@@ -41,11 +41,9 @@
 //! erased return gets the `checkcast` that puts its static type back, which is what lets the next use
 //! of the value verify.
 //!
-//! A `static` nested type is its own class file, named `Outer$Inner` and listed in an `InnerClasses`
-//! attribute — which is the only place a nested type's `private` and `static` can live. Referring to one
-//! *by name* still needs resolution the index does not do: a simple or partly-qualified nested name
-//! (`Counter`, `Outer.Counter`) resolves against packages and imports only, so the reference reports
-//! even where the declaration compiles.
+//! A `static` nested type is its own class file, named `Outer$Inner`, listed in an `InnerClasses`
+//! attribute — the only place a nested type's `private` and `static` can live — and reachable by simple
+//! or partly-qualified name. An `implements` clause reaches the `interfaces` list.
 //!
 //! Not yet at all: varargs, `Signature` attributes and bridge methods, lambdas, method references,
 //! non-`static` inner classes, local and anonymous classes, and `enum` / `record` declarations. Each
@@ -255,6 +253,17 @@ impl Compile {
             |id| Descriptor::internal_name_of(id, index),
         );
         let super_class = pool.class_index(&super_name).ok_or(AsmError::PoolFull)?;
+        // Every *interface* supertype, in the order the source listed them. Dropping them produced a
+        // class the JVM loads and then refuses to dispatch through: an `invokeinterface` on a type whose
+        // `interfaces` never mentioned it is `IncompatibleClassChangeError` at the first call.
+        let mut interfaces = Vec::new();
+        for supertype in &index.item(item).supertypes {
+            if index.item(supertype.id).kind != DefKind::Interface {
+                continue;
+            }
+            let name = Descriptor::internal_name_of(supertype.id, index);
+            interfaces.push(pool.class_index(&name).ok_or(AsmError::PoolFull)?);
+        }
 
         let body = node
             .children()
@@ -353,6 +362,7 @@ impl Compile {
         class.access_flags = ClassAccessFlags(Self::class_flags(node, is_interface));
         class.this_class = this_class;
         class.super_class = super_class;
+        class.interfaces = interfaces;
         class.fields = fields;
         class.methods = methods;
         class.attributes = nesting;

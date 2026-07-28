@@ -161,6 +161,7 @@ public class System extends Object {
 
 public class Class extends Object {
     public String getName();
+    public String getSimpleName();
     public boolean desiredAssertionStatus();
 }
 

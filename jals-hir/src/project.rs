@@ -1060,7 +1060,20 @@ impl ProjectIndex {
             return TypeResolution::Project(id);
         }
 
-        // 3. On-demand imports `import a.b.*;`. A single hit binds; several distinct hits are
+        // 3. A *nested* type of a type declared in this file. `class Outer { static class Counter {} }`
+        //    puts `Counter` in scope inside `Outer` under its simple name, and its fully-qualified name
+        //    is `<package>.Outer.Counter` — which step 2 cannot find, because it only appends the name
+        //    to the *package*.
+        //
+        //    Every type declared in the file is tried as the enclosing one, longest name first, so a
+        //    nested type nested more deeply wins over a shallower one of the same name. That is wider
+        //    than JLS §6.5.5's scoping, which would only look at the *enclosing* declarations of the use
+        //    — but this crate does no checking, and a legal program has exactly one candidate anyway.
+        if let Some(id) = self.nested_in_file(file, name) {
+            return TypeResolution::Project(id);
+        }
+
+        // 4. On-demand imports `import a.b.*;`. A single hit binds; several distinct hits are
         //    ambiguous, so we stay conservative and treat it as external (no diagnostic).
         let mut hits = meta
             .on_demand
@@ -1074,7 +1087,7 @@ impl ProjectIndex {
             };
         }
 
-        // 4. Implicit `java.lang` import: an unqualified name is brought into every compilation unit
+        // 5. Implicit `java.lang` import: an unqualified name is brought into every compilation unit
         //    from `java.lang`. When the stubs are indexed (via `with_stdlib`) it binds to one;
         //    when they are not, `java.lang.*` is absent from `by_fqn` and this falls through to the
         //    external handling below — identical to the pre-stub behaviour.
@@ -1095,11 +1108,42 @@ impl ProjectIndex {
     /// Resolves a qualified type name (`a.b.C`) referenced from `file`. A name we have indexed binds
     /// to it; any other fully-qualified name is taken to be external (no diagnostic), since the JDK
     /// and third-party classpath are not indexed.
-    fn resolve_qualified(&self, qualified: &str) -> TypeResolution {
-        match self.by_fqn.get(qualified) {
-            Some(&id) => TypeResolution::Project(id),
-            None => TypeResolution::External,
+    fn resolve_qualified(&self, file: FileId, qualified: &str) -> TypeResolution {
+        if let Some(&id) = self.by_fqn.get(qualified) {
+            return TypeResolution::Project(id);
         }
+        // A *partly*-qualified nested name: `Outer.Counter` is not a fully-qualified name, but its first
+        // segment is a simple type name that resolves, and the rest is the nesting below it. Written
+        // this way from another file in the same package, it is the ordinary spelling.
+        let Some((head, rest)) = qualified.split_once('.') else {
+            return TypeResolution::External;
+        };
+        if let TypeResolution::Project(outer) = self.resolve_type(file, head)
+            && let Some(&id) = self.by_fqn.get(&format!(
+                "{}.{rest}",
+                self.items[outer.0 as usize].fqn.as_str()
+            ))
+        {
+            return TypeResolution::Project(id);
+        }
+        TypeResolution::External
+    }
+
+    /// A type nested inside one this file declares, by simple name.
+    ///
+    /// Longest enclosing name first, so a more deeply nested type wins over a shallower one sharing its
+    /// simple name.
+    fn nested_in_file(&self, file: FileId, name: &str) -> Option<ItemId> {
+        let mut enclosing: Vec<&str> = self
+            .items
+            .iter()
+            .filter(|item| item.file == file)
+            .map(|item| item.fqn.as_str())
+            .collect();
+        enclosing.sort_unstable_by_key(|fqn| core::cmp::Reverse(fqn.len()));
+        enclosing
+            .into_iter()
+            .find_map(|outer| self.by_fqn.get(&format!("{outer}.{name}")).copied())
     }
 
     /// Resolves the type-name `reference` (simple or qualified) from `file` against the project.
@@ -1120,7 +1164,7 @@ impl ProjectIndex {
     ) -> TypeResolution {
         qualified.map_or_else(
             || self.resolve_type(file, name),
-            |qualified| self.resolve_qualified(qualified),
+            |qualified| self.resolve_qualified(file, qualified),
         )
     }
 

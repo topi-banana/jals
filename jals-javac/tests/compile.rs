@@ -618,7 +618,7 @@ public class Outer {
     }
 
     static class Person implements Named {
-        public String name() { return ""; }
+        public String name() { return "person"; }
 
         static class Nested {
             int deep() { return 3; }
@@ -626,6 +626,17 @@ public class Outer {
     }
 
     public static void main(String[] args) {
+        // Referred to by simple name from inside the enclosing type, and by a partly-qualified one —
+        // neither of which is a fully-qualified name, so neither resolves against packages alone.
+        Counter counted = new Counter(21);
+        System.out.println(counted.doubled());
+        Named named = new Person();
+        System.out.println(named.name());
+        System.out.println(new Person.Nested().deep());
+        System.out.println(new Outer.Counter(5).doubled());
+        System.out.println(Counter.class.getName());
+        // `getSimpleName` reads the `InnerClasses` entry; without one it answers `Outer$Counter`.
+        System.out.println(Counter.class.getSimpleName());
         System.out.println(shared);
     }
 }
@@ -687,7 +698,10 @@ public class Outer {
     if !java_available() {
         return;
     }
-    assert_eq!(run(source, "com.example.Outer"), "10\n");
+    assert_eq!(
+        run(source, "com.example.Outer"),
+        "42\nperson\n3\n10\ncom.example.Outer$Counter\nCounter\n10\n"
+    );
 }
 
 /// A non-`static` nested class holds its enclosing instance in a synthetic field, and every one of its
@@ -2300,4 +2314,67 @@ public class Widened {
 }
 "#;
     assert_eq!(run(source, "Widened"), "xy1\n");
+}
+
+/// An `implements` clause reaches the class file's `interfaces` list.
+///
+/// Dropping it produced a class the JVM loads and then refuses to dispatch through: an
+/// `invokeinterface` on a type whose `interfaces` never mentioned the interface is an
+/// `IncompatibleClassChangeError` at the first call, not a load-time error — so only running it finds
+/// this.
+#[test]
+fn an_implements_clause_reaches_the_interfaces_list() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+interface Speaks {
+    void speak();
+}
+
+interface Ranks {
+    int rank();
+}
+
+public class Greeter implements Speaks, Ranks {
+    public void speak() {
+        System.out.println("spoke");
+    }
+
+    public int rank() {
+        return 7;
+    }
+
+    public static void main(String[] args) {
+        Greeter greeter = new Greeter();
+        Speaks talker = greeter;
+        talker.speak();
+        Ranks ordered = greeter;
+        System.out.println(ordered.rank());
+    }
+}
+"#;
+    let classes = compile(source).expect("compile");
+    let greeter = classes
+        .iter()
+        .find(|class| class.internal_name == "Greeter")
+        .expect("the implementing class");
+    let class =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(greeter.bytes.as_slice()))
+            .expect("reparse");
+    let named: Vec<String> = class
+        .interfaces
+        .iter()
+        .map(|&index| {
+            class
+                .constant_pool
+                .class_name(index)
+                .expect("a Class entry")
+                .into_owned()
+        })
+        .collect();
+    // In the order the source listed them, which is what a `Comparable` before a `Runnable` would
+    // change and nothing else would notice.
+    assert_eq!(named, ["Speaks", "Ranks"]);
+    assert_eq!(run(source, "Greeter"), "spoke\n7\n");
 }
