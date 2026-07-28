@@ -3394,19 +3394,14 @@ impl Lowering<'_> {
         // lowered: `outer.new Inner()` names a *different* enclosing instance, and taking `this`
         // regardless would build the object against the wrong one — wrong state, silently.
         let encloses = self.layout.inner.get(&item).copied();
-        if encloses.is_some() {
-            if new.syntax().children().any(|child| {
-                ast::Expr::cast(child).is_some_and(|expr| !matches!(expr, ast::Expr::ArrayInit(_)))
-            }) {
-                return Err(WasmError::Unsupported(
-                    "a qualified `new` of an inner class",
-                ));
-            }
-            if self.owner.is_none() {
-                return Err(WasmError::Unsupported(
-                    "a `new` of an inner class outside an instance method",
-                ));
-            }
+        // `outer.new Inner()` names the enclosing instance explicitly; the qualifier is an expression
+        // sitting *before* the `new` keyword. Unqualified, it is `this`, which a `static` method has not
+        // got.
+        let qualifier = encloses.and_then(|_| Self::new_qualifier(new));
+        if encloses.is_some() && qualifier.is_none() && self.owner.is_none() {
+            return Err(WasmError::Unsupported(
+                "a `new` of an inner class outside an instance method",
+            ));
         }
         let arguments: Vec<ast::Expr> = new
             .syntax()
@@ -3444,7 +3439,7 @@ impl Lowering<'_> {
                 insn.local_set(slot).local_get(slot);
                 // The enclosing instance is the constructor's first declared argument.
                 if encloses.is_some() {
-                    insn.local_get(0);
+                    self.enclosing_instance(qualifier.as_ref(), insn)?;
                 }
                 for argument in &arguments {
                     self.expr(argument, insn)?;
@@ -3464,9 +3459,9 @@ impl Lowering<'_> {
                         .copied()
                         .ok_or(WasmError::Unsupported("an inner class with no outer field"))?;
                     insn.local_set(slot);
-                    insn.local_get(slot)
-                        .local_get(0)
-                        .struct_set(struct_type, field);
+                    insn.local_get(slot);
+                    self.enclosing_instance(qualifier.as_ref(), insn)?;
+                    insn.struct_set(struct_type, field);
                     insn.local_get(slot);
                 }
             }
@@ -3603,6 +3598,35 @@ impl Lowering<'_> {
         }
         insn.end();
         Ok(ty)
+    }
+
+    /// The expression a qualified `new` names as its enclosing instance: the one sitting *before* the
+    /// `new` keyword. `None` for the unqualified form.
+    fn new_qualifier(new: &ast::NewExpr) -> Option<ast::Expr> {
+        let keyword = new
+            .syntax()
+            .children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .find(|token| token.kind() == jals_syntax::SyntaxKind::NEW_KW)?;
+        new.syntax()
+            .children()
+            .filter(|child| child.text_range().end() <= keyword.text_range().start())
+            .find_map(ast::Expr::cast)
+    }
+
+    /// Push the enclosing instance an inner class's constructor takes: the qualifier when the source
+    /// wrote one, `this` otherwise.
+    fn enclosing_instance(&mut self, qualifier: Option<&ast::Expr>, insn: &mut Insn) -> Result<()> {
+        match qualifier {
+            Some(expr) => {
+                self.expr(expr, insn)?
+                    .ok_or(WasmError::Unsupported("a qualified `new` with no receiver"))?;
+            }
+            None => {
+                insn.local_get(0);
+            }
+        }
+        Ok(())
     }
 
     /// A fresh unnamed local of type `ty`, for values that must outlive the stack.

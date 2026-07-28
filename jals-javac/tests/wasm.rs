@@ -1679,8 +1679,9 @@ public class Risky {
 /// before anything else runs, so an initialiser or the body can already reach it. A class with no declared
 /// constructor has no function to write it in, so the `new` writes it.
 ///
-/// Only the *unqualified* form is lowered. `outer.new Inner()` names a different enclosing instance, and
-/// taking `this` regardless would build the object against the wrong one — wrong state, silently.
+/// `outer.new Inner()` names the enclosing instance explicitly, and it is not the same as `this`: the
+/// qualifier is an expression sitting *before* the `new` keyword, which is the only thing that
+/// distinguishes the two forms in the tree.
 #[test]
 fn an_inner_class_holds_its_enclosing_instance() {
     let source = r"
@@ -1720,10 +1721,23 @@ public class Outer {
         Outer o = new Outer(1);
         return o.defaulted();
     }
+
+    // A *qualified* `new` names a different enclosing instance than `this`.
+    int fromAnother(Outer other, int n) {
+        Inner i = other.new Inner(n);
+        return i.total() + other.base;
+    }
+
+    public static int qualified(int n) {
+        Outer host = new Outer(1);
+        Outer named = new Outer(70);
+        return host.fromAnother(named, n);
+    }
 }
 ";
     assert_invoke(&[source], "run", &["3"], "13");
     assert_invoke(&[source], "implicit", &[], "5");
+    assert_invoke(&[source], "qualified", &["2"], "72");
 
     // A `new` of an inner class needs an enclosing instance, which a `static` method does not have.
     let outside = concat!(
