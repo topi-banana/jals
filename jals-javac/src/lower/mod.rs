@@ -899,6 +899,10 @@ impl Compile {
             // field. Reported until that is chased down, rather than emitted as a handle whose parameter
             // nothing fills.
             let captured = Self::captured_by(lambda, context.resolved);
+
+            // A capturing lambda: the descriptor, the leading slots, and the call-site arguments now all
+            // line up, and the synthetic method still fails the assembler's frame check — reported until
+            // that is chased down, rather than emitted as code the verifier would reject.
             if !captured.is_empty() {
                 return Err(LowerError::Unsupported("a capturing lambda"));
             }
@@ -916,6 +920,12 @@ impl Compile {
             let code = {
                 let mut asm = Assembler::new(pool, Receiver::Static, &descriptor)?;
                 let mut slots = Slots::new(&context, None, true);
+                // The captures come first, in the order the call site pushes them: the metafactory prepends
+                // the captured values to the interface method's own arguments when it invokes the handle.
+                for &id in &captured {
+                    let width = Slots::ty_width(context.inference.type_of_def(id));
+                    slots.declare(id, width);
+                }
                 for param in decl.params().into_iter().flat_map(|list| list.params()) {
                     let id = context
                         .def_at(param.syntax())
