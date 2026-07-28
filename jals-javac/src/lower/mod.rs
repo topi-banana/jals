@@ -429,6 +429,11 @@ impl Compile {
             match member.kind() {
                 FIELD_DECL => Self::field(member, &context, &mut pool, &mut fields)?,
                 METHOD_DECL => methods.push(Self::method(member, &context, &mut pool)?),
+                // A record's compact constructor is the canonical one, emitted by `record_members` with
+                // the components as its parameters. Emitting it here would give it `<init>()V` instead.
+                CONSTRUCTOR_DECL if is_record && Self::is_compact_constructor(member) => {
+                    saw_constructor = true;
+                }
                 CONSTRUCTOR_DECL => {
                     saw_constructor = true;
                     methods.push(Self::constructor(
@@ -2190,35 +2195,31 @@ impl Compile {
             descriptors.push((name.text().to_owned(), descriptor));
         }
 
-        // A *compact* constructor (`P { … }`, with no parameter list at all) takes the components
-        // implicitly and assigns every one of them after its body runs. Nothing here does that, so
-        // emitting it would produce `<init>()V` — wrong descriptor *and* a record whose components are
-        // all zero, which nothing at run time would flag.
-        if members.iter().any(|member| {
-            member.kind() == CONSTRUCTOR_DECL
-                && !member
-                    .children()
-                    .any(|child| child.kind() == jals_syntax::SyntaxKind::PARAM_LIST)
-        }) {
-            return Err(LowerError::Unsupported("a compact `record` constructor"));
-        }
+        // A *compact* constructor (`P { … }`, with no parameter list at all) **is** the canonical one:
+        // it takes the components implicitly, and the field assignments follow its body. So it is
+        // emitted from here rather than from the member loop, which would give it `<init>()V`.
+        let compact = members
+            .iter()
+            .find(|member| Self::is_compact_constructor(member));
         // Only an explicit *canonical* constructor replaces the synthesised one — "some constructor
         // exists" is not the same thing. `record P(int x) { P() { this(0); } }` declares a
         // no-argument one and still needs `<init>(I)V` for `this(0)` to have a target.
-        if !members.iter().any(|member| {
+        let declares_canonical = members.iter().any(|member| {
             member.kind() == CONSTRUCTOR_DECL
                 && member
                     .children()
                     .find_map(ast::ParamList::cast)
                     .map_or(0, |list| list.params().count())
                     == components.len()
-        }) {
+        });
+        if compact.is_some() || !declares_canonical {
             methods.push(Self::canonical_constructor(
                 context,
                 pool,
                 super_name,
                 &descriptors,
                 Self::access_level(node),
+                compact.map(|member| (member, components.as_slice())),
             )?);
         }
         for (name, descriptor) in &descriptors {
@@ -2508,13 +2509,21 @@ impl Compile {
             .collect()
     }
 
-    /// The canonical constructor: `super()`, then one `putfield` per component, in header order.
+    /// The canonical constructor: `super()`, the compact body if there is one, then one `putfield` per
+    /// component, in header order.
+    ///
+    /// A *compact* constructor (`P { … }`) declares no parameters and no assignments, and means both:
+    /// the components are its parameters, and the field writes follow whatever it did to them
+    /// (JLS §8.10.4.2). So the body is lowered with each component's *definition* bound to the
+    /// parameter slot rather than to the field — which is what makes `x = Math.abs(x)` normalise the
+    /// argument and what leaves the field still zero for the body's own reads, as Java has it.
     fn canonical_constructor(
         context: &Context<'_>,
         pool: &mut ConstantPool,
         super_name: &str,
         components: &[(String, String)],
         access: u16,
+        compact: Option<(&SyntaxNode, &[SyntaxToken])>,
     ) -> Result<MethodInfo> {
         let mut descriptor = String::from("(");
         for (_, component) in components {
@@ -2530,22 +2539,70 @@ impl Compile {
         )?;
         asm.load(0)?;
         asm.invoke_special(super_name, "<init>", "()V", false)?;
+
         // Parameter 0 is `this`; each component's slot follows, at its own width — a `long` or a
         // `double` component takes two, and getting that wrong reads the *next* parameter's low half.
-        let mut slot = 1u16;
-        for (name, component) in components {
-            asm.load(0)?;
-            asm.load(slot)?;
-            asm.put_field(&context.this_class, name, component)?;
-            slot += Slots::descriptor_width(component);
+        let mut slots = Slots::for_constructor(context, None, false);
+        let mut placements = Vec::with_capacity(components.len());
+        for (position, (_, component)) in components.iter().enumerate() {
+            let width = Slots::descriptor_width(component);
+            // The definition a body reference to the component's name binds to. Declaring it here is
+            // what puts the *parameter* ahead of the field in `Place::resolve` and in `Expr::name`,
+            // both of which consult the slot map before falling back to a field of the enclosing type.
+            let bound = compact
+                .and_then(|(_, names)| names.get(position))
+                .and_then(SyntaxToken::parent)
+                .and_then(|node| context.def_at(&node));
+            placements.push(match bound {
+                Some(id) => slots.declare(id, width),
+                None => slots.declare_temporary(width),
+            });
         }
-        asm.return_(None)?;
+
+        let mut emit = Emit::new(&mut asm, slots, jals_hir::Ty::Void, true);
+        if let Some((member, _)) = compact {
+            let body = member
+                .children()
+                .find_map(ast::Block::cast)
+                .ok_or(LowerError::Unsupported("a malformed constructor"))?;
+            // A `return` would jump over the field writes, leaving every component at its default. JLS
+            // §8.10.4.2 makes one a compile-time error for exactly that reason, so there is no correct
+            // lowering to pick — reported rather than emitted with the writes skipped. A `return` inside
+            // a lambda in the body is caught too, which over-reports rather than under-reports.
+            if body
+                .syntax()
+                .descendants()
+                .any(|node| node.kind() == jals_syntax::SyntaxKind::RETURN_STMT)
+            {
+                return Err(LowerError::Unsupported(
+                    "a `return` in a compact `record` constructor",
+                ));
+            }
+            for statement in body.stmts() {
+                stmt::Stmt::lower(&statement, context, &mut emit)?;
+            }
+        }
+        for ((name, component), slot) in components.iter().zip(placements) {
+            emit.asm.load(0)?;
+            emit.asm.load(slot)?;
+            emit.asm.put_field(&context.this_class, name, component)?;
+        }
+        emit.asm.return_(None)?;
         Ok(MethodInfo {
             access_flags: MethodAccessFlags(access),
             name_index,
             descriptor_index,
             attributes: alloc::vec![asm.finish()?],
         })
+    }
+
+    /// Whether a member is a record's *compact* constructor: a `CONSTRUCTOR_DECL` with no parameter
+    /// list at all, which is the only thing that distinguishes `P { … }` from `P() { … }` in the tree.
+    fn is_compact_constructor(member: &SyntaxNode) -> bool {
+        member.kind() == CONSTRUCTOR_DECL
+            && !member
+                .children()
+                .any(|child| child.kind() == jals_syntax::SyntaxKind::PARAM_LIST)
     }
 
     /// One accessor: `return this.name;`.

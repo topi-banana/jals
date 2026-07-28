@@ -2617,26 +2617,12 @@ public class Records {
     );
 }
 
-/// A record's non-canonical constructor does not replace the canonical one, and a compact one is
-/// reported.
+/// A record's non-canonical constructor does not replace the canonical one.
 ///
 /// "Some constructor exists" is not "the canonical constructor exists": `record P(int x) { P() {
 /// this(0); } }` declares a no-argument one and still needs `<init>(I)V` for `this(0)` to have a target.
-/// A *compact* constructor (`P { … }`, no parameter list) assigns every component implicitly after its
-/// body — emitting it as written gives the wrong descriptor *and* a record whose components are all
-/// zero, which nothing at run time would flag.
 #[test]
 fn a_record_constructor_replaces_the_canonical_one_only_when_it_is_canonical() {
-    let compact = "record P(int x) { P { } }";
-    let error = compile(compact).expect_err("a compact constructor is not lowered");
-    assert!(
-        matches!(
-            error,
-            LowerError::Unsupported("a compact `record` constructor")
-        ),
-        "got {error}"
-    );
-
     let source = r"
 record P(int x) {
     // A convenience constructor that delegates: the canonical one must still be emitted for it to
@@ -2676,6 +2662,102 @@ public class Both {
         return;
     }
     assert_eq!(run(source, "Both"), "3\n0\n");
+}
+
+/// A compact constructor **is** the canonical one, and its body sees the parameters.
+///
+/// `P { … }` declares no parameter list and no assignments, and means both: the components are its
+/// parameters, and the field writes follow whatever the body did to them (JLS §8.10.4.2). So each
+/// component's name has to bind to the *parameter* inside the body — binding it to the field would
+/// read zero and then have the trailing write overwrite whatever the body stored.
+///
+/// The descriptor check is the other half: emitting the declaration as written gives `<init>()V`, which
+/// is the wrong descriptor *and* a record whose components are all zero.
+#[test]
+fn a_compact_record_constructor_normalises_its_components() {
+    let source = r#"
+record Range(int lo, int hi) {
+    Range {
+        // Reads and writes of `lo` are the parameter, not the field: the field is still zero here, and
+        // what this stores is what gets written to it.
+        if (lo > hi) {
+            int swap = lo;
+            lo = hi;
+            hi = swap;
+        }
+        if (lo < 0) {
+            lo = 0;
+        }
+    }
+
+    int span() {
+        return hi - lo;
+    }
+}
+
+record Widths(long l, double d, String s) {
+    Widths {
+        // A `long` and a `double` each take two slots, so a component after one of them is read at the
+        // wrong offset if the widths are not accounted for.
+        l = l * 2;
+        d = d + 0.5;
+        s = s + "!";
+    }
+}
+
+public class Compact {
+    public static void main(String[] args) {
+        Range r = new Range(9, 4);
+        System.out.println(r.lo() + " " + r.hi() + " " + r.span());
+        System.out.println(new Range(-3, 5).lo());
+        System.out.println(new Range(2, 7).span());
+        Widths w = new Widths(21L, 3.0, "hi");
+        System.out.println(w.l() + " " + w.d() + " " + w.s());
+    }
+}
+"#;
+    let classes = compile(source).expect("compile");
+    let range = classes
+        .iter()
+        .find(|class| class.internal_name == "Range")
+        .expect("the record");
+    let class = jals_exec::block_on_inline(jals_classfile::ClassFile::read(range.bytes.as_slice()))
+        .expect("reparse");
+    let descriptors: Vec<String> = class
+        .methods
+        .iter()
+        .filter(|method| class.constant_pool.utf8(method.name_index).as_deref() == Some("<init>"))
+        .map(|method| {
+            class
+                .constant_pool
+                .utf8(method.descriptor_index)
+                .expect("utf8")
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(descriptors, ["(II)V".to_owned()]);
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Compact"), "4 9 5\n0\n5\n42 3.5 hi!\n");
+}
+
+/// A `return` in a compact constructor is reported rather than lowered.
+///
+/// It would jump over the implicit field writes, leaving every component at its default — which is why
+/// JLS §8.10.4.2 makes one a compile-time error. There is no correct lowering to pick.
+#[test]
+fn a_return_in_a_compact_record_constructor_is_reported() {
+    let source = "record P(int x) { P { if (x < 0) { return; } } }";
+    let error = compile(source).expect_err("a `return` there has no lowering");
+    assert!(
+        matches!(
+            error,
+            LowerError::Unsupported("a `return` in a compact `record` constructor")
+        ),
+        "got {error}"
+    );
 }
 
 /// Three `enum` shapes are reported, each because a *descriptor* would come out wrong.
