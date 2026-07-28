@@ -135,7 +135,7 @@ jobs:
       # instrumented workspace build under this exact compiler. No rustc-dev / RUSTC_BOOTSTRAP /
       # source build (those are only for `cargo install`-ing hawk). The ref is hardcoded because a
       # step-level `uses:` does not interpolate `env`; it is cargo-hawk 0.1.9's pinned rustc.
-      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
       # Not in taiki-e/install-action's prebuilt set. The official cargo-dist installer drops
       # `cargo-hawk` and its `cargo-hawk-driver` into ~/.cargo/bin (on PATH); the version-pinned
