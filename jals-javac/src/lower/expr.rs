@@ -840,9 +840,6 @@ impl Expr {
         if new.args().is_none() {
             return Self::new_array(new, context, emit);
         }
-        if new.body().is_some() {
-            return Err(LowerError::Unsupported("an anonymous class"));
-        }
 
         let unresolved = || LowerError::Unresolved(new.syntax().text().to_string().trim().into());
         let arguments: alloc::vec::Vec<ast::Expr> = new
@@ -850,6 +847,30 @@ impl Expr {
             .into_iter()
             .flat_map(|list| list.args())
             .collect();
+        // An anonymous class is its own type, and the `new` builds *that* rather than the type it named:
+        // the index keyed its item on the `new` keyword's position, so this is the only lookup needed.
+        if new.body().is_some() {
+            let span = Context::span(new.syntax());
+            let item = context
+                .index
+                .item_by_decl(context.file, span.start)
+                .ok_or_else(|| LowerError::Unresolved("an anonymous class".into()))?;
+            if new
+                .args()
+                .into_iter()
+                .flat_map(|list| list.args())
+                .next()
+                .is_some()
+            {
+                return Err(LowerError::Unsupported(
+                    "an anonymous class with constructor arguments",
+                ));
+            }
+            let owner = Descriptor::internal_name_of(item, context.index);
+            emit.asm.new_object(&owner)?;
+            emit.asm.dup()?;
+            return Ok(emit.asm.invoke_special(&owner, "<init>", "()V", false)?);
+        }
         let selected = context
             .inference
             .call_target_of(Context::span(new.syntax()));

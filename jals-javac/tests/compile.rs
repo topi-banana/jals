@@ -1323,7 +1323,6 @@ fn the_features_after_this_milestone_are_still_reported() {
     for (source, expected) in [
         ("Runnable r = () -> {};", "a lambda"),
         ("Runnable r = Later::main;", "a method reference"),
-        ("Object o = new Later() { };", "an anonymous class"),
     ] {
         let program = format!(
             r"
@@ -3434,4 +3433,77 @@ public class Host {
         return;
     }
     assert_eq!(run(source, "Host"), "12\n47\nkept\n");
+}
+
+/// An anonymous class — `new I() { … }` — is its own class file.
+///
+/// It has no name and no declaration keyword, so the index had nothing to make an item from until it was
+/// taught to; without an item there is no member resolution and no descriptor. Now the body is compiled
+/// like any other class and the `new` builds *that* type rather than the one it named — which is what the
+/// expression means, and why the two are the same `new` in the source and two different types underneath.
+#[test]
+fn an_anonymous_class_is_its_own_class_file() {
+    let source = r#"
+interface Greeter {
+    String greet();
+}
+
+public class Outer {
+    static Greeter first() {
+        return new Greeter() {
+            public String greet() { return "one"; }
+        };
+    }
+
+    // A second one in the same class gets its own number, and its own type.
+    static Greeter second() {
+        return new Greeter() {
+            public String greet() { return "two"; }
+        };
+    }
+
+    public static void main(String[] args) {
+        System.out.println(first().greet());
+        System.out.println(second().greet());
+    }
+}
+"#;
+    let classes = compile(source).expect("compile");
+    let names: Vec<&str> = classes
+        .iter()
+        .map(|class| class.internal_name.as_str())
+        .collect();
+    assert_eq!(names, ["Greeter", "Outer", "Outer$1", "Outer$2"]);
+
+    let anonymous = classes
+        .iter()
+        .find(|class| class.internal_name == "Outer$1")
+        .expect("the first anonymous class");
+    let class =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(anonymous.bytes.as_slice()))
+            .expect("reparse");
+    // The type the `new` named becomes an *interface* of the anonymous class, not its superclass.
+    assert_eq!(
+        class
+            .constant_pool
+            .class_name(class.super_class)
+            .expect("a Class entry"),
+        "java/lang/Object"
+    );
+    assert_eq!(
+        class
+            .interfaces
+            .iter()
+            .map(|&index| class
+                .constant_pool
+                .class_name(index)
+                .expect("a Class entry"))
+            .collect::<Vec<_>>(),
+        ["Greeter"]
+    );
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Outer"), "one\ntwo\n");
 }

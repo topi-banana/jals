@@ -73,8 +73,8 @@ use jals_classfile::{
 };
 use jals_hir::{DefKind, FileId, ItemId, ProjectIndex, Resolved, TypeInference};
 use jals_syntax::SyntaxKind::{
-    ANNOTATION_TYPE_DECL, CLASS_DECL, CONSTRUCTOR_DECL, ENUM_DECL, FIELD_DECL, INTERFACE_DECL,
-    METHOD_DECL, RECORD_DECL,
+    ANNOTATION_TYPE_DECL, CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL, ENUM_DECL, FIELD_DECL,
+    INTERFACE_DECL, METHOD_DECL, RECORD_DECL,
 };
 use jals_syntax::ast::{self, AstNode as _};
 use jals_syntax::{SyntaxNode, SyntaxToken};
@@ -197,6 +197,23 @@ impl Compile {
                 node.kind(),
                 CLASS_DECL | INTERFACE_DECL | ENUM_DECL | ANNOTATION_TYPE_DECL | RECORD_DECL
             ) {
+                // An anonymous class body is its own class file too, and the index gave it an item keyed
+                // on the `new` keyword's position — which is the only offset it has to be found by.
+                if node.kind() == jals_syntax::SyntaxKind::NEW_EXPR
+                    && node.children().any(|child| child.kind() == CLASS_BODY)
+                    && let Some(item) =
+                        index.item_by_decl(file, usize::from(node.text_range().start()))
+                {
+                    out.push(Self::class(
+                        &node,
+                        item,
+                        resolved,
+                        inference,
+                        index,
+                        file,
+                        class_version,
+                    )?);
+                }
                 continue;
             }
             // A *local* class is nested inside a method body rather than a class body, and it is its
