@@ -1644,10 +1644,11 @@ impl ProjectIndex {
             if cfg.disables_node(&node) {
                 continue;
             }
-            // A lambda is, in every way the index cares about, a one-method class implementing the interface
-            // it is converted to. Giving it an item is what lets a backend with no `invokedynamic` — the
-            // wasm one — reach it through the same dispatch every class already uses.
-            if node.kind() == LAMBDA_EXPR {
+            // A lambda and a method reference are, in every way the index cares about, one-method classes
+            // implementing the interface they are converted to. Giving each an item is what lets a backend
+            // with no `invokedynamic` — the wasm one — reach it through the same dispatch every class uses.
+            // They share one counter because they are the same kind of thing to everything downstream.
+            if matches!(node.kind(), LAMBDA_EXPR | SyntaxKind::METHOD_REF_EXPR) {
                 let enclosing_key = enclosing.as_deref().unwrap_or("").to_owned();
                 let ordinal = lambdas.entry(enclosing_key).or_insert(0_usize);
                 let simple = alloc::format!("lambda${ordinal}");

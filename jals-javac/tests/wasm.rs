@@ -1972,3 +1972,55 @@ public class Uses {
     assert_invoke(&[source], "blocked", &["14"], "42");
     assert_invoke(&[source], "both", &["4"], "45");
 }
+
+/// A method reference, which is the same one-method class a lambda is — with a body that delegates.
+///
+/// The index gives it the same item, supertype, and member a lambda gets, so the dispatch chain finds it the
+/// same way. Its body is one call: the interface method's arguments go straight to the method the source named,
+/// forwarded by position, so nothing needs binding by name. A delegating reference captures nothing, which is
+/// why building the object is a bare allocation.
+///
+/// A *bound* reference (`x::m`) captures its receiver and a constructor reference allocates; neither is a plain
+/// delegation, and each is reported.
+#[test]
+fn a_method_reference_delegates_to_the_method_it_names() {
+    let source = r"
+public interface Doubler { int apply(int n); }
+
+public interface Reader { int read(Box b); }
+
+public class Box {
+    int value;
+    // A declared constructor, because a class without one does not yet run its field initialisers here.
+    Box(int value) { this.value = value; }
+    int get() { return value; }
+}
+
+public class Uses {
+    static int twice(int n) { return n * 2; }
+
+    public static int statically(int n) {
+        Doubler d = Uses::twice;
+        return d.apply(n);
+    }
+
+    // Unbound: the interface supplies the receiver as the first argument, which the delegation forwards.
+    public static int unbound() {
+        Reader r = Box::get;
+        return r.read(new Box(9));
+    }
+}
+";
+    assert_invoke(&[source], "statically", &["21"], "42");
+    assert_invoke(&[source], "unbound", &[], "9");
+
+    let constructing = concat!(
+        "public interface Maker { Box make(); } public class Box { int v; } ",
+        "public class U { public static int run(int n) { Maker m = Box::new; return n; } }"
+    );
+    let error = compile(&[constructing]).expect_err("a constructor reference is not compiled yet");
+    assert!(
+        matches!(error, WasmError::Unsupported("a constructor reference")),
+        "got {error}"
+    );
+}

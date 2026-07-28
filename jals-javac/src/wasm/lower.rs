@@ -47,7 +47,8 @@ use jals_hir::{
 };
 use jals_syntax::SyntaxKind::{
     CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL, ENUM_BODY, ENUM_CONSTANT, ENUM_DECL, FIELD_DECL,
-    INITIALIZER, INTERFACE_DECL, LAMBDA_EXPR, METHOD_DECL, MODIFIERS, NEW_EXPR, RECORD_DECL,
+    INITIALIZER, INTERFACE_DECL, LAMBDA_EXPR, METHOD_DECL, METHOD_REF_EXPR, MODIFIERS, NEW_EXPR,
+    RECORD_DECL,
 };
 use jals_syntax::ast::{self, AstNode as _};
 use jals_syntax::{SyntaxNode, SyntaxToken};
@@ -525,7 +526,7 @@ impl CompileWasm {
                 node.kind(),
                 CLASS_DECL | INTERFACE_DECL | ENUM_DECL | RECORD_DECL | ANNOTATION_TYPE_DECL
             ) || Self::is_anonymous(node)
-                || node.kind() == LAMBDA_EXPR
+                || Self::is_functional(node)
         })
     }
 
@@ -580,6 +581,12 @@ impl CompileWasm {
         node.kind() == NEW_EXPR && node.children().any(|child| child.kind() == CLASS_BODY)
     }
 
+    /// Whether `node` is a lambda or a method reference — the two forms the index gives a one-method class
+    /// item to, and which a backend with no `invokedynamic` emits as exactly that.
+    fn is_functional(node: &SyntaxNode) -> bool {
+        matches!(node.kind(), LAMBDA_EXPR | METHOD_REF_EXPR)
+    }
+
     /// The item a type declaration declares, whether it has a name to look up or only a position.
     fn item_of(
         node: &SyntaxNode,
@@ -588,7 +595,7 @@ impl CompileWasm {
     ) -> Result<Option<ItemId>> {
         // A lambda and an anonymous body are both nameless, and the index keys each on its own start
         // offset — the only thing either has to be found by.
-        if Self::is_anonymous(node) || node.kind() == LAMBDA_EXPR {
+        if Self::is_anonymous(node) || Self::is_functional(node) {
             return Ok(index.item_by_decl(input.file, usize::from(node.text_range().start())));
         }
         let name = Self::name_token(node).ok_or(WasmError::Unsupported("a class with no name"))?;
@@ -659,7 +666,7 @@ impl CompileWasm {
             };
             // A lambda has no body *node* of members: it declares exactly one method, the interface's, and
             // the lambda expression itself is that method's body.
-            if class.kind() == LAMBDA_EXPR {
+            if Self::is_functional(&class) {
                 let Some(member) = index
                     .own_members(item)
                     .iter()
@@ -1254,6 +1261,29 @@ impl Body {
 
         // A lambda's parameters live under its own `LambdaParams`, and its captures are fields rather than
         // parameters — so nothing trails them.
+        if let Some(member) = method.lambda
+            && method.node.kind() == METHOD_REF_EXPR
+        {
+            // A method reference's body is one delegation: pass the interface method's own arguments straight
+            // to the method the source named. Its parameters need no bindings, because nothing reads them by
+            // name — they are forwarded by position.
+            let mut insn = Insn::new();
+            let target = Lowering::referenced_method(&method.node, input, index)?;
+            let function = *layout.functions.get(&target).ok_or(WasmError::Unsupported(
+                "a method reference to a method outside this module",
+            ))?;
+            let arity = index.member(member).params.len();
+            // A `static` target takes the arguments alone; an instance one takes the first as its receiver,
+            // which is what an *unbound* reference means — and either way the order is already right.
+            for position in 0..arity {
+                insn.local_get(u32::try_from(position + 1).map_err(|_| WasmError::TooLarge)?);
+            }
+            insn.call(function).return_();
+            return Ok(Self {
+                locals: Vec::new(),
+                code: insn.into_body(),
+            });
+        }
         if let Some(member) = method.lambda {
             for param in method
                 .node
@@ -2738,6 +2768,23 @@ impl Lowering<'_> {
             // A lambda *is* an instance of a one-method class here, so building one is building that: allocate
             // the struct and write the captures into it, exactly as an anonymous class's `new` does. There is
             // no `invokedynamic` to reach for and no need of one — the dispatch chain already finds the type.
+            ast::Expr::MethodRef(reference) => {
+                // The same object a lambda builds: the type is what the dispatch chain tests, and a delegating
+                // reference captures nothing to write into it.
+                let item = self
+                    .index
+                    .item_by_decl(self.input.file, Self::span(reference.syntax()).start)
+                    .ok_or(WasmError::Unsupported("a method reference with no item"))?;
+                let struct_type = *self
+                    .layout
+                    .structs
+                    .get(&item)
+                    .ok_or(WasmError::Unsupported(
+                        "a method reference with no struct type",
+                    ))?;
+                insn.struct_new_default(struct_type);
+                self.layout.class_ref(item).map(Some)
+            }
             ast::Expr::Lambda(lambda) => {
                 let item = self
                     .index
@@ -2770,7 +2817,6 @@ impl Lowering<'_> {
                 }
                 Ok(Some(ty))
             }
-            ast::Expr::MethodRef(_) => Err(WasmError::Unsupported("a method reference")),
             ast::Expr::ClassLiteral(_) => Err(WasmError::Unsupported("a `.class` literal")),
             // No target here, so the element type is whatever inference read off the elements. That is
             // right when they agree with the declaration and wrong when they do not — which is why a
@@ -4066,6 +4112,64 @@ impl Lowering<'_> {
             }
         }
         Ok(())
+    }
+
+    /// The method a `Type::name` reference names.
+    ///
+    /// Only a reference qualified by a *type*: a bound one (`x::m`) captures its receiver and a constructor one
+    /// needs an allocation, and neither is a plain delegation.
+    fn referenced_method(
+        node: &SyntaxNode,
+        input: &WasmInput<'_>,
+        index: &ProjectIndex,
+    ) -> Result<MemberId> {
+        if node
+            .children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .any(|token| token.kind() == jals_syntax::SyntaxKind::NEW_KW)
+        {
+            return Err(WasmError::Unsupported("a constructor reference"));
+        }
+        let name = node
+            .children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .filter(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+            .last()
+            .ok_or(WasmError::Unsupported("a method reference with no name"))?;
+        // The qualifier names a type, which is what makes this a delegation rather than a capture.
+        let qualifier = node
+            .children()
+            .find_map(ast::Expr::cast)
+            .ok_or(WasmError::Unsupported(
+                "a method reference with no qualifier",
+            ))?;
+        let owner = input
+            .inference
+            .type_of_expr(Lowering::span(qualifier.syntax()))
+            .and_then(Ty::project_id)
+            .or_else(|| {
+                // A type name is a name reference until something resolves it; the index is what does.
+                index
+                    .item_by_fqn(qualifier.syntax().text().to_string().trim())
+                    .or_else(|| {
+                        Some(qualifier.syntax().text().to_string())
+                            .and_then(|text| index.item_by_fqn(text.trim()))
+                    })
+            })
+            .ok_or(WasmError::Unsupported(
+                "a method reference whose qualifier is no indexed type",
+            ))?;
+        index
+            .own_members(owner)
+            .iter()
+            .copied()
+            .find(|&id| {
+                let info = index.member(id);
+                info.kind == DefKind::Method && info.name == name.text()
+            })
+            .ok_or(WasmError::Unsupported(
+                "a method reference to a method this cannot find",
+            ))
     }
 
     /// The `(struct field, type)` a captured local is read through, when `id` is one of the enclosing
