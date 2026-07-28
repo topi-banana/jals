@@ -1071,3 +1071,48 @@ fn a_static_initialiser_block_is_reported() {
         "got {error}"
     );
 }
+
+/// A `static` nested class is simply another struct type.
+///
+/// wasm's type space is flat and has no naming convention to satisfy, so there is nothing for a nested
+/// class to be nested *in*. Walking only the root's children dropped every one of them silently — the
+/// type never existed, and a call to one of its methods reported an unresolved name pointing nowhere
+/// useful. A non-`static` one is reported instead: it holds its enclosing instance in a synthetic field
+/// and takes it as an extra constructor parameter, so its constructor would be one parameter short of
+/// what a `new` passes.
+#[test]
+fn a_static_nested_class_is_its_own_struct_type() {
+    let source = r"
+public class Outer {
+    static class Inner {
+        int value;
+        Inner(int value) { this.value = value; }
+        int doubled() { return value * 2; }
+    }
+
+    static class Deeper extends Inner {
+        Deeper(int value) { super(value + 1); }
+    }
+
+    public static int through_a_nested_class(int n) {
+        Inner inner = new Inner(n);
+        return inner.doubled();
+    }
+
+    // A nested subclass of a nested class: the supertype-first ordering has to reach both.
+    public static int through_a_nested_subclass(int n) {
+        Deeper deeper = new Deeper(n);
+        return deeper.doubled();
+    }
+}
+";
+    assert_invoke(&[source], "through_a_nested_class", &["5"], "10");
+    assert_invoke(&[source], "through_a_nested_subclass", &["5"], "12");
+
+    let inner = "public class O { class I { int f; } }";
+    let error = compile(&[inner]).expect_err("an inner class needs a synthetic parameter");
+    assert!(
+        matches!(error, WasmError::Unsupported("a non-`static` inner class")),
+        "got {error}"
+    );
+}

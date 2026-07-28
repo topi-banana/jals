@@ -198,9 +198,15 @@ impl CompileWasm {
     fn classes_in_order(inputs: &[WasmInput<'_>], index: &ProjectIndex) -> Result<Vec<ItemId>> {
         let mut declared = Vec::new();
         for input in inputs {
-            for node in input.root.children().filter(|n| n.kind() == CLASS_DECL) {
+            for node in Self::class_declarations(input.root) {
                 let name = Self::name_token(&node)
                     .ok_or(WasmError::Unsupported("a class with no name"))?;
+                // A non-`static` nested class holds its enclosing instance in a synthetic field and
+                // takes it as an extra constructor parameter. Neither exists here, so its constructor
+                // would be one parameter short of what a `new` passes — reported rather than emitted.
+                if Self::is_inner(&node) {
+                    return Err(WasmError::Unsupported("a non-`static` inner class"));
+                }
                 let item = index
                     .item_by_decl(input.file, usize::from(name.text_range().start()))
                     .ok_or_else(|| WasmError::Unresolved(name.text().into()))?;
@@ -213,6 +219,39 @@ impl CompileWasm {
             Self::push_with_supertypes(item, index, &declared, &mut ordered);
         }
         Ok(ordered)
+    }
+
+    /// Every class declaration in `root`, nested ones included.
+    ///
+    /// wasm's type space is flat and has no naming convention to satisfy, so a `static` nested class is
+    /// simply another struct type — there is nothing for it to be nested *in*. Walking only the root's
+    /// children dropped every one of them silently: the type never existed, and a call to one of its
+    /// methods reported an unresolved name that pointed nowhere useful.
+    ///
+    /// A class inside a *block* is a local or anonymous class, whose captured locals need a synthetic
+    /// constructor parameter each. `Lowering` reports one where it appears rather than here.
+    fn class_declarations(root: &SyntaxNode) -> impl Iterator<Item = SyntaxNode> + '_ {
+        root.descendants().filter(|node| {
+            node.kind() == CLASS_DECL
+                && !node
+                    .ancestors()
+                    .skip(1)
+                    .any(|ancestor| ancestor.kind() == jals_syntax::SyntaxKind::BLOCK)
+        })
+    }
+
+    /// Whether a class declaration is a non-`static` nested one.
+    fn is_inner(node: &SyntaxNode) -> bool {
+        let nested = node
+            .parent()
+            .is_some_and(|parent| parent.kind() == jals_syntax::SyntaxKind::CLASS_BODY);
+        nested
+            && !node
+                .children()
+                .filter(|child| child.kind() == MODIFIERS)
+                .flat_map(|modifiers| modifiers.children_with_tokens())
+                .filter_map(jals_syntax::SyntaxElement::into_token)
+                .any(|token| token.kind() == jals_syntax::SyntaxKind::STATIC_KW)
     }
 
     fn push_with_supertypes(
@@ -251,7 +290,7 @@ impl CompileWasm {
         module: &mut Module,
         out: &mut Vec<Method>,
     ) -> Result<()> {
-        for class in input.root.children().filter(|n| n.kind() == CLASS_DECL) {
+        for class in Self::class_declarations(input.root) {
             let name =
                 Self::name_token(&class).ok_or(WasmError::Unsupported("a class with no name"))?;
             let item = index
