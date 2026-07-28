@@ -274,9 +274,18 @@ impl Compile {
             .descendants()
             .any(|child| child.kind() == jals_syntax::SyntaxKind::ASSERT_STMT);
         if asserts {
+            // An interface field must be `public static final` (JVMS §4.5) — no exception for a
+            // synthetic one. Emitting it package-private made an `assert` inside a `default` method a
+            // `ClassFormatError: Illegal field modifiers` at load time.
+            let visibility = if is_interface {
+                FieldAccessFlags::PUBLIC
+            } else {
+                0
+            };
             fields.push(FieldInfo {
                 access_flags: FieldAccessFlags(
-                    FieldAccessFlags::STATIC
+                    visibility
+                        | FieldAccessFlags::STATIC
                         | FieldAccessFlags::FINAL
                         | FieldAccessFlags::SYNTHETIC,
                 ),

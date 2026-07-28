@@ -2123,3 +2123,79 @@ public class Named {
         "java.lang.String\nNamed\nint\nvoid\n[Ljava.lang.String;\n[J\ntrue\n"
     );
 }
+
+/// An `assert` inside an interface's `default` method.
+///
+/// JVMS §4.5 requires every interface field to be `public static final`, with no exception for a
+/// synthetic one. Emitting `$assertionsDisabled` package-private made the interface a
+/// `ClassFormatError: Illegal field modifiers` at load — which nothing but a JVM would have caught,
+/// because the class reparses perfectly.
+#[test]
+fn an_assert_in_an_interface_gets_a_public_flag() {
+    let classes = compile(
+        r#"
+public interface Checkable {
+    default int checked(int n) {
+        assert n > 0 : "positive";
+        return n;
+    }
+}
+"#,
+    )
+    .expect("compile");
+    let class =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(classes[0].bytes.as_slice()))
+            .expect("reparse");
+    // public | static | final | synthetic
+    assert_eq!(class.fields.len(), 1);
+    assert_eq!(
+        class.fields[0].access_flags.0,
+        0x0001 | 0x0008 | 0x0010 | 0x1000
+    );
+
+    if !java_available() {
+        return;
+    }
+    let directory = tempfile::tempdir().expect("temp dir");
+    std::fs::write(directory.path().join("Checkable.class"), &classes[0].bytes).expect("write");
+    let output = Command::new("java")
+        .arg("-XX:-UsePerfData")
+        .arg("-cp")
+        .arg(directory.path())
+        .arg("Checkable")
+        .output()
+        .expect("run java");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("ClassFormatError") && !stderr.contains("VerifyError"),
+        "the JVM rejected the interface: {stderr}"
+    );
+}
+
+/// An overload set mixing a specific reference parameter with `Object` picks the one the argument's
+/// static type names.
+///
+/// `StringBuilder.append` declares both, and the two are mutually assignable as far as the shallow
+/// stub model can see — so nothing *dominates*, and selection falls back to an order rather than to a
+/// rule. It lands on the right one today; this pins that, because the wrong one is an
+/// `invokevirtual append(String)` with an `Object` on the stack, which the assembler's
+/// reference-vs-reference check accepts and the JVM rejects at load.
+#[test]
+fn an_object_argument_does_not_bind_to_a_string_parameter() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Widened {
+    public static void main(String[] args) {
+        StringBuilder builder = new StringBuilder();
+        Object boxed = "x";
+        builder.append(boxed);
+        builder.append("y");
+        builder.append(1);
+        System.out.println(builder.toString());
+    }
+}
+"#;
+    assert_eq!(run(source, "Widened"), "xy1\n");
+}
