@@ -1135,3 +1135,73 @@ public class Filled {
     assert_invoke(&[source], "nested", &["5"], "10");
     assert_invoke(&[source], "fromAStatic", &[], "15");
 }
+
+/// An overridden method dispatches on the receiver's *actual* type.
+///
+/// Every call used to be a direct one to the statically-selected member, so `a.legs()` on a `Bird` held
+/// in an `Animal` called `Animal.legs()` — 4 where Java says 2, in a module that validates. The
+/// self-call inside `describe()` was wrong the same way, which is the half that a test of the call site
+/// alone would miss.
+///
+/// There is no vtable and no `call_ref`. wasm has no dynamic loading and no classpath, and this backend
+/// compiles the whole project as one module — so the set of classes that can override a method is
+/// closed and known, and a chain of `ref.test` most-derived-first answers exactly what a vtable would.
+/// The receiver and the arguments are spilled into locals because each arm re-pushes them and Java
+/// evaluates them once.
+#[test]
+fn an_overridden_method_dispatches_on_the_runtime_type() {
+    let source = r"
+public class Animal {
+    int legs() { return 4; }
+    // A self-call has to dispatch too: `this` is a `Bird` here even though the method is `Animal`'s.
+    int described() { return legs() * 10; }
+    int scaled(int n) { return legs() * n; }
+}
+
+public class Bird extends Animal {
+    int legs() { return 2; }
+}
+
+public class Penguin extends Bird {
+    int legs() { return 1; }
+}
+
+public class Snake extends Animal {
+    int legs() { return 0; }
+}
+
+public class Zoo {
+    public static int through_a_supertype() {
+        Animal a = new Bird();
+        return a.legs();
+    }
+
+    // The most-derived override has to be tested first: testing `Bird` before `Penguin` would answer 2.
+    public static int through_two_levels() {
+        Animal a = new Penguin();
+        return a.legs();
+    }
+
+    public static int through_a_self_call() {
+        Animal a = new Bird();
+        return a.described();
+    }
+
+    public static int with_an_argument(int n) {
+        Animal a = new Snake();
+        return a.scaled(n) + 1;
+    }
+
+    // A class that overrides nothing keeps its own method, and one held as itself needs no test.
+    public static int without_overriding() {
+        Snake s = new Snake();
+        return s.described();
+    }
+}
+";
+    assert_invoke(&[source], "through_a_supertype", &[], "2");
+    assert_invoke(&[source], "through_two_levels", &[], "1");
+    assert_invoke(&[source], "through_a_self_call", &[], "20");
+    assert_invoke(&[source], "with_an_argument", &["6"], "1");
+    assert_invoke(&[source], "without_overriding", &[], "0");
+}

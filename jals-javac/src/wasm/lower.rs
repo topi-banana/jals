@@ -2856,6 +2856,132 @@ impl Lowering<'_> {
         Ok(ty)
     }
 
+    /// Every class in this module that overrides `member`, most-derived first.
+    ///
+    /// wasm has no dynamic loading and no classpath: this backend compiles the *whole* project as one
+    /// module, so the set of classes that can override a method is closed and known here. That is what
+    /// makes dispatch by type test sound — and it is the only reason it is, which is why it is written
+    /// down rather than assumed.
+    ///
+    /// Empty when nothing overrides the method, which is the common case and the one that keeps a
+    /// direct `call`.
+    fn overriders(&self, member: MemberId) -> Vec<(ItemId, MemberId)> {
+        let info = self.index.member(member);
+        if info.kind != DefKind::Method {
+            return Vec::new();
+        }
+        let (name, arity, owner) = (info.name.clone(), info.params.len(), info.owner);
+        let mut found: Vec<(ItemId, MemberId)> = Vec::new();
+        for &item in self.layout.structs.keys() {
+            if item == owner || !self.index.is_subtype(item, owner) {
+                continue;
+            }
+            let over = self.index.own_members(item).iter().copied().find(|&id| {
+                let candidate = self.index.member(id);
+                candidate.kind == DefKind::Method
+                    && candidate.name == name
+                    && candidate.params.len() == arity
+            });
+            if let Some(over) = over {
+                found.push((item, over));
+            }
+        }
+        // Most-derived first, so a subclass's override is tested before its superclass's: testing the
+        // other way round would let the base class's `ref.test` succeed for every descendant and answer
+        // with the wrong method.
+        found.sort_by(|&(a, _), &(b, _)| {
+            self.index
+                .is_subtype(a, b)
+                .cmp(&self.index.is_subtype(b, a))
+                .reverse()
+        });
+        found
+    }
+
+    /// A virtual call: test the receiver's actual type against each override, most-derived first, and
+    /// fall through to the statically-selected method when none matches.
+    ///
+    /// The receiver and every argument are spilled into locals first, because each arm re-pushes them
+    /// and Java evaluates them exactly once. There is no vtable and no `call_ref`: with the whole
+    /// project in one module the overrides are a known, closed set, so a chain of `ref.test` answers
+    /// the same question a vtable would — and needs no element section to declare function references
+    /// in.
+    fn virtual_call(
+        &mut self,
+        call: &ast::CallExpr,
+        member: MemberId,
+        arguments: &[ast::Expr],
+        overriders: &[(ItemId, MemberId)],
+        ty: Option<ValType>,
+        insn: &mut Insn,
+    ) -> Result<Option<ValType>> {
+        // A bare call in an instance method is an implicit `this`, which is local 0.
+        let receiver_ty = if let Some(ast::Expr::FieldAccess(access)) = call.callee() {
+            let receiver = access
+                .receiver()
+                .ok_or(WasmError::Unsupported("a call with no receiver"))?;
+            self.expr(&receiver, insn)?
+                .ok_or(WasmError::Unsupported("a receiver with no value"))?
+        } else {
+            let owner = self
+                .owner
+                .ok_or(WasmError::Unsupported("a bare call in a `static` method"))?;
+            insn.local_get(0);
+            self.layout.class_ref(owner)?
+        };
+        let receiver = self.scratch(receiver_ty);
+        insn.local_set(receiver);
+
+        // Lowered untargeted, exactly as the direct-call path does: an argument's own inferred type is
+        // what both use, so a virtual call converts no differently from a static one.
+        let mut slots = Vec::with_capacity(arguments.len());
+        for argument in arguments {
+            let value = self
+                .expr(argument, insn)?
+                .ok_or(WasmError::Unsupported("an argument with no value"))?;
+            let slot = self.scratch(value);
+            insn.local_set(slot);
+            slots.push(slot);
+        }
+
+        match ty {
+            Some(ty) => insn.block_typed(ty),
+            None => insn.block(),
+        };
+        let leave = insn.depth();
+        for &(item, over) in overriders {
+            let Some(&function) = self.layout.functions.get(&over) else {
+                continue;
+            };
+            let struct_type = self.layout.structs[&item];
+            insn.local_get(receiver);
+            insn.ref_test(HeapType::Concrete(struct_type), false);
+            insn.if_();
+            insn.local_get(receiver);
+            insn.ref_cast(HeapType::Concrete(struct_type), false);
+            for &slot in &slots {
+                insn.local_get(slot);
+            }
+            insn.call(function);
+            insn.br(insn.depth() - leave);
+            insn.end();
+        }
+        let function = *self
+            .layout
+            .functions
+            .get(&member)
+            .ok_or(WasmError::Unsupported(
+                "a call to a method outside this module",
+            ))?;
+        insn.local_get(receiver);
+        for &slot in &slots {
+            insn.local_get(slot);
+        }
+        insn.call(function);
+        insn.end();
+        Ok(ty)
+    }
+
     /// A fresh unnamed local of type `ty`, for values that must outlive the stack.
     fn scratch(&mut self, ty: ValType) -> u32 {
         let slot = self.next;
@@ -2880,6 +3006,19 @@ impl Lowering<'_> {
         let info = self.index.member(member);
         let is_static = info.modifiers.is_static;
 
+        let arguments: Vec<ast::Expr> = call.args().into_iter().flat_map(|l| l.args()).collect();
+        let overriders = if is_static {
+            Vec::new()
+        } else {
+            self.overriders(member)
+        };
+        if !overriders.is_empty() {
+            let ty = match self.index.resolved_member_ty(member) {
+                Ty::Void => None,
+                ty => Some(self.layout.val_type(&ty)?),
+            };
+            return self.virtual_call(call, member, &arguments, &overriders, ty, insn);
+        }
         if !is_static {
             match call.callee() {
                 Some(ast::Expr::FieldAccess(access)) => {
@@ -2894,8 +3033,8 @@ impl Lowering<'_> {
                 }
             }
         }
-        for argument in call.args().into_iter().flat_map(|list| list.args()) {
-            self.expr(&argument, insn)?;
+        for argument in &arguments {
+            self.expr(argument, insn)?;
         }
         insn.call(function);
 
