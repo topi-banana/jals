@@ -2074,14 +2074,17 @@ public interface Maker { Box make(); }
 
 public class Box {
     int v = 5;
+    int w;
+    { w = v * 4; }
 }
 
 public class U {
     public static int run() {
         Maker m = Box::new;
-        return m.make().v;
+        Box b = m.make();
+        return b.v + b.w;
     }
 }
 ";
-    assert_invoke(&[constructing], "run", &[], "5");
+    assert_invoke(&[constructing], "run", &[], "25");
 }

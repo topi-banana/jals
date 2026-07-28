@@ -1318,7 +1318,7 @@ impl Body {
         // other body does.
         if let Some(owner) = method.initialises {
             let mut insn = Insn::new();
-            lowering.initializers(owner, &method.node, 0, false, &mut insn)?;
+            lowering.initializers(owner, &method.node, 0, &mut insn)?;
             return Ok(Self {
                 locals: lowering.locals,
                 code: insn.into_body(),
@@ -1362,18 +1362,12 @@ impl Body {
                     return Err(WasmError::Unsupported(
                         "a constructor reference with no matching constructor",
                     ));
-                } else if let Some(body) = layout.bodies.get(&created).cloned()
-                    && let Some(class_body) = body
-                        .children()
-                        .find(|child| matches!(child.kind(), CLASS_BODY | ENUM_BODY))
-                {
-                    // No constructor to run the field initialisers, so this runs them — the same gap, and the
-                    // same answer, as a plain `new` of such a class.
-                    let slot = lowering.next;
+                } else if let Some(&initialise) = layout.default_constructors.get(&created) {
+                    // Declaring no constructor does not mean there is nothing to run: the synthesised one
+                    // runs the field initialisers, and it is the same function a plain `new` calls.
+                    let slot = u32::try_from(lowering.locals.len()).unwrap_or(0) + lowering.next;
                     lowering.locals.push(layout.class_ref(created)?);
-                    lowering.next += 1;
-                    insn.local_set(slot);
-                    lowering.initializers(created, &class_body, slot, true, &mut insn)?;
+                    insn.local_set(slot).local_get(slot).call(initialise);
                     insn.local_get(slot);
                 }
                 insn.return_();
@@ -1504,7 +1498,7 @@ impl Body {
             // The constructor's parent *is* the class body, which is where the initialisers are and
             // the reason they need no search: they are this declaration's siblings, in order.
             if let (Some(owner), Some(body)) = (method.owner, method.node.parent()) {
-                lowering.initializers(owner, &body, 0, false, &mut insn)?;
+                lowering.initializers(owner, &body, 0, &mut insn)?;
             }
         }
         if let Some(block) = &block {
@@ -1645,22 +1639,11 @@ impl Lowering<'_> {
         owner: ItemId,
         class_body: &SyntaxNode,
         receiver: u32,
-        // Whether this runs from a `new` rather than from a constructor. Not inferable from `receiver`: a
-        // scratch local in a `static` method with no parameters is slot 0 too.
-        from_new: bool,
         insn: &mut Insn,
     ) -> Result<()> {
         let struct_type = self.layout.structs[&owner];
         for node in class_body.children() {
             if node.kind() == INITIALIZER {
-                // Run from a `new` rather than from a constructor, the object is in a local rather than in
-                // slot 0 — and a block's own field reads go through `this`, which is slot 0 by construction.
-                // Reported rather than emitted against the wrong receiver.
-                if from_new {
-                    return Err(WasmError::Unsupported(
-                        "an instance initialiser block in a class with no constructor",
-                    ));
-                }
                 // The `static` keyword is inside the `MODIFIERS` child, not on the `INITIALIZER`
                 // itself. A `static { … }` runs once at class initialisation rather than per instance,
                 // and this backend has no start function to run it in — so it is reported rather than
