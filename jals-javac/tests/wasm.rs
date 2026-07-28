@@ -2580,3 +2580,55 @@ public class Deconstruct {
     assert_invoke(&[source], "varComponents", &[], "7");
     assert_invoke(&[source], "nullComponent", &[], "100");
 }
+
+/// Four shapes that a report sweep would not have found, because none of them was reported.
+///
+/// An interface's members reach a `default` body, a `static` one, and a field — the last is implicitly
+/// `static final` (§9.3), and a class with only those used to be given a synthesised *constructor*,
+/// which panicked on an interface's missing struct type. A `char` is an unsigned 16-bit integer and is
+/// an `i32` here like every other integral type narrower than `long`; its literal was reported. A
+/// `continue` naming a loop from inside a `switch` crosses two structures at once.
+#[test]
+fn an_interface_member_a_char_and_a_labelled_jump_run() {
+    let source = r"
+public interface Sized {
+    int LIMIT = 7;
+
+    static int of(int n) { return n * 2; }
+
+    default int doubled() { return of(3); }
+}
+
+public class Thing implements Sized {}
+
+public class Reader {
+    public static int fromDefault() { return new Thing().doubled(); }
+    public static int fromStatic() { return Sized.of(4); }
+    public static int fromField() { return Sized.LIMIT; }
+
+    public static int labelled() {
+        int total = 0;
+        outer: for (int i = 0; i < 3; i++) {
+            switch (i) {
+                case 1:
+                    continue outer;
+                default:
+                    total += i;
+            }
+        }
+        return total;
+    }
+
+    public static int chars() {
+        char c = 'a';
+        c += 1;
+        return c;
+    }
+}
+";
+    assert_invoke(&[source], "fromDefault", &[], "6");
+    assert_invoke(&[source], "fromStatic", &[], "8");
+    assert_invoke(&[source], "fromField", &[], "7");
+    assert_invoke(&[source], "labelled", &[], "2");
+    assert_invoke(&[source], "chars", &[], "98");
+}

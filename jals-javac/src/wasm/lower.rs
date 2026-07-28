@@ -909,7 +909,9 @@ impl CompileWasm {
                             .children()
                             .any(|child| ast::Expr::cast(child).is_some()))
             });
-            if !declares_constructor && has_initialisers {
+            // An interface has no instances, so it has no instance initialisers: its fields are
+            // implicitly `static` (§9.3) and run in the class's initialisation, not a constructor's.
+            if !declares_constructor && has_initialisers && class.kind() != INTERFACE_DECL {
                 let signature = module.add_type(SubType::plain(CompType::Func {
                     params: alloc::vec![layout.class_ref(item)?],
                     results: Vec::new(),
@@ -1993,7 +1995,10 @@ impl Lowering<'_> {
         receiver: u32,
         insn: &mut Insn,
     ) -> Result<()> {
-        let struct_type = self.layout.structs[&owner];
+        let struct_type =
+            *self.layout.structs.get(&owner).ok_or_else(|| {
+                WasmError::NoRepresentation(self.index.item(owner).fqn.to_string())
+            })?;
         for node in class_body.children() {
             if node.kind() == INITIALIZER {
                 // The `static` keyword is inside the `MODIFIERS` child, not on the `INITIALIZER`
@@ -3497,7 +3502,9 @@ impl Lowering<'_> {
     }
 
     fn literal(&self, literal: &ast::Literal, insn: &mut Insn) -> Result<ValType> {
-        use jals_syntax::SyntaxKind::{FALSE_KW, FLOAT_LITERAL, INT_LITERAL, NULL_KW, TRUE_KW};
+        use jals_syntax::SyntaxKind::{
+            CHAR_LITERAL, FALSE_KW, FLOAT_LITERAL, INT_LITERAL, NULL_KW, TRUE_KW,
+        };
         let token = literal
             .syntax()
             .children_with_tokens()
@@ -3541,6 +3548,20 @@ impl Lowering<'_> {
                 match ty {
                     ValType::F32 => insn.f32_const(text.parse().map_err(|_| unreadable())?),
                     _ => insn.f64_const(text.parse().map_err(|_| unreadable())?),
+                };
+            }
+            // A `char` is an unsigned 16-bit integer, so it is an `i32` here like every other integral
+            // type narrower than `long`. The escape reading is shared with the JVM backend: `'\n'` and
+            // `'\u0041'` mean what they mean in both, and reading them twice would be two chances to
+            // disagree about one of them.
+            CHAR_LITERAL => {
+                let value = crate::lower::expr::Expr::literal_text(text)
+                    .ok()
+                    .and_then(|text| text.chars().next())
+                    .ok_or(WasmError::Unsupported("a `char` literal this cannot read"))?;
+                match ty {
+                    ValType::I64 => insn.i64_const(i64::from(u32::from(value))),
+                    _ => insn.i32_const(i32::try_from(u32::from(value)).unwrap_or(0)),
                 };
             }
             _ => return Err(WasmError::Unsupported("this literal kind")),
