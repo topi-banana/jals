@@ -32,8 +32,8 @@ use jals_exec::Yielder;
 use jals_syntax::SyntaxKind::{
     ANNOTATION_TYPE_DECL, CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL, ELLIPSIS, ENUM_BODY,
     ENUM_CONSTANT, ENUM_DECL, EXTENDS_CLAUSE, FIELD_DECL, IMPLEMENTS_CLAUSE, INTERFACE_DECL,
-    LBRACK, METHOD_DECL, MODIFIERS, NEW_EXPR, PRIVATE_KW, RECORD_COMPONENT, RECORD_DECL,
-    RECORD_HEADER, STATIC_KW,
+    LAMBDA_EXPR, LBRACK, METHOD_DECL, MODIFIERS, NEW_EXPR, PRIVATE_KW, RECORD_COMPONENT,
+    RECORD_DECL, RECORD_HEADER, STATIC_KW,
 };
 use jals_syntax::ast::{self, AstNode};
 use jals_syntax::cfg::CfgMap;
@@ -1602,11 +1602,34 @@ impl ProjectIndex {
         // One counter per enclosing type, so two anonymous classes in the same class get 1 and 2.
         let mut anonymous: alloc::collections::BTreeMap<alloc::string::String, usize> =
             alloc::collections::BTreeMap::new();
+        // Numbered per enclosing type as well, and separately: a lambda and an anonymous class in the same
+        // class must not both be `1`.
+        let mut lambdas: alloc::collections::BTreeMap<alloc::string::String, usize> =
+            alloc::collections::BTreeMap::new();
         let mut stack: Vec<(SyntaxNode, Option<alloc::rc::Rc<str>>)> = vec![(root.clone(), None)];
         while let Some((node, enclosing)) = stack.pop() {
             yielder.tick().await;
             if cfg.disables_node(&node) {
                 continue;
+            }
+            // A lambda is, in every way the index cares about, a one-method class implementing the interface
+            // it is converted to. Giving it an item is what lets a backend with no `invokedynamic` — the
+            // wasm one — reach it through the same dispatch every class already uses.
+            if node.kind() == LAMBDA_EXPR {
+                let enclosing_key = enclosing.as_deref().unwrap_or("").to_owned();
+                let ordinal = lambdas.entry(enclosing_key).or_insert(0_usize);
+                let simple = alloc::format!("lambda${ordinal}");
+                *ordinal += 1;
+                let fqn = Self::build_fqn(package, enclosing.as_deref(), &simple);
+                let start = usize::from(node.text_range().start());
+                out.push(RawType {
+                    fqn,
+                    kind: DefKind::Class,
+                    name_range: start..start,
+                    type_params: Vec::new(),
+                    members: Vec::new(),
+                    raw_supertypes: Vec::new(),
+                });
             }
             // An anonymous class body is a type declaration with no name and no keyword. Nothing else
             // indexes it, so `new I() { … }` had no item at all — and without an item there is no member
