@@ -738,14 +738,33 @@ impl Compile {
         let Some(decl) = ast::FieldDecl::cast(node.clone()) else {
             return Ok(());
         };
+        let vars = Self::type_variables(node);
+        let written = node.children().find_map(ast::Type::cast);
+        // A field whose type mentions a type variable keeps it here: erasure writes the *bound* into the
+        // descriptor, so `T value` and `Object value` are the same field without this.
+        let signature = match &written {
+            Some(ty) if Self::mentions_variable(ty, &vars) => {
+                Some(Self::type_signature(ty, &vars, context)?)
+            }
+            _ => None,
+        };
         for name in decl.names() {
             let member = context.member_at(&name)?;
             let descriptor = Descriptor::field_descriptor(member, context.index)?.to_string();
+            let mut attributes = Vec::new();
+            if let Some(signature) = &signature {
+                let name_index = pool.utf8_index("Signature").ok_or(AsmError::PoolFull)?;
+                let signature_index = pool.utf8_index(signature).ok_or(AsmError::PoolFull)?;
+                attributes.push(jals_classfile::Attribute {
+                    name_index,
+                    body: jals_classfile::AttributeBody::Signature { signature_index },
+                });
+            }
             out.push(FieldInfo {
                 access_flags: FieldAccessFlags(Self::field_flags(node, context.in_interface)),
                 name_index: pool.utf8_index(name.text()).ok_or(AsmError::PoolFull)?,
                 descriptor_index: pool.utf8_index(&descriptor).ok_or(AsmError::PoolFull)?,
-                attributes: Vec::new(),
+                attributes,
             });
         }
         Ok(())
@@ -798,6 +817,16 @@ impl Compile {
             // An abstract or interface method has no `Code` attribute at all.
             None => Vec::new(),
         };
+        // A method that declares type parameters, or whose signature mentions one in scope, keeps them
+        // here: `T first(List<T> xs)` and `Object first(List xs)` are otherwise the same method.
+        if let Some(signature) = Self::method_signature(node, context)? {
+            let name_index = pool.utf8_index("Signature").ok_or(AsmError::PoolFull)?;
+            let signature_index = pool.utf8_index(&signature).ok_or(AsmError::PoolFull)?;
+            attributes.push(jals_classfile::Attribute {
+                name_index,
+                body: jals_classfile::AttributeBody::Signature { signature_index },
+            });
+        }
         // `int count() default 3` is an annotation element's default, and the *only* place it lives in
         // the class file is this attribute. Dropping it compiles `@Marker` — an omitted element with a
         // default — into a use no reader can resolve.
@@ -1042,6 +1071,131 @@ impl Compile {
             out.push(';');
         }
         Ok(Some(out))
+    }
+
+    /// The `MethodSignature` (JVMS §4.7.9.1) a generic method needs, or `None` when nothing about it is
+    /// generic.
+    ///
+    /// Its own type parameters first, then each formal parameter, then the result. `throws` is written
+    /// only when a thrown type is itself a variable, which is the one case the encoding requires it.
+    fn method_signature(node: &SyntaxNode, context: &Context<'_>) -> Result<Option<String>> {
+        let decl = ast::MethodDecl::cast(node.clone())
+            .ok_or(LowerError::Unsupported("a malformed method declaration"))?;
+        let vars = Self::type_variables(node);
+        let own: Vec<ast::TypeParam> = node
+            .children()
+            .find_map(ast::TypeParams::cast)
+            .map(|params| params.params().collect())
+            .unwrap_or_default();
+        let parameters: Vec<ast::Type> = decl
+            .params()
+            .map(|list| list.params().filter_map(|param| param.ty()).collect())
+            .unwrap_or_default();
+        let returns = decl.return_type();
+        let generic = !own.is_empty()
+            || parameters
+                .iter()
+                .chain(returns.as_ref())
+                .any(|ty| Self::mentions_variable(ty, &vars));
+        if !generic {
+            return Ok(None);
+        }
+        let mut out = String::new();
+        if !own.is_empty() {
+            out.push('<');
+            for param in &own {
+                let name = param
+                    .name()
+                    .ok_or(LowerError::Unsupported("a type parameter with no name"))?;
+                out.push_str(&name);
+                let bounds: Vec<ast::Type> = param
+                    .syntax()
+                    .children()
+                    .filter_map(ast::Type::cast)
+                    .collect();
+                if bounds.is_empty() {
+                    out.push_str(":Ljava/lang/Object;");
+                    continue;
+                }
+                for bound in &bounds {
+                    out.push(':');
+                    out.push_str(&Self::type_signature(bound, &vars, context)?);
+                }
+            }
+            out.push('>');
+        }
+        out.push('(');
+        for ty in &parameters {
+            out.push_str(&Self::type_signature(ty, &vars, context)?);
+        }
+        out.push(')');
+        match &returns {
+            // `void` has no reference signature; the encoding spells it `V` like a descriptor does.
+            Some(ty)
+                if !ty
+                    .syntax()
+                    .children_with_tokens()
+                    .filter_map(jals_syntax::SyntaxElement::into_token)
+                    .any(|token| token.kind() == jals_syntax::SyntaxKind::VOID_KW) =>
+            {
+                out.push_str(&Self::type_signature(ty, &vars, context)?);
+            }
+            _ => out.push('V'),
+        }
+        Ok(Some(out))
+    }
+
+    /// The type-variable names in scope for a member of `node`'s enclosing declaration, plus any the
+    /// member itself declares.
+    fn type_variables(member: &SyntaxNode) -> Vec<String> {
+        let mut names = Vec::new();
+        for ancestor in member.ancestors() {
+            if let Some(params) = ancestor.children().find_map(ast::TypeParams::cast) {
+                names.extend(params.params().filter_map(|param| param.name()));
+            }
+        }
+        names
+    }
+
+    /// One `JavaTypeSignature` (JVMS §4.7.9.1) for a written type.
+    ///
+    /// A name in `vars` is a *type variable*, written `T<name>;` — which is the whole reason this exists
+    /// rather than reusing the descriptor: erasure replaces a variable with its bound, and the signature
+    /// is where the variable itself is kept. Type *arguments* are erased here for the same reason the
+    /// class signature erases its supertypes: leaving them out loses only what a reflective reader would
+    /// see, never what the JVM links on.
+    fn type_signature(ty: &ast::Type, vars: &[String], context: &Context<'_>) -> Result<String> {
+        use jals_syntax::SyntaxKind::LBRACK;
+        let dimensions = ty
+            .syntax()
+            .children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .filter(|token| token.kind() == LBRACK)
+            .count();
+        let mut out = "[".repeat(dimensions);
+        if let Some(name) = ty.simple_name().filter(|name| {
+            !ty.is_qualified() && vars.iter().any(|var| var == name) && !ty.is_primitive_or_var()
+        }) {
+            out.push('T');
+            out.push_str(&name);
+            out.push(';');
+            return Ok(out);
+        }
+        // Not a variable: the erased descriptor, with the dimensions already written above.
+        let erased = context.ty_of_type(ty)?;
+        let descriptor = Descriptor::descriptor_of(&erased, context.index)?.to_string();
+        out.push_str(descriptor.trim_start_matches('['));
+        Ok(out)
+    }
+
+    /// Whether a written type mentions any of `vars`, which is what decides if a member needs a
+    /// `Signature` at all.
+    fn mentions_variable(ty: &ast::Type, vars: &[String]) -> bool {
+        ty.syntax()
+            .descendants_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .filter(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+            .any(|token| vars.iter().any(|var| var == token.text()))
     }
 
     /// A record's synthesised members: a `private final` field per component, the canonical

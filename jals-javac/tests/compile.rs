@@ -3032,3 +3032,108 @@ class Plain {}
     );
     assert_eq!(run(&program, "Uses"), "ok\n");
 }
+
+/// A generic method's and a generic field's `Signature`.
+///
+/// Erasure writes a type variable's *bound* into the descriptor, so `T value` and `Object value` are the
+/// same field, and `T first(List<T> xs)` and `Object first(List xs)` the same method, without this. A
+/// member that mentions no variable and declares none carries no attribute at all.
+///
+/// A method declaring type parameters *of its own* (`static <E> E pick(E a, E b)`) is not here: its
+/// erased descriptor needs `E`'s bound, which the descriptor path cannot resolve yet, so it fails before
+/// any signature is written. That is a separate gap from this one.
+#[test]
+fn a_generic_member_carries_its_signature() {
+    let source = r"
+interface Named {}
+
+class Holder<T> {
+    T value;
+    int plain;
+
+    T get() { return value; }
+
+    void put(T next) { value = next; }
+
+    int ungeneric(int n) { return n; }
+
+    T[] many() { return null; }
+}
+";
+    let classes = compile(source).expect("compile");
+    let holder = classes
+        .iter()
+        .find(|class| class.internal_name == "Holder")
+        .expect("the class");
+    let class =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(holder.bytes.as_slice()))
+            .expect("reparse");
+    let read = |attributes: &[jals_classfile::Attribute]| {
+        attributes
+            .iter()
+            .find_map(|attribute| match &attribute.body {
+                jals_classfile::AttributeBody::Signature { signature_index } => Some(
+                    class
+                        .constant_pool
+                        .utf8(*signature_index)
+                        .expect("utf8")
+                        .into_owned(),
+                ),
+                _ => None,
+            })
+    };
+    let fields: Vec<(String, Option<String>)> = class
+        .fields
+        .iter()
+        .map(|field| {
+            (
+                class
+                    .constant_pool
+                    .utf8(field.name_index)
+                    .expect("utf8")
+                    .into_owned(),
+                read(&field.attributes),
+            )
+        })
+        .collect();
+    assert_eq!(
+        fields,
+        [
+            ("value".to_owned(), Some("TT;".to_owned())),
+            ("plain".to_owned(), None),
+        ]
+    );
+    let methods: Vec<(String, Option<String>)> = class
+        .methods
+        .iter()
+        .map(|method| {
+            (
+                class
+                    .constant_pool
+                    .utf8(method.name_index)
+                    .expect("utf8")
+                    .into_owned(),
+                read(&method.attributes),
+            )
+        })
+        .collect();
+    assert_eq!(
+        methods,
+        [
+            ("get".to_owned(), Some("()TT;".to_owned())),
+            ("put".to_owned(), Some("(TT;)V".to_owned())),
+            ("ungeneric".to_owned(), None),
+            ("many".to_owned(), Some("()[TT;".to_owned())),
+            ("<init>".to_owned(), None),
+        ]
+    );
+
+    if !java_available() {
+        return;
+    }
+    let program = format!(
+        "{source}\npublic class Uses {{ public static void main(String[] a) \
+         {{ System.out.println(new Holder<String>().get()); }} }}\n"
+    );
+    assert_eq!(run(&program, "Uses"), "null\n");
+}
