@@ -649,7 +649,7 @@ impl Expr {
     /// variable arity at all: `f(int...)`'s descriptor is `([I)V` and the call site builds the `int[]`.
     /// One argument that is already an array of the right type passes straight through instead — that
     /// is JLS §15.12.4.2's rule, and packing it would produce an `int[][]`.
-    fn arguments(
+    pub(crate) fn arguments(
         arguments: &[ast::Expr],
         params: &[Ty],
         varargs: bool,

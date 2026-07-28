@@ -2760,29 +2760,120 @@ fn a_return_in_a_compact_record_constructor_is_reported() {
     );
 }
 
-/// Three `enum` shapes are reported, each because a *descriptor* would come out wrong.
+/// An `enum` whose constants carry arguments, through a constructor the source declares.
 ///
-/// A constant with arguments and a declared constructor both need the two synthetic parameters (`name`,
-/// `ordinal`) prepended to a descriptor the index computed from the declaration, leaving every one of
-/// them two parameters short. A constant with a body is an anonymous subclass — its own class file, and
-/// the enum then cannot be `final`.
+/// Every `enum` constructor takes two parameters the source never writes — the constant's name and its
+/// ordinal — because they are what `Enum`'s own constructor needs, and nothing else can set what
+/// `name()`, `ordinal()`, and `compareTo` return. So a declared one is emitted two parameters *wider*
+/// than the index computed from its declaration, the implicit delegation passes those two straight
+/// through, and each constant's written arguments follow them at the call in `<clinit>`.
 #[test]
-fn the_enum_shapes_that_need_a_wider_descriptor_are_reported() {
+fn an_enum_constant_carries_its_arguments_to_a_declared_constructor() {
+    let source = r#"
+enum Planet {
+    MERCURY(3.3e23, 2.44e6),
+    EARTH(5.976e24, 6.378e6);
+
+    private final double mass;
+    private final double radius;
+    // A field initialiser still runs, after the delegation and before the body.
+    private final int tag = 7;
+
+    Planet(double mass, double radius) {
+        this.mass = mass;
+        this.radius = radius;
+    }
+
+    double surfaceGravity() {
+        return 6.67300E-11 * mass / (radius * radius);
+    }
+
+    int tag() { return tag; }
+}
+
+// A second `enum` whose constructor has a different arity, so the two synthetic parameters are not
+// simply "the first two of every constructor".
+enum Size {
+    SMALL(1, "s"), LARGE(9, "l");
+
+    final int weight;
+    final String code;
+
+    Size(int weight, String code) {
+        this.weight = weight;
+        this.code = code;
+    }
+}
+
+public class Enums {
+    public static void main(String[] args) {
+        System.out.println(Planet.EARTH.ordinal());
+        System.out.println(Planet.EARTH.name());
+        System.out.println(Planet.EARTH.tag());
+        System.out.println((long) (Planet.EARTH.surfaceGravity() * 100.0));
+        System.out.println((long) (Planet.MERCURY.surfaceGravity() * 100.0));
+        System.out.println(Planet.values().length);
+        System.out.println(Planet.valueOf("MERCURY").ordinal());
+        System.out.println(Size.LARGE.weight + Size.LARGE.code);
+        System.out.println(Size.SMALL.compareTo(Size.LARGE));
+    }
+}
+"#;
+    let classes = compile(source).expect("compile");
+    let planet = classes
+        .iter()
+        .find(|class| class.internal_name == "Planet")
+        .expect("the enum");
+    let class =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(planet.bytes.as_slice()))
+            .expect("reparse");
+    let descriptors: Vec<String> = class
+        .methods
+        .iter()
+        .filter(|method| class.constant_pool.utf8(method.name_index).as_deref() == Some("<init>"))
+        .map(|method| {
+            class
+                .constant_pool
+                .utf8(method.descriptor_index)
+                .expect("utf8")
+                .into_owned()
+        })
+        .collect();
+    // The declared `(double, double)` one, and no synthesised `(String, int)` beside it.
+    assert_eq!(descriptors, ["(Ljava/lang/String;IDD)V".to_owned()]);
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(
+        run(source, "Enums"),
+        "1\nEARTH\n7\n980\n369\n2\n0\n9l\n-1\n"
+    );
+}
+
+/// The `enum` shapes that are still reported, each because a *descriptor* or a *class file* would come
+/// out wrong.
+///
+/// A constant with a body is an anonymous subclass — its own class file, and the enum then cannot be
+/// `final`. A `this(…)` between two constructors would be lowered from the descriptor the index
+/// computed, which is two parameters short of the one emitted.
+#[test]
+fn the_enum_shapes_that_need_another_class_file_are_reported() {
     for (source, expected) in [
-        (
-            "enum E { A(1), B(2); E(int code) {} }",
-            "an `enum` constant with arguments",
-        ),
-        (
-            "enum E { A, B; E() {} }",
-            "an `enum` with its own constructor",
-        ),
         (
             "enum E { A { int f() { return 1; } }, B; int f() { return 0; } }",
             "an `enum` constant with a body",
         ),
+        (
+            "enum E { A(1); E(int code) {} E() { this(0); } }",
+            "an explicit constructor invocation in an `enum`",
+        ),
+        (
+            "enum E { A(1, 2); E(int a) {} }",
+            "an `enum` constant with no matching constructor",
+        ),
     ] {
-        let error = compile(source).expect_err("this enum needs a wider constructor descriptor");
+        let error = compile(source).expect_err("this enum has no lowering");
         assert!(
             matches!(error, LowerError::Unsupported(what) if what == expected),
             "`{source}` should report {expected:?}, got {error}"

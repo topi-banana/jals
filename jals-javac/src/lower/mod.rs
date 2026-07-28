@@ -89,6 +89,11 @@ const ENUM: &str = "java/lang/Enum";
 const RECORD: &str = "java/lang/Record";
 /// The synthetic field an inner class holds its enclosing instance in, named as javac names it.
 const OUTER: &str = "this$0";
+/// The type of an `enum` constructor's first synthetic parameter, and of `Enum`'s own.
+const STRING: &str = "java/lang/String";
+/// `Enum`'s constructor, which every `enum` constructor delegates to: the constant's name, then its
+/// ordinal. Nothing else can set them, and `name()`, `ordinal()`, and `compareTo` all read them.
+const ENUM_INIT: &str = "(Ljava/lang/String;I)V";
 
 /// The synthetic array holding an `enum`'s constants, in declaration order.
 ///
@@ -159,6 +164,10 @@ pub(crate) struct Context<'a> {
     /// Whether the type being emitted is an interface, which decides the access levels JLS §9.3
     /// and §9.4 let a declaration leave unwritten.
     in_interface: bool,
+    /// Whether the type being emitted is an `enum`, whose every constructor takes two parameters the
+    /// source never writes: the constant's name and its ordinal, which are what `Enum`'s own
+    /// constructor needs and the only way `name()`, `ordinal()`, and `compareTo` get their answers.
+    in_enum: bool,
     /// The internal name of the class an inner class holds an instance of. `None` for every other class.
     encloses: Option<String>,
     /// Every inner class in this file and the class it holds an instance of, so a `new` of one can pass
@@ -325,6 +334,7 @@ impl Compile {
             file,
             this_class: internal_name.clone(),
             in_interface: is_interface,
+            in_enum: is_enum,
             encloses: encloses.clone(),
             inner: Self::inner_classes_of(node, index, file),
             captures: Self::captures_of(node, resolved, index, file),
@@ -400,7 +410,7 @@ impl Compile {
             .unwrap_or_default();
 
         if is_enum {
-            Self::enum_shape(&constants, &members)?;
+            Self::enum_shape(&constants)?;
         }
 
         let mut fields = Vec::new();
@@ -1797,6 +1807,22 @@ impl Compile {
                 .params
                 .insert(0, jals_classfile::FieldType::Object(enclosing.clone()));
         }
+        // An `enum`'s takes the constant's name and ordinal first, for the same reason: they are what
+        // `Enum`'s own constructor needs, and the declaration writes neither.
+        if context.in_enum {
+            descriptor.params.insert(
+                0,
+                jals_classfile::FieldType::Base(jals_classfile::BaseType::Int),
+            );
+            descriptor
+                .params
+                .insert(0, jals_classfile::FieldType::Object(STRING.to_owned()));
+        }
+        let synthetic = if context.in_enum {
+            2
+        } else {
+            u16::from(context.encloses.is_some())
+        };
         // The captures go *after* every declared parameter, so a declared one keeps its slot.
         for &captured in context.captured_here() {
             descriptor.params.push(Descriptor::descriptor_of(
@@ -1812,10 +1838,19 @@ impl Compile {
         let delegation = body
             .as_ref()
             .and_then(Self::explicit_constructor_invocation);
+        // A `this(…)` between two `enum` constructors would be lowered from the descriptor the index
+        // computed, which is two parameters short of the one emitted here — a `NoSuchMethodError` in
+        // `<clinit>` rather than anything a verifier catches. (`super(…)` is not a Java program in an
+        // `enum` at all: only `Enum` may call `Enum`'s constructor.)
+        if context.in_enum && delegation.is_some() {
+            return Err(LowerError::Unsupported(
+                "an explicit constructor invocation in an `enum`",
+            ));
+        }
 
         let params = node.children().find_map(ast::ParamList::cast);
         let mut asm = Assembler::new(pool, Receiver::Constructor(&context.this_class), &text)?;
-        let slots = Slots::for_constructor(context, params.as_ref(), context.encloses.is_some());
+        let slots = Slots::for_constructor(context, params.as_ref(), synthetic);
         let mut emit = Emit::new(&mut asm, slots, jals_hir::Ty::Void, true);
         match &delegation {
             // `this(…)` and `super(…)` each replace part of what the prologue emits, and running
@@ -2542,7 +2577,7 @@ impl Compile {
 
         // Parameter 0 is `this`; each component's slot follows, at its own width — a `long` or a
         // `double` component takes two, and getting that wrong reads the *next* parameter's low half.
-        let mut slots = Slots::for_constructor(context, None, false);
+        let mut slots = Slots::for_constructor(context, None, 0);
         let mut placements = Vec::with_capacity(components.len());
         for (position, (_, component)) in components.iter().enumerate() {
             let width = Slots::descriptor_width(component);
@@ -2655,7 +2690,7 @@ impl Compile {
         let name_index = pool.utf8_index("<init>").ok_or(AsmError::PoolFull)?;
         let descriptor_index = pool.utf8_index(&text).ok_or(AsmError::PoolFull)?;
         let mut asm = Assembler::new(pool, Receiver::Constructor(&context.this_class), &text)?;
-        let slots = Slots::for_constructor(context, None, context.encloses.is_some());
+        let slots = Slots::for_constructor(context, None, u16::from(context.encloses.is_some()));
         let mut emit = Emit::new(&mut asm, slots, jals_hir::Ty::Void, true);
         Self::prologue(context, &mut emit, super_name, super_item, members)?;
         asm.return_(None)?;
@@ -2667,34 +2702,14 @@ impl Compile {
         })
     }
 
-    /// The three `enum` shapes this reports, each because a *descriptor* would come out wrong.
+    /// The one `enum` shape this reports.
     ///
-    /// A constant with arguments and a declared constructor both need the two synthetic parameters
-    /// (`name`, `ordinal`) *prepended* to a descriptor the index computed from the declaration, which
-    /// would leave every one of them two parameters short — a `NoSuchMethodError` in `<clinit>`. A
-    /// constant with a body is an anonymous subclass: its own class file, and the enum then cannot be
-    /// `final`.
-    ///
-    /// Checked before any member is emitted, because a user-declared enum constructor otherwise reaches
-    /// the prologue first and reports the missing `super()` rather than the reason there is one.
-    fn enum_shape(constants: &[ast::EnumConstant], members: &[SyntaxNode]) -> Result<()> {
+    /// A constant with a **body** is an anonymous subclass: its own class file, with the enum then not
+    /// `final` and the constant's field typed as the base. Nothing else about the declaration says so,
+    /// which is why it is checked here rather than found by whatever tried to emit it.
+    fn enum_shape(constants: &[ast::EnumConstant]) -> Result<()> {
         if constants.iter().any(|constant| constant.body().is_some()) {
             return Err(LowerError::Unsupported("an `enum` constant with a body"));
-        }
-        if constants.iter().any(|constant| {
-            constant
-                .args()
-                .is_some_and(|list| list.args().next().is_some())
-        }) {
-            return Err(LowerError::Unsupported("an `enum` constant with arguments"));
-        }
-        if members
-            .iter()
-            .any(|member| member.kind() == CONSTRUCTOR_DECL)
-        {
-            return Err(LowerError::Unsupported(
-                "an `enum` with its own constructor",
-            ));
         }
         Ok(())
     }
@@ -2752,25 +2767,31 @@ impl Compile {
         });
 
         // `private Color(String name, int ordinal) { super(name, ordinal); <initialisers> }`
-        let init_descriptor = "(Ljava/lang/String;I)V";
-        let name_index = pool.utf8_index("<init>").ok_or(AsmError::PoolFull)?;
-        let descriptor_index = pool.utf8_index(init_descriptor).ok_or(AsmError::PoolFull)?;
-        let mut asm = Assembler::new(pool, Receiver::Constructor(internal_name), init_descriptor)?;
-        let slots = Slots::new(context, None, false);
-        let mut emit = Emit::new(&mut asm, slots, jals_hir::Ty::Void, true);
-        emit.asm.load(0)?;
-        emit.asm.load(1)?;
-        emit.asm.load(2)?;
-        emit.asm
-            .invoke_special(ENUM, "<init>", init_descriptor, false)?;
-        Self::initializers(context, &mut emit, members, false)?;
-        asm.return_(None)?;
-        methods.push(MethodInfo {
-            access_flags: MethodAccessFlags(MethodAccessFlags::PRIVATE),
-            name_index,
-            descriptor_index,
-            attributes: alloc::vec![asm.finish()?],
-        });
+        //
+        // Only when the source declares none: a declared one is emitted from the member loop, with the
+        // same two synthetic parameters ahead of whatever it wrote, and it runs the initialisers itself.
+        if !members
+            .iter()
+            .any(|member| member.kind() == CONSTRUCTOR_DECL)
+        {
+            let name_index = pool.utf8_index("<init>").ok_or(AsmError::PoolFull)?;
+            let descriptor_index = pool.utf8_index(ENUM_INIT).ok_or(AsmError::PoolFull)?;
+            let mut asm = Assembler::new(pool, Receiver::Constructor(internal_name), ENUM_INIT)?;
+            let slots = Slots::new(context, None, false);
+            let mut emit = Emit::new(&mut asm, slots, jals_hir::Ty::Void, true);
+            emit.asm.load(0)?;
+            emit.asm.load(1)?;
+            emit.asm.load(2)?;
+            emit.asm.invoke_special(ENUM, "<init>", ENUM_INIT, false)?;
+            Self::initializers(context, &mut emit, members, false)?;
+            asm.return_(None)?;
+            methods.push(MethodInfo {
+                access_flags: MethodAccessFlags(MethodAccessFlags::PRIVATE),
+                name_index,
+                descriptor_index,
+                attributes: alloc::vec![asm.finish()?],
+            });
+        }
 
         // `public static Color[] values() { return (Color[]) $VALUES.clone(); }`
         //
@@ -2819,6 +2840,45 @@ impl Compile {
         Ok(())
     }
 
+    /// The declared `enum` constructor a constant with `arity` arguments builds through.
+    ///
+    /// `None` when the source declares none, which is the synthesised `(String, int)` one. Selected by
+    /// arity rather than by applicability: a constant's argument list is not an expression the index
+    /// resolved a call target for, so there is nothing to read a selection out of. Two constructors of
+    /// the same arity are reported instead of guessed at.
+    fn enum_constructor(arity: usize, context: &Context<'_>) -> Result<Option<jals_hir::MemberId>> {
+        let mut matching = context
+            .index
+            .own_members(context.this_item)
+            .iter()
+            .copied()
+            .filter(|&member| {
+                let info = context.index.member(member);
+                info.kind == DefKind::Constructor && info.params.len() == arity
+            });
+        let Some(first) = matching.next() else {
+            let declares_one = context
+                .index
+                .own_members(context.this_item)
+                .iter()
+                .any(|&member| context.index.member(member).kind == DefKind::Constructor);
+            // Arguments with no constructor to take them, or a constructor of every other arity: the
+            // linter's to report, and nothing here can pick a descriptor for it.
+            if declares_one || arity > 0 {
+                return Err(LowerError::Unsupported(
+                    "an `enum` constant with no matching constructor",
+                ));
+            }
+            return Ok(None);
+        };
+        if matching.next().is_some() {
+            return Err(LowerError::Unsupported(
+                "an `enum` with two constructors of one arity",
+            ));
+        }
+        Ok(Some(first))
+    }
+
     /// `<clinit>`: every `static` field initialiser and `static { … }` block, in source order.
     ///
     /// `None` when the type has neither, because an empty `<clinit>` is still a method the JVM loads
@@ -2851,7 +2911,7 @@ impl Compile {
         // An `enum`'s constants are built *first*, because a `static` initialiser below them may read
         // one and JLS §12.4.2 runs them in that order.
         if !constants.is_empty() {
-            Self::enum_constants(constants, internal_name, &mut emit)?;
+            Self::enum_constants(constants, internal_name, context, &mut emit)?;
         }
         Self::initializers(context, &mut emit, members, true)?;
         if asm.reachable() {
@@ -2873,14 +2933,20 @@ impl Compile {
     fn enum_constants(
         constants: &[ast::EnumConstant],
         internal_name: &str,
+        context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
     ) -> Result<()> {
         let descriptor = alloc::format!("L{internal_name};");
-        let init = "(Ljava/lang/String;I)V";
         for (ordinal, constant) in constants.iter().enumerate() {
             let name = constant
                 .name()
                 .ok_or(LowerError::Unsupported("an `enum` constant with no name"))?;
+            let arguments: Vec<ast::Expr> = constant
+                .args()
+                .into_iter()
+                .flat_map(|list| list.args())
+                .collect();
+            let selected = Self::enum_constructor(arguments.len(), context)?;
             emit.asm.new_object(internal_name)?;
             emit.asm.dup()?;
             emit.asm.const_string(&name)?;
@@ -2888,8 +2954,22 @@ impl Compile {
                 .const_int(i32::try_from(ordinal).map_err(|_| {
                     LowerError::Unsupported("an `enum` with this many constants")
                 })?)?;
+            // The name and the ordinal are already on the stack, so the written arguments follow them
+            // exactly as the emitted descriptor names them.
+            let init = match selected {
+                Some(member) => {
+                    let params = context.index.resolved_param_tys(member);
+                    let varargs = context.index.member(member).varargs;
+                    expr::Expr::arguments(&arguments, &params, varargs, context, emit)?;
+                    let mut written =
+                        Descriptor::method_descriptor(member, context.index, true)?.to_string();
+                    written = alloc::format!("(L{STRING};I{}", written.trim_start_matches('('));
+                    written
+                }
+                None => ENUM_INIT.to_owned(),
+            };
             emit.asm
-                .invoke_special(internal_name, "<init>", init, false)?;
+                .invoke_special(internal_name, "<init>", &init, false)?;
             emit.asm.put_static(internal_name, &name, &descriptor)?;
         }
 
@@ -3057,6 +3137,16 @@ impl Compile {
         super_item: Option<ItemId>,
         members: &[SyntaxNode],
     ) -> Result<()> {
+        // An `enum`'s superclass is `Enum`, which has no no-argument constructor: the implicit
+        // delegation passes the two synthetic parameters straight through, which is the only way the
+        // constant's name and ordinal ever reach it.
+        if context.in_enum {
+            emit.asm.load(0)?;
+            emit.asm.load(1)?;
+            emit.asm.load(2)?;
+            emit.asm.invoke_special(ENUM, "<init>", ENUM_INIT, false)?;
+            return Self::initializers(context, emit, members, false);
+        }
         // `super()` exists only if the superclass declares no constructor at all or declares a
         // no-argument one. Emitting the call regardless produces a class that loads and then
         // throws `NoSuchMethodError` at the first `new` — a run-time failure the compiler is in a
