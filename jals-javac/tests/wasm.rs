@@ -1116,3 +1116,31 @@ public class Outer {
         "got {error}"
     );
 }
+
+/// A type declaration this backend lays out nothing for reports *itself*.
+///
+/// Dropping one is what the class walk used to do to every nested declaration: the type never exists,
+/// and the first use of it reports an unresolved name pointing at nothing a reader can act on. An
+/// interface needs a dispatch mechanism (a function table or a per-type vtable struct); an `enum` and a
+/// `record` need the synthesised members the JVM backend builds. Saying which is missing is the
+/// difference between a compiler with a gap and one that looks broken.
+#[test]
+fn each_unrepresentable_type_declaration_names_itself() {
+    for (source, expected) in [
+        ("interface I { int f(); }", "an `interface` declaration"),
+        ("enum E { A, B }", "an `enum` declaration"),
+        ("record R(int x) {}", "a `record` declaration"),
+        ("@interface M {}", "an `@interface` declaration"),
+        // Nested, which is where the silent drop used to happen.
+        (
+            "public class O { interface I {} }",
+            "an `interface` declaration",
+        ),
+    ] {
+        let error = compile(&[source]).expect_err("this declaration is not laid out yet");
+        assert!(
+            matches!(error, WasmError::Unsupported(what) if what == expected),
+            "`{source}` should report {expected:?}, got {error}"
+        );
+    }
+}

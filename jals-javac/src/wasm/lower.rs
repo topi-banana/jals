@@ -198,7 +198,13 @@ impl CompileWasm {
     fn classes_in_order(inputs: &[WasmInput<'_>], index: &ProjectIndex) -> Result<Vec<ItemId>> {
         let mut declared = Vec::new();
         for input in inputs {
-            for node in Self::class_declarations(input.root) {
+            for node in Self::type_declarations(input.root) {
+                // A type this backend does not lay out at all. Dropping one is what the class walk used
+                // to do to *every* nested declaration: the type never exists, and the first use of it
+                // reports an unresolved name that points at nothing a reader can act on.
+                if let Some(what) = Self::unrepresentable_kind(node.kind()) {
+                    return Err(WasmError::Unsupported(what));
+                }
                 let name = Self::name_token(&node)
                     .ok_or(WasmError::Unsupported("a class with no name"))?;
                 // A non-`static` nested class holds its enclosing instance in a synthetic field and
@@ -221,7 +227,25 @@ impl CompileWasm {
         Ok(ordered)
     }
 
-    /// Every class declaration in `root`, nested ones included.
+    /// The declaration kinds this backend lays out no type for, each naming itself.
+    ///
+    /// An interface needs a dispatch mechanism (a function table or a per-type vtable struct), and an
+    /// `enum` and a `record` need the synthesised members the JVM backend builds. None is laid out yet,
+    /// and every one of them would otherwise vanish without a word.
+    const fn unrepresentable_kind(kind: jals_syntax::SyntaxKind) -> Option<&'static str> {
+        use jals_syntax::SyntaxKind::{
+            ANNOTATION_TYPE_DECL, ENUM_DECL, INTERFACE_DECL, RECORD_DECL,
+        };
+        match kind {
+            INTERFACE_DECL => Some("an `interface` declaration"),
+            ENUM_DECL => Some("an `enum` declaration"),
+            RECORD_DECL => Some("a `record` declaration"),
+            ANNOTATION_TYPE_DECL => Some("an `@interface` declaration"),
+            _ => None,
+        }
+    }
+
+    /// Every type declaration in `root`, nested ones included.
     ///
     /// wasm's type space is flat and has no naming convention to satisfy, so a `static` nested class is
     /// simply another struct type — there is nothing for it to be nested *in*. Walking only the root's
@@ -230,13 +254,18 @@ impl CompileWasm {
     ///
     /// A class inside a *block* is a local or anonymous class, whose captured locals need a synthetic
     /// constructor parameter each. `Lowering` reports one where it appears rather than here.
-    fn class_declarations(root: &SyntaxNode) -> impl Iterator<Item = SyntaxNode> + '_ {
+    fn type_declarations(root: &SyntaxNode) -> impl Iterator<Item = SyntaxNode> + '_ {
+        use jals_syntax::SyntaxKind::{
+            ANNOTATION_TYPE_DECL, ENUM_DECL, INTERFACE_DECL, RECORD_DECL,
+        };
         root.descendants().filter(|node| {
-            node.kind() == CLASS_DECL
-                && !node
-                    .ancestors()
-                    .skip(1)
-                    .any(|ancestor| ancestor.kind() == jals_syntax::SyntaxKind::BLOCK)
+            matches!(
+                node.kind(),
+                CLASS_DECL | INTERFACE_DECL | ENUM_DECL | RECORD_DECL | ANNOTATION_TYPE_DECL
+            ) && !node
+                .ancestors()
+                .skip(1)
+                .any(|ancestor| ancestor.kind() == jals_syntax::SyntaxKind::BLOCK)
         })
     }
 
@@ -290,7 +319,7 @@ impl CompileWasm {
         module: &mut Module,
         out: &mut Vec<Method>,
     ) -> Result<()> {
-        for class in Self::class_declarations(input.root) {
+        for class in Self::type_declarations(input.root) {
             let name =
                 Self::name_token(&class).ok_or(WasmError::Unsupported("a class with no name"))?;
             let item = index
