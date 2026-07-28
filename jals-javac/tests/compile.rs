@@ -4059,3 +4059,54 @@ fn a_record_pattern_is_reported() {
         "got {error}"
     );
 }
+
+/// A pattern `switch`, both syntaxes, with a guard.
+///
+/// A pattern is not a constant, so there is nothing for a jump table to index on: the arms' types are
+/// tested in source order and the first match wins, which is what §14.11.1 says. The guard runs after
+/// its pattern bound, because it is written in terms of the binding.
+///
+/// Every binding is set to `null` before the chain rather than only on its own matching path. Java
+/// scopes a pattern variable to its arm so nothing can read another's, but the verifier merges every
+/// edge into an arm's entry and refuses a slot some edge left unwritten.
+#[test]
+fn a_case_pattern_dispatches_on_the_selector_type() {
+    let source = r#"
+public class Cases {
+    static String describe(Object o) {
+        return switch (o) {
+            case String s when s.length() > 3 -> "long " + s;
+            case String s -> "text " + s.length();
+            case Integer n -> "int " + n;
+            default -> "other";
+        };
+    }
+
+    // The colon form dispatches the same way; only what happens after the arm is entered differs.
+    static int colon(Object o) {
+        switch (o) {
+            case String s:
+                return s.length();
+            case Integer n:
+                return n;
+            default:
+                return -1;
+        }
+    }
+
+    public static void main(String[] args) {
+        System.out.println(describe(Integer.valueOf(42)));
+        System.out.println(describe("abcde"));
+        System.out.println(describe("hey"));
+        System.out.println(describe(new Object()));
+        System.out.println(colon("abcd"));
+        System.out.println(colon(Integer.valueOf(9)));
+        System.out.println(colon(new Object()));
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Cases"),
+        "int 42\nlong abcde\ntext 3\nother\n4\n9\n-1\n"
+    );
+}

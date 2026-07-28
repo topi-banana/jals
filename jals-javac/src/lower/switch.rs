@@ -28,8 +28,10 @@ use jals_syntax::SyntaxKind::{
 };
 use jals_syntax::ast::{self, AstNode as _};
 
+use crate::desc::Descriptor;
 use crate::jvm::{Branch, Compare, Label};
 use crate::lower::expr::Expr;
+use crate::lower::slots::Slots;
 use crate::lower::stmt::Stmt;
 use crate::lower::{Context, Emit, LowerError, Result};
 
@@ -37,6 +39,13 @@ use crate::lower::{Context, Emit, LowerError, Result};
 struct Arm {
     /// The `case` keys that reach this arm, already evaluated. Empty for `default`.
     keys: Vec<Key>,
+    /// The `case T t` patterns that reach this arm, in the order they are written.
+    ///
+    /// A pattern is not a constant, so it indexes no jump table: a `switch` with one dispatches by
+    /// testing each arm's type in source order, which is what §14.11.1 says a pattern `switch` does.
+    patterns: Vec<jals_syntax::SyntaxNode>,
+    /// The arm's `when` clause, which runs after the pattern bound and before the arm is taken.
+    guard: Option<ast::Expr>,
     /// Whether one of this arm's labels is `default`.
     is_default: bool,
     /// Where the arm's body begins.
@@ -155,34 +164,46 @@ impl Switch {
     /// One arm's keys and entry label, from its `case` / `default` labels.
     fn arm(labels: impl Iterator<Item = ast::SwitchLabel>, emit: &mut Emit<'_, '_>) -> Result<Arm> {
         let mut keys = Vec::new();
+        let mut patterns = Vec::new();
+        let mut guard = None;
         let mut is_default = false;
         for label in labels {
             if label.is_default() {
                 is_default = true;
             }
-            // A pattern label tests a *type*, not a constant, and binds a name scoped to the arm.
-            // Neither fits a jump table.
-            if label.syntax().children().any(|child| {
-                matches!(
-                    child.kind(),
-                    TYPE_PATTERN | RECORD_PATTERN | UNNAMED_PATTERN
-                )
-            }) {
-                return Err(LowerError::Unsupported("a `case` pattern"));
-            }
+            // A *record* pattern deconstructs and an unnamed one binds nothing under a name this could
+            // find; both are a different lowering. A type pattern tests a type and binds one name.
             if label
                 .syntax()
                 .children()
-                .any(|child| ast::Guard::cast(child).is_some())
+                .any(|child| matches!(child.kind(), RECORD_PATTERN | UNNAMED_PATTERN))
             {
-                return Err(LowerError::Unsupported("a guarded `case`"));
+                return Err(LowerError::Unsupported("a `case` pattern"));
             }
-            for value in label.syntax().children().filter_map(ast::Expr::cast) {
-                keys.push(Self::key(&value)?);
+            patterns.extend(
+                label
+                    .syntax()
+                    .children()
+                    .filter(|child| child.kind() == TYPE_PATTERN),
+            );
+            if let Some(clause) = label.syntax().children().find_map(ast::Guard::cast) {
+                guard = clause.condition();
+                if guard.is_none() {
+                    return Err(LowerError::Unsupported("a guarded `case`"));
+                }
+            }
+            // A `Guard`'s condition is an expression child of the label too, so the keys are read only
+            // when there is no guard to have contributed one.
+            if guard.is_none() {
+                for value in label.syntax().children().filter_map(ast::Expr::cast) {
+                    keys.push(Self::key(&value)?);
+                }
             }
         }
         Ok(Arm {
             keys,
+            patterns,
+            guard,
             is_default,
             entry: emit.asm.label(),
         })
@@ -196,6 +217,12 @@ impl Switch {
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
     ) -> Result<()> {
+        if arms
+            .iter()
+            .any(|arm| !arm.patterns.is_empty() || arm.guard.is_some())
+        {
+            return Self::dispatch_patterns(selector, arms, fallback, context, emit);
+        }
         let text = arms
             .iter()
             .flat_map(|arm| &arm.keys)
@@ -215,6 +242,78 @@ impl Switch {
         Expr::lower(selector, context, emit)?;
         let cases = Self::int_cases(arms)?;
         Ok(emit.asm.switch(&cases, fallback)?)
+    }
+
+    /// A pattern `switch`: each arm's type is tested in source order, and the first match wins.
+    ///
+    /// No jump table, because a pattern is not a constant and there is nothing to index on. §14.11.1
+    /// gives the first *matching* label, so the tests are emitted in the order they are written and a
+    /// `default` is only reached by falling out of all of them — which is what `fallback` already is.
+    ///
+    /// Every binding is set to `null` before the chain rather than only on its own matching path. Java
+    /// scopes a pattern variable to its arm so nothing can read another's, but the verifier merges every
+    /// edge into an arm's entry and refuses a slot some edge left unwritten; `null` joins into any
+    /// reference type, so one store up front settles all of them.
+    fn dispatch_patterns(
+        selector: &ast::Expr,
+        arms: &[Arm],
+        fallback: Label,
+        context: &Context<'_>,
+        emit: &mut Emit<'_, '_>,
+    ) -> Result<()> {
+        // A constant beside a pattern would need the jump table this does not build.
+        if arms.iter().any(|arm| !arm.keys.is_empty()) {
+            return Err(LowerError::Unsupported("a `switch` mixing key types"));
+        }
+        let mut bindings = Vec::new();
+        for arm in arms {
+            for pattern in &arm.patterns {
+                let bound = context
+                    .def_at(pattern)
+                    .ok_or(LowerError::Unsupported("a `case` pattern with no binding"))?;
+                let ty = context.inference.type_of_def(bound);
+                let slot = emit.slots.declare(bound, Slots::ty_width(ty));
+                emit.asm.const_null()?;
+                emit.asm.store(slot)?;
+                bindings.push((pattern.clone(), slot));
+            }
+        }
+        let scratch = emit.slots.declare_temporary(1);
+        Expr::lower(selector, context, emit)?;
+        emit.asm.store(scratch)?;
+        for arm in arms {
+            // A bare `default` matches nothing here: it is where the chain lands when every test failed.
+            if arm.patterns.is_empty() && arm.guard.is_none() {
+                continue;
+            }
+            let next = emit.asm.label();
+            for pattern in &arm.patterns {
+                let ty = pattern
+                    .children()
+                    .find_map(ast::Type::cast)
+                    .ok_or(LowerError::Unsupported("a `case` pattern with no type"))?;
+                let entry = Descriptor::class_entry(&context.ty_of_type(&ty)?, context.index)?;
+                let slot = bindings
+                    .iter()
+                    .find(|(node, _)| node == pattern)
+                    .map(|&(_, slot)| slot)
+                    .ok_or(LowerError::Unsupported("a `case` pattern with no binding"))?;
+                emit.asm.load(scratch)?;
+                emit.asm.instance_of(&entry)?;
+                emit.asm.branch(Branch::IntZero(Compare::Eq), next)?;
+                // Bound before the guard runs, because the guard is written in terms of the binding.
+                emit.asm.load(scratch)?;
+                emit.asm.check_cast(&entry)?;
+                emit.asm.store(slot)?;
+            }
+            if let Some(guard) = &arm.guard {
+                Expr::lower(guard, context, emit)?;
+                emit.asm.branch(Branch::IntZero(Compare::Eq), next)?;
+            }
+            emit.asm.branch(Branch::Always, arm.entry)?;
+            emit.asm.bind(next)?;
+        }
+        Ok(emit.asm.branch(Branch::Always, fallback)?)
     }
 
     /// The `(key, target)` pairs an integral `switch` jumps on.
