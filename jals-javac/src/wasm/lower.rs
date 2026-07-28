@@ -277,7 +277,7 @@ impl CompileWasm {
         index: &ProjectIndex,
         layout: &Layout,
         deferred: &[(MemberId, ast::Expr)],
-        constants: &[(MemberId, ItemId)],
+        constants: &[(MemberId, ItemId, SyntaxNode)],
         module: &mut Module,
     ) -> Result<()> {
         let blocks: Vec<(usize, ast::Block)> = inputs
@@ -292,16 +292,25 @@ impl CompileWasm {
         }
         let mut insn = Insn::new();
         // Every constant first, before any user initialiser: a `static { … }` block or a field
-        // initialiser may name one, and §8.9.3 builds the constants before either runs.
-        for &(member, owner) in constants {
-            let global = *layout
-                .statics
-                .get(&member)
-                .ok_or(WasmError::Unsupported("an `enum` constant with no global"))?;
-            insn.struct_new_default(layout.structs[&owner]);
-            insn.global_set(global);
-        }
+        // initialiser may name one, and §8.9.3 builds the constants before either runs. Their own
+        // arguments are expressions, so this needs the same lowering a body does — hence a pass over
+        // the inputs of its own, ahead of the pass that runs the user initialisers.
         let mut locals = Vec::new();
+        for input in inputs {
+            let mut lowering = Lowering::for_static(input, index, layout, locals);
+            for (member, owner, node) in constants {
+                if index.member(*member).file != input.file {
+                    continue;
+                }
+                let global = *layout
+                    .statics
+                    .get(member)
+                    .ok_or(WasmError::Unsupported("an `enum` constant with no global"))?;
+                lowering.enum_constant(*owner, node, &mut insn)?;
+                insn.global_set(global);
+            }
+            locals = lowering.locals;
+        }
         for (position, input) in inputs.iter().enumerate() {
             let mut lowering = Lowering::for_static(input, index, layout, locals);
             for (member, value) in deferred {
@@ -1025,15 +1034,19 @@ impl Layout {
     ///
     /// A constant is a `static final` field whose value the source never writes: it is an allocation,
     /// which no constant expression can hold, so the global starts as `null` and the start function
-    /// builds it. A constant with arguments or a body is *reported* — the first needs the two synthetic
-    /// constructor parameters (`name`, `ordinal`) the index knows nothing about, and the second is an
-    /// anonymous subclass, which is its own type.
+    /// builds it. A constant with a **body** is *reported* — it is an anonymous subclass, which is its
+    /// own type.
+    ///
+    /// The two synthetic parameters a JVM `enum` constructor takes (`name`, `ordinal`) have nothing to
+    /// carry here: `name()` and `ordinal()` come from `java.lang.Enum` and involve a `String`, which
+    /// this backend has no representation for. So a constant's arguments go straight to the declared
+    /// constructor, with nothing ahead of them.
     fn declare_constants(
         &mut self,
         input: &WasmInput<'_>,
         index: &ProjectIndex,
         module: &mut Module,
-        out: &mut Vec<(MemberId, ItemId)>,
+        out: &mut Vec<(MemberId, ItemId, SyntaxNode)>,
     ) -> Result<()> {
         for node in input.root.descendants() {
             if node.kind() != ENUM_DECL {
@@ -1049,12 +1062,6 @@ impl Layout {
                     .ok_or(WasmError::Unsupported("a malformed `enum` constant"))?;
                 if constant.body().is_some() {
                     return Err(WasmError::Unsupported("an `enum` constant with a body"));
-                }
-                if constant
-                    .args()
-                    .is_some_and(|list| list.args().next().is_some())
-                {
-                    return Err(WasmError::Unsupported("an `enum` constant with arguments"));
                 }
                 let name = member
                     .children_with_tokens()
@@ -1074,7 +1081,7 @@ impl Layout {
                 let global =
                     u32::try_from(module.globals.len() - 1).map_err(|_| WasmError::TooLarge)?;
                 self.statics.insert(id, global);
-                out.push((id, owner));
+                out.push((id, owner, member.clone()));
             }
         }
         Ok(())
@@ -1624,6 +1631,66 @@ impl Lowering<'_> {
     ) -> Result<()> {
         self.value_as(value, declared, insn)?;
         insn.global_set(global);
+        Ok(())
+    }
+
+    /// Build one `enum` constant: allocate it, then run the constructor its arguments select.
+    ///
+    /// The allocation alone is not the finished object. A constant is the one `new` an `enum` has, and
+    /// leaving out the constructor left every field at its default — a module that validates and reads
+    /// back zero. Selection is by arity: a constant's argument list is not an expression the index
+    /// resolved a call target for, so there is nothing to read a selection out of.
+    fn enum_constant(&mut self, owner: ItemId, node: &SyntaxNode, insn: &mut Insn) -> Result<()> {
+        let arguments: Vec<ast::Expr> = node
+            .children()
+            .find_map(ast::ArgList::cast)
+            .map(|list| list.args().collect())
+            .unwrap_or_default();
+        let mut matching = self
+            .index
+            .own_members(owner)
+            .iter()
+            .copied()
+            .filter(|&member| {
+                let info = self.index.member(member);
+                info.kind == DefKind::Constructor && info.params.len() == arguments.len()
+            });
+        let selected = matching.next();
+        if selected.is_some() && matching.next().is_some() {
+            return Err(WasmError::Unsupported(
+                "an `enum` with two constructors of one arity",
+            ));
+        }
+        if selected.is_none() && !arguments.is_empty() {
+            return Err(WasmError::Unsupported(
+                "an `enum` constant with no matching constructor",
+            ));
+        }
+        let ty = self.layout.class_ref(owner)?;
+        insn.struct_new_default(self.layout.structs[&owner]);
+        // Either constructor leaves the object where it found it: the receiver is stored and re-read
+        // rather than duplicated, wasm having no `dup`, and the global takes it from there.
+        let function = match selected {
+            Some(constructor) => Some(
+                *self
+                    .layout
+                    .functions
+                    .get(&constructor)
+                    .ok_or(WasmError::Unsupported("an `enum` constructor with no body"))?,
+            ),
+            // No declared constructor is not "nothing to run": the synthesised one runs the field
+            // initialisers, and a constant with none of either needs no call at all.
+            None => self.layout.default_constructors.get(&owner).copied(),
+        };
+        let Some(function) = function else {
+            return Ok(());
+        };
+        let slot = self.scratch(ty);
+        insn.local_set(slot).local_get(slot);
+        for argument in &arguments {
+            self.expr(argument, insn)?;
+        }
+        insn.call(function).local_get(slot);
         Ok(())
     }
 

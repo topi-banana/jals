@@ -1515,21 +1515,76 @@ public class Palette {
     assert_invoke(&[source], "distinct", &[], "0");
 }
 
-/// The two `enum` shapes that need a wider constructor descriptor are reported.
+/// An `enum` constant carries its arguments to the constructor the source declared.
 ///
-/// A constant with arguments needs the two synthetic parameters (`name`, `ordinal`) prepended to a
-/// descriptor the index computed from the declaration; one with a body is an anonymous subclass, which is
-/// its own type. Both are the same reports the JVM backend gives, for the same reasons.
+/// The two synthetic parameters a JVM `enum` constructor takes (`name`, `ordinal`) have nothing to carry
+/// here: both of the methods that read them come from `java.lang.Enum` and involve a `String`, which this
+/// backend has no representation for. So a constant's arguments go to the declared constructor with
+/// nothing ahead of them — and the constructor *runs*, which the plain allocation the start function used
+/// to emit did not: every field read back as its default, in a module that validates.
+#[test]
+fn an_enum_constant_carries_its_arguments() {
+    let source = r"
+public enum Coin {
+    PENNY(1), NICKEL(5), QUARTER(25);
+
+    final int cents;
+    // A field initialiser runs from the constructor, so a constant gets it too.
+    final int tag = 7;
+
+    Coin(int cents) {
+        this.cents = cents;
+    }
+
+    int doubled() {
+        return cents * 2;
+    }
+}
+
+// Constants with no arguments at all still need the synthesised constructor to run the initialiser.
+public enum Flag {
+    ON, OFF;
+    int mark = 3;
+}
+
+public class Money {
+    public static int total() {
+        return Coin.PENNY.cents + Coin.NICKEL.cents + Coin.QUARTER.cents;
+    }
+
+    public static int doubled() {
+        return Coin.QUARTER.doubled();
+    }
+
+    public static int tag() {
+        return Coin.NICKEL.tag;
+    }
+
+    public static int mark() {
+        return Flag.ON.mark + Flag.OFF.mark;
+    }
+}
+";
+    assert_invoke(&[source], "total", &[], "31");
+    assert_invoke(&[source], "doubled", &[], "50");
+    assert_invoke(&[source], "tag", &[], "7");
+    assert_invoke(&[source], "mark", &[], "6");
+}
+
+/// The `enum` shape that needs its own type is reported.
+///
+/// A constant with a body is an anonymous subclass, which is a type of its own — the same report the JVM
+/// backend gives, for the same reason.
 #[test]
 fn the_enum_shapes_that_need_more_are_reported() {
     for (source, expected) in [
         (
-            "public enum E { A(1), B(2); int c; E(int c) { this.c = c; } }",
-            "an `enum` constant with arguments",
-        ),
-        (
             "public enum E { A { int f() { return 1; } }, B; int f() { return 0; } }",
             "an `enum` constant with a body",
+        ),
+        (
+            "public enum E { A(1, 2); E(int a) {} }",
+            "an `enum` constant with no matching constructor",
         ),
     ] {
         let error = compile(&[source]).expect_err("this enum needs more than a plain allocation");
