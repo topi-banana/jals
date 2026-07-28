@@ -91,41 +91,57 @@ public class Number extends Object {
 }
 
 public class Integer extends Number {
+    // `int.class` is a `getstatic` of this field, not an `ldc` — a primitive has no `Class` entry.
+    public static Class TYPE;
     public static Integer valueOf(int i);
     public static int parseInt(String s);
     public int intValue();
 }
 
 public class Long extends Number {
+    public static Class TYPE;
     public static Long valueOf(long l);
     public static long parseLong(String s);
     public long longValue();
 }
 
 public class Double extends Number {
+    public static Class TYPE;
     public static Double valueOf(double d);
     public static double parseDouble(String s);
     public double doubleValue();
 }
 
 public class Float extends Number {
+    public static Class TYPE;
     public static Float valueOf(float f);
     public float floatValue();
 }
 
+public class Void extends Object {
+    public static Class TYPE;
+}
+
 public class Short extends Number {
+    public static Class TYPE;
+    public static Short valueOf(short s);
     public short shortValue();
 }
 
 public class Byte extends Number {
+    public static Class TYPE;
+    public static Byte valueOf(byte b);
     public byte byteValue();
 }
 
 public class Character extends Object {
+    public static Class TYPE;
+    public static Character valueOf(char c);
     public char charValue();
 }
 
 public class Boolean extends Object {
+    public static Class TYPE;
     public static Boolean valueOf(boolean b);
     public boolean booleanValue();
 }

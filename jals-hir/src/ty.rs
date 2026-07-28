@@ -219,9 +219,16 @@ impl Ty {
     }
 
     /// The numeric primitive this type is, if any (`boolean` excluded).
-    pub(crate) const fn as_numeric(&self) -> Option<Primitive> {
+    pub(crate) fn as_numeric(&self) -> Option<Primitive> {
         match self {
             Self::Primitive(p) if p.is_numeric() => Some(*p),
+            // A numeric wrapper unboxes before an operator sees it (JLS §5.6), so `someInteger + 1` is
+            // an `int` expression. Leaving it unknown made every overload taking it unselectable —
+            // `println(list.get(0) + 1)` bound to `println(boolean)` and printed `true`.
+            Self::Class(ClassTy::Project { name, .. } | ClassTy::External { name, .. }) => {
+                Primitive::unwrap_name(name.rsplit('.').next().unwrap_or(name))
+                    .filter(|primitive| primitive.is_numeric())
+            }
             _ => None,
         }
     }
@@ -461,7 +468,7 @@ impl Ty {
 
     /// Unary numeric promotion (JLS §5.6.1): `byte` / `short` / `char` widen to `int`; other numeric
     /// types are unchanged; a non-numeric operand yields [`Ty::Unknown`].
-    pub(crate) const fn unary_promote(&self) -> Self {
+    pub(crate) fn unary_promote(&self) -> Self {
         match self.as_numeric() {
             Some(Primitive::Byte | Primitive::Short | Primitive::Char) => {
                 Self::Primitive(Primitive::Int)

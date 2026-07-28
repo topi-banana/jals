@@ -25,7 +25,6 @@
 //! try-with-resources, `synchronized`, and `assert` — the last guarded by the synthetic
 //! `$assertionsDisabled` field, because assertions are off unless the JVM was started with `-ea`.
 //!
-
 //! `switch` too, in both syntaxes and as a statement or an expression, over an integral selector or a
 //! `String` — the latter through `hashCode()` plus an `equals` per candidate, because two different
 //! strings can hash alike.
@@ -37,9 +36,13 @@
 //! A constructor may delegate (`this(…)` / `super(args)`), and a `native` method declares why it has
 //! no body with its own flag rather than borrowing `abstract`'s.
 //!
-//! Not yet at all: boxing, varargs, generics beyond erasure, lambdas, method references, `.class`
-//! literals, inner classes, and `enum` / `record` declarations. Each arrives with the milestone that
-//! can test it.
+//! Boxing and unboxing too, and `.class` literals — including the primitive form, which reads the
+//! `TYPE` field its wrapper carries because a primitive has no `Class` entry to `ldc`. A generic call's
+//! erased return gets the `checkcast` that puts its static type back, which is what lets the next use
+//! of the value verify.
+//!
+//! Not yet at all: varargs, `Signature` attributes and bridge methods, lambdas, method references,
+//! inner classes, and `enum` / `record` declarations. Each arrives with the milestone that can test it.
 
 mod emit;
 mod expr;
@@ -898,6 +901,37 @@ impl Context<'_> {
             };
             candidate = next;
         }
+    }
+
+    /// The type a *name* names, when the grammar parsed it as an expression.
+    ///
+    /// `String.class`'s base is a name reference, not a type node, because nothing tells the parser
+    /// which of the two it is until the `.class` arrives. So the dotted text is resolved against the
+    /// index directly.
+    fn ty_of_name(&self, node: &SyntaxNode) -> Result<jals_hir::Ty> {
+        let text: String = node
+            .children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .filter(|token| {
+                matches!(
+                    token.kind(),
+                    jals_syntax::SyntaxKind::IDENT | jals_syntax::SyntaxKind::DOT
+                )
+            })
+            .map(|token| token.text().to_owned())
+            .collect();
+        let simple = text.rsplit('.').next().unwrap_or(&text).to_owned();
+        let qualified = text.contains('.').then(|| text.clone());
+        let id = self
+            .index
+            .resolve_type_name(self.file, &simple, qualified.as_deref())
+            .project_id()
+            .ok_or_else(|| DescError::Unresolved(simple.clone()))?;
+        Ok(jals_hir::Ty::Class(jals_hir::ClassTy::Project {
+            id,
+            name: simple,
+            args: Vec::new(),
+        }))
     }
 
     /// The primitive a `TYPE` node's keyword names.

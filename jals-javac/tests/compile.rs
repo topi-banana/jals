@@ -1232,8 +1232,6 @@ fn the_features_after_this_milestone_are_still_reported() {
     for (source, expected) in [
         ("Runnable r = () -> {};", "this expression form"),
         ("Runnable r = Later::main;", "this expression form"),
-        ("Object c = int.class;", "this expression form"),
-        ("Integer boxed = 1;", "a boxing conversion"),
         ("Object o = new Later() { };", "an anonymous class"),
         ("class Inner {}", "a local type declaration"),
     ] {
@@ -2041,4 +2039,87 @@ public class Table {{
             "`{source}` should report {expected:?}, got {error}"
         );
     }
+}
+
+/// Boxing and unboxing, which are the one conversion no opcode performs.
+///
+/// A `valueOf` call and an `xxxValue` call, and *which* one depends on the names on either side rather
+/// than on the stack representations — which is why they sit outside the conversion table. Boxing never
+/// widens on the way: `Long l = 1;` is not a Java program precisely because that would take two
+/// conversions, so the wrapper is read off the value's own type.
+#[test]
+fn boxing_and_unboxing_run() {
+    if !java_available() {
+        return;
+    }
+    let source = r"
+public class Boxed {
+    static int unbox(Integer n) { return n; }
+    static Integer box(int n) { return n; }
+    // Unboxing may widen afterwards, which the accessor alone does not do.
+    static long widened(Integer n) { return n; }
+
+    public static void main(String[] args) {
+        System.out.println(unbox(box(5)));
+        System.out.println(widened(box(7)));
+        // Boxing to a supertype: `Integer.valueOf` first, and the widening reference conversion is free.
+        Object any = 3;
+        System.out.println(any.toString());
+        Long big = 4294967296L;
+        System.out.println(big.longValue());
+        Boolean flag = true;
+        System.out.println(flag.booleanValue());
+        Character letter = 'q';
+        System.out.println(letter.charValue());
+        Double fraction = 1.5;
+        System.out.println(fraction.doubleValue());
+        // Binary numeric promotion unboxes before it promotes, so a wrapper is an arithmetic operand.
+        Integer counted = 3;
+        int total = 0;
+        total += counted;
+        System.out.println(total);
+        java.util.List<Integer> numbers = new java.util.ArrayList<Integer>();
+        numbers.add(1);
+        numbers.add(2);
+        System.out.println(numbers.get(0) + 1);
+        int summed = 0;
+        for (Integer n : numbers) { summed += n; }
+        System.out.println(summed);
+    }
+}
+";
+    assert_eq!(
+        run(source, "Boxed"),
+        "5\n7\n3\n4294967296\ntrue\nq\n1.5\n3\n2\n3\n"
+    );
+}
+
+/// A `.class` literal.
+///
+/// A reference type's is an `ldc` over the same `Class` entry a `checkcast` names. A *primitive* has no
+/// such entry — there is no `Class` constant for `int` — so it reads the `TYPE` field its wrapper
+/// carries for exactly this purpose, and `void` reads `Void.TYPE`. A primitive *array* is a reference
+/// again, so `long[].class` goes back to the `ldc`.
+#[test]
+fn class_literals_name_every_kind_of_type() {
+    if !java_available() {
+        return;
+    }
+    let source = r"
+public class Named {
+    public static void main(String[] args) {
+        System.out.println(String.class.getName());
+        System.out.println(Named.class.getName());
+        System.out.println(int.class.getName());
+        System.out.println(void.class.getName());
+        System.out.println(String[].class.getName());
+        System.out.println(long[].class.getName());
+        System.out.println(int.class == Integer.TYPE);
+    }
+}
+";
+    assert_eq!(
+        run(source, "Named"),
+        "java.lang.String\nNamed\nint\nvoid\n[Ljava.lang.String;\n[J\ntrue\n"
+    );
 }

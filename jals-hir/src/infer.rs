@@ -765,7 +765,7 @@ impl TypeInference {
     /// cannot tell whether the value is a constant in range, so we never report these —
     /// under-reporting (missing `byte b = someInt;`) rather than risk a false positive on the legal,
     /// common `byte b = 1;`.
-    const fn rescued_by_constant_narrowing(expected: &Ty, found: &Ty) -> bool {
+    fn rescued_by_constant_narrowing(expected: &Ty, found: &Ty) -> bool {
         matches!(
             expected,
             Ty::Primitive(Primitive::Byte | Primitive::Short | Primitive::Char)
@@ -940,7 +940,7 @@ impl<'a> Inferer<'a> {
             // Target-typed forms still need a later phase: a method reference / lambda takes its
             // type from context.
             ast::Expr::MethodRef(_) | ast::Expr::Lambda(_) => Ty::Unknown,
-            ast::Expr::ClassLiteral(_) => Ty::Class(ClassTy::external("Class")),
+            ast::Expr::ClassLiteral(_) => self.java_lang_ty("Class"),
         }
     }
 
@@ -985,6 +985,30 @@ impl<'a> Inferer<'a> {
             return self.def_types[id.0 as usize].clone();
         }
         Ty::Unknown
+    }
+
+    /// The indexed type `name` resolves to from this file, or an external one by that name.
+    ///
+    /// A `.class` literal's type is `java.lang.Class`, and reaching *its* members — `getName()` — needs
+    /// the indexed stub. An external type by that name has no members at all, so the access resolved
+    /// to nothing and the call after it with it.
+    fn java_lang_ty(&self, name: &str) -> Ty {
+        let Some((index, file)) = self.project else {
+            return Ty::Class(ClassTy::external(name));
+        };
+        index
+            .resolve_type_name(file, name, None)
+            .project_id()
+            .map_or_else(
+                || Ty::Class(ClassTy::external(name)),
+                |id| {
+                    Ty::Class(ClassTy::Project {
+                        id,
+                        name: name.to_owned(),
+                        args: Vec::new(),
+                    })
+                },
+            )
     }
 
     /// The type `this` has where `node` appears: the enclosing type declaration, raw.

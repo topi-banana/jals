@@ -114,6 +114,7 @@ impl Expr {
             ast::Expr::Switch(switch) => {
                 crate::lower::switch::Switch::expression(switch, context, emit)
             }
+            ast::Expr::ClassLiteral(literal) => Self::class_literal(literal, context, emit),
             // An array initialiser has no type of its own — `{1, 2, 3}` is an array of whatever it is
             // assigned to — so it is normally reached through `lower_as`, which knows the target.
             // Inference does record one where it could work it out, which covers a declaration.
@@ -142,21 +143,82 @@ impl Expr {
             return Self::array_initializer(init, target, context, emit);
         }
         Self::lower(expr, context, emit)?;
-        let target = Repr::of(target)?;
+        let target_repr = Repr::of(target)?;
         let source = Self::source_repr(expr, context, emit)?;
-        Self::coerce(source, target, emit)
+        // Boxing crosses the primitive / reference boundary, which no conversion opcode does — it is a
+        // `valueOf` or an `xxxValue` call, and which one depends on the *names* on either side rather
+        // than on the representations.
+        match (source, target_repr) {
+            (Repr::Number(_) | Repr::Boolean, Repr::Reference) => Self::box_value(source, emit),
+            (Repr::Reference, Repr::Number(_) | Repr::Boolean) => {
+                Self::unbox_value(expr, target_repr, context, emit)
+            }
+            _ => Self::coerce(source, target_repr, emit),
+        }
+    }
+
+    /// Box the primitive on top of the stack into its own wrapper (JLS §5.1.7).
+    ///
+    /// *Its own* — boxing never widens on the way. `Long l = 1;` is not a Java program precisely
+    /// because that would take two conversions, so the wrapper is read off the value's own type and a
+    /// widening *reference* conversion (to `Object`, to `Number`) then costs nothing.
+    fn box_value(source: Repr, emit: &mut Emit<'_, '_>) -> Result<()> {
+        let (wrapper, descriptor) = match source {
+            Repr::Boolean => ("java/lang/Boolean", "(Z)Ljava/lang/Boolean;"),
+            Repr::Number(Numeric::Byte) => ("java/lang/Byte", "(B)Ljava/lang/Byte;"),
+            Repr::Number(Numeric::Short) => ("java/lang/Short", "(S)Ljava/lang/Short;"),
+            Repr::Number(Numeric::Char) => ("java/lang/Character", "(C)Ljava/lang/Character;"),
+            Repr::Number(Numeric::Int) => ("java/lang/Integer", "(I)Ljava/lang/Integer;"),
+            Repr::Number(Numeric::Long) => ("java/lang/Long", "(J)Ljava/lang/Long;"),
+            Repr::Number(Numeric::Float) => ("java/lang/Float", "(F)Ljava/lang/Float;"),
+            Repr::Number(Numeric::Double) => ("java/lang/Double", "(D)Ljava/lang/Double;"),
+            Repr::Reference => return Err(LowerError::Unsupported("a boxing conversion")),
+        };
+        Ok(emit
+            .asm
+            .invoke_static(wrapper, "valueOf", descriptor, false)?)
+    }
+
+    /// Unbox the wrapper on top of the stack, then widen if the target is wider (JLS §5.1.8).
+    ///
+    /// The accessor comes from the *source* type, because only a wrapper has one: `Object` does not
+    /// unbox, and an unindexed external type is a reference whatever its name suggests.
+    fn unbox_value(
+        expr: &ast::Expr,
+        target: Repr,
+        context: &Context<'_>,
+        emit: &mut Emit<'_, '_>,
+    ) -> Result<()> {
+        let source = Self::type_of(expr.syntax(), context)?;
+        let wrapper = Descriptor::class_entry(&source, context.index)?;
+        let (accessor, descriptor, unboxed) = match wrapper.as_str() {
+            "java/lang/Boolean" => ("booleanValue", "()Z", Repr::Boolean),
+            "java/lang/Byte" => ("byteValue", "()B", Repr::Number(Numeric::Byte)),
+            "java/lang/Short" => ("shortValue", "()S", Repr::Number(Numeric::Short)),
+            "java/lang/Character" => ("charValue", "()C", Repr::Number(Numeric::Char)),
+            "java/lang/Integer" => ("intValue", "()I", Repr::Number(Numeric::Int)),
+            "java/lang/Long" => ("longValue", "()J", Repr::Number(Numeric::Long)),
+            "java/lang/Float" => ("floatValue", "()F", Repr::Number(Numeric::Float)),
+            "java/lang/Double" => ("doubleValue", "()D", Repr::Number(Numeric::Double)),
+            _ => return Err(LowerError::Unsupported("an unboxing conversion")),
+        };
+        emit.asm.invoke_virtual(&wrapper, accessor, descriptor)?;
+        // `long n = someInteger;` unboxes to an `int` and then widens, which is one conversion more
+        // than the accessor gives.
+        Self::coerce(unboxed, target, emit)
     }
 
     /// Emit `expr` and convert its value to the numeric type `target`.
+    ///
+    /// Through [`lower_as`](Self::lower_as), which is where boxing lives: an `Integer` operand of an
+    /// arithmetic operator unboxes first (JLS §5.6.2), and that is one call rather than a case here.
     fn lower_to(
         expr: &ast::Expr,
         target: Numeric,
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
     ) -> Result<()> {
-        Self::lower(expr, context, emit)?;
-        let source = Self::source_repr(expr, context, emit)?;
-        Self::coerce(source, Repr::Number(target), emit)
+        Self::lower_as(expr, &Self::ty_of(target), context, emit)
     }
 
     /// The representation of the value `expr` just left on the stack.
@@ -242,11 +304,30 @@ impl Expr {
 
     /// The numeric type `node`'s recorded type is, reported if it is not one.
     fn numeric_of(node: &SyntaxNode, context: &Context<'_>) -> Result<Numeric> {
-        Repr::of(&Self::type_of(node, context)?)?
-            .number()
-            .ok_or(LowerError::Unsupported(
-                "an arithmetic operand of this type",
-            ))
+        let ty = Self::type_of(node, context)?;
+        if let Some(numeric) = Repr::of(&ty)?.number() {
+            return Ok(numeric);
+        }
+        // Binary numeric promotion unboxes before it promotes (JLS §5.6.2), so a wrapper counts as the
+        // primitive it wraps — `total += someInteger` is ordinary Java.
+        Self::unboxed(&ty, context).ok_or(LowerError::Unsupported(
+            "an arithmetic operand of this type",
+        ))
+    }
+
+    /// The primitive a wrapper type unboxes to, if it is one.
+    fn unboxed(ty: &Ty, context: &Context<'_>) -> Option<Numeric> {
+        let entry = Descriptor::class_entry(ty, context.index).ok()?;
+        Some(match entry.as_str() {
+            "java/lang/Byte" => Numeric::Byte,
+            "java/lang/Short" => Numeric::Short,
+            "java/lang/Character" => Numeric::Char,
+            "java/lang/Integer" => Numeric::Int,
+            "java/lang/Long" => Numeric::Long,
+            "java/lang/Float" => Numeric::Float,
+            "java/lang/Double" => Numeric::Double,
+            _ => return None,
+        })
     }
 
     fn literal(
@@ -565,13 +646,115 @@ impl Expr {
         } else {
             emit.asm.invoke_virtual(&owner, &name, &descriptor)?;
         }
-        Ok(())
+        Self::restore_erased(call.syntax(), member, context, emit)
+    }
+
+    /// Put back the static type a generic call's erased descriptor threw away.
+    ///
+    /// `List<String>.get(0)` returns `Object` at the JVM level — the descriptor is erased, and the
+    /// substitution that makes it a `String` exists only in the analysis. So the stack says `Object`,
+    /// and the next use of the value is verified against `Object` and rejected. javac emits the same
+    /// `checkcast`, in the same place, for the same reason.
+    fn restore_erased(
+        node: &SyntaxNode,
+        member: MemberId,
+        context: &Context<'_>,
+        emit: &mut Emit<'_, '_>,
+    ) -> Result<()> {
+        // A `void` call left nothing to cast, and a primitive one needs no cast — only a reference
+        // whose descriptor was erased does.
+        let Ok(actual) = Self::type_of(node, context) else {
+            return Ok(());
+        };
+        if !matches!(Repr::of(&actual), Ok(Repr::Reference)) {
+            return Ok(());
+        }
+        // The *declared* return type is what the descriptor erased; an un-substituted type variable
+        // erases to `Object`, which is exactly the case that needs the cast.
+        let declared = context.index.resolved_member_ty(member);
+        let (Ok(erased), Ok(precise)) = (
+            Descriptor::descriptor_of(&declared, context.index),
+            Descriptor::descriptor_of(&actual, context.index),
+        ) else {
+            return Ok(());
+        };
+        if erased == precise {
+            return Ok(());
+        }
+        Ok(emit
+            .asm
+            .check_cast(&Descriptor::class_entry(&actual, context.index)?)?)
     }
 
     /// `array[index]`.
     fn index(index: &ast::IndexExpr, context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
         let place = Place::resolve(&ast::Expr::Index(index.clone()), context, emit)?;
         place.read(emit.asm)
+    }
+
+    /// `Foo.class`, `int.class`, `String[].class`.
+    ///
+    /// A reference type's is an `ldc` over the same `Class` entry a `checkcast` names. A *primitive*
+    /// has no such entry — there is no `Class` constant for `int` — so `int.class` reads the
+    /// `TYPE` field its wrapper carries for exactly this purpose, which is what javac emits too.
+    fn class_literal(
+        literal: &ast::ClassLiteral,
+        context: &Context<'_>,
+        emit: &mut Emit<'_, '_>,
+    ) -> Result<()> {
+        // `String[].class`'s dimension brackets sit on the literal itself rather than inside the type,
+        // so they are counted here and wrapped around whatever the base names.
+        let dimensions = literal
+            .syntax()
+            .children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .filter(|token| token.kind() == jals_syntax::SyntaxKind::LBRACK)
+            .count();
+        // `void.class` is the one literal whose base is not a value type at all, so it never reaches
+        // `ty_of_type` — and `Void` is the wrapper that carries its `TYPE`.
+        if dimensions == 0
+            && literal
+                .syntax()
+                .descendants_with_tokens()
+                .any(|element| element.kind() == jals_syntax::SyntaxKind::VOID_KW)
+        {
+            return Ok(emit
+                .asm
+                .get_static("java/lang/Void", "TYPE", "Ljava/lang/Class;")?);
+        }
+        let mut named = match (literal.ty(), literal.expr()) {
+            (Some(ty), _) => context.ty_of_type(&ty)?,
+            // The reference form's base is parsed as an *expression* — a bare `String` is a name
+            // reference — so it is resolved as a type name rather than lowered as a value.
+            (None, Some(base)) => context.ty_of_name(base.syntax())?,
+            (None, None) => return Err(LowerError::Unsupported("a `.class` with no type")),
+        };
+        for _ in 0..dimensions {
+            named = Ty::Array(alloc::boxed::Box::new(named));
+        }
+        // A primitive *array* is still a reference, so only an undimensioned primitive takes the
+        // `TYPE` route.
+        if let Ty::Primitive(primitive) = &named {
+            let wrapper = Self::wrapper_of(*primitive);
+            return Ok(emit.asm.get_static(wrapper, "TYPE", "Ljava/lang/Class;")?);
+        }
+        Ok(emit
+            .asm
+            .const_class(&Descriptor::class_entry(&named, context.index)?)?)
+    }
+
+    /// The wrapper class carrying a primitive's `TYPE` field.
+    const fn wrapper_of(primitive: Primitive) -> &'static str {
+        match primitive {
+            Primitive::Boolean => "java/lang/Boolean",
+            Primitive::Byte => "java/lang/Byte",
+            Primitive::Short => "java/lang/Short",
+            Primitive::Char => "java/lang/Character",
+            Primitive::Int => "java/lang/Integer",
+            Primitive::Long => "java/lang/Long",
+            Primitive::Float => "java/lang/Float",
+            Primitive::Double => "java/lang/Double",
+        }
     }
 
     /// `new Foo(args)`, `new T[n]`, `new T[n][m]`, or `new T[]{…}`.
@@ -992,8 +1175,10 @@ impl Expr {
 
         // A `+` whose result is a `String` is concatenation, not addition, and it shares this node
         // kind.
+        // Asked of the recorded type rather than required of it: `someInteger + 1`'s result is an
+        // `int` that inference leaves unknown, and an unknown result is certainly not a `String`.
         if operation == BinOp::Add
-            && Self::is_string(&Self::type_of(binary.syntax(), context)?, context)
+            && Self::type_of(binary.syntax(), context).is_ok_and(|ty| Self::is_string(&ty, context))
         {
             return Self::concat(binary, context, emit);
         }
