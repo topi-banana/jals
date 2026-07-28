@@ -1148,6 +1148,19 @@ impl<'pool> Assembler<'pool> {
         self.invoke(Instruction::InvokeStatic(index), None, descriptor)
     }
 
+    /// `invokedynamic`: a call site the JVM links by running a bootstrap method.
+    ///
+    /// No owner, because there is none — the call site names only itself, its descriptor, and which
+    /// `BootstrapMethods` entry computes the handle it will call. That is what lets one bootstrap serve
+    /// every site of the same shape.
+    pub fn invoke_dynamic(&mut self, bootstrap: u16, name: &str, descriptor: &str) -> Result<()> {
+        let index = self
+            .pool
+            .invoke_dynamic_index(bootstrap, name, descriptor)
+            .ok_or(AsmError::PoolFull)?;
+        self.invoke(Instruction::InvokeDynamic { index }, None, descriptor)
+    }
+
     /// `invokevirtual owner.name descriptor`, with the receiver below the arguments.
     pub fn invoke_virtual(&mut self, owner: &str, name: &str, descriptor: &str) -> Result<()> {
         let index = self.method_ref(owner, name, descriptor, false)?;

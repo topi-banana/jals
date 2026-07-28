@@ -1262,3 +1262,32 @@ fn a_monitor_is_taken_and_released() {
     });
     assert_eq!(run("Monitor", &class), "locked\n");
 }
+
+/// `invokedynamic` names no owner, and its descriptor is what the stack effect comes from.
+///
+/// The call site names only itself, its descriptor, and which `BootstrapMethods` entry computes the handle
+/// it will call — which is what lets one bootstrap serve every site of the same shape. The assembler treats
+/// it as an invocation with no receiver, so a `()Lp/Iface;` site leaves one reference and nothing else.
+#[test]
+fn an_invokedynamic_leaves_what_its_descriptor_says() {
+    let mut pool = ConstantPool::new();
+    let mut asm = Assembler::new(&mut pool, Receiver::Static, "()Lp/Iface;").expect("assembler");
+    asm.invoke_dynamic(0, "run", "()Lp/Iface;")
+        .expect("call site");
+    let top = asm.stack_top().expect("a value");
+    asm.return_(Some(&top)).expect("return");
+    let code = asm.finish().expect("finish");
+    let jals_classfile::AttributeBody::Code(body) = &code.body else {
+        panic!("a Code attribute");
+    };
+    // One `invokedynamic` and one `areturn`, and a frame deep enough for the reference it left.
+    assert_eq!(body.max_stack, 1);
+    assert!(
+        body.code.iter().any(|instruction| matches!(
+            instruction,
+            jals_classfile::Instruction::InvokeDynamic { .. }
+        )),
+        "the call site is an `invokedynamic`: {:?}",
+        body.code
+    );
+}
