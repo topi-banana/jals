@@ -567,13 +567,7 @@ impl Expr {
         member: MemberId,
         context: &Context<'_>,
     ) -> Result<(String, String, String)> {
-        let owner = Descriptor::internal_name(
-            context
-                .index
-                .item(context.index.member(member).owner)
-                .fqn
-                .as_str(),
-        );
+        let owner = Descriptor::internal_name_of(context.index.member(member).owner, context.index);
         let descriptor = Descriptor::field_descriptor(member, context.index)?.to_string();
         Ok((owner, context.index.member(member).name.clone(), descriptor))
     }
@@ -588,7 +582,7 @@ impl Expr {
             })?;
         let info = context.index.member(member);
         let owner_item = context.index.item(info.owner);
-        let owner = Descriptor::internal_name(owner_item.fqn.as_str());
+        let owner = Descriptor::internal_name_of(info.owner, context.index);
         let interface_owner = owner_item.kind == DefKind::Interface;
         let constructor = info.kind == DefKind::Constructor;
         let descriptor = MethodDescriptor::to_string(&Descriptor::method_descriptor(
@@ -785,13 +779,7 @@ impl Expr {
         // `new Foo()` on the most ordinary class in Java arrives with none. Its descriptor is fixed.
         let (owner, descriptor, params) = if let Some(member) = selected {
             (
-                Descriptor::internal_name(
-                    context
-                        .index
-                        .item(context.index.member(member).owner)
-                        .fqn
-                        .as_str(),
-                ),
+                Descriptor::internal_name_of(context.index.member(member).owner, context.index),
                 MethodDescriptor::to_string(&Descriptor::method_descriptor(
                     member,
                     context.index,
@@ -816,7 +804,7 @@ impl Expr {
                 return Err(unresolved());
             }
             (
-                Descriptor::internal_name(context.index.item(id).fqn.as_str()),
+                Descriptor::internal_name_of(id, context.index),
                 "()V".to_owned(),
                 alloc::vec::Vec::new(),
             )

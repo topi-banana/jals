@@ -591,24 +591,126 @@ public class Locals {
     assert_eq!(run(source, "Locals"), "16\n");
 }
 
-/// A nested type is its own class file. Dropping it silently would produce an outer class that
-/// loads and then throws `NoClassDefFoundError` at the first use of the inner one — a failure the
-/// compiler is in a position to report and the run time is not.
+/// A nested type is its own class file, named `Outer$Inner`.
+///
+/// Nothing in the dotted fully-qualified name says which boundary is a package and which is a nesting,
+/// so each one is decided by asking whether the prefix before it is itself a type. Getting it wrong
+/// produces a class that loads under one name and is referred to under another — a
+/// `NoClassDefFoundError` at the first use.
 #[test]
-fn a_nested_type_is_reported_rather_than_dropped() {
-    let source = r"
+fn a_nested_type_becomes_its_own_class_file() {
+    let source = r#"
+package com.example;
+
 public class Outer {
-    static class Inner {
+    static int shared = 10;
+
+    static class Counter {
+        int value;
+
+        Counter(int value) { this.value = value; }
+
+        int doubled() { return value * 2; }
+    }
+
+    interface Named {
+        String name();
+    }
+
+    static class Person implements Named {
+        public String name() { return ""; }
+
+        static class Nested {
+            int deep() { return 3; }
+        }
+    }
+
+    public static void main(String[] args) {
+        System.out.println(shared);
+    }
+}
+"#;
+    let classes = compile(source).expect("compile");
+    let names: Vec<&str> = classes
+        .iter()
+        .map(|class| class.internal_name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "com/example/Outer",
+            "com/example/Outer$Counter",
+            "com/example/Outer$Named",
+            "com/example/Outer$Person",
+            // Nesting is not one level: the `$` is at every boundary the index says is one.
+            "com/example/Outer$Person$Nested",
+        ]
+    );
+
+    // The `InnerClasses` attribute is where a nested type's `private` and `static` live — its own
+    // `access_flags` has nowhere to put either, so this is the only record of what the source wrote,
+    // and `getSimpleName` reads it back from here too.
+    let outer =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(classes[0].bytes.as_slice()))
+            .expect("reparse");
+    let entries = outer
+        .attributes
+        .iter()
+        .find_map(|attribute| match &attribute.body {
+            jals_classfile::AttributeBody::InnerClasses(entries) => Some(entries),
+            _ => None,
+        })
+        .expect("an InnerClasses attribute");
+    let listed: Vec<(String, u16)> = entries
+        .iter()
+        .map(|entry| {
+            (
+                outer
+                    .constant_pool
+                    .utf8(entry.inner_name_index)
+                    .expect("utf8")
+                    .into_owned(),
+                entry.inner_class_access_flags(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            ("Counter".to_owned(), 0x0008),
+            // An interface entry keeps `ACC_INTERFACE | ACC_ABSTRACT` and gains no `ACC_SUPER`.
+            ("Named".to_owned(), 0x0200 | 0x0400),
+            ("Person".to_owned(), 0x0008),
+        ]
+    );
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "com.example.Outer"), "10\n");
+}
+
+/// A non-`static` nested class holds its enclosing instance in a synthetic field, and every one of its
+/// constructors takes that instance as an extra first parameter — so the descriptors the index computed
+/// from the declaration would all be one parameter short. That is a `NoSuchMethodError` at the first
+/// `new`, not a missing convenience, so it is reported.
+#[test]
+fn a_non_static_inner_class_is_reported() {
+    let error = compile(
+        r"
+public class Enclosing {
+    class Inner {
         int value;
     }
 
     public static void main(String[] args) {}
 }
-";
-    let error = compile(source).expect_err("nested types are not emitted yet");
+",
+    )
+    .expect_err("an inner class needs its enclosing instance threaded through");
     assert!(
-        matches!(error, LowerError::Unsupported("a nested type declaration")),
-        "expected the nested-type report, got {error}"
+        matches!(error, LowerError::Unsupported("a non-`static` inner class")),
+        "expected the inner-class report, got {error}"
     );
 }
 

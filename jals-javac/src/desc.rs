@@ -16,7 +16,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use jals_classfile::{BaseType, FieldType, MethodDescriptor, ReturnType};
-use jals_hir::{ClassTy, MemberId, Primitive, ProjectIndex, Ty};
+use jals_hir::{ClassTy, ItemId, MemberId, Primitive, ProjectIndex, Ty};
 
 /// Why a type could not be given a descriptor.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,10 +62,36 @@ impl Descriptor {
     /// A type's internal binary name (`java/lang/String`), from the dotted fully-qualified name the
     /// index holds.
     ///
-    /// Only package separators become `/`; a nested type's `$` separator is not recovered here,
-    /// because a dotted name alone does not say which of its segments are packages.
+    /// Every separator becomes `/`. A dotted name alone does not say which of its segments are
+    /// packages, so a nested type's `$` cannot be recovered from one —
+    /// [`internal_name_of`](Self::internal_name_of) asks the index instead.
     pub fn internal_name(fqn: &str) -> String {
         fqn.replace('.', "/")
+    }
+
+    /// An *indexed* type's internal binary name, with `$` where the nesting is.
+    ///
+    /// `Outer.Inner` is `Outer$Inner` and `com.example.Main` is `com/example/Main`, and nothing in the
+    /// two dotted names distinguishes them — so each boundary is decided by asking whether the prefix
+    /// before it is itself a type. Getting this wrong produces a class that loads under one name and is
+    /// referred to under another, which is a `NoClassDefFoundError` at the first use.
+    pub fn internal_name_of(id: ItemId, index: &ProjectIndex) -> String {
+        let fqn = index.item(id).fqn.as_str();
+        let mut out = String::with_capacity(fqn.len());
+        let mut prefix = String::new();
+        for (position, segment) in fqn.split('.').enumerate() {
+            if position > 0 {
+                out.push(if index.item_by_fqn(&prefix).is_some() {
+                    '$'
+                } else {
+                    '/'
+                });
+                prefix.push('.');
+            }
+            out.push_str(segment);
+            prefix.push_str(segment);
+        }
+        out
     }
 
     /// The field type a value of `ty` has, erased.
@@ -76,7 +102,7 @@ impl Descriptor {
                 FieldType::Array(alloc::boxed::Box::new(Self::field_type(element, index)?))
             }
             Ty::Class(ClassTy::Project { id, .. }) => {
-                FieldType::Object(Self::internal_name(index.item(*id).fqn.as_str()))
+                FieldType::Object(Self::internal_name_of(*id, index))
             }
             Ty::Class(ClassTy::External { name, .. }) => {
                 return Err(DescError::Unresolved(name.clone()));

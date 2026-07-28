@@ -482,7 +482,7 @@ impl Stmt {
             .resolve_member(*id, "close", jals_hir::Namespace::Method)
             .ok_or(LowerError::Unsupported("a resource with no `close()`"))?;
         let declaring = context.index.member(closer).owner;
-        let owner = Descriptor::internal_name(context.index.item(declaring).fqn.as_str());
+        let owner = Descriptor::internal_name_of(declaring, context.index);
         let interface = context.index.item(declaring).kind == jals_hir::DefKind::Interface;
 
         // A declared resource is a local the body can read; one naming an existing variable still gets

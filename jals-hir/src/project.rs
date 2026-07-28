@@ -1225,6 +1225,16 @@ impl ProjectIndex {
 
     /// The project item declared at `name_start` in `file`, if that position is a type declaration's
     /// name. Maps a file-local type definition back to its cross-file [`ItemId`].
+    /// The indexed item with this fully-qualified name.
+    ///
+    /// Every level of an [`Fqn`] is dotted — packages and enclosing types alike — so a consumer that
+    /// has to tell the two apart asks whether a *prefix* is itself a type. A class file's internal name
+    /// is exactly that consumer: it separates packages with `/` and nested types with `$`, and a dotted
+    /// name alone cannot say which boundary is which.
+    pub fn item_by_fqn(&self, fqn: &str) -> Option<ItemId> {
+        self.by_fqn.get(fqn).copied()
+    }
+
     pub fn item_by_decl(&self, file: FileId, name_start: usize) -> Option<ItemId> {
         self.decl_to_item.get(&(file, name_start)).copied()
     }

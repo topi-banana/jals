@@ -41,8 +41,15 @@
 //! erased return gets the `checkcast` that puts its static type back, which is what lets the next use
 //! of the value verify.
 //!
+//! A `static` nested type is its own class file, named `Outer$Inner` and listed in an `InnerClasses`
+//! attribute — which is the only place a nested type's `private` and `static` can live. Referring to one
+//! *by name* still needs resolution the index does not do: a simple or partly-qualified nested name
+//! (`Counter`, `Outer.Counter`) resolves against packages and imports only, so the reference reports
+//! even where the declaration compiles.
+//!
 //! Not yet at all: varargs, `Signature` attributes and bridge methods, lambdas, method references,
-//! inner classes, and `enum` / `record` declarations. Each arrives with the milestone that can test it.
+//! non-`static` inner classes, local and anonymous classes, and `enum` / `record` declarations. Each
+//! arrives with the milestone that can test it.
 
 mod emit;
 // The wasm backend reads a literal the same way: the two lowerings are separate, but `0xFF` and
@@ -158,8 +165,21 @@ impl Compile {
         class_version: u16,
     ) -> Result<Vec<CompiledClass>> {
         let mut out = Vec::new();
-        for node in root.children() {
+        // `descendants`, not `children`: a nested type is its own class file, so it is compiled here
+        // rather than inside its enclosing one. Which is also why the enclosing class skips it as a
+        // member — it would otherwise be emitted twice.
+        for node in root.descendants() {
             if !matches!(node.kind(), CLASS_DECL | INTERFACE_DECL) {
+                continue;
+            }
+            // A *local* or anonymous class is nested inside a method body rather than a class body,
+            // and its captured locals need a synthetic constructor parameter each. `Stmt::block`
+            // reports it where it appears, and skipping it here keeps that the report.
+            if node
+                .ancestors()
+                .skip(1)
+                .any(|ancestor| ancestor.kind() == jals_syntax::SyntaxKind::BLOCK)
+            {
                 continue;
             }
             let name = node
@@ -183,6 +203,12 @@ impl Compile {
         Ok(out)
     }
 
+    /// Whether `node` is a type declaration nested directly inside another type's body.
+    fn is_nested(node: &SyntaxNode) -> bool {
+        node.parent()
+            .is_some_and(|parent| ast::ClassBody::cast(parent).is_some())
+    }
+
     /// Compile one type declaration.
     fn class(
         node: &SyntaxNode,
@@ -193,7 +219,17 @@ impl Compile {
         file: FileId,
         class_version: u16,
     ) -> Result<CompiledClass> {
-        let internal_name = Descriptor::internal_name(index.item(item).fqn.as_str());
+        // A non-`static` nested class holds its enclosing instance in a synthetic field, and every one
+        // of its constructors takes that instance as an extra first parameter. The index computed its
+        // descriptors from the declaration, so all of them would be one parameter short — which is a
+        // `NoSuchMethodError` at the first `new`, not a missing convenience.
+        if Self::is_nested(node)
+            && !Self::has_modifier(node, jals_syntax::SyntaxKind::STATIC_KW)
+            && index.item(item).kind != DefKind::Interface
+        {
+            return Err(LowerError::Unsupported("a non-`static` inner class"));
+        }
+        let internal_name = Descriptor::internal_name_of(item, index);
         let is_interface = index.item(item).kind == DefKind::Interface;
         let context = Context {
             index,
@@ -216,7 +252,7 @@ impl Compile {
             .find(|&id| index.item(id).kind != DefKind::Interface);
         let super_name = super_item.map_or_else(
             || "java/lang/Object".to_owned(),
-            |id| Descriptor::internal_name(index.item(id).fqn.as_str()),
+            |id| Descriptor::internal_name_of(id, index),
         );
         let super_class = pool.class_index(&super_name).ok_or(AsmError::PoolFull)?;
 
@@ -232,15 +268,20 @@ impl Compile {
         let mut saw_constructor = false;
 
         for member in &members {
-            // A nested type is its own class file, which this milestone does not emit. Dropping it
-            // silently would produce a class that loads and then throws `NoClassDefFoundError` at
-            // the first use — the exact failure mode a compiler that reports nothing has to avoid.
-            if matches!(
-                member.kind(),
-                CLASS_DECL | INTERFACE_DECL | ENUM_DECL | RECORD_DECL | ANNOTATION_TYPE_DECL
-            ) {
-                return Err(LowerError::Unsupported("a nested type declaration"));
+            // A nested type is its own class file, compiled by `file` rather than here. An `enum`, a
+            // `record`, and an `@interface` are not compiled at all yet, and dropping one silently
+            // would produce a class that loads and then throws `NoClassDefFoundError` at the first use
+            // — the exact failure a compiler that reports nothing has to avoid.
+            match member.kind() {
+                CLASS_DECL | INTERFACE_DECL => continue,
+                ENUM_DECL | RECORD_DECL | ANNOTATION_TYPE_DECL => {
+                    return Err(LowerError::Unsupported("a nested `enum` or `record`"));
+                }
+                _ => {}
             }
+            // A non-`static` nested class holds a reference to its enclosing instance, which means a
+            // synthetic field *and* an extra parameter on every constructor — so the descriptors the
+            // index computed from the declaration would all be one parameter short.
             match member.kind() {
                 FIELD_DECL => Self::field(member, &context, &mut pool, &mut fields)?,
                 METHOD_DECL => methods.push(Self::method(member, &context, &mut pool)?),
@@ -306,16 +347,106 @@ impl Compile {
             methods.push(class_init);
         }
 
+        let nesting = Self::inner_classes(node, &context, &mut pool)?;
+
         let mut class = ClassFile::new(class_version, 0, pool);
         class.access_flags = ClassAccessFlags(Self::class_flags(node, is_interface));
         class.this_class = this_class;
         class.super_class = super_class;
         class.fields = fields;
         class.methods = methods;
+        class.attributes = nesting;
         Ok(CompiledClass {
             internal_name,
             bytes: class.write(),
         })
+    }
+
+    /// The `InnerClasses` attribute: this type if it is nested, plus every type nested directly in it.
+    ///
+    /// Not optional decoration. A nested type's `private` or `static` cannot live in its own
+    /// `access_flags` — the JVM has nowhere to put either — so this is the only record of what the
+    /// source declared, and reflection reads it back from here. `getSimpleName` also comes from here;
+    /// without it a nested class reports `Outer$Inner`.
+    fn inner_classes(
+        node: &SyntaxNode,
+        context: &Context<'_>,
+        pool: &mut ConstantPool,
+    ) -> Result<Vec<jals_classfile::Attribute>> {
+        let mut nested: Vec<&SyntaxNode> = Vec::new();
+        let own_body: Vec<SyntaxNode> = node
+            .children()
+            .find(|child| ast::ClassBody::cast(child.clone()).is_some())
+            .map(|body| body.children().collect())
+            .unwrap_or_default();
+        let inner: Vec<&SyntaxNode> = own_body
+            .iter()
+            .filter(|child| matches!(child.kind(), CLASS_DECL | INTERFACE_DECL))
+            .collect();
+        nested.extend(inner);
+        if Self::is_nested(node) {
+            nested.push(node);
+        }
+        if nested.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut entries = Vec::with_capacity(nested.len());
+        for declaration in nested {
+            let name = declaration
+                .children_with_tokens()
+                .filter_map(jals_syntax::SyntaxElement::into_token)
+                .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+                .ok_or(LowerError::Unsupported("a type declaration with no name"))?;
+            let item = context
+                .index
+                .item_by_decl(context.file, usize::from(name.text_range().start()))
+                .ok_or_else(|| LowerError::Unresolved(name.text().into()))?;
+            let enclosing = declaration
+                .ancestors()
+                .skip(1)
+                .find(|ancestor| matches!(ancestor.kind(), CLASS_DECL | INTERFACE_DECL))
+                .and_then(|outer| {
+                    let token = outer
+                        .children_with_tokens()
+                        .filter_map(jals_syntax::SyntaxElement::into_token)
+                        .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)?;
+                    context
+                        .index
+                        .item_by_decl(context.file, usize::from(token.text_range().start()))
+                })
+                .ok_or(LowerError::Unsupported(
+                    "a nested type with no enclosing type",
+                ))?;
+
+            let inner_index = pool
+                .class_index(&Descriptor::internal_name_of(item, context.index))
+                .ok_or(AsmError::PoolFull)?;
+            let outer_index = pool
+                .class_index(&Descriptor::internal_name_of(enclosing, context.index))
+                .ok_or(AsmError::PoolFull)?;
+            let name_index = pool.utf8_index(name.text()).ok_or(AsmError::PoolFull)?;
+            // The flags the *source* wrote, which is where a nested type's `private` and `static` go.
+            let is_interface = context.index.item(item).kind == DefKind::Interface;
+            let mut flags = Self::class_flags(declaration, is_interface) & !ClassAccessFlags::SUPER;
+            flags |= Self::access_level(declaration);
+            if Self::has_modifier(declaration, jals_syntax::SyntaxKind::STATIC_KW) {
+                // `ClassAccessFlags` has no `STATIC`, because a *class* file cannot be static — only
+                // an `InnerClasses` entry records it (JVMS §4.7.6, `ACC_STATIC` = 0x0008).
+                flags |= MethodAccessFlags::STATIC;
+            }
+            entries.push(jals_classfile::InnerClassEntry::new(
+                inner_index,
+                outer_index,
+                name_index,
+                flags,
+            ));
+        }
+        let name_index = pool.utf8_index("InnerClasses").ok_or(AsmError::PoolFull)?;
+        Ok(alloc::vec![jals_classfile::Attribute {
+            name_index,
+            body: jals_classfile::AttributeBody::InnerClasses(entries),
+        }])
     }
 
     /// The access-level bit a declaration carries, or `0` for package-private.
