@@ -1643,10 +1643,25 @@ impl Expr {
         emit: &mut Emit<'_, '_>,
     ) -> Result<()> {
         use jals_classfile::VerificationType as Vt;
-        let (left_repr, right_repr) = (
-            Repr::of(&Self::type_of(left.syntax(), context)?)?,
-            Repr::of(&Self::type_of(right.syntax(), context)?)?,
+        let (left_ty, right_ty) = (
+            Self::type_of(left.syntax(), context)?,
+            Self::type_of(right.syntax(), context)?,
         );
+        let (left_repr, right_repr) = (Repr::of(&left_ty)?, Repr::of(&right_ty)?);
+        // A wrapper counts as the primitive it wraps, but not always. §15.20.1 gives `<` and its
+        // relatives binary numeric promotion outright, so both sides unbox. §15.21 gives `==` numeric
+        // equality only when at least one side *is* a number: two references compare as references, which
+        // is why `a == b` on two `Integer`s is identity in Java and must not become `a.intValue() == …`.
+        let ordering = !matches!(compare, Compare::Eq | Compare::Ne);
+        let unbox = ordering || left_repr.number().is_some() || right_repr.number().is_some();
+        let left_repr = match Self::unboxed(&left_ty, context) {
+            Some(numeric) if unbox => Repr::Number(numeric),
+            _ => left_repr,
+        };
+        let right_repr = match Self::unboxed(&right_ty, context) {
+            Some(numeric) if unbox => Repr::Number(numeric),
+            _ => right_repr,
+        };
         if let (Some(a), Some(b)) = (left_repr.number(), right_repr.number()) {
             let promoted = Self::promote(a, b);
             Self::lower_to(left, promoted, context, emit)?;

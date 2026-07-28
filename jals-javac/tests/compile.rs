@@ -4110,3 +4110,36 @@ public class Cases {
         "int 42\nlong abcde\ntext 3\nother\n4\n9\n-1\n"
     );
 }
+
+/// A comparison unboxes, and knows when not to.
+///
+/// §15.20.1 gives `<` and its relatives binary numeric promotion outright, so both sides unbox. §15.21
+/// gives `==` numeric equality only when at least one side *is* a number: two references compare as
+/// references, which is why `a == b` on two `Integer`s is identity and must not become an `intValue`
+/// pair. The last line is the one that tells the two apart — 200 is outside `Integer`'s cache, so the
+/// two boxes are distinct objects and numeric equality would have said `true`.
+#[test]
+fn a_comparison_unboxes_a_wrapper_but_keeps_reference_equality() {
+    let source = r#"
+public class Boxed {
+    public static void main(String[] args) {
+        Integer n = Integer.valueOf(200);
+        Integer m = Integer.valueOf(200);
+        Long l = Long.valueOf(9L);
+        Double d = Double.valueOf(1.5);
+        System.out.println(n > 3);
+        System.out.println(n == 200);
+        System.out.println(200 == n);
+        System.out.println(n < 3 ? "lt" : "ge");
+        System.out.println(l > 8);
+        System.out.println(d < 2.0);
+        System.out.println(n <= m);
+        System.out.println(n == m);
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Boxed"),
+        "true\ntrue\ntrue\nge\ntrue\ntrue\ntrue\nfalse\n"
+    );
+}
