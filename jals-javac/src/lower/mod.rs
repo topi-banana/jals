@@ -46,9 +46,7 @@
 //! or partly-qualified name. An `implements` clause reaches the `interfaces` list.
 //!
 //! An `enum` gets the four member groups its source never writes: a field per constant, the `$VALUES`
-//! array, a `(String, int)` constructor reaching `Enum`'s, and `values()` / `valueOf()`. `values()` and
-//! `valueOf()` are *emitted* but not yet *callable*: they are synthetic, so the index has no member for
-//! either and a call to one resolves to nothing.
+//! array, a `(String, int)` constructor reaching `Enum`'s, and `values()` / `valueOf()`.
 //!
 //! Not yet at all: varargs, `Signature` attributes and bridge methods, lambdas, method references,
 //! non-`static` inner classes, local and anonymous classes, and `record` / `@interface` declarations.

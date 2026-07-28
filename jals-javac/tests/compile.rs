@@ -2391,9 +2391,13 @@ public class Greeter implements Speaks, Ranks {
 /// verifies and compares wrongly.
 #[test]
 fn an_enum_gets_its_constants_and_synthetic_members() {
-    let source = r"
+    let source = r#"
 enum Colour {
-    RED, GREEN, BLUE
+    RED, GREEN, BLUE;
+
+    int brightness = 5;
+
+    int bright() { return brightness + ordinal(); }
 }
 
 public class Palette {
@@ -2405,9 +2409,14 @@ public class Palette {
         System.out.println(picked == Colour.BLUE);
         System.out.println(Colour.RED.ordinal());
         System.out.println(Colour.RED.compareTo(Colour.BLUE));
+        // The two synthetic methods, and a method the body declares.
+        System.out.println(Colour.values().length);
+        System.out.println(Colour.valueOf("GREEN").ordinal());
+        System.out.println(Colour.GREEN.bright());
+        for (Colour each : Colour.values()) { System.out.println(each.name()); }
     }
 }
-";
+"#;
     let classes = compile(source).expect("compile");
     let colour = classes
         .iter()
@@ -2440,6 +2449,7 @@ public class Palette {
             .collect::<Vec<_>>(),
         [
             // public | static | final | enum
+            ("brightness".to_owned(), 0x0000),
             ("RED".to_owned(), 0x0001 | 0x0008 | 0x0010 | 0x4000),
             ("GREEN".to_owned(), 0x0001 | 0x0008 | 0x0010 | 0x4000),
             ("BLUE".to_owned(), 0x0001 | 0x0008 | 0x0010 | 0x4000),
@@ -2453,7 +2463,7 @@ public class Palette {
             .iter()
             .map(|method| name_of(method.name_index))
             .collect::<Vec<_>>(),
-        ["<init>", "values", "valueOf", "<clinit>"]
+        ["bright", "<init>", "values", "valueOf", "<clinit>"]
     );
 
     if !java_available() {
@@ -2461,7 +2471,10 @@ public class Palette {
     }
     // `compareTo` orders by ordinal, so `RED` against `BLUE` is -2 — which is only right if the
     // constants were numbered in declaration order.
-    assert_eq!(run(source, "Palette"), "BLUE\n2\nBLUE\ntrue\n0\n-2\n");
+    assert_eq!(
+        run(source, "Palette"),
+        "BLUE\n2\nBLUE\ntrue\n0\n-2\n3\n1\n6\nRED\nGREEN\nBLUE\n"
+    );
 }
 
 /// Three `enum` shapes are reported, each because a *descriptor* would come out wrong.

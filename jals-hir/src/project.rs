@@ -1706,6 +1706,57 @@ impl ProjectIndex {
                 _ => {}
             }
         }
+        // `values()` and `valueOf(String)` are written by the *compiler*, not by the source — so
+        // nothing above produces them, and a call to either resolved to nothing even though both are
+        // emitted and both work at run time. They are recorded here because this is where an enum's
+        // members are, and because the alternative is every consumer special-casing the two names.
+        if node.kind() == ENUM_DECL {
+            let own = MemberType::Named {
+                name: owner_simple.to_owned(),
+                qualified: None,
+                dims: 0,
+                args: Vec::new(),
+            };
+            let array = MemberType::Named {
+                name: owner_simple.to_owned(),
+                qualified: None,
+                dims: 1,
+                args: Vec::new(),
+            };
+            let string = MemberType::Named {
+                name: "String".to_owned(),
+                qualified: None,
+                dims: 0,
+                args: Vec::new(),
+            };
+            let synthetic = |name: &str, ty: MemberType, params: Vec<Param>| Member {
+                owner,
+                name: name.to_owned(),
+                kind: DefKind::Method,
+                file,
+                // Nothing declares them, so there is no name range to point at — which is also what
+                // keeps `member_by_decl` from ever finding one.
+                name_range: 0..0,
+                ty,
+                modifiers: MemberModifiers {
+                    is_static: true,
+                    is_private: false,
+                },
+                params,
+                varargs: false,
+                throws: Vec::new(),
+                source_location: None,
+            };
+            members.push(synthetic("values", array, Vec::new()));
+            members.push(synthetic(
+                "valueOf",
+                own,
+                alloc::vec![Param {
+                    name: Some("name".to_owned()),
+                    ty: string,
+                }],
+            ));
+        }
         members
     }
 }
