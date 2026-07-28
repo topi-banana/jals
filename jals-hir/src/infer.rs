@@ -991,14 +991,55 @@ impl<'a> Inferer<'a> {
             ast::Expr::FieldAccess(f) => self.field_access_ty(f),
             ast::Expr::Call(c) => self.call_ty(c),
             ast::Expr::Switch(s) => self.switch_ty(s),
-            // Target-typed forms still need a later phase: a method reference / lambda takes its
-            // type from context.
-            ast::Expr::MethodRef(_) | ast::Expr::Lambda(_) => Ty::Unknown,
+            // A method reference and a lambda have no type of their own: they take one from the context
+            // they appear in, which is the whole meaning of "target-typed".
+            ast::Expr::MethodRef(e) => self.target_ty(e.syntax()),
+            ast::Expr::Lambda(e) => self.target_ty(e.syntax()),
             ast::Expr::ClassLiteral(_) => self.java_lang_ty("Class"),
         }
     }
 
     /// The memoised type of the (already-visited) expression node, or [`Ty::Unknown`].
+    /// The type a target-typed expression takes from its context (JLS §15.27.3): a lambda and a method
+    /// reference are the two forms that have none of their own.
+    ///
+    /// Three contexts are read, which are the ones that name a type outright: a declaration's written type,
+    /// an assignment's target, and the enclosing method's return type. An *argument* position needs the
+    /// selected overload's parameter, and overload selection runs after this — so one stays `Unknown`
+    /// rather than being guessed at from a candidate that may not be the one chosen.
+    fn target_ty(&self, node: &SyntaxNode) -> Ty {
+        let Some(parent) = node.parent() else {
+            return Ty::Unknown;
+        };
+        match parent.kind() {
+            // `F f = …` / `F f; f = …`: the declared type is written right there.
+            LOCAL_VAR_DECL | FIELD_DECL => {
+                let ty = parent.children().find_map(ast::Type::cast);
+                if ty.as_ref().is_some_and(Cst::is_var_type) {
+                    // `var f = () -> …` is not a Java program: there is no type to infer *from*.
+                    return Ty::Unknown;
+                }
+                self.ty_of_opt_type(ty.as_ref())
+            }
+            ASSIGNMENT_EXPR => ast::AssignmentExpr::cast(parent)
+                .and_then(|assignment| assignment.target())
+                .map_or(Ty::Unknown, |target| self.expr_ty(target.syntax())),
+            // `return () -> …`: the method's own return type, which is where a `return` value is checked
+            // against anyway.
+            RETURN_STMT => node
+                .ancestors()
+                .find(|ancestor| ancestor.kind() == METHOD_DECL)
+                .and_then(|method| {
+                    method
+                        .children()
+                        .find_map(ast::Type::cast)
+                        .map(|ty| self.ty_of_opt_type(Some(&ty)))
+                })
+                .unwrap_or(Ty::Unknown),
+            _ => Ty::Unknown,
+        }
+    }
+
     fn expr_ty(&self, node: &SyntaxNode) -> Ty {
         let r = node.text_range();
         self.expr_by_span
