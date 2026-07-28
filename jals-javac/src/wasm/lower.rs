@@ -1046,6 +1046,7 @@ impl Body {
             owner: method.owner,
             loops: Vec::new(),
             pending_label: None,
+            yields: Vec::new(),
         };
         // `this` is parameter 0 of an instance method or a constructor.
         if method.owner.is_some() || method.is_constructor {
@@ -1122,6 +1123,9 @@ struct Lowering<'a> {
     loops: Vec<Loop>,
     /// A label read off a `LabeledStmt`, waiting for the loop it labels to claim it.
     pending_label: Option<String>,
+    /// Enclosing `switch` *expressions*, innermost last: where a `yield` branches to, and the type the
+    /// value it carries must have.
+    yields: Vec<(u32, ValType)>,
 }
 
 /// One arm of a lowered `switch`: which keys reach it, in the order the arms are written.
@@ -1170,6 +1174,7 @@ impl Lowering<'_> {
             owner: None,
             loops: Vec::new(),
             pending_label: None,
+            yields: Vec::new(),
         }
     }
 
@@ -1353,7 +1358,17 @@ impl Lowering<'_> {
             ast::Stmt::Throw(statement) => self.throw(statement, insn),
             ast::Stmt::Try(statement) => self.try_catch(statement, insn),
             ast::Stmt::Synchronized(statement) => self.synchronized(statement, insn),
-            ast::Stmt::Yield(_) => Err(WasmError::Unsupported("a `yield`")),
+            ast::Stmt::Yield(statement) => {
+                let value = statement
+                    .expr()
+                    .ok_or(WasmError::Unsupported("a `yield` with no value"))?;
+                let (leave, ty) = *self.yields.last().ok_or(WasmError::Unsupported(
+                    "a `yield` outside a `switch` expression",
+                ))?;
+                self.arm_value(&value, ty, insn)?;
+                insn.br(insn.depth() - leave);
+                Ok(())
+            }
             ast::Stmt::Switch(statement) => {
                 let selector = statement
                     .selector()
@@ -1936,13 +1951,25 @@ impl Lowering<'_> {
             leave,
             repeat: None,
         });
+        if let Some(ty) = result {
+            self.yields.push((leave, ty));
+        }
         let lowered = if rules.is_empty() {
             self.switch_groups(&groups, result, insn)
         } else {
             self.switch_rules(&rules, result, leave, insn)
         };
+        if result.is_some() {
+            self.yields.pop();
+        }
         self.loops.pop();
         lowered?;
+        // A colon-form arm leaves by `yield`, so the last group's end carries no value. Java's own rule
+        // is that every arm yields or throws; the instruction is here so the validator does not have to
+        // infer that rule, exactly as a value-returning body's trailing one is.
+        if result.is_some() {
+            insn.unreachable();
+        }
         insn.end();
         Ok(())
     }
@@ -2109,14 +2136,7 @@ impl Lowering<'_> {
         result: Option<ValType>,
         insn: &mut Insn,
     ) -> Result<()> {
-        if result.is_some() {
-            // A colon-form expression arm ends in `yield`, whose value would have to reach the block's
-            // end from an arbitrary statement position. Reported rather than emitted as a module the
-            // validator rejects for a missing value.
-            return Err(WasmError::Unsupported(
-                "a `switch` expression in the colon form",
-            ));
-        }
+        let _ = result;
         for group in groups {
             insn.end();
             for statement in group.stmts() {

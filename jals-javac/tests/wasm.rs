@@ -1533,3 +1533,62 @@ public class Places {
     assert_invoke(&[source], "widths", &["2"], "42");
     assert_invoke(&[source], "nested", &["5"], "10");
 }
+
+/// `yield`, which is how a colon-form `switch` *expression* produces its value.
+///
+/// The whole `switch` is already a typed block, so a `yield` is a `br` out of it carrying the value —
+/// there is nothing else to it once the block has a result type. A colon-form arm leaves that way, so the
+/// last group's end carries no value: Java's own rule is that every arm yields or throws, and the
+/// trailing `unreachable` is there so the validator does not have to infer that rule.
+#[test]
+fn a_yield_leaves_a_switch_expression() {
+    let source = r"
+public class Pick {
+    public static int colonForm(int n) {
+        return switch (n) {
+            case 0:
+                yield 10;
+            case 1:
+                yield 11;
+            default:
+                yield -1;
+        };
+    }
+
+    // A block-bodied arrow arm yields too, and a `yield` from inside an `if` has to reach the same
+    // place — the branch depth comes from the emitter, not from how deeply the source nested it.
+    public static int nested(int n) {
+        return switch (n) {
+            case 0: {
+                if (n == 0) {
+                    yield 100;
+                }
+                yield 200;
+            }
+            default:
+                yield 300;
+        };
+    }
+
+    // A `switch` expression inside another one: the inner `yield` must reach the *inner* block.
+    public static int layered(int n) {
+        return switch (n) {
+            case 0:
+                yield switch (n + 1) {
+                    case 1:
+                        yield 7;
+                    default:
+                        yield 8;
+                };
+            default:
+                yield 9;
+        };
+    }
+}
+";
+    assert_invoke(&[source], "colonForm", &["1"], "11");
+    assert_invoke(&[source], "colonForm", &["5"], "-1");
+    assert_invoke(&[source], "nested", &["0"], "100");
+    assert_invoke(&[source], "layered", &["0"], "7");
+    assert_invoke(&[source], "layered", &["3"], "9");
+}
