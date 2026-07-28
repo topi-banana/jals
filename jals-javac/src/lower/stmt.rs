@@ -52,10 +52,32 @@ impl Stmt {
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
     ) -> Result<()> {
+        // A *local* type declaration is a child of the block that is not a statement, so iterating
+        // `stmts()` walks straight past it — and a class that vanished would be a `NoClassDefFoundError`
+        // at the first use, which is exactly the failure a compiler is in a position to report.
+        if let Some(local) = block
+            .syntax()
+            .children()
+            .find(|child| Self::declares_a_type(child.kind()))
+        {
+            let _ = local;
+            return Err(LowerError::Unsupported("a local type declaration"));
+        }
         for statement in block.stmts() {
             Self::lower(&statement, context, emit)?;
         }
         Ok(())
+    }
+
+    /// Whether a node kind declares a type, which a block may contain and this cannot emit.
+    const fn declares_a_type(kind: jals_syntax::SyntaxKind) -> bool {
+        use jals_syntax::SyntaxKind::{
+            ANNOTATION_TYPE_DECL, CLASS_DECL, ENUM_DECL, INTERFACE_DECL, RECORD_DECL,
+        };
+        matches!(
+            kind,
+            CLASS_DECL | INTERFACE_DECL | ENUM_DECL | RECORD_DECL | ANNOTATION_TYPE_DECL
+        )
     }
 
     /// Emit one statement.
@@ -109,8 +131,45 @@ impl Stmt {
             ast::Stmt::Synchronized(statement) => Self::synchronized(statement, context, emit),
             ast::Stmt::Try(statement) => Self::try_catch(statement, context, emit),
             ast::Stmt::Assert(statement) => Self::assert(statement, context, emit),
-            _ => Err(LowerError::Unsupported("this statement form")),
+            ast::Stmt::Switch(statement) => {
+                crate::lower::switch::Switch::statement(statement, labels, context, emit)
+            }
+            // Every `Stmt` variant is covered, so there is no catch-all left to write. What a statement
+            // still cannot reach it reports from inside — a `case` label with no constant value, a
+            // resource with no `close()` — rather than by not being handled at all.
+            ast::Stmt::Yield(statement) => Self::yield_value(statement, context, emit),
         }
+    }
+
+    /// `yield v;` — a `switch` expression's arm handing back its value.
+    fn yield_value(
+        statement: &ast::YieldStmt,
+        context: &Context<'_>,
+        emit: &mut Emit<'_, '_>,
+    ) -> Result<()> {
+        let (done, result, depth) = emit.yield_target()?;
+        let value = statement
+            .expr()
+            .ok_or(LowerError::Unsupported("a `yield` with no value"))?;
+        Expr::lower_as(&value, &result, context, emit)?;
+        // Leaving the arm runs whatever `finally` blocks it sits inside, and those cannot be allowed
+        // to see the value on the stack — so it goes into a slot, exactly as a `return`'s does.
+        let crossed = emit.crossed(depth);
+        if !crossed.is_empty() {
+            let ty = emit
+                .asm
+                .stack_top()
+                .ok_or(LowerError::Unsupported("a `yield` that produced no value"))?;
+            let width = u16::from(matches!(
+                ty,
+                jals_classfile::VerificationType::Long | jals_classfile::VerificationType::Double
+            ));
+            let held = emit.slots.declare_temporary(width + 1);
+            emit.asm.store(held)?;
+            Self::run_guards(&crossed, context, emit)?;
+            emit.asm.load(held)?;
+        }
+        Ok(emit.asm.branch(Branch::Always, done)?)
     }
 
     /// `throw e;`
@@ -590,7 +649,7 @@ impl Stmt {
     /// The JVM has no "evaluate and drop", so the caller pops back down to the depth it started at.
     /// A `for` header's init and update sections need this too: they are bare expressions in the
     /// grammar, and an `i++` left on the stack at the back edge is a frame the loop head cannot merge.
-    fn discarded(
+    pub(crate) fn discarded(
         expression: &ast::Expr,
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,

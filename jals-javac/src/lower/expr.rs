@@ -111,6 +111,9 @@ impl Expr {
             ast::Expr::Cast(cast) => Self::cast(cast, context, emit),
             ast::Expr::Ternary(ternary) => Self::ternary(ternary, context, emit),
             ast::Expr::New(new) => Self::new_expr(new, context, emit),
+            ast::Expr::Switch(switch) => {
+                crate::lower::switch::Switch::expression(switch, context, emit)
+            }
             // An array initialiser has no type of its own — `{1, 2, 3}` is an array of whatever it is
             // assigned to — so it is normally reached through `lower_as`, which knows the target.
             // Inference does record one where it could work it out, which covers a declaration.
@@ -265,9 +268,9 @@ impl Expr {
             TRUE_KW => emit.asm.const_int(1)?,
             FALSE_KW => emit.asm.const_int(0)?,
             NULL_KW => emit.asm.const_null()?,
-            STRING_LITERAL => emit.asm.const_string(&Self::string_value(text)?)?,
+            STRING_LITERAL => emit.asm.const_string(&Self::literal_text(text)?)?,
             CHAR_LITERAL => {
-                let value = Self::string_value(text)?
+                let value = Self::literal_text(text)?
                     .chars()
                     .next()
                     .ok_or(LowerError::Unsupported("an empty character literal"))?;
@@ -277,7 +280,7 @@ impl Expr {
             // the width, and inference has already turned that suffix into a type. Reading the type
             // rather than re-reading the suffix keeps the two from disagreeing.
             INT_LITERAL => {
-                let value = Self::integer(text.trim_end_matches(['l', 'L']))?;
+                let value = Self::integer_literal(text.trim_end_matches(['l', 'L']))?;
                 if matches!(
                     Self::type_of(literal.syntax(), context),
                     Ok(Ty::Primitive(Primitive::Long))
@@ -314,7 +317,7 @@ impl Expr {
     }
 
     /// An integer literal's value, in whichever base its prefix names, with `_` separators removed.
-    fn integer(text: &str) -> Result<i64> {
+    pub(crate) fn integer_literal(text: &str) -> Result<i64> {
         let cleaned = text.replace('_', "");
         let (digits, radix) = match cleaned.get(..2).map(str::to_ascii_lowercase).as_deref() {
             Some("0x") => (&cleaned[2..], 16),
@@ -349,7 +352,7 @@ impl Expr {
     /// An escape this does not know is reported rather than approximated. Pushing the character
     /// after the backslash — the old fallback — turned `A` into `u0041` and `\101` into `101`,
     /// which is a string constant that is simply wrong, in a class file nothing downstream checks.
-    fn string_value(text: &str) -> Result<String> {
+    pub(crate) fn literal_text(text: &str) -> Result<String> {
         let inner = Self::unquote(text);
         let unknown = || LowerError::Unsupported("an escape sequence this lowering cannot read");
         let mut out = String::with_capacity(inner.len());

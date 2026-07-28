@@ -62,6 +62,9 @@ pub(crate) struct Emit<'a, 'pool> {
     scopes: Vec<Scope>,
     /// The `finally` blocks currently in force, innermost last.
     guards: Vec<Guard>,
+    /// The `switch` expressions being lowered, innermost last: where a `yield` jumps, the type it has
+    /// to produce, and how deep the `switch`'s own scope is so a `yield` knows which guards it crosses.
+    yields: Vec<(Label, Ty, usize)>,
 }
 
 /// What a guarded region has to run before control leaves it.
@@ -112,6 +115,7 @@ impl<'a, 'pool> Emit<'a, 'pool> {
             has_this,
             scopes: Vec::new(),
             guards: Vec::new(),
+            yields: Vec::new(),
         }
     }
 
@@ -182,6 +186,28 @@ impl<'a, 'pool> Emit<'a, 'pool> {
                     .ok_or_else(|| LowerError::Unresolved(String::from(name)))
             },
         )
+    }
+
+    // --- `yield` -------------------------------------------------------------
+
+    /// Enter a `switch` expression, whose arms `yield` a `result` to `done`.
+    ///
+    /// Called straight after [`enter`](Self::enter), so the `switch`'s own scope is the innermost one
+    /// — which is the depth a `yield` measures its crossed guards against.
+    pub(crate) fn enter_yield(&mut self, done: Label, result: Ty) {
+        let depth = self.scopes.len().saturating_sub(1);
+        self.yields.push((done, result, depth));
+    }
+
+    pub(crate) fn leave_yield(&mut self) {
+        self.yields.pop();
+    }
+
+    /// Where a `yield` goes, what it produces, and the scope depth it leaves.
+    pub(crate) fn yield_target(&self) -> Result<(Label, Ty, usize)> {
+        self.yields.last().cloned().ok_or(LowerError::Unsupported(
+            "a `yield` outside a `switch` expression",
+        ))
     }
 
     // --- `finally` -----------------------------------------------------------

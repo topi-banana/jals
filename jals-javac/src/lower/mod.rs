@@ -29,8 +29,16 @@
 //! **a method needs a body** unless it is `abstract` or an interface method, because `native` has no
 //! body and no flag pair that could say so legally.
 //!
-//! Not yet at all: `switch` (statement or expression), boxing, varargs, generics beyond erasure,
-//! lambdas, method references, `.class` literals, inner classes, and constructor delegation
+//! `switch` too, in both syntaxes and as a statement or an expression, over an integral selector or a
+//! `String` — the latter through `hashCode()` plus an `equals` per candidate, because two different
+//! strings can hash alike.
+//!
+//! Every statement form in the grammar is now lowered. What a statement still cannot reach it reports
+//! from inside: a `case` label with no constant value, a `case` *pattern*, a resource with no
+//! `close()`, a local type declaration.
+//!
+//! Not yet at all: boxing, varargs, generics beyond erasure, lambdas, method references, `.class`
+//! literals, inner classes, `enum` / `record` declarations, and constructor delegation
 //! (`this(…)` / `super(args)`). Each arrives with the milestone that can test it.
 
 mod emit;
@@ -38,6 +46,7 @@ mod expr;
 mod place;
 mod slots;
 mod stmt;
+mod switch;
 
 pub(crate) use crate::lower::emit::Emit;
 

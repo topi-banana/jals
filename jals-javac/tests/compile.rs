@@ -1171,15 +1171,12 @@ public class Several {
 #[test]
 fn the_features_after_this_milestone_are_still_reported() {
     for (source, expected) in [
-        ("switch (1) { default: break; }", "this statement form"),
         ("Runnable r = () -> {};", "this expression form"),
         ("Runnable r = Later::main;", "this expression form"),
         ("Object c = int.class;", "this expression form"),
         ("Integer boxed = 1;", "a boxing conversion"),
-        (
-            "int v = switch (1) { default -> 2; };",
-            "this expression form",
-        ),
+        ("Object o = new Later() { };", "an anonymous class"),
+        ("class Inner {}", "a local type declaration"),
     ] {
         let program = format!(
             r"
@@ -1778,4 +1775,211 @@ public class Resourceful implements AutoCloseable {
          ran\nclose:ct\nfrom close:close:ct\n\
          close:c\ncaught:inner\nfinally\n"
     );
+}
+
+/// `switch`, in both syntaxes, as a statement and as an expression.
+///
+/// The colon form *falls through* and the arrow form does not, which is the only difference between
+/// them and one `goto` per arm in the output. A `break` leaves the whole `switch`; a `continue` looks
+/// straight past it, because a `switch` is a `break` target that is not a loop.
+#[test]
+fn both_switch_syntaxes_run() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Selected {
+    static String fallsThrough(int n) {
+        String out = "";
+        switch (n) {
+            case 0:
+            case 1:
+                out = "low";
+                break;
+            case 2:
+                out = "two";
+                // No `break`: the next group runs too, which is what the colon form means.
+            case 3:
+                out = out + "three";
+                break;
+            default:
+                out = "other";
+        }
+        return out;
+    }
+
+    static String arrows(int n) {
+        String out = "";
+        switch (n) {
+            case 0, 1 -> out = "low";
+            case 2 -> out = "two";
+            default -> out = "other";
+        }
+        return out;
+    }
+
+    static int valued(int n) {
+        return switch (n) {
+            case 0 -> 10;
+            case 1 -> { yield 20; }
+            case 2 -> throw new IllegalStateException("two");
+            default -> 99;
+        };
+    }
+
+    static String narrow(char c) {
+        return switch (c) {
+            case 'x' -> "ex";
+            case 'y' -> "why";
+            default -> "?";
+        };
+    }
+
+    static int sparse(int n) {
+        // Keys 1000 apart take the `lookupswitch` form; the dense ones above take `tableswitch`.
+        switch (n) {
+            case -1: return 100;
+            case 1000: return 200;
+            default: return 300;
+        }
+    }
+
+    static int leaves(int limit) {
+        int total = 0;
+        for (int i = 0; i < limit; i++) {
+            switch (i) {
+                case 1: continue;
+                case 3: break;
+                default: total += i;
+            }
+            total += 100;
+        }
+        return total;
+    }
+
+    static int cleanedUp(int n) {
+        try {
+            return switch (n) {
+                case 0 -> { yield 1; }
+                default -> 2;
+            };
+        } finally {
+            System.out.println("cleanup");
+        }
+    }
+
+    public static void main(String[] args) {
+        for (int i = 0; i < 5; i++) { System.out.println(fallsThrough(i)); }
+        for (int i = 0; i < 4; i++) { System.out.println(arrows(i)); }
+        System.out.println(valued(0));
+        System.out.println(valued(1));
+        try {
+            valued(2);
+        } catch (IllegalStateException e) {
+            System.out.println("threw:" + e.getMessage());
+        }
+        System.out.println(valued(9));
+        System.out.println(narrow('y'));
+        System.out.println(sparse(-1) + sparse(1000) + sparse(7));
+        System.out.println(leaves(5));
+        System.out.println(cleanedUp(0));
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Selected"),
+        "low\nlow\ntwothree\nthree\nother\n\
+         low\nlow\ntwo\nother\n\
+         10\n20\nthrew:two\n99\n\
+         why\n\
+         600\n\
+         406\n\
+         cleanup\n1\n"
+    );
+}
+
+/// A `switch` on a `String` is a `switch` on `hashCode()` plus an `equals` per candidate.
+///
+/// The `equals` is not an optimisation to skip. Two different strings can hash alike — `"Aa"` and
+/// `"BB"` famously do — and a lowering that trusted the hash would send one of them to the other's
+/// arm, in a class file that verifies and runs and answers wrongly.
+#[test]
+fn a_string_switch_confirms_the_hash_with_equals() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Named {
+    static String pick(String s) {
+        switch (s) {
+            case "a": return "A";
+            case "b": return "B";
+            case "Aa": return "collides-Aa";
+            case "BB": return "collides-BB";
+            default: return "?";
+        }
+    }
+
+    static int arrowed(String s) {
+        return switch (s) {
+            case "one", "uno" -> 1;
+            case "two" -> 2;
+            default -> 0;
+        };
+    }
+
+    public static void main(String[] args) {
+        System.out.println(pick("a"));
+        System.out.println(pick("b"));
+        // The two keys with the same hash have to reach their own arms.
+        System.out.println(pick("Aa"));
+        System.out.println(pick("BB"));
+        System.out.println(pick("zz"));
+        System.out.println(arrowed("one") + arrowed("uno") + arrowed("two") + arrowed("x"));
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Named"),
+        "A\nB\ncollides-Aa\ncollides-BB\n?\n4\n"
+    );
+}
+
+/// A `switch` the lowering cannot build a jump table for is reported rather than approximated.
+#[test]
+fn a_switch_it_cannot_tabulate_is_reported() {
+    for (source, expected) in [
+        // A jump table is built now, so a label whose value is not known now cannot be in it.
+        (
+            "int k = 1; switch (args.length) { case k: break; }",
+            "a non-literal `case`",
+        ),
+        // A `switch` expression has to produce a value on every path, and exhaustiveness over an
+        // `enum` or a sealed hierarchy — the other way to satisfy that — is not lowered.
+        (
+            "int v = switch (args.length) { case 0 -> 1; };",
+            "a `switch` expression with no `default`",
+        ),
+        // A `long` selector is not a Java program, and narrowing it to an `int` would compile it into
+        // one that switches on the low 32 bits.
+        (
+            "long n = 1; switch ((int) n) { default: break; } switch (n) { default: break; }",
+            "a `switch` on this selector type",
+        ),
+    ] {
+        let program = format!(
+            r"
+public class Table {{
+    public static void main(String[] args) {{
+        {source}
+    }}
+}}
+"
+        );
+        let error = compile(&program).expect_err("this switch cannot be tabulated");
+        assert!(
+            matches!(error, LowerError::Unsupported(what) if what == expected),
+            "`{source}` should report {expected:?}, got {error}"
+        );
+    }
 }
