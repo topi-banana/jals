@@ -18,6 +18,7 @@ mod body;
 mod cfg;
 mod expr;
 mod hierarchy;
+mod lines;
 mod literal;
 mod switch;
 mod types;

@@ -183,9 +183,9 @@ pub struct InnerClassEntry {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LineNumberEntry {
     /// Bytecode offset where the line begins.
-    start_pc: u16,
+    pub start_pc: u16,
     /// The source line number.
-    line_number: u16,
+    pub line_number: u16,
 }
 
 /// One entry of a `LocalVariableTable`.
@@ -194,7 +194,7 @@ pub struct LocalVariableEntry {
     /// Start of the variable's live range.
     pub start_pc: u16,
     /// Length of the live range.
-    length: u16,
+    pub length: u16,
     /// `Utf8` index of the variable's name.
     pub name_index: u16,
     /// `Utf8` index of the variable's field descriptor.

@@ -6,6 +6,7 @@
 
 use alloc::borrow::ToOwned;
 use alloc::boxed::Box;
+use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -109,6 +110,29 @@ pub(crate) enum ArrayForm {
     Init(Vec<Expr>),
 }
 
+/// The `init` clause of a recovered [`Stmt::For`].
+///
+/// `ty` is `Some` only when the `for` declares the variable itself (`for (int i = 0; …)`), which is
+/// legal solely when the local's whole live range lies inside the loop. Otherwise the hoisted
+/// [`Stmt::Declare`] stays and the clause is a bare assignment (`for (i = 0; …)`).
+pub(crate) struct ForInit {
+    pub ty: Option<String>,
+    pub name: String,
+    pub value: Expr,
+}
+
+/// The `update` clause of a recovered [`Stmt::For`]: the `StatementExpression` subset of [`Stmt`]
+/// that the Java grammar admits there.
+///
+/// Built only through [`ForUpdate::from_stmt`], so a recovered `for` can never render an update
+/// clause a parser would reject — rendering is total and needs no safety net.
+pub(crate) enum ForUpdate {
+    /// An assignment, sugared to `++` / `--` / `+=` when it updates its own target.
+    Assign { target: Expr, value: Expr },
+    /// A discarded call or object creation.
+    Call(Expr),
+}
+
 /// A reconstructed Java statement.
 pub(crate) enum Stmt {
     /// A bare expression statement `expr;` (a discarded call).
@@ -135,6 +159,15 @@ pub(crate) enum Stmt {
     },
     /// A `while (cond) { body }` (a top-test loop).
     While { cond: Expr, body: Vec<Self> },
+    /// A `for (init; cond; update) { body }`, folded from a top-test loop whose `LineNumberTable`
+    /// puts the update on the header's source line. `init` is `None` when the initializer could not
+    /// be absorbed, which renders as `for (; cond; update)`.
+    For {
+        init: Option<ForInit>,
+        cond: Expr,
+        update: ForUpdate,
+        body: Vec<Self>,
+    },
     /// A `do { body } while (cond);` (a bottom-test loop).
     DoWhile { body: Vec<Self>, cond: Expr },
     /// A `switch (selector) { arms }`, recovered from a `tableswitch` / `lookupswitch`. Rendered
@@ -198,6 +231,23 @@ impl Stmt {
                 }
                 out.push(format!("{pad}}}"));
             }
+            Self::For {
+                init,
+                cond,
+                update,
+                body,
+            } => {
+                let init = init.as_ref().map_or_else(String::new, ForInit::render);
+                out.push(format!(
+                    "{pad}for ({init}; {}; {}) {{",
+                    cond.render(),
+                    update.render()
+                ));
+                for s in body {
+                    s.render_into(indent + 4, out);
+                }
+                out.push(format!("{pad}}}"));
+            }
             Self::DoWhile { body, cond } => {
                 out.push(format!("{pad}do {{"));
                 for s in body {
@@ -241,9 +291,110 @@ impl Stmt {
             Self::SuperCall(args) => format!("super({});", Expr::render_args(args)),
             Self::ThisCall(args) => format!("this({});", Expr::render_args(args)),
             Self::Break => "break;".to_owned(),
-            Self::If { .. } | Self::While { .. } | Self::DoWhile { .. } | Self::Switch { .. } => {
+            Self::If { .. }
+            | Self::While { .. }
+            | Self::For { .. }
+            | Self::DoWhile { .. }
+            | Self::Switch { .. } => {
                 unreachable!("block statements are rendered by render_into")
             }
+        }
+    }
+
+    /// Collect the names every `for` in this tree declares in its own `init` clause — the hoisted
+    /// [`Stmt::Declare`]s the caller must drop, since the `for` now declares them.
+    ///
+    /// Deliberately written without a wildcard arm. Missing a nested block would silently keep a
+    /// declaration the `for` has taken over, and the duplicate is a *scope* error rather than a
+    /// syntax one, so the valid-Java property test cannot catch it. A new block-carrying variant
+    /// must fail to compile here instead.
+    pub(crate) fn for_declared_names(stmts: &[Self], out: &mut BTreeSet<String>) {
+        for stmt in stmts {
+            match stmt {
+                Self::For { init, body, .. } => {
+                    if let Some(ForInit {
+                        ty: Some(_), name, ..
+                    }) = init
+                    {
+                        out.insert(name.clone());
+                    }
+                    Self::for_declared_names(body, out);
+                }
+                Self::If { then, els, .. } => {
+                    Self::for_declared_names(then, out);
+                    Self::for_declared_names(els, out);
+                }
+                Self::While { body, .. } | Self::DoWhile { body, .. } => {
+                    Self::for_declared_names(body, out);
+                }
+                Self::Switch { arms, .. } => {
+                    for arm in arms {
+                        Self::for_declared_names(&arm.body, out);
+                    }
+                }
+                Self::Expr(_)
+                | Self::Declare { .. }
+                | Self::Return(_)
+                | Self::Assign { .. }
+                | Self::Throw(_)
+                | Self::SuperCall(_)
+                | Self::ThisCall(_)
+                | Self::Break => {}
+            }
+        }
+    }
+}
+
+impl ForInit {
+    fn render(&self) -> String {
+        self.ty.as_ref().map_or_else(
+            || format!("{} = {}", self.name, self.value.render()),
+            |ty| format!("{ty} {} = {}", self.name, self.value.render()),
+        )
+    }
+}
+
+impl ForUpdate {
+    /// The `for` update this statement can be, or `Err(the statement)` when it cannot be one.
+    ///
+    /// Java's `ForUpdate` admits only a `StatementExpression`, so an assignment becomes
+    /// [`ForUpdate::Assign`] and a discarded expression becomes [`ForUpdate::Call`] — the latter only
+    /// for the two expressions the simulator ever discards into one. Everything else keeps the loop
+    /// a `while`, which is why the rejected statement is handed back rather than dropped: the caller
+    /// has already taken it off the loop body and must put it back.
+    pub(crate) fn from_stmt(stmt: Stmt) -> Result<Self, Box<Stmt>> {
+        match stmt {
+            Stmt::Assign { target, value } => Ok(Self::Assign { target, value }),
+            Stmt::Expr(expr @ (Expr::Call { .. } | Expr::New { .. })) => Ok(Self::Call(expr)),
+            other => Err(Box::new(other)),
+        }
+    }
+
+    fn render(&self) -> String {
+        match self {
+            Self::Call(expr) => expr.render(),
+            Self::Assign { target, value } => Self::render_assign(target, value),
+        }
+    }
+
+    /// `i = i + 1` → `i++`, `i = i - 1` → `i--`, `i = i + n` → `i += n`; anything else stays a plain
+    /// assignment. The sugar is confined to the `for` header, where a compound form is what a reader
+    /// expects; a body `iinc` still renders as `i = i + 1`, since recovering `++` in general is a
+    /// separate concern.
+    fn render_assign(target: &Expr, value: &Expr) -> String {
+        let plain = format!("{} = {}", target.render(), value.render());
+        let (Expr::Local(name), Expr::Binary { op, lhs, rhs }) = (target, value) else {
+            return plain;
+        };
+        let Expr::Local(updated) = &**lhs else {
+            return plain;
+        };
+        if updated != name || !matches!(*op, "+" | "-") {
+            return plain;
+        }
+        match &**rhs {
+            Expr::Literal(by) if by == "1" => format!("{name}{op}{op}"),
+            rhs => format!("{name} {op}= {}", rhs.render()),
         }
     }
 }
