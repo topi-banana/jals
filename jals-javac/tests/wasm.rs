@@ -2521,8 +2521,10 @@ public class Reader {
 ///
 /// The recursive case: test the type, then read each component through its *accessor* — which is what a
 /// deconstruction calls (§14.30.1), a record being free to declare one by hand — and match the component
-/// pattern against that. `_` matches anything and binds nothing, so it emits nothing at all, and a
-/// primitive component carries no test because its type *is* the component's.
+/// pattern against that. `_` matches anything and binds nothing, so it emits nothing at all. Two forms
+/// carry no test: a primitive component, and one of the component's *own* type — the latter matches
+/// unconditionally (§14.30.2), including a `null` component that a `ref.test` would reject. `var` is that
+/// same case spelled without the type, and its binding takes the component's.
 ///
 /// The selector is an interface rather than `Object`: a wasm host has no `java.base`, and an interface
 /// type is held at the top of the reference hierarchy, which is exactly what a pattern narrows from.
@@ -2543,6 +2545,21 @@ public class Deconstruct {
         };
     }
 
+    // `var` is the ordinary spelling: the component pattern's type *is* the component's.
+    static int summed(Node o) {
+        return switch (o) {
+            case Point(var x, var y) -> x + y;
+            case Line(var a, var b) -> (a == null ? 100 : 0) + (b == null ? 20 : 0);
+            default -> -1;
+        };
+    }
+
+    public static int varComponents() { return summed(new Point(3, 4)); }
+
+    // A `null` component still matches a pattern of the component's own type (§14.30.2), which a
+    // `ref.test` would have rejected.
+    public static int nullComponent() { return summed(new Line(null, new Point(1, 1))); }
+
     public static int line() { return total(new Line(new Point(1, 2), new Point(3, 4))); }
     public static int point() { return total(new Point(9, 8)); }
     public static int other() { return total(new Shape()); }
@@ -2560,4 +2577,6 @@ public class Deconstruct {
     assert_invoke(&[source], "point", &[], "9");
     assert_invoke(&[source], "other", &[], "-1");
     assert_invoke(&[source], "tested", &[], "56");
+    assert_invoke(&[source], "varComponents", &[], "7");
+    assert_invoke(&[source], "nullComponent", &[], "100");
 }

@@ -868,6 +868,7 @@ impl<'a> Inferer<'a> {
         self.collect_declared_types(&root).await;
         // After the written types, because a lambda's target is one of them.
         self.collect_lambda_params(&root).await;
+        self.collect_pattern_components(&root).await;
         self.infer_in(&root).await;
         let project = self.project;
         let mut inference = TypeInference {
@@ -906,6 +907,74 @@ impl<'a> Inferer<'a> {
                     for tok in Collect::direct_ident_tokens(&node) {
                         self.set_def_type(Collect::token_start(&tok), t.clone());
                     }
+                }
+            }
+        }
+    }
+
+    /// Type a `record` pattern's `var` components from the components they stand for.
+    ///
+    /// `case Point(var x, var y)` writes no type for either binding, and nothing else can supply one:
+    /// a component pattern's type *is* the record component's, position by position (JLS §14.30.1).
+    /// This is the ordinary spelling of a record pattern, and without it the binding has no type at all
+    /// — which is a report at the first use rather than anything a reader could act on.
+    async fn collect_pattern_components(&mut self, root: &SyntaxNode) {
+        use jals_syntax::SyntaxKind::{RECORD_PATTERN, TYPE_PATTERN, UNNAMED_PATTERN};
+        let Some((index, file)) = self.project else {
+            return;
+        };
+        let mut yielder = Yielder::new();
+        for pattern in root.descendants().filter(|n| n.kind() == RECORD_PATTERN) {
+            yielder.tick().await;
+            let Some(written) = pattern.children().find_map(ast::Type::cast) else {
+                continue;
+            };
+            let Some(name) = written.simple_name() else {
+                continue;
+            };
+            let qualified = written
+                .is_qualified()
+                .then(|| written.qualified_text())
+                .flatten();
+            let Some(item) = index
+                .resolve_type_name(file, &name, qualified.as_deref())
+                .project_id()
+            else {
+                continue;
+            };
+            let components: Vec<MemberId> = index
+                .own_members(item)
+                .iter()
+                .copied()
+                .filter(|&member| {
+                    let info = index.member(member);
+                    info.kind == DefKind::Field && !info.modifiers.is_static
+                })
+                .collect();
+            let subs: Vec<SyntaxNode> = pattern
+                .children()
+                .filter(|child| {
+                    matches!(
+                        child.kind(),
+                        TYPE_PATTERN | RECORD_PATTERN | UNNAMED_PATTERN
+                    )
+                })
+                .collect();
+            for (component, sub) in components.iter().zip(&subs) {
+                // Only a `var` one: an explicitly typed component pattern was typed by pass 1, and may
+                // narrow to something the component's declared type is not.
+                if sub.kind() != TYPE_PATTERN
+                    || !sub
+                        .children()
+                        .find_map(ast::Type::cast)
+                        .as_ref()
+                        .is_some_and(Cst::is_var_type)
+                {
+                    continue;
+                }
+                let ty = index.resolved_member_ty(*component);
+                for tok in Collect::direct_ident_tokens(sub) {
+                    self.set_def_type(Collect::token_start(&tok), ty.clone());
                 }
             }
         }

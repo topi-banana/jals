@@ -4292,7 +4292,10 @@ public class Bodies {
 /// pattern against that. So a nested pattern is one test and a chain of reads rather than anything the
 /// source has to spell out. `_` matches anything and binds nothing, so it emits nothing at all.
 ///
-/// A primitive component carries no test: its type is the component's, and there is no narrowing to do.
+/// Two component patterns carry no test at all: a primitive one, because there is no narrowing to do,
+/// and one of the component's *own* type, because it matches unconditionally (§14.30.2) — including a
+/// `null` component, which an `instanceof` would reject and so drop a match Java makes. `var` is the same
+/// case spelled without the type, and its binding takes the component's.
 #[test]
 fn a_record_pattern_deconstructs() {
     let source = r#"
@@ -4315,14 +4318,61 @@ public class Deconstruct {
         };
     }
 
+    // `var` is the ordinary spelling: the component pattern's type *is* the component's.
+    static int summed(Object o) {
+        return switch (o) {
+            case Point(var x, var y) -> x + y;
+            case Line(var a, var b) -> (a == null ? 100 : 0) + (b == null ? 20 : 0);
+            default -> -1;
+        };
+    }
+
     public static void main(String[] args) {
         System.out.println(describe(new Point(1, 2)));
         System.out.println(describe("no"));
         System.out.println(total(new Line(new Point(1, 2), new Point(3, 4))));
         System.out.println(total(new Point(9, 8)));
         System.out.println(total("no"));
+        System.out.println(summed(new Point(3, 4)));
+        // A `null` component still matches a pattern of the component's own type (§14.30.2), which an
+        // `instanceof` would have rejected.
+        System.out.println(summed(new Line(null, new Point(1, 1))));
+        System.out.println(summed(new Line(new Point(1, 1), null)));
     }
 }
 "#;
-    assert_eq!(run(source, "Deconstruct"), "point 1,2\nother\n10\n9\n-1\n");
+    assert_eq!(
+        run(source, "Deconstruct"),
+        "point 1,2\nother\n10\n9\n-1\n7\n100\n20\n"
+    );
+}
+
+#[test]
+fn probe_var_component() {
+    let source = r#"
+record Point(int x, int y) {}
+record Line(Point a, Point b) {}
+public class P {
+    static int f(Object o) {
+        return switch (o) {
+            case Point(var x, var y) -> x + y;
+            case Line(Point a, Point b) -> a == null ? 100 : 200;
+            default -> -1;
+        };
+    }
+    public static void main(String[] a) {
+        System.out.println(f(new Point(3, 4)));
+        System.out.println(f(new Line(null, new Point(1, 1))));
+        System.out.println(f(new Line(new Point(1, 1), null)));
+        System.out.println(f("no"));
+    }
+}
+"#;
+    match compile(source) {
+        Ok(_) => println!("PROBE compiled"),
+        Err(e) => println!("PROBE err {e}"),
+    }
+    if java_available() && compile(source).is_ok() {
+        println!("PROBE run {:?}", run(source, "P"));
+    }
 }

@@ -270,7 +270,7 @@ impl Switch {
             let next = emit.asm.label();
             for pattern in &arm.patterns {
                 // Bound before the guard runs, because the guard is written in terms of the binding.
-                Expr::match_pattern(pattern, scratch, next, context, emit)?;
+                Expr::match_pattern(pattern, scratch, next, None, context, emit)?;
             }
             if let Some(guard) = &arm.guard {
                 Expr::lower(guard, context, emit)?;

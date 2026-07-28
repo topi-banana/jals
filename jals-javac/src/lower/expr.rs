@@ -1548,7 +1548,7 @@ impl Expr {
         let done = emit.asm.label();
         Self::lower(&operand, context, emit)?;
         emit.asm.store(scratch)?;
-        Self::match_pattern(&pattern, scratch, fail, context, emit)?;
+        Self::match_pattern(&pattern, scratch, fail, None, context, emit)?;
         emit.asm.const_int(1)?;
         emit.asm.branch(Branch::Always, done)?;
         emit.asm.bind(fail)?;
@@ -1608,6 +1608,7 @@ impl Expr {
         pattern: &SyntaxNode,
         value: u16,
         fail: crate::jvm::Label,
+        declared: Option<&Ty>,
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
     ) -> Result<()> {
@@ -1623,14 +1624,16 @@ impl Expr {
                     .slots
                     .slot_of(bound)
                     .ok_or(LowerError::Unsupported("a pattern with no slot"))?;
-                let declared = context.inference.type_of_def(bound).clone();
-                // A primitive component carries no test: its type is the component's, and a `ref`
-                // instruction over it is not a program. A reference one narrows, which is the test.
-                if matches!(declared, Ty::Primitive(_)) {
+                let bound_ty = context.inference.type_of_def(bound).clone();
+                // Two cases carry no test. A primitive one because a `ref` instruction over it is not
+                // a program. And a component pattern of the component's *own* type because it matches
+                // unconditionally (§14.30.2) — including a `null` component, which an `instanceof`
+                // would reject and so drop a match Java makes.
+                if matches!(bound_ty, Ty::Primitive(_)) || declared == Some(&bound_ty) {
                     emit.asm.load(value)?;
                     return Ok(emit.asm.store(slot)?);
                 }
-                let entry = Descriptor::class_entry(&declared, context.index)?;
+                let entry = Descriptor::class_entry(&bound_ty, context.index)?;
                 emit.asm.load(value)?;
                 emit.asm.instance_of(&entry)?;
                 emit.asm.branch(Branch::IntZero(Compare::Eq), fail)?;
@@ -1697,7 +1700,7 @@ impl Expr {
                         &alloc::format!("(){descriptor}"),
                     )?;
                     emit.asm.store(held)?;
-                    Self::match_pattern(sub, held, fail, context, emit)?;
+                    Self::match_pattern(sub, held, fail, Some(&component_ty), context, emit)?;
                 }
                 Ok(())
             }

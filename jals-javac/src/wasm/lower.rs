@@ -3026,7 +3026,7 @@ impl Lowering<'_> {
             insn.block();
             let next = insn.depth();
             for pattern in &arm.patterns {
-                self.match_pattern(pattern, scratch, next, insn)?;
+                self.match_pattern(pattern, scratch, next, None, insn)?;
             }
             // The guard runs after the patterns bound, because it is written in terms of the bindings.
             if let Some(guard) = &arm.guard {
@@ -4094,7 +4094,7 @@ impl Lowering<'_> {
         insn.i32_const(0).local_set(answer);
         insn.block();
         let fail = insn.depth();
-        self.match_pattern(&pattern, scratch, fail, insn)?;
+        self.match_pattern(&pattern, scratch, fail, None, insn)?;
         insn.i32_const(1).local_set(answer);
         insn.end();
         insn.local_get(answer);
@@ -4112,6 +4112,7 @@ impl Lowering<'_> {
         pattern: &SyntaxNode,
         value: u32,
         fail: u32,
+        declared: Option<&Ty>,
         insn: &mut Insn,
     ) -> Result<()> {
         use jals_syntax::SyntaxKind::{RECORD_PATTERN, TYPE_PATTERN, UNNAMED_PATTERN};
@@ -4122,11 +4123,13 @@ impl Lowering<'_> {
                 let bound = self
                     .def_at(pattern)
                     .ok_or(WasmError::Unsupported("a pattern with no binding"))?;
-                let declared = self.input.inference.type_of_def(bound).clone();
+                let bound_ty = self.input.inference.type_of_def(bound).clone();
                 let slot = self.declare_local(bound)?;
-                // A primitive component carries no test: its type is the component's, and a `ref`
-                // instruction over it is not a program. A reference one narrows, which is the test.
-                if matches!(declared, Ty::Primitive(_)) {
+                // Two cases carry no test. A primitive one because a `ref` instruction over it is not a
+                // program. And a component pattern of the component's *own* type because it matches
+                // unconditionally (§14.30.2) — including a `null` component, which a `ref.test` would
+                // reject and so drop a match Java makes.
+                if matches!(bound_ty, Ty::Primitive(_)) || declared == Some(&bound_ty) {
                     insn.local_get(value).local_set(slot);
                     return Ok(());
                 }
@@ -4214,7 +4217,8 @@ impl Lowering<'_> {
                     );
                     insn.local_get(narrowed).call(function);
                     insn.local_set(held);
-                    self.match_pattern(sub, held, fail, insn)?;
+                    let component_ty = self.index.resolved_member_ty(*component);
+                    self.match_pattern(sub, held, fail, Some(&component_ty), insn)?;
                 }
                 Ok(())
             }
