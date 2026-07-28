@@ -1056,6 +1056,22 @@ public class Cleanly {
         return -1;
     }
 
+    // §14.20.2: the returned value is computed, *then* the cleanup runs — so a cleanup can observe the
+    // value's side effects and cannot change what is returned.
+    public static int returnedThrough(int n) {
+        trace = 0;
+        try {
+            return n;
+        } finally {
+            trace = 42;
+        }
+    }
+
+    public static int cleanedFirst() {
+        returnedThrough(5);
+        return trace == 42 ? 1 : 0;
+    }
+
     static int shared;
 
     public static int locked(int n) {
@@ -1071,15 +1087,17 @@ public class Cleanly {
     assert_invoke(&[source], "afterCatching", &["5"], "105");
     assert_invoke(&[source], "onTheWayOut", &[], "7");
     assert_invoke(&[source], "locked", &["4"], "8");
+    assert_invoke(&[source], "returnedThrough", &["5"], "5");
+    assert_invoke(&[source], "cleanedFirst", &[], "1");
 }
 
-/// A `finally` over a jump, and try-with-resources, are reported.
+/// A `finally` over a `break` or a `continue`, and try-with-resources, are reported.
 #[test]
 fn a_finally_over_a_jump_and_a_resource_are_reported() {
     for (statement, expected) in [
         (
-            "try { return 1; } finally { n = 2; }",
-            "a `finally` over a `return`, `break`, or `continue`",
+            "while (n > 0) { try { break; } finally { n = 2; } }",
+            "a `finally` over a `break` or a `continue`",
         ),
         (
             "try (AutoCloseable c = null) { n = 1; } catch (Exception e) { n = 2; }",

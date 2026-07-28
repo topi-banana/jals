@@ -1046,6 +1046,7 @@ impl Body {
             owner: method.owner,
             loops: Vec::new(),
             pending_label: None,
+            cleanups: Vec::new(),
             yields: Vec::new(),
         };
         // `this` is parameter 0 of an instance method or a constructor.
@@ -1123,6 +1124,8 @@ struct Lowering<'a> {
     loops: Vec<Loop>,
     /// A label read off a `LabeledStmt`, waiting for the loop it labels to claim it.
     pending_label: Option<String>,
+    /// Enclosing `finally` blocks, innermost last: a `return` runs every one of them on its way out.
+    cleanups: Vec<ast::Block>,
     /// Enclosing `switch` *expressions*, innermost last: where a `yield` branches to, and the type the
     /// value it carries must have.
     yields: Vec<(u32, ValType)>,
@@ -1174,6 +1177,7 @@ impl Lowering<'_> {
             owner: None,
             loops: Vec::new(),
             pending_label: None,
+            cleanups: Vec::new(),
             yields: Vec::new(),
         }
     }
@@ -1336,8 +1340,15 @@ impl Lowering<'_> {
                 self.discard(&value, insn)
             }
             ast::Stmt::Return(statement) => {
+                // The value is computed *first*, then every enclosing `finally` runs, then the frame
+                // leaves — which is the order §14.20.2 gives and the reason a cleanup can observe the
+                // value's side effects but not change what is returned.
                 if let Some(value) = statement.expr() {
                     self.expr(&value, insn)?;
+                }
+                let cleanups = self.cleanups.clone();
+                for cleanup in cleanups.iter().rev() {
+                    self.block(cleanup, insn)?;
                 }
                 insn.return_();
                 Ok(())
@@ -1780,18 +1791,26 @@ impl Lowering<'_> {
         // protected code is a way out this lowering does not intercept — it would branch straight past
         // the block the cleanup sits after. Reported rather than emitted with the cleanup skipped, which
         // would be a silent one.
+        // A `return` out of protected code runs the cleanup on its way (see `Stmt::Return`). A `break`
+        // or a `continue` does not: its target may be inside or outside the `try`, and only the one
+        // outside needs the cleanup — telling them apart needs the loop stack the JVM backend's guards
+        // carry, so one is reported rather than emitted with the cleanup skipped.
         if finally.is_some() {
             let jumps = |node: &SyntaxNode| {
                 node.descendants()
-                    .any(|n| matches!(n.kind(), RETURN_STMT | BREAK_STMT | CONTINUE_STMT))
+                    .any(|n| matches!(n.kind(), BREAK_STMT | CONTINUE_STMT))
             };
             if jumps(body.syntax()) || clauses.iter().any(|c| jumps(c.syntax())) {
                 return Err(WasmError::Unsupported(
-                    "a `finally` over a `return`, `break`, or `continue`",
+                    "a `finally` over a `break` or a `continue`",
                 ));
             }
         }
+        let _ = RETURN_STMT;
 
+        if let Some(cleanup) = &finally {
+            self.cleanups.push(cleanup.clone());
+        }
         insn.block();
         let out = insn.depth();
         insn.block_typed(ValType::Ref(RefType::nullable(HeapType::Any)));
@@ -1808,6 +1827,11 @@ impl Lowering<'_> {
         insn.local_set(caught);
         for clause in &clauses {
             self.catch_clause(clause, caught, out, insn)?;
+        }
+        // Popped before the cleanup's own copies are emitted: a `return` inside the `finally` must not
+        // run the `finally` again.
+        if finally.is_some() {
+            self.cleanups.pop();
         }
         // Nothing matched: run the cleanup and re-throw, so the exception leaves this frame rather than
         // vanishing. This is the copy of `finally` the *exceptional* path needs; the normal path gets
