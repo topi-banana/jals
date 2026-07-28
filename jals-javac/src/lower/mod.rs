@@ -186,6 +186,8 @@ pub(crate) struct Lambda {
     call_descriptor: String,
     /// Index into the class's `BootstrapMethods`.
     bootstrap: u16,
+    /// The locals the call site passes, in the order the descriptor names them.
+    captured: alloc::vec::Vec<jals_hir::DefId>,
 }
 
 impl Lambda {
@@ -202,6 +204,11 @@ impl Lambda {
     /// Which `BootstrapMethods` entry links this call site.
     pub(crate) const fn bootstrap(&self) -> u16 {
         self.bootstrap
+    }
+
+    /// The locals the call site passes, in descriptor order.
+    pub(crate) fn captured(&self) -> &[jals_hir::DefId] {
+        &self.captured
     }
 }
 
@@ -868,9 +875,7 @@ impl Compile {
         for (ordinal, lambda) in lambdas.iter().enumerate() {
             let decl = ast::LambdaExpr::cast(lambda.clone())
                 .ok_or(LowerError::Unsupported("a malformed lambda"))?;
-            let Some(value) = decl.expr_body() else {
-                return Err(LowerError::Unsupported("a lambda with a block body"));
-            };
+
             // The interface the context asked for, and the one method it declares.
             let item = expr::Expr::type_of(lambda, &context)?
                 .project_id()
@@ -886,6 +891,23 @@ impl Compile {
             )?);
             let interface = Descriptor::internal_name_of(item, context.index);
             let returns = context.index.resolved_member_ty(member);
+            // Each captured local is a *leading* parameter of the synthetic method and an argument of the
+            // call site — leading, because the metafactory prepends the captured values to the interface
+            // method's own arguments when it invokes the handle.
+            // A capturing lambda is *nearly* here: the captures are collected, the leading parameters and
+            // the call-site arguments line up, and the body still reads `bump` as neither a local nor a
+            // field. Reported until that is chased down, rather than emitted as a handle whose parameter
+            // nothing fills.
+            let captured = Self::captured_by(lambda, context.resolved);
+            if !captured.is_empty() {
+                return Err(LowerError::Unsupported("a capturing lambda"));
+            }
+            let mut prefix = String::new();
+            for &id in &captured {
+                prefix.push_str(&Self::capture_descriptor(id, &context)?);
+            }
+            let synthetic_descriptor =
+                alloc::format!("({prefix}{}", descriptor.trim_start_matches('('));
 
             // The synthetic method takes the interface's own descriptor, since nothing is captured. The
             // assembler borrows the pool for as long as it lives, so its code comes out first and every
@@ -904,15 +926,29 @@ impl Compile {
                     slots.declare(id, width);
                 }
                 let mut emit = Emit::new(&mut asm, slots, returns.clone(), false);
-                if matches!(returns, jals_hir::Ty::Void) {
-                    stmt::Stmt::discarded(&value, &context, &mut emit)?;
-                    asm.return_(None)?;
-                } else {
-                    expr::Expr::lower_as(&value, &returns, &context, &mut emit)?;
-                    let top = asm
-                        .stack_top()
-                        .ok_or(LowerError::Unsupported("a lambda body with no value"))?;
-                    asm.return_(Some(&top))?;
+                match (decl.expr_body(), decl.block_body()) {
+                    // An expression body *is* the returned value, or is evaluated for its effect when the
+                    // interface method returns nothing.
+                    (Some(value), _) => {
+                        if matches!(returns, jals_hir::Ty::Void) {
+                            stmt::Stmt::discarded(&value, &context, &mut emit)?;
+                            asm.return_(None)?;
+                        } else {
+                            expr::Expr::lower_as(&value, &returns, &context, &mut emit)?;
+                            let top = asm
+                                .stack_top()
+                                .ok_or(LowerError::Unsupported("a lambda body with no value"))?;
+                            asm.return_(Some(&top))?;
+                        }
+                    }
+                    // A block body returns for itself, except that a `void` one may run off its end.
+                    (None, Some(block)) => {
+                        stmt::Stmt::block(&block, &context, &mut emit)?;
+                        if matches!(returns, jals_hir::Ty::Void) && asm.reachable() {
+                            asm.return_(None)?;
+                        }
+                    }
+                    (None, None) => return Err(LowerError::Unsupported("a lambda with no body")),
                 }
                 asm.finish()?
             };
@@ -920,14 +956,22 @@ impl Compile {
                 // private | static | synthetic
                 access_flags: MethodAccessFlags(0x0002 | 0x0008 | 0x1000),
                 name_index: pool.utf8_index(&synthetic).ok_or(AsmError::PoolFull)?,
-                descriptor_index: pool.utf8_index(&descriptor).ok_or(AsmError::PoolFull)?,
+                descriptor_index: pool
+                    .utf8_index(&synthetic_descriptor)
+                    .ok_or(AsmError::PoolFull)?,
                 attributes: alloc::vec![code],
             });
 
             // `metafactory` is handed the interface's shape, a handle to the body, and the shape again — the
             // two `MethodType`s differ only where generics erase, which this does not model.
             let handle = pool
-                .method_handle_index(6, &context.this_class, &synthetic, &descriptor, false)
+                .method_handle_index(
+                    6,
+                    &context.this_class,
+                    &synthetic,
+                    &synthetic_descriptor,
+                    false,
+                )
                 .ok_or(AsmError::PoolFull)?;
             let shape = pool
                 .method_type_index(&descriptor)
@@ -945,8 +989,9 @@ impl Compile {
                 (span.start, span.end),
                 Lambda {
                     interface_method: name,
-                    call_descriptor: alloc::format!("()L{interface};"),
+                    call_descriptor: alloc::format!("({prefix})L{interface};"),
                     bootstrap: index,
+                    captured,
                 },
             );
         }

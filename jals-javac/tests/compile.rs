@@ -1317,30 +1317,6 @@ public class Several {
     assert_eq!(run(source, "Several"), "1\n2\n3\n67\n");
 }
 
-/// The constructs still ahead, each reported rather than dropped and each naming *itself*.
-#[test]
-fn the_features_after_this_milestone_are_still_reported() {
-    for (source, expected) in [
-        ("Runnable r = () -> {};", "a lambda with a block body"),
-        ("Runnable r = Later::main;", "a method reference"),
-    ] {
-        let program = format!(
-            r"
-public class Later {{
-    public static void main(String[] args) {{
-        {source}
-    }}
-}}
-"
-        );
-        let error = compile(&program).expect_err("this is a later milestone");
-        assert!(
-            matches!(error, LowerError::Unsupported(what) if what == expected),
-            "`{source}` should report {expected:?}, got {error}"
-        );
-    }
-}
-
 /// `new Foo(args)`, with the overload the arguments selected.
 #[test]
 fn object_creation_runs_the_constructor_it_selected() {
@@ -2914,30 +2890,31 @@ public class Holder {
     assert_eq!(run(source, "Holder"), "ran\n");
 }
 
-/// The lambda forms still ahead, and a method reference, each naming themselves.
-///
-/// A *block* body needs the statement lowering to produce the synthetic method's body, and a *capturing*
-/// lambda needs its captures as leading parameters of both that method and the call site — each is its own
-/// step, and reporting beats emitting a call site whose arguments do not match its handle.
+/// A capturing lambda and a method reference each name themselves.
 #[test]
-fn a_lambda_and_a_method_reference_each_name_themselves() {
-    for (source, expected) in [
-        (
-            "interface F { int f(int n); } class C { F g() { return n -> { return n + 1; }; } }",
-            "a lambda with a block body",
-        ),
-        (
-            "interface F { int f(int n); } class C { static int h(int n) { return n; } \
-             F g() { return C::h; } }",
-            "a method reference",
-        ),
-    ] {
-        let error = compile(source).expect_err("this form is not compiled yet");
-        assert!(
-            matches!(error, LowerError::Unsupported(what) if what == expected),
-            "`{source}` should report {expected:?}, got {error}"
-        );
-    }
+fn a_capturing_lambda_names_itself() {
+    let source =
+        "interface F { int f(int n); } class C { F g() { int bump = 1; return n -> n + bump; } }";
+    let error = compile(source).expect_err("a capturing lambda is not compiled yet");
+    assert!(
+        matches!(error, LowerError::Unsupported("a capturing lambda")),
+        "got {error}"
+    );
+}
+
+/// A method reference names itself.
+///
+/// It needs no synthetic method — the handle points straight at the method the source named — but it does
+/// need that method resolved, and resolution for a `::` is its own step.
+#[test]
+fn a_method_reference_names_itself() {
+    let source = "interface F { int f(int n); } class C { static int h(int n) { return n; } \
+                  F g() { return C::h; } }";
+    let error = compile(source).expect_err("a method reference is not compiled yet");
+    assert!(
+        matches!(error, LowerError::Unsupported("a method reference")),
+        "got {error}"
+    );
 }
 
 /// A generic type declaration's `Signature`.
@@ -3530,6 +3507,9 @@ public class Uses {
         Doubler d = n -> n + 1;
         System.out.println(d.apply(41));
         System.out.println(made().apply(21));
+        // A block body, which returns for itself.
+        Doubler blocked = n -> { return n * 3; };
+        System.out.println(blocked.apply(14));
     }
 }
 ";
@@ -3567,6 +3547,11 @@ public class Uses {
                 "(I)I".to_owned(),
                 0x0002 | 0x0008 | 0x1000
             ),
+            (
+                "lambda$2".to_owned(),
+                "(I)I".to_owned(),
+                0x0002 | 0x0008 | 0x1000
+            ),
         ]
     );
     // Every call site indexes into this attribute; without it the class does not even load.
@@ -3578,10 +3563,10 @@ public class Uses {
             _ => None,
         })
         .expect("the `BootstrapMethods` attribute");
-    assert_eq!(bootstraps.len(), 2, "one entry per lambda");
+    assert_eq!(bootstraps.len(), 3, "one entry per lambda");
 
     if !java_available() {
         return;
     }
-    assert_eq!(run(source, "Uses"), "42\n42\n");
+    assert_eq!(run(source, "Uses"), "42\n42\n42\n");
 }

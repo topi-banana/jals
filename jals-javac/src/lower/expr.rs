@@ -134,6 +134,15 @@ impl Expr {
                 let info = context
                     .lambda_at(&span)
                     .ok_or(LowerError::Unsupported("a lambda outside a class body"))?;
+                // The captured values, in the order the call site's descriptor names them: the metafactory
+                // prepends them to the interface method's own arguments when it invokes the handle.
+                for &id in info.captured() {
+                    let slot = emit
+                        .slots
+                        .slot_of(id)
+                        .ok_or(LowerError::Unsupported("a capture with no local here"))?;
+                    emit.asm.load(slot)?;
+                }
                 Ok(emit.asm.invoke_dynamic(
                     info.bootstrap(),
                     info.interface_method(),
