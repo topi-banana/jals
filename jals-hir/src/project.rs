@@ -1673,6 +1673,36 @@ impl ProjectIndex {
             // An anonymous class body is a type declaration with no name and no keyword. Nothing else
             // indexes it, so `new I() { … }` had no item at all — and without an item there is no member
             // resolution, no descriptor, and nothing a backend could emit.
+            // An `enum` constant with a body is an anonymous *subclass of the enum*, numbered and named
+            // exactly as one written with `new` is — and with the enclosing `enum` as its supertype,
+            // which the source never writes because the constant's position already says it.
+            if node.kind() == ENUM_CONSTANT
+                && node.children().any(|child| child.kind() == CLASS_BODY)
+            {
+                let enclosing_key = enclosing.as_deref().unwrap_or("").to_owned();
+                let ordinal = anonymous.entry(enclosing_key).or_insert(0_usize);
+                *ordinal += 1;
+                let simple = alloc::format!("{ordinal}");
+                let fqn = Self::build_fqn(package, enclosing.as_deref(), &simple);
+                let start = usize::from(node.text_range().start());
+                let supertype = enclosing
+                    .as_deref()
+                    .and_then(|fqn| fqn.rsplit('.').next())
+                    .map(|name| MemberType::Named {
+                        name: name.to_owned(),
+                        qualified: None,
+                        dims: 0,
+                        args: Vec::new(),
+                    });
+                out.push(RawType {
+                    fqn,
+                    kind: DefKind::Class,
+                    name_range: start..start,
+                    type_params: Vec::new(),
+                    members: Self::members_of_decl(ItemId(0), FileId(0), &node, &simple, cfg),
+                    raw_supertypes: supertype.into_iter().collect(),
+                });
+            }
             if node.kind() == NEW_EXPR && node.children().any(|child| child.kind() == CLASS_BODY) {
                 let enclosing_key = enclosing.as_deref().unwrap_or("").to_owned();
                 let ordinal = anonymous.entry(enclosing_key).or_insert(0_usize);

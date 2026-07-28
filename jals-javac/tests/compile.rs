@@ -2851,19 +2851,13 @@ public class Enums {
     );
 }
 
-/// The `enum` shapes that are still reported, each because a *descriptor* or a *class file* would come
-/// out wrong.
+/// The `enum` shapes that are still reported, each because a *descriptor* would come out wrong.
 ///
-/// A constant with a body is an anonymous subclass — its own class file, and the enum then cannot be
-/// `final`. A `this(…)` between two constructors would be lowered from the descriptor the index
-/// computed, which is two parameters short of the one emitted.
+/// A `this(…)` between two constructors would be lowered from the descriptor the index computed, which
+/// is two parameters short of the one emitted.
 #[test]
 fn the_enum_shapes_that_need_another_class_file_are_reported() {
     for (source, expected) in [
-        (
-            "enum E { A { int f() { return 1; } }, B; int f() { return 0; } }",
-            "an `enum` constant with a body",
-        ),
         (
             "enum E { A(1); E(int code) {} E() { this(0); } }",
             "an explicit constructor invocation in an `enum`",
@@ -4235,4 +4229,66 @@ public class Uses {
         return;
     }
     assert_eq!(run(source, "Uses"), "Wide\n");
+}
+
+/// An `enum` constant with a body, which is an anonymous subclass of the enum.
+///
+/// Three things follow from that and nothing else says them. The enum is not `final` — a `final` class
+/// with a subclass is a `VerifyError` at load — and is `abstract` when a constant body implements
+/// something the enum declares `abstract`. The constant's `new` builds *its own* class, though its
+/// field still has the enum's type. And the enum's constructors widen to package-private, because a
+/// subclass cannot reach a `private` one without the nestmate attributes this does not emit; `new` on an
+/// enum is not a Java program, so nothing observes the difference.
+#[test]
+fn an_enum_constant_with_a_body_is_its_own_subclass() {
+    let source = r#"
+enum Op {
+    ADD { int apply(int a, int b) { return a + b; } },
+    MUL(2) { int apply(int a, int b) { return a * b * scale; } };
+
+    final int scale;
+
+    Op() { this.scale = 1; }
+
+    Op(int scale) { this.scale = scale; }
+
+    abstract int apply(int a, int b);
+
+    // A concrete member the bodies inherit rather than override.
+    int twice(int n) { return apply(n, n); }
+}
+
+public class Bodies {
+    public static void main(String[] args) {
+        System.out.println(Op.ADD.apply(2, 3));
+        System.out.println(Op.MUL.apply(2, 3));
+        System.out.println(Op.ADD.twice(4));
+        System.out.println(Op.MUL.twice(4));
+        System.out.println(Op.MUL.ordinal() + " " + Op.MUL.name());
+        System.out.println(Op.values().length);
+    }
+}
+"#;
+    let classes = compile(source).expect("compile");
+    let names: Vec<&str> = classes
+        .iter()
+        .map(|class| class.internal_name.as_str())
+        .collect();
+    assert_eq!(names, ["Op", "Op$1", "Op$2", "Bodies"]);
+
+    let op = classes
+        .iter()
+        .find(|class| class.internal_name == "Op")
+        .expect("the enum");
+    let class = jals_exec::block_on_inline(jals_classfile::ClassFile::read(op.bytes.as_slice()))
+        .expect("reparse");
+    // enum | abstract, and *not* final.
+    assert_eq!(class.access_flags.0 & 0x4000, 0x4000, "enum");
+    assert_eq!(class.access_flags.0 & 0x0400, 0x0400, "abstract");
+    assert_eq!(class.access_flags.0 & 0x0010, 0, "not final");
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Bodies"), "5\n12\n8\n32\n1 MUL\n2\n");
 }

@@ -168,6 +168,11 @@ pub(crate) struct Context<'a> {
     /// source never writes: the constant's name and its ordinal, which are what `Enum`'s own
     /// constructor needs and the only way `name()`, `ordinal()`, and `compareTo` get their answers.
     in_enum: bool,
+    /// Whether any of this `enum`'s constants declares a body, which makes each such constant a
+    /// *subclass* — and a subclass cannot reach a `private` constructor without the nestmate
+    /// attributes this does not emit, so the constructors widen to package-private instead. Not
+    /// observable in a well-formed program: `new` on an `enum` is not a Java program at all.
+    enum_subclassed: bool,
     /// The internal name of the class an inner class holds an instance of. `None` for every other class.
     encloses: Option<String>,
     /// Every inner class in this file and the class it holds an instance of, so a `new` of one can pass
@@ -249,8 +254,13 @@ impl Compile {
             ) {
                 // An anonymous class body is its own class file too, and the index gave it an item keyed
                 // on the `new` keyword's position — which is the only offset it has to be found by.
-                if node.kind() == jals_syntax::SyntaxKind::NEW_EXPR
-                    && node.children().any(|child| child.kind() == CLASS_BODY)
+                // An `enum` constant's body is an anonymous subclass of the enum, and the index keyed
+                // its item on the constant's own position for the same reason a `new`'s is keyed on the
+                // keyword's: there is no name to key on.
+                if matches!(
+                    node.kind(),
+                    jals_syntax::SyntaxKind::NEW_EXPR | jals_syntax::SyntaxKind::ENUM_CONSTANT
+                ) && node.children().any(|child| child.kind() == CLASS_BODY)
                     && let Some(item) =
                         index.item_by_decl(file, usize::from(node.text_range().start()))
                 {
@@ -335,6 +345,11 @@ impl Compile {
             this_class: internal_name.clone(),
             in_interface: is_interface,
             in_enum: is_enum,
+            enum_subclassed: is_enum
+                && node
+                    .descendants()
+                    .filter(|n| n.kind() == jals_syntax::SyntaxKind::ENUM_CONSTANT)
+                    .any(|n| n.children().any(|child| child.kind() == CLASS_BODY)),
             encloses: encloses.clone(),
             inner: Self::inner_classes_of(node, index, file),
             captures: Self::captures_of(node, resolved, index, file),
@@ -409,10 +424,6 @@ impl Compile {
             .map(|body| body.constants().collect())
             .unwrap_or_default();
 
-        if is_enum {
-            Self::enum_shape(&constants)?;
-        }
-
         let mut fields = Vec::new();
         let mut methods = Vec::new();
         // Worked out before any body is lowered, because a body cannot add a method to the class it is in.
@@ -467,11 +478,38 @@ impl Compile {
             // constructor: the body declares none and has nowhere to write `super(…)`. Its own
             // constructor therefore takes that one's parameters and forwards them. Both sides read the
             // selection from the same span, so neither can pick a different constructor than the other.
-            let forwarded = (node.kind() == jals_syntax::SyntaxKind::NEW_EXPR)
-                .then(|| inference.call_target_of(Context::span(node)))
-                .flatten()
-                .map(|member| Descriptor::method_descriptor(member, index, true))
-                .transpose()?;
+            // An `enum` constant's body is a subclass of the enum, so its constructor forwards to the
+            // enum's — which takes the constant's name and ordinal ahead of whatever the source wrote,
+            // and this is the only place they can be passed on from. Anything else forwards to the
+            // superclass constructor its own arguments selected.
+            let forwarded = if node.kind() == jals_syntax::SyntaxKind::ENUM_CONSTANT
+                && let Some(super_item) = super_item
+            {
+                let arity = ast::EnumConstant::cast(node.clone())
+                    .and_then(|constant| constant.args())
+                    .map_or(0, |list| list.args().count());
+                let mut descriptor = Self::enum_constructor(arity, super_item, &context)?
+                    .map(|member| Descriptor::method_descriptor(member, index, true))
+                    .transpose()?
+                    .unwrap_or(MethodDescriptor {
+                        params: Vec::new(),
+                        return_type: jals_classfile::ReturnType::Void,
+                    });
+                descriptor.params.insert(
+                    0,
+                    jals_classfile::FieldType::Base(jals_classfile::BaseType::Int),
+                );
+                descriptor
+                    .params
+                    .insert(0, jals_classfile::FieldType::Object(STRING.to_owned()));
+                Some(descriptor)
+            } else {
+                (node.kind() == jals_syntax::SyntaxKind::NEW_EXPR)
+                    .then(|| inference.call_target_of(Context::span(node)))
+                    .flatten()
+                    .map(|member| Descriptor::method_descriptor(member, index, true))
+                    .transpose()?
+            };
             methods.push(Self::default_constructor(
                 &context,
                 &mut pool,
@@ -614,9 +652,19 @@ impl Compile {
         let mut class = ClassFile::new(class_version, 0, pool);
         let mut flags = Self::class_flags(node, is_interface, is_annotation);
         if is_enum {
-            // `ACC_ENUM` is what makes `Enum.valueOf` and a `switch` over the type work at run time,
-            // and `ACC_FINAL` is what an enum with no constant bodies is.
-            flags |= ClassAccessFlags::ENUM | ClassAccessFlags::FINAL;
+            // `ACC_ENUM` is what makes `Enum.valueOf` and a `switch` over the type work at run time.
+            // `ACC_FINAL` is what an enum with no constant bodies is — one *with* a body has a subclass,
+            // and a `final` class with a subclass is a `VerifyError` at load.
+            flags |= ClassAccessFlags::ENUM;
+            if constants.iter().all(|constant| constant.body().is_none()) {
+                flags |= ClassAccessFlags::FINAL;
+            } else if members.iter().any(|member| {
+                member.kind() == METHOD_DECL
+                    && Self::has_modifier(member, jals_syntax::SyntaxKind::ABSTRACT_KW)
+            }) {
+                // A constant body may implement an `abstract` member, which the enum itself does not.
+                flags |= ClassAccessFlags::ABSTRACT;
+            }
         }
         if is_record {
             // Every record is implicitly final (JLS §8.10), and the source never writes it.
@@ -1948,7 +1996,13 @@ impl Compile {
         }
 
         Ok(MethodInfo {
-            access_flags: MethodAccessFlags(Self::method_flags(node, context.in_interface)),
+            // A constant with a body is a *subclass*, and a subclass cannot reach a `private`
+            // constructor without the nestmate attributes this does not emit.
+            access_flags: MethodAccessFlags(if context.enum_subclassed {
+                Self::method_flags(node, context.in_interface) & !MethodAccessFlags::PRIVATE
+            } else {
+                Self::method_flags(node, context.in_interface)
+            }),
             name_index,
             descriptor_index,
             attributes: alloc::vec![asm.finish()?],
@@ -2785,18 +2839,6 @@ impl Compile {
         })
     }
 
-    /// The one `enum` shape this reports.
-    ///
-    /// A constant with a **body** is an anonymous subclass: its own class file, with the enum then not
-    /// `final` and the constant's field typed as the base. Nothing else about the declaration says so,
-    /// which is why it is checked here rather than found by whatever tried to emit it.
-    fn enum_shape(constants: &[ast::EnumConstant]) -> Result<()> {
-        if constants.iter().any(|constant| constant.body().is_some()) {
-            return Err(LowerError::Unsupported("an `enum` constant with a body"));
-        }
-        Ok(())
-    }
-
     /// An `enum`'s four synthesised member groups: a field per constant, the `$VALUES` array, the
     /// constructor, and `values()` / `valueOf()`.
     ///
@@ -2868,8 +2910,13 @@ impl Compile {
             emit.asm.invoke_special(ENUM, "<init>", ENUM_INIT, false)?;
             Self::initializers(context, &mut emit, members, false)?;
             asm.return_(None)?;
+            let access = if context.enum_subclassed {
+                0
+            } else {
+                MethodAccessFlags::PRIVATE
+            };
             methods.push(MethodInfo {
-                access_flags: MethodAccessFlags(MethodAccessFlags::PRIVATE),
+                access_flags: MethodAccessFlags(access),
                 name_index,
                 descriptor_index,
                 attributes: alloc::vec![asm.finish()?],
@@ -2929,10 +2976,14 @@ impl Compile {
     /// arity rather than by applicability: a constant's argument list is not an expression the index
     /// resolved a call target for, so there is nothing to read a selection out of. Two constructors of
     /// the same arity are reported instead of guessed at.
-    fn enum_constructor(arity: usize, context: &Context<'_>) -> Result<Option<jals_hir::MemberId>> {
+    fn enum_constructor(
+        arity: usize,
+        owner: ItemId,
+        context: &Context<'_>,
+    ) -> Result<Option<jals_hir::MemberId>> {
         let mut matching = context
             .index
-            .own_members(context.this_item)
+            .own_members(owner)
             .iter()
             .copied()
             .filter(|&member| {
@@ -2942,7 +2993,7 @@ impl Compile {
         let Some(first) = matching.next() else {
             let declares_one = context
                 .index
-                .own_members(context.this_item)
+                .own_members(owner)
                 .iter()
                 .any(|&member| context.index.member(member).kind == DefKind::Constructor);
             // Arguments with no constructor to take them, or a constructor of every other arity: the
@@ -3029,8 +3080,19 @@ impl Compile {
                 .into_iter()
                 .flat_map(|list| list.args())
                 .collect();
-            let selected = Self::enum_constructor(arguments.len(), context)?;
-            emit.asm.new_object(internal_name)?;
+            let selected = Self::enum_constructor(arguments.len(), context.this_item, context)?;
+            // A constant with a body is an instance of its *own* subclass, which is where its
+            // overrides live. Its field still has the enum's type, so nothing else changes.
+            let built = match context.index.item_by_decl(
+                context.file,
+                usize::from(constant.syntax().text_range().start()),
+            ) {
+                Some(item) if constant.body().is_some() => {
+                    Descriptor::internal_name_of(item, context.index)
+                }
+                _ => internal_name.to_owned(),
+            };
+            emit.asm.new_object(&built)?;
             emit.asm.dup()?;
             emit.asm.const_string(&name)?;
             emit.asm
@@ -3051,8 +3113,7 @@ impl Compile {
                 }
                 None => ENUM_INIT.to_owned(),
             };
-            emit.asm
-                .invoke_special(internal_name, "<init>", &init, false)?;
+            emit.asm.invoke_special(&built, "<init>", &init, false)?;
             emit.asm.put_static(internal_name, &name, &descriptor)?;
         }
 
