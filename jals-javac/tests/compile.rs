@@ -2378,3 +2378,118 @@ public class Greeter implements Speaks, Ranks {
     assert_eq!(named, ["Speaks", "Ranks"]);
     assert_eq!(run(source, "Greeter"), "spoke\n7\n");
 }
+
+/// An `enum` is a class whose every interesting member the compiler synthesises.
+///
+/// The source writes constants and a body; the class file needs a field per constant, a `$VALUES` array
+/// holding them in declaration order, a `(String, int)` constructor reaching `Enum`'s, and
+/// `values()` / `valueOf()`. An `enum` that emitted only what its body declares would be a type with no
+/// constants at all.
+///
+/// The ordinal *is* the declaration position — it is what `ordinal()` returns, what `compareTo` orders
+/// by, and what a `switch` over the type indexes on — so numbering them any other way is a class that
+/// verifies and compares wrongly.
+#[test]
+fn an_enum_gets_its_constants_and_synthetic_members() {
+    let source = r"
+enum Colour {
+    RED, GREEN, BLUE
+}
+
+public class Palette {
+    public static void main(String[] args) {
+        Colour picked = Colour.BLUE;
+        System.out.println(picked.name());
+        System.out.println(picked.ordinal());
+        System.out.println(picked.toString());
+        System.out.println(picked == Colour.BLUE);
+        System.out.println(Colour.RED.ordinal());
+        System.out.println(Colour.RED.compareTo(Colour.BLUE));
+    }
+}
+";
+    let classes = compile(source).expect("compile");
+    let colour = classes
+        .iter()
+        .find(|class| class.internal_name == "Colour")
+        .expect("the enum");
+    let class =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(colour.bytes.as_slice()))
+            .expect("reparse");
+    let name_of = |index| class.constant_pool.utf8(index).expect("utf8").into_owned();
+
+    // `ACC_ENUM` is what makes `Enum.valueOf` and a `switch` over the type work at run time, and
+    // `ACC_FINAL` is what an enum with no constant bodies is.
+    assert_eq!(
+        class.access_flags.0,
+        0x0020 | 0x0010 | 0x4000,
+        "super | final | enum"
+    );
+    assert_eq!(
+        class
+            .constant_pool
+            .class_name(class.super_class)
+            .expect("a Class entry"),
+        "java/lang/Enum"
+    );
+    assert_eq!(
+        class
+            .fields
+            .iter()
+            .map(|field| (name_of(field.name_index), field.access_flags.0))
+            .collect::<Vec<_>>(),
+        [
+            // public | static | final | enum
+            ("RED".to_owned(), 0x0001 | 0x0008 | 0x0010 | 0x4000),
+            ("GREEN".to_owned(), 0x0001 | 0x0008 | 0x0010 | 0x4000),
+            ("BLUE".to_owned(), 0x0001 | 0x0008 | 0x0010 | 0x4000),
+            // private | static | final | synthetic
+            ("$VALUES".to_owned(), 0x0002 | 0x0008 | 0x0010 | 0x1000),
+        ]
+    );
+    assert_eq!(
+        class
+            .methods
+            .iter()
+            .map(|method| name_of(method.name_index))
+            .collect::<Vec<_>>(),
+        ["<init>", "values", "valueOf", "<clinit>"]
+    );
+
+    if !java_available() {
+        return;
+    }
+    // `compareTo` orders by ordinal, so `RED` against `BLUE` is -2 — which is only right if the
+    // constants were numbered in declaration order.
+    assert_eq!(run(source, "Palette"), "BLUE\n2\nBLUE\ntrue\n0\n-2\n");
+}
+
+/// Three `enum` shapes are reported, each because a *descriptor* would come out wrong.
+///
+/// A constant with arguments and a declared constructor both need the two synthetic parameters (`name`,
+/// `ordinal`) prepended to a descriptor the index computed from the declaration, leaving every one of
+/// them two parameters short. A constant with a body is an anonymous subclass — its own class file, and
+/// the enum then cannot be `final`.
+#[test]
+fn the_enum_shapes_that_need_a_wider_descriptor_are_reported() {
+    for (source, expected) in [
+        (
+            "enum E { A(1), B(2); E(int code) {} }",
+            "an `enum` constant with arguments",
+        ),
+        (
+            "enum E { A, B; E() {} }",
+            "an `enum` with its own constructor",
+        ),
+        (
+            "enum E { A { int f() { return 1; } }, B; int f() { return 0; } }",
+            "an `enum` constant with a body",
+        ),
+    ] {
+        let error = compile(source).expect_err("this enum needs a wider constructor descriptor");
+        assert!(
+            matches!(error, LowerError::Unsupported(what) if what == expected),
+            "`{source}` should report {expected:?}, got {error}"
+        );
+    }
+}

@@ -913,7 +913,18 @@ impl ProjectIndex {
                 member.file = file;
                 self.register_member(owner, member);
             }
-            let (supertypes, has_external) = self.resolve_supertypes(file, &raw.raw_supertypes);
+            let (mut supertypes, has_external) = self.resolve_supertypes(file, &raw.raw_supertypes);
+            // Every `enum` extends `java.lang.Enum` implicitly, and the source never writes it — so
+            // there is no `extends` clause to have resolved. Without it `name()`, `ordinal()`, and
+            // `toString()` resolve to nothing on an enum value, which is most of what one is for.
+            if self.items[owner.0 as usize].kind == DefKind::Enum
+                && let TypeResolution::Project(id) = self.resolve_qualified(file, "java.lang.Enum")
+            {
+                supertypes.push(Supertype {
+                    id,
+                    args: Vec::new(),
+                });
+            }
             let item = &mut self.items[owner.0 as usize];
             item.supertypes = supertypes;
             item.has_external_supertype = has_external;

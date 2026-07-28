@@ -165,6 +165,20 @@ public class Class extends Object {
     public boolean desiredAssertionStatus();
 }
 
+// Every `enum` extends this, and its two-argument constructor is what an enum constant's synthetic
+// `super(name, ordinal)` reaches. `valueOf` is generic in the JDK; erased it takes a `Class` and a
+// `String` and returns an `Enum`.
+public class Enum extends Object implements Comparable {
+    protected Enum(String name, int ordinal);
+    public String name();
+    public int ordinal();
+    public String toString();
+    public boolean equals(Object other);
+    public int hashCode();
+    public int compareTo(Object other);
+    public static Enum valueOf(Class enumType, String name);
+}
+
 public class Throwable extends Object {
     public Throwable();
     public Throwable(String message);

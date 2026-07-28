@@ -45,9 +45,14 @@
 //! attribute — the only place a nested type's `private` and `static` can live — and reachable by simple
 //! or partly-qualified name. An `implements` clause reaches the `interfaces` list.
 //!
+//! An `enum` gets the four member groups its source never writes: a field per constant, the `$VALUES`
+//! array, a `(String, int)` constructor reaching `Enum`'s, and `values()` / `valueOf()`. `values()` and
+//! `valueOf()` are *emitted* but not yet *callable*: they are synthetic, so the index has no member for
+//! either and a call to one resolves to nothing.
+//!
 //! Not yet at all: varargs, `Signature` attributes and bridge methods, lambdas, method references,
-//! non-`static` inner classes, local and anonymous classes, and `enum` / `record` declarations. Each
-//! arrives with the milestone that can test it.
+//! non-`static` inner classes, local and anonymous classes, and `record` / `@interface` declarations.
+//! Each arrives with the milestone that can test it.
 
 mod emit;
 // The wasm backend reads a literal the same way: the two lowerings are separate, but `0xFF` and
@@ -79,6 +84,15 @@ use jals_syntax::{SyntaxNode, SyntaxToken};
 use crate::desc::{DescError, Descriptor};
 use crate::jvm::{AsmError, Assembler, Receiver};
 use crate::lower::slots::Slots;
+
+/// The supertype every `enum` has, and which its source never writes.
+const ENUM: &str = "java/lang/Enum";
+
+/// The synthetic array holding an `enum`'s constants, in declaration order.
+///
+/// javac's own name. `values()` hands out a *clone* of it, which is why the array can be `final` and
+/// still not let a caller reorder the constants.
+const VALUES: &str = "$VALUES";
 
 /// One emitted class file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,7 +181,7 @@ impl Compile {
         // rather than inside its enclosing one. Which is also why the enclosing class skips it as a
         // member — it would otherwise be emitted twice.
         for node in root.descendants() {
-            if !matches!(node.kind(), CLASS_DECL | INTERFACE_DECL) {
+            if !matches!(node.kind(), CLASS_DECL | INTERFACE_DECL | ENUM_DECL) {
                 continue;
             }
             // A *local* or anonymous class is nested inside a method body rather than a class body,
@@ -229,6 +243,7 @@ impl Compile {
         }
         let internal_name = Descriptor::internal_name_of(item, index);
         let is_interface = index.item(item).kind == DefKind::Interface;
+        let is_enum = index.item(item).kind == DefKind::Enum;
         let context = Context {
             index,
             inference,
@@ -248,10 +263,16 @@ impl Compile {
             .iter()
             .map(|supertype| supertype.id)
             .find(|&id| index.item(id).kind != DefKind::Interface);
-        let super_name = super_item.map_or_else(
-            || "java/lang/Object".to_owned(),
-            |id| Descriptor::internal_name_of(id, index),
-        );
+        // An `enum`'s supertype is `java.lang.Enum` and the source never writes it, so there is no
+        // `extends` clause for the index to have recorded.
+        let super_name = if is_enum {
+            ENUM.to_owned()
+        } else {
+            super_item.map_or_else(
+                || "java/lang/Object".to_owned(),
+                |id| Descriptor::internal_name_of(id, index),
+            )
+        };
         let super_class = pool.class_index(&super_name).ok_or(AsmError::PoolFull)?;
         // Every *interface* supertype, in the order the source listed them. Dropping them produced a
         // class the JVM loads and then refuses to dispatch through: an `invokeinterface` on a type whose
@@ -265,12 +286,31 @@ impl Compile {
             interfaces.push(pool.class_index(&name).ok_or(AsmError::PoolFull)?);
         }
 
-        let body = node
+        // An `enum`'s members live under an `EnumBody`, after the constants and the `;`.
+        let members: Vec<SyntaxNode> = if is_enum {
+            node.children()
+                .find_map(ast::EnumBody::cast)
+                .map(|body| {
+                    body.members()
+                        .map(|member| member.syntax().clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            node.children()
+                .find(|child| ast::ClassBody::cast(child.clone()).is_some())
+                .map(|body| body.children().collect())
+                .unwrap_or_default()
+        };
+        let constants: Vec<ast::EnumConstant> = node
             .children()
-            .find(|child| ast::ClassBody::cast(child.clone()).is_some());
-        let members: Vec<SyntaxNode> = body
-            .map(|body| body.children().collect())
+            .find_map(ast::EnumBody::cast)
+            .map(|body| body.constants().collect())
             .unwrap_or_default();
+
+        if is_enum {
+            Self::enum_shape(&constants, &members)?;
+        }
 
         let mut fields = Vec::new();
         let mut methods = Vec::new();
@@ -282,9 +322,9 @@ impl Compile {
             // would produce a class that loads and then throws `NoClassDefFoundError` at the first use
             // — the exact failure a compiler that reports nothing has to avoid.
             match member.kind() {
-                CLASS_DECL | INTERFACE_DECL => continue,
-                ENUM_DECL | RECORD_DECL | ANNOTATION_TYPE_DECL => {
-                    return Err(LowerError::Unsupported("a nested `enum` or `record`"));
+                CLASS_DECL | INTERFACE_DECL | ENUM_DECL => continue,
+                RECORD_DECL | ANNOTATION_TYPE_DECL => {
+                    return Err(LowerError::Unsupported("a `record` or `@interface`"));
                 }
                 _ => {}
             }
@@ -310,7 +350,9 @@ impl Compile {
         }
         // A class with no declared constructor gets the default one, which is the only place a
         // field initialiser could run for it.
-        if !saw_constructor && !is_interface {
+        // An `enum` gets the synthesised `(String, int)` constructor instead, which is the only one
+        // that can reach `Enum`'s — there is no no-argument `super()` for a default one to call.
+        if !saw_constructor && !is_interface && !is_enum {
             methods.push(Self::default_constructor(
                 &context,
                 &mut pool,
@@ -319,6 +361,19 @@ impl Compile {
                 &members,
                 Self::access_level(node),
             )?);
+        }
+        // An `enum`'s constants, its `$VALUES`, its constructor, and its two static methods are all
+        // synthesised: none of them is written in the source, and every one of them is required.
+        if is_enum {
+            Self::enum_members(
+                &constants,
+                &context,
+                &mut pool,
+                &internal_name,
+                &members,
+                &mut fields,
+                &mut methods,
+            )?;
         }
         // An `assert` is guarded by a synthetic field the JVM's `-ea` flag decides, so a class
         // containing one gains that field and the `<clinit>` code that reads the flag.
@@ -352,14 +407,27 @@ impl Compile {
         // when the class is first used. Nothing else runs them — so dropping them produced a class
         // whose `static int n = 5;` read back as 0, which is a silent miscompile rather than a
         // missing feature.
-        if let Some(class_init) = Self::class_initializer(&context, &mut pool, &members, asserts)? {
+        if let Some(class_init) = Self::class_initializer(
+            &context,
+            &mut pool,
+            &members,
+            asserts,
+            if is_enum { constants.as_slice() } else { &[] },
+            &internal_name,
+        )? {
             methods.push(class_init);
         }
 
         let nesting = Self::inner_classes(node, &context, &mut pool)?;
 
         let mut class = ClassFile::new(class_version, 0, pool);
-        class.access_flags = ClassAccessFlags(Self::class_flags(node, is_interface));
+        let mut flags = Self::class_flags(node, is_interface);
+        if is_enum {
+            // `ACC_ENUM` is what makes `Enum.valueOf` and a `switch` over the type work at run time,
+            // and `ACC_FINAL` is what an enum with no constant bodies is.
+            flags |= ClassAccessFlags::ENUM | ClassAccessFlags::FINAL;
+        }
+        class.access_flags = ClassAccessFlags(flags);
         class.this_class = this_class;
         class.super_class = super_class;
         class.interfaces = interfaces;
@@ -391,7 +459,7 @@ impl Compile {
             .unwrap_or_default();
         let inner: Vec<&SyntaxNode> = own_body
             .iter()
-            .filter(|child| matches!(child.kind(), CLASS_DECL | INTERFACE_DECL))
+            .filter(|child| matches!(child.kind(), CLASS_DECL | INTERFACE_DECL | ENUM_DECL))
             .collect();
         nested.extend(inner);
         if Self::is_nested(node) {
@@ -415,7 +483,7 @@ impl Compile {
             let enclosing = declaration
                 .ancestors()
                 .skip(1)
-                .find(|ancestor| matches!(ancestor.kind(), CLASS_DECL | INTERFACE_DECL))
+                .find(|ancestor| matches!(ancestor.kind(), CLASS_DECL | INTERFACE_DECL | ENUM_DECL))
                 .and_then(|outer| {
                     let token = outer
                         .children_with_tokens()
@@ -759,6 +827,158 @@ impl Compile {
         })
     }
 
+    /// The three `enum` shapes this reports, each because a *descriptor* would come out wrong.
+    ///
+    /// A constant with arguments and a declared constructor both need the two synthetic parameters
+    /// (`name`, `ordinal`) *prepended* to a descriptor the index computed from the declaration, which
+    /// would leave every one of them two parameters short — a `NoSuchMethodError` in `<clinit>`. A
+    /// constant with a body is an anonymous subclass: its own class file, and the enum then cannot be
+    /// `final`.
+    ///
+    /// Checked before any member is emitted, because a user-declared enum constructor otherwise reaches
+    /// the prologue first and reports the missing `super()` rather than the reason there is one.
+    fn enum_shape(constants: &[ast::EnumConstant], members: &[SyntaxNode]) -> Result<()> {
+        if constants.iter().any(|constant| constant.body().is_some()) {
+            return Err(LowerError::Unsupported("an `enum` constant with a body"));
+        }
+        if constants.iter().any(|constant| {
+            constant
+                .args()
+                .is_some_and(|list| list.args().next().is_some())
+        }) {
+            return Err(LowerError::Unsupported("an `enum` constant with arguments"));
+        }
+        if members
+            .iter()
+            .any(|member| member.kind() == CONSTRUCTOR_DECL)
+        {
+            return Err(LowerError::Unsupported(
+                "an `enum` with its own constructor",
+            ));
+        }
+        Ok(())
+    }
+
+    /// An `enum`'s four synthesised member groups: a field per constant, the `$VALUES` array, the
+    /// constructor, and `values()` / `valueOf()`.
+    ///
+    /// None of them is written in the source and every one is required — `Enum.valueOf` reads the
+    /// constants reflectively, a `switch` over the type reads `ordinal()`, and `values()` is how a
+    /// caller enumerates them. So an `enum` that emitted only what its body declares would be a type
+    /// with no constants at all.
+    ///
+    /// Two shapes are reported. A constant with **arguments** or a **declared constructor** both need
+    /// the two synthetic parameters (`name`, `ordinal`) *prepended* to a descriptor the index computed
+    /// from the declaration, which would leave every one of them two parameters short; a constant with
+    /// a **body** is an anonymous subclass, which is a separate class file the enum then cannot be
+    /// `final`.
+    fn enum_members(
+        constants: &[ast::EnumConstant],
+        context: &Context<'_>,
+        pool: &mut ConstantPool,
+        internal_name: &str,
+        members: &[SyntaxNode],
+        fields: &mut Vec<FieldInfo>,
+        methods: &mut Vec<MethodInfo>,
+    ) -> Result<()> {
+        let descriptor = alloc::format!("L{internal_name};");
+        let array = alloc::format!("[{descriptor}");
+        for constant in constants {
+            let name = constant
+                .name()
+                .ok_or(LowerError::Unsupported("an `enum` constant with no name"))?;
+            fields.push(FieldInfo {
+                access_flags: FieldAccessFlags(
+                    FieldAccessFlags::PUBLIC
+                        | FieldAccessFlags::STATIC
+                        | FieldAccessFlags::FINAL
+                        | FieldAccessFlags::ENUM,
+                ),
+                name_index: pool.utf8_index(&name).ok_or(AsmError::PoolFull)?,
+                descriptor_index: pool.utf8_index(&descriptor).ok_or(AsmError::PoolFull)?,
+                attributes: Vec::new(),
+            });
+        }
+        fields.push(FieldInfo {
+            access_flags: FieldAccessFlags(
+                FieldAccessFlags::PRIVATE
+                    | FieldAccessFlags::STATIC
+                    | FieldAccessFlags::FINAL
+                    | FieldAccessFlags::SYNTHETIC,
+            ),
+            name_index: pool.utf8_index(VALUES).ok_or(AsmError::PoolFull)?,
+            descriptor_index: pool.utf8_index(&array).ok_or(AsmError::PoolFull)?,
+            attributes: Vec::new(),
+        });
+
+        // `private Color(String name, int ordinal) { super(name, ordinal); <initialisers> }`
+        let init_descriptor = "(Ljava/lang/String;I)V";
+        let name_index = pool.utf8_index("<init>").ok_or(AsmError::PoolFull)?;
+        let descriptor_index = pool.utf8_index(init_descriptor).ok_or(AsmError::PoolFull)?;
+        let mut asm = Assembler::new(pool, Receiver::Constructor(internal_name), init_descriptor)?;
+        let slots = Slots::new(context, None, false);
+        let mut emit = Emit::new(&mut asm, slots, jals_hir::Ty::Void, true);
+        emit.asm.load(0)?;
+        emit.asm.load(1)?;
+        emit.asm.load(2)?;
+        emit.asm
+            .invoke_special(ENUM, "<init>", init_descriptor, false)?;
+        Self::initializers(context, &mut emit, members, false)?;
+        asm.return_(None)?;
+        methods.push(MethodInfo {
+            access_flags: MethodAccessFlags(MethodAccessFlags::PRIVATE),
+            name_index,
+            descriptor_index,
+            attributes: alloc::vec![asm.finish()?],
+        });
+
+        // `public static Color[] values() { return (Color[]) $VALUES.clone(); }`
+        //
+        // A *clone*, so a caller cannot reorder the constants through the array it was handed. `clone`
+        // on an array type is declared to return `Object`, hence the cast.
+        let values_descriptor = alloc::format!("(){array}");
+        let name_index = pool.utf8_index("values").ok_or(AsmError::PoolFull)?;
+        let descriptor_index = pool
+            .utf8_index(&values_descriptor)
+            .ok_or(AsmError::PoolFull)?;
+        let mut asm = Assembler::new(pool, Receiver::Static, &values_descriptor)?;
+        asm.get_static(internal_name, VALUES, &array)?;
+        asm.invoke_virtual(&array, "clone", "()Ljava/lang/Object;")?;
+        asm.check_cast(&array)?;
+        let returned = asm.stack_top().ok_or(AsmError::StackUnderflow)?;
+        asm.return_(Some(&returned))?;
+        methods.push(MethodInfo {
+            access_flags: MethodAccessFlags(MethodAccessFlags::PUBLIC | MethodAccessFlags::STATIC),
+            name_index,
+            descriptor_index,
+            attributes: alloc::vec![asm.finish()?],
+        });
+
+        // `public static Color valueOf(String name) { return (Color) Enum.valueOf(Color.class, name); }`
+        let of_descriptor = alloc::format!("(Ljava/lang/String;){descriptor}");
+        let name_index = pool.utf8_index("valueOf").ok_or(AsmError::PoolFull)?;
+        let descriptor_index = pool.utf8_index(&of_descriptor).ok_or(AsmError::PoolFull)?;
+        let mut asm = Assembler::new(pool, Receiver::Static, &of_descriptor)?;
+        asm.const_class(internal_name)?;
+        asm.load(0)?;
+        asm.invoke_static(
+            ENUM,
+            "valueOf",
+            "(Ljava/lang/Class;Ljava/lang/String;)Ljava/lang/Enum;",
+            false,
+        )?;
+        asm.check_cast(internal_name)?;
+        let returned = asm.stack_top().ok_or(AsmError::StackUnderflow)?;
+        asm.return_(Some(&returned))?;
+        methods.push(MethodInfo {
+            access_flags: MethodAccessFlags(MethodAccessFlags::PUBLIC | MethodAccessFlags::STATIC),
+            name_index,
+            descriptor_index,
+            attributes: alloc::vec![asm.finish()?],
+        });
+        Ok(())
+    }
+
     /// `<clinit>`: every `static` field initialiser and `static { … }` block, in source order.
     ///
     /// `None` when the type has neither, because an empty `<clinit>` is still a method the JVM loads
@@ -769,8 +989,11 @@ impl Compile {
         pool: &mut ConstantPool,
         members: &[SyntaxNode],
         asserts: bool,
+        constants: &[ast::EnumConstant],
+        internal_name: &str,
     ) -> Result<Option<MethodInfo>> {
         if !asserts
+            && constants.is_empty()
             && !members
                 .iter()
                 .any(|member| Self::initializes(member, context.in_interface, true))
@@ -785,6 +1008,11 @@ impl Compile {
         if asserts {
             Self::assertion_flag(context, &mut emit)?;
         }
+        // An `enum`'s constants are built *first*, because a `static` initialiser below them may read
+        // one and JLS §12.4.2 runs them in that order.
+        if !constants.is_empty() {
+            Self::enum_constants(constants, internal_name, &mut emit)?;
+        }
         Self::initializers(context, &mut emit, members, true)?;
         if asm.reachable() {
             asm.return_(None)?;
@@ -795,6 +1023,56 @@ impl Compile {
             descriptor_index,
             attributes: alloc::vec![asm.finish()?],
         }))
+    }
+
+    /// Build every `enum` constant, then the `$VALUES` array holding them in declaration order.
+    ///
+    /// The ordinal *is* the declaration position: it is what `ordinal()` returns, what a `switch` over
+    /// the type indexes on, and what `compareTo` orders by. Numbering them any other way would be a
+    /// class that verifies and compares wrongly.
+    fn enum_constants(
+        constants: &[ast::EnumConstant],
+        internal_name: &str,
+        emit: &mut Emit<'_, '_>,
+    ) -> Result<()> {
+        let descriptor = alloc::format!("L{internal_name};");
+        let init = "(Ljava/lang/String;I)V";
+        for (ordinal, constant) in constants.iter().enumerate() {
+            let name = constant
+                .name()
+                .ok_or(LowerError::Unsupported("an `enum` constant with no name"))?;
+            emit.asm.new_object(internal_name)?;
+            emit.asm.dup()?;
+            emit.asm.const_string(&name)?;
+            emit.asm
+                .const_int(i32::try_from(ordinal).map_err(|_| {
+                    LowerError::Unsupported("an `enum` with this many constants")
+                })?)?;
+            emit.asm
+                .invoke_special(internal_name, "<init>", init, false)?;
+            emit.asm.put_static(internal_name, &name, &descriptor)?;
+        }
+
+        emit.asm.const_int(
+            i32::try_from(constants.len())
+                .map_err(|_| LowerError::Unsupported("an `enum` with this many constants"))?,
+        )?;
+        emit.asm.new_array(&descriptor)?;
+        for (ordinal, constant) in constants.iter().enumerate() {
+            let name = constant
+                .name()
+                .ok_or(LowerError::Unsupported("an `enum` constant with no name"))?;
+            emit.asm.dup()?;
+            emit.asm
+                .const_int(i32::try_from(ordinal).map_err(|_| {
+                    LowerError::Unsupported("an `enum` with this many constants")
+                })?)?;
+            emit.asm.get_static(internal_name, &name, &descriptor)?;
+            emit.asm.array_store(&descriptor)?;
+        }
+        Ok(emit
+            .asm
+            .put_static(internal_name, VALUES, &alloc::format!("[{descriptor}"))?)
     }
 
     /// `$assertionsDisabled = !Foo.class.desiredAssertionStatus();`
