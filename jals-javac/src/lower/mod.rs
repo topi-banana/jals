@@ -25,10 +25,7 @@
 //! try-with-resources, `synchronized`, and `assert` — the last guarded by the synthetic
 //! `$assertionsDisabled` field, because assertions are off unless the JVM was started with `-ea`.
 //!
-//! One thing is narrower than it sounds, and it is *reported* where it stops rather than approximated:
-//! **a method needs a body** unless it is `abstract` or an interface method, because `native` has no
-//! body and no flag pair that could say so legally.
-//!
+
 //! `switch` too, in both syntaxes and as a statement or an expression, over an integral selector or a
 //! `String` — the latter through `hashCode()` plus an `equals` per candidate, because two different
 //! strings can hash alike.
@@ -37,9 +34,12 @@
 //! from inside: a `case` label with no constant value, a `case` *pattern*, a resource with no
 //! `close()`, a local type declaration.
 //!
+//! A constructor may delegate (`this(…)` / `super(args)`), and a `native` method declares why it has
+//! no body with its own flag rather than borrowing `abstract`'s.
+//!
 //! Not yet at all: boxing, varargs, generics beyond erasure, lambdas, method references, `.class`
-//! literals, inner classes, `enum` / `record` declarations, and constructor delegation
-//! (`this(…)` / `super(args)`). Each arrives with the milestone that can test it.
+//! literals, inner classes, and `enum` / `record` declarations. Each arrives with the milestone that
+//! can test it.
 
 mod emit;
 mod expr;
@@ -371,10 +371,11 @@ impl Compile {
     /// `strictfp` is deliberately not emitted. `ACC_STRICT` is a method flag only for major
     /// versions 46–60 (JVMS §4.6); from 61 on, strict floating point is the *only* semantics there
     /// is, so dropping the bit changes nothing about the program and setting it would set a bit the
-    /// version reserves. `native` is not emitted either, but that one cannot be dropped silently —
-    /// see [`method`](Self::method).
+    /// version reserves.
     fn method_flags(node: &SyntaxNode, in_interface: bool) -> u16 {
-        use jals_syntax::SyntaxKind::{ABSTRACT_KW, FINAL_KW, STATIC_KW, SYNCHRONIZED_KW};
+        use jals_syntax::SyntaxKind::{
+            ABSTRACT_KW, FINAL_KW, NATIVE_KW, STATIC_KW, SYNCHRONIZED_KW,
+        };
         let level = match Self::access_level(node) {
             0 if in_interface => MethodAccessFlags::PUBLIC,
             level => level,
@@ -385,6 +386,7 @@ impl Compile {
             (FINAL_KW, MethodAccessFlags::FINAL),
             (ABSTRACT_KW, MethodAccessFlags::ABSTRACT),
             (SYNCHRONIZED_KW, MethodAccessFlags::SYNCHRONIZED),
+            (NATIVE_KW, MethodAccessFlags::NATIVE),
         ] {
             if Self::has_modifier(node, keyword) {
                 flags |= bit;
@@ -491,13 +493,12 @@ impl Compile {
             // An abstract or interface method has no `Code` attribute at all.
             None => Vec::new(),
         };
-        // No body means no `Code` attribute, and the JVM accepts that only from a method whose
-        // flags say why it has none. `abstract` says so, and an interface method says so
-        // implicitly (JLS §9.4). `native` also has no body, but *its* flag is the explanation, and
-        // `ACC_NATIVE | ACC_ABSTRACT` is a pair JVMS §4.6 forbids — a JVM rejects the whole class
-        // with "illegal modifiers: 0x500". Calling every body-less method abstract produced exactly
-        // that, so anything else with no body is reported instead.
-        let flags = if attributes.is_empty() {
+        // No body means no `Code` attribute, and the JVM accepts that only from a method whose flags
+        // say why it has none. `native` says so with its own flag — already set above — and
+        // `ACC_NATIVE | ACC_ABSTRACT` is a pair JVMS §4.6 forbids, which a JVM rejects with "illegal
+        // modifiers: 0x500". `abstract` says so directly, and an interface method says so implicitly
+        // (JLS §9.4). Anything else with no body is a declaration the JVM would refuse.
+        let flags = if attributes.is_empty() && flags & MethodAccessFlags::NATIVE == 0 {
             if context.in_interface
                 || Self::has_modifier(node, jals_syntax::SyntaxKind::ABSTRACT_KW)
             {
@@ -537,21 +538,32 @@ impl Compile {
         let descriptor_index = pool.utf8_index(&text).ok_or(AsmError::PoolFull)?;
 
         let body = node.children().find_map(ast::Block::cast);
-        if let Some(body) = &body
-            && Self::has_explicit_constructor_invocation(body.syntax())
-        {
-            return Err(LowerError::Unsupported(
-                "an explicit constructor invocation",
-            ));
-        }
+        let delegation = body
+            .as_ref()
+            .and_then(Self::explicit_constructor_invocation);
 
         let params = node.children().find_map(ast::ParamList::cast);
         let mut asm = Assembler::new(pool, Receiver::Constructor(&context.this_class), &text)?;
         let slots = Slots::new(context, params.as_ref(), false);
         let mut emit = Emit::new(&mut asm, slots, jals_hir::Ty::Void, true);
-        Self::prologue(context, &mut emit, super_name, super_item, members)?;
+        match &delegation {
+            // `this(…)` and `super(…)` each replace part of what the prologue emits, and running
+            // both would run that part twice (JLS §8.8.7). `this(…)` replaces all of it — the
+            // constructor it delegates to has already run the field initialisers — while `super(…)`
+            // replaces only the `super()` call, so the initialisers still follow it.
+            Some(call) => {
+                expr::Expr::lower(&ast::Expr::Call(call.clone()), context, &mut emit)?;
+                if !Self::delegates_to_this(call) {
+                    Self::initializers(context, &mut emit, members, false)?;
+                }
+            }
+            None => Self::prologue(context, &mut emit, super_name, super_item, members)?,
+        }
         if let Some(body) = &body {
-            stmt::Stmt::block(body, context, &mut emit)?;
+            // The explicit invocation is the body's first statement, and it has already been emitted.
+            for statement in body.stmts().skip(usize::from(delegation.is_some())) {
+                stmt::Stmt::lower(&statement, context, &mut emit)?;
+            }
         }
         // A constructor is `void`, so it needs the instruction unless every path already returned.
         if asm.reachable() {
@@ -730,27 +742,37 @@ impl Compile {
         Ok(())
     }
 
-    /// Whether `body` contains an explicit constructor invocation — a bare `this(…)` or `super(…)`.
+    /// The body's explicit constructor invocation — a bare `this(…)` or `super(…)`.
     ///
-    /// Both replace part of what [`prologue`](Self::prologue) emits: `super(args)` stands in for
-    /// the no-argument `super()`, and `this(…)` stands in for the field initialisers too, since
-    /// the constructor it delegates to has already run them. Emitting the prologue *and* the
-    /// invocation runs one of them twice, so the shape is reported until it is lowered.
-    ///
-    /// Only the bare forms match. `this.method()` and `super.method()` are qualified calls whose
-    /// callee is a field access, not a name reference.
-    fn has_explicit_constructor_invocation(body: &SyntaxNode) -> bool {
+    /// JLS §8.8.7 puts it first or nowhere, so only the first statement is examined. Only the bare
+    /// forms count: `this.method()` and `super.method()` are qualified calls whose callee is a field
+    /// access rather than a name reference.
+    fn explicit_constructor_invocation(body: &ast::Block) -> Option<ast::CallExpr> {
         use jals_syntax::SyntaxKind::{SUPER_KW, THIS_KW};
-        body.descendants()
-            .filter_map(ast::CallExpr::cast)
-            .any(|call| {
-                matches!(call.callee(), Some(ast::Expr::NameRef(name))
-                    if name
-                        .syntax()
-                        .children_with_tokens()
-                        .filter_map(jals_syntax::SyntaxElement::into_token)
-                        .any(|token| matches!(token.kind(), THIS_KW | SUPER_KW)))
-            })
+        let ast::Stmt::Expr(first) = body.stmts().next()? else {
+            return None;
+        };
+        let ast::Expr::Call(call) = first.expr()? else {
+            return None;
+        };
+        let ast::Expr::NameRef(name) = call.callee()? else {
+            return None;
+        };
+        name.syntax()
+            .children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .any(|token| matches!(token.kind(), THIS_KW | SUPER_KW))
+            .then_some(call)
+    }
+
+    /// Whether an explicit constructor invocation is the `this(…)` form rather than `super(…)`.
+    fn delegates_to_this(call: &ast::CallExpr) -> bool {
+        matches!(call.callee(), Some(ast::Expr::NameRef(name))
+            if name
+                .syntax()
+                .children_with_tokens()
+                .filter_map(jals_syntax::SyntaxElement::into_token)
+                .any(|token| token.kind() == jals_syntax::SyntaxKind::THIS_KW))
     }
 
     /// `super()` followed by every instance field's initialiser — what a constructor runs before

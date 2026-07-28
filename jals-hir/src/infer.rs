@@ -430,6 +430,9 @@ impl TypeInference {
                         && let Some(selected) = self
                             .resolve_call(&call, index, file)
                             .and_then(|resolution| resolution.selected)
+                            // A bare `this(…)` / `super(…)` is a constructor, which no name lookup
+                            // finds — so it resolves the way a `new` does.
+                            .or_else(|| self.resolve_explicit_constructor(&call, index, file))
                     {
                         calls.push(((span.start, span.end), selected));
                     }
@@ -547,6 +550,68 @@ impl TypeInference {
             })
             .collect();
         Self::most_specific(&applicable, index)
+    }
+
+    /// The constructor a bare `this(args)` or `super(args)` binds to.
+    ///
+    /// Neither goes through [`call_target`](Self::call_target): a constructor is not reachable by name
+    /// lookup (it is indexed under its class's own name and in no name space a call searches), and
+    /// `this` / `super` carry no identifier token to look up either. So the candidate set is a type's
+    /// *own* constructors, exactly as a `new` uses — the enclosing type for `this(…)` and its class
+    /// supertype for `super(…)`.
+    ///
+    /// Without this a constructor's own delegation resolved to nothing, and `this(1)` was
+    /// indistinguishable from a call to a method named `this`.
+    fn resolve_explicit_constructor(
+        &self,
+        call: &ast::CallExpr,
+        index: &ProjectIndex,
+        file: FileId,
+    ) -> Option<MemberId> {
+        let Some(ast::Expr::NameRef(name)) = call.callee() else {
+            return None;
+        };
+        let keyword = name
+            .syntax()
+            .children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .find(|token| matches!(token.kind(), THIS_KW | SUPER_KW))?;
+        let enclosing = index.enclosing_item(file, call.syntax())?;
+        let owner = if keyword.kind() == THIS_KW {
+            enclosing
+        } else {
+            // The class supertype, which is the only one a `super(…)` can name. An interface has no
+            // constructor to reach.
+            index
+                .item(enclosing)
+                .supertypes
+                .iter()
+                .map(|supertype| supertype.id)
+                .find(|&id| index.item(id).kind != DefKind::Interface)?
+        };
+        let args: Vec<ast::Expr> = call
+            .args()
+            .map(|list| list.args().collect())
+            .unwrap_or_default();
+        let candidates: Vec<MemberId> = index
+            .own_members(owner)
+            .iter()
+            .copied()
+            .filter(|&id| {
+                let member = index.member(id);
+                member.kind == DefKind::Constructor
+                    && !member.varargs
+                    && member.params.len() == args.len()
+            })
+            .collect();
+        if candidates.is_empty() {
+            return None;
+        }
+        let arg_tys: Vec<Option<&Ty>> = args
+            .iter()
+            .map(|argument| self.type_of_expr(Collect::node_span(argument.syntax())))
+            .collect();
+        Self::select_overload(&candidates, &arg_tys, index)
     }
 
     /// The constructor `new C(args)` binds to.

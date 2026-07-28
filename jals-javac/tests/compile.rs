@@ -612,34 +612,67 @@ public class Outer {
     );
 }
 
-/// A constructor's prologue emits `super()` and the field initialisers. An explicit `this(…)` or
-/// `super(args)` replaces part of that, so emitting both would run one of them twice — a class that
-/// verifies and initialises wrongly. Reported until the delegation is lowered.
+/// `this(…)` and `super(args)` each replace part of what a constructor's prologue emits.
+///
+/// `super(args)` stands in for the no-argument `super()`; `this(…)` stands in for the field
+/// initialisers too, because the constructor it delegates to has already run them. Emitting the
+/// prologue *and* the invocation runs one of them twice — a class that verifies and initialises
+/// wrongly — so this is checked by what the fields hold rather than by whether it compiles.
 #[test]
-fn an_explicit_constructor_invocation_is_reported() {
-    for body in ["this(1);", "super();"] {
-        let source = format!(
-            r"
-public class Delegating {{
-    int v = 7;
-
-    Delegating(int v) {{}}
-
-    Delegating() {{ {body} }}
-
-    public static void main(String[] args) {{}}
-}}
-"
-        );
-        let error = compile(&source).expect_err("constructor delegation is not lowered yet");
-        assert!(
-            matches!(
-                error,
-                LowerError::Unsupported("an explicit constructor invocation")
-            ),
-            "`{body}` should be reported, got {error}"
-        );
+fn a_constructor_delegates_without_running_the_prologue_twice() {
+    if !java_available() {
+        return;
     }
+    let source = r#"
+public class Seeded {
+    int seed;
+    String tag = "tagged";
+    // Counts how many constructor *bodies* ran. The initialiser that zeroes it runs exactly once, so
+    // a doubled prologue would show up here as a 1 where a 2 belongs.
+    int bodies = 0;
+
+    Seeded() {
+        this(7);
+        bodies += 1;
+    }
+
+    Seeded(int seed) {
+        this.seed = seed;
+        bodies += 1;
+    }
+
+    int seed() { return seed; }
+    String tag() { return tag; }
+    int bodies() { return bodies; }
+}
+
+class Extended extends Seeded {
+    int extra = 5;
+
+    Extended() { super(11); }
+    Extended(int a, int b) { super(a + b); }
+
+    int total() { return seed() + extra; }
+}
+
+class Delegating {
+    public static void main(String[] args) {
+        System.out.println(new Seeded().seed());
+        System.out.println(new Seeded().tag());
+        System.out.println(new Seeded().bodies());
+        System.out.println(new Seeded(3).seed());
+        System.out.println(new Seeded(3).bodies());
+        System.out.println(new Extended().total());
+        System.out.println(new Extended(1, 2).total());
+        // The superclass's own initialiser still ran: `super(args)` replaces only `super()`.
+        System.out.println(new Extended().tag());
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Delegating"),
+        "7\ntagged\n2\n3\n1\n16\n8\ntagged\n"
+    );
 }
 
 /// The prologue's `super()` only exists if the superclass has one. Emitting it regardless produced
@@ -759,37 +792,63 @@ public interface Shape {
     );
 }
 
-/// A method with no body has to say *why* it has none. `abstract` says so and an interface method
-/// says so implicitly; `native` says so with its own flag, and `ACC_NATIVE | ACC_ABSTRACT` is a
-/// pair JVMS §4.6 forbids — a JVM rejects the class with "illegal modifiers: 0x500".
+/// A method with no body has to say *why* it has none.
+///
+/// `abstract` says so and an interface method says so implicitly; `native` says so with its own flag.
+/// `ACC_NATIVE | ACC_ABSTRACT` is a pair JVMS §4.6 forbids — a JVM rejects the class with "illegal
+/// modifiers: 0x500" — so a `native` method takes `ACC_NATIVE` and *not* `ACC_ABSTRACT`.
 #[test]
-fn a_body_less_method_that_is_not_abstract_is_reported() {
-    let error = compile(
+fn a_body_less_method_says_why_it_has_none() {
+    let classes = compile(
         r"
-public class Bodyless {
+public abstract class Bodyless {
     native int f();
+    public static native synchronized long g(int n);
+    abstract int h();
 
     public static void main(String[] args) {}
 }
 ",
     )
-    .expect_err("`native` has no body this can lower, and no flag pair that would say so");
+    .expect("`native` explains itself with its own flag");
+    let class =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(classes[0].bytes.as_slice()))
+            .expect("reparse");
+    let name_of = |index| class.constant_pool.utf8(index).expect("utf8").into_owned();
+    let flags: Vec<(String, u16)> = class
+        .methods
+        .iter()
+        .map(|method| (name_of(method.name_index), method.access_flags.0))
+        .collect();
+    assert_eq!(
+        flags,
+        [
+            // native, package-private — and not abstract.
+            ("f".to_owned(), 0x0100),
+            // public | static | synchronized | native
+            ("g".to_owned(), 0x0001 | 0x0008 | 0x0020 | 0x0100),
+            // abstract, which is the other way to have no body.
+            ("h".to_owned(), 0x0400),
+            ("main".to_owned(), 0x0001 | 0x0008),
+            ("<init>".to_owned(), 0x0001),
+        ]
+    );
+
+    // Neither explanation is a declaration the JVM would refuse.
+    let error = compile(
+        r"
+public class Silent {
+    int f();
+
+    public static void main(String[] args) {}
+}
+",
+    )
+    .expect_err("nothing says why `f` has no body");
     assert!(
         matches!(error, LowerError::Unsupported("a method with no body")),
         "expected the body-less report, got {error}"
     );
-
-    // `abstract` does say why, and still compiles.
-    compile(
-        r"
-public abstract class Abstract {
-    abstract int f();
-
-    public static void main(String[] args) {}
-}
-",
-    )
-    .expect("an `abstract` method declares why it has no body");
 }
 
 /// Every loop form, and `break` / `continue` with and without a label.
