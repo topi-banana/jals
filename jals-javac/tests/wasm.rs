@@ -2632,3 +2632,69 @@ public class Reader {
     assert_invoke(&[source], "labelled", &[], "2");
     assert_invoke(&[source], "chars", &[], "98");
 }
+
+/// A jump inside a `finally` runs only the cleanups *outside* that `finally`.
+///
+/// The cleanup a `return` or a `break` leaves behind used to be lowered against the whole open set,
+/// including itself — so a jump inside one re-entered it, and the compiler recursed until its own
+/// stack ran out. An abort is not a report, which is the one property this backend does claim.
+///
+/// The answers are Java's: a `return` in a `finally` discards the one the `try` had (§14.20.2), a
+/// `break` in a `finally` discards the pending `return`, and the enclosing cleanup still runs once.
+#[test]
+fn a_jump_inside_a_finally_runs_only_the_outer_cleanups() {
+    let source = r"
+public class Unwind {
+    public static int returnsFromFinally() {
+        try {
+            return 1;
+        } finally {
+            return 2;
+        }
+    }
+
+    public static int breaksFromFinally() {
+        int n = 0;
+        for (int i = 0; i < 3; i++) {
+            try {
+                n += 1;
+                break;
+            } finally {
+                break;
+            }
+        }
+        return n;
+    }
+
+    public static int breakDiscardsAReturn() {
+        for (int i = 0; i < 3; i++) {
+            try {
+                return 1;
+            } finally {
+                break;
+            }
+        }
+        return 0;
+    }
+
+    public static int outerCleanupStillRuns() {
+        int n = 0;
+        try {
+            try {
+                n += 1;
+                return n;
+            } finally {
+                n += 10;
+                return n;
+            }
+        } finally {
+            n += 100;
+        }
+    }
+}
+";
+    assert_invoke(&[source], "returnsFromFinally", &[], "2");
+    assert_invoke(&[source], "breaksFromFinally", &[], "1");
+    assert_invoke(&[source], "breakDiscardsAReturn", &[], "0");
+    assert_invoke(&[source], "outerCleanupStillRuns", &[], "11");
+}

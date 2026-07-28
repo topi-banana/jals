@@ -2140,10 +2140,8 @@ impl Lowering<'_> {
                 if let Some(value) = statement.expr() {
                     self.expr(&value, insn)?;
                 }
-                let cleanups = self.cleanups.clone();
-                for cleanup in cleanups.iter().rev() {
-                    self.block(cleanup, insn)?;
-                }
+                // A `return` leaves the frame, so it leaves *every* open cleanup behind.
+                self.run_cleanups(0, insn)?;
                 insn.return_();
                 Ok(())
             }
@@ -3281,16 +3279,35 @@ impl Lowering<'_> {
         // behind, so each runs on the way out, innermost first. A cleanup opened outside the target is
         // not left behind and must not run.
         let outer = target.cleanups;
-        let pending: Vec<ast::Block> = self.cleanups[outer.min(self.cleanups.len())..]
-            .iter()
-            .rev()
-            .cloned()
-            .collect();
-        for cleanup in &pending {
-            self.block(cleanup, insn)?;
-        }
+        self.run_cleanups(outer, insn)?;
         insn.br(insn.depth() - depth);
         Ok(())
+    }
+
+    /// Emit the cleanups above `outer`, innermost first — the `finally` blocks a jump leaves behind.
+    ///
+    /// Each is lowered against the cleanups that enclose *it*, not against the whole open set. A
+    /// `finally` is not protected by itself: a `return` inside one runs only what is outside it, and
+    /// §14.20.2 gives that jump the abrupt completion — the enclosing `try` is already leaving.
+    /// Lowering against the unshrunk set instead re-entered the same cleanup for every jump it
+    /// contained, which recursed until the compiler's own stack ran out.
+    ///
+    /// The stack is restored afterwards because this is one *copy* of the cleanup, not the end of
+    /// its scope: the exceptional and normal paths still have theirs to emit, and
+    /// [`try_catch`](Self::try_catch) is what pops for good.
+    fn run_cleanups(&mut self, outer: usize, insn: &mut Insn) -> Result<()> {
+        let open = core::mem::take(&mut self.cleanups);
+        let mut outcome = Ok(());
+        for index in (outer.min(open.len())..open.len()).rev() {
+            self.cleanups.clear();
+            self.cleanups.extend_from_slice(&open[..index]);
+            outcome = self.block(&open[index], insn);
+            if outcome.is_err() {
+                break;
+            }
+        }
+        self.cleanups = open;
+        outcome
     }
 
     // --- expressions --------------------------------------------------------
