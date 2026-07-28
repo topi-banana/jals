@@ -1278,13 +1278,76 @@ impl Body {
             // to the method the source named. Its parameters need no bindings, because nothing reads them by
             // name — they are forwarded by position.
             let mut insn = Insn::new();
-            let target = Lowering::referenced_method(&method.node, input, index)?;
+            // `T::new` allocates rather than delegating: the object *is* what the interface method returns.
+            if Lowering::constructs(&method.node) {
+                let created = Lowering::constructed_item(&method.node, input, index)?;
+                let struct_type = layout.structs[&created];
+                insn.struct_new_default(struct_type);
+                let arity = index.member(member).params.len();
+                let constructor = index.own_members(created).iter().copied().find(|&id| {
+                    let info = index.member(id);
+                    info.kind == DefKind::Constructor && info.params.len() == arity
+                });
+                if let Some(constructor) = constructor {
+                    let function =
+                        *layout
+                            .functions
+                            .get(&constructor)
+                            .ok_or(WasmError::Unsupported(
+                                "a constructor reference to a constructor with no body",
+                            ))?;
+                    let slot = u32::try_from(lowering.locals.len()).unwrap_or(0) + lowering.next;
+                    lowering.locals.push(layout.class_ref(created)?);
+                    insn.local_set(slot).local_get(slot);
+                    for position in 0..arity {
+                        insn.local_get(
+                            u32::try_from(position + 1).map_err(|_| WasmError::TooLarge)?,
+                        );
+                    }
+                    insn.call(function).local_get(slot);
+                } else if arity > 0 {
+                    return Err(WasmError::Unsupported(
+                        "a constructor reference with no matching constructor",
+                    ));
+                } else if let Some(body) = layout.bodies.get(&created).cloned()
+                    && let Some(class_body) = body
+                        .children()
+                        .find(|child| matches!(child.kind(), CLASS_BODY | ENUM_BODY))
+                {
+                    // No constructor to run the field initialisers, so this runs them — the same gap, and the
+                    // same answer, as a plain `new` of such a class.
+                    let slot = lowering.next;
+                    lowering.locals.push(layout.class_ref(created)?);
+                    lowering.next += 1;
+                    insn.local_set(slot);
+                    lowering.initializers(created, &class_body, slot, true, &mut insn)?;
+                    insn.local_get(slot);
+                }
+                insn.return_();
+                return Ok(Self {
+                    locals: lowering.locals,
+                    code: insn.into_body(),
+                });
+            }
+            let (target, bound) = Lowering::referenced_method(&method.node, input, index)?;
             let function = *layout.functions.get(&target).ok_or(WasmError::Unsupported(
                 "a method reference to a method outside this module",
             ))?;
             let arity = index.member(member).params.len();
-            // A `static` target takes the arguments alone; an instance one takes the first as its receiver,
-            // which is what an *unbound* reference means — and either way the order is already right.
+            // A *bound* reference's receiver was captured when the object was built, so it comes out of the
+            // field rather than off the argument list — and it has to go on first, being the receiver.
+            if bound {
+                let owner = method
+                    .owner
+                    .ok_or(WasmError::Unsupported("a bound reference with no owner"))?;
+                let field = *layout
+                    .capture_slot
+                    .get(&owner)
+                    .ok_or(WasmError::Unsupported("a bound reference with no capture"))?;
+                insn.local_get(0).struct_get(layout.structs[&owner], field);
+            }
+            // A `static` target takes the arguments alone; an unbound instance one takes the first as its
+            // receiver, and forwarding by position already puts it there.
             for position in 0..arity {
                 insn.local_get(u32::try_from(position + 1).map_err(|_| WasmError::TooLarge)?);
             }
@@ -2806,8 +2869,27 @@ impl Lowering<'_> {
                     .ok_or(WasmError::Unsupported(
                         "a method reference with no struct type",
                     ))?;
+                let ty = self.layout.class_ref(item)?;
                 insn.struct_new_default(struct_type);
-                self.layout.class_ref(item).map(Some)
+                let captured = self.layout.captures.get(&item).cloned().unwrap_or_default();
+                if !captured.is_empty() {
+                    let slot = self.scratch(ty);
+                    let first = *self
+                        .layout
+                        .capture_slot
+                        .get(&item)
+                        .ok_or(WasmError::Unsupported("a capture with no field"))?;
+                    insn.local_set(slot);
+                    for (offset, (id, _)) in captured.iter().enumerate() {
+                        insn.local_get(slot);
+                        self.push_capture(*id, insn)?;
+                        let field =
+                            first + u32::try_from(offset).map_err(|_| WasmError::TooLarge)?;
+                        insn.struct_set(struct_type, field);
+                    }
+                    insn.local_get(slot);
+                }
+                Ok(Some(ty))
             }
             ast::Expr::Lambda(lambda) => {
                 let item = self
@@ -4150,6 +4232,33 @@ impl Lowering<'_> {
         Ok(())
     }
 
+    /// Whether a reference names `new` rather than a method.
+    fn constructs(node: &SyntaxNode) -> bool {
+        node.children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .any(|token| token.kind() == jals_syntax::SyntaxKind::NEW_KW)
+    }
+
+    /// The type a `T::new` reference constructs.
+    fn constructed_item(
+        node: &SyntaxNode,
+        input: &WasmInput<'_>,
+        index: &ProjectIndex,
+    ) -> Result<ItemId> {
+        let qualifier = node
+            .children()
+            .find_map(ast::Expr::cast)
+            .ok_or(WasmError::Unsupported(
+                "a constructor reference with no type",
+            ))?;
+        let _ = input;
+        index
+            .item_by_fqn(qualifier.syntax().text().to_string().trim())
+            .ok_or(WasmError::Unsupported(
+                "a constructor reference to an unindexed type",
+            ))
+    }
+
     /// The method a `Type::name` reference names.
     ///
     /// Only a reference qualified by a *type*: a bound one (`x::m`) captures its receiver and a constructor one
@@ -4158,14 +4267,7 @@ impl Lowering<'_> {
         node: &SyntaxNode,
         input: &WasmInput<'_>,
         index: &ProjectIndex,
-    ) -> Result<MemberId> {
-        if node
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .any(|token| token.kind() == jals_syntax::SyntaxKind::NEW_KW)
-        {
-            return Err(WasmError::Unsupported("a constructor reference"));
-        }
+    ) -> Result<(MemberId, bool)> {
         let name = node
             .children_with_tokens()
             .filter_map(jals_syntax::SyntaxElement::into_token)
@@ -4179,23 +4281,19 @@ impl Lowering<'_> {
             .ok_or(WasmError::Unsupported(
                 "a method reference with no qualifier",
             ))?;
-        let owner = input
+        // A qualifier with a *type* of its own is a value, and the reference is bound to it; one that is only
+        // a name the index resolves is a type, and the reference is static or unbound. That is the whole
+        // difference, and it decides where the receiver comes from.
+        let bound = input
             .inference
             .type_of_expr(Lowering::span(qualifier.syntax()))
-            .and_then(Ty::project_id)
-            .or_else(|| {
-                // A type name is a name reference until something resolves it; the index is what does.
-                index
-                    .item_by_fqn(qualifier.syntax().text().to_string().trim())
-                    .or_else(|| {
-                        Some(qualifier.syntax().text().to_string())
-                            .and_then(|text| index.item_by_fqn(text.trim()))
-                    })
-            })
+            .and_then(Ty::project_id);
+        let owner = bound
+            .or_else(|| index.item_by_fqn(qualifier.syntax().text().to_string().trim()))
             .ok_or(WasmError::Unsupported(
                 "a method reference whose qualifier is no indexed type",
             ))?;
-        index
+        let member = index
             .own_members(owner)
             .iter()
             .copied()
@@ -4205,7 +4303,8 @@ impl Lowering<'_> {
             })
             .ok_or(WasmError::Unsupported(
                 "a method reference to a method this cannot find",
-            ))
+            ))?;
+        Ok((member, bound.is_some()))
     }
 
     /// The `(struct field, type)` a captured local is read through, when `id` is one of the enclosing

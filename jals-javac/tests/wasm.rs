@@ -2016,8 +2016,9 @@ public class Uses {
 /// forwarded by position, so nothing needs binding by name. A delegating reference captures nothing, which is
 /// why building the object is a bare allocation.
 ///
-/// A *bound* reference (`x::m`) captures its receiver and a constructor reference allocates; neither is a plain
-/// delegation, and each is reported.
+/// A *bound* reference (`x::m`) captures its receiver, so the delegation reads it from the capture field and
+/// puts it first. A constructor reference allocates instead of delegating: the object *is* what the interface
+/// method returns.
 #[test]
 fn a_method_reference_delegates_to_the_method_it_names() {
     let source = r"
@@ -2048,14 +2049,46 @@ public class Uses {
 ";
     assert_invoke(&[source], "statically", &["21"], "42");
     assert_invoke(&[source], "unbound", &[], "9");
+}
 
-    let constructing = concat!(
-        "public interface Maker { Box make(); } public class Box { int v; } ",
-        "public class U { public static int run(int n) { Maker m = Box::new; return n; } }"
-    );
-    let error = compile(&[constructing]).expect_err("a constructor reference is not compiled yet");
-    assert!(
-        matches!(error, WasmError::Unsupported("a constructor reference")),
-        "got {error}"
-    );
+/// The two reference forms that are not a plain delegation.
+///
+/// `s::scaled` is *bound*: its receiver is captured when the object is built, so the body reads it out of the
+/// capture field and puts it first, being the receiver. `Box::new` allocates — the object is what the interface
+/// method returns — and a class with no constructor still needs its field initialisers run, which is the same
+/// gap a plain `new` of such a class has and gets the same answer.
+#[test]
+fn a_bound_and_a_constructor_reference_run() {
+    let bound = r"
+public interface Doubler { int apply(int n); }
+
+public class Scaler {
+    int factor;
+    Scaler(int factor) { this.factor = factor; }
+    int scaled(int n) { return n * factor; }
+
+    public static int run(int n) {
+        Scaler s = new Scaler(3);
+        Doubler d = s::scaled;
+        return d.apply(n);
+    }
+}
+";
+    assert_invoke(&[bound], "run", &["14"], "42");
+
+    let constructing = r"
+public interface Maker { Box make(); }
+
+public class Box {
+    int v = 5;
+}
+
+public class U {
+    public static int run() {
+        Maker m = Box::new;
+        return m.make().v;
+    }
+}
+";
+    assert_invoke(&[constructing], "run", &[], "5");
 }
