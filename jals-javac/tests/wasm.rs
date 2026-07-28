@@ -1163,9 +1163,9 @@ public class Derived extends Base {
 
 /// A class with *no* declared constructor still runs its field initialisers.
 ///
-/// They run in a constructor, and a class without one has no function to run them in — so the `new` runs them,
-/// the same place it already fills an inner class's enclosing instance and a capturing class's fields. Without
-/// this a `class Box { int value = 9; }` read back as 0: a wrong value in a module that validates.
+/// They run in a constructor, and a class without one had no function to run them in — so `class Box { int value
+/// = 9; }` read back as 0, a wrong value in a module that validates. One is *synthesised* for such a class and
+/// the `new` calls it, which is what gives an initialiser block a slot 0 to read its own fields through.
 #[test]
 fn a_class_with_no_constructor_still_runs_its_field_initialisers() {
     let source = r"
@@ -1181,20 +1181,13 @@ public class Seeded {
 ";
     assert_invoke(&[source], "summed", &[], "9");
 
-    // A `{ … }` block reads its own fields through `this`, which is slot 0 by construction — and run from a
-    // `new` the object is in a local instead. Reported rather than written against the wrong receiver.
+    // A `{ … }` block reads its own fields through `this`, which only a *function* has a slot 0 to be — so one
+    // is synthesised for a class that declares no constructor, and the `new` calls it.
     let blocked = concat!(
-        "public class S { int n = 1; { n = 2; } ",
+        "public class S { int n = 1; { n = n + 4; } ",
         "public static int run() { return new S().n; } }"
     );
-    let error = compile(&[blocked]).expect_err("a block initialiser needs a constructor here");
-    assert!(
-        matches!(
-            error,
-            WasmError::Unsupported("an instance initialiser block in a class with no constructor")
-        ),
-        "got {error}"
-    );
+    assert_invoke(&[blocked], "run", &[], "5");
 }
 
 /// Both instance initialiser forms, in the order they are written.

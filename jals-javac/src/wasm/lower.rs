@@ -121,6 +121,9 @@ struct Method {
     encloses: Option<ItemId>,
     /// How many trailing parameters hold captured locals.
     captures: usize,
+    /// Whether this is the synthesised constructor of a class that declares none: its `node` is the class body
+    /// and its only work is the initialisers.
+    initialises: Option<ItemId>,
     /// The interface method this body implements, when the "method" is a lambda expression rather than a
     /// declaration. A lambda's captures are *fields*, not parameters, so only its own parameters are bound.
     lambda: Option<MemberId>,
@@ -705,6 +708,7 @@ impl CompileWasm {
                     has_result,
                     encloses: None,
                     captures: 0,
+                    initialises: None,
                     lambda: Some(member),
                 });
                 continue;
@@ -716,6 +720,41 @@ impl CompileWasm {
             else {
                 continue;
             };
+            // A class that declares no constructor still has initialisers to run, and an initialiser *block*
+            // reads its own fields through `this` — which only a function has a slot 0 to be. So one is
+            // synthesised, and the `new` calls it.
+            let declares_constructor = body
+                .children()
+                .any(|member| member.kind() == CONSTRUCTOR_DECL);
+            let has_initialisers = body.children().any(|member| {
+                member.kind() == INITIALIZER
+                    || (member.kind() == FIELD_DECL
+                        && member
+                            .children()
+                            .any(|child| ast::Expr::cast(child).is_some()))
+            });
+            if !declares_constructor && has_initialisers {
+                let signature = module.add_type(SubType::plain(CompType::Func {
+                    params: alloc::vec![layout.class_ref(item)?],
+                    results: Vec::new(),
+                }));
+                let function = Module::func_index(out.len());
+                layout.default_constructors.insert(item, function);
+                out.push(Method {
+                    owner: Some(item),
+                    node: body.clone(),
+                    input: position,
+                    signature,
+                    index: function,
+                    export: None,
+                    is_constructor: false,
+                    has_result: false,
+                    encloses: None,
+                    captures: 0,
+                    initialises: Some(item),
+                    lambda: None,
+                });
+            }
             for node in body.children() {
                 if !matches!(node.kind(), METHOD_DECL | CONSTRUCTOR_DECL) {
                     continue;
@@ -781,6 +820,7 @@ impl CompileWasm {
                     has_result,
                     encloses,
                     captures: captured.len(),
+                    initialises: None,
                     lambda: None,
                     export: (is_static && !is_constructor)
                         .then(|| index.member(member).name.clone()),
@@ -813,6 +853,9 @@ struct Layout {
     inner: BTreeMap<ItemId, ItemId>,
     /// The synthetic enclosing-instance field's index, for each inner class.
     outer: BTreeMap<ItemId, u32>,
+    /// The function that runs a constructor-less class's initialisers, for the `new` to call. A block reads its
+    /// own fields through `this`, and only a function has a slot 0 to be `this`.
+    default_constructors: BTreeMap<ItemId, u32>,
     /// Each class's declaration node, so a `new` can reach the field initialisers of a class *other* than the
     /// one being lowered — which is the only way a class with no constructor ever runs them.
     bodies: BTreeMap<ItemId, SyntaxNode>,
@@ -1271,6 +1314,16 @@ impl Body {
 
         // A lambda's parameters live under its own `LambdaParams`, and its captures are fields rather than
         // parameters — so nothing trails them.
+        // The synthesised constructor: `this` is slot 0, so a block initialiser reads its fields the way every
+        // other body does.
+        if let Some(owner) = method.initialises {
+            let mut insn = Insn::new();
+            lowering.initializers(owner, &method.node, 0, false, &mut insn)?;
+            return Ok(Self {
+                locals: lowering.locals,
+                code: insn.into_body(),
+            });
+        }
         if let Some(member) = method.lambda
             && method.node.kind() == METHOD_REF_EXPR
         {
@@ -4022,14 +4075,9 @@ impl Lowering<'_> {
             None if !declares_constructor && arguments.is_empty() => {
                 // No constructor at all, so nothing else will run the field initialisers: without this a
                 // `class Box { int value = 9; }` read back as 0 — a wrong value in a module that validates.
-                if let Some(body) = self.layout.bodies.get(&item).cloned()
-                    && let Some(class_body) = body
-                        .children()
-                        .find(|child| matches!(child.kind(), CLASS_BODY | ENUM_BODY))
-                {
+                if let Some(&initialise) = self.layout.default_constructors.get(&item) {
                     let slot = self.scratch(ty);
-                    insn.local_set(slot);
-                    self.initializers(item, &class_body, slot, true, insn)?;
+                    insn.local_set(slot).local_get(slot).call(initialise);
                     insn.local_get(slot);
                 }
                 // No constructor function to fill the capture fields either, so the `new` fills them — the
