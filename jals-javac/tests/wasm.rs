@@ -891,3 +891,53 @@ fn a_computed_static_initialiser_is_reported() {
         );
     }
 }
+
+/// An array-typed field, in a struct and in a global.
+///
+/// A field's type needs an array type index and an array's element may be a class, so neither can be
+/// laid out before the other. Every type lives in one recursive group, so the fix is index
+/// pre-assignment rather than anything to do with wasm's type system: classes reserve their indices,
+/// then the arrays get theirs, then the struct bodies are written. Before that, an `int[] cells;`
+/// field reported that `int[]` had no wasm representation — which is not true of `int[]`.
+#[test]
+fn an_array_typed_field_is_laid_out() {
+    let source = r"
+public class Bag {
+    int[] cells;
+    Bag[] siblings;
+    static int[] shared;
+
+    public static int through_a_field(int n) {
+        Bag bag = new Bag();
+        bag.cells = new int[3];
+        bag.cells[1] = n;
+        bag.cells[1] += 4;
+        int total = 0;
+        for (int cell : bag.cells) {
+            total += cell;
+        }
+        return total;
+    }
+
+    // An array *of* the class whose field it is: the recursive group is what makes this legal.
+    public static int through_a_self_array(int n) {
+        Bag bag = new Bag();
+        bag.siblings = new Bag[2];
+        bag.siblings[0] = new Bag();
+        bag.siblings[0].cells = new int[1];
+        bag.siblings[0].cells[0] = n;
+        return bag.siblings[0].cells[0] + bag.siblings.length;
+    }
+
+    public static int through_a_global(int n) {
+        shared = new int[2];
+        shared[0] = n;
+        shared[1] = n * 2;
+        return shared[0] + shared[1];
+    }
+}
+";
+    assert_invoke(&[source], "through_a_field", &["5"], "9");
+    assert_invoke(&[source], "through_a_self_array", &["7"], "9");
+    assert_invoke(&[source], "through_a_global", &["3"], "9");
+}

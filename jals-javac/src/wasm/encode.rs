@@ -361,6 +361,26 @@ impl Module {
         u32::try_from(self.types.len() - 1).unwrap_or(u32::MAX)
     }
 
+    /// Reserve a type index whose body is filled in by [`set_type`](Self::set_type) later.
+    ///
+    /// Every type goes in one recursive group, so an index may be *referred to* before its body
+    /// exists — which is what lets a class's field mention an array type declared after it and an
+    /// array's element mention a class. The placeholder is a fieldless struct: if a caller forgets to
+    /// fill one, the module still encodes, and the empty struct is what a reader sees.
+    pub(crate) fn reserve_type(&mut self) -> u32 {
+        self.add_type(SubType::plain(CompType::Struct(Vec::new())))
+    }
+
+    /// Fill in a body reserved by [`reserve_type`](Self::reserve_type).
+    pub(crate) fn set_type(&mut self, index: u32, ty: SubType) {
+        if let Some(slot) = usize::try_from(index)
+            .ok()
+            .and_then(|index| self.types.get_mut(index))
+        {
+            *slot = ty;
+        }
+    }
+
     /// The index a defined function will have. Nothing is imported yet, so the function index
     /// space starts at the definitions; a host import would occupy the low indices and shift these,
     /// which is why the mapping is written out rather than assumed at the call site.

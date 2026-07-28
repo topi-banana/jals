@@ -124,10 +124,13 @@ impl CompileWasm {
         let mut module = Module::new();
         let mut layout = Layout::default();
 
-        // Pass 1: every class gets a struct type, in an order where a supertype is declared first
-        // so its field prefix is known when the subtype is laid out.
-        for item in Self::classes_in_order(inputs, index)? {
-            layout.declare_class(item, index, &mut module)?;
+        // Pass 1: every class *reserves* a struct type index, in an order where a supertype comes
+        // first so its field prefix is known when the subtype is laid out. Only the index is fixed
+        // here — the body waits, because a field of array type needs an array type index and an
+        // array's element may be one of these classes.
+        let classes = Self::classes_in_order(inputs, index)?;
+        for &item in &classes {
+            layout.reserve_class(item, index, &mut module);
         }
         // Then every array type the program mentions. wasm has one declared type per element
         // type, and a body cannot introduce one mid-lowering, so they are collected from the
@@ -142,6 +145,10 @@ impl CompileWasm {
                 let ty = input.inference.type_of_def(def.id).clone();
                 layout.declare_array(&ty, &mut module)?;
             }
+        }
+        // Now every index is known, so the struct bodies can name array types and vice versa.
+        for &item in &classes {
+            layout.fill_class(item, index, &mut module)?;
         }
         // Then every `static` field, which is module state rather than a struct slot. After the
         // arrays, because a `static int[]` field's global needs its array type to exist.
@@ -324,15 +331,19 @@ struct Layout {
 }
 
 impl Layout {
-    /// Give `item` a struct type whose fields are its supertype's followed by its own.
-    fn declare_class(
-        &mut self,
-        item: ItemId,
-        index: &ProjectIndex,
-        module: &mut Module,
-    ) -> Result<()> {
+    /// Reserve `item`'s struct type index and work out which fields it holds.
+    ///
+    /// Reserving rather than declaring is what makes an array-typed field work: the field's *type*
+    /// needs an array type index, and an array's element may be a class — so neither can be laid out
+    /// before the other. Every type lives in one recursive group, so an index may be referred to
+    /// before its body exists; [`fill_class`](Self::fill_class) writes the body once every index is
+    /// known.
+    ///
+    /// The field list itself needs no types, only its supertype's list first — which is why
+    /// `classes_in_order` still walks supertypes first.
+    fn reserve_class(&mut self, item: ItemId, index: &ProjectIndex, module: &mut Module) {
         if self.structs.contains_key(&item) {
-            return Ok(());
+            return;
         }
         let parent =
             CompileWasm::superclass(item, index).filter(|id| self.structs.contains_key(id));
@@ -346,7 +357,16 @@ impl Layout {
                 members.push(member);
             }
         }
+        self.structs.insert(item, module.reserve_type());
+        self.fields.insert(item, members);
+    }
 
+    /// Write `item`'s struct body: its supertype's fields followed by its own, at their wasm types.
+    fn fill_class(&self, item: ItemId, index: &ProjectIndex, module: &mut Module) -> Result<()> {
+        let Some(&type_index) = self.structs.get(&item) else {
+            return Ok(());
+        };
+        let members = self.fields.get(&item).cloned().unwrap_or_default();
         let mut fields = Vec::with_capacity(members.len());
         for &member in &members {
             fields.push(FieldType {
@@ -356,14 +376,16 @@ impl Layout {
                 mutable: true,
             });
         }
-
-        let type_index = module.add_type(SubType {
-            is_final: false,
-            supertype: parent.and_then(|id| self.structs.get(&id)).copied(),
-            comp: CompType::Struct(fields),
-        });
-        self.structs.insert(item, type_index);
-        self.fields.insert(item, members);
+        let parent =
+            CompileWasm::superclass(item, index).and_then(|id| self.structs.get(&id).copied());
+        module.set_type(
+            type_index,
+            SubType {
+                is_final: false,
+                supertype: parent,
+                comp: CompType::Struct(fields),
+            },
+        );
         Ok(())
     }
 
