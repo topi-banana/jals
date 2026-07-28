@@ -2239,3 +2239,95 @@ public class Reader {
     assert_invoke(&[source], "widened", &[], "100");
     assert_invoke(&[source], "bumped", &[], "128");
 }
+
+/// A class is initialised on its first *use*, not at a fixed point in a module-wide sequence.
+///
+/// JLS §12.4.1 initialises a class when something first reaches it, and one start function cannot
+/// express that: a class declared later may be read by one declared earlier. So each class's
+/// initialisation is a guarded function of its own, called from the start function in source order and
+/// again from every `static` access — the guard makes all but the first call a load and a branch.
+///
+/// Without it an `enum` constant built from another class's `static` field read that field as zero,
+/// which is a wrong value in a module that validates. Both orders are tested, because getting it right
+/// only when the dependency happens to be declared first is not getting it right.
+#[test]
+fn a_class_is_initialised_before_its_statics_are_read() {
+    let forward = r"
+public class Holder { static int scale = compute(); static int compute() { return 3; } }
+public enum Coin {
+    ONE(1), TWO(2);
+    final int v;
+    Coin(int n) { v = n * Holder.scale; }
+}
+public class Reader { public static int ordered() { return Coin.TWO.v; } }
+";
+    assert_invoke(&[forward], "ordered", &[], "6");
+
+    let reversed = r"
+public enum Coin {
+    ONE(1), TWO(2);
+    final int v;
+    Coin(int n) { v = n * Holder.scale; }
+}
+public class Holder { static int scale = compute(); static int compute() { return 3; } }
+public class Reader { public static int ordered() { return Coin.TWO.v; } }
+";
+    assert_invoke(&[reversed], "ordered", &[], "6");
+
+    // A field initialiser and a `static { … }` block are one sequence in *source* order (§12.4.2), not
+    // two: running every field before every block left `b` as 1.
+    let interleaved = r"
+public class Seq {
+    static int a = one();
+    static { a = a * 2; }
+    static int b = a;
+    static int one() { return 1; }
+}
+public class Reader { public static int seq() { return Seq.a * 10 + Seq.b; } }
+";
+    assert_invoke(&[interleaved], "seq", &[], "22");
+}
+
+/// A constructor runs what the source does not write: the superclass's construction, then the
+/// initialisers.
+///
+/// Four shapes, because each reaches the chain differently. `this(…)` runs it through the constructor
+/// it delegates to and must not run it again; an explicit `super(args)` *is* the call; a class three
+/// deep with a middle constructor that delegates nowhere needs the implicit one at every level; and a
+/// class with no initialisers of its own is a link in the chain rather than its end.
+#[test]
+fn every_constructor_reaches_the_superclass_chain_once() {
+    let source = r"
+public class Base { int b = 1; }
+
+public class Leaf extends Base {
+    int seen = 0;
+    Leaf() { seen = seen + 10; }
+    Leaf(int n) { this(); seen = seen + n; }
+}
+
+public class Taking {
+    int b = 1;
+    int got;
+    Taking(int n) { got = n; }
+}
+
+public class Passing extends Taking {
+    int own = 2;
+    Passing() { super(7); }
+}
+
+public class A0 { int a = 1; }
+public class A1 extends A0 { int b = 2; A1() { } }
+public class A2 extends A1 { int c = 4; }
+
+public class Chains {
+    public static int delegating() { Leaf l = new Leaf(5); return l.b * 1000 + l.seen; }
+    public static int explicitSuper() { Passing p = new Passing(); return p.b * 100 + p.got * 10 + p.own; }
+    public static int deep() { A2 x = new A2(); return x.a + x.b + x.c; }
+}
+";
+    assert_invoke(&[source], "delegating", &[], "1015");
+    assert_invoke(&[source], "explicitSuper", &[], "172");
+    assert_invoke(&[source], "deep", &[], "7");
+}

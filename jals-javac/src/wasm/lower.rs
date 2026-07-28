@@ -46,9 +46,9 @@ use jals_hir::{
     DefId, DefKind, FileId, ItemId, MemberId, Primitive, ProjectIndex, Resolved, Ty, TypeInference,
 };
 use jals_syntax::SyntaxKind::{
-    CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL, ENUM_BODY, ENUM_CONSTANT, ENUM_DECL, FIELD_DECL,
-    INITIALIZER, INTERFACE_DECL, LAMBDA_EXPR, METHOD_DECL, METHOD_REF_EXPR, MODIFIERS, NEW_EXPR,
-    RECORD_DECL,
+    ANNOTATION_TYPE_DECL, CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL, ENUM_BODY, ENUM_CONSTANT,
+    ENUM_DECL, FIELD_DECL, INITIALIZER, INTERFACE_DECL, LAMBDA_EXPR, METHOD_DECL, METHOD_REF_EXPR,
+    MODIFIERS, NEW_EXPR, RECORD_DECL,
 };
 use jals_syntax::ast::{self, AstNode as _};
 use jals_syntax::{SyntaxNode, SyntaxToken};
@@ -245,6 +245,35 @@ impl CompileWasm {
         // *declared* method has its index, so the indices stay in step with the order bodies are pushed.
         let synthesised = Self::record_members(inputs, index, &mut layout, &mut module, &methods)?;
 
+        // Each class's initialisation is a function of its own, reserved before any body so a body can
+        // call it. A body has to: JLS §12.4.1 initialises a class on its first *use*, and this module's
+        // one start function cannot express that ordering — a class declared later may be read by one
+        // declared earlier, which is what left an `enum` constant built from a `static` field that was
+        // still zero.
+        let blocks: Vec<(usize, ItemId, ast::Block)> = inputs
+            .iter()
+            .enumerate()
+            .flat_map(|(position, input)| {
+                Self::static_initializers(input.root, input, index)
+                    .into_iter()
+                    .map(move |(owner, block)| (position, owner, block))
+            })
+            .collect();
+        let state = StaticState {
+            deferred: &deferred,
+            constants: &constants,
+            blocks: &blocks,
+        };
+        Self::reserve_class_inits(
+            inputs,
+            index,
+            &mut layout,
+            &mut module,
+            &state,
+            methods.len() + synthesised.len(),
+        );
+        let inits = Self::class_initializers(inputs, index, &layout, &state, &mut module)?;
+
         // Pass 3: bodies.
         for method in &methods {
             let input = &inputs[method.input];
@@ -263,87 +292,178 @@ impl CompileWasm {
         for func in synthesised {
             module.funcs.push(func);
         }
-        // A `static` initialiser cannot live in a global's constant expression, so it runs in the
-        // module's start function — which an engine calls before anything else, exactly as a JVM runs
-        // `<clinit>` before the first use of the class.
-        Self::class_initializer(inputs, index, &layout, &deferred, &constants, &mut module)?;
+        for func in &inits {
+            module.funcs.push(func.clone());
+        }
+        // Every class's initialisation, called in source order. A class whose initialisers read
+        // another's have already run it by then — each one guards itself, so calling it again is free.
+        if !inits.is_empty() {
+            let mut insn = Insn::new();
+            for &(function, _) in layout.class_inits.values() {
+                insn.call(function);
+            }
+            let signature = module.add_type(SubType::plain(CompType::Func {
+                params: Vec::new(),
+                results: Vec::new(),
+            }));
+            let start = Module::func_index(module.funcs.len());
+            module.funcs.push(Func {
+                type_index: signature,
+                locals: Vec::new(),
+                body: insn.into_body(),
+            });
+            module.start = Some(start);
+        }
         module.finish().ok_or(WasmError::TooLarge)
     }
 
-    /// Synthesise the start function: every computed `static` field initialiser and every
-    /// `static { … }` block, in source order, or nothing when there are none.
-    fn class_initializer(
+    /// Give every class with static state a function index and a "has run" flag.
+    ///
+    /// Reserved before any body is lowered, because a body calls one: a `static` field read has to
+    /// initialise the class that declares it first, and that class may be declared *after* the one
+    /// reading it. The flag is what makes calling it again free, and what makes the re-entrant call a
+    /// class's own initialiser produces a no-op rather than a loop — the same answer §12.4.2 gives.
+    fn reserve_class_inits(
+        inputs: &[WasmInput<'_>],
+        index: &ProjectIndex,
+        layout: &mut Layout,
+        module: &mut Module,
+        state: &StaticState<'_>,
+        mut next: usize,
+    ) {
+        let StaticState {
+            deferred,
+            constants,
+            blocks,
+        } = *state;
+        // Source order, so a module with no cross-class dependency runs exactly what it used to.
+        let mut owners = Vec::new();
+        for (position, input) in inputs.iter().enumerate() {
+            let mut push = |owner: ItemId| {
+                if !owners.contains(&owner) {
+                    owners.push(owner);
+                }
+            };
+            for node in input.root.descendants() {
+                if !Self::declares_a_type(&node) {
+                    continue;
+                }
+                let Ok(owner) = Layout::owner_of(&node, input, index) else {
+                    continue;
+                };
+                let has_constants = constants.iter().any(|&(_, item, _)| item == owner);
+                let has_deferred = deferred
+                    .iter()
+                    .any(|(member, _)| index.member(*member).owner == owner);
+                let has_blocks = blocks
+                    .iter()
+                    .any(|&(at, item, _)| at == position && item == owner);
+                if has_constants || has_deferred || has_blocks {
+                    push(owner);
+                }
+            }
+        }
+        for owner in owners {
+            let mut init = Insn::new();
+            init.i32_const(0);
+            module.globals.push(Global {
+                ty: ValType::I32,
+                init: init.into_body(),
+            });
+            let flag = u32::try_from(module.globals.len() - 1).unwrap_or(0);
+            layout
+                .class_inits
+                .insert(owner, (Module::func_index(next), flag));
+            next += 1;
+        }
+    }
+
+    /// One function per class with static state: its `enum` constants, then its computed `static`
+    /// field initialisers and `static { … }` blocks, in source order (§8.9.3, §12.4.2).
+    fn class_initializers(
         inputs: &[WasmInput<'_>],
         index: &ProjectIndex,
         layout: &Layout,
-        deferred: &[(MemberId, ast::Expr)],
-        constants: &[(MemberId, ItemId, SyntaxNode)],
+        state: &StaticState<'_>,
         module: &mut Module,
-    ) -> Result<()> {
-        let blocks: Vec<(usize, ast::Block)> = inputs
-            .iter()
-            .enumerate()
-            .flat_map(|(position, input)| {
-                Self::static_initializers(input.root).map(move |block| (position, block))
-            })
-            .collect();
-        if deferred.is_empty() && blocks.is_empty() && constants.is_empty() {
-            return Ok(());
-        }
-        let mut insn = Insn::new();
-        // Every constant first, before any user initialiser: a `static { … }` block or a field
-        // initialiser may name one, and §8.9.3 builds the constants before either runs. Their own
-        // arguments are expressions, so this needs the same lowering a body does — hence a pass over
-        // the inputs of its own, ahead of the pass that runs the user initialisers.
-        let mut locals = Vec::new();
-        for input in inputs {
-            let mut lowering = Lowering::for_static(input, index, layout, locals);
-            for (member, owner, node) in constants {
-                if index.member(*member).file != input.file {
-                    continue;
-                }
-                let global = *layout
-                    .statics
-                    .get(member)
-                    .ok_or(WasmError::Unsupported("an `enum` constant with no global"))?;
-                lowering.enum_constant(*owner, node, &mut insn)?;
-                insn.global_set(global);
-            }
-            locals = lowering.locals;
-        }
-        for (position, input) in inputs.iter().enumerate() {
-            let mut lowering = Lowering::for_static(input, index, layout, locals);
-            for (member, value) in deferred {
-                if index.member(*member).file != input.file {
-                    continue;
-                }
-                let global = *layout
-                    .statics
-                    .get(member)
-                    .ok_or(WasmError::Unsupported("a `static` field with no global"))?;
-                let declared = index.resolved_member_ty(*member);
-                lowering.assign_static(value, &declared, global, &mut insn)?;
-            }
-            for (owner, block) in &blocks {
-                if *owner != position {
-                    continue;
-                }
-                lowering.block(block, &mut insn)?;
-            }
-            locals = lowering.locals;
-        }
+    ) -> Result<Vec<Func>> {
+        let StaticState {
+            deferred,
+            constants,
+            blocks,
+        } = *state;
         let signature = module.add_type(SubType::plain(CompType::Func {
             params: Vec::new(),
             results: Vec::new(),
         }));
-        let start = Module::func_index(module.funcs.len());
-        module.funcs.push(Func {
-            type_index: signature,
-            locals,
-            body: insn.into_body(),
-        });
-        module.start = Some(start);
-        Ok(())
+        let mut out = Vec::new();
+        for (&owner, &(_, flag)) in &layout.class_inits {
+            let mut insn = Insn::new();
+            // The guard, and the flag set *before* the body: a class whose initialiser reaches back to
+            // its own statics gets the values written so far rather than a second run.
+            insn.block();
+            insn.global_get(flag);
+            insn.br_if(0);
+            insn.i32_const(1);
+            insn.global_set(flag);
+            let mut locals = Vec::new();
+            for (position, input) in inputs.iter().enumerate() {
+                let mut lowering = Lowering::for_static(input, index, layout, locals);
+                // Every constant first: a `static { … }` block or a field initialiser may name one, and
+                // §8.9.3 builds them before either runs.
+                for (member, item, node) in constants {
+                    if *item != owner || index.member(*member).file != input.file {
+                        continue;
+                    }
+                    let global = *layout
+                        .statics
+                        .get(member)
+                        .ok_or(WasmError::Unsupported("an `enum` constant with no global"))?;
+                    lowering.enum_constant(*item, node, &mut insn)?;
+                    insn.global_set(global);
+                }
+                // A field initialiser and a `static { … }` block are one sequence in *source* order
+                // (§12.4.2), not two: `static int a = 1; static { a = 2; } static int b = a;` leaves `b`
+                // as 2, and running every field before every block left it as 1.
+                let mut sequence: Vec<(usize, StaticStep<'_>)> = Vec::new();
+                for entry in deferred {
+                    let info = index.member(entry.0);
+                    if info.owner == owner && info.file == input.file {
+                        sequence.push((info.name_range.start, StaticStep::Field(entry)));
+                    }
+                }
+                for (at, item, block) in blocks {
+                    if *at == position && *item == owner {
+                        sequence.push((
+                            usize::from(block.syntax().text_range().start()),
+                            StaticStep::Block(block),
+                        ));
+                    }
+                }
+                sequence.sort_by_key(|&(at, _)| at);
+                for (_, step) in sequence {
+                    match step {
+                        StaticStep::Field((member, value)) => {
+                            let global = *layout
+                                .statics
+                                .get(member)
+                                .ok_or(WasmError::Unsupported("a `static` field with no global"))?;
+                            let declared = index.resolved_member_ty(*member);
+                            lowering.assign_static(value, &declared, global, &mut insn)?;
+                        }
+                        StaticStep::Block(block) => lowering.block(block, &mut insn)?,
+                    }
+                }
+                locals = lowering.locals;
+            }
+            insn.end();
+            out.push(Func {
+                type_index: signature,
+                locals,
+                body: insn.into_body(),
+            });
+        }
+        Ok(out)
     }
 
     /// A record's canonical constructor and one accessor per component, written out rather than walked.
@@ -448,18 +568,54 @@ impl CompileWasm {
         Ok(out)
     }
 
-    /// Every `static { … }` block in `root`, in source order.
-    fn static_initializers(root: &SyntaxNode) -> impl Iterator<Item = ast::Block> + '_ {
-        root.descendants()
-            .filter(|node| node.kind() == INITIALIZER)
-            .filter(|node| {
-                node.children()
+    /// Every `static { … }` block in `root`, in source order, with the type that declares it.
+    ///
+    /// The owner is what groups a block with the field initialisers it runs beside: JLS §12.4.2 runs
+    /// one class's static initialisers as one sequence, and a block that reads a field of *another*
+    /// class is what makes the grouping observable.
+    fn static_initializers(
+        root: &SyntaxNode,
+        input: &WasmInput<'_>,
+        index: &ProjectIndex,
+    ) -> Vec<(ItemId, ast::Block)> {
+        let mut out = Vec::new();
+        for node in root.descendants() {
+            if node.kind() != INITIALIZER
+                || !node
+                    .children()
                     .filter(|child| child.kind() == MODIFIERS)
                     .flat_map(|modifiers| modifiers.children_with_tokens())
                     .filter_map(jals_syntax::SyntaxElement::into_token)
                     .any(|token| token.kind() == jals_syntax::SyntaxKind::STATIC_KW)
-            })
-            .filter_map(|node| node.children().find_map(ast::Block::cast))
+            {
+                continue;
+            }
+            let owner = node
+                .ancestors()
+                .find(Self::declares_a_type)
+                .and_then(|declaration| {
+                    declaration
+                        .children_with_tokens()
+                        .filter_map(jals_syntax::SyntaxElement::into_token)
+                        .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+                })
+                .and_then(|name| {
+                    index.item_by_decl(input.file, usize::from(name.text_range().start()))
+                });
+            if let (Some(owner), Some(block)) = (owner, node.children().find_map(ast::Block::cast))
+            {
+                out.push((owner, block));
+            }
+        }
+        out
+    }
+
+    /// Whether a node is a type declaration, which is what a member's owner is found by walking to.
+    fn declares_a_type(node: &SyntaxNode) -> bool {
+        matches!(
+            node.kind(),
+            CLASS_DECL | INTERFACE_DECL | ENUM_DECL | RECORD_DECL | ANNOTATION_TYPE_DECL
+        )
     }
 
     /// Every project class, supertypes first.
@@ -884,6 +1040,13 @@ struct Layout {
     /// Each `static` field's global index. A Java `static` field is module state, which is what a
     /// wasm global is; an instance field is a struct slot instead.
     statics: BTreeMap<MemberId, u32>,
+    /// `(initialiser function, "has run" flag global)` for each class with static state.
+    ///
+    /// A JVM initialises a class on its first *use* (JLS §12.4.1), and one start function cannot
+    /// express that: a class declared later may be read by one declared earlier. So each class's
+    /// initialisation is its own guarded function, called from the start function in source order and
+    /// again from every `static` access — the guard makes all but the first call free.
+    class_inits: BTreeMap<ItemId, (u32, u32)>,
     /// `(element type, array type index)`. A `Vec` because `ValType` has no ordering and a program
     /// has a handful of distinct element types.
     arrays: Vec<(ValType, u32)>,
@@ -1282,6 +1445,26 @@ impl Layout {
         let slot = self.fields.get(&owner)?.iter().position(|&f| f == member)?;
         u32::try_from(slot).ok()
     }
+}
+
+/// Everything that runs in some class's initialisation, before it is grouped by the class it belongs to.
+#[derive(Clone, Copy)]
+struct StaticState<'a> {
+    /// `(field, initialiser)` for every `static` field whose value has to be computed.
+    deferred: &'a [(MemberId, ast::Expr)],
+    /// `(field, enum, declaration)` for every `enum` constant, which is an allocation rather than a
+    /// constant expression.
+    constants: &'a [(MemberId, ItemId, SyntaxNode)],
+    /// `(input, owner, block)` for every `static { … }`.
+    blocks: &'a [(usize, ItemId, ast::Block)],
+}
+
+/// One step of a class's static sequence, which JLS §12.4.2 runs in *source* order.
+enum StaticStep<'a> {
+    /// A `static` field's computed initialiser.
+    Field(&'a (MemberId, ast::Expr)),
+    /// A `static { … }` block.
+    Block(&'a ast::Block),
 }
 
 /// One method body being lowered.
@@ -3269,6 +3452,7 @@ impl Lowering<'_> {
                 .layout
                 .val_type(&self.index.resolved_member_ty(member))?;
             let global = self.layout.statics.get(&member).ok_or_else(unresolved)?;
+            self.ensure_initialised(member, insn);
             insn.global_get(*global);
             return Ok(ty);
         }
@@ -3280,6 +3464,21 @@ impl Lowering<'_> {
         let struct_type = self.layout.structs[&owner];
         insn.local_get(0).struct_get(struct_type, slot);
         self.layout.val_type(&self.index.resolved_member_ty(member))
+    }
+
+    /// Initialise the class that declares `member` before its `static` field is touched.
+    ///
+    /// JLS §12.4.1 initialises a class on its first *use*, and a `static` field access is one. The
+    /// function guards itself, so all but the first call is a load and a branch — and a class reaching
+    /// its own statics mid-initialisation gets the values written so far, which is what §12.4.2 says.
+    fn ensure_initialised(&self, member: MemberId, insn: &mut Insn) {
+        if let Some(&(function, _)) = self
+            .layout
+            .class_inits
+            .get(&self.index.member(member).owner)
+        {
+            insn.call(function);
+        }
     }
 
     /// The field an unqualified name reaches when nothing in the file declared it: one of a supertype's.
@@ -3423,6 +3622,7 @@ impl Lowering<'_> {
                 .statics
                 .get(&member)
                 .ok_or_else(|| WasmError::Unresolved(access.field().unwrap_or_default()))?;
+            self.ensure_initialised(member, insn);
             insn.global_get(*global);
             return Ok(ty);
         }
@@ -3983,6 +4183,7 @@ impl Lowering<'_> {
                         *self.layout.statics.get(&member).ok_or_else(|| {
                             WasmError::Unresolved(access.field().unwrap_or_default())
                         })?;
+                    self.ensure_initialised(member, insn);
                     return Ok(Place::Global { index: global, ty });
                 }
                 let slot = self
@@ -4025,6 +4226,7 @@ impl Lowering<'_> {
                 let member = member.ok_or_else(unresolved)?;
                 if self.index.member(member).modifiers.is_static {
                     let global = *self.layout.statics.get(&member).ok_or_else(unresolved)?;
+                    self.ensure_initialised(member, insn);
                     return Ok(Place::Global { index: global, ty });
                 }
                 let owner = self.owner.ok_or_else(unresolved)?;
