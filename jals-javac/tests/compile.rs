@@ -3607,6 +3607,37 @@ public class Uses {
     assert_eq!(run(source, "Uses"), "42\n42\n42\n42\n");
 }
 
+/// An *unbound* instance method reference: `Type::method`, where the interface supplies the receiver.
+///
+/// The referenced method takes one fewer parameter than the interface declares, because the interface's first
+/// argument *is* the receiver. The handle is `invokeVirtual` for the same reason a bound reference's is — the
+/// method is called on a receiver either way, and the handle cannot tell where that receiver came from.
+#[test]
+fn an_unbound_instance_reference_takes_its_receiver_as_the_first_argument() {
+    let source = r"
+interface Reader {
+    int read(Box b);
+}
+
+class Box {
+    int value = 9;
+    int get() { return value; }
+}
+
+public class Uses {
+    public static void main(String[] args) {
+        Reader r = Box::get;
+        System.out.println(r.read(new Box()));
+    }
+}
+";
+    if !java_available() {
+        compile(source).expect("compile");
+        return;
+    }
+    assert_eq!(run(source, "Uses"), "9\n");
+}
+
 /// A *bound* method reference and a constructor reference.
 ///
 /// `u::scaled` captures its receiver, so the call site takes it as an argument and the handle is

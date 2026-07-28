@@ -1095,6 +1095,10 @@ impl Compile {
         if constructs {
             return Self::constructor_reference(owner_item, member, item, context, pool);
         }
+        let arity = context.index.member(member).params.len();
+        // Set when the referenced method turns out to be an instance one named through its *type*, whose
+        // receiver the interface supplies as its first argument.
+        let unbound = core::cell::Cell::new(false);
         // The method's own name is a direct token of the reference: everything before the `::` is a node.
         let referenced = node
             .children_with_tokens()
@@ -1114,7 +1118,29 @@ impl Compile {
                     && info.modifiers.is_static == receiver.is_none()
                     // A bound reference passes the receiver separately, so the interface method's own
                     // arity is what the referenced method takes.
-                    && info.params.len() == context.index.member(member).params.len()
+                    && info.params.len() == arity
+            })
+            // Not found as that shape: a reference qualified by a *type* may still name an instance method,
+            // and then the interface's first argument is the receiver — `Type::method` with one fewer
+            // parameter than the interface declares. That is the *unbound* form.
+            .or_else(|| {
+                (receiver.is_none() && arity > 0)
+                    .then(|| {
+                        context
+                            .index
+                            .own_members(owner_item)
+                            .iter()
+                            .copied()
+                            .find(|&id| {
+                                let info = context.index.member(id);
+                                info.kind == DefKind::Method
+                                    && info.name == referenced.text()
+                                    && !info.modifiers.is_static
+                                    && info.params.len() == arity - 1
+                            })
+                    })
+                    .flatten()
+                    .inspect(|_| unbound.set(true))
             })
             .ok_or(LowerError::Unsupported(
                 "a method reference to a method this cannot find",
@@ -1126,9 +1152,14 @@ impl Compile {
             false,
         )?);
 
-        // 6 is `invokeStatic` and 5 is `invokeVirtual` (JVMS Table 5.4.3.5-A): a bound reference calls the
-        // method *on* the captured receiver.
-        let kind = if receiver.is_some() { 5 } else { 6 };
+        // 6 is `invokeStatic` and 5 is `invokeVirtual` (JVMS Table 5.4.3.5-A): both a bound reference and an
+        // unbound one call the method *on* a receiver — the difference is only where that receiver comes
+        // from, and the handle cannot tell.
+        let kind = if receiver.is_some() || unbound.get() {
+            5
+        } else {
+            6
+        };
         let handle = pool
             .method_handle_index(kind, &owner, referenced.text(), &target_descriptor, false)
             .ok_or(AsmError::PoolFull)?;
