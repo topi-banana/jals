@@ -1887,3 +1887,53 @@ public class Host {
     // 7 + 5, plus 40 + 7.
     assert_invoke(&[source], "run", &["7"], "59");
 }
+
+/// An anonymous class — `new I() { … }` — is its own struct type.
+///
+/// It has no name and no declaration keyword, so it is recognised by shape and its item is found by the
+/// `new` keyword's position, which is the only offset the index could key it on. The `new` then builds
+/// *that* type rather than the one it named, and the type it named becomes what the dispatch chain tests
+/// against.
+///
+/// One that *captures* is still reported. An anonymous class never declares a constructor, so it lands on
+/// the "capturing class with no declared constructor" report — and the `new`-fills-the-fields fix that
+/// would lift it runs into a separate `anyref`-versus-struct mismatch, which is not something to leave
+/// half-done in the emitter.
+#[test]
+fn an_anonymous_class_is_its_own_struct_type() {
+    let source = r"
+public interface Shape { int area(); }
+
+public class Areas {
+    static Shape fixed_() {
+        return new Shape() {
+            public int area() { return 3; }
+        };
+    }
+
+    // A second one gets its own type, and the dispatch chain has to tell them apart.
+    static Shape other() {
+        return new Shape() {
+            public int area() { return 10; }
+        };
+    }
+
+    public static int run(int n) { return fixed_().area() + other().area() + n; }
+}
+";
+    assert_invoke(&[source], "run", &["1"], "14");
+
+    let capturing = concat!(
+        "public interface Shape { int area(); } ",
+        "public class A { static Shape of(int n) { return new Shape() { public int area() { return n; } }; } ",
+        "public static int run(int n) { return of(n).area(); } }"
+    );
+    let error = compile(&[capturing]).expect_err("a capturing anonymous class is not lowered yet");
+    assert!(
+        matches!(
+            error,
+            WasmError::Unsupported("a capturing class with no declared constructor")
+        ),
+        "got {error}"
+    );
+}

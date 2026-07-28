@@ -47,7 +47,7 @@ use jals_hir::{
 };
 use jals_syntax::SyntaxKind::{
     CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL, ENUM_BODY, ENUM_CONSTANT, ENUM_DECL, FIELD_DECL,
-    INITIALIZER, INTERFACE_DECL, METHOD_DECL, MODIFIERS, RECORD_DECL,
+    INITIALIZER, INTERFACE_DECL, METHOD_DECL, MODIFIERS, NEW_EXPR, RECORD_DECL,
 };
 use jals_syntax::ast::{self, AstNode as _};
 use jals_syntax::{SyntaxNode, SyntaxToken};
@@ -462,18 +462,13 @@ impl CompileWasm {
                 if let Some(what) = Self::unrepresentable_kind(node.kind()) {
                     return Err(WasmError::Unsupported(what));
                 }
-                let name = Self::name_token(&node)
-                    .ok_or(WasmError::Unsupported("a class with no name"))?;
+                let Some(item) = Self::item_of(&node, input, index)? else {
+                    continue;
+                };
                 if node.kind() == INTERFACE_DECL {
-                    let item = index
-                        .item_by_decl(input.file, usize::from(name.text_range().start()))
-                        .ok_or_else(|| WasmError::Unresolved(name.text().into()))?;
                     interfaces.push(item);
                     continue;
                 }
-                let item = index
-                    .item_by_decl(input.file, usize::from(name.text_range().start()))
-                    .ok_or_else(|| WasmError::Unresolved(name.text().into()))?;
                 let captured = Self::captured_by(&node, input);
                 if !captured.is_empty() {
                     captures.push((item, captured));
@@ -526,7 +521,7 @@ impl CompileWasm {
             matches!(
                 node.kind(),
                 CLASS_DECL | INTERFACE_DECL | ENUM_DECL | RECORD_DECL | ANNOTATION_TYPE_DECL
-            )
+            ) || Self::is_anonymous(node)
         })
     }
 
@@ -572,6 +567,29 @@ impl CompileWasm {
             }
         }
         out
+    }
+
+    /// Whether `node` is an anonymous class body: a `new` with a class body of its own. It is a type
+    /// declaration with no name and no keyword, so it is recognised by shape; the index keys its item on
+    /// the `new` keyword's position, which is the only offset it can be found by.
+    fn is_anonymous(node: &SyntaxNode) -> bool {
+        node.kind() == NEW_EXPR && node.children().any(|child| child.kind() == CLASS_BODY)
+    }
+
+    /// The item a type declaration declares, whether it has a name to look up or only a position.
+    fn item_of(
+        node: &SyntaxNode,
+        input: &WasmInput<'_>,
+        index: &ProjectIndex,
+    ) -> Result<Option<ItemId>> {
+        if Self::is_anonymous(node) {
+            return Ok(index.item_by_decl(input.file, usize::from(node.text_range().start())));
+        }
+        let name = Self::name_token(node).ok_or(WasmError::Unsupported("a class with no name"))?;
+        index
+            .item_by_decl(input.file, usize::from(name.text_range().start()))
+            .ok_or_else(|| WasmError::Unresolved(name.text().into()))
+            .map(Some)
     }
 
     /// Whether a class declaration is a non-`static` nested one.
@@ -630,11 +648,9 @@ impl CompileWasm {
         out: &mut Vec<Method>,
     ) -> Result<()> {
         for class in Self::type_declarations(input.root) {
-            let name =
-                Self::name_token(&class).ok_or(WasmError::Unsupported("a class with no name"))?;
-            let item = index
-                .item_by_decl(input.file, usize::from(name.text_range().start()))
-                .ok_or_else(|| WasmError::Unresolved(name.text().into()))?;
+            let Some(item) = Self::item_of(&class, input, index)? else {
+                continue;
+            };
             // An `enum`'s members live under an `ENUM_BODY`, after the constants and the `;`.
             let Some(body) = class
                 .children()
@@ -3630,12 +3646,18 @@ impl Lowering<'_> {
             insn.array_new_default(array_type);
             return Ok(ty);
         }
-        let item = self
-            .input
-            .inference
-            .type_of_expr(Self::span(new.syntax()))
-            .and_then(Ty::project_id)
-            .ok_or(WasmError::Unsupported("a `new` of an unindexed type"))?;
+        // An anonymous class is its own type, and the `new` builds *that* rather than the type it named.
+        let item = if CompileWasm::is_anonymous(new.syntax()) {
+            self.index
+                .item_by_decl(self.input.file, Self::span(new.syntax()).start)
+                .ok_or(WasmError::Unsupported("an anonymous class with no item"))?
+        } else {
+            self.input
+                .inference
+                .type_of_expr(Self::span(new.syntax()))
+                .and_then(Ty::project_id)
+                .ok_or(WasmError::Unsupported("a `new` of an unindexed type"))?
+        };
         let struct_type =
             *self.layout.structs.get(&item).ok_or_else(|| {
                 WasmError::NoRepresentation(self.index.item(item).fqn.to_string())
