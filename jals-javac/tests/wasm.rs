@@ -1764,3 +1764,40 @@ public class Outer {
         "got {error}"
     );
 }
+
+/// A local class — one declared inside a method body.
+///
+/// wasm's type space is flat and has nothing to say about where a class was written, so a local class is
+/// laid out like any other. What it may not do is *capture* a local from the method that encloses it: each
+/// capture needs a synthetic constructor parameter the index knows nothing about, so its constructor would
+/// come out one parameter short of what a `new` passes.
+#[test]
+fn a_local_class_is_laid_out_unless_it_captures() {
+    let source = r"
+public class Host {
+    public static int run(int n) {
+        class Counter {
+            int total;
+            Counter(int start) { total = start; }
+            int bumped(int by) { return total + by; }
+        }
+        Counter c = new Counter(n);
+        return c.bumped(5);
+    }
+}
+";
+    assert_invoke(&[source], "run", &["7"], "12");
+
+    let capturing = concat!(
+        "public class H { public static int run(int n) { ",
+        "class C { int read() { return n; } } return new C().read(); } }"
+    );
+    let error = compile(&[capturing]).expect_err("a capture needs a synthetic parameter");
+    assert!(
+        matches!(
+            error,
+            WasmError::Unsupported("a local class that captures a local")
+        ),
+        "got {error}"
+    );
+}

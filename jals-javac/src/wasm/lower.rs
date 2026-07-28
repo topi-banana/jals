@@ -465,6 +465,11 @@ impl CompileWasm {
                 let item = index
                     .item_by_decl(input.file, usize::from(name.text_range().start()))
                     .ok_or_else(|| WasmError::Unresolved(name.text().into()))?;
+                if Self::captures_a_local(&node, input) {
+                    return Err(WasmError::Unsupported(
+                        "a local class that captures a local",
+                    ));
+                }
                 if Self::is_inner(&node) {
                     let enclosing = node.parent().and_then(|body| body.parent()).ok_or(
                         WasmError::Unsupported("an inner class with no enclosing type"),
@@ -502,8 +507,9 @@ impl CompileWasm {
     /// children dropped every one of them silently: the type never existed, and a call to one of its
     /// methods reported an unresolved name that pointed nowhere useful.
     ///
-    /// A class inside a *block* is a local or anonymous class, whose captured locals need a synthetic
-    /// constructor parameter each. `Lowering` reports one where it appears rather than here.
+    /// A class inside a *block* is a local class, and wasm's flat type space has nothing to say about
+    /// where it was written — so it is laid out like any other. What it may *not* do is capture a local:
+    /// each capture needs a synthetic constructor parameter, and `captures_a_local` reports one.
     fn type_declarations(root: &SyntaxNode) -> impl Iterator<Item = SyntaxNode> + '_ {
         use jals_syntax::SyntaxKind::{
             ANNOTATION_TYPE_DECL, ENUM_DECL, INTERFACE_DECL, RECORD_DECL,
@@ -512,11 +518,39 @@ impl CompileWasm {
             matches!(
                 node.kind(),
                 CLASS_DECL | INTERFACE_DECL | ENUM_DECL | RECORD_DECL | ANNOTATION_TYPE_DECL
-            ) && !node
-                .ancestors()
-                .skip(1)
-                .any(|ancestor| ancestor.kind() == jals_syntax::SyntaxKind::BLOCK)
+            )
         })
+    }
+
+    /// Whether a class declared inside a block reads a local from the method that encloses it.
+    ///
+    /// Each captured local needs a synthetic constructor parameter, which the index knows nothing about —
+    /// so its constructor would come out one parameter short of what a `new` passes. A capture is any
+    /// name inside the class that resolves to a definition *outside* it.
+    fn captures_a_local(node: &SyntaxNode, input: &WasmInput<'_>) -> bool {
+        let inside_block = node
+            .ancestors()
+            .skip(1)
+            .any(|ancestor| ancestor.kind() == jals_syntax::SyntaxKind::BLOCK);
+        if !inside_block {
+            return false;
+        }
+        let range = node.text_range();
+        node.descendants_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .filter(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+            .any(|token| {
+                input
+                    .resolved
+                    .reference_at(usize::from(token.text_range().start()))
+                    .and_then(|reference| reference.resolution.def_id())
+                    .and_then(|id| {
+                        let def = input.resolved.def(id);
+                        let start = u32::try_from(def.name_range.start).ok()?;
+                        Some(!range.contains(start.into()))
+                    })
+                    .unwrap_or(false)
+            })
     }
 
     /// Whether a class declaration is a non-`static` nested one.
