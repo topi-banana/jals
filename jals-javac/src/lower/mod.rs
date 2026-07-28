@@ -870,9 +870,30 @@ impl Compile {
         let lambdas: Vec<SyntaxNode> = members
             .iter()
             .flat_map(SyntaxNode::descendants)
-            .filter(|node| node.kind() == jals_syntax::SyntaxKind::LAMBDA_EXPR)
+            .filter(|node| {
+                matches!(
+                    node.kind(),
+                    jals_syntax::SyntaxKind::LAMBDA_EXPR | jals_syntax::SyntaxKind::METHOD_REF_EXPR
+                )
+            })
             .collect();
         for (ordinal, lambda) in lambdas.iter().enumerate() {
+            // A method reference needs no synthetic method at all: the handle points straight at the method
+            // the source named, which is the whole difference between the two forms.
+            if lambda.kind() == jals_syntax::SyntaxKind::METHOD_REF_EXPR {
+                let (call, entry) = Self::method_reference(lambda, &context, pool)?;
+                let index = u16::try_from(bootstraps.len()).map_err(|_| AsmError::PoolFull)?;
+                bootstraps.push(entry);
+                let span = Context::span(lambda);
+                context.lambdas.insert(
+                    (span.start, span.end),
+                    Lambda {
+                        bootstrap: index,
+                        ..call
+                    },
+                );
+                continue;
+            }
             let decl = ast::LambdaExpr::cast(lambda.clone())
                 .ok_or(LowerError::Unsupported("a malformed lambda"))?;
 
@@ -1003,6 +1024,100 @@ impl Compile {
             );
         }
         Ok((context, out, bootstraps))
+    }
+
+    /// A `Type::method` reference: the call site it needs, and the `BootstrapMethods` entry that links it.
+    ///
+    /// Only a reference to a `static` method of a named type. An instance one (`x::m`) captures the receiver,
+    /// and a constructor one (`T::new`) needs `newInvokeSpecial` — each is its own kind of handle.
+    fn method_reference(
+        node: &SyntaxNode,
+        context: &Context<'_>,
+        pool: &mut ConstantPool,
+    ) -> Result<(Lambda, jals_classfile::BootstrapMethod)> {
+        const METAFACTORY: &str = "java/lang/invoke/LambdaMetafactory";
+        const METAFACTORY_DESCRIPTOR: &str = "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;";
+        // The *last* identifier is the method: everything before the `::` names the type.
+        let referenced = node
+            .children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .filter(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+            .last()
+            .ok_or(LowerError::Unsupported("a method reference with no name"))?;
+        // The interface the context asked for, and the one method it declares.
+        let item =
+            expr::Expr::type_of(node, context)?
+                .project_id()
+                .ok_or(LowerError::Unsupported(
+                    "a method reference with no target type",
+                ))?;
+        let member = Self::functional_member(item, context)
+            .ok_or(LowerError::Unsupported("a target with no single method"))?;
+        let name = context.index.member(member).name.clone();
+        let descriptor = MethodDescriptor::to_string(&Descriptor::method_descriptor(
+            member,
+            context.index,
+            false,
+        )?);
+        let interface = Descriptor::internal_name_of(item, context.index);
+
+        // The class the method belongs to. `Uses::twice` parses its qualifier as an *expression* — a name
+        // reference is what a type name looks like before anything resolves it — so both spellings are read,
+        // and only a name that resolves to a type gets past here.
+        let owner_item = if let Some(owner_ty) = node.children().find_map(ast::Type::cast) {
+            context.ty_of_type(&owner_ty)?.project_id()
+        } else {
+            node.children()
+                .find_map(ast::Expr::cast)
+                .and_then(|qualifier| context.ty_of_name(qualifier.syntax()).ok())
+                .and_then(|ty| ty.project_id())
+        }
+        .ok_or(LowerError::Unsupported(
+            "a method reference whose qualifier is no indexed type",
+        ))?;
+        let target = context
+            .index
+            .own_members(owner_item)
+            .iter()
+            .copied()
+            .find(|&id| {
+                let info = context.index.member(id);
+                info.kind == DefKind::Method
+                    && info.name == referenced.text()
+                    && info.modifiers.is_static
+                    && info.params.len() == context.index.member(member).params.len()
+            })
+            .ok_or(LowerError::Unsupported(
+                "a method reference to a `static` method this cannot find",
+            ))?;
+        let owner = Descriptor::internal_name_of(owner_item, context.index);
+        let target_descriptor = MethodDescriptor::to_string(&Descriptor::method_descriptor(
+            target,
+            context.index,
+            false,
+        )?);
+
+        let handle = pool
+            .method_handle_index(6, &owner, referenced.text(), &target_descriptor, false)
+            .ok_or(AsmError::PoolFull)?;
+        let shape = pool
+            .method_type_index(&descriptor)
+            .ok_or(AsmError::PoolFull)?;
+        let bootstrap = pool
+            .method_handle_index(6, METAFACTORY, "metafactory", METAFACTORY_DESCRIPTOR, false)
+            .ok_or(AsmError::PoolFull)?;
+        Ok((
+            Lambda {
+                interface_method: name,
+                call_descriptor: alloc::format!("()L{interface};"),
+                bootstrap: 0,
+                captured: alloc::vec::Vec::new(),
+            },
+            jals_classfile::BootstrapMethod {
+                bootstrap_method_ref: bootstrap,
+                bootstrap_arguments: alloc::vec![shape, handle, shape],
+            },
+        ))
     }
 
     /// The one method a functional interface declares, or `None` when it declares none or several.

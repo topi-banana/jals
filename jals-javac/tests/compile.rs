@@ -2890,19 +2890,68 @@ public class Holder {
     assert_eq!(run(source, "Holder"), "ran\n");
 }
 
-/// A method reference names itself.
+/// A method reference to a `static` method.
 ///
-/// It needs no synthetic method — the handle points straight at the method the source named — but it does
-/// need that method resolved, and resolution for a `::` is its own step.
+/// It needs no synthetic method: the handle points straight at the method the source named, which is the whole
+/// difference from a lambda. The call site is otherwise identical, which is why both go through the same map.
 #[test]
-fn a_method_reference_names_itself() {
-    let source = "interface F { int f(int n); } class C { static int h(int n) { return n; } \
-                  F g() { return C::h; } }";
-    let error = compile(source).expect_err("a method reference is not compiled yet");
+fn a_method_reference_points_at_the_method_it_names() {
+    let source = r"
+interface Doubler {
+    int apply(int n);
+}
+
+public class Uses {
+    static int twice(int n) { return n * 2; }
+
+    public static void main(String[] args) {
+        Doubler d = Uses::twice;
+        System.out.println(d.apply(21));
+    }
+}
+";
+    let classes = compile(source).expect("compile");
+    let uses = classes
+        .iter()
+        .find(|class| class.internal_name == "Uses")
+        .expect("the class");
+    let class = jals_exec::block_on_inline(jals_classfile::ClassFile::read(uses.bytes.as_slice()))
+        .expect("reparse");
+    let name_of = |index| class.constant_pool.utf8(index).expect("utf8").into_owned();
+    // No `lambda$N`: the handle names `twice` itself.
     assert!(
-        matches!(error, LowerError::Unsupported("a method reference")),
+        !class
+            .methods
+            .iter()
+            .any(|method| name_of(method.name_index).starts_with("lambda$")),
+        "a method reference synthesises nothing"
+    );
+    let bootstraps = class
+        .attributes
+        .iter()
+        .find_map(|attribute| match &attribute.body {
+            jals_classfile::AttributeBody::BootstrapMethods(methods) => Some(methods),
+            _ => None,
+        })
+        .expect("the `BootstrapMethods` attribute");
+    assert_eq!(bootstraps.len(), 1);
+
+    // An instance or constructor reference captures a receiver or needs `newInvokeSpecial`, and says so.
+    let instance = "interface F { int f(); } class C { int m() { return 1; } \
+                    F g() { C c = new C(); return c::m; } }";
+    let error = compile(instance).expect_err("an instance method reference is not compiled yet");
+    assert!(
+        matches!(
+            error,
+            LowerError::Unsupported("a method reference whose qualifier is no indexed type")
+        ),
         "got {error}"
     );
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Uses"), "42\n");
 }
 
 /// A generic type declaration's `Signature`.

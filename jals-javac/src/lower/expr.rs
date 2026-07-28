@@ -149,7 +149,19 @@ impl Expr {
                     info.call_descriptor(),
                 )?)
             }
-            ast::Expr::MethodRef(_) => Err(LowerError::Unsupported("a method reference")),
+            // The same call site a lambda gets; the difference is entirely in the handle, which points at
+            // the method the source named rather than at a synthesised one.
+            ast::Expr::MethodRef(reference) => {
+                let span = Context::span(reference.syntax());
+                let info = context.lambda_at(&span).ok_or(LowerError::Unsupported(
+                    "a method reference outside a class body",
+                ))?;
+                Ok(emit.asm.invoke_dynamic(
+                    info.bootstrap(),
+                    info.interface_method(),
+                    info.call_descriptor(),
+                )?)
+            }
         }
     }
 
