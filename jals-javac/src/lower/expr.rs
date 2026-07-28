@@ -891,28 +891,18 @@ impl Expr {
             .collect();
         // An anonymous class is its own type, and the `new` builds *that* rather than the type it named:
         // the index keyed its item on the `new` keyword's position, so this is the only lookup needed.
-        if new.body().is_some() {
-            let span = Context::span(new.syntax());
-            let item = context
-                .index
-                .item_by_decl(context.file, span.start)
-                .ok_or_else(|| LowerError::Unresolved("an anonymous class".into()))?;
-            if new
-                .args()
-                .into_iter()
-                .flat_map(|list| list.args())
-                .next()
-                .is_some()
-            {
-                return Err(LowerError::Unsupported(
-                    "an anonymous class with constructor arguments",
-                ));
-            }
-            let owner = Descriptor::internal_name_of(item, context.index);
-            emit.asm.new_object(&owner)?;
-            emit.asm.dup()?;
-            return Ok(emit.asm.invoke_special(&owner, "<init>", "()V", false)?);
-        }
+        // What the arguments select is still the *superclass* constructor, which the anonymous class's
+        // own one takes the parameters of and forwards to — the body declares no constructor and cannot.
+        let anonymous = new
+            .body()
+            .is_some()
+            .then(|| {
+                context
+                    .index
+                    .item_by_decl(context.file, Context::span(new.syntax()).start)
+                    .ok_or_else(|| LowerError::Unresolved("an anonymous class".into()))
+            })
+            .transpose()?;
         let selected = context
             .inference
             .call_target_of(Context::span(new.syntax()));
@@ -952,16 +942,23 @@ impl Expr {
             )
         };
 
+        // The type built, which for an anonymous class is its own item rather than the one the arguments
+        // selected a constructor of — that one is its *superclass*.
+        let owner = anonymous.map_or(owner, |item| {
+            Descriptor::internal_name_of(item, context.index)
+        });
         // An inner class's constructor takes the enclosing instance first, and the descriptor the index
         // computed does not carry it — the declaration never wrote it. The qualifier names it when the
         // source wrote one (`outer.new Inner()`); otherwise it is `this`.
-        let target = selected
-            .map(|member| context.index.member(member).owner)
-            .or_else(|| {
-                Self::type_of(new.syntax(), context)
-                    .ok()
-                    .and_then(|ty| ty.project_id())
-            });
+        let target = anonymous.or_else(|| {
+            selected
+                .map(|member| context.index.member(member).owner)
+                .or_else(|| {
+                    Self::type_of(new.syntax(), context)
+                        .ok()
+                        .and_then(|ty| ty.project_id())
+                })
+        });
         let enclosing = target.and_then(|item| context.inner.get(&item).cloned());
         // A local class's captures are trailing parameters, appended in the order the class reads them.
         let captured = target

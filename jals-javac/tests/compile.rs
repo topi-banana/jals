@@ -3683,6 +3683,80 @@ public class Outer {
     assert_eq!(run(source, "Outer"), "one\ntwo\n");
 }
 
+/// `new Base(1) { … }`: the arguments go to the **superclass** constructor.
+///
+/// The body declares no constructor and has nowhere to write `super(…)`, so the anonymous class's own
+/// synthesised constructor takes that constructor's parameters and forwards them. Both sides read the
+/// selection from the same span — the class file's, and the `new`'s — so neither can pick a different
+/// constructor than the other, which is what would otherwise produce a `NoSuchMethodError` at the `new`.
+#[test]
+fn an_anonymous_class_carries_its_arguments_to_the_superclass() {
+    let source = r"
+class Base {
+    final int seed;
+    final long scale;
+
+    Base(int seed, long scale) {
+        this.seed = seed;
+        this.scale = scale;
+    }
+
+    int value() { return seed; }
+
+    long scaled() { return scale; }
+}
+
+public class Anon {
+    static Base make(int n) {
+        // A capture *and* superclass arguments: the captured local is a trailing parameter, after the
+        // forwarded ones, and a field initialiser runs after both.
+        return new Base(n * 2, 10L) {
+            int extra = 100;
+
+            @Override
+            int value() { return n + extra; }
+        };
+    }
+
+    public static void main(String[] args) {
+        Base b = make(3);
+        System.out.println(b.value());
+        // The `long` argument reached the superclass at the right slot: reading it back through an
+        // inherited method is what says the width of the forwarded parameter was accounted for.
+        System.out.println(b.scaled());
+        System.out.println(new Base(7, 2L) { }.value());
+    }
+}
+";
+    let classes = compile(source).expect("compile");
+    let anonymous = classes
+        .iter()
+        .find(|class| class.internal_name == "Anon$1")
+        .expect("the first anonymous class");
+    let class =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(anonymous.bytes.as_slice()))
+            .expect("reparse");
+    let descriptors: Vec<String> = class
+        .methods
+        .iter()
+        .filter(|method| class.constant_pool.utf8(method.name_index).as_deref() == Some("<init>"))
+        .map(|method| {
+            class
+                .constant_pool
+                .utf8(method.descriptor_index)
+                .expect("utf8")
+                .into_owned()
+        })
+        .collect();
+    // The superclass's two parameters, then the captured `n`.
+    assert_eq!(descriptors, ["(IJI)V".to_owned()]);
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Anon"), "103\n10\n7\n");
+}
+
 /// A lambda, compiled to an `invokedynamic` that `LambdaMetafactory` links.
 ///
 /// The body cannot turn itself into a method — expression lowering has no channel for adding one — so every

@@ -463,6 +463,15 @@ impl Compile {
         // An `enum` gets the synthesised `(String, int)` constructor instead, which is the only one
         // that can reach `Enum`'s — there is no no-argument `super()` for a default one to call.
         if !saw_constructor && !is_interface && !is_enum && !is_record {
+            // An anonymous class's `new` may carry arguments, and they go to the *superclass*
+            // constructor: the body declares none and has nowhere to write `super(…)`. Its own
+            // constructor therefore takes that one's parameters and forwards them. Both sides read the
+            // selection from the same span, so neither can pick a different constructor than the other.
+            let forwarded = (node.kind() == jals_syntax::SyntaxKind::NEW_EXPR)
+                .then(|| inference.call_target_of(Context::span(node)))
+                .flatten()
+                .map(|member| Descriptor::method_descriptor(member, index, true))
+                .transpose()?;
             methods.push(Self::default_constructor(
                 &context,
                 &mut pool,
@@ -470,6 +479,7 @@ impl Compile {
                 super_item,
                 &members,
                 Self::access_level(node),
+                forwarded.as_ref(),
             )?);
         }
         // A record's components are declared once, in its header, and every one of them stands for a
@@ -830,19 +840,39 @@ impl Compile {
         let Some(root) = node.ancestors().last() else {
             return out;
         };
-        for declaration in root.descendants().filter(|n| n.kind() == CLASS_DECL) {
-            let captured = Self::captured_by(&declaration, resolved);
+        for declaration in root.descendants() {
+            // An anonymous class captures like a local one, and its declaration is the `new` — but what
+            // is scanned is its *body*. Scanning the whole `new` would count a local the arguments name
+            // as captured, and an argument is evaluated at the creation site rather than read from a
+            // field: `new Base(n) { }` with a body that never says `n` captures nothing.
+            let (scanned, at) = match declaration.kind() {
+                CLASS_DECL => (
+                    declaration.clone(),
+                    declaration
+                        .children_with_tokens()
+                        .filter_map(jals_syntax::SyntaxElement::into_token)
+                        .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+                        .map(|token| usize::from(token.text_range().start())),
+                ),
+                jals_syntax::SyntaxKind::NEW_EXPR => {
+                    let Some(body) = declaration
+                        .children()
+                        .find(|child| child.kind() == CLASS_BODY)
+                    else {
+                        continue;
+                    };
+                    (body, Some(usize::from(declaration.text_range().start())))
+                }
+                _ => continue,
+            };
+            let captured = Self::captured_by(&scanned, resolved);
             if captured.is_empty() {
                 continue;
             }
-            let Some(name) = declaration
-                .children_with_tokens()
-                .filter_map(jals_syntax::SyntaxElement::into_token)
-                .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
-            else {
+            let Some(at) = at else {
                 continue;
             };
-            if let Some(item) = index.item_by_decl(file, usize::from(name.text_range().start())) {
+            if let Some(item) = index.item_by_decl(file, at) {
                 out.insert(item, captured);
             }
         }
@@ -1863,7 +1893,7 @@ impl Compile {
                     Self::initializers(context, &mut emit, members, false)?;
                 }
             }
-            None => Self::prologue(context, &mut emit, super_name, super_item, members)?,
+            None => Self::prologue(context, &mut emit, super_name, super_item, members, None)?,
         }
         if let Some(body) = &body {
             // The explicit invocation is the body's first statement, and it has already been emitted.
@@ -2676,12 +2706,22 @@ impl Compile {
         super_item: Option<ItemId>,
         members: &[SyntaxNode],
         access: u16,
+        forwarded: Option<&MethodDescriptor>,
     ) -> Result<MethodInfo> {
         let mut params = String::new();
         if let Some(enclosing) = &context.encloses {
             params.push('L');
             params.push_str(enclosing);
             params.push(';');
+        }
+        // An anonymous class's own constructor takes the superclass constructor's parameters and passes
+        // them on: `new Base(1) { … }` has nowhere else to say `super(1)` from, the body declaring no
+        // constructor. They go before the captures, which is where a declared constructor's own are.
+        let mut synthetic = u16::from(context.encloses.is_some());
+        for param in forwarded.iter().flat_map(|descriptor| &descriptor.params) {
+            let written = param.to_string();
+            synthetic += Slots::descriptor_width(&written);
+            params.push_str(&written);
         }
         for &captured in context.captured_here() {
             params.push_str(&Self::capture_descriptor(captured, context)?);
@@ -2690,9 +2730,11 @@ impl Compile {
         let name_index = pool.utf8_index("<init>").ok_or(AsmError::PoolFull)?;
         let descriptor_index = pool.utf8_index(&text).ok_or(AsmError::PoolFull)?;
         let mut asm = Assembler::new(pool, Receiver::Constructor(&context.this_class), &text)?;
-        let slots = Slots::for_constructor(context, None, u16::from(context.encloses.is_some()));
+        let slots = Slots::for_constructor(context, None, synthetic);
         let mut emit = Emit::new(&mut asm, slots, jals_hir::Ty::Void, true);
-        Self::prologue(context, &mut emit, super_name, super_item, members)?;
+        Self::prologue(
+            context, &mut emit, super_name, super_item, members, forwarded,
+        )?;
         asm.return_(None)?;
         Ok(MethodInfo {
             access_flags: MethodAccessFlags(access),
@@ -3136,38 +3178,55 @@ impl Compile {
         super_name: &str,
         super_item: Option<ItemId>,
         members: &[SyntaxNode],
+        forwarded: Option<&MethodDescriptor>,
     ) -> Result<()> {
-        // An `enum`'s superclass is `Enum`, which has no no-argument constructor: the implicit
-        // delegation passes the two synthetic parameters straight through, which is the only way the
-        // constant's name and ordinal ever reach it.
-        if context.in_enum {
+        // Three ways to reach the superclass constructor, and only the first is the plain `super()`.
+        if let Some(descriptor) = forwarded {
+            // An anonymous class's superclass constructor takes arguments the `new` handed over, and
+            // this constructor's own parameters *are* those arguments, in order and at their own widths.
+            emit.asm.load(0)?;
+            let mut slot = 1 + u16::from(context.encloses.is_some());
+            for param in &descriptor.params {
+                emit.asm.load(slot)?;
+                slot += Slots::descriptor_width(&param.to_string());
+            }
+            emit.asm.invoke_special(
+                super_name,
+                "<init>",
+                &MethodDescriptor::to_string(descriptor),
+                false,
+            )?;
+        } else if context.in_enum {
+            // An `enum`'s superclass is `Enum`, which has no no-argument constructor: the implicit
+            // delegation passes the two synthetic parameters straight through, which is the only way
+            // the constant's name and ordinal ever reach it.
             emit.asm.load(0)?;
             emit.asm.load(1)?;
             emit.asm.load(2)?;
             emit.asm.invoke_special(ENUM, "<init>", ENUM_INIT, false)?;
-            return Self::initializers(context, emit, members, false);
-        }
-        // `super()` exists only if the superclass declares no constructor at all or declares a
-        // no-argument one. Emitting the call regardless produces a class that loads and then
-        // throws `NoSuchMethodError` at the first `new` — a run-time failure the compiler is in a
-        // position to report instead.
-        if let Some(super_item) = super_item {
-            let mut constructors = context
-                .index
-                .own_members(super_item)
-                .iter()
-                .map(|&member| context.index.member(member))
-                .filter(|member| member.kind == DefKind::Constructor)
-                .peekable();
-            if constructors.peek().is_some() && !constructors.any(|m| m.params.is_empty()) {
-                return Err(LowerError::Unsupported(
-                    "a superclass with no no-argument constructor",
-                ));
+        } else {
+            // `super()` exists only if the superclass declares no constructor at all or declares a
+            // no-argument one. Emitting the call regardless produces a class that loads and then
+            // throws `NoSuchMethodError` at the first `new` — a run-time failure the compiler is in a
+            // position to report instead.
+            if let Some(super_item) = super_item {
+                let mut constructors = context
+                    .index
+                    .own_members(super_item)
+                    .iter()
+                    .map(|&member| context.index.member(member))
+                    .filter(|member| member.kind == DefKind::Constructor)
+                    .peekable();
+                if constructors.peek().is_some() && !constructors.any(|m| m.params.is_empty()) {
+                    return Err(LowerError::Unsupported(
+                        "a superclass with no no-argument constructor",
+                    ));
+                }
             }
+            emit.asm.load(0)?;
+            emit.asm
+                .invoke_special(super_name, "<init>", "()V", false)?;
         }
-        emit.asm.load(0)?;
-        emit.asm
-            .invoke_special(super_name, "<init>", "()V", false)?;
         // The enclosing instance is stored after `super()` — before it, `this` is still
         // `UninitializedThis` and a `putfield` on it is not something the verifier accepts here. Before
         // the field initialisers, so one of them can already read it.
