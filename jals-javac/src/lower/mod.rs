@@ -1062,13 +1062,35 @@ impl Compile {
             }
         }
         out.push('>');
-        out.push('L');
-        out.push_str(super_name);
-        out.push(';');
-        for name in interface_names {
+        // The *written* supertypes, so a generic one keeps its arguments (`extends Holder<T>`). A class
+        // with no `extends` has none to write and gets `Object`.
+        let vars: Vec<String> = declared.iter().filter_map(ast::TypeParam::name).collect();
+        let written = |kind: jals_syntax::SyntaxKind| -> Vec<ast::Type> {
+            node.children()
+                .filter(|child| child.kind() == kind)
+                .flat_map(|clause| clause.children().filter_map(ast::Type::cast))
+                .collect()
+        };
+        if let Some(ty) = written(jals_syntax::SyntaxKind::EXTENDS_CLAUSE).first() {
+            out.push_str(&Self::type_signature(ty, &vars, context)?);
+        } else {
             out.push('L');
-            out.push_str(name);
+            out.push_str(super_name);
             out.push(';');
+        }
+        let implemented = written(jals_syntax::SyntaxKind::IMPLEMENTS_CLAUSE);
+        if implemented.len() == interface_names.len() {
+            for ty in &implemented {
+                out.push_str(&Self::type_signature(ty, &vars, context)?);
+            }
+        } else {
+            // An interface the source wrote that the index did not resolve would put the two lists out
+            // of step; the erased names are still right, only less informative.
+            for name in interface_names {
+                out.push('L');
+                out.push_str(name);
+                out.push(';');
+            }
         }
         Ok(Some(out))
     }
@@ -1181,10 +1203,28 @@ impl Compile {
             out.push(';');
             return Ok(out);
         }
-        // Not a variable: the erased descriptor, with the dimensions already written above.
+        // Not a variable: the erased descriptor for the name, plus the type *arguments* the source
+        // wrote. A reflective reader gets `List<T>` from this where the descriptor alone says `List`.
         let erased = context.ty_of_type(ty)?;
         let descriptor = Descriptor::descriptor_of(&erased, context.index)?.to_string();
-        out.push_str(descriptor.trim_start_matches('['));
+        let name = descriptor.trim_start_matches('[');
+        let arguments: Vec<ast::Type> = ty
+            .syntax()
+            .children()
+            .find_map(ast::TypeArgs::cast)
+            .map(|args| args.args().collect())
+            .unwrap_or_default();
+        if arguments.is_empty() || !name.starts_with('L') {
+            out.push_str(name);
+            return Ok(out);
+        }
+        // `Lname<args>;` — the arguments go before the terminating semicolon, not after it.
+        out.push_str(name.trim_end_matches(';'));
+        out.push('<');
+        for argument in &arguments {
+            out.push_str(&Self::type_signature(argument, vars, context)?);
+        }
+        out.push_str(">;");
         Ok(out)
     }
 

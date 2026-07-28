@@ -2983,6 +2983,11 @@ class Bounded<T extends Named> {}
 
 class Several<A, B extends Named> implements Named {}
 
+// A generic supertype keeps the arguments the `extends` clause wrote.
+class Derived<T> extends Box<T> {}
+
+class Wrapped<T> extends Box<Named> implements Named {}
+
 class Plain {}
 ";
     let classes = compile(source).expect("compile");
@@ -3019,6 +3024,14 @@ class Plain {}
     assert_eq!(
         signature("Several").as_deref(),
         Some("<A:Ljava/lang/Object;B:LNamed;>Ljava/lang/Object;LNamed;")
+    );
+    assert_eq!(
+        signature("Derived").as_deref(),
+        Some("<T:Ljava/lang/Object;>LBox<TT;>;")
+    );
+    assert_eq!(
+        signature("Wrapped").as_deref(),
+        Some("<T:Ljava/lang/Object;>LBox<LNamed;>;LNamed;")
     );
     // A declaration with no type parameters carries no attribute at all, rather than an empty one.
     assert_eq!(signature("Plain"), None);
@@ -3058,6 +3071,9 @@ class Holder<T> {
     int ungeneric(int n) { return n; }
 
     T[] many() { return null; }
+
+    // A written type argument survives here too, not just on the declaration.
+    Holder<T> self() { return this; }
 }
 ";
     let classes = compile(source).expect("compile");
@@ -3124,6 +3140,7 @@ class Holder<T> {
             ("put".to_owned(), Some("(TT;)V".to_owned())),
             ("ungeneric".to_owned(), None),
             ("many".to_owned(), Some("()[TT;".to_owned())),
+            ("self".to_owned(), Some("()LHolder<TT;>;".to_owned())),
             ("<init>".to_owned(), None),
         ]
     );
