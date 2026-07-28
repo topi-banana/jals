@@ -967,6 +967,38 @@ impl ProjectIndex {
                     args: Vec::new(),
                 });
             }
+            // A lambda item's one member is the interface method it implements. Only its *name* and arity
+            // matter here — a dispatch built on subtyping looks the member up by those, and a backend makes
+            // the descriptor itself. Done after the supertypes resolve, because the interface is one of them.
+            if self.items[owner.0 as usize]
+                .fqn
+                .as_str()
+                .rsplit('.')
+                .next()
+                .is_some_and(|simple| simple.starts_with("lambda$"))
+                && let Some(implemented) = supertypes.first().map(|supertype| supertype.id)
+                && let Some(&method) = self
+                    .own_members(implemented)
+                    .iter()
+                    .find(|&&id| self.member(id).kind == DefKind::Method)
+            {
+                let shape = self.member(method);
+                let synthetic = Member {
+                    owner,
+                    name: shape.name.clone(),
+                    kind: DefKind::Method,
+                    file,
+                    // Nothing declares it, so there is no name range to point at.
+                    name_range: 0..0,
+                    ty: shape.ty.clone(),
+                    modifiers: MemberModifiers::default(),
+                    params: shape.params.clone(),
+                    varargs: false,
+                    throws: Vec::new(),
+                    source_location: None,
+                };
+                self.register_member(owner, synthetic);
+            }
             let item = &mut self.items[owner.0 as usize];
             item.supertypes = supertypes;
             item.has_external_supertype = has_external;
