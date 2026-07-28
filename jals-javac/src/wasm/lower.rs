@@ -763,7 +763,12 @@ impl Lowering<'_> {
     fn stmt(&mut self, statement: &ast::Stmt, insn: &mut Insn) -> Result<()> {
         match statement {
             ast::Stmt::Block(block) => self.block(block, insn),
-            ast::Stmt::Empty(_) => Ok(()),
+            // `;` has nothing to emit, and neither has an `assert`: Java evaluates one only when
+            // assertions are *enabled*, they are disabled by default, and a wasm host has no `-ea` to
+            // turn them on. So an `assert` compiles to nothing, which is exactly what a JVM does with
+            // one by default — the condition is still parsed, resolved, and linted, it simply has no
+            // run-time effect. A trap would be *stricter* than Java.
+            ast::Stmt::Empty(_) | ast::Stmt::Assert(_) => Ok(()),
             ast::Stmt::LocalVar(declaration) => self.local(declaration, insn),
             ast::Stmt::Expr(expression) => {
                 let Some(value) = expression.expr() else {
@@ -786,6 +791,15 @@ impl Lowering<'_> {
             ast::Stmt::Break(statement) => self.leave(statement.syntax(), false, insn),
             ast::Stmt::Continue(statement) => self.leave(statement.syntax(), true, insn),
             ast::Stmt::Labeled(statement) => self.labelled(statement, insn),
+            // Each of these names itself rather than going through a catch-all, so a report says which
+            // construct is missing. All four wait on the same thing: the exception-handling proposal's
+            // `tag` section and `try_table`, which `encode.rs` does not write yet. `synchronized` waits
+            // on it too — its body is `finally`-protected, and a monitor this host does not have is the
+            // smaller half of the problem.
+            ast::Stmt::Throw(_) => Err(WasmError::Unsupported("a `throw`")),
+            ast::Stmt::Try(_) => Err(WasmError::Unsupported("a `try`")),
+            ast::Stmt::Synchronized(_) => Err(WasmError::Unsupported("a `synchronized` block")),
+            ast::Stmt::Yield(_) => Err(WasmError::Unsupported("a `yield`")),
             ast::Stmt::Switch(statement) => {
                 let selector = statement
                     .selector()
@@ -795,7 +809,6 @@ impl Lowering<'_> {
                     .ok_or(WasmError::Unsupported("a `switch` with no body"))?;
                 self.switch(&selector, &body, None, insn)
             }
-            _ => Err(WasmError::Unsupported("this statement form")),
         }
     }
 

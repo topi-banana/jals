@@ -941,3 +941,41 @@ public class Bag {
     assert_invoke(&[source], "through_a_self_array", &["7"], "9");
     assert_invoke(&[source], "through_a_global", &["3"], "9");
 }
+
+/// Every statement form is either compiled or reports *itself*.
+///
+/// A catch-all report says only "this statement form", which sends a reader looking. Each of these
+/// waits on the same thing — the exception-handling proposal's `tag` section and `try_table`, which the
+/// encoder does not write yet — and saying so is the difference between a compiler that is missing a
+/// feature and one that looks broken.
+///
+/// `assert` is the exception: Java evaluates one only when assertions are *enabled*, they are disabled
+/// by default, and a wasm host has no `-ea` to turn them on. So it compiles to nothing, which is
+/// exactly what a JVM does with one by default. A trap would be stricter than Java.
+#[test]
+fn each_uncompiled_statement_form_names_itself() {
+    let body = |statement: &str| {
+        format!(
+            "public class S {{ public static int run(int n) {{ {statement} return n; }} }}\n\
+             class Boom extends RuntimeException {{}}\n"
+        )
+    };
+    for (statement, expected) in [
+        ("throw new Boom();", "a `throw`"),
+        ("try { n = 1; } catch (Boom b) { n = 2; }", "a `try`"),
+        (
+            "synchronized (S.class) { n = 1; }",
+            "a `synchronized` block",
+        ),
+    ] {
+        let source = body(statement);
+        let error = compile(&[&source]).expect_err("this form is not compiled yet");
+        assert!(
+            matches!(error, WasmError::Unsupported(what) if what == expected),
+            "`{statement}` should report {expected:?}, got {error}"
+        );
+    }
+    // An `assert` compiles, and to nothing: the module runs as if assertions were disabled.
+    let source = "public class S { public static int run(int n) { assert n > 0; return n; } }";
+    assert_invoke(&[source], "run", &["-5"], "-5");
+}
