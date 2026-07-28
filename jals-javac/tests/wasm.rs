@@ -1221,9 +1221,8 @@ public class Seeded {
 /// wasm's type space is flat and has no naming convention to satisfy, so there is nothing for a nested
 /// class to be nested *in*. Walking only the root's children dropped every one of them silently — the
 /// type never existed, and a call to one of its methods reported an unresolved name pointing nowhere
-/// useful. A non-`static` one is reported instead: it holds its enclosing instance in a synthetic field
-/// and takes it as an extra constructor parameter, so its constructor would be one parameter short of
-/// what a `new` passes.
+/// useful. (A non-`static` one carries an enclosing instance; that is
+/// `an_inner_class_holds_its_enclosing_instance`.)
 #[test]
 fn a_static_nested_class_is_its_own_struct_type() {
     let source = r"
@@ -1252,13 +1251,6 @@ public class Outer {
 ";
     assert_invoke(&[source], "through_a_nested_class", &["5"], "10");
     assert_invoke(&[source], "through_a_nested_subclass", &["5"], "12");
-
-    let inner = "public class O { class I { int f; } }";
-    let error = compile(&[inner]).expect_err("an inner class needs a synthetic parameter");
-    assert!(
-        matches!(error, WasmError::Unsupported("a non-`static` inner class")),
-        "got {error}"
-    );
 }
 
 /// A type declaration this backend lays out nothing for reports *itself*.
@@ -1677,4 +1669,84 @@ public class Risky {
 ";
     assert_invoke(&[source], "caught", &["3"], "103");
     assert_invoke(&[source], "caught", &["-4"], "104");
+}
+
+/// A non-`static` inner class, which holds its enclosing instance in a synthetic field.
+///
+/// The field goes *after* the class's own, so every real field keeps the slot the layout computes for it
+/// — and that is why a subclass of an inner class is reported instead: its own fields would start where
+/// the synthetic one sits. Each constructor takes the enclosing instance right after `this` and writes it
+/// before anything else runs, so an initialiser or the body can already reach it. A class with no declared
+/// constructor has no function to write it in, so the `new` writes it.
+///
+/// Only the *unqualified* form is lowered. `outer.new Inner()` names a different enclosing instance, and
+/// taking `this` regardless would build the object against the wrong one — wrong state, silently.
+#[test]
+fn an_inner_class_holds_its_enclosing_instance() {
+    let source = r"
+public class Outer {
+    int base;
+
+    class Inner {
+        int extra;
+        Inner(int extra) { this.extra = extra; }
+        int total() { return extra; }
+    }
+
+    // No declared constructor: the `new` writes the synthetic field itself.
+    class Plain {
+        int flag;
+    }
+
+    Outer(int base) { this.base = base; }
+
+    int build(int n) {
+        Inner i = new Inner(n);
+        return i.total() + base;
+    }
+
+    int defaulted() {
+        Plain p = new Plain();
+        p.flag = 5;
+        return p.flag;
+    }
+
+    public static int run(int n) {
+        Outer o = new Outer(10);
+        return o.build(n);
+    }
+
+    public static int implicit() {
+        Outer o = new Outer(1);
+        return o.defaulted();
+    }
+}
+";
+    assert_invoke(&[source], "run", &["3"], "13");
+    assert_invoke(&[source], "implicit", &[], "5");
+
+    // A `new` of an inner class needs an enclosing instance, which a `static` method does not have.
+    let outside = concat!(
+        "public class O { int f; class I { int g; } ",
+        "public static int run(int n) { I i = new I(); return n; } }"
+    );
+    let error = compile(&[outside]).expect_err("a `static` method has no enclosing instance");
+    assert!(
+        matches!(
+            error,
+            WasmError::Unsupported("a `new` of an inner class outside an instance method")
+        ),
+        "got {error}"
+    );
+
+    // A subclass of an inner class would place its first field on top of the synthetic one.
+    let extended = "public class O { int f; class I { int g; } class J extends I {} }";
+    let error = compile(&[extended]).expect_err("a subclass of an inner class is not laid out");
+    assert!(
+        matches!(
+            error,
+            WasmError::Unsupported("a subclass of an inner class")
+        ),
+        "got {error}"
+    );
 }

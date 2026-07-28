@@ -116,6 +116,8 @@ struct Method {
     export: Option<String>,
     /// A constructor initialises `this` rather than returning a value.
     is_constructor: bool,
+    /// The class this constructor's extra first parameter holds, when it belongs to an inner class.
+    encloses: Option<ItemId>,
     /// Whether the function's signature has a result, which decides whether its body needs a trailing
     /// `unreachable`.
     has_result: bool,
@@ -135,7 +137,22 @@ impl CompileWasm {
         // here — the body waits, because a field of array type needs an array type index and an
         // array's element may be one of these classes.
         let mut interface_items = Vec::new();
-        let classes = Self::classes_in_order(inputs, index, &mut interface_items)?;
+        let mut inner_items = Vec::new();
+        let classes =
+            Self::classes_in_order(inputs, index, &mut interface_items, &mut inner_items)?;
+        for (item, enclosing) in inner_items {
+            layout.inner.insert(item, enclosing);
+        }
+        // A subclass's own fields start after its supertype's, and an inner class's synthetic field sits
+        // after *its* own — so a subclass would place its first field on top of it. Reported rather than
+        // laid out wrong.
+        for &item in &classes {
+            if let Some(parent) = Self::superclass(item, index)
+                && layout.inner.contains_key(&parent)
+            {
+                return Err(WasmError::Unsupported("a subclass of an inner class"));
+            }
+        }
         // An interface has no struct type, so it is registered before any class is laid out: a field or
         // a parameter of interface type has to resolve to *something* while the structs are built.
         for item in interface_items {
@@ -422,6 +439,7 @@ impl CompileWasm {
         inputs: &[WasmInput<'_>],
         index: &ProjectIndex,
         interfaces: &mut Vec<ItemId>,
+        inner: &mut Vec<(ItemId, ItemId)>,
     ) -> Result<Vec<ItemId>> {
         let mut declared = Vec::new();
         for input in inputs {
@@ -444,12 +462,15 @@ impl CompileWasm {
                 // A non-`static` nested class holds its enclosing instance in a synthetic field and
                 // takes it as an extra constructor parameter. Neither exists here, so its constructor
                 // would be one parameter short of what a `new` passes — reported rather than emitted.
-                if Self::is_inner(&node) {
-                    return Err(WasmError::Unsupported("a non-`static` inner class"));
-                }
                 let item = index
                     .item_by_decl(input.file, usize::from(name.text_range().start()))
                     .ok_or_else(|| WasmError::Unresolved(name.text().into()))?;
+                if Self::is_inner(&node) {
+                    let enclosing = node.parent().and_then(|body| body.parent()).ok_or(
+                        WasmError::Unsupported("an inner class with no enclosing type"),
+                    )?;
+                    inner.push((item, Layout::owner_of(&enclosing, input, index)?));
+                }
                 declared.push(item);
             }
         }
@@ -585,8 +606,16 @@ impl CompileWasm {
                 let is_static = index.member(member).modifiers.is_static;
 
                 let mut params = Vec::new();
+                // An inner class's constructor takes the enclosing instance right after `this`, and
+                // stores it into the synthetic field before the body runs.
+                let encloses = is_constructor
+                    .then(|| layout.inner.get(&item).copied())
+                    .flatten();
                 if is_constructor || !is_static {
                     params.push(layout.class_ref(item)?);
+                }
+                if let Some(enclosing) = encloses {
+                    params.push(layout.class_ref(enclosing)?);
                 }
                 for ty in index.resolved_param_tys(member) {
                     params.push(layout.val_type(&ty)?);
@@ -613,6 +642,7 @@ impl CompileWasm {
                     // A `public static` method is the module's surface: a wasm host has no `main`
                     // convention, so every one of them is exported by name.
                     has_result,
+                    encloses,
                     export: (is_static && !is_constructor)
                         .then(|| index.member(member).name.clone()),
                     is_constructor,
@@ -638,6 +668,12 @@ struct Layout {
     fields: BTreeMap<ItemId, Vec<MemberId>>,
     /// Each method's function index.
     functions: BTreeMap<MemberId, u32>,
+    /// A non-`static` nested class and the class that encloses it. Its instance holds the enclosing one
+    /// in a synthetic field, appended *after* its own — which keeps every real field's slot where
+    /// `field_slot` computes it, and is why a class extending an inner class is reported instead.
+    inner: BTreeMap<ItemId, ItemId>,
+    /// The synthetic enclosing-instance field's index, for each inner class.
+    outer: BTreeMap<ItemId, u32>,
     /// The one exception tag, if the module throws anything. Every Java throw is a reference, so one
     /// tag carrying one reference covers all of them and the *class* of that reference is what a
     /// `catch` tests.
@@ -686,7 +722,12 @@ impl Layout {
     }
 
     /// Write `item`'s struct body: its supertype's fields followed by its own, at their wasm types.
-    fn fill_class(&self, item: ItemId, index: &ProjectIndex, module: &mut Module) -> Result<()> {
+    fn fill_class(
+        &mut self,
+        item: ItemId,
+        index: &ProjectIndex,
+        module: &mut Module,
+    ) -> Result<()> {
         let Some(&type_index) = self.structs.get(&item) else {
             return Ok(());
         };
@@ -699,6 +740,16 @@ impl Layout {
                 // once by a constructor — after `struct.new_default` has already made it.
                 mutable: true,
             });
+        }
+        // The enclosing instance goes last, so every real field keeps the slot `field_slot` computes.
+        let outer = self.inner.get(&item).copied();
+        if let Some(enclosing) = outer {
+            let slot = u32::try_from(fields.len()).map_err(|_| WasmError::TooLarge)?;
+            fields.push(FieldType {
+                storage: StorageType::Val(self.class_ref(enclosing)?),
+                mutable: true,
+            });
+            self.outer.insert(item, slot);
         }
         let parent =
             CompileWasm::superclass(item, index).and_then(|id| self.structs.get(&id).copied());
@@ -1053,6 +1104,10 @@ impl Body {
         if method.owner.is_some() || method.is_constructor {
             lowering.next += 1;
         }
+        // An inner class's constructor takes the enclosing instance next, before any declared parameter.
+        if method.encloses.is_some() {
+            lowering.next += 1;
+        }
         if let Some(params) = method.node.children().find_map(ast::ParamList::cast) {
             for param in params.params() {
                 let ty = lowering.declare_param(param.syntax())?;
@@ -1066,6 +1121,15 @@ impl Body {
         // that emitted only its own body left every one of them unrun — a field reading back as its
         // type's default in a module that validates. A `this(…)` delegation is the exception: the
         // constructor it reaches runs them, and running them twice would undo what it did.
+        // The synthetic field is written before anything else, so an initialiser or the body can already
+        // reach the enclosing instance through it.
+        if let (Some(owner), Some(_)) = (method.owner, method.encloses)
+            && let Some(&slot) = layout.outer.get(&owner)
+        {
+            insn.local_get(0)
+                .local_get(1)
+                .struct_set(layout.structs[&owner], slot);
+        }
         if method.is_constructor && !block.as_ref().is_some_and(Self::delegates_to_this) {
             // The constructor's parent *is* the class body, which is where the initialisers are and
             // the reason they need no search: they are this declaration's siblings, in order.
@@ -3326,6 +3390,24 @@ impl Lowering<'_> {
                 WasmError::NoRepresentation(self.index.item(item).fqn.to_string())
             })?;
 
+        // An inner class's constructor needs the enclosing instance. Only the unqualified form is
+        // lowered: `outer.new Inner()` names a *different* enclosing instance, and taking `this`
+        // regardless would build the object against the wrong one — wrong state, silently.
+        let encloses = self.layout.inner.get(&item).copied();
+        if encloses.is_some() {
+            if new.syntax().children().any(|child| {
+                ast::Expr::cast(child).is_some_and(|expr| !matches!(expr, ast::Expr::ArrayInit(_)))
+            }) {
+                return Err(WasmError::Unsupported(
+                    "a qualified `new` of an inner class",
+                ));
+            }
+            if self.owner.is_none() {
+                return Err(WasmError::Unsupported(
+                    "a `new` of an inner class outside an instance method",
+                ));
+            }
+        }
         let arguments: Vec<ast::Expr> = new
             .syntax()
             .children()
@@ -3360,14 +3442,34 @@ impl Lowering<'_> {
                 // that only surfaced once a `new` sat inside a `block`.
                 let slot = self.scratch(ty);
                 insn.local_set(slot).local_get(slot);
+                // The enclosing instance is the constructor's first declared argument.
+                if encloses.is_some() {
+                    insn.local_get(0);
+                }
                 for argument in &arguments {
                     self.expr(argument, insn)?;
                 }
                 insn.call(function).local_get(slot);
             }
             // No declared constructor: the implicit default one initialises nothing, so the
-            // allocation is already the finished object.
-            None if !declares_constructor && arguments.is_empty() => {}
+            // allocation is already the finished object — except for an inner class, whose synthetic
+            // field is written here because there is no constructor function to write it.
+            None if !declares_constructor && arguments.is_empty() => {
+                if encloses.is_some() {
+                    let slot = self.scratch(ty);
+                    let field = self
+                        .layout
+                        .outer
+                        .get(&item)
+                        .copied()
+                        .ok_or(WasmError::Unsupported("an inner class with no outer field"))?;
+                    insn.local_set(slot);
+                    insn.local_get(slot)
+                        .local_get(0)
+                        .struct_set(struct_type, field);
+                    insn.local_get(slot);
+                }
+            }
             None => return Err(WasmError::Unresolved("a matching constructor".into())),
         }
         Ok(ty)
