@@ -1571,28 +1571,18 @@ public class Money {
     assert_invoke(&[source], "mark", &[], "6");
 }
 
-/// The `enum` shape that needs its own type is reported.
-///
-/// A constant with a body is an anonymous subclass, which is a type of its own — the same report the JVM
-/// backend gives, for the same reason.
+/// A constant whose arguments match no constructor is reported: there is no descriptor to pick.
 #[test]
 fn the_enum_shapes_that_need_more_are_reported() {
-    for (source, expected) in [
-        (
-            "public enum E { A { int f() { return 1; } }, B; int f() { return 0; } }",
-            "an `enum` constant with a body",
+    let source = "public enum E { A(1, 2); E(int a) {} }";
+    let error = compile(&[source]).expect_err("this enum has no constructor to build with");
+    assert!(
+        matches!(
+            error,
+            WasmError::Unsupported("an `enum` constant with no matching constructor")
         ),
-        (
-            "public enum E { A(1, 2); E(int a) {} }",
-            "an `enum` constant with no matching constructor",
-        ),
-    ] {
-        let error = compile(&[source]).expect_err("this enum needs more than a plain allocation");
-        assert!(
-            matches!(error, WasmError::Unsupported(what) if what == expected),
-            "`{source}` should report {expected:?}, got {error}"
-        );
-    }
+        "got {error}"
+    );
 }
 
 /// A `record`: fields from the header, plus a canonical constructor and accessors written out.
@@ -2478,4 +2468,45 @@ public class Using {
     assert_invoke(&[source], "caught", &[], "1037");
     assert_invoke(&[source], "overridden", &[], "101");
     assert_invoke(&[source], "normal", &[], "105");
+}
+
+/// An `enum` constant with a body, which is an anonymous subclass of the enum.
+///
+/// The struct it gets holds the enum's fields first, exactly as any subclass's does, which is what lets
+/// the body read `scale` and what makes the existing `ref.test` chain dispatch `apply` to it. The
+/// constant's global still has the enum's type; only what is allocated changes.
+///
+/// The same five answers a real JVM gives for this source.
+#[test]
+fn an_enum_constant_with_a_body_is_its_own_subclass() {
+    let source = r"
+public enum Op {
+    ADD { int apply(int a, int b) { return a + b; } },
+    MUL(2) { int apply(int a, int b) { return a * b * scale; } };
+
+    final int scale;
+
+    Op() { this.scale = 1; }
+
+    Op(int scale) { this.scale = scale; }
+
+    int apply(int a, int b) { return 0; }
+
+    // A concrete member the bodies inherit rather than override, whose self-call still dispatches.
+    int twice(int n) { return apply(n, n); }
+}
+
+public class Reader {
+    public static int add() { return Op.ADD.apply(2, 3); }
+    public static int mul() { return Op.MUL.apply(2, 3); }
+    public static int twiceAdd() { return Op.ADD.twice(4); }
+    public static int twiceMul() { return Op.MUL.twice(4); }
+    public static int same() { return Op.ADD == Op.ADD ? 1 : 0; }
+}
+";
+    assert_invoke(&[source], "add", &[], "5");
+    assert_invoke(&[source], "mul", &[], "12");
+    assert_invoke(&[source], "twiceAdd", &[], "8");
+    assert_invoke(&[source], "twiceMul", &[], "32");
+    assert_invoke(&[source], "same", &[], "1");
 }

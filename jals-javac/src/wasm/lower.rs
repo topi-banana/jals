@@ -753,7 +753,10 @@ impl CompileWasm {
     /// declaration with no name and no keyword, so it is recognised by shape; the index keys its item on
     /// the `new` keyword's position, which is the only offset it can be found by.
     fn is_anonymous(node: &SyntaxNode) -> bool {
-        node.kind() == NEW_EXPR && node.children().any(|child| child.kind() == CLASS_BODY)
+        // An `enum` constant with a body is the other form: an anonymous subclass of the enum, keyed on
+        // the constant's own position for the same reason — there is no name to key on.
+        matches!(node.kind(), NEW_EXPR | ENUM_CONSTANT)
+            && node.children().any(|child| child.kind() == CLASS_BODY)
     }
 
     /// Whether `node` is a lambda or a method reference — the two forms the index gives a one-method class
@@ -823,7 +826,15 @@ impl CompileWasm {
             .supertypes
             .iter()
             .map(|supertype| supertype.id)
-            .find(|&id| index.item(id).kind == DefKind::Class)
+            // An `enum` counts: a constant with a body is a subclass of one, and it is the only way a
+            // declaration that is not a `class` ever appears here. Its struct has to hold the enum's
+            // fields, which is what makes the layout inherit and the subtyping declared.
+            .find(|&id| {
+                matches!(
+                    index.item(id).kind,
+                    DefKind::Class | DefKind::Enum | DefKind::Record
+                )
+            })
     }
 
     /// Register every method and constructor `input` declares.
@@ -1220,11 +1231,6 @@ impl Layout {
             for member in body.iter().flat_map(SyntaxNode::children) {
                 if member.kind() != ENUM_CONSTANT {
                     continue;
-                }
-                let constant = ast::EnumConstant::cast(member.clone())
-                    .ok_or(WasmError::Unsupported("a malformed `enum` constant"))?;
-                if constant.body().is_some() {
-                    return Err(WasmError::Unsupported("an `enum` constant with a body"));
                 }
                 let name = member
                     .children_with_tokens()
@@ -1899,6 +1905,15 @@ impl Lowering<'_> {
             .find_map(ast::ArgList::cast)
             .map(|list| list.args().collect())
             .unwrap_or_default();
+        // A constant with a body is an instance of its *own* subclass, which is where its overrides
+        // live. Its global still has the enum's type, so nothing else changes.
+        let built = if node.children().any(|child| child.kind() == CLASS_BODY) {
+            self.index
+                .item_by_decl(self.input.file, usize::from(node.text_range().start()))
+                .ok_or(WasmError::Unsupported("an `enum` constant with no item"))?
+        } else {
+            owner
+        };
         let mut matching = self
             .index
             .own_members(owner)
@@ -1919,8 +1934,8 @@ impl Lowering<'_> {
                 "an `enum` constant with no matching constructor",
             ));
         }
-        let ty = self.layout.class_ref(owner)?;
-        insn.struct_new_default(self.layout.structs[&owner]);
+        let ty = self.layout.class_ref(built)?;
+        insn.struct_new_default(self.layout.structs[&built]);
         // Either constructor leaves the object where it found it: the receiver is stored and re-read
         // rather than duplicated, wasm having no `dup`, and the global takes it from there.
         let function = match selected {
@@ -1932,8 +1947,14 @@ impl Lowering<'_> {
                     .ok_or(WasmError::Unsupported("an `enum` constructor with no body"))?,
             ),
             // No declared constructor is not "nothing to run": the synthesised one runs the field
-            // initialisers, and a constant with none of either needs no call at all.
-            None => self.layout.default_constructors.get(&owner).copied(),
+            // initialisers of the enum *and* of the body, which is what the chain from the built type
+            // reaches. A constant with none of either needs no call at all.
+            None => self
+                .layout
+                .default_constructors
+                .get(&built)
+                .copied()
+                .or_else(|| Body::super_constructor(built, self.index, self.layout)),
         };
         let Some(function) = function else {
             return Ok(());
