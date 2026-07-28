@@ -1325,6 +1325,11 @@ impl Body {
         // other body does.
         if let Some(owner) = method.initialises {
             let mut insn = Insn::new();
+            // The implicit `super()` first, as a declared constructor's is: the superclass's
+            // initialisers run before this class's (§12.5).
+            if let Some(function) = Self::super_constructor(owner, index, layout) {
+                insn.local_get(0).call(function);
+            }
             lowering.initializers(owner, &method.node, 0, &mut insn)?;
             return Ok(Self {
                 locals: lowering.locals,
@@ -1369,7 +1374,12 @@ impl Body {
                     return Err(WasmError::Unsupported(
                         "a constructor reference with no matching constructor",
                     ));
-                } else if let Some(&initialise) = layout.default_constructors.get(&created) {
+                } else if let Some(initialise) = layout
+                    .default_constructors
+                    .get(&created)
+                    .copied()
+                    .or_else(|| Self::super_constructor(created, index, layout))
+                {
                     // Declaring no constructor does not mean there is nothing to run: the synthesised one
                     // runs the field initialisers, and it is the same function a plain `new` calls.
                     let slot = u32::try_from(lowering.locals.len()).unwrap_or(0) + lowering.next;
@@ -1502,6 +1512,15 @@ impl Body {
             }
         }
         if method.is_constructor && !block.as_ref().is_some_and(Self::delegates_to_this) {
+            // The implicit `super()`, which the source writes only when it has arguments to pass. It
+            // runs the superclass's initialisers, and without it every inherited field read back as its
+            // default in a module that validates.
+            if let Some(owner) = method.owner
+                && !block.as_ref().is_some_and(Self::delegates_to_super)
+                && let Some(function) = Self::super_constructor(owner, index, layout)
+            {
+                insn.local_get(0).call(function);
+            }
             // The constructor's parent *is* the class body, which is where the initialisers are and
             // the reason they need no search: they are this declaration's siblings, in order.
             if let (Some(owner), Some(body)) = (method.owner, method.node.parent()) {
@@ -1528,6 +1547,19 @@ impl Body {
 impl Body {
     /// Whether a constructor body begins with `this(…)` rather than `super(…)` or a statement.
     fn delegates_to_this(block: &ast::Block) -> bool {
+        Self::delegation(block, jals_syntax::SyntaxKind::THIS_KW)
+    }
+
+    /// Whether a constructor body begins with an explicit `super(…)`.
+    fn delegates_to_super(block: &ast::Block) -> bool {
+        Self::delegation(block, jals_syntax::SyntaxKind::SUPER_KW)
+    }
+
+    /// Whether the body's first statement is a bare `this(…)` / `super(…)` naming `keyword`.
+    ///
+    /// JLS §8.8.7 puts an explicit constructor invocation first or nowhere, so only the first statement
+    /// is examined. `this.m()` and `super.m()` are qualified calls whose callee is a field access.
+    fn delegation(block: &ast::Block, keyword: jals_syntax::SyntaxKind) -> bool {
         let Some(ast::Stmt::Expr(first)) = block.stmts().next() else {
             return false;
         };
@@ -1539,7 +1571,38 @@ impl Body {
                 .syntax()
                 .children_with_tokens()
                 .filter_map(jals_syntax::SyntaxElement::into_token)
-                .any(|token| token.kind() == jals_syntax::SyntaxKind::THIS_KW))
+                .any(|token| token.kind() == keyword))
+    }
+
+    /// The function an implicit `super()` calls: the nearest ancestor with initialisers to run.
+    ///
+    /// A subclass's construction runs its superclass's field initialisers first (JLS §12.5), and
+    /// leaving that out read every inherited field back as its default in a module that validates. The
+    /// walk continues past an ancestor that has no constructor function of its own, because *its*
+    /// superclass may still have one — a class with no initialisers is a link in the chain, not its end.
+    ///
+    /// `None` at a class whose declared constructors all take arguments: Java requires an explicit
+    /// `super(…)` there, so there is nothing implicit to call, and the source wrote what to run.
+    fn super_constructor(owner: ItemId, index: &ProjectIndex, layout: &Layout) -> Option<u32> {
+        let mut candidate = CompileWasm::superclass(owner, index);
+        while let Some(item) = candidate {
+            let mut declared = index
+                .own_members(item)
+                .iter()
+                .copied()
+                .filter(|&member| index.member(member).kind == DefKind::Constructor)
+                .peekable();
+            if declared.peek().is_some() {
+                return declared
+                    .find(|&member| index.member(member).params.is_empty())
+                    .and_then(|member| layout.functions.get(&member).copied());
+            }
+            if let Some(&function) = layout.default_constructors.get(&item) {
+                return Some(function);
+            }
+            candidate = CompileWasm::superclass(item, index);
+        }
+        None
     }
 }
 
@@ -3178,25 +3241,29 @@ impl Lowering<'_> {
     fn name(&self, name: &ast::NameRef, insn: &mut Insn) -> Result<ValType> {
         let text = name.syntax().text().to_string();
         let unresolved = || WasmError::Unresolved(text.trim().into());
-        let id = self.def_at(name.syntax()).ok_or_else(unresolved)?;
-        if let Some(slot) = self.slot_of(id) {
-            insn.local_get(slot);
-            return self.layout.val_type(self.input.inference.type_of_def(id));
-        }
-        // A captured local is not a local *here*: it lives in the field the constructor filled.
-        if let Some((field, ty)) = self.capture_field(id) {
-            let owner = self.owner.ok_or_else(unresolved)?;
-            insn.local_get(0)
-                .struct_get(self.layout.structs[&owner], field);
-            return self.layout.val_type(&ty);
-        }
-        // Not a local: a field of the enclosing class. A `static` one is a global and needs no
-        // receiver; an instance one is reached through `this`, which is local 0.
-        let declaration = self.input.resolved.def(id);
-        let member = self
-            .index
-            .member_by_decl(self.input.file, declaration.name_range.start)
-            .ok_or_else(unresolved)?;
+        let member = match self.def_at(name.syntax()) {
+            Some(id) => {
+                if let Some(slot) = self.slot_of(id) {
+                    insn.local_get(slot);
+                    return self.layout.val_type(self.input.inference.type_of_def(id));
+                }
+                // A captured local is not a local *here*: it lives in the field the constructor filled.
+                if let Some((field, ty)) = self.capture_field(id) {
+                    let owner = self.owner.ok_or_else(unresolved)?;
+                    insn.local_get(0)
+                        .struct_get(self.layout.structs[&owner], field);
+                    return self.layout.val_type(&ty);
+                }
+                // Not a local: a field of the enclosing class. A `static` one is a global and needs no
+                // receiver; an instance one is reached through `this`, which is local 0.
+                let declaration = self.input.resolved.def(id);
+                self.index
+                    .member_by_decl(self.input.file, declaration.name_range.start)
+            }
+            // Nothing in the file declared it, which an *inherited* field never is.
+            None => self.inherited_field(name.syntax()),
+        };
+        let member = member.ok_or_else(unresolved)?;
         if self.index.member(member).modifiers.is_static {
             let ty = self
                 .layout
@@ -3213,6 +3280,36 @@ impl Lowering<'_> {
         let struct_type = self.layout.structs[&owner];
         insn.local_get(0).struct_get(struct_type, slot);
         self.layout.val_type(&self.index.resolved_member_ty(member))
+    }
+
+    /// The field an unqualified name reaches when nothing in the file declared it: one of a supertype's.
+    ///
+    /// Name resolution is file-local, and a superclass's field is not something it can see — it may not
+    /// even be in this file. So the name is looked up on the enclosing type and then up the superclass
+    /// chain, nearest first, which is the order that makes a shadowing field win. A struct holds its
+    /// supertype's fields first, so the slot the inherited member lands in is the enclosing type's own.
+    fn inherited_field(&self, node: &SyntaxNode) -> Option<MemberId> {
+        let name = node
+            .children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)?;
+        let mut candidate = self.owner;
+        while let Some(item) = candidate {
+            if let Some(member) = self
+                .index
+                .own_members(item)
+                .iter()
+                .copied()
+                .find(|&member| {
+                    let info = self.index.member(member);
+                    info.kind == DefKind::Field && info.name == name.text()
+                })
+            {
+                return Some(member);
+            }
+            candidate = CompileWasm::superclass(item, self.index);
+        }
+        None
     }
 
     /// `{1, 2, 3}`, whose elements are written rather than defaulted.
@@ -3910,17 +4007,22 @@ impl Lowering<'_> {
             ast::Expr::NameRef(name) => {
                 let text = name.syntax().text().to_string();
                 let unresolved = || WasmError::Unresolved(text.trim().into());
-                let id = self.def_at(name.syntax()).ok_or_else(unresolved)?;
-                if let Some(slot) = self.slot_of(id) {
-                    return Ok(Place::Local { slot, ty });
-                }
-                // A bare name that is no local is a field of the enclosing class. A `static` one is
-                // a global; an instance one needs no spill, local 0 being a stable receiver already.
-                let declaration = self.input.resolved.def(id);
-                let member = self
-                    .index
-                    .member_by_decl(self.input.file, declaration.name_range.start)
-                    .ok_or_else(unresolved)?;
+                let member = match self.def_at(name.syntax()) {
+                    Some(id) => {
+                        if let Some(slot) = self.slot_of(id) {
+                            return Ok(Place::Local { slot, ty });
+                        }
+                        // A bare name that is no local is a field of the enclosing class. A `static`
+                        // one is a global; an instance one needs no spill, local 0 being a stable
+                        // receiver already.
+                        let declaration = self.input.resolved.def(id);
+                        self.index
+                            .member_by_decl(self.input.file, declaration.name_range.start)
+                    }
+                    // Nothing in the file declared it, which an *inherited* field never is.
+                    None => self.inherited_field(name.syntax()),
+                };
+                let member = member.ok_or_else(unresolved)?;
                 if self.index.member(member).modifiers.is_static {
                     let global = *self.layout.statics.get(&member).ok_or_else(unresolved)?;
                     return Ok(Place::Global { index: global, ty });
@@ -4134,7 +4236,15 @@ impl Lowering<'_> {
             None if !declares_constructor && arguments.is_empty() => {
                 // No constructor at all, so nothing else will run the field initialisers: without this a
                 // `class Box { int value = 9; }` read back as 0 — a wrong value in a module that validates.
-                if let Some(&initialise) = self.layout.default_constructors.get(&item) {
+                // Its own synthesised constructor, or — when it has no initialisers of its own — the
+                // nearest ancestor's, whose initialisers still have to run.
+                if let Some(initialise) = self
+                    .layout
+                    .default_constructors
+                    .get(&item)
+                    .copied()
+                    .or_else(|| Body::super_constructor(item, self.index, self.layout))
+                {
                     let slot = self.scratch(ty);
                     insn.local_set(slot).local_get(slot).call(initialise);
                     insn.local_get(slot);

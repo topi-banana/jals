@@ -2182,3 +2182,60 @@ public class U {
 ";
     assert_invoke(&[constructing], "run", &[], "25");
 }
+
+/// An unqualified name that reaches an **inherited** field.
+///
+/// Name resolution is file-local and a superclass's field is not something it can see, so the name is
+/// looked up on the enclosing type and then up the superclass chain, nearest first — the order that makes
+/// a shadowing field win. A struct holds its supertype's fields first, so the slot the inherited member
+/// lands in is the enclosing type's own, and no separate lookup is needed for it.
+#[test]
+fn an_unqualified_name_reaches_an_inherited_field() {
+    let source = r"
+public class Base {
+    int seed = 4;
+    static int shared = 9;
+    long wide = 100L;
+}
+
+public class Middle extends Base {
+    int own = 1;
+}
+
+public class Leaf extends Middle {
+    // A field of the same name shadows the inherited one, and the nearest declaration wins.
+    int seed = 7;
+
+    int shadowed() { return seed; }
+
+    int inherited() { return own; }
+
+    int statics() { return shared; }
+
+    long widened() { return wide; }
+
+    // Assignment takes the same route, and an inherited name as an *operand* needs the type inference
+    // recorded for it.
+    int bumped() {
+        wide += 5L;
+        own++;
+        shared = 20;
+        own = own + 1;
+        return own + (int) wide + shared;
+    }
+}
+
+public class Reader {
+    public static int shadowed() { return new Leaf().shadowed(); }
+    public static int inherited() { return new Leaf().inherited(); }
+    public static int statics() { return new Leaf().statics(); }
+    public static long widened() { return new Leaf().widened(); }
+    public static int bumped() { return new Leaf().bumped(); }
+}
+";
+    assert_invoke(&[source], "shadowed", &[], "7");
+    assert_invoke(&[source], "inherited", &[], "1");
+    assert_invoke(&[source], "statics", &[], "9");
+    assert_invoke(&[source], "widened", &[], "100");
+    assert_invoke(&[source], "bumped", &[], "128");
+}
