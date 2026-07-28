@@ -1515,8 +1515,15 @@ impl Body {
         if let Some(owner) = method.initialises {
             let mut insn = Insn::new();
             // The implicit `super()` first, as a declared constructor's is: the superclass's
-            // initialisers run before this class's (§12.5).
-            if let Some(function) = Self::super_constructor(owner, index, layout) {
+            // initialisers run before this class's (§12.5). Except under an `enum`: a constant's body is
+            // a subclass whose *constant site* calls the enum's constructor, that being the one place
+            // the constant's arguments exist — calling it here too would run the enum's twice, and the
+            // no-argument one at that, which is a different constructor from the one selected.
+            let under_enum = CompileWasm::superclass(owner, index)
+                .is_some_and(|parent| index.item(parent).kind == DefKind::Enum);
+            if let Some(function) = Self::super_constructor(owner, index, layout)
+                && !under_enum
+            {
                 insn.local_get(0).call(function);
             }
             lowering.initializers(owner, &method.node, 0, &mut insn)?;
@@ -1936,9 +1943,13 @@ impl Lowering<'_> {
         }
         let ty = self.layout.class_ref(built)?;
         insn.struct_new_default(self.layout.structs[&built]);
-        // Either constructor leaves the object where it found it: the receiver is stored and re-read
-        // rather than duplicated, wasm having no `dup`, and the global takes it from there.
-        let function = match selected {
+        // The receiver is stored and re-read rather than duplicated, wasm having no `dup`, and the
+        // global takes it from there.
+        let slot = self.scratch(ty);
+        insn.local_set(slot);
+        // The enum's own construction: the constructor the arguments selected, or — when the enum
+        // declares none — the synthesised one that runs its field initialisers.
+        let enum_constructor = match selected {
             Some(constructor) => Some(
                 *self
                     .layout
@@ -1946,25 +1957,25 @@ impl Lowering<'_> {
                     .get(&constructor)
                     .ok_or(WasmError::Unsupported("an `enum` constructor with no body"))?,
             ),
-            // No declared constructor is not "nothing to run": the synthesised one runs the field
-            // initialisers of the enum *and* of the body, which is what the chain from the built type
-            // reaches. A constant with none of either needs no call at all.
-            None => self
-                .layout
-                .default_constructors
-                .get(&built)
-                .copied()
-                .or_else(|| Body::super_constructor(built, self.index, self.layout)),
+            None => self.layout.default_constructors.get(&owner).copied(),
         };
-        let Some(function) = function else {
-            return Ok(());
-        };
-        let slot = self.scratch(ty);
-        insn.local_set(slot).local_get(slot);
-        for argument in &arguments {
-            self.expr(argument, insn)?;
+        if let Some(function) = enum_constructor {
+            insn.local_get(slot);
+            for argument in &arguments {
+                self.expr(argument, insn)?;
+            }
+            insn.call(function);
         }
-        insn.call(function).local_get(slot);
+        // Then the body's *own* initialisers, which belong to a second class and run after the enum's
+        // (§12.5). Nothing else reaches them: the enum's constructor knows nothing of the subclass, and
+        // running them from the body's synthesised constructor's own `super()` would run the enum's
+        // twice — which is why that call is skipped under an `enum`.
+        if built != owner
+            && let Some(&initialise) = self.layout.default_constructors.get(&built)
+        {
+            insn.local_get(slot).call(initialise);
+        }
+        insn.local_get(slot);
         Ok(())
     }
 

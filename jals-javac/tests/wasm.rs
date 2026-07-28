@@ -2476,13 +2476,19 @@ public class Using {
 /// the body read `scale` and what makes the existing `ref.test` chain dispatch `apply` to it. The
 /// constant's global still has the enum's type; only what is allocated changes.
 ///
-/// The same five answers a real JVM gives for this source.
+/// The body's *own* field initialisers run after the enum's construction and are reached from the
+/// constant site, nothing else knowing about them: the enum's constructor knows nothing of the subclass,
+/// and running them from the body's synthesised `super()` would run the enum's twice. `extra` is what
+/// checks that — a constant with both arguments and a body used to read it back as zero.
+///
+/// The JVM test compiles the same enum, so the two backends' answers are compared against each other and
+/// against a real JVM's.
 #[test]
 fn an_enum_constant_with_a_body_is_its_own_subclass() {
     let source = r"
 public enum Op {
     ADD { int apply(int a, int b) { return a + b; } },
-    MUL(2) { int apply(int a, int b) { return a * b * scale; } };
+    MUL(2) { int extra = 7; int apply(int a, int b) { return a * b * scale + extra; } };
 
     final int scale;
 
@@ -2505,8 +2511,8 @@ public class Reader {
 }
 ";
     assert_invoke(&[source], "add", &[], "5");
-    assert_invoke(&[source], "mul", &[], "12");
+    assert_invoke(&[source], "mul", &[], "19");
     assert_invoke(&[source], "twiceAdd", &[], "8");
-    assert_invoke(&[source], "twiceMul", &[], "32");
+    assert_invoke(&[source], "twiceMul", &[], "39");
     assert_invoke(&[source], "same", &[], "1");
 }

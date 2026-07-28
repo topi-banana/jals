@@ -4239,12 +4239,15 @@ public class Uses {
 /// field still has the enum's type. And the enum's constructors widen to package-private, because a
 /// subclass cannot reach a `private` one without the nestmate attributes this does not emit; `new` on an
 /// enum is not a Java program, so nothing observes the difference.
+///
+/// The wasm test compiles the same enum, so the two backends' answers are compared against each other
+/// and against a real JVM's.
 #[test]
 fn an_enum_constant_with_a_body_is_its_own_subclass() {
     let source = r#"
 enum Op {
     ADD { int apply(int a, int b) { return a + b; } },
-    MUL(2) { int apply(int a, int b) { return a * b * scale; } };
+    MUL(2) { int extra = 7; int apply(int a, int b) { return a * b * scale + extra; } };
 
     final int scale;
 
@@ -4290,5 +4293,5 @@ public class Bodies {
     if !java_available() {
         return;
     }
-    assert_eq!(run(source, "Bodies"), "5\n12\n8\n32\n1 MUL\n2\n");
+    assert_eq!(run(source, "Bodies"), "5\n19\n8\n39\n1 MUL\n2\n");
 }
