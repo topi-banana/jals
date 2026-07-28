@@ -1926,3 +1926,49 @@ public class Areas {
     );
     assert_invoke(&[capturing], "run", &["6"], "12");
 }
+
+/// A lambda, which in a module with no `invokedynamic` is an instance of a one-method class.
+///
+/// The index gives a lambda its own item, the interface it is converted to as its supertype, and that
+/// interface's method as its one member — so the dispatch chain that already finds every implementing class
+/// finds this too, and nothing new is needed to *call* it. Building one is then building that object:
+/// allocate the struct and write the captures into it, exactly as an anonymous class's `new` does.
+///
+/// A capture is a *field* here, not a leading parameter as on the JVM: the object outlives the frame either
+/// way, and a struct is what this backend has to keep it in.
+#[test]
+fn a_lambda_is_an_instance_of_a_one_method_class() {
+    let source = r"
+public interface Doubler { int apply(int n); }
+
+public class Uses {
+    public static int plain(int n) {
+        Doubler d = x -> x * 2;
+        return d.apply(n);
+    }
+
+    public static int capturing(int n) {
+        int bump = 40;
+        Doubler d = x -> x + bump;
+        return d.apply(n);
+    }
+
+    // A block body returns for itself.
+    public static int blocked(int n) {
+        Doubler d = x -> { return x * 3; };
+        return d.apply(n);
+    }
+
+    // Two lambdas on the same interface: the dispatch chain has to tell their types apart.
+    public static int both(int n) {
+        Doubler a = x -> x + 1;
+        Doubler b = x -> x * 10;
+        return a.apply(n) + b.apply(n);
+    }
+}
+";
+    assert_invoke(&[source], "plain", &["21"], "42");
+    assert_invoke(&[source], "capturing", &["2"], "42");
+    assert_invoke(&[source], "blocked", &["14"], "42");
+    assert_invoke(&[source], "both", &["4"], "45");
+}

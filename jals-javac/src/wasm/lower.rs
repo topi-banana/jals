@@ -47,7 +47,7 @@ use jals_hir::{
 };
 use jals_syntax::SyntaxKind::{
     CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL, ENUM_BODY, ENUM_CONSTANT, ENUM_DECL, FIELD_DECL,
-    INITIALIZER, INTERFACE_DECL, METHOD_DECL, MODIFIERS, NEW_EXPR, RECORD_DECL,
+    INITIALIZER, INTERFACE_DECL, LAMBDA_EXPR, METHOD_DECL, MODIFIERS, NEW_EXPR, RECORD_DECL,
 };
 use jals_syntax::ast::{self, AstNode as _};
 use jals_syntax::{SyntaxNode, SyntaxToken};
@@ -120,6 +120,9 @@ struct Method {
     encloses: Option<ItemId>,
     /// How many trailing parameters hold captured locals.
     captures: usize,
+    /// The interface method this body implements, when the "method" is a lambda expression rather than a
+    /// declaration. A lambda's captures are *fields*, not parameters, so only its own parameters are bound.
+    lambda: Option<MemberId>,
     /// Whether the function's signature has a result, which decides whether its body needs a trailing
     /// `unreachable`.
     has_result: bool,
@@ -522,6 +525,7 @@ impl CompileWasm {
                 node.kind(),
                 CLASS_DECL | INTERFACE_DECL | ENUM_DECL | RECORD_DECL | ANNOTATION_TYPE_DECL
             ) || Self::is_anonymous(node)
+                || node.kind() == LAMBDA_EXPR
         })
     }
 
@@ -582,7 +586,9 @@ impl CompileWasm {
         input: &WasmInput<'_>,
         index: &ProjectIndex,
     ) -> Result<Option<ItemId>> {
-        if Self::is_anonymous(node) {
+        // A lambda and an anonymous body are both nameless, and the index keys each on its own start
+        // offset — the only thing either has to be found by.
+        if Self::is_anonymous(node) || node.kind() == LAMBDA_EXPR {
             return Ok(index.item_by_decl(input.file, usize::from(node.text_range().start())));
         }
         let name = Self::name_token(node).ok_or(WasmError::Unsupported("a class with no name"))?;
@@ -651,6 +657,44 @@ impl CompileWasm {
             let Some(item) = Self::item_of(&class, input, index)? else {
                 continue;
             };
+            // A lambda has no body *node* of members: it declares exactly one method, the interface's, and
+            // the lambda expression itself is that method's body.
+            if class.kind() == LAMBDA_EXPR {
+                let Some(member) = index
+                    .own_members(item)
+                    .iter()
+                    .copied()
+                    .find(|&id| index.member(id).kind == DefKind::Method)
+                else {
+                    continue;
+                };
+                let mut params = alloc::vec![layout.class_ref(item)?];
+                for ty in index.resolved_param_tys(member) {
+                    params.push(layout.val_type(&ty)?);
+                }
+                let results = match index.resolved_member_ty(member) {
+                    Ty::Void => Vec::new(),
+                    ty => alloc::vec![layout.val_type(&ty)?],
+                };
+                let has_result = !results.is_empty();
+                let signature = module.add_type(SubType::plain(CompType::Func { params, results }));
+                let function = Module::func_index(out.len());
+                layout.functions.insert(member, function);
+                out.push(Method {
+                    owner: Some(item),
+                    node: class.clone(),
+                    input: position,
+                    signature,
+                    index: function,
+                    export: None,
+                    is_constructor: false,
+                    has_result,
+                    encloses: None,
+                    captures: 0,
+                    lambda: Some(member),
+                });
+                continue;
+            }
             // An `enum`'s members live under an `ENUM_BODY`, after the constants and the `;`.
             let Some(body) = class
                 .children()
@@ -723,6 +767,7 @@ impl CompileWasm {
                     has_result,
                     encloses,
                     captures: captured.len(),
+                    lambda: None,
                     export: (is_static && !is_constructor)
                         .then(|| index.member(member).name.clone()),
                     is_constructor,
@@ -1207,6 +1252,61 @@ impl Body {
             lowering.next += 1;
         }
 
+        // A lambda's parameters live under its own `LambdaParams`, and its captures are fields rather than
+        // parameters — so nothing trails them.
+        if let Some(member) = method.lambda {
+            for param in method
+                .node
+                .descendants()
+                .filter(|node| node.kind() == jals_syntax::SyntaxKind::PARAM)
+            {
+                let id = lowering
+                    .def_at(&param)
+                    .ok_or(WasmError::Unsupported("a lambda parameter with no binding"))?;
+                let ty = lowering
+                    .layout
+                    .val_type(lowering.input.inference.type_of_def(id))?;
+                lowering.slots.push((id, lowering.next));
+                lowering.next += 1;
+                let _ = ty;
+            }
+            let mut insn = Insn::new();
+            let returns = index.resolved_member_ty(member);
+            let body = method.node.children().find_map(ast::Block::cast);
+            match (
+                method
+                    .node
+                    .children()
+                    .filter_map(ast::Expr::cast)
+                    .find(|expr| !matches!(expr, ast::Expr::ArrayInit(_))),
+                body,
+            ) {
+                // An expression body *is* the value, or is run for its effect when the interface returns none.
+                (Some(value), _) => {
+                    if matches!(returns, Ty::Void) {
+                        lowering.discard(&value, &mut insn)?;
+                    } else {
+                        lowering.value_as(&value, &returns, &mut insn)?;
+                    }
+                    // An expression body leaves the value and writes no `return`, so the instruction is
+                    // needed here — unlike a declared method, where a trailing one would be dead code.
+                    insn.return_();
+                }
+                // A block body returns for itself; the trailing trap is the same dead code a declared body's
+                // is, and is there so the validator need not infer Java's definite-return rule.
+                (None, Some(block)) => {
+                    lowering.block(&block, &mut insn)?;
+                    if method.has_result {
+                        insn.unreachable();
+                    }
+                }
+                (None, None) => return Err(WasmError::Unsupported("a lambda with no body")),
+            }
+            return Ok(Self {
+                locals: lowering.locals,
+                code: insn.into_body(),
+            });
+        }
         if let Some(params) = method.node.children().find_map(ast::ParamList::cast) {
             for param in params.params() {
                 let ty = lowering.declare_param(param.syntax())?;
@@ -2635,7 +2735,41 @@ impl Lowering<'_> {
             // Both need a function reference and a target type to make one *of*; the interface that
             // would be that type is not laid out yet either. Each names itself rather than sharing a
             // catch-all, which said only "this expression form".
-            ast::Expr::Lambda(_) => Err(WasmError::Unsupported("a lambda")),
+            // A lambda *is* an instance of a one-method class here, so building one is building that: allocate
+            // the struct and write the captures into it, exactly as an anonymous class's `new` does. There is
+            // no `invokedynamic` to reach for and no need of one — the dispatch chain already finds the type.
+            ast::Expr::Lambda(lambda) => {
+                let item = self
+                    .index
+                    .item_by_decl(self.input.file, Self::span(lambda.syntax()).start)
+                    .ok_or(WasmError::Unsupported("a lambda with no item"))?;
+                let struct_type = *self
+                    .layout
+                    .structs
+                    .get(&item)
+                    .ok_or(WasmError::Unsupported("a lambda with no struct type"))?;
+                let ty = self.layout.class_ref(item)?;
+                insn.struct_new_default(struct_type);
+                let captured = self.layout.captures.get(&item).cloned().unwrap_or_default();
+                if !captured.is_empty() {
+                    let slot = self.scratch(ty);
+                    let first = *self
+                        .layout
+                        .capture_slot
+                        .get(&item)
+                        .ok_or(WasmError::Unsupported("a capture with no field"))?;
+                    insn.local_set(slot);
+                    for (offset, (id, _)) in captured.iter().enumerate() {
+                        insn.local_get(slot);
+                        self.push_capture(*id, insn)?;
+                        let field =
+                            first + u32::try_from(offset).map_err(|_| WasmError::TooLarge)?;
+                        insn.struct_set(struct_type, field);
+                    }
+                    insn.local_get(slot);
+                }
+                Ok(Some(ty))
+            }
             ast::Expr::MethodRef(_) => Err(WasmError::Unsupported("a method reference")),
             ast::Expr::ClassLiteral(_) => Err(WasmError::Unsupported("a `.class` literal")),
             // No target here, so the element type is whatever inference read off the elements. That is
