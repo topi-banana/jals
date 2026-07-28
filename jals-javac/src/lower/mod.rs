@@ -169,6 +169,40 @@ pub(crate) struct Context<'a> {
     captures: alloc::collections::BTreeMap<ItemId, alloc::vec::Vec<jals_hir::DefId>>,
     /// The class being compiled, so its own captures can be told from another's.
     this_item: ItemId,
+    /// Every lambda in this class, by its span: the call site's name and descriptor, and which
+    /// `BootstrapMethods` entry links it.
+    lambdas: alloc::collections::BTreeMap<(usize, usize), Lambda>,
+}
+
+/// What a lambda's `invokedynamic` needs, worked out before any body is lowered.
+///
+/// A body cannot turn itself into a method — expression lowering has no channel for adding one — so every
+/// lambda is found, numbered, and synthesised up front, exactly as nested classes and captures already are.
+/// Expression lowering then only reads this.
+pub(crate) struct Lambda {
+    /// The functional interface's method name, which is the call site's name.
+    interface_method: String,
+    /// The call site's descriptor: no arguments, since nothing is captured, returning the interface.
+    call_descriptor: String,
+    /// Index into the class's `BootstrapMethods`.
+    bootstrap: u16,
+}
+
+impl Lambda {
+    /// The call site's name, which is the functional interface's method name.
+    pub(crate) fn interface_method(&self) -> &str {
+        &self.interface_method
+    }
+
+    /// The call site's descriptor.
+    pub(crate) fn call_descriptor(&self) -> &str {
+        &self.call_descriptor
+    }
+
+    /// Which `BootstrapMethods` entry links this call site.
+    pub(crate) const fn bootstrap(&self) -> u16 {
+        self.bootstrap
+    }
 }
 
 /// The source-to-class-file lowering.
@@ -288,6 +322,7 @@ impl Compile {
             inner: Self::inner_classes_of(node, index, file),
             captures: Self::captures_of(node, resolved, index, file),
             this_item: item,
+            lambdas: alloc::collections::BTreeMap::new(),
         };
 
         let mut pool = ConstantPool::new();
@@ -363,6 +398,11 @@ impl Compile {
 
         let mut fields = Vec::new();
         let mut methods = Vec::new();
+        // Worked out before any body is lowered, because a body cannot add a method to the class it is in.
+        let (context, lambda_methods, bootstraps) =
+            Self::synthesise_lambdas(context, &members, &mut pool)?;
+        methods.extend(lambda_methods);
+
         let mut saw_constructor = false;
 
         for member in &members {
@@ -515,6 +555,17 @@ impl Compile {
             nesting.push(jals_classfile::Attribute {
                 name_index,
                 body: jals_classfile::AttributeBody::Signature { signature_index },
+            });
+        }
+        if !bootstraps.is_empty() {
+            // The attribute every `invokedynamic` in the class indexes into. Without it a call site names an
+            // entry that is not there, which is a `ClassFormatError` before anything runs.
+            let name_index = pool
+                .utf8_index("BootstrapMethods")
+                .ok_or(AsmError::PoolFull)?;
+            nesting.push(jals_classfile::Attribute {
+                name_index,
+                body: jals_classfile::AttributeBody::BootstrapMethods(bootstraps),
             });
         }
         if let Some(components) = record_attribute {
@@ -787,6 +838,131 @@ impl Compile {
             Descriptor::descriptor_of(context.inference.type_of_def(id), context.index)?
                 .to_string(),
         )
+    }
+
+    /// Find every lambda in `members`, synthesise the method that holds each body, and build the
+    /// `BootstrapMethods` entry that links it.
+    ///
+    /// Only a *non-capturing* lambda with an expression body is emitted. A capturing one needs its captures
+    /// as leading parameters of both the synthetic method and the call site, and a block body needs the
+    /// statement lowering; each is its own step, and reporting beats emitting a call site whose arguments do
+    /// not match its handle.
+    fn synthesise_lambdas<'a>(
+        mut context: Context<'a>,
+        members: &[SyntaxNode],
+        pool: &mut ConstantPool,
+    ) -> Result<(
+        Context<'a>,
+        Vec<MethodInfo>,
+        Vec<jals_classfile::BootstrapMethod>,
+    )> {
+        const METAFACTORY: &str = "java/lang/invoke/LambdaMetafactory";
+        const METAFACTORY_DESCRIPTOR: &str = "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;";
+        let mut out = Vec::new();
+        let mut bootstraps = Vec::new();
+        let lambdas: Vec<SyntaxNode> = members
+            .iter()
+            .flat_map(SyntaxNode::descendants)
+            .filter(|node| node.kind() == jals_syntax::SyntaxKind::LAMBDA_EXPR)
+            .collect();
+        for (ordinal, lambda) in lambdas.iter().enumerate() {
+            let decl = ast::LambdaExpr::cast(lambda.clone())
+                .ok_or(LowerError::Unsupported("a malformed lambda"))?;
+            let Some(value) = decl.expr_body() else {
+                return Err(LowerError::Unsupported("a lambda with a block body"));
+            };
+            // The interface the context asked for, and the one method it declares.
+            let item = expr::Expr::type_of(lambda, &context)?
+                .project_id()
+                .ok_or(LowerError::Unsupported("a lambda with no target type"))?;
+            let member = Self::functional_member(item, &context).ok_or(LowerError::Unsupported(
+                "a lambda target with no single method",
+            ))?;
+            let name = context.index.member(member).name.clone();
+            let descriptor = MethodDescriptor::to_string(&Descriptor::method_descriptor(
+                member,
+                context.index,
+                false,
+            )?);
+            let interface = Descriptor::internal_name_of(item, context.index);
+            let returns = context.index.resolved_member_ty(member);
+
+            // The synthetic method takes the interface's own descriptor, since nothing is captured. The
+            // assembler borrows the pool for as long as it lives, so its code comes out first and every
+            // entry the method *info* needs is interned after it is gone.
+            let synthetic = alloc::format!("lambda${ordinal}");
+            let code = {
+                let mut asm = Assembler::new(pool, Receiver::Static, &descriptor)?;
+                let mut slots = Slots::new(&context, None, true);
+                for param in decl.params().into_iter().flat_map(|list| list.params()) {
+                    let id = context
+                        .def_at(param.syntax())
+                        .ok_or(LowerError::Unsupported(
+                            "a lambda parameter with no binding",
+                        ))?;
+                    let width = Slots::ty_width(context.inference.type_of_def(id));
+                    slots.declare(id, width);
+                }
+                let mut emit = Emit::new(&mut asm, slots, returns.clone(), false);
+                if matches!(returns, jals_hir::Ty::Void) {
+                    stmt::Stmt::discarded(&value, &context, &mut emit)?;
+                    asm.return_(None)?;
+                } else {
+                    expr::Expr::lower_as(&value, &returns, &context, &mut emit)?;
+                    let top = asm
+                        .stack_top()
+                        .ok_or(LowerError::Unsupported("a lambda body with no value"))?;
+                    asm.return_(Some(&top))?;
+                }
+                asm.finish()?
+            };
+            out.push(MethodInfo {
+                // private | static | synthetic
+                access_flags: MethodAccessFlags(0x0002 | 0x0008 | 0x1000),
+                name_index: pool.utf8_index(&synthetic).ok_or(AsmError::PoolFull)?,
+                descriptor_index: pool.utf8_index(&descriptor).ok_or(AsmError::PoolFull)?,
+                attributes: alloc::vec![code],
+            });
+
+            // `metafactory` is handed the interface's shape, a handle to the body, and the shape again — the
+            // two `MethodType`s differ only where generics erase, which this does not model.
+            let handle = pool
+                .method_handle_index(6, &context.this_class, &synthetic, &descriptor, false)
+                .ok_or(AsmError::PoolFull)?;
+            let shape = pool
+                .method_type_index(&descriptor)
+                .ok_or(AsmError::PoolFull)?;
+            let bootstrap = pool
+                .method_handle_index(6, METAFACTORY, "metafactory", METAFACTORY_DESCRIPTOR, false)
+                .ok_or(AsmError::PoolFull)?;
+            bootstraps.push(jals_classfile::BootstrapMethod {
+                bootstrap_method_ref: bootstrap,
+                bootstrap_arguments: alloc::vec![shape, handle, shape],
+            });
+            let index = u16::try_from(bootstraps.len() - 1).map_err(|_| AsmError::PoolFull)?;
+            let span = Context::span(lambda);
+            context.lambdas.insert(
+                (span.start, span.end),
+                Lambda {
+                    interface_method: name,
+                    call_descriptor: alloc::format!("()L{interface};"),
+                    bootstrap: index,
+                },
+            );
+        }
+        Ok((context, out, bootstraps))
+    }
+
+    /// The one method a functional interface declares, or `None` when it declares none or several.
+    fn functional_member(item: ItemId, context: &Context<'_>) -> Option<jals_hir::MemberId> {
+        let mut methods = context
+            .index
+            .own_members(item)
+            .iter()
+            .copied()
+            .filter(|&id| context.index.member(id).kind == DefKind::Method);
+        let only = methods.next()?;
+        methods.next().is_none().then_some(only)
     }
 
     /// Every inner class declared in the file `node` belongs to, mapped to the internal name of the class
@@ -2568,6 +2744,11 @@ impl Compile {
 }
 
 impl Context<'_> {
+    /// What the lambda at `span` was compiled into, when this class has one there.
+    pub(crate) fn lambda_at(&self, span: &core::ops::Range<usize>) -> Option<&Lambda> {
+        self.lambdas.get(&(span.start, span.end))
+    }
+
     /// The locals a local class in this file captures.
     pub(crate) fn captures_of_item(
         &self,

@@ -1321,7 +1321,7 @@ public class Several {
 #[test]
 fn the_features_after_this_milestone_are_still_reported() {
     for (source, expected) in [
-        ("Runnable r = () -> {};", "a lambda"),
+        ("Runnable r = () -> {};", "a lambda with a block body"),
         ("Runnable r = Later::main;", "a method reference"),
     ] {
         let program = format!(
@@ -2914,17 +2914,17 @@ public class Holder {
     assert_eq!(run(source, "Holder"), "ran\n");
 }
 
-/// A lambda and a method reference each name themselves.
+/// The lambda forms still ahead, and a method reference, each naming themselves.
 ///
-/// Both need `invokedynamic` and a `BootstrapMethods` attribute, and the constant pool has no
-/// `MethodHandle` / `MethodType` / `InvokeDynamic` builder yet. A report that says only "this expression
-/// form" sends a reader looking for which one it meant.
+/// A *block* body needs the statement lowering to produce the synthetic method's body, and a *capturing*
+/// lambda needs its captures as leading parameters of both that method and the call site — each is its own
+/// step, and reporting beats emitting a call site whose arguments do not match its handle.
 #[test]
 fn a_lambda_and_a_method_reference_each_name_themselves() {
     for (source, expected) in [
         (
-            "interface F { int f(int n); } class C { F g() { return n -> n + 1; } }",
-            "a lambda",
+            "interface F { int f(int n); } class C { F g() { return n -> { return n + 1; }; } }",
+            "a lambda with a block body",
         ),
         (
             "interface F { int f(int n); } class C { static int h(int n) { return n; } \
@@ -3506,4 +3506,82 @@ public class Outer {
         return;
     }
     assert_eq!(run(source, "Outer"), "one\ntwo\n");
+}
+
+/// A lambda, compiled to an `invokedynamic` that `LambdaMetafactory` links.
+///
+/// The body cannot turn itself into a method — expression lowering has no channel for adding one — so every
+/// lambda is found, numbered, and synthesised before any body is lowered, the same way nested classes and
+/// captures already are. What is left at the use site is the call site itself: no arguments, because nothing
+/// is captured, returning the functional interface the context asked for.
+#[test]
+fn a_lambda_becomes_an_invokedynamic() {
+    let source = r"
+interface Doubler {
+    int apply(int n);
+}
+
+public class Uses {
+    // A lambda in a `return`, whose target is the method's own return type.
+    static Doubler made() { return n -> n * 2; }
+
+    public static void main(String[] args) {
+        // And one in a declaration, whose target is the written type.
+        Doubler d = n -> n + 1;
+        System.out.println(d.apply(41));
+        System.out.println(made().apply(21));
+    }
+}
+";
+    let classes = compile(source).expect("compile");
+    let uses = classes
+        .iter()
+        .find(|class| class.internal_name == "Uses")
+        .expect("the class");
+    let class = jals_exec::block_on_inline(jals_classfile::ClassFile::read(uses.bytes.as_slice()))
+        .expect("reparse");
+    let name_of = |index| class.constant_pool.utf8(index).expect("utf8").into_owned();
+    // One synthetic method per lambda, `private static synthetic`, taking the interface's own descriptor.
+    let synthetic: Vec<(String, String, u16)> = class
+        .methods
+        .iter()
+        .filter(|method| name_of(method.name_index).starts_with("lambda$"))
+        .map(|method| {
+            (
+                name_of(method.name_index),
+                name_of(method.descriptor_index),
+                method.access_flags.0,
+            )
+        })
+        .collect();
+    assert_eq!(
+        synthetic,
+        [
+            (
+                "lambda$0".to_owned(),
+                "(I)I".to_owned(),
+                0x0002 | 0x0008 | 0x1000
+            ),
+            (
+                "lambda$1".to_owned(),
+                "(I)I".to_owned(),
+                0x0002 | 0x0008 | 0x1000
+            ),
+        ]
+    );
+    // Every call site indexes into this attribute; without it the class does not even load.
+    let bootstraps = class
+        .attributes
+        .iter()
+        .find_map(|attribute| match &attribute.body {
+            jals_classfile::AttributeBody::BootstrapMethods(methods) => Some(methods),
+            _ => None,
+        })
+        .expect("the `BootstrapMethods` attribute");
+    assert_eq!(bootstraps.len(), 2, "one entry per lambda");
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Uses"), "42\n42\n");
 }

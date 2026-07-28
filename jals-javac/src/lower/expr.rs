@@ -126,7 +126,20 @@ impl Expr {
             // no `MethodHandle` / `MethodType` / `InvokeDynamic` builder yet. Each names itself rather
             // than sharing a catch-all: a report that says only "this expression form" sends a reader
             // looking for which one.
-            ast::Expr::Lambda(_) => Err(LowerError::Unsupported("a lambda")),
+            // The synthetic method and the bootstrap entry were built before any body was lowered, so all
+            // that is left here is the call site: no arguments, because nothing is captured, returning the
+            // functional interface the context asked for.
+            ast::Expr::Lambda(lambda) => {
+                let span = Context::span(lambda.syntax());
+                let info = context
+                    .lambda_at(&span)
+                    .ok_or(LowerError::Unsupported("a lambda outside a class body"))?;
+                Ok(emit.asm.invoke_dynamic(
+                    info.bootstrap(),
+                    info.interface_method(),
+                    info.call_descriptor(),
+                )?)
+            }
             ast::Expr::MethodRef(_) => Err(LowerError::Unsupported("a method reference")),
         }
     }
