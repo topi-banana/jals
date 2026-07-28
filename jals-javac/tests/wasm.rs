@@ -1772,19 +1772,13 @@ public class Host {
 ";
     assert_invoke(&[source], "run", &["7"], "12");
 
-    // A capturing class with no declared constructor has no function to fill its capture fields in.
+    // A capturing class with no declared constructor has no function to fill its capture fields, so the
+    // `new` fills them — the same way it fills an inner class's single enclosing instance.
     let capturing = concat!(
         "public class H { public static int run(int n) { ",
-        "class C { int read() { return n; } } return new C().read(); } }"
+        "class C { int read() { return n * 3; } } return new C().read(); } }"
     );
-    let error = compile(&[capturing]).expect_err("there is no constructor to fill the fields");
-    assert!(
-        matches!(
-            error,
-            WasmError::Unsupported("a capturing class with no declared constructor")
-        ),
-        "got {error}"
-    );
+    assert_invoke(&[capturing], "run", &["4"], "12");
 }
 
 /// try-with-resources: each resource closed in reverse declaration order, on both paths.
@@ -1923,17 +1917,12 @@ public class Areas {
 ";
     assert_invoke(&[source], "run", &["1"], "14");
 
+    // A capturing one: the `new` fills the capture fields itself, since an anonymous class never declares
+    // a constructor to fill them in.
     let capturing = concat!(
         "public interface Shape { int area(); } ",
-        "public class A { static Shape of(int n) { return new Shape() { public int area() { return n; } }; } ",
+        "public class A { static Shape of(int n) { return new Shape() { public int area() { return n * 2; } }; } ",
         "public static int run(int n) { return of(n).area(); } }"
     );
-    let error = compile(&[capturing]).expect_err("a capturing anonymous class is not lowered yet");
-    assert!(
-        matches!(
-            error,
-            WasmError::Unsupported("a capturing class with no declared constructor")
-        ),
-        "got {error}"
-    );
+    assert_invoke(&[capturing], "run", &["6"], "12");
 }

@@ -3647,7 +3647,8 @@ impl Lowering<'_> {
             return Ok(ty);
         }
         // An anonymous class is its own type, and the `new` builds *that* rather than the type it named.
-        let item = if CompileWasm::is_anonymous(new.syntax()) {
+        let anonymous = CompileWasm::is_anonymous(new.syntax());
+        let item = if anonymous {
             self.index
                 .item_by_decl(self.input.file, Self::span(new.syntax()).start)
                 .ok_or(WasmError::Unsupported("an anonymous class with no item"))?
@@ -3657,6 +3658,15 @@ impl Lowering<'_> {
                 .type_of_expr(Self::span(new.syntax()))
                 .and_then(Ty::project_id)
                 .ok_or(WasmError::Unsupported("a `new` of an unindexed type"))?
+        };
+        // The expression's *inferred* type is the interface the `new` named, which is held as `anyref` —
+        // but the value on the stack is the anonymous struct, and anything that writes its fields needs
+        // the concrete type. The subtyping makes the two interchangeable everywhere else, which is why
+        // only the capture stores noticed.
+        let ty = if anonymous {
+            self.layout.class_ref(item)?
+        } else {
+            ty
         };
         let struct_type =
             *self.layout.structs.get(&item).ok_or_else(|| {
@@ -3724,10 +3734,26 @@ impl Lowering<'_> {
             // allocation is already the finished object — except for an inner class, whose synthetic
             // field is written here because there is no constructor function to write it.
             None if !declares_constructor && arguments.is_empty() => {
-                if !self.layout.captures.get(&item).is_none_or(Vec::is_empty) {
-                    return Err(WasmError::Unsupported(
-                        "a capturing class with no declared constructor",
-                    ));
+                // No constructor function to fill the capture fields, so the `new` fills them — the same
+                // way it fills an inner class's single enclosing instance. An anonymous class is always
+                // this case: it never declares a constructor.
+                let captured = self.layout.captures.get(&item).cloned().unwrap_or_default();
+                if !captured.is_empty() {
+                    let slot = self.scratch(ty);
+                    let first = *self
+                        .layout
+                        .capture_slot
+                        .get(&item)
+                        .ok_or(WasmError::Unsupported("a capture with no field"))?;
+                    insn.local_set(slot);
+                    for (offset, (id, _)) in captured.iter().enumerate() {
+                        insn.local_get(slot);
+                        self.push_capture(*id, insn)?;
+                        let field =
+                            first + u32::try_from(offset).map_err(|_| WasmError::TooLarge)?;
+                        insn.struct_set(struct_type, field);
+                    }
+                    insn.local_get(slot);
                 }
                 if encloses.is_some() {
                     let slot = self.scratch(ty);
@@ -3927,17 +3953,24 @@ impl Lowering<'_> {
     fn push_captures(&self, item: ItemId, insn: &mut Insn) -> Result<()> {
         let captured = self.layout.captures.get(&item).cloned().unwrap_or_default();
         for (id, _) in &captured {
-            if let Some(slot) = self.slot_of(*id) {
-                insn.local_get(slot);
-            } else if let Some((field, _)) = self.capture_field(*id) {
-                let owner = self
-                    .owner
-                    .ok_or(WasmError::Unsupported("a capture with no enclosing class"))?;
-                insn.local_get(0)
-                    .struct_get(self.layout.structs[&owner], field);
-            } else {
-                return Err(WasmError::Unsupported("a capture with no value here"));
-            }
+            self.push_capture(*id, insn)?;
+        }
+        Ok(())
+    }
+
+    /// Push one captured local's value, from wherever it lives *here*: a local of the enclosing method, or
+    /// this class's own capture field when one capturing class creates another.
+    fn push_capture(&self, id: DefId, insn: &mut Insn) -> Result<()> {
+        if let Some(slot) = self.slot_of(id) {
+            insn.local_get(slot);
+        } else if let Some((field, _)) = self.capture_field(id) {
+            let owner = self
+                .owner
+                .ok_or(WasmError::Unsupported("a capture with no enclosing class"))?;
+            insn.local_get(0)
+                .struct_get(self.layout.structs[&owner], field);
+        } else {
+            return Err(WasmError::Unsupported("a capture with no value here"));
         }
         Ok(())
     }
