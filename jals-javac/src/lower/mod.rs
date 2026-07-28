@@ -1037,13 +1037,6 @@ impl Compile {
     ) -> Result<(Lambda, jals_classfile::BootstrapMethod)> {
         const METAFACTORY: &str = "java/lang/invoke/LambdaMetafactory";
         const METAFACTORY_DESCRIPTOR: &str = "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;";
-        // The *last* identifier is the method: everything before the `::` names the type.
-        let referenced = node
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .filter(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
-            .last()
-            .ok_or(LowerError::Unsupported("a method reference with no name"))?;
         // The interface the context asked for, and the one method it declares.
         let item =
             expr::Expr::type_of(node, context)?
@@ -1061,20 +1054,54 @@ impl Compile {
         )?);
         let interface = Descriptor::internal_name_of(item, context.index);
 
+        // A constructor reference names `new` rather than a method: the handle is `newInvokeSpecial` on the
+        // type's own constructor, and there is nothing to capture.
+        let constructs = node
+            .children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .any(|token| token.kind() == jals_syntax::SyntaxKind::NEW_KW);
+
         // The class the method belongs to. `Uses::twice` parses its qualifier as an *expression* — a name
-        // reference is what a type name looks like before anything resolves it — so both spellings are read,
-        // and only a name that resolves to a type gets past here.
-        let owner_item = if let Some(owner_ty) = node.children().find_map(ast::Type::cast) {
+        // reference is what a type name looks like before anything resolves it — so both spellings are read.
+        let qualifier = node.children().find_map(ast::Expr::cast);
+        let named_type = if let Some(owner_ty) = node.children().find_map(ast::Type::cast) {
             context.ty_of_type(&owner_ty)?.project_id()
         } else {
-            node.children()
-                .find_map(ast::Expr::cast)
-                .and_then(|qualifier| context.ty_of_name(qualifier.syntax()).ok())
+            qualifier
+                .as_ref()
+                .and_then(|q| context.ty_of_name(q.syntax()).ok())
                 .and_then(|ty| ty.project_id())
+        };
+        // Not a type: the qualifier is a *value*, so the reference is bound to it and the receiver is what
+        // the call site captures. Only a local is read, because a capture is loaded from a slot.
+        let (owner_item, receiver) = if let Some(item) = named_type {
+            (item, None)
+        } else {
+            {
+                let expr = qualifier.as_ref().ok_or(LowerError::Unsupported(
+                    "a method reference with no qualifier",
+                ))?;
+                let id = context
+                    .def_at(expr.syntax())
+                    .ok_or(LowerError::Unsupported(
+                        "a method reference whose qualifier is no local",
+                    ))?;
+                let item = context.inference.type_of_def(id).project_id().ok_or(
+                    LowerError::Unsupported("a method reference on a value of an unindexed type"),
+                )?;
+                (item, Some(id))
+            }
+        };
+        if constructs {
+            return Self::constructor_reference(owner_item, member, item, context, pool);
         }
-        .ok_or(LowerError::Unsupported(
-            "a method reference whose qualifier is no indexed type",
-        ))?;
+        // The method's own name is a direct token of the reference: everything before the `::` is a node.
+        let referenced = node
+            .children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .filter(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+            .last()
+            .ok_or(LowerError::Unsupported("a method reference with no name"))?;
         let target = context
             .index
             .own_members(owner_item)
@@ -1084,11 +1111,13 @@ impl Compile {
                 let info = context.index.member(id);
                 info.kind == DefKind::Method
                     && info.name == referenced.text()
-                    && info.modifiers.is_static
+                    && info.modifiers.is_static == receiver.is_none()
+                    // A bound reference passes the receiver separately, so the interface method's own
+                    // arity is what the referenced method takes.
                     && info.params.len() == context.index.member(member).params.len()
             })
             .ok_or(LowerError::Unsupported(
-                "a method reference to a `static` method this cannot find",
+                "a method reference to a method this cannot find",
             ))?;
         let owner = Descriptor::internal_name_of(owner_item, context.index);
         let target_descriptor = MethodDescriptor::to_string(&Descriptor::method_descriptor(
@@ -1097,8 +1126,83 @@ impl Compile {
             false,
         )?);
 
+        // 6 is `invokeStatic` and 5 is `invokeVirtual` (JVMS Table 5.4.3.5-A): a bound reference calls the
+        // method *on* the captured receiver.
+        let kind = if receiver.is_some() { 5 } else { 6 };
         let handle = pool
-            .method_handle_index(6, &owner, referenced.text(), &target_descriptor, false)
+            .method_handle_index(kind, &owner, referenced.text(), &target_descriptor, false)
+            .ok_or(AsmError::PoolFull)?;
+        let shape = pool
+            .method_type_index(&descriptor)
+            .ok_or(AsmError::PoolFull)?;
+        let bootstrap = pool
+            .method_handle_index(6, METAFACTORY, "metafactory", METAFACTORY_DESCRIPTOR, false)
+            .ok_or(AsmError::PoolFull)?;
+        // A bound reference's call site takes the receiver, which is the one value it captures.
+        let (prefix, captured) = receiver.map_or_else(
+            || (String::new(), alloc::vec::Vec::new()),
+            |id| (alloc::format!("L{owner};"), alloc::vec![id]),
+        );
+        Ok((
+            Lambda {
+                interface_method: name,
+                call_descriptor: alloc::format!("({prefix})L{interface};"),
+                bootstrap: 0,
+                captured,
+            },
+            jals_classfile::BootstrapMethod {
+                bootstrap_method_ref: bootstrap,
+                bootstrap_arguments: alloc::vec![shape, handle, shape],
+            },
+        ))
+    }
+
+    /// `T::new`: the handle is `newInvokeSpecial` on the type's own constructor, and nothing is captured.
+    fn constructor_reference(
+        owner_item: ItemId,
+        member: jals_hir::MemberId,
+        target: ItemId,
+        context: &Context<'_>,
+        pool: &mut ConstantPool,
+    ) -> Result<(Lambda, jals_classfile::BootstrapMethod)> {
+        const METAFACTORY: &str = "java/lang/invoke/LambdaMetafactory";
+        const METAFACTORY_DESCRIPTOR: &str = "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;";
+        let owner = Descriptor::internal_name_of(owner_item, context.index);
+        let interface = Descriptor::internal_name_of(target, context.index);
+        let name = context.index.member(member).name.clone();
+        let descriptor = MethodDescriptor::to_string(&Descriptor::method_descriptor(
+            member,
+            context.index,
+            false,
+        )?);
+        // A class with no declared constructor has the implicit no-argument one, whose descriptor is fixed.
+        let arity = context.index.member(member).params.len();
+        let constructor = context
+            .index
+            .own_members(owner_item)
+            .iter()
+            .copied()
+            .find(|&id| {
+                let info = context.index.member(id);
+                info.kind == DefKind::Constructor && info.params.len() == arity
+            });
+        let target_descriptor = match constructor {
+            Some(id) => MethodDescriptor::to_string(&Descriptor::method_descriptor(
+                id,
+                context.index,
+                true,
+            )?),
+            None if arity == 0 => "()V".to_owned(),
+            None => {
+                return Err(LowerError::Unsupported(
+                    "a constructor reference with no matching constructor",
+                ));
+            }
+        };
+        // 8 is `newInvokeSpecial`: the handle allocates as well as initialises, which is what makes the
+        // factory the interface asks for.
+        let handle = pool
+            .method_handle_index(8, &owner, "<init>", &target_descriptor, false)
             .ok_or(AsmError::PoolFull)?;
         let shape = pool
             .method_type_index(&descriptor)

@@ -2936,18 +2936,6 @@ public class Uses {
         .expect("the `BootstrapMethods` attribute");
     assert_eq!(bootstraps.len(), 1);
 
-    // An instance or constructor reference captures a receiver or needs `newInvokeSpecial`, and says so.
-    let instance = "interface F { int f(); } class C { int m() { return 1; } \
-                    F g() { C c = new C(); return c::m; } }";
-    let error = compile(instance).expect_err("an instance method reference is not compiled yet");
-    assert!(
-        matches!(
-            error,
-            LowerError::Unsupported("a method reference whose qualifier is no indexed type")
-        ),
-        "got {error}"
-    );
-
     if !java_available() {
         return;
     }
@@ -3617,4 +3605,64 @@ public class Uses {
         return;
     }
     assert_eq!(run(source, "Uses"), "42\n42\n42\n42\n");
+}
+
+/// A *bound* method reference and a constructor reference.
+///
+/// `u::scaled` captures its receiver, so the call site takes it as an argument and the handle is
+/// `invokeVirtual` — the method is called *on* the captured value. `Holder::new` captures nothing and its
+/// handle is `newInvokeSpecial`, which allocates as well as initialises, and that is what makes it the
+/// factory the interface asks for.
+#[test]
+fn a_bound_and_a_constructor_reference_run() {
+    let source = r"
+interface Doubler {
+    int apply(int n);
+}
+
+interface Maker {
+    Holder make();
+}
+
+class Holder {
+    int tag = 7;
+}
+
+public class Uses {
+    int factor;
+
+    Uses(int factor) { this.factor = factor; }
+
+    int scaled(int n) { return n * factor; }
+
+    public static void main(String[] args) {
+        Uses u = new Uses(3);
+        Doubler bound = u::scaled;
+        System.out.println(bound.apply(14));
+        Maker made = Holder::new;
+        System.out.println(made.make().tag);
+    }
+}
+";
+    let classes = compile(source).expect("compile");
+    let uses = classes
+        .iter()
+        .find(|class| class.internal_name == "Uses")
+        .expect("the class");
+    let class = jals_exec::block_on_inline(jals_classfile::ClassFile::read(uses.bytes.as_slice()))
+        .expect("reparse");
+    let bootstraps = class
+        .attributes
+        .iter()
+        .find_map(|attribute| match &attribute.body {
+            jals_classfile::AttributeBody::BootstrapMethods(methods) => Some(methods),
+            _ => None,
+        })
+        .expect("the `BootstrapMethods` attribute");
+    assert_eq!(bootstraps.len(), 2, "one entry per reference");
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Uses"), "42\n7\n");
 }

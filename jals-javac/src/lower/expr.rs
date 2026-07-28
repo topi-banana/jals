@@ -156,6 +156,14 @@ impl Expr {
                 let info = context.lambda_at(&span).ok_or(LowerError::Unsupported(
                     "a method reference outside a class body",
                 ))?;
+                // A *bound* reference captures its receiver, which the call site passes like any capture.
+                for &id in info.captured() {
+                    let slot = emit
+                        .slots
+                        .slot_of(id)
+                        .ok_or(LowerError::Unsupported("a receiver with no local here"))?;
+                    emit.asm.load(slot)?;
+                }
                 Ok(emit.asm.invoke_dynamic(
                     info.bootstrap(),
                     info.interface_method(),
