@@ -49,6 +49,12 @@ fn loops() -> ClassFile {
     ))
 }
 
+fn fors() -> ClassFile {
+    fixture(include_bytes!(
+        "../../jals-classpath/tests/fixtures/Fors.class"
+    ))
+}
+
 fn arrays() -> ClassFile {
     fixture(include_bytes!(
         "../../jals-classpath/tests/fixtures/Arrays.class"
@@ -1283,4 +1289,190 @@ fn a_string_switch_bails() {
     // javac lowers it to a hashCode()/equals() pre-dispatch through two synthetic locals that the
     // `LocalVariableTable` does not name, so the method has no confident reading.
     assert!(decompile(method(&cf, "onString"), &cf, &["s".to_owned()]).is_none());
+}
+
+#[test]
+fn recovers_a_for_that_declares_its_counter() {
+    // Byte-identical to `Loops.sum`'s `while` — only the `LineNumberTable` says this one was a
+    // `for`, by putting the update on the header's line. The counter dies with the loop, so the
+    // header declares it and no `int i;` is hoisted.
+    let cf = fors();
+    let body = decompile(method(&cf, "sum"), &cf, &["n".to_owned()]).expect("sum decompiles");
+    assert_eq!(
+        body,
+        [
+            "int total;",
+            "total = 0;",
+            "for (int i = 0; i < n; i++) {",
+            "    total = total + i;",
+            "}",
+            "return total;",
+        ]
+    );
+}
+
+#[test]
+fn a_for_lifts_only_the_last_statement_of_its_latch() {
+    // The latch block holds both body statements and the update; only the update may move.
+    let cf = fors();
+    let body = decompile(method(&cf, "twoStmtBody"), &cf, &["n".to_owned()])
+        .expect("twoStmtBody decompiles");
+    assert_eq!(
+        body,
+        [
+            "int total;",
+            "total = 0;",
+            "for (int i = 0; i < n; i++) {",
+            "    total = total + i;",
+            "    total = total + 1;",
+            "}",
+            "return total;",
+        ]
+    );
+}
+
+#[test]
+fn a_for_body_may_branch() {
+    // The latch is reached from both sides of the `if`, so splitting it out of the region must
+    // leave the `if` structuring untouched.
+    let cf = fors();
+    let body = decompile(method(&cf, "withIf"), &cf, &["n".to_owned()]).expect("withIf decompiles");
+    assert_eq!(
+        body,
+        [
+            "int total;",
+            "total = 0;",
+            "for (int i = 0; i < n; i++) {",
+            "    if (i > 0) {",
+            "        total = total + i;",
+            "    }",
+            "}",
+            "return total;",
+        ]
+    );
+}
+
+#[test]
+fn a_counter_that_outlives_its_loop_keeps_its_hoisted_declaration() {
+    // The update folds, but the initializer sits on its own source line, so the header takes no
+    // init clause and the declaration stays where it is.
+    let cf = fors();
+    let body =
+        decompile(method(&cf, "outlives"), &cf, &["n".to_owned()]).expect("outlives decompiles");
+    assert_eq!(
+        body,
+        ["int i;", "i = 0;", "for (; i < n; i++) {", "}", "return i;"]
+    );
+}
+
+#[test]
+fn a_while_whose_update_has_its_own_line_stays_a_while() {
+    let cf = fors();
+    let body =
+        decompile(method(&cf, "whileLoop"), &cf, &["n".to_owned()]).expect("whileLoop decompiles");
+    assert_eq!(
+        body,
+        [
+            "int total;",
+            "int i;",
+            "total = 0;",
+            "i = 0;",
+            "while (i < n) {",
+            "    total = total + i;",
+            "    i = i + 1;",
+            "}",
+            "return total;",
+        ]
+    );
+}
+
+#[test]
+fn a_one_line_while_folds_but_may_not_absorb_its_declaration() {
+    // Written on one line, so every part of the loop shares the header's line and the line evidence
+    // cannot tell it from a `for` — it renders as one, which is valid and means the same thing.
+    // `i` is read after the loop, though, so only the `LocalVariableTable`'s live range keeps the
+    // declaration out of the header; absorbing it would not compile.
+    let cf = fors();
+    let body = decompile(method(&cf, "inlineWhile"), &cf, &["n".to_owned()])
+        .expect("inlineWhile decompiles");
+    assert_eq!(
+        body,
+        [
+            "int total;",
+            "int i;",
+            "total = 0;",
+            "for (i = 0; i < n; i++) {",
+            "    total = total + i;",
+            "}",
+            "return total + i;",
+        ]
+    );
+}
+
+#[test]
+fn two_loops_sharing_a_slot_both_keep_the_shared_declaration() {
+    // One hoisted `int i;` serves both loops, so neither may absorb it — the slot's live ranges
+    // cover both loops, which fails the confinement check on each. Absorbing in one would leave the
+    // other referencing an undeclared name.
+    let cf = fors();
+    let body = decompile(method(&cf, "twice"), &cf, &["n".to_owned()]).expect("twice decompiles");
+    assert_eq!(
+        body,
+        [
+            "int total;",
+            "int i;",
+            "total = 0;",
+            "for (i = 0; i < n; i++) {",
+            "    total = total + 1;",
+            "}",
+            "for (i = 0; i < n; i++) {",
+            "    total = total + 1;",
+            "}",
+            "return total;",
+        ]
+    );
+}
+
+#[test]
+fn a_parameter_used_as_a_counter_is_never_re_declared() {
+    // Declaring the counter in the header would shadow the signature's own `int n`. A parameter's
+    // slot is live from offset 0 to the end of the method, so the confinement check can never
+    // succeed for one — no separate guard is needed.
+    let cf = fors();
+    let body = decompile(method(&cf, "reuse"), &cf, &["n".to_owned()]).expect("reuse decompiles");
+    assert_eq!(
+        body,
+        [
+            "int total;",
+            "total = 0;",
+            "for (n = 0; n < 10; n++) {",
+            "    total = total + n;",
+            "}",
+            "return total;",
+        ]
+    );
+}
+
+#[test]
+fn a_header_with_two_updates_keeps_the_extra_one_in_the_body() {
+    // `for (int i = 0, j = n; i < j; i++, j--)`. Only the latch's last statement can become the
+    // update clause, so `i++` stays at the end of the body and only `j` moves into the header.
+    // A different shape from the source, but the same meaning and still valid Java.
+    let cf = fors();
+    let body = decompile(method(&cf, "twoUpdates"), &cf, &["n".to_owned()])
+        .expect("twoUpdates decompiles");
+    assert_eq!(
+        body,
+        [
+            "int total;",
+            "int i;",
+            "total = 0;",
+            "i = 0;",
+            "for (int j = n; i < j; j--) {",
+            "    total = total + 1;",
+            "    i = i + 1;",
+            "}",
+            "return total;",
+        ]
+    );
 }

@@ -20,14 +20,61 @@ continuation-indent = 4
 # limit — so most constructs keep the default `if-long` fill. A method chain that does not fit
 # goes one call per line, and a long `case` label list wraps (its `ExpressionSwitch` behavior).
 method-chain = "if-long-per-item"
-case-labels = "if-long"
+# `visitConditionalExpression` uses a UNIFIED break, so `?` and `:` go together.
+ternary = "if-long-per-item"
+# `visitFormals` uses a UNIFIED break, so a parameter list goes one per line when it wraps.
+method-parameters = "if-long-per-item"
+case-labels = "if-long-per-item"
+# `visitEnumDeclaration` forces a break between enum constants, and `visitTry` between resources.
+enum-constants = "always-per-item"
+resource-list = "always-per-item"
+# `classDeclarationTypeList`, `visitThrowsClause`, `visitParameterizedType`, and `visitAnnotation`
+# also use UNIFIED breaks, so a clause, a type-argument list, or an annotation's member-value pairs
+# go one item per line when they do not fit.
+type-arguments = "if-long-per-item"
+type-parameters = "if-long-per-item"
+deconstruction-list = "if-long-per-item"
+multi-catch-types = "if-long-per-item"
+for-statement = "if-long-per-item"
+annotation-arguments = "if-long-per-item"
+extends-list = "if-long-per-item"
+throws-list = "if-long-per-item"
+# `hasOnlyShortItems`: an argument list fills only while every argument is under 10 columns of
+# source; one longer argument sends the whole list one-per-line.
+fill-item-width = 10
+# `isFormatMethod`: a leading format string takes the first continuation line whole, and the
+# values it interpolates pack onto the next.
+format-string-arguments = true
+# `visitLabeledStatement` always breaks after a label's `:`.
+labeled-statement = "always-per-item"
 # Preserve the source row breaks of a grid-shaped array initializer instead of reflowing it.
 tabular-array-initializers = true
+# `fieldAnnotationDirection` asks the same question of every variable — field, local, parameter,
+# record component, resource, `catch` parameter: `@Deprecated int x;` stays on one line, but one
+# annotation with arguments puts the whole run onto its own lines.
+parameter-annotations = "always-per-item"
+variable-annotations = "always-per-item"
+inline-argumentless-annotations = true
+# `StringWrapper`: re-wrap a string concatenation that overflows the column limit.
+reflow-long-strings = true
+
+[braces]
+# GJF collapses an empty body to `{}` and never joins a non-empty one, and `visitStatement`
+# separates a braceless body from its header with a break whose flat form is a space, so
+# `if (a) return;` stays on one line when it fits.
+keep-type-body-on-one-line = "if-empty"
+keep-method-body-on-one-line = "if-empty"
+keep-control-statement-on-one-line = true
+
+[spacing]
+# `new String[] { … }` takes a space before the initializer's brace.
+before-array-initializer-left-brace = true
 
 [comments]
-# google-java-format always reflows comments, Javadoc included, against the column limit.
+# google-java-format reflows Javadoc and `//` comments against the column limit, but a `/* … */`
+# block comment is only trimmed and re-indented — `JavaCommentsHelper` never refills one.
 format-line = true
-format-block = true
+format-block = false
 format-javadoc = true
 format-header = true
 width = 100
@@ -44,3 +91,5 @@ order = "group"
 groups = ["static", "*"]
 static-first = true
 reorder-modifiers = true
+# `RemoveUnusedImports`: drop an import whose simple name appears nowhere else in the file.
+remove-unused = true

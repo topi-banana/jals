@@ -49,6 +49,19 @@ pub struct Imports {
     /// annotations to the front. google-java-format's `ModifierOrderer`, which it always runs;
     /// no Eclipse or IntelliJ equivalent.
     pub reorder_modifiers: bool,
+    /// Delete an `import` whose simple name appears nowhere else in the file.
+    /// google-java-format's `RemoveUnusedImports` — its `--skip-removing-unused-imports`
+    /// inverted — which it always runs.
+    ///
+    /// The name test is a *syntactic* one: every identifier in the file, plus the reference
+    /// names of Javadoc's `@link` / `@see` / `@throws`, form the used set. No type resolution
+    /// is involved, so a shadowed name keeps its import alive — the same blind spot
+    /// google-java-format has. IntelliJ's optimize-imports resolves the classpath instead and
+    /// therefore does not project here (`jals-fmt/MAPPING.md` §7).
+    ///
+    /// The only rule in this crate that *removes* significant tokens, so it defaults to `false`
+    /// and the strict token invariant holds unless opted into.
+    pub remove_unused: bool,
 }
 
 impl Default for Imports {
@@ -63,6 +76,7 @@ impl Default for Imports {
             ],
             static_first: false,
             reorder_modifiers: false,
+            remove_unused: false,
         }
     }
 }

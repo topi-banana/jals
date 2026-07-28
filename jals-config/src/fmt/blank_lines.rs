@@ -53,6 +53,14 @@ pub struct BlankLines {
     /// Blank lines before a type body's closing `}`. Eclipse
     /// `blank_lines_after_last_class_body_declaration` / IntelliJ `BLANK_LINES_BEFORE_CLASS_END`.
     pub at_type_body_end: usize,
+    /// Blank lines around a member that carries a Javadoc comment, whatever its kind.
+    ///
+    /// A documented field reads as its own unit even where undocumented ones are packed
+    /// together, so this wins over [`around_field`](Self::around_field) rather than being capped
+    /// by it — google-java-format's `hasJavaDoc(bodyDeclaration)` arm of
+    /// `thisOneGetsBlankLineBefore`. Neither Eclipse nor IntelliJ has an equivalent: both decide
+    /// the separation from the member's kind alone.
+    pub around_documented_member: usize,
     /// Blank lines around a field declaration. Eclipse `blank_lines_before_field` /
     /// IntelliJ `BLANK_LINES_AROUND_FIELD`.
     pub around_field: usize,
@@ -96,6 +104,7 @@ impl Default for BlankLines {
             around_type: 1,
             at_type_body_start: 0,
             at_type_body_end: 0,
+            around_documented_member: 1,
             around_field: 0,
             around_method: 1,
             around_field_in_interface: 0,

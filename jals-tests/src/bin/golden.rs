@@ -1,22 +1,23 @@
 //! `jals-golden` command-line interface: format `*.input` files from a golden
-//! corpus with a Google Java Style config and report how close the result is to the
-//! paired `*.output` produced by `google-java-format`.
+//! corpus with the style config of the native formatter that produced it, and report
+//! how close the result is to the paired `*.output`.
 //!
 //! This is the formatter-fidelity counterpart to `jals-tests` (which checks parser
-//! soundness). See [`jals_tests::golden`] for the metric and the known gaps.
+//! soundness). See [`jals_tests::golden`] for the metric, the accuracy tiers, and the
+//! known gaps.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
 use jals_tests::Harness;
-use jals_tests::golden::{GOLDEN_SOURCES, GoldenReport, GoldenSource};
+use jals_tests::golden::{GOLDEN_SOURCES, GoldenReport, GoldenSource, Pin, TARGETS, Target};
 
 #[derive(Parser)]
 #[command(
     name = "jals-golden",
     version,
-    about = "Compare jals-fmt (Google-style) output against google-java-format goldens"
+    about = "Compare jals-fmt output against google-java-format / palantir / Eclipse / IntelliJ goldens"
 )]
 struct Cli {
     /// Golden corpora to check, by name. With none given, every known corpus is checked.
@@ -28,9 +29,13 @@ struct Cli {
 
     /// Check an ad-hoc corpus directory directly (a tree of `*.input`/`*.output`
     /// pairs), ignoring the named sources. Useful for pointing at your own
-    /// google-java-format-formatted project.
+    /// formatted project; pair it with `--style` to pick which formatter made it.
     #[arg(long, value_name = "DIR")]
     dir: Option<PathBuf>,
+
+    /// Which native formatter's style to score a `--dir` corpus with.
+    #[arg(long, value_name = "TARGET", default_value = "gjf")]
+    style: String,
 
     /// List the N least-similar files per corpus (0 = none).
     #[arg(long, value_name = "N", default_value_t = 20)]
@@ -39,6 +44,14 @@ struct Cli {
     /// Number of parallel worker threads (defaults to the number of logical CPUs).
     #[arg(short = 'j', long, value_name = "N")]
     jobs: Option<usize>,
+
+    /// Report the corpora that are present instead of failing on the ones that are not.
+    ///
+    /// CI selects every corpus, but the generated ones can legitimately be absent (a
+    /// generation step that was skipped or timed out). Without this, one missing corpus
+    /// costs the whole report.
+    #[arg(long)]
+    allow_missing: bool,
 
     /// Emit a GitHub-flavored Markdown summary instead of plain text.
     #[arg(long)]
@@ -59,7 +72,18 @@ impl Cli {
             return ExitCode::from(1);
         }
 
-        let cfg = GoldenReport::google_config();
+        let Some(style) = Target::by_name(&cli.style) else {
+            eprintln!(
+                "error: unknown style `{}` (known: {})",
+                cli.style,
+                TARGETS
+                    .iter()
+                    .map(|t| t.name)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            return ExitCode::from(2);
+        };
 
         // An explicit `--dir` is an ad-hoc corpus: scan it directly, no registry.
         if let Some(dir) = &cli.dir {
@@ -67,7 +91,7 @@ impl Cli {
                 eprintln!("error: --dir not found at {}", dir.display());
                 return ExitCode::from(2);
             }
-            let report = GoldenReport::run("dir", dir, &cfg);
+            let report = GoldenReport::run("dir", dir, style, Pin::Unpinned);
             cli.emit(&[report]);
             return ExitCode::SUCCESS;
         }
@@ -101,16 +125,22 @@ impl Cli {
             };
             let root = sources_dir.join(source.root_rel);
             if !root.is_dir() {
+                let level = if cli.allow_missing { "note" } else { "error" };
                 eprintln!(
-                    "error: corpus `{}` not found at {}\n       see jals-tests/README.md for how to fetch / generate it",
+                    "{level}: corpus `{}` not found at {}\n       see jals-tests/README.md for how to fetch / generate it",
                     source.name,
                     root.display()
                 );
-                any_missing = true;
+                any_missing |= !cli.allow_missing;
                 continue;
             }
             eprintln!("formatting `{}` under {} ...", source.name, root.display());
-            reports.push(GoldenReport::run(source.name, &root, &cfg));
+            reports.push(GoldenReport::run(
+                source.name,
+                &root,
+                source.target,
+                source.pin,
+            ));
         }
 
         cli.emit(&reports);
@@ -136,6 +166,14 @@ impl Cli {
 
     fn print_report(&self, report: &GoldenReport) {
         println!("Corpus: {}  ({})", report.name, report.root.display());
+        if let Some(source) = GoldenSource::by_name(&report.name) {
+            println!("  {}", source.description);
+        }
+        println!(
+            "  reference        {}  [{}]",
+            report.reference,
+            report.tier.label()
+        );
         println!("  pairs            {}", report.total);
         println!(
             "  exact matches    {}  ({:.2}%)",

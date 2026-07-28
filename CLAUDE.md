@@ -119,12 +119,13 @@ filesystem reads into portable interfaces.
   `struct.new_default`, declared subtyping, no `memory` section, and no allocator or collector of
   its own. Portable and featureless; no host filesystem APIs.
 - `jals-classfile`, `jals-hir`, `jals-syntax`, `jals-fmt`, `jals-lint`, `jals-decompile`: portable
-  domain crates; do not add host filesystem APIs. `jals-fmt` is **WIP** — its implementation was
-  removed for a from-scratch rewrite and it is currently a no-op that returns its input unchanged
-  (only `FormatOutput::format_source` and the `Warning` surface remain). Its `import` and
-  `generate` modules are complete and shipped: `import` lowers a native Eclipse / IntelliJ /
-  google-java-format / Palantir / Spotless config onto `jals_config::fmt::Config`, and `generate`
-  renders that config back out as a `jalsfmt.toml`. Both are pure and stay portable.
+  domain crates; do not add host filesystem APIs. `jals-fmt` has **one layout engine** — a port of
+  google-java-format's greedy `computeBreaks` over a GJF-shaped `Doc`/`Level`/`Break` IR — and
+  every style target is reached by tuning `jals_config::fmt::Config` on top of it, never by
+  swapping engines (`jals-fmt/DESIGN.md`). Do not add an engine trait, a second renderer, or a
+  Wadler/prettier `fits`. Its `import` and `generate` modules lower a native Eclipse / IntelliJ /
+  google-java-format / Palantir / Spotless config onto that `Config` and render it back out as a
+  `jalsfmt.toml`. All of it is pure and stays portable.
 - Tests, `xtask`, and `editors/zed` may use host paths for fixtures and tooling.
 
 The `.ast-grep/rules/no-portable-host-path.yml` allowlist enforces the host boundary. Add a narrow
@@ -158,8 +159,11 @@ its `lib.rs`; every other module imports with `use alloc::...`. The
 ## Invariants
 
 - Parsing is lossless and never panics on malformed input.
-- Formatting is idempotent and preserves the significant token sequence unless an explicitly
-  configured text-normalization rule applies.
+- Formatting is idempotent. It preserves the significant token multiset except where an
+  explicitly configured rule applies: the four token-changing passes — import ordering,
+  unused-import removal, modifier ordering, and long-string rewrapping — plus the opt-in literal
+  normalizations and brace forcing. Only unused-import removal removes tokens, and only brace
+  forcing adds them.
 - All project and artifact enumeration is deterministic.
 - File/directory collisions, duplicate entries, file ancestors, root escape, unsafe archive
   members, and cache digest mismatches must be rejected or diagnosed structurally.

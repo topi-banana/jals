@@ -205,7 +205,14 @@ impl Parser<'_> {
     /// Entry point. Parses a compilation unit.
     pub(crate) async fn root(&mut self) {
         let m = self.start();
-        if self.at(PACKAGE_KW) {
+        // A package declaration may carry annotations (JLS 7.4.1), which conventionally live in
+        // `package-info.java`. They belong to the declaration, so the lookahead skips them before
+        // deciding whether one is there at all.
+        if self.at(PACKAGE_KW)
+            || (self.at(AT)
+                && !self.nth_at(1, INTERFACE_KW)
+                && self.nth_nofuel(self.skip_annotations_lookahead(0)) == PACKAGE_KW)
+        {
             self.package_decl().await;
         }
         while self.at(IMPORT_KW) || self.at_attributed_import() {
@@ -225,7 +232,12 @@ impl Parser<'_> {
 
     async fn package_decl(&mut self) {
         let m = self.start();
-        self.bump(PACKAGE_KW);
+        let modifiers = self.start();
+        while self.at(AT) && !self.nth_at(1, INTERFACE_KW) {
+            self.annotation().await;
+        }
+        modifiers.complete(self, MODIFIERS);
+        self.expect(PACKAGE_KW);
         self.qualified_name(false).await;
         self.expect(SEMICOLON);
         m.complete(self, PACKAGE_DECL);
@@ -1095,8 +1107,13 @@ impl Parser<'_> {
             self.modifiers().await;
             self.type_().await;
             self.eat_varargs().await; // varargs.
-            // Also allows a `this` receiver parameter (`Foo this`).
+            // Also allows a receiver parameter, plain (`Foo this`) or qualified by the enclosing
+            // instance an inner class's constructor names (`Outer.this`).
             if self.at(THIS_KW) {
+                self.bump(THIS_KW);
+            } else if self.at(IDENT) && self.nth_at(1, DOT) && self.nth_at(2, THIS_KW) {
+                self.bump(IDENT);
+                self.bump(DOT);
                 self.bump(THIS_KW);
             } else {
                 self.expect(IDENT);
@@ -2215,6 +2232,17 @@ impl Parser<'_> {
         if let Some(pure_primitive) = self.cast_kind() {
             return Some(self.cast_expr(pure_primitive).await);
         }
+        // A type-use annotation may open an expression whose operand is a *type*: `@A List::new`
+        // annotates `List`, not the reference. Only that shape — an annotation run followed by a
+        // name — is consumed here; anywhere else a leading `@` is not an expression at all.
+        if self.at(AT) && !self.nth_at(1, INTERFACE_KW) {
+            let after = self.skip_annotations_lookahead(0);
+            if self.nth_nofuel(after) == IDENT || PRIMITIVE_TYPE.contains(self.nth_nofuel(after)) {
+                while self.at(AT) && !self.nth_at(1, INTERFACE_KW) {
+                    self.annotation().await;
+                }
+            }
+        }
         match self.current() {
             BANG | TILDE | PLUS | MINUS | PLUS_PLUS | MINUS_MINUS => {
                 let m = self.start();
@@ -2692,9 +2720,11 @@ impl Parser<'_> {
             // Bare untyped parameter (`x` / `_`).
             self.bump_any();
         } else {
-            // Typed parameter (including `var`).
+            // Typed parameter (including `var`), which may be varargs: `(String... s) -> s[0]`
+            // is a legal lambda for a `String[]`-taking functional interface.
             self.modifiers().await;
             self.type_().await;
+            self.eat_varargs().await;
             self.binding_name();
         }
         pm.complete(self, PARAM);

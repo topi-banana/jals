@@ -1,0 +1,56 @@
+<!--
+  IntelliJ IDEA code style scheme for the `openjdk-intellij` golden corpus.
+
+  Committed because it is read twice: `gen-openjdk-corpus.sh intellij` hands it to IDEA's
+  command-line formatter (`format.sh -s`), and `jals_tests::golden::Target::intellij_config`
+  imports these same bytes through `jals_fmt::import::intellij`. A corpus generated from one
+  style and scored against another would measure the config plumbing, not the layout engines.
+
+  It is deliberately *short*. Only two groups of settings are stated:
+
+    1. The metrics the corpus is meaningless without — right margin and the indent options.
+    2. The `KEEP_*` family, forced off. This is the one place the profile departs from a
+       stock IDEA install, and it is the point of the whole exercise: IntelliJ's output is a
+       function of the input's existing line breaks (`jals-fmt/DESIGN.md` §11 conclusion 3,
+       §18.2's D5), and jals deliberately refuses to work that way. Left on, most of every
+       `.output` would just be OpenJDK's own hand-wrapping preserved, and the number would
+       report a difference jals is designed to have rather than anything about wrapping.
+
+  Everything else — the WRAP_*, ALIGN_*, SPACE_* and brace families — is left unstated, so
+  IDEA uses its own defaults and `jals_fmt::import::intellij` uses its model's. Those two are
+  believed equal but not proven so here, which is the known caveat on this corpus's number;
+  see `jals-tests/README.md`. Values are not guessed into this file: writing a wrong "default"
+  would move the corpus away from stock IDEA, which is worse than leaving it out.
+-->
+<component name="ProjectCodeStyleConfiguration">
+  <code_scheme name="Project" version="173">
+    <codeStyleSettings language="JAVA">
+      <!-- IDEA's own Java defaults, restated so the corpus does not depend on them. -->
+      <option name="RIGHT_MARGIN" value="120" />
+
+      <!-- D5 suppression: never carry the input's line breaks into the output. -->
+      <option name="KEEP_LINE_BREAKS" value="false" />
+      <option name="KEEP_FIRST_COLUMN_COMMENT" value="false" />
+      <option name="KEEP_CONTROL_STATEMENT_IN_ONE_LINE" value="false" />
+      <option name="KEEP_SIMPLE_BLOCKS_IN_ONE_LINE" value="false" />
+      <option name="KEEP_SIMPLE_METHODS_IN_ONE_LINE" value="false" />
+      <option name="KEEP_SIMPLE_LAMBDAS_IN_ONE_LINE" value="false" />
+      <option name="KEEP_SIMPLE_CLASSES_IN_ONE_LINE" value="false" />
+      <option name="KEEP_MULTIPLE_EXPRESSIONS_IN_ONE_LINE" value="false" />
+      <!-- The one thing the engine may read from input whitespace is "was there a blank
+           line here", normalized to a single line — the same budget Eclipse's stock
+           `number_of_empty_lines_to_preserve=1` gives. -->
+      <option name="KEEP_BLANK_LINES_IN_CODE" value="1" />
+      <option name="KEEP_BLANK_LINES_IN_DECLARATIONS" value="1" />
+      <option name="KEEP_BLANK_LINES_BEFORE_RBRACE" value="1" />
+      <option name="KEEP_BLANK_LINES_BETWEEN_PACKAGE_DECLARATION_AND_HEADER" value="1" />
+
+      <indentOptions>
+        <option name="INDENT_SIZE" value="4" />
+        <option name="CONTINUATION_INDENT_SIZE" value="8" />
+        <option name="TAB_SIZE" value="4" />
+        <option name="USE_TAB_CHARACTER" value="false" />
+      </indentOptions>
+    </codeStyleSettings>
+  </code_scheme>
+</component>
