@@ -145,13 +145,18 @@ impl CompileWasm {
         let mut interface_items = Vec::new();
         let mut inner_items = Vec::new();
         let mut captured_items = Vec::new();
+        let mut body_nodes = Vec::new();
         let classes = Self::classes_in_order(
             inputs,
             index,
             &mut interface_items,
             &mut inner_items,
             &mut captured_items,
+            &mut body_nodes,
         )?;
+        for (item, node) in body_nodes {
+            layout.bodies.insert(item, node);
+        }
         for (item, enclosing) in inner_items {
             layout.inner.insert(item, enclosing);
         }
@@ -456,6 +461,7 @@ impl CompileWasm {
         interfaces: &mut Vec<ItemId>,
         inner: &mut Vec<(ItemId, ItemId)>,
         captures: &mut Vec<(ItemId, Vec<(DefId, Ty)>)>,
+        bodies: &mut Vec<(ItemId, SyntaxNode)>,
     ) -> Result<Vec<ItemId>> {
         let mut declared = Vec::new();
         for input in inputs {
@@ -477,6 +483,7 @@ impl CompileWasm {
                 if !captured.is_empty() {
                     captures.push((item, captured));
                 }
+                bodies.push((item, node.clone()));
                 if Self::is_inner(&node) {
                     let enclosing = node.parent().and_then(|body| body.parent()).ok_or(
                         WasmError::Unsupported("an inner class with no enclosing type"),
@@ -806,6 +813,9 @@ struct Layout {
     inner: BTreeMap<ItemId, ItemId>,
     /// The synthetic enclosing-instance field's index, for each inner class.
     outer: BTreeMap<ItemId, u32>,
+    /// Each class's declaration node, so a `new` can reach the field initialisers of a class *other* than the
+    /// one being lowered — which is the only way a class with no constructor ever runs them.
+    bodies: BTreeMap<ItemId, SyntaxNode>,
     /// Every local class and the locals it captures, in source order. Each becomes a struct field and a
     /// *trailing* constructor parameter, which is how the class outlives the frame the local lived in.
     captures: BTreeMap<ItemId, Vec<(DefId, Ty)>>,
@@ -1377,8 +1387,8 @@ impl Body {
         if method.is_constructor && !block.as_ref().is_some_and(Self::delegates_to_this) {
             // The constructor's parent *is* the class body, which is where the initialisers are and
             // the reason they need no search: they are this declaration's siblings, in order.
-            if let Some(body) = method.node.parent() {
-                lowering.initializers(&body, &mut insn)?;
+            if let (Some(owner), Some(body)) = (method.owner, method.node.parent()) {
+                lowering.initializers(owner, &body, 0, false, &mut insn)?;
             }
         }
         if let Some(block) = &block {
@@ -1514,13 +1524,27 @@ impl Lowering<'_> {
     /// are emitted from the class body's children here rather than reached through `stmt`. A
     /// `FIELD_DECL` is not a statement, and a `{ … }` in a class body is not the same node as one in a
     /// method.
-    fn initializers(&mut self, class_body: &SyntaxNode, insn: &mut Insn) -> Result<()> {
-        let Some(owner) = self.owner else {
-            return Ok(());
-        };
+    fn initializers(
+        &mut self,
+        owner: ItemId,
+        class_body: &SyntaxNode,
+        receiver: u32,
+        // Whether this runs from a `new` rather than from a constructor. Not inferable from `receiver`: a
+        // scratch local in a `static` method with no parameters is slot 0 too.
+        from_new: bool,
+        insn: &mut Insn,
+    ) -> Result<()> {
         let struct_type = self.layout.structs[&owner];
         for node in class_body.children() {
             if node.kind() == INITIALIZER {
+                // Run from a `new` rather than from a constructor, the object is in a local rather than in
+                // slot 0 — and a block's own field reads go through `this`, which is slot 0 by construction.
+                // Reported rather than emitted against the wrong receiver.
+                if from_new {
+                    return Err(WasmError::Unsupported(
+                        "an instance initialiser block in a class with no constructor",
+                    ));
+                }
                 // The `static` keyword is inside the `MODIFIERS` child, not on the `INITIALIZER`
                 // itself. A `static { … }` runs once at class initialisation rather than per instance,
                 // and this backend has no start function to run it in — so it is reported rather than
@@ -1561,7 +1585,7 @@ impl Lowering<'_> {
                 let Some(slot) = self.layout.field_slot(owner, member) else {
                     continue;
                 };
-                insn.local_get(0);
+                insn.local_get(receiver);
                 let declared = self.index.resolved_member_ty(member);
                 self.value_as(value, &declared, insn)?;
                 insn.struct_set(struct_type, slot);
@@ -3914,8 +3938,20 @@ impl Lowering<'_> {
             // allocation is already the finished object — except for an inner class, whose synthetic
             // field is written here because there is no constructor function to write it.
             None if !declares_constructor && arguments.is_empty() => {
-                // No constructor function to fill the capture fields, so the `new` fills them — the same
-                // way it fills an inner class's single enclosing instance. An anonymous class is always
+                // No constructor at all, so nothing else will run the field initialisers: without this a
+                // `class Box { int value = 9; }` read back as 0 — a wrong value in a module that validates.
+                if let Some(body) = self.layout.bodies.get(&item).cloned()
+                    && let Some(class_body) = body
+                        .children()
+                        .find(|child| matches!(child.kind(), CLASS_BODY | ENUM_BODY))
+                {
+                    let slot = self.scratch(ty);
+                    insn.local_set(slot);
+                    self.initializers(item, &class_body, slot, true, insn)?;
+                    insn.local_get(slot);
+                }
+                // No constructor function to fill the capture fields either, so the `new` fills them — the
+                // same way it fills an inner class's single enclosing instance. An anonymous class is always
                 // this case: it never declares a constructor.
                 let captured = self.layout.captures.get(&item).cloned().unwrap_or_default();
                 if !captured.is_empty() {

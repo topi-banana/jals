@@ -1161,6 +1161,42 @@ public class Derived extends Base {
     assert_invoke(&[source], "direct", &["5"], "7");
 }
 
+/// A class with *no* declared constructor still runs its field initialisers.
+///
+/// They run in a constructor, and a class without one has no function to run them in — so the `new` runs them,
+/// the same place it already fills an inner class's enclosing instance and a capturing class's fields. Without
+/// this a `class Box { int value = 9; }` read back as 0: a wrong value in a module that validates.
+#[test]
+fn a_class_with_no_constructor_still_runs_its_field_initialisers() {
+    let source = r"
+public class Seeded {
+    int fixed = 7;
+    int stamped = 2;
+
+    public static int summed() {
+        Seeded it = new Seeded();
+        return it.fixed + it.stamped;
+    }
+}
+";
+    assert_invoke(&[source], "summed", &[], "9");
+
+    // A `{ … }` block reads its own fields through `this`, which is slot 0 by construction — and run from a
+    // `new` the object is in a local instead. Reported rather than written against the wrong receiver.
+    let blocked = concat!(
+        "public class S { int n = 1; { n = 2; } ",
+        "public static int run() { return new S().n; } }"
+    );
+    let error = compile(&[blocked]).expect_err("a block initialiser needs a constructor here");
+    assert!(
+        matches!(
+            error,
+            WasmError::Unsupported("an instance initialiser block in a class with no constructor")
+        ),
+        "got {error}"
+    );
+}
+
 /// Both instance initialiser forms, in the order they are written.
 ///
 /// A field's `= …` and a bare `{ … }` block interleave into one sequence that runs before the
@@ -1990,9 +2026,8 @@ public interface Doubler { int apply(int n); }
 public interface Reader { int read(Box b); }
 
 public class Box {
-    int value;
-    // A declared constructor, because a class without one does not yet run its field initialisers here.
-    Box(int value) { this.value = value; }
+    // No declared constructor: the `new` runs the initialiser itself.
+    int value = 9;
     int get() { return value; }
 }
 
@@ -2007,7 +2042,7 @@ public class Uses {
     // Unbound: the interface supplies the receiver as the first argument, which the delegation forwards.
     public static int unbound() {
         Reader r = Box::get;
-        return r.read(new Box(9));
+        return r.read(new Box());
     }
 }
 ";
