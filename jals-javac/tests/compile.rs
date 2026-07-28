@@ -2890,18 +2890,6 @@ public class Holder {
     assert_eq!(run(source, "Holder"), "ran\n");
 }
 
-/// A capturing lambda and a method reference each name themselves.
-#[test]
-fn a_capturing_lambda_names_itself() {
-    let source =
-        "interface F { int f(int n); } class C { F g() { int bump = 1; return n -> n + bump; } }";
-    let error = compile(source).expect_err("a capturing lambda is not compiled yet");
-    assert!(
-        matches!(error, LowerError::Unsupported("a capturing lambda")),
-        "got {error}"
-    );
-}
-
 /// A method reference names itself.
 ///
 /// It needs no synthetic method — the handle points straight at the method the source named — but it does
@@ -3510,6 +3498,11 @@ public class Uses {
         // A block body, which returns for itself.
         Doubler blocked = n -> { return n * 3; };
         System.out.println(blocked.apply(14));
+        // And one that captures a local: the capture leads both the synthetic method's parameters and the
+        // arguments the call site pushes.
+        int bump = 40;
+        Doubler capturing = n -> n + bump;
+        System.out.println(capturing.apply(2));
     }
 }
 ";
@@ -3552,6 +3545,12 @@ public class Uses {
                 "(I)I".to_owned(),
                 0x0002 | 0x0008 | 0x1000
             ),
+            // The capture leads: `(int bump, int n)`.
+            (
+                "lambda$3".to_owned(),
+                "(II)I".to_owned(),
+                0x0002 | 0x0008 | 0x1000
+            ),
         ]
     );
     // Every call site indexes into this attribute; without it the class does not even load.
@@ -3563,10 +3562,10 @@ public class Uses {
             _ => None,
         })
         .expect("the `BootstrapMethods` attribute");
-    assert_eq!(bootstraps.len(), 3, "one entry per lambda");
+    assert_eq!(bootstraps.len(), 4, "one entry per lambda");
 
     if !java_available() {
         return;
     }
-    assert_eq!(run(source, "Uses"), "42\n42\n42\n");
+    assert_eq!(run(source, "Uses"), "42\n42\n42\n42\n");
 }

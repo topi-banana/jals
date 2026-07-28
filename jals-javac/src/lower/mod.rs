@@ -903,9 +903,6 @@ impl Compile {
             // A capturing lambda: the descriptor, the leading slots, and the call-site arguments now all
             // line up, and the synthetic method still fails the assembler's frame check — reported until
             // that is chased down, rather than emitted as code the verifier would reject.
-            if !captured.is_empty() {
-                return Err(LowerError::Unsupported("a capturing lambda"));
-            }
             let mut prefix = String::new();
             for &id in &captured {
                 prefix.push_str(&Self::capture_descriptor(id, &context)?);
@@ -913,12 +910,12 @@ impl Compile {
             let synthetic_descriptor =
                 alloc::format!("({prefix}{}", descriptor.trim_start_matches('('));
 
-            // The synthetic method takes the interface's own descriptor, since nothing is captured. The
-            // assembler borrows the pool for as long as it lives, so its code comes out first and every
-            // entry the method *info* needs is interned after it is gone.
+            // The synthetic method takes the interface's descriptor with the captures prepended, which is
+            // also what seeds its initial locals. The assembler borrows the pool for as long as it lives,
+            // so its code comes out first and every entry the method *info* needs is interned after.
             let synthetic = alloc::format!("lambda${ordinal}");
             let code = {
-                let mut asm = Assembler::new(pool, Receiver::Static, &descriptor)?;
+                let mut asm = Assembler::new(pool, Receiver::Static, &synthetic_descriptor)?;
                 let mut slots = Slots::new(&context, None, true);
                 // The captures come first, in the order the call site pushes them: the metafactory prepends
                 // the captured values to the interface method's own arguments when it invokes the handle.
