@@ -422,6 +422,13 @@ impl Insn {
         self
     }
 
+    /// Allocate an array of type `ty` from the `count` values already on the stack, first element
+    /// deepest — Java's `{1, 2, 3}`, where the elements are written rather than defaulted.
+    pub(crate) fn array_new_fixed(&mut self, ty: u32, count: u32) -> &mut Self {
+        self.gc(0x08).u32(ty).u32(count);
+        self
+    }
+
     pub(crate) fn array_get(&mut self, ty: u32) -> &mut Self {
         self.gc(0x0B).u32(ty);
         self

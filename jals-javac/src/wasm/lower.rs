@@ -228,8 +228,8 @@ impl CompileWasm {
                     .statics
                     .get(member)
                     .ok_or(WasmError::Unsupported("a `static` field with no global"))?;
-                let ty = layout.val_type(&index.resolved_member_ty(*member))?;
-                lowering.assign_static(value, ty, global, &mut insn)?;
+                let declared = index.resolved_member_ty(*member);
+                lowering.assign_static(value, &declared, global, &mut insn)?;
             }
             for (owner, block) in &blocks {
                 if *owner != position {
@@ -920,20 +920,11 @@ impl Lowering<'_> {
     fn assign_static(
         &mut self,
         value: &ast::Expr,
-        ty: ValType,
+        declared: &Ty,
         global: u32,
         insn: &mut Insn,
     ) -> Result<()> {
-        let source = self.num_of(value.syntax()).ok();
-        self.expr(value, insn)?.ok_or(WasmError::Unsupported(
-            "a `static` initialiser with no value",
-        ))?;
-        if let (Some(source), Ok(target)) = (source, Self::num_for(ty))
-            && source != target
-        {
-            insn.convert(source, target)
-                .ok_or(WasmError::Unsupported("this assignment conversion"))?;
-        }
+        self.value_as(value, declared, insn)?;
         insn.global_set(global);
         Ok(())
     }
@@ -993,8 +984,8 @@ impl Lowering<'_> {
                     continue;
                 };
                 insn.local_get(0);
-                self.expr(value, insn)?
-                    .ok_or(WasmError::Unsupported("a field initialiser with no value"))?;
+                let declared = self.index.resolved_member_ty(member);
+                self.value_as(value, &declared, insn)?;
                 insn.struct_set(struct_type, slot);
             }
         }
@@ -1132,7 +1123,8 @@ impl Lowering<'_> {
                 .ok_or_else(|| WasmError::Unresolved(name.text().into()))?;
             let slot = self.declare_local(id)?;
             if let Some(value) = values.get(position) {
-                self.expr(value, insn)?;
+                let declared = self.input.inference.type_of_def(id).clone();
+                self.value_as(value, &declared, insn)?;
                 insn.local_set(slot);
             }
         }
@@ -1805,7 +1797,10 @@ impl Lowering<'_> {
             ast::Expr::Lambda(_) => Err(WasmError::Unsupported("a lambda")),
             ast::Expr::MethodRef(_) => Err(WasmError::Unsupported("a method reference")),
             ast::Expr::ClassLiteral(_) => Err(WasmError::Unsupported("a `.class` literal")),
-            ast::Expr::ArrayInit(_) => Err(WasmError::Unsupported("an array initialiser")),
+            // No target here, so the element type is whatever inference read off the elements. That is
+            // right when they agree with the declaration and wrong when they do not — which is why a
+            // declaration hands its own type down through `value_as` instead of coming through here.
+            ast::Expr::ArrayInit(init) => self.array_initializer(init, None, insn).map(Some),
         }
     }
 
@@ -1972,6 +1967,68 @@ impl Lowering<'_> {
         let struct_type = self.layout.structs[&owner];
         insn.local_get(0).struct_get(struct_type, slot);
         self.layout.val_type(&self.index.resolved_member_ty(member))
+    }
+
+    /// `{1, 2, 3}`, whose elements are written rather than defaulted.
+    ///
+    /// An array initialiser has no type of its own — `{1, 2}` is an array of whatever it is assigned to
+    /// — so the element type comes from the type inference recorded for the *declaration*. One
+    /// instruction takes the values from the stack, so there is no allocate-then-fill sequence and no
+    /// index to keep.
+    fn array_initializer(
+        &mut self,
+        init: &ast::ArrayInit,
+        target: Option<&Ty>,
+        insn: &mut Insn,
+    ) -> Result<ValType> {
+        // The *target* decides the element type, not the elements: `long[] c = {1, 2}` is an `i64`
+        // array whose elements happen to be written as `int` literals, and reading the type off the
+        // elements built an `i32` array instead — a module the validator rejects, and the wrong type if
+        // it had not.
+        let inferred = self
+            .input
+            .inference
+            .type_of_expr(Self::span(init.syntax()))
+            .cloned();
+        let Some(Ty::Array(element)) = target.cloned().or(inferred) else {
+            return Err(WasmError::Unsupported(
+                "an array initialiser with no target type",
+            ));
+        };
+        let element_ty = self.layout.val_type(&element)?;
+        let array_type = self
+            .layout
+            .array_type(element_ty)
+            .ok_or_else(|| WasmError::NoRepresentation("an array".to_owned()))?;
+        let elements: Vec<ast::Expr> = init.elements().collect();
+        let count = u32::try_from(elements.len()).map_err(|_| WasmError::TooLarge)?;
+        for value in &elements {
+            // A nested initialiser (`{{1}, {2}}`) reaches this same arm through `expr`, whose recorded
+            // type is the inner array's — so nothing here has to know how deep it is.
+            self.value_as(value, &element, insn)?;
+        }
+        insn.array_new_fixed(array_type, count);
+        Ok(ValType::Ref(RefType::nullable(HeapType::Concrete(
+            array_type,
+        ))))
+    }
+
+    /// Emit `value` as a value of the declared type `declared`, converting where a numeric assignment
+    /// conversion applies and handing a nested array initialiser its own element type.
+    fn value_as(&mut self, value: &ast::Expr, declared: &Ty, insn: &mut Insn) -> Result<()> {
+        if let ast::Expr::ArrayInit(nested) = value {
+            self.array_initializer(nested, Some(declared), insn)?;
+            return Ok(());
+        }
+        let declared_ty = self.layout.val_type(declared)?;
+        if self.num_of(value.syntax()).is_ok()
+            && let Ok(target) = Self::num_for(declared_ty)
+        {
+            return self.operand(value, target, insn);
+        }
+        self.expr(value, insn)?
+            .ok_or(WasmError::Unsupported("a value that produced nothing"))?;
+        Ok(())
     }
 
     /// `array[index]`.

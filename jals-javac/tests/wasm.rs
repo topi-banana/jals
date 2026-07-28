@@ -1091,18 +1091,47 @@ fn each_unrepresentable_type_declaration_names_itself() {
     }
 }
 
-/// Each uncompiled expression form names itself too.
+/// `{1, 2, 3}`, whose elements are written rather than defaulted.
 ///
-/// An array initialiser is the one array form still missing. A lambda, a method reference, and `.class`
-/// each name themselves too, but none is reachable from a compiling program yet: every one of them
-/// needs a *target type* the backend reports first — an interface it does not lay out, or a library
-/// type it has no representation for.
+/// An array initialiser has no type of its own — it is an array of whatever it is assigned to — so the
+/// element type comes from what inference recorded for the declaration. One instruction takes the
+/// values straight off the stack, so there is no allocate-then-fill sequence and no index to keep.
 #[test]
-fn each_uncompiled_expression_form_names_itself() {
-    let source = "public class E { public static int run(int n) { int[] a = {1, 2}; return n; } }";
-    let error = compile(&[source]).expect_err("an array initialiser is not compiled yet");
-    assert!(
-        matches!(error, WasmError::Unsupported("an array initialiser")),
-        "got {error}"
-    );
+fn an_array_initialiser_builds_its_array() {
+    let source = r"
+public class Filled {
+    static int[] shared = {7, 8};
+
+    public static int summed(int n) {
+        int[] cells = {n, n * 2, n * 3};
+        int total = 0;
+        for (int cell : cells) {
+            total += cell;
+        }
+        return total + cells.length;
+    }
+
+    // A widening conversion per element: an `int` literal into a `long[]`.
+    public static long widened() {
+        long[] cells = {1, 2, 3};
+        return cells[0] + cells[1] + cells[2];
+    }
+
+    // Nested: the inner initialiser's own recorded type is the inner array's, so nothing has to know
+    // how deep it is.
+    public static int nested(int n) {
+        int[][] grid = {{n, 1}, {2}};
+        return grid[0][0] + grid[0][1] + grid[1][0] + grid.length;
+    }
+
+    // A `static` field's initialiser is computed, so it runs in the start function.
+    public static int fromAStatic() {
+        return shared[0] + shared[1];
+    }
+}
+";
+    assert_invoke(&[source], "summed", &["2"], "15");
+    assert_invoke(&[source], "widened", &[], "6");
+    assert_invoke(&[source], "nested", &["5"], "10");
+    assert_invoke(&[source], "fromAStatic", &[], "15");
 }
