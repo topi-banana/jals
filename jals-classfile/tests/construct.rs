@@ -289,3 +289,43 @@ fn interning_into_a_read_pool_reuses_its_entries() {
         "nothing was appended for an entry that was already there"
     );
 }
+
+/// The three constant-pool shapes an `invokedynamic` needs, which nothing could build before.
+///
+/// A `MethodType` is a descriptor with no name and no owner. A `MethodHandle` wraps a reference whose
+/// *kind* has to agree with the entry it points at — an interface method needs an `InterfaceMethodRef`,
+/// which is why the caller says which rather than having it inferred. An `InvokeDynamic` names the call
+/// site and which `BootstrapMethods` entry computes it, and names the lambda body nowhere at all.
+#[test]
+fn an_invokedynamic_call_site_can_be_built() {
+    let mut pool = ConstantPool::new();
+    let ty = pool
+        .method_type_index("()Ljava/lang/Object;")
+        .expect("type");
+    let virtual_handle = pool
+        .method_handle_index(5, "p/Owner", "run", "()V", false)
+        .expect("virtual handle");
+    let interface_handle = pool
+        .method_handle_index(9, "p/Iface", "run", "()V", true)
+        .expect("interface handle");
+    let site = pool
+        .invoke_dynamic_index(0, "run", "(I)Lp/Iface;")
+        .expect("call site");
+    // Four distinct entries, none of them index 0 — which is not a constant-pool index at all.
+    let indices = [ty, virtual_handle, interface_handle, site];
+    assert!(indices.iter().all(|&index| index > 0), "{indices:?}");
+    for (position, &index) in indices.iter().enumerate() {
+        assert!(
+            !indices[position + 1..].contains(&index),
+            "distinct entries: {indices:?}"
+        );
+    }
+
+    // Writing, reading, and writing again has to give the same bytes: the only proof that each tag and
+    // payload survived the binary form rather than merely being accepted by it.
+    let mut class = ClassFile::new(69, 0, pool);
+    class.this_class = 0;
+    let bytes = class.write();
+    let read = jals_exec::block_on_inline(ClassFile::read(bytes.as_slice())).expect("read");
+    assert_eq!(read.write(), bytes);
+}

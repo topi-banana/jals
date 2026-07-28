@@ -416,6 +416,59 @@ impl ConstantPool {
         })
     }
 
+    /// Intern a `MethodType` entry (and the `Utf8` descriptor it points at).
+    ///
+    /// One of the three shapes an `invokedynamic` bootstrap argument takes: a method *type* is a
+    /// descriptor with no name and no owner, which is what `LambdaMetafactory` is handed to describe the
+    /// functional interface's shape.
+    pub fn method_type_index(&mut self, descriptor: &str) -> Option<u16> {
+        let descriptor_index = self.utf8_index(descriptor)?;
+        self.intern(ConstantPoolEntry::MethodType { descriptor_index })
+    }
+
+    /// Intern a `MethodHandle` entry over a `MethodRef` to `owner.name descriptor`.
+    ///
+    /// `reference_kind` is JVMS Table 5.4.3.5-A: 5 `invokeVirtual`, 6 `invokeStatic`, 7 `invokeSpecial`,
+    /// 9 `invokeInterface`. The kind and the *referenced entry* have to agree — an interface method needs
+    /// an `InterfaceMethodRef`, which is why that is a separate argument rather than inferred.
+    pub fn method_handle_index(
+        &mut self,
+        reference_kind: u8,
+        owner: &str,
+        name: &str,
+        descriptor: &str,
+        interface_owner: bool,
+    ) -> Option<u16> {
+        let reference_index = if interface_owner {
+            self.interface_method_ref_index(owner, name, descriptor)?
+        } else {
+            self.method_ref_index(owner, name, descriptor)?
+        };
+        self.intern(ConstantPoolEntry::MethodHandle {
+            reference_kind,
+            reference_index,
+        })
+    }
+
+    /// Intern an `InvokeDynamic` entry: the call site's name and descriptor, plus which
+    /// `BootstrapMethods` entry computes it.
+    ///
+    /// The *name* is the functional interface's method name and the *descriptor* takes the captured
+    /// values and returns the interface — neither names the lambda body, which is what makes the same
+    /// bootstrap serve every call site that shares its shape.
+    pub fn invoke_dynamic_index(
+        &mut self,
+        bootstrap_method_attr_index: u16,
+        name: &str,
+        descriptor: &str,
+    ) -> Option<u16> {
+        let name_and_type_index = self.name_and_type_index(name, descriptor)?;
+        self.intern(ConstantPoolEntry::InvokeDynamic {
+            bootstrap_method_attr_index,
+            name_and_type_index,
+        })
+    }
+
     /// Intern a `FieldRef` and everything it references. `owner` is an internal-form class name.
     pub fn field_ref_index(&mut self, owner: &str, name: &str, descriptor: &str) -> Option<u16> {
         let class_index = self.class_index(owner)?;
