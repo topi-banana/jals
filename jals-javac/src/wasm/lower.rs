@@ -45,7 +45,9 @@ use alloc::vec::Vec;
 use jals_hir::{
     DefId, DefKind, FileId, ItemId, MemberId, Primitive, ProjectIndex, Resolved, Ty, TypeInference,
 };
-use jals_syntax::SyntaxKind::{CLASS_DECL, CONSTRUCTOR_DECL, FIELD_DECL, METHOD_DECL};
+use jals_syntax::SyntaxKind::{
+    CLASS_DECL, CONSTRUCTOR_DECL, FIELD_DECL, INITIALIZER, METHOD_DECL, MODIFIERS,
+};
 use jals_syntax::ast::{self, AstNode as _};
 use jals_syntax::{SyntaxNode, SyntaxToken};
 
@@ -648,7 +650,11 @@ impl Body {
         // type's default in a module that validates. A `this(…)` delegation is the exception: the
         // constructor it reaches runs them, and running them twice would undo what it did.
         if method.is_constructor && !block.as_ref().is_some_and(Self::delegates_to_this) {
-            lowering.initializers(&mut insn)?;
+            // The constructor's parent *is* the class body, which is where the initialisers are and
+            // the reason they need no search: they are this declaration's siblings, in order.
+            if let Some(body) = method.node.parent() {
+                lowering.initializers(&body, &mut insn)?;
+            }
         }
         if let Some(block) = &block {
             lowering.block(block, &mut insn)?;
@@ -722,31 +728,38 @@ struct Loop {
 }
 
 impl Lowering<'_> {
-    /// Every instance field initialiser the enclosing class declares, in source order.
+    /// Every instance initialiser the enclosing class declares, in source order.
     ///
-    /// They run before the constructor's own body (JLS §12.5), which is why they are emitted here
-    /// rather than reached through `stmt` — a `FIELD_DECL` is not a statement.
-    fn initializers(&mut self, insn: &mut Insn) -> Result<()> {
+    /// Two forms interleave: a field's `= …`, and a bare `{ … }` block. JLS §12.5 runs them in the
+    /// order they are *written*, one sequence, before the constructor's own body — which is why they
+    /// are emitted from the class body's children here rather than reached through `stmt`. A
+    /// `FIELD_DECL` is not a statement, and a `{ … }` in a class body is not the same node as one in a
+    /// method.
+    fn initializers(&mut self, class_body: &SyntaxNode, insn: &mut Insn) -> Result<()> {
         let Some(owner) = self.owner else {
             return Ok(());
         };
         let struct_type = self.layout.structs[&owner];
-        let fields: Vec<SyntaxNode> = self
-            .input
-            .root
-            .descendants()
-            .filter(|node| node.kind() == FIELD_DECL)
-            .filter(|node| {
-                // Only *this* class's fields: a sibling or nested declaration has its own
-                // constructor, and its initialisers belong there.
-                node.parent()
-                    .and_then(|body| body.parent())
-                    .is_some_and(|declaration| {
-                        Self::declares(&declaration, owner, self.input, self.index)
-                    })
-            })
-            .collect();
-        for node in fields {
+        for node in class_body.children() {
+            if node.kind() == INITIALIZER {
+                // The `static` keyword is inside the `MODIFIERS` child, not on the `INITIALIZER`
+                // itself. A `static { … }` runs once at class initialisation rather than per instance,
+                // and this backend has no start function to run it in — so it is reported rather than
+                // run in every constructor, which would be a different program.
+                if node
+                    .children()
+                    .filter(|child| child.kind() == MODIFIERS)
+                    .flat_map(|modifiers| modifiers.children_with_tokens())
+                    .filter_map(jals_syntax::SyntaxElement::into_token)
+                    .any(|token| token.kind() == jals_syntax::SyntaxKind::STATIC_KW)
+                {
+                    return Err(WasmError::Unsupported("a `static` initialiser block"));
+                }
+                if let Some(block) = node.children().find_map(ast::Block::cast) {
+                    self.block(&block, insn)?;
+                }
+                continue;
+            }
             let Some(declaration) = ast::FieldDecl::cast(node.clone()) else {
                 continue;
             };
@@ -775,20 +788,6 @@ impl Lowering<'_> {
             }
         }
         Ok(())
-    }
-
-    /// Whether the type declaration `node` is the indexed item `owner`.
-    fn declares(
-        node: &SyntaxNode,
-        owner: ItemId,
-        input: &WasmInput<'_>,
-        index: &ProjectIndex,
-    ) -> bool {
-        node.children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
-            .and_then(|name| index.item_by_decl(input.file, usize::from(name.text_range().start())))
-            == Some(owner)
     }
 
     fn declare_param(&mut self, node: &SyntaxNode) -> Result<ValType> {

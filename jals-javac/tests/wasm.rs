@@ -1018,14 +1018,27 @@ public class Derived extends Base {
     assert_invoke(&[source], "direct", &["5"], "7");
 }
 
-/// An instance field initialiser is not a statement anywhere in the source, so a constructor that
-/// emitted only its own body left every one of them unrun.
+/// Both instance initialiser forms, in the order they are written.
+///
+/// A field's `= …` and a bare `{ … }` block interleave into one sequence that runs before the
+/// constructor's body (§12.5). Neither is a statement anywhere in the source, so a constructor that
+/// emitted only its own body left every one of them unrun — a field reading back as 0 in a module that
+/// validates. Order is observable: the block below overwrites what the field initialiser above it set
+/// and is then overwritten by the one below.
 #[test]
-fn an_instance_field_initialiser_runs() {
+fn every_instance_initialiser_runs_in_source_order() {
     let source = r"
 public class Seeded {
     int fixed = 7;
+    int stamped = 1;
     int given;
+
+    // Runs after `stamped = 1` and before `stamped = 3`.
+    { stamped = stamped * 2; }
+
+    int later = 0;
+
+    { stamped = stamped + 3; }
 
     Seeded(int given) { this.given = given; }
 
@@ -1033,7 +1046,28 @@ public class Seeded {
         Seeded it = new Seeded(n);
         return it.fixed + it.given;
     }
+
+    // 1, doubled to 2, then + 3.
+    public static int ordered() {
+        return new Seeded(0).stamped;
+    }
 }
 ";
     assert_invoke(&[source], "summed", &["3"], "10");
+    assert_invoke(&[source], "ordered", &[], "5");
+}
+
+/// A `static { … }` block is not an instance initialiser, and running it in every constructor would be
+/// a different program. Reported until the module has a start function to run it once.
+#[test]
+fn a_static_initialiser_block_is_reported() {
+    let source = "public class S { static int n; static { n = 1; } S() {} }";
+    let error = compile(&[source]).expect_err("a static initialiser needs a start function");
+    assert!(
+        matches!(
+            error,
+            WasmError::Unsupported("a `static` initialiser block")
+        ),
+        "got {error}"
+    );
 }
