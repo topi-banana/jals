@@ -1628,7 +1628,13 @@ impl ProjectIndex {
                     name_range: start..start,
                     type_params: Vec::new(),
                     members: Vec::new(),
-                    raw_supertypes: Vec::new(),
+                    // The interface the lambda is converted to, read from the context that names it — the
+                    // same three places target typing reads (§15.27.3). Recording it as a supertype is what
+                    // makes the lambda a *subtype* of the interface, which is what a dispatch built on
+                    // subtyping needs to find it.
+                    raw_supertypes: Self::lambda_target_of(&node)
+                        .map(|ty| alloc::vec![MemberType::of(Some(ty))])
+                        .unwrap_or_default(),
                 });
             }
             // An anonymous class body is a type declaration with no name and no keyword. Nothing else
@@ -2089,6 +2095,26 @@ impl ProjectIndex {
             ENUM_DECL => Some(DefKind::Enum),
             RECORD_DECL => Some(DefKind::Record),
             ANNOTATION_TYPE_DECL => Some(DefKind::AnnotationType),
+            _ => None,
+        }
+    }
+
+    /// The written type of the context a lambda appears in: a declaration's type, an assignment's target's
+    /// declaration, or the enclosing method's return type.
+    ///
+    /// Read syntactically because this runs before anything is resolved. An argument position is not read, for
+    /// the same reason target typing does not read one: the parameter depends on an overload chosen later.
+    fn lambda_target_of(node: &SyntaxNode) -> Option<ast::Type> {
+        let parent = node.parent()?;
+        match parent.kind() {
+            SyntaxKind::LOCAL_VAR_DECL | SyntaxKind::FIELD_DECL => {
+                parent.children().find_map(ast::Type::cast)
+            }
+            SyntaxKind::RETURN_STMT => node
+                .ancestors()
+                .find(|ancestor| ancestor.kind() == METHOD_DECL)?
+                .children()
+                .find_map(ast::Type::cast),
             _ => None,
         }
     }
