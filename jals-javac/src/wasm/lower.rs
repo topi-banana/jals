@@ -47,7 +47,7 @@ use jals_hir::{
 };
 use jals_syntax::SyntaxKind::{
     CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL, ENUM_BODY, ENUM_CONSTANT, ENUM_DECL, FIELD_DECL,
-    INITIALIZER, INTERFACE_DECL, METHOD_DECL, MODIFIERS,
+    INITIALIZER, INTERFACE_DECL, METHOD_DECL, MODIFIERS, RECORD_DECL,
 };
 use jals_syntax::ast::{self, AstNode as _};
 use jals_syntax::{SyntaxNode, SyntaxToken};
@@ -200,6 +200,11 @@ impl CompileWasm {
             )?;
         }
 
+        // A record's canonical constructor and its accessors have no declaration to walk: the header
+        // declares the components and the compiler owes the rest. They are synthesised here, after every
+        // *declared* method has its index, so the indices stay in step with the order bodies are pushed.
+        let synthesised = Self::record_members(inputs, index, &mut layout, &mut module, &methods)?;
+
         // Pass 3: bodies.
         for method in &methods {
             let input = &inputs[method.input];
@@ -214,6 +219,9 @@ impl CompileWasm {
                     .exports
                     .push((name.clone(), ExportKind::Func, method.index));
             }
+        }
+        for func in synthesised {
+            module.funcs.push(func);
         }
         // A `static` initialiser cannot live in a global's constant expression, so it runs in the
         // module's start function — which an engine calls before anything else, exactly as a JVM runs
@@ -289,6 +297,108 @@ impl CompileWasm {
         Ok(())
     }
 
+    /// A record's canonical constructor and one accessor per component, written out rather than walked.
+    ///
+    /// A component is declared once, in the header, and stands for a field, an accessor, and a
+    /// constructor parameter — none of which the body writes. The index already synthesises all three
+    /// (that is what makes `r.x()` resolve), so what is missing here is only the code, and it is short
+    /// enough to write directly: the constructor stores each parameter into its slot, and an accessor
+    /// reads one back.
+    ///
+    /// `equals`, `hashCode`, and `toString` are *not* synthesised. All three come from
+    /// `java.lang.Record` and two of them involve a `String`, which has no wasm representation by this
+    /// backend's design — a call to one reports rather than being guessed at.
+    fn record_members(
+        inputs: &[WasmInput<'_>],
+        index: &ProjectIndex,
+        layout: &mut Layout,
+        module: &mut Module,
+        methods: &[Method],
+    ) -> Result<Vec<Func>> {
+        let mut out = Vec::new();
+        for input in inputs {
+            for node in input.root.descendants() {
+                if node.kind() != RECORD_DECL {
+                    continue;
+                }
+                let owner = Layout::owner_of(&node, input, index)?;
+                let struct_type = layout.structs[&owner];
+                let this = layout.class_ref(owner)?;
+                let components: Vec<MemberId> =
+                    layout.fields.get(&owner).cloned().unwrap_or_default();
+
+                // The canonical constructor, unless the body wrote one: `this` then one parameter per
+                // component, each stored into its own slot.
+                let declared_constructor = index.own_members(owner).iter().any(|&id| {
+                    let m = index.member(id);
+                    m.kind == DefKind::Constructor && m.name_range != (0..0)
+                });
+                if !declared_constructor
+                    && let Some(&ctor) = index
+                        .own_members(owner)
+                        .iter()
+                        .find(|&&id| index.member(id).kind == DefKind::Constructor)
+                {
+                    let mut params = alloc::vec![this];
+                    let mut body = Insn::new();
+                    for (position, &component) in components.iter().enumerate() {
+                        let ty = layout.val_type(&index.resolved_member_ty(component))?;
+                        params.push(ty);
+                        let slot = u32::try_from(position + 1).map_err(|_| WasmError::TooLarge)?;
+                        let field = layout
+                            .field_slot(owner, component)
+                            .ok_or(WasmError::Unsupported("a record component with no slot"))?;
+                        body.local_get(0)
+                            .local_get(slot)
+                            .struct_set(struct_type, field);
+                    }
+                    let signature = module.add_type(SubType::plain(CompType::Func {
+                        params,
+                        results: Vec::new(),
+                    }));
+                    let function = Module::func_index(methods.len() + out.len());
+                    layout.functions.insert(ctor, function);
+                    out.push(Func {
+                        type_index: signature,
+                        locals: Vec::new(),
+                        body: body.into_body(),
+                    });
+                }
+
+                // One accessor per component, unless the body declared it by hand.
+                for &component in &components {
+                    let name = index.member(component).name.clone();
+                    let accessor = index.own_members(owner).iter().copied().find(|&id| {
+                        let m = index.member(id);
+                        m.kind == DefKind::Method && m.name == name && m.params.is_empty()
+                    });
+                    let Some(accessor) = accessor else { continue };
+                    if layout.functions.contains_key(&accessor) {
+                        continue;
+                    }
+                    let ty = layout.val_type(&index.resolved_member_ty(component))?;
+                    let field = layout
+                        .field_slot(owner, component)
+                        .ok_or(WasmError::Unsupported("a record component with no slot"))?;
+                    let mut body = Insn::new();
+                    body.local_get(0).struct_get(struct_type, field);
+                    let signature = module.add_type(SubType::plain(CompType::Func {
+                        params: alloc::vec![this],
+                        results: alloc::vec![ty],
+                    }));
+                    let function = Module::func_index(methods.len() + out.len());
+                    layout.functions.insert(accessor, function);
+                    out.push(Func {
+                        type_index: signature,
+                        locals: Vec::new(),
+                        body: body.into_body(),
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+
     /// Every `static { … }` block in `root`, in source order.
     fn static_initializers(root: &SyntaxNode) -> impl Iterator<Item = ast::Block> + '_ {
         root.descendants()
@@ -357,9 +467,8 @@ impl CompileWasm {
     /// `enum` and a `record` need the synthesised members the JVM backend builds. None is laid out yet,
     /// and every one of them would otherwise vanish without a word.
     const fn unrepresentable_kind(kind: jals_syntax::SyntaxKind) -> Option<&'static str> {
-        use jals_syntax::SyntaxKind::{ANNOTATION_TYPE_DECL, RECORD_DECL};
+        use jals_syntax::SyntaxKind::ANNOTATION_TYPE_DECL;
         match kind {
-            RECORD_DECL => Some("a `record` declaration"),
             ANNOTATION_TYPE_DECL => Some("an `@interface` declaration"),
             _ => None,
         }
@@ -391,6 +500,11 @@ impl CompileWasm {
 
     /// Whether a class declaration is a non-`static` nested one.
     fn is_inner(node: &SyntaxNode) -> bool {
+        // A nested interface, `enum`, `record`, and `@interface` are all implicitly `static` and hold no
+        // enclosing instance, so only a nested *class* can be an inner one.
+        if node.kind() != CLASS_DECL {
+            return false;
+        }
         let nested = node
             .parent()
             .is_some_and(|parent| parent.kind() == jals_syntax::SyntaxKind::CLASS_BODY);

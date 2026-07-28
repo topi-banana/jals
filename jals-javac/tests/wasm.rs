@@ -1229,12 +1229,11 @@ public class Outer {
 #[test]
 fn each_unrepresentable_type_declaration_names_itself() {
     for (source, expected) in [
-        ("record R(int x) {}", "a `record` declaration"),
         ("@interface M {}", "an `@interface` declaration"),
         // Nested, which is where the silent drop used to happen.
         (
-            "public class O { record R(int x) {} }",
-            "a `record` declaration",
+            "public class O { @interface M {} }",
+            "an `@interface` declaration",
         ),
     ] {
         let error = compile(&[source]).expect_err("this declaration is not laid out yet");
@@ -1492,4 +1491,45 @@ fn the_enum_shapes_that_need_more_are_reported() {
             "`{source}` should report {expected:?}, got {error}"
         );
     }
+}
+
+/// A `record`: fields from the header, plus a canonical constructor and accessors written out.
+///
+/// A component is declared once, in the header, and stands for three things — a field, an accessor, and
+/// a constructor parameter — none of which the body writes. The index already synthesises all three
+/// (that is what makes `p.x()` resolve), so what was missing was only the code, and it is short enough
+/// to write directly: the constructor stores each parameter into its slot and an accessor reads one back.
+///
+/// `equals`, `hashCode`, and `toString` are *not* synthesised here. All three come from
+/// `java.lang.Record`, and two of them involve a `String`, which has no wasm representation by this
+/// backend's design — a call to one reports rather than being guessed at.
+#[test]
+fn a_record_gets_a_constructor_and_accessors() {
+    let source = r"
+public record Point(int x, long span) {}
+
+public record Wrapped(Point inner) {}
+
+public class Places {
+    public static int through_a_record(int n) {
+        Point p = new Point(n, 4L);
+        return p.x() + (int) p.span();
+    }
+
+    // A `long` component, whose accessor's result type has to be the component's rather than an `i32`.
+    public static long widths(int n) {
+        Point p = new Point(n, 40L);
+        return p.span() + p.x();
+    }
+
+    // A record component of record type: the reference representation has to hold up through both.
+    public static int nested(int n) {
+        Wrapped w = new Wrapped(new Point(n, 1L));
+        return w.inner().x() * 2;
+    }
+}
+";
+    assert_invoke(&[source], "through_a_record", &["3"], "7");
+    assert_invoke(&[source], "widths", &["2"], "42");
+    assert_invoke(&[source], "nested", &["5"], "10");
 }
