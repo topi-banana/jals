@@ -34,8 +34,8 @@ use jals_exec::Yielder;
 
 use jals_syntax::SyntaxKind::{
     AMP, AMP_AMP, ASSIGNMENT_EXPR, BANG, BANG_EQ, BOOLEAN_KW, BYTE_KW, CALL_EXPR, CARET,
-    CATCH_CLAUSE, CHAR_KW, CHAR_LITERAL, COMMA, CONSTRUCTOR_DECL, DOT, DOUBLE_KW, EQ, EQ_EQ,
-    FALSE_KW, FIELD_ACCESS, FIELD_DECL, FLOAT_KW, FLOAT_LITERAL, FOR_EACH_STMT, GT, IDENT,
+    CATCH_CLAUSE, CHAR_KW, CHAR_LITERAL, COMMA, CONSTRUCTOR_DECL, DOT, DOUBLE_KW, ELLIPSIS, EQ,
+    EQ_EQ, FALSE_KW, FIELD_ACCESS, FIELD_DECL, FLOAT_KW, FLOAT_LITERAL, FOR_EACH_STMT, GT, IDENT,
     INSTANCEOF_KW, INT_KW, INT_LITERAL, LAMBDA_EXPR, LBRACK, LOCAL_VAR_DECL, LONG_KW, LSHIFT, LT,
     LT_EQ, METHOD_DECL, MINUS, NEW_EXPR, NULL_KW, PARAM, PERCENT, PIPE, PIPE_PIPE, PLUS,
     RECORD_COMPONENT, RESOURCE, RETURN_STMT, SHORT_KW, SLASH, STAR, STRING_LITERAL, SUPER_KW,
@@ -475,9 +475,9 @@ impl TypeInference {
     /// before `println(String)` would swallow every string, and the mistake would surface as a
     /// run-time `NoSuchMethodError` from a descriptor nothing ever checked.
     ///
-    /// What is *not* modelled: the three phases (strict / loose / variable-arity) are collapsed
-    /// into one, boxing is whatever [`Ty::is_assignable_to`] admits, and a varargs candidate is
-    /// skipped entirely since its arity is not fixed.
+    /// What is *not* modelled: the first two phases (strict / loose) are collapsed into one and
+    /// boxing is whatever [`Ty::is_assignable_to`] admits. Variable arity *is* a separate phase,
+    /// because it has to be: it may only be consulted once fixed arity has found nothing.
     fn resolve_call(
         &self,
         call: &ast::CallExpr,
@@ -489,15 +489,31 @@ impl TypeInference {
             .args()
             .map(|list| list.args().collect())
             .unwrap_or_default();
-        // Candidates of the right arity (a varargs method is skipped — its arity is variable).
-        let candidates: Vec<MemberId> = index
-            .resolve_members_all(owner, &name, Namespace::Method)
-            .into_iter()
+        let reachable = index.resolve_members_all(owner, &name, Namespace::Method);
+        // Phase one: fixed arity, which is every non-varargs method taking exactly this many
+        // arguments.
+        let mut candidates: Vec<MemberId> = reachable
+            .iter()
+            .copied()
             .filter(|&id| {
                 let member = index.member(id);
                 !member.varargs && member.params.len() == args.len()
             })
             .collect();
+        // Phase two: variable arity (JLS §15.12.2.4), and *only* when phase one found nothing —
+        // which is the order the specification gives and the reason `f(Object[])` must not win over
+        // `f(String, String)`. A varargs method takes its fixed parameters plus any number more, so
+        // one argument short of its arity is legal (`f()` against `f(int...)`) and any number over is.
+        if candidates.is_empty() {
+            candidates = reachable
+                .iter()
+                .copied()
+                .filter(|&id| {
+                    let member = index.member(id);
+                    member.varargs && args.len() + 1 >= member.params.len()
+                })
+                .collect();
+        }
         if candidates.is_empty() {
             return None;
         }
@@ -539,14 +555,46 @@ impl TypeInference {
             .copied()
             .filter(|&id| {
                 let member = index.member(id);
-                arg_tys.iter().zip(&member.params).all(|(arg_ty, param)| {
-                    arg_ty.is_none_or(|ty| {
-                        ty.is_assignable_to(
-                            &index.member_type_to_ty(member.file, member.owner, &param.ty),
-                            Some(index),
-                        )
-                    })
-                })
+                let fits = |arg_ty: Option<&Ty>, target: &Ty| {
+                    arg_ty.is_none_or(|ty| ty.is_assignable_to(target, Some(index)))
+                };
+                let declared = |param: &crate::Param| {
+                    index.member_type_to_ty(member.file, member.owner, &param.ty)
+                };
+                if !member.varargs {
+                    return arg_tys
+                        .iter()
+                        .zip(&member.params)
+                        .all(|(arg_ty, param)| fits(*arg_ty, &declared(param)));
+                }
+                // A varargs method's *last* parameter stands for however many arguments are left, so
+                // each of those is checked against its **element** type rather than against the array.
+                // `zip` alone would compare a `String` to a `String[]` and reject the call.
+                let Some((last, fixed)) = member.params.split_last() else {
+                    return false;
+                };
+                if !arg_tys
+                    .iter()
+                    .zip(fixed)
+                    .all(|(arg_ty, param)| fits(*arg_ty, &declared(param)))
+                {
+                    return false;
+                }
+                let element = match declared(last) {
+                    Ty::Array(element) => *element,
+                    // A varargs parameter is an array by construction; anything else is an index that
+                    // could not work the type out, and staying lenient is this module's habit.
+                    other => other,
+                };
+                let rest = &arg_tys[fixed.len().min(arg_tys.len())..];
+                // Exactly one trailing argument may be the array itself rather than an element
+                // (JLS §15.12.4.2): `total(new int[] {1, 2})` passes straight through to `int...`.
+                if let [only] = rest
+                    && fits(*only, &declared(last))
+                {
+                    return true;
+                }
+                rest.iter().all(|arg_ty| fits(*arg_ty, &element))
             })
             .collect();
         Self::most_specific(&applicable, index)
@@ -846,7 +894,13 @@ impl<'a> Inferer<'a> {
             if Self::declares_typed_bindings(node.kind()) {
                 let ty = node.children().find_map(ast::Type::cast);
                 if !ty.as_ref().is_some_and(Cst::is_var_type) {
-                    let t = self.ty_of_opt_type(ty.as_ref());
+                    let mut t = self.ty_of_opt_type(ty.as_ref());
+                    // A `...` parameter is an array binding inside the body: `int... xs` writes the
+                    // element type, and only the ellipsis says the local is an `int[]`. Without this
+                    // the body sees `xs` as an `int` and every use of it is typed one dimension short.
+                    if Self::is_variable_arity(&node) {
+                        t = Ty::Array(Box::new(t));
+                    }
                     for tok in Collect::direct_ident_tokens(&node) {
                         self.set_def_type(Collect::token_start(&tok), t.clone());
                     }
@@ -1457,6 +1511,15 @@ impl Inferer<'_> {
                 | RESOURCE
                 | METHOD_DECL
         )
+    }
+
+    /// Whether `node` is a `PARAM` declared with `...`.
+    fn is_variable_arity(node: &SyntaxNode) -> bool {
+        node.kind() == PARAM
+            && node
+                .children_with_tokens()
+                .filter_map(SyntaxElement::into_token)
+                .any(|t| t.kind() == ELLIPSIS)
     }
 
     /// The [`Ty`] of a primitive (or `void`) type keyword, or `None` for any other token.

@@ -240,7 +240,9 @@ pub struct Member {
     pub params: Vec<Param>,
     /// Whether this method's last parameter is a varargs (`int... xs`). A varargs method accepts a
     /// variable arity, so argument checking skips it. Always `false` for non-methods.
-    pub(crate) varargs: bool,
+    /// Public because a *code generator* needs it: the JVM has no variable arity, so a varargs call
+    /// site is the thing that builds the array, and it cannot know to unless it can ask.
+    pub varargs: bool,
     /// The checked exceptions a method / constructor declares in its `throws` clause, captured like
     /// [`ty`](Member::ty) as resolvable data (each a named reference type). Empty for a non-executable
     /// member and for one that declares no `throws`. Consumed by the checked-exception analysis
@@ -313,6 +315,34 @@ pub enum MemberType {
     },
     /// No resolvable value type — a constructor, a `var` slot, or a type that could not be read.
     Unknown,
+}
+
+impl MemberType {
+    /// This type with one more array level.
+    ///
+    /// What `int... xs` needs: the `...` is the only thing saying the parameter is an `int[]`, and both
+    /// its type inside the body and the method's descriptor depend on knowing that.
+    fn with_extra_dimension(self) -> Self {
+        match self {
+            Self::Primitive { keyword, dims } => Self::Primitive {
+                keyword,
+                dims: dims.saturating_add(1),
+            },
+            Self::Named {
+                name,
+                qualified,
+                dims,
+                args,
+            } => Self::Named {
+                name,
+                qualified,
+                dims: dims.saturating_add(1),
+                args,
+            },
+            // Nothing to add a dimension to, and inventing one would name a type the source did not.
+            other => other,
+        }
+    }
 }
 
 /// The cross-file resolution of a type-name reference.
@@ -1773,17 +1803,22 @@ impl ProjectIndex {
         // return none for one — leaving every constructor with an empty parameter list.
         if let Some(list) = method.children().find_map(ast::ParamList::cast) {
             for param in list.params() {
-                if param
+                let spread = param
                     .syntax()
                     .children_with_tokens()
                     .filter_map(SyntaxElement::into_token)
-                    .any(|t| t.kind() == ELLIPSIS)
-                {
-                    varargs = true;
+                    .any(|t| t.kind() == ELLIPSIS);
+                varargs |= spread;
+                // `int... xs` declares an `int[]`, and the `...` is the only thing that says so. Its
+                // *type* has to carry the dimension: the parameter is a local of that type inside the
+                // body, and the method's descriptor is `([I)V` rather than `(I)V`.
+                let mut ty = MemberType::of(param.ty());
+                if spread {
+                    ty = ty.with_extra_dimension();
                 }
                 params.push(Param {
                     name: param.name(),
-                    ty: MemberType::of(param.ty()),
+                    ty,
                 });
             }
         }

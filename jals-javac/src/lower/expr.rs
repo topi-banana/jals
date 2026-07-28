@@ -572,6 +572,68 @@ impl Expr {
         Ok((owner, context.index.member(member).name.clone(), descriptor))
     }
 
+    /// A call's arguments, each converted to its *declared* parameter type.
+    ///
+    /// `f(1)` against `f(long)` is an `i2l`, which JLS §5.3 calls the method-invocation conversion.
+    ///
+    /// A **varargs** call's trailing arguments are packed into an array first, because the JVM has no
+    /// variable arity at all: `f(int...)`'s descriptor is `([I)V` and the call site builds the `int[]`.
+    /// One argument that is already an array of the right type passes straight through instead — that
+    /// is JLS §15.12.4.2's rule, and packing it would produce an `int[][]`.
+    fn arguments(
+        arguments: &[ast::Expr],
+        params: &[Ty],
+        varargs: bool,
+        context: &Context<'_>,
+        emit: &mut Emit<'_, '_>,
+    ) -> Result<()> {
+        if !varargs {
+            for (index, argument) in arguments.iter().enumerate() {
+                let declared = params
+                    .get(index)
+                    .ok_or(LowerError::Unsupported("a call with too many arguments"))?;
+                Self::lower_as(argument, declared, context, emit)?;
+            }
+            return Ok(());
+        }
+        let Some((last, fixed)) = params.split_last() else {
+            return Err(LowerError::Unsupported("a varargs call with no parameters"));
+        };
+        for (index, argument) in arguments.iter().take(fixed.len()).enumerate() {
+            Self::lower_as(argument, &fixed[index], context, emit)?;
+        }
+        let rest = &arguments[fixed.len().min(arguments.len())..];
+        let Ty::Array(element) = last else {
+            return Err(LowerError::Unsupported(
+                "a varargs parameter that is no array",
+            ));
+        };
+        // Exactly one argument, already an array: passed through rather than wrapped. Wrapping it
+        // would hand the callee a one-element array *of arrays*.
+        if rest.len() == 1
+            && Self::type_of(rest[0].syntax(), context)
+                .is_ok_and(|ty| matches!(ty, Ty::Array(_) | Ty::Null))
+        {
+            return Self::lower_as(&rest[0], last, context, emit);
+        }
+        let descriptor = Descriptor::descriptor_of(element, context.index)?.to_string();
+        emit.asm.const_int(
+            i32::try_from(rest.len())
+                .map_err(|_| LowerError::Unsupported("a call with this many arguments"))?,
+        )?;
+        emit.asm.new_array(&descriptor)?;
+        for (index, argument) in rest.iter().enumerate() {
+            emit.asm.dup()?;
+            emit.asm.const_int(
+                i32::try_from(index)
+                    .map_err(|_| LowerError::Unsupported("a call with this many arguments"))?,
+            )?;
+            Self::lower_as(argument, element, context, emit)?;
+            emit.asm.array_store(&descriptor)?;
+        }
+        Ok(())
+    }
+
     /// A call, dispatched by how the selected member is reached.
     fn call(call: &ast::CallExpr, context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
         let member = context
@@ -592,6 +654,7 @@ impl Expr {
         )?);
         let is_static = info.modifiers.is_static;
         let is_private = info.modifiers.is_private;
+        let varargs = info.varargs;
         // A constructor is declared under its class's name and invoked under `<init>`. The index
         // records the declaration, so the JVM's spelling is supplied here rather than read.
         let name = if constructor {
@@ -611,21 +674,12 @@ impl Expr {
                 _ => emit.load_this()?,
             }
         }
-        // Each argument is converted to the *declared* parameter type: `f(1)` against `f(long)` is
-        // an `i2l`, which JLS §5.3 calls the method-invocation conversion.
-        for (index, argument) in call
+        let arguments: alloc::vec::Vec<ast::Expr> = call
             .args()
             .into_iter()
             .flat_map(|list| list.args())
-            .enumerate()
-        {
-            match params.get(index) {
-                Some(declared) => Self::lower_as(&argument, declared, context, emit)?,
-                // More arguments than parameters means a varargs call, whose trailing arguments
-                // have to be packed into an array first.
-                None => return Err(LowerError::Unsupported("a varargs call")),
-            }
-        }
+            .collect();
+        Self::arguments(&arguments, &params, varargs, context, emit)?;
 
         if is_static {
             emit.asm
@@ -814,12 +868,8 @@ impl Expr {
         // The constructor consumes one reference and returns nothing, so the expression's own value
         // has to be a second copy — made *before* the arguments go on top of it.
         emit.asm.dup()?;
-        for (index, argument) in arguments.iter().enumerate() {
-            match params.get(index) {
-                Some(declared) => Self::lower_as(argument, declared, context, emit)?,
-                None => return Err(LowerError::Unsupported("a varargs constructor")),
-            }
-        }
+        let varargs = selected.is_some_and(|member| context.index.member(member).varargs);
+        Self::arguments(&arguments, &params, varargs, context, emit)?;
         Ok(emit
             .asm
             .invoke_special(&owner, "<init>", &descriptor, false)?)

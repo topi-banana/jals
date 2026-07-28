@@ -255,9 +255,14 @@ fn an_override_is_still_checked() {
 }
 
 #[test]
-fn varargs_methods_are_skipped() {
-    let src = "class C { void v(int... xs) {} void g() { v(1.0); } }";
-    assert!(indexed(&[src], 0).is_empty());
+fn a_varargs_method_checks_its_trailing_arguments() {
+    // A trailing argument is checked against the *element* type, so a `double` fits no `int...` — this
+    // used to be silently accepted, because a varargs candidate was dropped before it was checked.
+    let bad = "class C { void v(int... xs) {} void g() { v(1.0); } }";
+    assert_eq!(indexed(&[bad], 0).len(), 1);
+    // Any number of applicable trailing arguments is fine, including none, and so is the array itself.
+    let ok = "class C { void v(int... xs) {} void g() { v(); v(1); v(1, 2); v(new int[] {3}); } }";
+    assert!(indexed(&[ok], 0).is_empty());
 }
 
 #[test]

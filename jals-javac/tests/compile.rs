@@ -2506,3 +2506,56 @@ fn the_enum_shapes_that_need_a_wider_descriptor_are_reported() {
         );
     }
 }
+
+/// Variable arity, end to end (JLS §15.12.2.4, §15.12.4.2).
+///
+/// Four separate things have to hold together for this to run: the index has to give `int... values`
+/// the array dimension the `...` implies (or the descriptor is `(I)V`), the body has to see that
+/// parameter as an `int[]` (or `for (int v : values)` does not compile), overload resolution has to
+/// consult variable arity only *after* fixed arity finds nothing (or `pick(9)` calls the wrong one),
+/// and the call site has to pack the trailing arguments into a fresh array — except when a single
+/// array argument is passed straight through.
+#[test]
+fn a_variable_arity_method_packs_its_trailing_arguments() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Sums {
+    static int total(int... values) {
+        int sum = 0;
+        for (int v : values) { sum += v; }
+        return sum;
+    }
+
+    static String join(String separator, String... parts) {
+        String out = "";
+        for (String part : parts) { out = out + separator + part; }
+        return out;
+    }
+
+    // A fixed-arity overload wins over the varargs one for the argument list they both accept.
+    static int pick(int a) { return 1; }
+    static int pick(int... a) { return 2; }
+
+    public static void main(String[] args) {
+        System.out.println(total());
+        System.out.println(total(1));
+        System.out.println(total(1, 2, 3));
+        System.out.println(join("-", "a", "b"));
+        // No trailing arguments at all still builds the empty array.
+        System.out.println(join("-").isEmpty());
+        System.out.println(pick(9));
+        System.out.println(pick(9, 9));
+        // An array argument passes through instead of being wrapped in another array.
+        int[] already = {4, 5};
+        System.out.println(total(already));
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Sums"),
+        "0\n1\n6\n-a-b\ntrue\n1\n2\n9\n",
+        "each varargs call site"
+    );
+}
