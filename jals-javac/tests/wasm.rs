@@ -349,27 +349,73 @@ public class Compound {
     );
 }
 
-/// One opcode names one operand type, and wasm converts nothing implicitly. Choosing the family
+/// One opcode names one operand type, and wasm converts nothing implicitly.
+///
+/// So Java's numeric promotions are instructions here as much as on the JVM, and choosing the family
 /// from the left operand alone emitted `i64.add` over an `i32` for `n + 1` on a `long` — a module
-/// `wasm-tools` rejects with "expected i64, found i32".
+/// `wasm-tools` rejects with "expected i64, found i32". The shift is the one place wasm disagrees with
+/// the JVM outright: `i64.shl` takes **two** `i64`s where `lshl` takes a `long` and an `int`, so the
+/// count is converted to the result's width rather than to `int`.
 #[test]
-fn a_mixed_numeric_binary_is_reported_rather_than_mis_emitted() {
+fn numeric_promotion_and_the_unary_operators_run() {
     let source = r"
 public class Mixed {
-    public static long run(long n) {
+    public static long widened(long n) {
         long x = n + 1;
         return x;
     }
+
+    public static double mixedFloat(int n) {
+        return n + 0.5;
+    }
+
+    public static long shifted(long n, int by) {
+        return n << by;
+    }
+
+    public static int masked(int n) {
+        return (n & 0xF0) | 1;
+    }
+
+    public static int complemented(int n) {
+        return ~n;
+    }
+
+    public static int negated(int n) {
+        return -n;
+    }
+
+    public static double negatedFloat(double n) {
+        return -n;
+    }
+
+    public static int flipped(int b) {
+        boolean flag = b != 0;
+        if (!flag) { return 1; }
+        return 0;
+    }
+
+    public static int narrowed(double n) {
+        return (int) n;
+    }
+
+    public static int truncated(int n) {
+        return (byte) n;
+    }
 }
 ";
-    let error = compile(&[source]).expect_err("numeric promotion is not lowered yet");
-    assert!(
-        matches!(
-            error,
-            WasmError::Unsupported("a binary operator over two different numeric types")
-        ),
-        "expected the mixed-operand report, got {error}"
-    );
+    assert_invoke(&[source], "widened", &["9"], "10");
+    assert_invoke(&[source], "mixedFloat", &["3"], "3.5");
+    assert_invoke(&[source], "shifted", &["1", "40"], "1099511627776");
+    assert_invoke(&[source], "masked", &["255"], "241");
+    assert_invoke(&[source], "complemented", &["5"], "-6");
+    assert_invoke(&[source], "negated", &["7"], "-7");
+    assert_invoke(&[source], "negatedFloat", &["1.5"], "-1.5");
+    assert_invoke(&[source], "flipped", &["0"], "1");
+    // The *saturating* truncation JLS §5.1.3 requires. wasm's plain `i32.trunc_f64_s` traps on a NaN
+    // or an out-of-range value, where Java wants a 0 or the nearest representable one.
+    assert_invoke(&[source], "narrowed", &["3.9"], "3");
+    assert_invoke(&[source], "truncated", &["200"], "-56");
 }
 
 /// Arrays are wasm array types, allocated by the host like every other object: `new int[n]` is one

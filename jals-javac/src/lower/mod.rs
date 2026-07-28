@@ -45,7 +45,9 @@
 //! inner classes, and `enum` / `record` declarations. Each arrives with the milestone that can test it.
 
 mod emit;
-mod expr;
+// The wasm backend reads a literal the same way: the two lowerings are separate, but `0xFF` and
+// `1_000` mean the same thing in both, and reading them twice would be two chances to disagree.
+pub(crate) mod expr;
 mod place;
 mod slots;
 mod stmt;

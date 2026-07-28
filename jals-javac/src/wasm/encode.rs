@@ -85,7 +85,7 @@ impl Bytes {
 
     /// The element count that prefixes every vector, and every other length the format spells as a
     /// `u32`. A `usize` that does not fit sets [`overflow`](Self::overflow) instead of wrapping.
-    fn count(&mut self, len: usize) -> &mut Self {
+    pub(crate) fn count(&mut self, len: usize) -> &mut Self {
         let Ok(len) = u32::try_from(len) else {
             self.overflow = true;
             return self.u32(u32::MAX);
@@ -117,14 +117,23 @@ impl Bytes {
 pub(crate) enum HeapType {
     /// A declared type, by index.
     Concrete(u32),
+    /// The bottom of the reference hierarchy, whose only inhabitant is `null`.
+    ///
+    /// The one abstract heap type this backend needs: a bare `null` has no type of its own in Java, and
+    /// `(ref null none)` is a subtype of *every* nullable reference — so it fits wherever the literal
+    /// does without the target type having to be known first.
+    None,
 }
 
 impl HeapType {
-    fn write_to(self, out: &mut Bytes) {
+    pub(crate) fn write_to(self, out: &mut Bytes) {
         match self {
             // A concrete heap type is the type index as a *signed* LEB, which is what keeps it
             // apart from the negatively-encoded abstract ones.
             Self::Concrete(index) => out.i32(index.cast_signed()),
+            // The abstract heap types occupy the negative range of the same signed encoding, which
+            // is what keeps them apart from an index.
+            Self::None => out.byte(0x71),
         };
     }
 }

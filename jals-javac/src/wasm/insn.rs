@@ -10,7 +10,7 @@
 
 use alloc::vec::Vec;
 
-use crate::wasm::encode::{Bytes, ValType};
+use crate::wasm::encode::{Bytes, HeapType, ValType};
 
 /// A binary numeric operation, resolved to an opcode by the type it applies to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +26,52 @@ pub(crate) enum NumOp {
     Le,
     Gt,
     Ge,
+    And,
+    Or,
+    Xor,
+    /// `<<`
+    Shl,
+    /// `>>`, the arithmetic shift that keeps the sign bit.
+    Shr,
+    /// `>>>`, the logical shift that does not.
+    Ushr,
+}
+
+impl NumOp {
+    /// Whether this operator's right operand is a shift count.
+    ///
+    /// wasm and the JVM disagree here, which is a real difference and not a spelling one: `i64.shl`
+    /// takes **two `i64`s** where `lshl` takes a `long` and an `int`. So a Java `long << int` needs its
+    /// count *extended* on the way in, where the JVM backend needs nothing.
+    pub(crate) const fn is_shift(self) -> bool {
+        matches!(self, Self::Shl | Self::Shr | Self::Ushr)
+    }
+}
+
+/// A primitive type as a *conversion* names it, matching the JVM backend's
+/// [`Numeric`](crate::jvm::Numeric): `byte` / `short` / `char` are `i32` on the stack and three
+/// different narrowing targets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Num {
+    Byte,
+    Short,
+    Char,
+    Int,
+    Long,
+    Float,
+    Double,
+}
+
+impl Num {
+    /// The wasm value type this occupies.
+    pub(crate) const fn val(self) -> ValType {
+        match self {
+            Self::Long => ValType::I64,
+            Self::Float => ValType::F32,
+            Self::Double => ValType::F64,
+            Self::Byte | Self::Short | Self::Char | Self::Int => ValType::I32,
+        }
+    }
 }
 
 /// Builds one function body.
@@ -192,6 +238,20 @@ impl Insn {
             (ValType::F64, NumOp::Gt) => 0x64,
             (ValType::F64, NumOp::Le) => 0x65,
             (ValType::F64, NumOp::Ge) => 0x66,
+            // The bitwise and shift families exist only over the two integer types, which is also
+            // where Java has them.
+            (ValType::I32, NumOp::And) => 0x71,
+            (ValType::I32, NumOp::Or) => 0x72,
+            (ValType::I32, NumOp::Xor) => 0x73,
+            (ValType::I32, NumOp::Shl) => 0x74,
+            (ValType::I32, NumOp::Shr) => 0x75,
+            (ValType::I32, NumOp::Ushr) => 0x76,
+            (ValType::I64, NumOp::And) => 0x83,
+            (ValType::I64, NumOp::Or) => 0x84,
+            (ValType::I64, NumOp::Xor) => 0x85,
+            (ValType::I64, NumOp::Shl) => 0x86,
+            (ValType::I64, NumOp::Shr) => 0x87,
+            (ValType::I64, NumOp::Ushr) => 0x88,
             _ => return None,
         };
         self.out.byte(opcode);
@@ -202,6 +262,73 @@ impl Insn {
     pub(crate) fn i32_eqz(&mut self) -> &mut Self {
         self.out.byte(0x45);
         self
+    }
+
+    /// Negate the floating value on top. wasm has no integer negation at all — `0 - x` is the way, and
+    /// the lowering emits that pair rather than pretending there is an opcode.
+    pub(crate) fn neg(&mut self, ty: ValType) -> Option<&mut Self> {
+        let opcode = match ty {
+            ValType::F32 => 0x8C,
+            ValType::F64 => 0x9A,
+            _ => return None,
+        };
+        self.out.byte(opcode);
+        Some(self)
+    }
+
+    /// Convert the value on top from `from` to `to`.
+    ///
+    /// Two steps whenever a narrowing to `byte` / `short` / `char` does not start from `int`, exactly as
+    /// JLS §5.1.3 defines it — and the second step is *not* the same instruction in each case: `byte`
+    /// and `short` sign-extend (`i32.extend8_s` / `i32.extend16_s`) while `char` masks, because it is
+    /// the one unsigned integral type.
+    ///
+    /// **The float-to-integer conversions are the saturating ones.** wasm's `i32.trunc_f32_s` *traps*
+    /// on a NaN or an out-of-range value; JLS §5.1.3 requires 0 for a NaN and the nearest
+    /// representable value otherwise, which is what `i32.trunc_sat_f32_s` does. Using the trapping
+    /// form would turn `(int) (0.0 / 0.0)` from a 0 into a crash.
+    pub(crate) fn convert(&mut self, from: Num, to: Num) -> Option<&mut Self> {
+        use Num::{Byte, Char, Double, Float, Int, Long, Short};
+        if from.val() != to.val() {
+            match (from, to) {
+                (Byte | Short | Char | Int, Long) => self.out.byte(0xAC),
+                (Byte | Short | Char | Int, Float) => self.out.byte(0xB2),
+                (Byte | Short | Char | Int, Double) => self.out.byte(0xB7),
+                (Long, Byte | Short | Char | Int) => self.out.byte(0xA7),
+                (Long, Float) => self.out.byte(0xB4),
+                (Long, Double) => self.out.byte(0xB9),
+                (Float, Byte | Short | Char | Int) => self.saturating(0x00),
+                (Float, Long) => self.saturating(0x04),
+                (Float, Double) => self.out.byte(0xBB),
+                (Double, Byte | Short | Char | Int) => self.saturating(0x02),
+                (Double, Long) => self.saturating(0x06),
+                (Double, Float) => self.out.byte(0xB6),
+                _ => return None,
+            };
+        }
+        // Step two, skipped where the source's range already fits the target's — `byte` to `short`
+        // needs nothing, while `byte` to `char` needs the mask because a signed byte's negative half
+        // has no place in an unsigned `char`.
+        match to {
+            Byte if from != Byte => {
+                self.out.byte(0xC0);
+            }
+            Short if !matches!(from, Byte | Short) => {
+                self.out.byte(0xC1);
+            }
+            Char if from != Char => {
+                // No `extend16_u`; the mask is the conversion.
+                self.out.byte(0x41).i32(0xFFFF);
+                self.out.byte(0x71);
+            }
+            _ => {}
+        }
+        Some(self)
+    }
+
+    /// One of the `0xFC`-prefixed saturating truncations.
+    fn saturating(&mut self, opcode: u8) -> &mut Bytes {
+        self.out.byte(0xFC).u32(u32::from(opcode))
     }
 
     // --- garbage-collected heap ---------------------------------------------
@@ -242,6 +369,43 @@ impl Insn {
 
     pub(crate) fn array_len(&mut self) -> &mut Self {
         self.gc(0x0F);
+        self
+    }
+
+    // --- references ---------------------------------------------------------
+
+    /// `ref.null` of a concrete type — Java's `null`, which has no type of its own.
+    pub(crate) fn ref_null(&mut self, heap: HeapType) -> &mut Self {
+        self.out.byte(0xD0);
+        heap.write_to(&mut self.out);
+        self
+    }
+
+    /// `ref.is_null`, which is how `x == null` is asked without a second operand.
+    pub(crate) fn ref_is_null(&mut self) -> &mut Self {
+        self.out.byte(0xD1);
+        self
+    }
+
+    /// `ref.eq` — reference identity, which is what Java's `==` means over two references.
+    pub(crate) fn ref_eq(&mut self) -> &mut Self {
+        self.out.byte(0xD3);
+        self
+    }
+
+    /// `ref.test (ref null ht)` — Java's `instanceof`, except that `instanceof` is false for `null`
+    /// and the nullable form of this is true, so the caller pairs it with a null check.
+    pub(crate) fn ref_test(&mut self, heap: HeapType, nullable: bool) -> &mut Self {
+        self.gc(if nullable { 0x15 } else { 0x14 });
+        heap.write_to(&mut self.out);
+        self
+    }
+
+    /// `ref.cast` — Java's checked cast. It traps rather than throwing a `ClassCastException`, which
+    /// is the closest a host with no exception model gets.
+    pub(crate) fn ref_cast(&mut self, heap: HeapType, nullable: bool) -> &mut Self {
+        self.gc(if nullable { 0x17 } else { 0x16 });
+        heap.write_to(&mut self.out);
         self
     }
 

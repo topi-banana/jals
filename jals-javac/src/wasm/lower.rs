@@ -19,10 +19,23 @@
 //! # Scope
 //!
 //! Primitives, user-declared classes (fields, constructors, methods), and the control flow that
-//! goes with them. Library types are out of scope by design — there is no `java.base` on a wasm
-//! host, and supplying one is a separate decision from compiling. So no `String`, no boxing, no
-//! exceptions, and no interface dispatch: a call resolves to exactly one function, because the
-//! static type of the receiver names exactly one method.
+//! goes with them: arithmetic with Java's numeric promotions, the bitwise and shift operators,
+//! comparisons at every width, reference identity and `instanceof`, casts, and the unary operators.
+//! Library types are out of scope by design — there is no `java.base` on a wasm host, and supplying
+//! one is a separate decision from compiling. So no `String`, no boxing, no exceptions, and no
+//! interface dispatch: a call resolves to exactly one function, because the static type of the
+//! receiver names exactly one method.
+//!
+//! # Where wasm and the JVM genuinely differ
+//!
+//! Most of the two backends' disagreements are spellings. Three are not:
+//!
+//! - **A shift's count.** `i64.shl` takes two `i64`s where `lshl` takes a `long` and an `int`, so the
+//!   count is converted to the *result's* width here and left alone there.
+//! - **Float-to-integer conversion traps.** `i32.trunc_f64_s` refuses a NaN, where JLS §5.1.3 wants a
+//!   0 — so the saturating `trunc_sat` forms are the ones that mean what Java means.
+//! - **There is no integer negation.** `-n` on an `int` is `0 - n`, which puts the zero on the stack
+//!   *before* the operand rather than after it.
 
 use alloc::borrow::ToOwned as _;
 use alloc::collections::BTreeMap;
@@ -39,7 +52,7 @@ use jals_syntax::{SyntaxNode, SyntaxToken};
 use crate::wasm::encode::{
     CompType, ExportKind, FieldType, Func, HeapType, Module, RefType, StorageType, SubType, ValType,
 };
-use crate::wasm::insn::{Insn, NumOp};
+use crate::wasm::insn::{Insn, Num, NumOp};
 
 /// Why a project could not be compiled to wasm.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -663,6 +676,8 @@ impl Lowering<'_> {
             ast::Expr::Call(call) => self.call(call, insn),
             ast::Expr::Index(index) => self.index(index, insn).map(Some),
             ast::Expr::FieldAccess(access) => self.field(access, insn).map(Some),
+            ast::Expr::Unary(unary) => self.unary(unary, insn).map(Some),
+            ast::Expr::Cast(cast) => self.cast(cast, insn).map(Some),
             _ => Err(WasmError::Unsupported("this expression form")),
         }
     }
@@ -701,13 +716,18 @@ impl Lowering<'_> {
     }
 
     fn literal(&self, literal: &ast::Literal, insn: &mut Insn) -> Result<ValType> {
-        use jals_syntax::SyntaxKind::{FALSE_KW, FLOAT_LITERAL, INT_LITERAL, TRUE_KW};
+        use jals_syntax::SyntaxKind::{FALSE_KW, FLOAT_LITERAL, INT_LITERAL, NULL_KW, TRUE_KW};
         let token = literal
             .syntax()
             .children_with_tokens()
             .filter_map(jals_syntax::SyntaxElement::into_token)
             .find(|token| !token.kind().is_trivia())
             .ok_or(WasmError::Unsupported("an empty literal"))?;
+        // `null` has no type of its own, so it is answered before `ty_of` is asked for one.
+        if token.kind() == NULL_KW {
+            insn.ref_null(HeapType::None);
+            return Ok(ValType::Ref(RefType::nullable(HeapType::None)));
+        }
         let ty = self.ty_of(literal.syntax())?;
         let text = token.text();
         match token.kind() {
@@ -718,11 +738,14 @@ impl Lowering<'_> {
                 insn.i32_const(0);
             }
             INT_LITERAL => {
-                let value: i64 = text
-                    .trim_end_matches(['l', 'L'])
-                    .replace('_', "")
-                    .parse()
-                    .map_err(|_| WasmError::Unsupported("an integer literal this cannot read"))?;
+                // Read by the same routine the JVM backend uses: `0xFF`, `0b1010`, `017`, and `1_000`
+                // all mean what they mean in both, and reading them twice would be two chances to
+                // disagree about one of them.
+                let value =
+                    crate::lower::expr::Expr::integer_literal(text.trim_end_matches(['l', 'L']))
+                        .map_err(|_| {
+                            WasmError::Unsupported("an integer literal this cannot read")
+                        })?;
                 match ty {
                     ValType::I64 => insn.i64_const(value),
                     _ => insn
@@ -819,9 +842,99 @@ impl Lowering<'_> {
         self.layout.val_type(&self.index.resolved_member_ty(member))
     }
 
+    fn unary(&mut self, unary: &ast::UnaryExpr, insn: &mut Insn) -> Result<ValType> {
+        use jals_syntax::SyntaxKind::{BANG, MINUS, PLUS, TILDE};
+        let operand = unary
+            .operand()
+            .ok_or(WasmError::Unsupported("a unary with no operand"))?;
+        let operator: Vec<_> = unary
+            .syntax()
+            .children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .map(|token| token.kind())
+            .filter(|kind| !kind.is_trivia())
+            .collect();
+        match operator.as_slice() {
+            // `!b` flips a `boolean`, which is an `i32` that is 0 or 1 — so `i32.eqz` *is* the flip.
+            [BANG] => {
+                self.expr(&operand, insn)?
+                    .ok_or(WasmError::Unsupported("a `!` on nothing"))?;
+                insn.i32_eqz();
+                Ok(ValType::I32)
+            }
+            // `+` is not a no-op: unary numeric promotion still applies.
+            [PLUS] => {
+                let promoted = Self::promote_one(self.num_of(operand.syntax())?);
+                self.operand(&operand, promoted, insn)?;
+                Ok(promoted.val())
+            }
+            [MINUS] => {
+                let promoted = Self::promote_one(self.num_of(operand.syntax())?);
+                // wasm has no integer negation at all, so an integral `-x` is `0 - x` — which means
+                // the zero goes on the stack *before* the operand.
+                match promoted {
+                    Num::Long => {
+                        insn.i64_const(0);
+                    }
+                    Num::Float | Num::Double => {}
+                    _ => {
+                        insn.i32_const(0);
+                    }
+                }
+                self.operand(&operand, promoted, insn)?;
+                if matches!(promoted, Num::Float | Num::Double) {
+                    insn.neg(promoted.val())
+                        .ok_or(WasmError::Unsupported("this negation"))?;
+                } else {
+                    insn.numeric(NumOp::Sub, promoted.val())
+                        .ok_or(WasmError::Unsupported("this negation"))?;
+                }
+                Ok(promoted.val())
+            }
+            // `~n` is `n ^ -1`, at the promoted width.
+            [TILDE] => {
+                let promoted = Self::promote_one(self.num_of(operand.syntax())?);
+                self.operand(&operand, promoted, insn)?;
+                match promoted {
+                    Num::Long => insn.i64_const(-1),
+                    _ => insn.i32_const(-1),
+                };
+                insn.numeric(NumOp::Xor, promoted.val())
+                    .ok_or(WasmError::Unsupported("this complement"))?;
+                Ok(promoted.val())
+            }
+            _ => Err(WasmError::Unsupported("this unary operator")),
+        }
+    }
+
+    /// `(T) e`.
+    ///
+    /// A primitive cast is a conversion; a reference cast is `ref.cast`, which *traps* rather than
+    /// throwing a `ClassCastException` — the closest a host with no exception model gets, and the
+    /// difference is worth knowing rather than hiding.
+    fn cast(&mut self, cast: &ast::CastExpr, insn: &mut Insn) -> Result<ValType> {
+        let operand = cast
+            .expr()
+            .ok_or(WasmError::Unsupported("a cast with no operand"))?;
+        let ty = cast
+            .ty()
+            .ok_or(WasmError::Unsupported("a cast with no type"))?;
+        if ty.is_primitive_or_var() {
+            let target = self.num_of(cast.syntax())?;
+            self.operand(&operand, target, insn)?;
+            return Ok(target.val());
+        }
+        let heap = self.named_type(&ty)?;
+        self.expr(&operand, insn)?
+            .ok_or(WasmError::Unsupported("a cast of nothing"))?;
+        insn.ref_cast(heap, true);
+        Ok(ValType::Ref(RefType::nullable(heap)))
+    }
+
     fn binary(&mut self, binary: &ast::BinaryExpr, insn: &mut Insn) -> Result<ValType> {
         use jals_syntax::SyntaxKind::{
-            BANG_EQ, EQ, EQ_EQ, GT, LT, LT_EQ, MINUS, PERCENT, PLUS, SLASH, STAR,
+            AMP, BANG_EQ, CARET, EQ, EQ_EQ, GT, INSTANCEOF_KW, LSHIFT, LT, LT_EQ, MINUS, PERCENT,
+            PIPE, PLUS, SLASH, STAR,
         };
         let left = binary
             .lhs()
@@ -837,6 +950,10 @@ impl Lowering<'_> {
             .filter(|kind| !kind.is_trivia())
             .collect();
 
+        if operator.first() == Some(&INSTANCEOF_KW) {
+            return self.instance_of(binary, insn);
+        }
+
         let op = match operator.as_slice() {
             [PLUS] => NumOp::Add,
             [MINUS] => NumOp::Sub,
@@ -850,28 +967,188 @@ impl Lowering<'_> {
             [GT] => NumOp::Gt,
             // `>=` is two tokens, so that `List<List<T>>` still closes as two `>`.
             [GT, EQ] => NumOp::Ge,
+            [AMP] => NumOp::And,
+            [PIPE] => NumOp::Or,
+            [CARET] => NumOp::Xor,
+            [LSHIFT] => NumOp::Shl,
+            // `>>` and `>>>` are separate `>` tokens, for the same reason `>=` is.
+            [GT, GT] => NumOp::Shr,
+            [GT, GT, GT] => NumOp::Ushr,
             _ => return Err(WasmError::Unsupported("this binary operator")),
         };
 
-        let no_value = || WasmError::Unsupported("a binary operand that produced no value");
-        let operand = self.expr(&left, insn)?.ok_or_else(no_value)?;
-        let other = self.expr(&right, insn)?.ok_or_else(no_value)?;
-        // wasm has no implicit conversion, and the opcode names one type for both operands:
-        // `i64.add` over an `i32` is a module the validator rejects. Java's binary numeric
-        // promotion would widen the narrower side here; until it is lowered, a mixed pair is
-        // reported rather than emitted as a module nothing will load.
-        if operand != other {
-            return Err(WasmError::Unsupported(
-                "a binary operator over two different numeric types",
-            ));
+        // A reference `==` / `!=` is identity, not arithmetic, and wasm spells it `ref.eq`.
+        if matches!(op, NumOp::Eq | NumOp::Ne) && self.is_reference(left.syntax()) {
+            return self.reference_equality(&left, &right, op == NumOp::Ne, insn);
         }
-        insn.numeric(op, operand)
+
+        let left_num = self.num_of(left.syntax())?;
+        if op.is_shift() {
+            // A shift promotes each side on its own, and wasm wants the *count* at the left operand's
+            // own width: `i64.shl` takes two `i64`s where `lshl` takes a `long` and an `int`. So the
+            // count is converted to the result's type rather than to `int`.
+            let promoted = Self::promote_one(left_num);
+            self.operand(&left, promoted, insn)?;
+            self.operand(&right, promoted, insn)?;
+            insn.numeric(op, promoted.val())
+                .ok_or(WasmError::Unsupported("this operator on this type"))?;
+            return Ok(promoted.val());
+        }
+
+        // Both operands share one type, because one opcode names one: `i64.add` over an `i32` is a
+        // module the validator rejects. Java's binary numeric promotion says which.
+        let promoted = Self::promote(left_num, self.num_of(right.syntax())?);
+        self.operand(&left, promoted, insn)?;
+        self.operand(&right, promoted, insn)?;
+        insn.numeric(op, promoted.val())
             .ok_or(WasmError::Unsupported("this operator on this type"))?;
         // A comparison is a `boolean`, which is an `i32`; arithmetic keeps its operand type.
         Ok(match op {
             NumOp::Eq | NumOp::Ne | NumOp::Lt | NumOp::Le | NumOp::Gt | NumOp::Ge => ValType::I32,
-            _ => operand,
+            _ => promoted.val(),
         })
+    }
+
+    /// Emit `expr` and convert its value to `target`.
+    fn operand(&mut self, expr: &ast::Expr, target: Num, insn: &mut Insn) -> Result<()> {
+        let source = self.num_of(expr.syntax())?;
+        self.expr(expr, insn)?
+            .ok_or(WasmError::Unsupported("an operand that produced no value"))?;
+        if source != target {
+            insn.convert(source, target)
+                .ok_or(WasmError::Unsupported("this conversion"))?;
+        }
+        Ok(())
+    }
+
+    /// The numeric type `node`'s recorded type is.
+    fn num_of(&self, node: &SyntaxNode) -> Result<Num> {
+        let ty = self
+            .input
+            .inference
+            .type_of_expr(Self::span(node))
+            .ok_or(WasmError::Unsupported("a value with no inferred type"))?;
+        let Ty::Primitive(primitive) = ty else {
+            return Err(WasmError::Unsupported("an arithmetic operand of this type"));
+        };
+        Ok(match primitive {
+            Primitive::Byte => Num::Byte,
+            Primitive::Short => Num::Short,
+            Primitive::Char => Num::Char,
+            // A `boolean` shares `int`'s representation, and the only operators it reaches are the
+            // bitwise ones, where that is exactly right.
+            Primitive::Int | Primitive::Boolean => Num::Int,
+            Primitive::Long => Num::Long,
+            Primitive::Float => Num::Float,
+            Primitive::Double => Num::Double,
+        })
+    }
+
+    /// Whether `node`'s recorded type is a reference.
+    fn is_reference(&self, node: &SyntaxNode) -> bool {
+        matches!(
+            self.input.inference.type_of_expr(Self::span(node)),
+            Some(Ty::Class(_) | Ty::Array(_) | Ty::Null)
+        )
+    }
+
+    /// Binary numeric promotion (JLS §5.6.2).
+    const fn promote(left: Num, right: Num) -> Num {
+        match (left, right) {
+            (Num::Double, _) | (_, Num::Double) => Num::Double,
+            (Num::Float, _) | (_, Num::Float) => Num::Float,
+            (Num::Long, _) | (_, Num::Long) => Num::Long,
+            _ => Num::Int,
+        }
+    }
+
+    /// Unary numeric promotion (JLS §5.6.1).
+    const fn promote_one(num: Num) -> Num {
+        match num {
+            Num::Byte | Num::Short | Num::Char | Num::Int => Num::Int,
+            other => other,
+        }
+    }
+
+    /// `a == b` / `a != b` over two references, which is identity.
+    fn reference_equality(
+        &mut self,
+        left: &ast::Expr,
+        right: &ast::Expr,
+        negated: bool,
+        insn: &mut Insn,
+    ) -> Result<ValType> {
+        // `x == null` has no second reference to compare: `ref.null` would need the *other* side's
+        // type, and `ref.is_null` asks the question directly.
+        let (value, other) = if Self::is_null_literal(right.syntax()) {
+            (left, None)
+        } else if Self::is_null_literal(left.syntax()) {
+            (right, None)
+        } else {
+            (left, Some(right))
+        };
+        self.expr(value, insn)?
+            .ok_or(WasmError::Unsupported("a comparison operand with no value"))?;
+        match other {
+            Some(other) => {
+                self.expr(other, insn)?
+                    .ok_or(WasmError::Unsupported("a comparison operand with no value"))?;
+                insn.ref_eq();
+            }
+            None => {
+                insn.ref_is_null();
+            }
+        }
+        if negated {
+            insn.i32_eqz();
+        }
+        Ok(ValType::I32)
+    }
+
+    /// Whether `node` is the `null` literal.
+    fn is_null_literal(node: &SyntaxNode) -> bool {
+        node.descendants_with_tokens()
+            .any(|element| element.kind() == jals_syntax::SyntaxKind::NULL_KW)
+    }
+
+    /// `e instanceof T`.
+    ///
+    /// `ref.test` answers it, with one difference the lowering has to close: its nullable form is
+    /// *true* for a `null`, and Java's `instanceof` is false for one. So the non-nullable form is used,
+    /// which is exactly the question Java asks.
+    fn instance_of(&mut self, binary: &ast::BinaryExpr, insn: &mut Insn) -> Result<ValType> {
+        let operand = binary
+            .lhs()
+            .ok_or(WasmError::Unsupported("an `instanceof` with no operand"))?;
+        let ty = binary
+            .syntax()
+            .children()
+            .find_map(ast::Type::cast)
+            .ok_or(WasmError::Unsupported("an `instanceof` with no type"))?;
+        let target = self.named_type(&ty)?;
+        self.expr(&operand, insn)?
+            .ok_or(WasmError::Unsupported("an `instanceof` on nothing"))?;
+        insn.ref_test(target, false);
+        Ok(ValType::I32)
+    }
+
+    /// The declared heap type a `TYPE` node names.
+    fn named_type(&self, ty: &ast::Type) -> Result<HeapType> {
+        let name = ty
+            .simple_name()
+            .ok_or(WasmError::Unsupported("a type with no name"))?;
+        let qualified = ty.is_qualified().then(|| ty.qualified_text()).flatten();
+        let item = self
+            .index
+            .resolve_type_name(self.input.file, &name, qualified.as_deref())
+            .project_id()
+            .ok_or_else(|| WasmError::Unresolved(name.clone()))?;
+        let index = self
+            .layout
+            .structs
+            .get(&item)
+            .ok_or(WasmError::NoRepresentation(name))?;
+        Ok(HeapType::Concrete(*index))
     }
 
     /// An assignment. Returns the assigned type when the value survives on the stack, and `None`
