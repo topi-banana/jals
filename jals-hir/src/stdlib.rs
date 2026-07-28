@@ -179,6 +179,16 @@ public class Enum extends Object implements Comparable {
     public static Enum valueOf(Class enumType, String name);
 }
 
+// Every `record` extends this, and the source never writes it. It declares the three `Object`
+// methods **abstract**, which is why a record class file that omits any of them loads and then
+// throws `AbstractMethodError` at the first call.
+public abstract class Record extends Object {
+    protected Record();
+    public abstract boolean equals(Object other);
+    public abstract int hashCode();
+    public abstract String toString();
+}
+
 public class Throwable extends Object {
     public Throwable();
     public Throwable(String message);

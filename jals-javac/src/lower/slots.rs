@@ -83,6 +83,18 @@ impl Slots {
     }
 
     /// How many slots a value of `ty` occupies.
+    /// How many local slots a value of the type this *descriptor* names occupies.
+    ///
+    /// A `long` and a `double` take two, everything else one — the one place the JVM's local array is
+    /// not one entry per value, and reading a parameter at the wrong offset reads the previous one's
+    /// high half.
+    pub(crate) const fn descriptor_width(descriptor: &str) -> u16 {
+        match descriptor.as_bytes() {
+            [b'J' | b'D'] => 2,
+            _ => 1,
+        }
+    }
+
     pub(crate) const fn ty_width(ty: &jals_hir::Ty) -> u16 {
         match ty {
             jals_hir::Ty::Primitive(jals_hir::Primitive::Long | jals_hir::Primitive::Double) => 2,

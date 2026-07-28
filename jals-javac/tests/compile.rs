@@ -2477,6 +2477,160 @@ public class Palette {
     );
 }
 
+/// A `record`: fields, the canonical constructor, accessors, and the `Record` attribute.
+///
+/// A component is written *once*, in the header, and stands for three declarations — a `private final`
+/// field, an accessor, and one constructor parameter. None of them is in the body, so a record that
+/// emitted only what its body declares would be a type with no state, no way to build one, and no way
+/// to read one. `java.lang.Record` is the superclass and the source never writes it; the `Record`
+/// attribute is what makes `Class.isRecord` true.
+#[test]
+fn a_record_gets_its_fields_constructor_and_accessors() {
+    let source = r#"
+record Point(int x, long span, String label) {
+    // `java.lang.Record` declares all three abstract, so a record that omits any of them loads and
+    // then throws `AbstractMethodError`.
+    public boolean equals(Object other) {
+        if (!(other instanceof Point)) { return false; }
+        Point that = (Point) other;
+        return x == that.x() && span == that.span() && label.equals(that.label());
+    }
+
+    public int hashCode() {
+        return x * 31 + label.hashCode();
+    }
+
+    public String toString() {
+        return "Point[x=" + x + ", span=" + span + ", label=" + label + "]";
+    }
+
+    // A component's accessor may be written by hand, and then it wins over the synthesised one.
+    int doubled() { return x * 2; }
+}
+
+public class Places {
+    public static void main(String[] args) {
+        Point p = new Point(3, 40L, "here");
+        System.out.println(p.x());
+        System.out.println(p.span());
+        System.out.println(p.label());
+        System.out.println(p.doubled());
+        System.out.println(p.toString());
+        System.out.println(p.equals(new Point(3, 40L, "here")));
+        System.out.println(p.equals(new Point(4, 40L, "here")));
+    }
+}
+"#;
+    let classes = compile(source).expect("compile");
+    let point = classes
+        .iter()
+        .find(|class| class.internal_name == "Point")
+        .expect("the record");
+    let class = jals_exec::block_on_inline(jals_classfile::ClassFile::read(point.bytes.as_slice()))
+        .expect("reparse");
+    let name_of = |index| class.constant_pool.utf8(index).expect("utf8").into_owned();
+
+    // Every record is implicitly final (§8.10), and the source never writes that either.
+    assert_eq!(class.access_flags.0, 0x0020 | 0x0010, "super | final");
+    assert_eq!(
+        class
+            .constant_pool
+            .class_name(class.super_class)
+            .expect("a Class entry"),
+        "java/lang/Record"
+    );
+    assert_eq!(
+        class
+            .fields
+            .iter()
+            .map(|field| (
+                name_of(field.name_index),
+                name_of(field.descriptor_index),
+                field.access_flags.0
+            ))
+            .collect::<Vec<_>>(),
+        [
+            // private | final
+            ("x".to_owned(), "I".to_owned(), 0x0002 | 0x0010),
+            ("span".to_owned(), "J".to_owned(), 0x0002 | 0x0010),
+            (
+                "label".to_owned(),
+                "Ljava/lang/String;".to_owned(),
+                0x0002 | 0x0010
+            ),
+        ]
+    );
+    // `doubled` is the body's own; `x`, `span`, and `label` are synthesised, and the canonical
+    // constructor takes all three components at their own widths.
+    assert_eq!(
+        class
+            .methods
+            .iter()
+            .map(|method| (name_of(method.name_index), name_of(method.descriptor_index)))
+            .collect::<Vec<_>>(),
+        [
+            ("equals".to_owned(), "(Ljava/lang/Object;)Z".to_owned()),
+            ("hashCode".to_owned(), "()I".to_owned()),
+            ("toString".to_owned(), "()Ljava/lang/String;".to_owned()),
+            ("doubled".to_owned(), "()I".to_owned()),
+            ("<init>".to_owned(), "(IJLjava/lang/String;)V".to_owned()),
+            ("x".to_owned(), "()I".to_owned()),
+            ("span".to_owned(), "()J".to_owned()),
+            ("label".to_owned(), "()Ljava/lang/String;".to_owned()),
+        ]
+    );
+    let components = class
+        .attributes
+        .iter()
+        .find_map(|attribute| match &attribute.body {
+            jals_classfile::AttributeBody::Record(components) => Some(components),
+            _ => None,
+        })
+        .expect("the `Record` attribute");
+    assert_eq!(
+        components
+            .iter()
+            .map(|component| (
+                name_of(component.name_index),
+                name_of(component.descriptor_index)
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("x".to_owned(), "I".to_owned()),
+            ("span".to_owned(), "J".to_owned()),
+            ("label".to_owned(), "Ljava/lang/String;".to_owned()),
+        ]
+    );
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(
+        run(source, "Places"),
+        "3\n40\nhere\n6\nPoint[x=3, span=40, label=here]\ntrue\nfalse\n"
+    );
+}
+
+/// A `record` that leaves any of the three `Object` methods to the compiler is reported.
+///
+/// `java.lang.Record` declares `equals`, `hashCode`, and `toString` abstract. javac derives all three
+/// through `invokedynamic` to `ObjectMethods.bootstrap`, which needs constant-pool entries this
+/// compiler does not build yet — and a class file that simply omits them loads and then throws
+/// `AbstractMethodError` at the first call, which is a run-time failure a compiler can report instead.
+#[test]
+fn a_record_without_the_object_methods_is_reported() {
+    let error = compile("record P(int x) {}").expect_err("the three methods are required");
+    assert!(
+        matches!(
+            error,
+            LowerError::Unsupported(
+                "a `record` that does not declare `equals`, `hashCode`, and `toString`"
+            )
+        ),
+        "got {error}"
+    );
+}
+
 /// Three `enum` shapes are reported, each because a *descriptor* would come out wrong.
 ///
 /// A constant with arguments and a declared constructor both need the two synthetic parameters (`name`,

@@ -32,7 +32,8 @@ use jals_exec::Yielder;
 use jals_syntax::SyntaxKind::{
     ANNOTATION_TYPE_DECL, CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL, ELLIPSIS, ENUM_BODY,
     ENUM_CONSTANT, ENUM_DECL, EXTENDS_CLAUSE, FIELD_DECL, IMPLEMENTS_CLAUSE, INTERFACE_DECL,
-    LBRACK, METHOD_DECL, MODIFIERS, PRIVATE_KW, RECORD_DECL, STATIC_KW,
+    LBRACK, METHOD_DECL, MODIFIERS, PRIVATE_KW, RECORD_COMPONENT, RECORD_DECL, RECORD_HEADER,
+    STATIC_KW,
 };
 use jals_syntax::ast::{self, AstNode};
 use jals_syntax::cfg::CfgMap;
@@ -955,6 +956,17 @@ impl ProjectIndex {
                     args: Vec::new(),
                 });
             }
+            // The same for a `record` and `java.lang.Record`, which is also where `equals`,
+            // `hashCode`, and `toString` come from on one.
+            if self.items[owner.0 as usize].kind == DefKind::Record
+                && let TypeResolution::Project(id) =
+                    self.resolve_qualified(file, "java.lang.Record")
+            {
+                supertypes.push(Supertype {
+                    id,
+                    args: Vec::new(),
+                });
+            }
             let item = &mut self.items[owner.0 as usize];
             item.supertypes = supertypes;
             item.has_external_supertype = has_external;
@@ -1734,6 +1746,88 @@ impl ProjectIndex {
                     }
                 }
                 _ => {}
+            }
+        }
+        // A record's components are written *once*, in its header, and stand for three declarations
+        // each: a `private final` field, an accessor of the same name, and one parameter of the
+        // canonical constructor. Nothing in the body declares any of them, so without this a
+        // component was not a member at all — `r.x()` resolved to nothing and the field had no type.
+        if node.kind() == RECORD_DECL {
+            let components: Vec<(SyntaxToken, MemberType)> = node
+                .children()
+                .find(|child| child.kind() == RECORD_HEADER)
+                .into_iter()
+                .flat_map(|header| header.children())
+                .filter(|child| child.kind() == RECORD_COMPONENT)
+                .filter_map(|component| {
+                    let name = Collect::first_ident_token(&component)?;
+                    let mut ty =
+                        MemberType::of(ast::RecordComponent::cast(component.clone())?.ty());
+                    if component
+                        .children_with_tokens()
+                        .filter_map(SyntaxElement::into_token)
+                        .any(|token| token.kind() == ELLIPSIS)
+                    {
+                        ty = ty.with_extra_dimension();
+                    }
+                    Some((name, ty))
+                })
+                .collect();
+            // An accessor or the canonical constructor may also be written out by hand, and then the
+            // declaration is the source's rather than a synthetic one.
+            let declared_accessors: Vec<String> = members
+                .iter()
+                .filter(|m| m.kind == DefKind::Method && m.params.is_empty())
+                .map(|m| m.name.clone())
+                .collect();
+            let declared_constructor = members.iter().any(|m| m.kind == DefKind::Constructor);
+            for (name, ty) in &components {
+                // The component's own name range: it *is* the field's declaration, which is what makes
+                // "go to definition" on the field land on the header rather than nowhere.
+                members.push(Member {
+                    modifiers: MemberModifiers {
+                        is_static: false,
+                        is_private: true,
+                    },
+                    ..new_member(name, DefKind::Field, ty.clone())
+                });
+                if !declared_accessors.iter().any(|have| have == name.text()) {
+                    members.push(Member {
+                        owner,
+                        name: name.text().to_owned(),
+                        kind: DefKind::Method,
+                        file,
+                        // Synthetic, so no range — the field above already owns the header's.
+                        name_range: 0..0,
+                        ty: ty.clone(),
+                        modifiers: MemberModifiers::default(),
+                        params: Vec::new(),
+                        varargs: false,
+                        throws: Vec::new(),
+                        source_location: None,
+                    });
+                }
+            }
+            if !declared_constructor && !components.is_empty() {
+                members.push(Member {
+                    owner,
+                    name: owner_simple.to_owned(),
+                    kind: DefKind::Constructor,
+                    file,
+                    name_range: 0..0,
+                    ty: MemberType::Unknown,
+                    modifiers: MemberModifiers::default(),
+                    params: components
+                        .iter()
+                        .map(|(name, ty)| Param {
+                            name: Some(name.text().to_owned()),
+                            ty: ty.clone(),
+                        })
+                        .collect(),
+                    varargs: false,
+                    throws: Vec::new(),
+                    source_location: None,
+                });
             }
         }
         // `values()` and `valueOf(String)` are written by the *compiler*, not by the source — so

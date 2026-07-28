@@ -85,6 +85,8 @@ use crate::lower::slots::Slots;
 
 /// The supertype every `enum` has, and which its source never writes.
 const ENUM: &str = "java/lang/Enum";
+/// Every `record`'s superclass, which the source never writes.
+const RECORD: &str = "java/lang/Record";
 
 /// The synthetic array holding an `enum`'s constants, in declaration order.
 ///
@@ -181,7 +183,7 @@ impl Compile {
         for node in root.descendants() {
             if !matches!(
                 node.kind(),
-                CLASS_DECL | INTERFACE_DECL | ENUM_DECL | ANNOTATION_TYPE_DECL
+                CLASS_DECL | INTERFACE_DECL | ENUM_DECL | ANNOTATION_TYPE_DECL | RECORD_DECL
             ) {
                 continue;
             }
@@ -250,6 +252,7 @@ impl Compile {
         let is_annotation = index.item(item).kind == DefKind::AnnotationType;
         let is_interface = is_annotation || index.item(item).kind == DefKind::Interface;
         let is_enum = index.item(item).kind == DefKind::Enum;
+        let is_record = index.item(item).kind == DefKind::Record;
         let context = Context {
             index,
             inference,
@@ -273,6 +276,8 @@ impl Compile {
         // `extends` clause for the index to have recorded.
         let super_name = if is_enum {
             ENUM.to_owned()
+        } else if is_record {
+            RECORD.to_owned()
         } else {
             super_item.map_or_else(
                 || "java/lang/Object".to_owned(),
@@ -336,8 +341,9 @@ impl Compile {
             // would produce a class that loads and then throws `NoClassDefFoundError` at the first use
             // — the exact failure a compiler that reports nothing has to avoid.
             match member.kind() {
-                CLASS_DECL | INTERFACE_DECL | ENUM_DECL | ANNOTATION_TYPE_DECL => continue,
-                RECORD_DECL => return Err(LowerError::Unsupported("a `record`")),
+                CLASS_DECL | INTERFACE_DECL | ENUM_DECL | ANNOTATION_TYPE_DECL | RECORD_DECL => {
+                    continue;
+                }
                 _ => {}
             }
             // A non-`static` nested class holds a reference to its enclosing instance, which means a
@@ -364,7 +370,7 @@ impl Compile {
         // field initialiser could run for it.
         // An `enum` gets the synthesised `(String, int)` constructor instead, which is the only one
         // that can reach `Enum`'s — there is no no-argument `super()` for a default one to call.
-        if !saw_constructor && !is_interface && !is_enum {
+        if !saw_constructor && !is_interface && !is_enum && !is_record {
             methods.push(Self::default_constructor(
                 &context,
                 &mut pool,
@@ -374,6 +380,21 @@ impl Compile {
                 Self::access_level(node),
             )?);
         }
+        // A record's components are declared once, in its header, and every one of them stands for a
+        // field, an accessor, and a constructor parameter — none of which the body writes.
+        let record_attribute = if is_record {
+            Some(Self::record_members(
+                node,
+                &context,
+                &mut pool,
+                &members,
+                &super_name,
+                &mut fields,
+                &mut methods,
+            )?)
+        } else {
+            None
+        };
         // An `enum`'s constants, its `$VALUES`, its constructor, and its two static methods are all
         // synthesised: none of them is written in the source, and every one of them is required.
         if is_enum {
@@ -430,7 +451,17 @@ impl Compile {
             methods.push(class_init);
         }
 
-        let nesting = Self::inner_classes(node, &context, &mut pool)?;
+        let mut nesting = Self::inner_classes(node, &context, &mut pool)?;
+        if let Some(components) = record_attribute {
+            // The `Record` attribute is what makes `Class.isRecord` true and what every reflective
+            // reader (and pattern matching) enumerates the components through. Without it the class is
+            // an ordinary final class with some accessors.
+            let name_index = pool.utf8_index("Record").ok_or(AsmError::PoolFull)?;
+            nesting.push(jals_classfile::Attribute {
+                name_index,
+                body: jals_classfile::AttributeBody::Record(components),
+            });
+        }
 
         let mut class = ClassFile::new(class_version, 0, pool);
         let mut flags = Self::class_flags(node, is_interface, is_annotation);
@@ -438,6 +469,10 @@ impl Compile {
             // `ACC_ENUM` is what makes `Enum.valueOf` and a `switch` over the type work at run time,
             // and `ACC_FINAL` is what an enum with no constant bodies is.
             flags |= ClassAccessFlags::ENUM | ClassAccessFlags::FINAL;
+        }
+        if is_record {
+            // Every record is implicitly final (JLS §8.10), and the source never writes it.
+            flags |= ClassAccessFlags::FINAL;
         }
         class.access_flags = ClassAccessFlags(flags);
         class.this_class = this_class;
@@ -474,7 +509,7 @@ impl Compile {
             .filter(|child| {
                 matches!(
                     child.kind(),
-                    CLASS_DECL | INTERFACE_DECL | ENUM_DECL | ANNOTATION_TYPE_DECL
+                    CLASS_DECL | INTERFACE_DECL | ENUM_DECL | ANNOTATION_TYPE_DECL | RECORD_DECL
                 )
             })
             .collect();
@@ -503,7 +538,11 @@ impl Compile {
                 .find(|ancestor| {
                     matches!(
                         ancestor.kind(),
-                        CLASS_DECL | INTERFACE_DECL | ENUM_DECL | ANNOTATION_TYPE_DECL
+                        CLASS_DECL
+                            | INTERFACE_DECL
+                            | ENUM_DECL
+                            | ANNOTATION_TYPE_DECL
+                            | RECORD_DECL
                     )
                 })
                 .and_then(|outer| {
@@ -925,6 +964,182 @@ impl Compile {
 
         Ok(MethodInfo {
             access_flags: MethodAccessFlags(Self::method_flags(node, context.in_interface)),
+            name_index,
+            descriptor_index,
+            attributes: alloc::vec![asm.finish()?],
+        })
+    }
+
+    /// A record's synthesised members: a `private final` field per component, the canonical
+    /// constructor, an accessor per component, and the `Record` attribute's component list.
+    ///
+    /// Every one of them comes from the *header*, which is the only place a component is written — so a
+    /// record that emitted just what its body declares would be a type with no state, no way to build
+    /// one, and no way to read one. An accessor the body declares by hand wins over the synthesised one
+    /// (JLS §8.10.3); so does an explicit canonical constructor.
+    ///
+    /// `equals`, `hashCode`, and `toString` are **required from the source** here. `java.lang.Record`
+    /// declares all three abstract, so a class file that omits any of them loads and then throws
+    /// `AbstractMethodError` at the first call — which is why this reports rather than emits nothing.
+    fn record_members(
+        node: &SyntaxNode,
+        context: &Context<'_>,
+        pool: &mut ConstantPool,
+        members: &[SyntaxNode],
+        super_name: &str,
+        fields: &mut Vec<FieldInfo>,
+        methods: &mut Vec<MethodInfo>,
+    ) -> Result<Vec<jals_classfile::RecordComponentInfo>> {
+        // The three `Object` methods a record must have. Emitting the header's members without them
+        // produces a class the JVM loads and then cannot dispatch through.
+        for (name, arity) in [("equals", 1), ("hashCode", 0), ("toString", 0)] {
+            let declared = members.iter().any(|member| {
+                member.kind() == METHOD_DECL
+                    && ast::MethodDecl::cast(member.clone())
+                        .and_then(|decl| decl.name())
+                        .as_deref()
+                        == Some(name)
+                    && ast::MethodDecl::cast(member.clone())
+                        .and_then(|decl| decl.params())
+                        .map_or(0, |list| list.params().count())
+                        == arity
+            });
+            if !declared {
+                return Err(LowerError::Unsupported(
+                    "a `record` that does not declare `equals`, `hashCode`, and `toString`",
+                ));
+            }
+        }
+
+        let components = Self::record_components(node);
+        let mut infos = Vec::with_capacity(components.len());
+        let mut descriptors = Vec::with_capacity(components.len());
+        for name in &components {
+            let member = context.member_at(name)?;
+            let descriptor = Descriptor::field_descriptor(member, context.index)?.to_string();
+            // `private final`, which is what makes a record's state immutable and reachable only
+            // through the accessors.
+            fields.push(FieldInfo {
+                access_flags: FieldAccessFlags(FieldAccessFlags::PRIVATE | FieldAccessFlags::FINAL),
+                name_index: pool.utf8_index(name.text()).ok_or(AsmError::PoolFull)?,
+                descriptor_index: pool.utf8_index(&descriptor).ok_or(AsmError::PoolFull)?,
+                attributes: Vec::new(),
+            });
+            infos.push(jals_classfile::RecordComponentInfo {
+                name_index: pool.utf8_index(name.text()).ok_or(AsmError::PoolFull)?,
+                descriptor_index: pool.utf8_index(&descriptor).ok_or(AsmError::PoolFull)?,
+                attributes: Vec::new(),
+            });
+            descriptors.push((name.text().to_owned(), descriptor));
+        }
+
+        // An explicit canonical constructor wins; it is already in `methods`.
+        if !members
+            .iter()
+            .any(|member| member.kind() == CONSTRUCTOR_DECL)
+        {
+            methods.push(Self::canonical_constructor(
+                context,
+                pool,
+                super_name,
+                &descriptors,
+                Self::access_level(node),
+            )?);
+        }
+        for (name, descriptor) in &descriptors {
+            // An accessor the body declares by hand is already in `methods`; the synthesised one would
+            // be a duplicate the JVM rejects outright.
+            let declared = members.iter().any(|member| {
+                member.kind() == METHOD_DECL
+                    && ast::MethodDecl::cast(member.clone())
+                        .and_then(|decl| decl.name())
+                        .as_deref()
+                        == Some(name.as_str())
+            });
+            if declared {
+                continue;
+            }
+            methods.push(Self::record_accessor(context, pool, name, descriptor)?);
+        }
+        Ok(infos)
+    }
+
+    /// The name token of every component in a record's header, in order.
+    fn record_components(node: &SyntaxNode) -> Vec<SyntaxToken> {
+        node.children()
+            .find(|child| child.kind() == jals_syntax::SyntaxKind::RECORD_HEADER)
+            .into_iter()
+            .flat_map(|header| header.children())
+            .filter(|child| child.kind() == jals_syntax::SyntaxKind::RECORD_COMPONENT)
+            .filter_map(|component| {
+                component
+                    .children_with_tokens()
+                    .filter_map(jals_syntax::SyntaxElement::into_token)
+                    .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+            })
+            .collect()
+    }
+
+    /// The canonical constructor: `super()`, then one `putfield` per component, in header order.
+    fn canonical_constructor(
+        context: &Context<'_>,
+        pool: &mut ConstantPool,
+        super_name: &str,
+        components: &[(String, String)],
+        access: u16,
+    ) -> Result<MethodInfo> {
+        let mut descriptor = String::from("(");
+        for (_, component) in components {
+            descriptor.push_str(component);
+        }
+        descriptor.push_str(")V");
+        let name_index = pool.utf8_index("<init>").ok_or(AsmError::PoolFull)?;
+        let descriptor_index = pool.utf8_index(&descriptor).ok_or(AsmError::PoolFull)?;
+        let mut asm = Assembler::new(
+            pool,
+            Receiver::Constructor(&context.this_class),
+            &descriptor,
+        )?;
+        asm.load(0)?;
+        asm.invoke_special(super_name, "<init>", "()V", false)?;
+        // Parameter 0 is `this`; each component's slot follows, at its own width — a `long` or a
+        // `double` component takes two, and getting that wrong reads the *next* parameter's low half.
+        let mut slot = 1u16;
+        for (name, component) in components {
+            asm.load(0)?;
+            asm.load(slot)?;
+            asm.put_field(&context.this_class, name, component)?;
+            slot += Slots::descriptor_width(component);
+        }
+        asm.return_(None)?;
+        Ok(MethodInfo {
+            access_flags: MethodAccessFlags(access),
+            name_index,
+            descriptor_index,
+            attributes: alloc::vec![asm.finish()?],
+        })
+    }
+
+    /// One accessor: `return this.name;`.
+    fn record_accessor(
+        context: &Context<'_>,
+        pool: &mut ConstantPool,
+        name: &str,
+        descriptor: &str,
+    ) -> Result<MethodInfo> {
+        let signature = alloc::format!("(){descriptor}");
+        let name_index = pool.utf8_index(name).ok_or(AsmError::PoolFull)?;
+        let descriptor_index = pool.utf8_index(&signature).ok_or(AsmError::PoolFull)?;
+        let mut asm = Assembler::new(pool, Receiver::Instance(&context.this_class), &signature)?;
+        asm.load(0)?;
+        asm.get_field(&context.this_class, name, descriptor)?;
+        let top = asm
+            .stack_top()
+            .ok_or(LowerError::Unsupported("an accessor that read nothing"))?;
+        asm.return_(Some(&top))?;
+        Ok(MethodInfo {
+            // An accessor is `public` whatever the record's own access level is (JLS §8.10.3).
+            access_flags: MethodAccessFlags(MethodAccessFlags::PUBLIC),
             name_index,
             descriptor_index,
             attributes: alloc::vec![asm.finish()?],
