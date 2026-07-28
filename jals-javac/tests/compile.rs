@@ -4002,3 +4002,60 @@ public class Inherit {
 ";
     assert_eq!(run(source, "Inherit"), "7\n1\n9\n100\n128\n");
 }
+
+/// `x instanceof T t`: a `boolean` that also binds.
+///
+/// The binding is not a flow-sensitive scoping problem for a *compiler* — whether `t` is legal at a
+/// given use is what `jals-lint` decides, and this crate never checks. What it does need is a slot the
+/// verifier calls definitely assigned, and only the matching path writes one. So the binding is set to
+/// `null` first: `null` joins into any reference type, which leaves the slot assigned with the pattern's
+/// own type on both paths and needs no second branch to arrange.
+#[test]
+fn an_instanceof_pattern_binds_the_narrowed_value() {
+    let source = r#"
+public class Patterns {
+    static String describe(Object o) {
+        if (o instanceof String s) {
+            return "string of " + s.length();
+        }
+        if (o instanceof Integer n) {
+            return "int " + n;
+        }
+        return "other";
+    }
+
+    public static void main(String[] args) {
+        System.out.println(describe("hello"));
+        System.out.println(describe(Integer.valueOf(7)));
+        System.out.println(describe(new Object()));
+        // The negated form binds on the branch the test did *not* take, which is the `else`.
+        Object o = "abc";
+        if (!(o instanceof String t)) {
+            System.out.println("no");
+        } else {
+            System.out.println(t.length());
+        }
+        // Two patterns in one condition: the second is evaluated only when the first matched.
+        Object p = "xy";
+        if (p instanceof String u && u.length() == 2) {
+            System.out.println("two");
+        }
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Patterns"),
+        "string of 5\nint 7\nother\n3\ntwo\n"
+    );
+}
+
+/// A `record` pattern and an unnamed one are still reported: both are a different lowering.
+#[test]
+fn a_record_pattern_is_reported() {
+    let source = "record P(int x) {} public class Q { static boolean f(Object o) { return o instanceof P(int a); } }";
+    let error = compile(source).expect_err("a record pattern deconstructs");
+    assert!(
+        matches!(error, LowerError::Unsupported("an `instanceof` pattern")),
+        "got {error}"
+    );
+}

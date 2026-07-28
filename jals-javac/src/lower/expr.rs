@@ -1517,28 +1517,62 @@ impl Expr {
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
     ) -> Result<()> {
-        // A pattern binds a name that is in scope only where the test succeeded, which is a
-        // flow-sensitive scoping rule this lowering does not model. A plain type test binds nothing.
+        // A *record* pattern deconstructs, which is a different lowering, and an unnamed one binds
+        // nothing under a name this could find. A type pattern binds one name to the narrowed value.
         use jals_syntax::SyntaxKind::{RECORD_PATTERN, TYPE_PATTERN, UNNAMED_PATTERN};
-        if binary.syntax().children().any(|child| {
-            matches!(
-                child.kind(),
-                TYPE_PATTERN | RECORD_PATTERN | UNNAMED_PATTERN
-            )
-        }) {
+        if binary
+            .syntax()
+            .children()
+            .any(|child| matches!(child.kind(), RECORD_PATTERN | UNNAMED_PATTERN))
+        {
             return Err(LowerError::Unsupported("an `instanceof` pattern"));
         }
-        let operand = Self::inner(binary.lhs())?;
-        let ty = binary
+        let pattern = binary
             .syntax()
+            .children()
+            .find(|child| child.kind() == TYPE_PATTERN);
+        let operand = Self::inner(binary.lhs())?;
+        let ty = pattern
+            .as_ref()
+            .unwrap_or_else(|| binary.syntax())
             .children()
             .find_map(ast::Type::cast)
             .ok_or(LowerError::Unsupported("an `instanceof` with no type"))?;
         let target = context.ty_of_type(&ty)?;
+        let entry = Descriptor::class_entry(&target, context.index)?;
+        let Some(pattern) = pattern else {
+            Self::lower(&operand, context, emit)?;
+            return Ok(emit.asm.instance_of(&entry)?);
+        };
+        // `x instanceof T t` is a `boolean` that also binds, and it binds only where it was true. Java
+        // scopes the name by flow so nothing can read it on the other path — but the *verifier* merges
+        // both paths at the join and refuses a slot only one of them wrote. So the binding is set to
+        // `null` first: `null` joins into any reference type, which leaves the slot definitely assigned
+        // with the pattern's own type and needs no second branch to arrange.
+        let bound = context.def_at(&pattern).ok_or(LowerError::Unsupported(
+            "an `instanceof` pattern with no binding",
+        ))?;
+        let slot = emit.slots.declare(
+            bound,
+            crate::lower::Slots::ty_width(context.inference.type_of_def(bound)),
+        );
+        emit.asm.const_null()?;
+        emit.asm.store(slot)?;
+        // The operand is spilled so the narrowed store needs no stack juggling under the result: the
+        // test's answer stays on the stack through the branch, and both paths leave exactly it.
+        let scratch = emit.slots.declare_temporary(1);
+        let done = emit.asm.label();
         Self::lower(&operand, context, emit)?;
-        Ok(emit
-            .asm
-            .instance_of(&Descriptor::class_entry(&target, context.index)?)?)
+        emit.asm.store(scratch)?;
+        emit.asm.load(scratch)?;
+        emit.asm.instance_of(&entry)?;
+        emit.asm.dup()?;
+        emit.asm.branch(Branch::IntZero(Compare::Eq), done)?;
+        emit.asm.load(scratch)?;
+        emit.asm.check_cast(&entry)?;
+        emit.asm.store(slot)?;
+        emit.asm.bind(done)?;
+        Ok(())
     }
 
     /// `a && b` / `a || b`, which evaluate `b` only when `a` did not already decide the answer.

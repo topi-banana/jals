@@ -2331,3 +2331,46 @@ public class Chains {
     assert_invoke(&[source], "explicitSuper", &[], "172");
     assert_invoke(&[source], "deep", &[], "7");
 }
+
+/// `x instanceof T t` on wasm: `ref.test`, then `ref.cast` into the binding on the matching path.
+///
+/// A wasm local starts at its type's default, so unlike the JVM there is nothing to arrange for the
+/// other path: the store goes inside the `if` and that is all. `ref.test`'s non-nullable form is used
+/// because Java's `instanceof` is false for a `null` and the nullable form is true for one.
+#[test]
+fn an_instanceof_pattern_binds_the_narrowed_value() {
+    let source = r"
+public class Animal { int legs() { return 4; } }
+public class Bird extends Animal { int legs() { return 2; } int wings() { return 2; } }
+public class Fish extends Animal { int fins() { return 5; } }
+
+public class Count {
+    static int parts(Animal a) {
+        if (a instanceof Bird b) {
+            return b.wings() * 100 + b.legs();
+        }
+        if (a instanceof Fish f) {
+            return f.fins();
+        }
+        return a.legs();
+    }
+
+    public static int bird() { return parts(new Bird()); }
+    public static int fish() { return parts(new Fish()); }
+    public static int plain() { return parts(new Animal()); }
+
+    // The negated form binds on the branch the test did not take.
+    public static int negated() {
+        Animal a = new Bird();
+        if (!(a instanceof Bird b)) {
+            return 0;
+        }
+        return b.wings();
+    }
+}
+";
+    assert_invoke(&[source], "bird", &[], "202");
+    assert_invoke(&[source], "fish", &[], "5");
+    assert_invoke(&[source], "plain", &[], "4");
+    assert_invoke(&[source], "negated", &[], "2");
+}

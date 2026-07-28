@@ -39,7 +39,7 @@ use jals_syntax::SyntaxKind::{
     INSTANCEOF_KW, INT_KW, INT_LITERAL, LAMBDA_EXPR, LBRACK, LOCAL_VAR_DECL, LONG_KW, LSHIFT, LT,
     LT_EQ, METHOD_DECL, MINUS, NEW_EXPR, NULL_KW, PARAM, PERCENT, PIPE, PIPE_PIPE, PLUS,
     RECORD_COMPONENT, RESOURCE, RETURN_STMT, SHORT_KW, SLASH, STAR, STRING_LITERAL, SUPER_KW,
-    TEXT_BLOCK, THIS_KW, TILDE, TRUE_KW, VAR_KW, VOID_KW,
+    TEXT_BLOCK, THIS_KW, TILDE, TRUE_KW, TYPE_PATTERN, VAR_KW, VOID_KW,
 };
 use jals_syntax::ast::{self, AstNode};
 use jals_syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
@@ -1612,6 +1612,9 @@ impl Inferer<'_> {
                 | FOR_EACH_STMT
                 | RESOURCE
                 | METHOD_DECL
+                // `x instanceof String s` writes the type beside the name, exactly as a local
+                // declaration does — the binding is a local, and this is where it gets its type.
+                | TYPE_PATTERN
         )
     }
 

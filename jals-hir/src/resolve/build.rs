@@ -9,7 +9,7 @@ use jals_syntax::SyntaxKind::{
     ENUM_CONSTANT, ENUM_DECL, FIELD_DECL, FOR_EACH_STMT, FOR_STMT, INTERFACE_DECL, LAMBDA_EXPR,
     LOCAL_VAR_DECL, METHOD_DECL, NAME_REF, NEW_EXPR, PARAM, PARAM_LIST, RECORD_COMPONENT,
     RECORD_DECL, RECORD_HEADER, SWITCH_EXPR, SWITCH_GROUP, SWITCH_LABEL, SWITCH_RULE, SWITCH_STMT,
-    TRY_STMT, TYPE, TYPE_PARAM, TYPE_PARAMS,
+    TRY_STMT, TYPE, TYPE_PARAM, TYPE_PARAMS, TYPE_PATTERN,
 };
 use jals_syntax::SyntaxNode;
 use jals_syntax::ast::{
@@ -63,6 +63,24 @@ impl Resolver {
                     for tok in local.names() {
                         self.add_def(scope, DefKind::Local, &tok);
                     }
+                }
+                self.build_children(node, scope).await;
+            }
+            // `x instanceof String s` binds `s` like a local declaration. Java scopes it by *flow* —
+            // only where the test succeeded — and that is a rule the linter enforces, not one resolution
+            // can express: a scope tree has no notion of "the branch where this was true". So the name
+            // goes in the enclosing scope, which is where every use that is legal at all can see it.
+            TYPE_PATTERN => {
+                // A `switch` label's pattern variables are already declared, in the arm's own scope, so
+                // only an `instanceof`'s reaches here — declaring it twice would record two definitions
+                // for one token.
+                let in_label = node
+                    .ancestors()
+                    .any(|ancestor| ancestor.kind() == SWITCH_LABEL);
+                if let Some(tok) = Collect::direct_ident_tokens(node).next()
+                    && !in_label
+                {
+                    self.add_def(scope, DefKind::PatternVar, &tok);
                 }
                 self.build_children(node, scope).await;
             }

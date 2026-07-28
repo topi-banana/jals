@@ -3744,12 +3744,6 @@ impl Lowering<'_> {
             AMP, AMP_AMP, BANG_EQ, CARET, EQ, EQ_EQ, GT, INSTANCEOF_KW, LSHIFT, LT, LT_EQ, MINUS,
             PERCENT, PIPE, PIPE_PIPE, PLUS, SLASH, STAR,
         };
-        let left = binary
-            .lhs()
-            .ok_or(WasmError::Unsupported("a binary with no left operand"))?;
-        let right = binary
-            .rhs()
-            .ok_or(WasmError::Unsupported("a binary with no right operand"))?;
         let operator: Vec<_> = binary
             .syntax()
             .children_with_tokens()
@@ -3758,9 +3752,17 @@ impl Lowering<'_> {
             .filter(|kind| !kind.is_trivia())
             .collect();
 
+        // Before the operands: an `instanceof` whose right side is a *pattern* has no right operand at
+        // all — the pattern is a binding, not an expression, and asking for one reported the wrong thing.
         if operator.first() == Some(&INSTANCEOF_KW) {
             return self.instance_of(binary, insn);
         }
+        let left = binary
+            .lhs()
+            .ok_or(WasmError::Unsupported("a binary with no left operand"))?;
+        let right = binary
+            .rhs()
+            .ok_or(WasmError::Unsupported("a binary with no right operand"))?;
 
         // `&&` and `||` are not operators over two values: the right operand may not run at all.
         match operator.as_slice() {
@@ -3931,18 +3933,53 @@ impl Lowering<'_> {
     /// *true* for a `null`, and Java's `instanceof` is false for one. So the non-nullable form is used,
     /// which is exactly the question Java asks.
     fn instance_of(&mut self, binary: &ast::BinaryExpr, insn: &mut Insn) -> Result<ValType> {
+        use jals_syntax::SyntaxKind::{RECORD_PATTERN, TYPE_PATTERN, UNNAMED_PATTERN};
+        // A *record* pattern deconstructs, which is a different lowering, and an unnamed one binds
+        // nothing under a name this could find. A type pattern binds one name to the narrowed value.
+        if binary
+            .syntax()
+            .children()
+            .any(|child| matches!(child.kind(), RECORD_PATTERN | UNNAMED_PATTERN))
+        {
+            return Err(WasmError::Unsupported("an `instanceof` pattern"));
+        }
         let operand = binary
             .lhs()
             .ok_or(WasmError::Unsupported("an `instanceof` with no operand"))?;
-        let ty = binary
+        let pattern = binary
             .syntax()
+            .children()
+            .find(|child| child.kind() == TYPE_PATTERN);
+        let ty = pattern
+            .as_ref()
+            .unwrap_or_else(|| binary.syntax())
             .children()
             .find_map(ast::Type::cast)
             .ok_or(WasmError::Unsupported("an `instanceof` with no type"))?;
         let target = self.named_type(&ty)?;
-        self.expr(&operand, insn)?
+        let operand_ty = self
+            .expr(&operand, insn)?
             .ok_or(WasmError::Unsupported("an `instanceof` on nothing"))?;
+        let Some(pattern) = pattern else {
+            insn.ref_test(target, false);
+            return Ok(ValType::I32);
+        };
+        // `x instanceof T t` binds only where the test succeeded, and a wasm local starts at its type's
+        // default — so the store goes inside the `if` and the other path needs nothing at all.
+        let bound = self.def_at(&pattern).ok_or(WasmError::Unsupported(
+            "an `instanceof` pattern with no binding",
+        ))?;
+        let slot = self.declare_local(bound)?;
+        let scratch = self.scratch(operand_ty);
+        let answer = self.scratch(ValType::I32);
+        insn.local_set(scratch).local_get(scratch);
         insn.ref_test(target, false);
+        insn.local_tee(answer);
+        insn.if_();
+        insn.local_get(scratch).ref_cast(target, false);
+        insn.local_set(slot);
+        insn.end();
+        insn.local_get(answer);
         Ok(ValType::I32)
     }
 
