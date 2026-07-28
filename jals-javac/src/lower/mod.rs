@@ -1012,11 +1012,29 @@ impl Compile {
             descriptors.push((name.text().to_owned(), descriptor));
         }
 
-        // An explicit canonical constructor wins; it is already in `methods`.
-        if !members
-            .iter()
-            .any(|member| member.kind() == CONSTRUCTOR_DECL)
-        {
+        // A *compact* constructor (`P { … }`, with no parameter list at all) takes the components
+        // implicitly and assigns every one of them after its body runs. Nothing here does that, so
+        // emitting it would produce `<init>()V` — wrong descriptor *and* a record whose components are
+        // all zero, which nothing at run time would flag.
+        if members.iter().any(|member| {
+            member.kind() == CONSTRUCTOR_DECL
+                && !member
+                    .children()
+                    .any(|child| child.kind() == jals_syntax::SyntaxKind::PARAM_LIST)
+        }) {
+            return Err(LowerError::Unsupported("a compact `record` constructor"));
+        }
+        // Only an explicit *canonical* constructor replaces the synthesised one — "some constructor
+        // exists" is not the same thing. `record P(int x) { P() { this(0); } }` declares a
+        // no-argument one and still needs `<init>(I)V` for `this(0)` to have a target.
+        if !members.iter().any(|member| {
+            member.kind() == CONSTRUCTOR_DECL
+                && member
+                    .children()
+                    .find_map(ast::ParamList::cast)
+                    .map_or(0, |list| list.params().count())
+                    == components.len()
+        }) {
             methods.push(Self::canonical_constructor(
                 context,
                 pool,

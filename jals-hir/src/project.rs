@@ -1780,7 +1780,13 @@ impl ProjectIndex {
                 .filter(|m| m.kind == DefKind::Method && m.params.is_empty())
                 .map(|m| m.name.clone())
                 .collect();
-            let declared_constructor = members.iter().any(|m| m.kind == DefKind::Constructor);
+            // Only an explicit *canonical* constructor replaces the synthesised one: arity is enough
+            // to tell them apart, and "some constructor exists" is not the same test —
+            // `record P(int x) { P() { this(0); } }` declares one and still needs the canonical one for
+            // `this(0)` to resolve.
+            let declared_canonical = members
+                .iter()
+                .any(|m| m.kind == DefKind::Constructor && m.params.len() == components.len());
             for (name, ty) in &components {
                 // The component's own name range: it *is* the field's declaration, which is what makes
                 // "go to definition" on the field land on the header rather than nowhere.
@@ -1808,7 +1814,7 @@ impl ProjectIndex {
                     });
                 }
             }
-            if !declared_constructor && !components.is_empty() {
+            if !declared_canonical {
                 members.push(Member {
                     owner,
                     name: owner_simple.to_owned(),

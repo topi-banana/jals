@@ -2668,6 +2668,67 @@ public class Records {
     );
 }
 
+/// A record's non-canonical constructor does not replace the canonical one, and a compact one is
+/// reported.
+///
+/// "Some constructor exists" is not "the canonical constructor exists": `record P(int x) { P() {
+/// this(0); } }` declares a no-argument one and still needs `<init>(I)V` for `this(0)` to have a target.
+/// A *compact* constructor (`P { … }`, no parameter list) assigns every component implicitly after its
+/// body — emitting it as written gives the wrong descriptor *and* a record whose components are all
+/// zero, which nothing at run time would flag.
+#[test]
+fn a_record_constructor_replaces_the_canonical_one_only_when_it_is_canonical() {
+    let compact = "record P(int x) { P { } }";
+    let error = compile(compact).expect_err("a compact constructor is not lowered");
+    assert!(
+        matches!(
+            error,
+            LowerError::Unsupported("a compact `record` constructor")
+        ),
+        "got {error}"
+    );
+
+    let source = r"
+record P(int x) {
+    // A convenience constructor that delegates: the canonical one must still be emitted for it to
+    // reach, and for `new P(3)` to link.
+    P() { this(0); }
+}
+
+public class Both {
+    public static void main(String[] args) {
+        System.out.println(new P(3).x());
+        System.out.println(new P().x());
+    }
+}
+";
+    let classes = compile(source).expect("compile");
+    let point = classes
+        .iter()
+        .find(|class| class.internal_name == "P")
+        .expect("the record");
+    let class = jals_exec::block_on_inline(jals_classfile::ClassFile::read(point.bytes.as_slice()))
+        .expect("reparse");
+    let descriptors: Vec<String> = class
+        .methods
+        .iter()
+        .filter(|method| class.constant_pool.utf8(method.name_index).as_deref() == Some("<init>"))
+        .map(|method| {
+            class
+                .constant_pool
+                .utf8(method.descriptor_index)
+                .expect("utf8")
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(descriptors, ["()V".to_owned(), "(I)V".to_owned()]);
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Both"), "3\n0\n");
+}
+
 /// Three `enum` shapes are reported, each because a *descriptor* would come out wrong.
 ///
 /// A constant with arguments and a declared constructor both need the two synthetic parameters (`name`,
