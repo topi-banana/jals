@@ -1291,3 +1291,97 @@ fn an_invokedynamic_leaves_what_its_descriptor_says() {
         body.code
     );
 }
+
+/// A slot written through `store_as` keeps its *declared* type, and that is what the frames say.
+///
+/// `store` types a slot by the value put in it, which is right for a slot the lowering took for
+/// itself and wrong for one the source declared: a `String` assigned to an `Object` local leaves an
+/// `Object` behind. Nothing else can restore that, because the widening happens at the assignment
+/// and the assembler has no hierarchy to widen with later.
+///
+/// Both places that have to agree are checked here. A backward jump merges against the header's
+/// frame, which `store` alone made a `String` the reassignment then contradicted; an exception
+/// handler is given the range's start state, which it would have described the same wrong way.
+#[test]
+fn a_declared_slot_keeps_its_declared_type() {
+    let object = "Ljava/lang/Object;";
+
+    // A loop header describing slot 1 as `Object`: the back edge writes a `String` into it, and a
+    // declared slot merges cleanly because both sides call it an `Object`.
+    let mut pool = ConstantPool::new();
+    pool.class_index("java/lang/Object").expect("Object");
+    let mut asm = Assembler::new(&mut pool, Receiver::Static, "()V").expect("assembler");
+    asm.const_null().expect("aconst_null");
+    asm.store_as(1, object).expect("astore_1");
+    let head = asm.label();
+    asm.bind(head).expect("bind");
+    asm.const_string("s").expect("ldc");
+    asm.store_as(1, object).expect("astore_1");
+    asm.branch(Branch::Always, head).expect("back edge");
+    asm.finish()
+        .expect("both sides describe slot 1 as `Object`");
+
+    // The same shape through `store`, which types the slot by the value: the header saw `Object`
+    // (from `null`) and the back edge arrives with a `String`, so the merge loses the slot — and a
+    // slot the frame described may not stop being described.
+    let mut pool = ConstantPool::new();
+    pool.class_index("java/lang/Object").expect("Object");
+    let mut asm = Assembler::new(&mut pool, Receiver::Static, "()V").expect("assembler");
+    asm.const_string("a").expect("ldc");
+    asm.store(1).expect("astore_1");
+    let head = asm.label();
+    asm.bind(head).expect("bind");
+    asm.new_object("java/lang/Object").expect("new");
+    asm.dup().expect("dup");
+    asm.invoke_special("java/lang/Object", "<init>", "()V", false)
+        .expect("<init>");
+    asm.store(1).expect("astore_1");
+    assert_eq!(
+        asm.branch(Branch::Always, head),
+        Err(AsmError::IncompatibleFrame),
+        "slot 1 stopped being the `String` the header's frame describes"
+    );
+
+    // A declared slot reassigned inside a protected range: the handler's frame is the range's start
+    // state, so the declared type is the only one that covers every instruction in between.
+    let mut pool = ConstantPool::new();
+    pool.class_index("java/lang/Object").expect("Object");
+    let mut asm = Assembler::new(&mut pool, Receiver::Static, "()V").expect("assembler");
+    asm.const_string("start").expect("ldc");
+    asm.store_as(1, object).expect("astore_1");
+    let (start, end, handler) = (asm.label(), asm.label(), asm.label());
+    asm.bind(start).expect("bind");
+    asm.new_object("java/lang/Object").expect("new");
+    asm.dup().expect("dup");
+    asm.invoke_special("java/lang/Object", "<init>", "()V", false)
+        .expect("<init>");
+    asm.store_as(1, object).expect("astore_1");
+    asm.mark(end).expect("mark");
+    asm.bind_handler(handler, start, "java/lang/Throwable")
+        .expect("handler");
+    asm.protect(start, end, handler, None).expect("protect");
+    asm.pop().expect("pop the caught reference");
+    asm.return_(None).expect("return");
+    let code = asm.finish().expect("the handler frame covers the range");
+    let AttributeBody::Code(body) = &code.body else {
+        panic!("`finish` builds a `Code` attribute");
+    };
+    let frame = body
+        .attributes
+        .iter()
+        .find_map(|attribute| match &attribute.body {
+            AttributeBody::StackMapTable(frames) => frames.last(),
+            _ => None,
+        })
+        .expect("a stack map frame");
+    let jals_classfile::StackMapFrame::Full { locals, .. } = frame else {
+        panic!("every frame is written as a `full_frame`");
+    };
+    assert_eq!(
+        locals[1],
+        VerificationType::Object {
+            cpool_index: pool.class_index("java/lang/Object").expect("Object"),
+        },
+        "the handler describes slot 1 by its declaration, not by the first value written"
+    );
+}
