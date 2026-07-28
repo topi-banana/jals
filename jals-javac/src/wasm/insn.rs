@@ -187,6 +187,13 @@ impl Insn {
         self
     }
 
+    /// `unreachable` — a trap. What a path Java cannot reach lowers to: it satisfies the validator's
+    /// demand for a value on every path without inventing one.
+    pub(crate) fn unreachable(&mut self) -> &mut Self {
+        self.out.byte(0x00);
+        self
+    }
+
     pub(crate) fn return_(&mut self) -> &mut Self {
         self.out.byte(0x0F);
         self

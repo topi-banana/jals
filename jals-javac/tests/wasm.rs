@@ -1073,15 +1073,11 @@ public class Outer {
 #[test]
 fn each_unrepresentable_type_declaration_names_itself() {
     for (source, expected) in [
-        ("interface I { int f(); }", "an `interface` declaration"),
         ("enum E { A, B }", "an `enum` declaration"),
         ("record R(int x) {}", "a `record` declaration"),
         ("@interface M {}", "an `@interface` declaration"),
         // Nested, which is where the silent drop used to happen.
-        (
-            "public class O { interface I {} }",
-            "an `interface` declaration",
-        ),
+        ("public class O { enum E { A } }", "an `enum` declaration"),
     ] {
         let error = compile(&[source]).expect_err("this declaration is not laid out yet");
         assert!(
@@ -1204,4 +1200,69 @@ public class Zoo {
     assert_invoke(&[source], "through_a_self_call", &[], "20");
     assert_invoke(&[source], "with_an_argument", &["6"], "1");
     assert_invoke(&[source], "without_overriding", &[], "0");
+}
+
+/// An interface, and a call dispatched through one.
+///
+/// An interface gets no struct type: wasm's declared subtyping is single-inheritance, so it could not be
+/// a supertype of two unrelated classes. A value of interface type is held at the *top* of the reference
+/// hierarchy (`anyref`) and narrowed with `ref.cast` at each use — and the dispatch is the same
+/// `ref.test` chain a class override uses, for the same reason it is sound: the whole project is one
+/// module, so the set of implementing classes is closed and known at the call site.
+///
+/// Its methods declare no function at all. An abstract method has no body, so putting a signature with
+/// a result type over an empty one is a module no engine accepts; every class that could satisfy the
+/// call is in the chain instead, and falling off the end traps.
+#[test]
+fn a_call_through_an_interface_reaches_the_implementation() {
+    let source = r"
+public interface Shape {
+    int area();
+}
+
+public class Square implements Shape {
+    int side;
+    Square(int side) { this.side = side; }
+    public int area() { return side * side; }
+}
+
+public class Rect implements Shape {
+    int w;
+    int h;
+    Rect(int w, int h) { this.w = w; this.h = h; }
+    public int area() { return w * h; }
+}
+
+public class Areas {
+    public static int through_an_interface(int n) {
+        Shape s = new Square(n);
+        return s.area();
+    }
+
+    // The other implementation, reached through the same static type.
+    public static int the_other_one(int n) {
+        Shape s = new Rect(n, 3);
+        return s.area();
+    }
+
+    // An interface as a parameter type, which is where the `anyref` representation has to hold up.
+    static int sum(Shape a, Shape b) { return a.area() + b.area(); }
+
+    public static int as_a_parameter(int n) {
+        return sum(new Square(n), new Rect(n, 2));
+    }
+
+    // An interface-typed field, so the struct layout has to name the representation too.
+    static Shape held;
+
+    public static int through_a_field(int n) {
+        held = new Rect(n, 5);
+        return held.area();
+    }
+}
+";
+    assert_invoke(&[source], "through_an_interface", &["4"], "16");
+    assert_invoke(&[source], "the_other_one", &["4"], "12");
+    assert_invoke(&[source], "as_a_parameter", &["3"], "15");
+    assert_invoke(&[source], "through_a_field", &["2"], "10");
 }

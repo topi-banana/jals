@@ -38,7 +38,7 @@
 //!   *before* the operand rather than after it.
 
 use alloc::borrow::ToOwned as _;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString as _};
 use alloc::vec::Vec;
 
@@ -46,7 +46,7 @@ use jals_hir::{
     DefId, DefKind, FileId, ItemId, MemberId, Primitive, ProjectIndex, Resolved, Ty, TypeInference,
 };
 use jals_syntax::SyntaxKind::{
-    CLASS_DECL, CONSTRUCTOR_DECL, FIELD_DECL, INITIALIZER, METHOD_DECL, MODIFIERS,
+    CLASS_DECL, CONSTRUCTOR_DECL, FIELD_DECL, INITIALIZER, INTERFACE_DECL, METHOD_DECL, MODIFIERS,
 };
 use jals_syntax::ast::{self, AstNode as _};
 use jals_syntax::{SyntaxNode, SyntaxToken};
@@ -130,7 +130,13 @@ impl CompileWasm {
         // first so its field prefix is known when the subtype is laid out. Only the index is fixed
         // here — the body waits, because a field of array type needs an array type index and an
         // array's element may be one of these classes.
-        let classes = Self::classes_in_order(inputs, index)?;
+        let mut interface_items = Vec::new();
+        let classes = Self::classes_in_order(inputs, index, &mut interface_items)?;
+        // An interface has no struct type, so it is registered before any class is laid out: a field or
+        // a parameter of interface type has to resolve to *something* while the structs are built.
+        for item in interface_items {
+            layout.interfaces.insert(item);
+        }
         for &item in &classes {
             layout.reserve_class(item, index, &mut module);
         }
@@ -272,7 +278,11 @@ impl CompileWasm {
     /// A struct's fields start with its supertype's, so the supertype's layout has to be settled
     /// first. The order is a depth-first walk of the `extends` chain; a cycle is impossible in a
     /// well-formed program and is simply not revisited here.
-    fn classes_in_order(inputs: &[WasmInput<'_>], index: &ProjectIndex) -> Result<Vec<ItemId>> {
+    fn classes_in_order(
+        inputs: &[WasmInput<'_>],
+        index: &ProjectIndex,
+        interfaces: &mut Vec<ItemId>,
+    ) -> Result<Vec<ItemId>> {
         let mut declared = Vec::new();
         for input in inputs {
             for node in Self::type_declarations(input.root) {
@@ -284,6 +294,13 @@ impl CompileWasm {
                 }
                 let name = Self::name_token(&node)
                     .ok_or(WasmError::Unsupported("a class with no name"))?;
+                if node.kind() == INTERFACE_DECL {
+                    let item = index
+                        .item_by_decl(input.file, usize::from(name.text_range().start()))
+                        .ok_or_else(|| WasmError::Unresolved(name.text().into()))?;
+                    interfaces.push(item);
+                    continue;
+                }
                 // A non-`static` nested class holds its enclosing instance in a synthetic field and
                 // takes it as an extra constructor parameter. Neither exists here, so its constructor
                 // would be one parameter short of what a `new` passes — reported rather than emitted.
@@ -310,11 +327,8 @@ impl CompileWasm {
     /// `enum` and a `record` need the synthesised members the JVM backend builds. None is laid out yet,
     /// and every one of them would otherwise vanish without a word.
     const fn unrepresentable_kind(kind: jals_syntax::SyntaxKind) -> Option<&'static str> {
-        use jals_syntax::SyntaxKind::{
-            ANNOTATION_TYPE_DECL, ENUM_DECL, INTERFACE_DECL, RECORD_DECL,
-        };
+        use jals_syntax::SyntaxKind::{ANNOTATION_TYPE_DECL, ENUM_DECL, RECORD_DECL};
         match kind {
-            INTERFACE_DECL => Some("an `interface` declaration"),
             ENUM_DECL => Some("an `enum` declaration"),
             RECORD_DECL => Some("a `record` declaration"),
             ANNOTATION_TYPE_DECL => Some("an `@interface` declaration"),
@@ -409,7 +423,13 @@ impl CompileWasm {
                 if !matches!(node.kind(), METHOD_DECL | CONSTRUCTOR_DECL) {
                     continue;
                 }
+                // An abstract method has no body, so there is no function to declare: a virtual call
+                // reaches the *implementations* instead. Declaring one would put a signature with a
+                // result type over an empty body, which no engine accepts.
                 let is_constructor = node.kind() == CONSTRUCTOR_DECL;
+                if !is_constructor && node.children().find_map(ast::Block::cast).is_none() {
+                    continue;
+                }
                 let member_name = Self::name_token(&node)
                     .ok_or(WasmError::Unsupported("a member with no name"))?;
                 let member = index
@@ -469,6 +489,10 @@ struct Layout {
     fields: BTreeMap<ItemId, Vec<MemberId>>,
     /// Each method's function index.
     functions: BTreeMap<MemberId, u32>,
+    /// Every interface this module declares. An interface gets no struct type — wasm's declared
+    /// subtyping is single-inheritance, so it could not be a supertype of two unrelated classes — so a
+    /// value of interface type is held at the top of the reference hierarchy and narrowed at each use.
+    interfaces: BTreeSet<ItemId>,
     /// Each `static` field's global index. A Java `static` field is module state, which is what a
     /// wasm global is; an instance field is a struct slot instead.
     statics: BTreeMap<MemberId, u32>,
@@ -727,6 +751,9 @@ impl Layout {
 
     /// A nullable reference to `item`'s struct type — how every Java reference is represented.
     fn class_ref(&self, item: ItemId) -> Result<ValType> {
+        if self.interfaces.contains(&item) {
+            return Ok(ValType::Ref(RefType::nullable(HeapType::Any)));
+        }
         let index = self
             .structs
             .get(&item)
@@ -751,7 +778,7 @@ impl Layout {
             Ty::Class(_) => {
                 let item = ty
                     .project_id()
-                    .filter(|id| self.structs.contains_key(id))
+                    .filter(|id| self.structs.contains_key(id) || self.interfaces.contains(id))
                     .ok_or_else(|| WasmError::NoRepresentation(ty.to_string()))?;
                 self.class_ref(item)?
             }
@@ -2966,18 +2993,22 @@ impl Lowering<'_> {
             insn.br(insn.depth() - leave);
             insn.end();
         }
-        let function = *self
-            .layout
-            .functions
-            .get(&member)
-            .ok_or(WasmError::Unsupported(
-                "a call to a method outside this module",
-            ))?;
-        insn.local_get(receiver);
-        for &slot in &slots {
-            insn.local_get(slot);
+        // An interface's method is abstract: there is no function to fall back to, and every class that
+        // could satisfy the call is already in the chain above. Reaching here means the receiver is
+        // `null` or of a type nothing implemented, which traps — the same answer `ref.cast` gives a
+        // failed cast, this host having no exception model.
+        match self.layout.functions.get(&member) {
+            Some(&function) => {
+                insn.local_get(receiver);
+                for &slot in &slots {
+                    insn.local_get(slot);
+                }
+                insn.call(function);
+            }
+            None => {
+                insn.unreachable();
+            }
         }
-        insn.call(function);
         insn.end();
         Ok(ty)
     }
@@ -2996,13 +3027,6 @@ impl Lowering<'_> {
             .inference
             .call_target_of(Self::span(call.syntax()))
             .ok_or_else(|| WasmError::Unresolved(call.syntax().text().to_string().trim().into()))?;
-        let function = *self
-            .layout
-            .functions
-            .get(&member)
-            .ok_or(WasmError::Unsupported(
-                "a call to a method outside this module",
-            ))?;
         let info = self.index.member(member);
         let is_static = info.modifiers.is_static;
 
@@ -3019,6 +3043,16 @@ impl Lowering<'_> {
             };
             return self.virtual_call(call, member, &arguments, &overriders, ty, insn);
         }
+        // Only now: a method with no function index is abstract, and an abstract one is only ever
+        // reached through the chain above. Looking it up first reported "outside this module" for every
+        // interface call, which named the wrong problem.
+        let function = *self
+            .layout
+            .functions
+            .get(&member)
+            .ok_or(WasmError::Unsupported(
+                "a call to a method outside this module",
+            ))?;
         if !is_static {
             match call.callee() {
                 Some(ast::Expr::FieldAccess(access)) => {

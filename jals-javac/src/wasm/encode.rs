@@ -117,6 +117,12 @@ impl Bytes {
 pub(crate) enum HeapType {
     /// A declared type, by index.
     Concrete(u32),
+    /// The top of the internal reference hierarchy: every struct and array reference is one.
+    ///
+    /// How an *interface*-typed value is held. An interface has no struct type of its own — wasm's
+    /// declared subtyping is single-inheritance, so it cannot be a supertype of two unrelated classes —
+    /// so the value is kept at the top of the hierarchy and narrowed with `ref.cast` at each use.
+    Any,
     /// The bottom of the reference hierarchy, whose only inhabitant is `null`.
     ///
     /// The one abstract heap type this backend needs: a bare `null` has no type of its own in Java, and
@@ -133,6 +139,7 @@ impl HeapType {
             Self::Concrete(index) => out.i32(index.cast_signed()),
             // The abstract heap types occupy the negative range of the same signed encoding, which
             // is what keeps them apart from an index.
+            Self::Any => out.byte(0x6E),
             Self::None => out.byte(0x71),
         };
     }
