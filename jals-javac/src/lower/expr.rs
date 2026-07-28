@@ -1517,62 +1517,192 @@ impl Expr {
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
     ) -> Result<()> {
-        // A *record* pattern deconstructs, which is a different lowering, and an unnamed one binds
-        // nothing under a name this could find. A type pattern binds one name to the narrowed value.
         use jals_syntax::SyntaxKind::{RECORD_PATTERN, TYPE_PATTERN, UNNAMED_PATTERN};
-        if binary
-            .syntax()
-            .children()
-            .any(|child| matches!(child.kind(), RECORD_PATTERN | UNNAMED_PATTERN))
-        {
-            return Err(LowerError::Unsupported("an `instanceof` pattern"));
-        }
-        let pattern = binary
-            .syntax()
-            .children()
-            .find(|child| child.kind() == TYPE_PATTERN);
         let operand = Self::inner(binary.lhs())?;
-        let ty = pattern
-            .as_ref()
-            .unwrap_or_else(|| binary.syntax())
-            .children()
-            .find_map(ast::Type::cast)
-            .ok_or(LowerError::Unsupported("an `instanceof` with no type"))?;
-        let target = context.ty_of_type(&ty)?;
-        let entry = Descriptor::class_entry(&target, context.index)?;
+        let pattern = binary.syntax().children().find(|child| {
+            matches!(
+                child.kind(),
+                TYPE_PATTERN | RECORD_PATTERN | UNNAMED_PATTERN
+            )
+        });
+        // A plain type test binds nothing, so it is the test and nothing else.
         let Some(pattern) = pattern else {
+            let ty = binary
+                .syntax()
+                .children()
+                .find_map(ast::Type::cast)
+                .ok_or(LowerError::Unsupported("an `instanceof` with no type"))?;
+            let target = context.ty_of_type(&ty)?;
             Self::lower(&operand, context, emit)?;
-            return Ok(emit.asm.instance_of(&entry)?);
+            return Ok(emit
+                .asm
+                .instance_of(&Descriptor::class_entry(&target, context.index)?)?);
         };
-        // `x instanceof T t` is a `boolean` that also binds, and it binds only where it was true. Java
-        // scopes the name by flow so nothing can read it on the other path — but the *verifier* merges
-        // both paths at the join and refuses a slot only one of them wrote. So the binding is set to
-        // `null` first: `null` joins into any reference type, which leaves the slot definitely assigned
-        // with the pattern's own type and needs no second branch to arrange.
-        let bound = context.def_at(&pattern).ok_or(LowerError::Unsupported(
-            "an `instanceof` pattern with no binding",
-        ))?;
-        let slot = emit.slots.declare(
-            bound,
-            crate::lower::Slots::ty_width(context.inference.type_of_def(bound)),
-        );
-        emit.asm.const_null()?;
-        emit.asm.store(slot)?;
-        // The operand is spilled so the narrowed store needs no stack juggling under the result: the
-        // test's answer stays on the stack through the branch, and both paths leave exactly it.
+        // A pattern is a `boolean` that also binds, and it binds only where it matched. Java scopes the
+        // names by flow so nothing can read them on the other path — but the *verifier* merges both
+        // paths at the join and refuses a slot only one of them wrote, so every binding is written a
+        // default first.
+        Self::declare_bindings(&pattern, context, emit)?;
         let scratch = emit.slots.declare_temporary(1);
+        let fail = emit.asm.label();
         let done = emit.asm.label();
         Self::lower(&operand, context, emit)?;
         emit.asm.store(scratch)?;
-        emit.asm.load(scratch)?;
-        emit.asm.instance_of(&entry)?;
-        emit.asm.dup()?;
-        emit.asm.branch(Branch::IntZero(Compare::Eq), done)?;
-        emit.asm.load(scratch)?;
-        emit.asm.check_cast(&entry)?;
-        emit.asm.store(slot)?;
+        Self::match_pattern(&pattern, scratch, fail, context, emit)?;
+        emit.asm.const_int(1)?;
+        emit.asm.branch(Branch::Always, done)?;
+        emit.asm.bind(fail)?;
+        emit.asm.const_int(0)?;
         emit.asm.bind(done)?;
         Ok(())
+    }
+
+    /// Give every binding in `pattern` a slot holding its type's default value.
+    ///
+    /// A pattern writes its bindings only where it matched, and the verifier merges both paths at the
+    /// join: a slot one edge left unwritten is not definitely assigned, whatever Java's scoping says
+    /// about who may read it. Writing the default up front settles all of them with one store each, and
+    /// `null` in particular joins into any reference type — so the slot keeps the pattern's own type.
+    pub(crate) fn declare_bindings(
+        pattern: &SyntaxNode,
+        context: &Context<'_>,
+        emit: &mut Emit<'_, '_>,
+    ) -> Result<()> {
+        use jals_syntax::SyntaxKind::TYPE_PATTERN;
+        for node in pattern
+            .descendants()
+            .filter(|node| node.kind() == TYPE_PATTERN)
+        {
+            let Some(bound) = context.def_at(&node) else {
+                return Err(LowerError::Unsupported("a pattern with no binding"));
+            };
+            let ty = context.inference.type_of_def(bound).clone();
+            let slot = emit
+                .slots
+                .declare(bound, crate::lower::Slots::ty_width(&ty));
+            Self::default_value(&ty, emit)?;
+            emit.asm.store(slot)?;
+        }
+        Ok(())
+    }
+
+    /// Push the default value of `ty` — what an unset binding holds (JLS §4.12.5).
+    fn default_value(ty: &Ty, emit: &mut Emit<'_, '_>) -> Result<()> {
+        match ty {
+            Ty::Primitive(Primitive::Long) => emit.asm.const_long(0)?,
+            Ty::Primitive(Primitive::Float) => emit.asm.const_float(0.0)?,
+            Ty::Primitive(Primitive::Double) => emit.asm.const_double(0.0)?,
+            Ty::Primitive(_) => emit.asm.const_int(0)?,
+            _ => emit.asm.const_null()?,
+        }
+        Ok(())
+    }
+
+    /// Match `pattern` against the value in `value`, branching to `fail` when it does not.
+    ///
+    /// Falls through on a match, with every binding written. A *record* pattern is the recursive case:
+    /// it tests the type, then reads each component through its accessor and matches the component
+    /// pattern against that — which is what makes `p instanceof Line(Point(int x, int y), var b)` one
+    /// test and a chain of reads rather than anything the source has to spell out.
+    pub(crate) fn match_pattern(
+        pattern: &SyntaxNode,
+        value: u16,
+        fail: crate::jvm::Label,
+        context: &Context<'_>,
+        emit: &mut Emit<'_, '_>,
+    ) -> Result<()> {
+        use jals_syntax::SyntaxKind::{RECORD_PATTERN, TYPE_PATTERN, UNNAMED_PATTERN};
+        match pattern.kind() {
+            // `_` matches anything and binds nothing, so there is nothing to emit.
+            UNNAMED_PATTERN => Ok(()),
+            TYPE_PATTERN => {
+                let bound = context
+                    .def_at(pattern)
+                    .ok_or(LowerError::Unsupported("a pattern with no binding"))?;
+                let slot = emit
+                    .slots
+                    .slot_of(bound)
+                    .ok_or(LowerError::Unsupported("a pattern with no slot"))?;
+                let declared = context.inference.type_of_def(bound).clone();
+                // A primitive component carries no test: its type is the component's, and a `ref`
+                // instruction over it is not a program. A reference one narrows, which is the test.
+                if matches!(declared, Ty::Primitive(_)) {
+                    emit.asm.load(value)?;
+                    return Ok(emit.asm.store(slot)?);
+                }
+                let entry = Descriptor::class_entry(&declared, context.index)?;
+                emit.asm.load(value)?;
+                emit.asm.instance_of(&entry)?;
+                emit.asm.branch(Branch::IntZero(Compare::Eq), fail)?;
+                emit.asm.load(value)?;
+                emit.asm.check_cast(&entry)?;
+                Ok(emit.asm.store(slot)?)
+            }
+            RECORD_PATTERN => {
+                let ty = pattern
+                    .children()
+                    .find_map(ast::Type::cast)
+                    .ok_or(LowerError::Unsupported("a `record` pattern with no type"))?;
+                let target = context.ty_of_type(&ty)?;
+                let item = target
+                    .project_id()
+                    .ok_or(LowerError::Unsupported("a `record` pattern on no record"))?;
+                let entry = Descriptor::class_entry(&target, context.index)?;
+                emit.asm.load(value)?;
+                emit.asm.instance_of(&entry)?;
+                emit.asm.branch(Branch::IntZero(Compare::Eq), fail)?;
+                let narrowed = emit.slots.declare_temporary(1);
+                emit.asm.load(value)?;
+                emit.asm.check_cast(&entry)?;
+                emit.asm.store(narrowed)?;
+                // The components in header order, which is the order the sub-patterns are written in.
+                let components: alloc::vec::Vec<MemberId> = context
+                    .index
+                    .own_members(item)
+                    .iter()
+                    .copied()
+                    .filter(|&member| {
+                        let info = context.index.member(member);
+                        info.kind == DefKind::Field && !info.modifiers.is_static
+                    })
+                    .collect();
+                let subs: alloc::vec::Vec<SyntaxNode> = pattern
+                    .children()
+                    .filter(|child| {
+                        matches!(
+                            child.kind(),
+                            TYPE_PATTERN | RECORD_PATTERN | UNNAMED_PATTERN
+                        )
+                    })
+                    .collect();
+                if subs.len() != components.len() {
+                    return Err(LowerError::Unsupported(
+                        "a `record` pattern of the wrong arity",
+                    ));
+                }
+                for (component, sub) in components.iter().zip(&subs) {
+                    let info = context.index.member(*component);
+                    let component_ty = context.index.resolved_member_ty(*component);
+                    let descriptor =
+                        Descriptor::descriptor_of(&component_ty, context.index)?.to_string();
+                    let held = emit
+                        .slots
+                        .declare_temporary(crate::lower::Slots::ty_width(&component_ty));
+                    emit.asm.load(narrowed)?;
+                    // Read through the *accessor*, which is what a deconstruction calls (§14.30.1): a
+                    // record may declare one by hand, and reading the field would go around it.
+                    emit.asm.invoke_virtual(
+                        &entry,
+                        &info.name,
+                        &alloc::format!("(){descriptor}"),
+                    )?;
+                    emit.asm.store(held)?;
+                    Self::match_pattern(sub, held, fail, context, emit)?;
+                }
+                Ok(())
+            }
+            _ => Err(LowerError::Unsupported("an `instanceof` pattern")),
+        }
     }
 
     /// `a && b` / `a || b`, which evaluate `b` only when `a` did not already decide the answer.

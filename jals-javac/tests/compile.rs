@@ -4043,17 +4043,6 @@ public class Patterns {
     );
 }
 
-/// A `record` pattern and an unnamed one are still reported: both are a different lowering.
-#[test]
-fn a_record_pattern_is_reported() {
-    let source = "record P(int x) {} public class Q { static boolean f(Object o) { return o instanceof P(int a); } }";
-    let error = compile(source).expect_err("a record pattern deconstructs");
-    assert!(
-        matches!(error, LowerError::Unsupported("an `instanceof` pattern")),
-        "got {error}"
-    );
-}
-
 /// A pattern `switch`, both syntaxes, with a guard.
 ///
 /// A pattern is not a constant, so there is nothing for a jump table to index on: the arms' types are
@@ -4294,4 +4283,46 @@ public class Bodies {
         return;
     }
     assert_eq!(run(source, "Bodies"), "5\n19\n8\n39\n1 MUL\n2\n");
+}
+
+/// A `record` pattern, which deconstructs.
+///
+/// The recursive case: test the type, then read each component through its *accessor* — which is what a
+/// deconstruction calls (§14.30.1), a record being free to declare one by hand — and match the component
+/// pattern against that. So a nested pattern is one test and a chain of reads rather than anything the
+/// source has to spell out. `_` matches anything and binds nothing, so it emits nothing at all.
+///
+/// A primitive component carries no test: its type is the component's, and there is no narrowing to do.
+#[test]
+fn a_record_pattern_deconstructs() {
+    let source = r#"
+record Point(int x, int y) {}
+record Line(Point a, Point b) {}
+
+public class Deconstruct {
+    static String describe(Object o) {
+        if (o instanceof Point(int x, int y)) {
+            return "point " + x + "," + y;
+        }
+        return "other";
+    }
+
+    static int total(Object o) {
+        return switch (o) {
+            case Line(Point(int x, int y), Point a) -> x + y + a.x() + a.y();
+            case Point(int x, _) -> x;
+            default -> -1;
+        };
+    }
+
+    public static void main(String[] args) {
+        System.out.println(describe(new Point(1, 2)));
+        System.out.println(describe("no"));
+        System.out.println(total(new Line(new Point(1, 2), new Point(3, 4))));
+        System.out.println(total(new Point(9, 8)));
+        System.out.println(total("no"));
+    }
+}
+"#;
+    assert_eq!(run(source, "Deconstruct"), "point 1,2\nother\n10\n9\n-1\n");
 }

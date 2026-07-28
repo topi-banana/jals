@@ -28,10 +28,8 @@ use jals_syntax::SyntaxKind::{
 };
 use jals_syntax::ast::{self, AstNode as _};
 
-use crate::desc::Descriptor;
 use crate::jvm::{Branch, Compare, Label};
 use crate::lower::expr::Expr;
-use crate::lower::slots::Slots;
 use crate::lower::stmt::Stmt;
 use crate::lower::{Context, Emit, LowerError, Result};
 
@@ -171,21 +169,12 @@ impl Switch {
             if label.is_default() {
                 is_default = true;
             }
-            // A *record* pattern deconstructs and an unnamed one binds nothing under a name this could
-            // find; both are a different lowering. A type pattern tests a type and binds one name.
-            if label
-                .syntax()
-                .children()
-                .any(|child| matches!(child.kind(), RECORD_PATTERN | UNNAMED_PATTERN))
-            {
-                return Err(LowerError::Unsupported("a `case` pattern"));
-            }
-            patterns.extend(
-                label
-                    .syntax()
-                    .children()
-                    .filter(|child| child.kind() == TYPE_PATTERN),
-            );
+            patterns.extend(label.syntax().children().filter(|child| {
+                matches!(
+                    child.kind(),
+                    TYPE_PATTERN | RECORD_PATTERN | UNNAMED_PATTERN
+                )
+            }));
             if let Some(clause) = label.syntax().children().find_map(ast::Guard::cast) {
                 guard = clause.condition();
                 if guard.is_none() {
@@ -265,17 +254,9 @@ impl Switch {
         if arms.iter().any(|arm| !arm.keys.is_empty()) {
             return Err(LowerError::Unsupported("a `switch` mixing key types"));
         }
-        let mut bindings = Vec::new();
         for arm in arms {
             for pattern in &arm.patterns {
-                let bound = context
-                    .def_at(pattern)
-                    .ok_or(LowerError::Unsupported("a `case` pattern with no binding"))?;
-                let ty = context.inference.type_of_def(bound);
-                let slot = emit.slots.declare(bound, Slots::ty_width(ty));
-                emit.asm.const_null()?;
-                emit.asm.store(slot)?;
-                bindings.push((pattern.clone(), slot));
+                Expr::declare_bindings(pattern, context, emit)?;
             }
         }
         let scratch = emit.slots.declare_temporary(1);
@@ -288,23 +269,8 @@ impl Switch {
             }
             let next = emit.asm.label();
             for pattern in &arm.patterns {
-                let ty = pattern
-                    .children()
-                    .find_map(ast::Type::cast)
-                    .ok_or(LowerError::Unsupported("a `case` pattern with no type"))?;
-                let entry = Descriptor::class_entry(&context.ty_of_type(&ty)?, context.index)?;
-                let slot = bindings
-                    .iter()
-                    .find(|(node, _)| node == pattern)
-                    .map(|&(_, slot)| slot)
-                    .ok_or(LowerError::Unsupported("a `case` pattern with no binding"))?;
-                emit.asm.load(scratch)?;
-                emit.asm.instance_of(&entry)?;
-                emit.asm.branch(Branch::IntZero(Compare::Eq), next)?;
                 // Bound before the guard runs, because the guard is written in terms of the binding.
-                emit.asm.load(scratch)?;
-                emit.asm.check_cast(&entry)?;
-                emit.asm.store(slot)?;
+                Expr::match_pattern(pattern, scratch, next, context, emit)?;
             }
             if let Some(guard) = &arm.guard {
                 Expr::lower(guard, context, emit)?;
