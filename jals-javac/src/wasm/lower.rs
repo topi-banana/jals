@@ -642,13 +642,39 @@ impl Body {
         }
 
         let mut insn = Insn::new();
-        if let Some(block) = method.node.children().find_map(ast::Block::cast) {
-            lowering.block(&block, &mut insn)?;
+        let block = method.node.children().find_map(ast::Block::cast);
+        // An instance field initialiser is not a statement anywhere in the source, so a constructor
+        // that emitted only its own body left every one of them unrun — a field reading back as its
+        // type's default in a module that validates. A `this(…)` delegation is the exception: the
+        // constructor it reaches runs them, and running them twice would undo what it did.
+        if method.is_constructor && !block.as_ref().is_some_and(Self::delegates_to_this) {
+            lowering.initializers(&mut insn)?;
+        }
+        if let Some(block) = &block {
+            lowering.block(block, &mut insn)?;
         }
         Ok(Self {
             locals: lowering.locals,
             code: insn.into_body(),
         })
+    }
+}
+
+impl Body {
+    /// Whether a constructor body begins with `this(…)` rather than `super(…)` or a statement.
+    fn delegates_to_this(block: &ast::Block) -> bool {
+        let Some(ast::Stmt::Expr(first)) = block.stmts().next() else {
+            return false;
+        };
+        let Some(ast::Expr::Call(call)) = first.expr() else {
+            return false;
+        };
+        matches!(call.callee(), Some(ast::Expr::NameRef(name))
+            if name
+                .syntax()
+                .children_with_tokens()
+                .filter_map(jals_syntax::SyntaxElement::into_token)
+                .any(|token| token.kind() == jals_syntax::SyntaxKind::THIS_KW))
     }
 }
 
@@ -696,6 +722,75 @@ struct Loop {
 }
 
 impl Lowering<'_> {
+    /// Every instance field initialiser the enclosing class declares, in source order.
+    ///
+    /// They run before the constructor's own body (JLS §12.5), which is why they are emitted here
+    /// rather than reached through `stmt` — a `FIELD_DECL` is not a statement.
+    fn initializers(&mut self, insn: &mut Insn) -> Result<()> {
+        let Some(owner) = self.owner else {
+            return Ok(());
+        };
+        let struct_type = self.layout.structs[&owner];
+        let fields: Vec<SyntaxNode> = self
+            .input
+            .root
+            .descendants()
+            .filter(|node| node.kind() == FIELD_DECL)
+            .filter(|node| {
+                // Only *this* class's fields: a sibling or nested declaration has its own
+                // constructor, and its initialisers belong there.
+                node.parent()
+                    .and_then(|body| body.parent())
+                    .is_some_and(|declaration| {
+                        Self::declares(&declaration, owner, self.input, self.index)
+                    })
+            })
+            .collect();
+        for node in fields {
+            let Some(declaration) = ast::FieldDecl::cast(node.clone()) else {
+                continue;
+            };
+            let names: Vec<SyntaxToken> = declaration.names().collect();
+            let values: Vec<ast::Expr> = node.children().filter_map(ast::Expr::cast).collect();
+            for (position, name) in names.iter().enumerate() {
+                let Some(value) = values.get(position) else {
+                    continue;
+                };
+                let Some(member) = self
+                    .index
+                    .member_by_decl(self.input.file, usize::from(name.text_range().start()))
+                else {
+                    continue;
+                };
+                if self.index.member(member).modifiers.is_static {
+                    continue;
+                }
+                let Some(slot) = self.layout.field_slot(owner, member) else {
+                    continue;
+                };
+                insn.local_get(0);
+                self.expr(value, insn)?
+                    .ok_or(WasmError::Unsupported("a field initialiser with no value"))?;
+                insn.struct_set(struct_type, slot);
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the type declaration `node` is the indexed item `owner`.
+    fn declares(
+        node: &SyntaxNode,
+        owner: ItemId,
+        input: &WasmInput<'_>,
+        index: &ProjectIndex,
+    ) -> bool {
+        node.children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+            .and_then(|name| index.item_by_decl(input.file, usize::from(name.text_range().start())))
+            == Some(owner)
+    }
+
     fn declare_param(&mut self, node: &SyntaxNode) -> Result<ValType> {
         let id = self
             .def_at(node)
@@ -2531,6 +2626,12 @@ impl Lowering<'_> {
         }
         insn.call(function);
 
+        // A constructor has no return type at all — `resolved_member_ty` reports `Unknown` for one,
+        // which is not a type this backend could represent even in principle. `this(…)` and `super(…)`
+        // are calls to one, and they produce no value.
+        if self.index.member(member).kind == DefKind::Constructor {
+            return Ok(None);
+        }
         match self.index.resolved_member_ty(member) {
             Ty::Void => Ok(None),
             ty => Ok(Some(self.layout.val_type(&ty)?)),

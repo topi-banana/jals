@@ -979,3 +979,61 @@ fn each_uncompiled_statement_form_names_itself() {
     let source = "public class S { public static int run(int n) { assert n > 0; return n; } }";
     assert_invoke(&[source], "run", &["-5"], "-5");
 }
+
+/// Constructor delegation, `this(…)` and `super(…)`.
+///
+/// Both are calls to a constructor, and a constructor has no return type at all — `resolved_member_ty`
+/// reports `Unknown` for one, which is not a type this backend could represent even in principle. Asking
+/// for its wasm type reported that `?` had no representation, which is true and useless: the fix is that
+/// a constructor call produces no value. wasm needs no `invokespecial`/`invokevirtual` distinction for
+/// either form, and declared subtyping is what lets a subclass reference reach the superclass
+/// constructor's parameter 0.
+#[test]
+fn constructor_delegation_runs() {
+    let source = r"
+public class Base {
+    int a;
+    Base(int a) { this.a = a; }
+}
+
+public class Derived extends Base {
+    int b;
+    // `super(a)` reaches `Base`'s constructor with `this` as its receiver.
+    Derived(int a, int b) { super(a); this.b = b; }
+    // `this(a, 100)` reaches this class's own two-argument one.
+    Derived(int a) { this(a, 100); }
+
+    public static int delegated(int n) {
+        Derived d = new Derived(n);
+        return d.a + d.b;
+    }
+
+    public static int direct(int n) {
+        Derived d = new Derived(n, 2);
+        return d.a + d.b;
+    }
+}
+";
+    assert_invoke(&[source], "delegated", &["5"], "105");
+    assert_invoke(&[source], "direct", &["5"], "7");
+}
+
+/// An instance field initialiser is not a statement anywhere in the source, so a constructor that
+/// emitted only its own body left every one of them unrun.
+#[test]
+fn an_instance_field_initialiser_runs() {
+    let source = r"
+public class Seeded {
+    int fixed = 7;
+    int given;
+
+    Seeded(int given) { this.given = given; }
+
+    public static int summed(int n) {
+        Seeded it = new Seeded(n);
+        return it.fixed + it.given;
+    }
+}
+";
+    assert_invoke(&[source], "summed", &["3"], "10");
+}
