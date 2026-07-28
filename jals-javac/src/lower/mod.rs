@@ -1164,6 +1164,19 @@ impl Compile {
             }
             _ => out.push('V'),
         }
+        // A thrown *type variable* is the one case the encoding needs a `throws` part for: an ordinary
+        // thrown class is already in the `Exceptions` attribute and adds nothing here.
+        let thrown: Vec<ast::Type> = node
+            .children()
+            .filter(|child| child.kind() == jals_syntax::SyntaxKind::THROWS_CLAUSE)
+            .flat_map(|clause| clause.children().filter_map(ast::Type::cast))
+            .collect();
+        if thrown.iter().any(|ty| Self::mentions_variable(ty, &vars)) {
+            for ty in &thrown {
+                out.push('^');
+                out.push_str(&Self::type_signature(ty, &vars, context)?);
+            }
+        }
         Ok(Some(out))
     }
 
@@ -1187,7 +1200,7 @@ impl Compile {
     /// class signature erases its supertypes: leaving them out loses only what a reflective reader would
     /// see, never what the JVM links on.
     fn type_signature(ty: &ast::Type, vars: &[String], context: &Context<'_>) -> Result<String> {
-        use jals_syntax::SyntaxKind::LBRACK;
+        use jals_syntax::SyntaxKind::{LBRACK, TYPE_ARGS};
         let dimensions = ty
             .syntax()
             .children_with_tokens()
@@ -1208,23 +1221,85 @@ impl Compile {
         let erased = context.ty_of_type(ty)?;
         let descriptor = Descriptor::descriptor_of(&erased, context.index)?.to_string();
         let name = descriptor.trim_start_matches('[');
-        let arguments: Vec<ast::Type> = ty
+        let Some(args) = ty
             .syntax()
             .children()
-            .find_map(ast::TypeArgs::cast)
-            .map(|args| args.args().collect())
-            .unwrap_or_default();
-        if arguments.is_empty() || !name.starts_with('L') {
+            .find(|child| child.kind() == TYPE_ARGS)
+        else {
+            out.push_str(name);
+            return Ok(out);
+        };
+        let rendered = Self::argument_signatures(&args, vars, context)?;
+        if rendered.is_empty() || !name.starts_with('L') {
             out.push_str(name);
             return Ok(out);
         }
         // `Lname<args>;` — the arguments go before the terminating semicolon, not after it.
         out.push_str(name.trim_end_matches(';'));
         out.push('<');
-        for argument in &arguments {
-            out.push_str(&Self::type_signature(argument, vars, context)?);
+        for argument in &rendered {
+            out.push_str(argument);
         }
         out.push_str(">;");
+        Ok(out)
+    }
+
+    /// One `TypeArgument` per argument in a `TYPE_ARGS` node, in order.
+    ///
+    /// A wildcard is *not* wrapped in a type node of its own: its `?`, its `extends` / `super`, and its
+    /// bound are all direct children of the argument list. So the list is walked in order rather than
+    /// through the typed accessor, which skips the `?` and would render `? extends T` as plain `T`.
+    fn argument_signatures(
+        args: &SyntaxNode,
+        vars: &[String],
+        context: &Context<'_>,
+    ) -> Result<Vec<String>> {
+        use jals_syntax::SyntaxKind::{EXTENDS_KW, QUESTION, SUPER_KW};
+        let mut out = Vec::new();
+        let mut pending: Option<char> = None;
+        for child in args.children_with_tokens() {
+            match child {
+                jals_syntax::SyntaxElement::Token(token) => match token.kind() {
+                    // A `?` with no bound is `*`, which only the *next* element can tell us: flush it
+                    // when the argument ends rather than guessing here.
+                    QUESTION => {
+                        if pending.is_some() {
+                            out.push("*".to_owned());
+                        }
+                        pending = Some('*');
+                    }
+                    EXTENDS_KW if pending.is_some() => pending = Some('+'),
+                    SUPER_KW if pending.is_some() => pending = Some('-'),
+                    jals_syntax::SyntaxKind::COMMA | jals_syntax::SyntaxKind::GT
+                        if pending == Some('*') =>
+                    {
+                        pending = None;
+                        out.push("*".to_owned());
+                    }
+                    _ => {}
+                },
+                jals_syntax::SyntaxElement::Node(node) => {
+                    let Some(ty) = ast::Type::cast(node) else {
+                        continue;
+                    };
+                    let rendered = Self::type_signature(&ty, vars, context)?;
+                    match pending.take() {
+                        Some('+') => out.push(alloc::format!("+{rendered}")),
+                        Some('-') => out.push(alloc::format!("-{rendered}")),
+                        // A `?` immediately followed by a type with no keyword between cannot happen in
+                        // a well-formed program; treat the `?` as unbounded and the type as its own.
+                        Some(_) => {
+                            out.push("*".to_owned());
+                            out.push(rendered);
+                        }
+                        None => out.push(rendered),
+                    }
+                }
+            }
+        }
+        if pending.is_some() {
+            out.push("*".to_owned());
+        }
         Ok(out)
     }
 
@@ -1234,8 +1309,13 @@ impl Compile {
         ty.syntax()
             .descendants_with_tokens()
             .filter_map(jals_syntax::SyntaxElement::into_token)
-            .filter(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
-            .any(|token| vars.iter().any(|var| var == token.text()))
+            .any(|token| match token.kind() {
+                jals_syntax::SyntaxKind::IDENT => vars.iter().any(|var| var == token.text()),
+                // A wildcard names no variable and still needs a signature: `Holder<?>` erases to
+                // `Holder`, and the `?` exists nowhere else.
+                jals_syntax::SyntaxKind::QUESTION => true,
+                _ => false,
+            })
     }
 
     /// A record's synthesised members: a `private final` field per component, the canonical

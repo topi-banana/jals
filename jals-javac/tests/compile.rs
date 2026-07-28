@@ -3074,6 +3074,16 @@ class Holder<T> {
 
     // A written type argument survives here too, not just on the declaration.
     Holder<T> self() { return this; }
+
+    // Wildcards: `*` unbounded, `+X` for `? extends X`, `-X` for `? super X`.
+    Holder<?> any() { return this; }
+
+    Holder<? extends T> covariant() { return this; }
+
+    Holder<? super T> contravariant() { return this; }
+
+    // A thrown *type variable* is the one case the encoding needs a `throws` part for.
+    T risky() throws java.io.IOException { return value; }
 }
 ";
     let classes = compile(source).expect("compile");
@@ -3141,6 +3151,13 @@ class Holder<T> {
             ("ungeneric".to_owned(), None),
             ("many".to_owned(), Some("()[TT;".to_owned())),
             ("self".to_owned(), Some("()LHolder<TT;>;".to_owned())),
+            ("any".to_owned(), Some("()LHolder<*>;".to_owned())),
+            ("covariant".to_owned(), Some("()LHolder<+TT;>;".to_owned())),
+            (
+                "contravariant".to_owned(),
+                Some("()LHolder<-TT;>;".to_owned())
+            ),
+            ("risky".to_owned(), Some("()TT;".to_owned())),
             ("<init>".to_owned(), None),
         ]
     );
