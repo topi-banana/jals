@@ -122,7 +122,12 @@ impl Expr {
                 let ty = Self::type_of(init.syntax(), context)?;
                 Self::array_initializer(init, &ty, context, emit)
             }
-            _ => Err(LowerError::Unsupported("this expression form")),
+            // Both need `invokedynamic` and a `BootstrapMethods` attribute, and the constant pool has
+            // no `MethodHandle` / `MethodType` / `InvokeDynamic` builder yet. Each names itself rather
+            // than sharing a catch-all: a report that says only "this expression form" sends a reader
+            // looking for which one.
+            ast::Expr::Lambda(_) => Err(LowerError::Unsupported("a lambda")),
+            ast::Expr::MethodRef(_) => Err(LowerError::Unsupported("a method reference")),
         }
     }
 

@@ -1656,7 +1656,13 @@ impl Lowering<'_> {
                 Ok(Some(ty))
             }
             ast::Expr::Cast(cast) => self.cast(cast, insn).map(Some),
-            _ => Err(WasmError::Unsupported("this expression form")),
+            // Both need a function reference and a target type to make one *of*; the interface that
+            // would be that type is not laid out yet either. Each names itself rather than sharing a
+            // catch-all, which said only "this expression form".
+            ast::Expr::Lambda(_) => Err(WasmError::Unsupported("a lambda")),
+            ast::Expr::MethodRef(_) => Err(WasmError::Unsupported("a method reference")),
+            ast::Expr::ClassLiteral(_) => Err(WasmError::Unsupported("a `.class` literal")),
+            ast::Expr::ArrayInit(_) => Err(WasmError::Unsupported("an array initialiser")),
         }
     }
 

@@ -1341,13 +1341,12 @@ public class Several {
     assert_eq!(run(source, "Several"), "1\n2\n3\n67\n");
 }
 
-/// Object creation is still not lowered, so the construct is reported rather than dropped. Both `new`
-/// forms stop here, and so do the features the milestones after this one bring.
+/// The constructs still ahead, each reported rather than dropped and each naming *itself*.
 #[test]
 fn the_features_after_this_milestone_are_still_reported() {
     for (source, expected) in [
-        ("Runnable r = () -> {};", "this expression form"),
-        ("Runnable r = Later::main;", "this expression form"),
+        ("Runnable r = () -> {};", "a lambda"),
+        ("Runnable r = Later::main;", "a method reference"),
         ("Object o = new Later() { };", "an anonymous class"),
         ("class Inner {}", "a local type declaration"),
     ] {
@@ -2939,4 +2938,30 @@ public class Holder {
     }
     // The JVM has to load and verify all three, `Marker` included.
     assert_eq!(run(source, "Holder"), "ran\n");
+}
+
+/// A lambda and a method reference each name themselves.
+///
+/// Both need `invokedynamic` and a `BootstrapMethods` attribute, and the constant pool has no
+/// `MethodHandle` / `MethodType` / `InvokeDynamic` builder yet. A report that says only "this expression
+/// form" sends a reader looking for which one it meant.
+#[test]
+fn a_lambda_and_a_method_reference_each_name_themselves() {
+    for (source, expected) in [
+        (
+            "interface F { int f(int n); } class C { F g() { return n -> n + 1; } }",
+            "a lambda",
+        ),
+        (
+            "interface F { int f(int n); } class C { static int h(int n) { return n; } \
+             F g() { return C::h; } }",
+            "a method reference",
+        ),
+    ] {
+        let error = compile(source).expect_err("this form is not compiled yet");
+        assert!(
+            matches!(error, LowerError::Unsupported(what) if what == expected),
+            "`{source}` should report {expected:?}, got {error}"
+        );
+    }
 }

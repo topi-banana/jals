@@ -1144,3 +1144,19 @@ fn each_unrepresentable_type_declaration_names_itself() {
         );
     }
 }
+
+/// Each uncompiled expression form names itself too.
+///
+/// An array initialiser is the one array form still missing. A lambda, a method reference, and `.class`
+/// each name themselves too, but none is reachable from a compiling program yet: every one of them
+/// needs a *target type* the backend reports first — an interface it does not lay out, or a library
+/// type it has no representation for.
+#[test]
+fn each_uncompiled_expression_form_names_itself() {
+    let source = "public class E { public static int run(int n) { int[] a = {1, 2}; return n; } }";
+    let error = compile(&[source]).expect_err("an array initialiser is not compiled yet");
+    assert!(
+        matches!(error, WasmError::Unsupported("an array initialiser")),
+        "got {error}"
+    );
+}
