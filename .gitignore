@@ -2,10 +2,15 @@
 /jals-playground/dist
 # Prebuilt `jals` binary vendored by the npm/bun launcher at install/first run.
 /npm/vendor
-# Generated golden corpus (derivatives of GPL'd OpenJDK sources — do not commit).
+# Generated golden corpora, one per reference formatter (derivatives of GPL'd OpenJDK
+# sources — do not commit). The `.tmp.*` names are the scratch dirs the generator swaps
+# from; they live on the same filesystem as the corpus so the final move is a rename.
 /jals-tests/sources/openjdk-gjf
-# Scratch dirs the golden generator swaps from (same fs as the corpus, for atomic rename).
-/jals-tests/sources/openjdk-gjf.tmp.*
-# Local google-java-format jar for golden generation (binary — never commit).
+/jals-tests/sources/openjdk-palantir
+/jals-tests/sources/openjdk-eclipse
+/jals-tests/sources/openjdk-intellij
+/jals-tests/sources/openjdk-*.tmp.*
+# Locally fetched reference formatters and the compiled Eclipse driver (binaries — never
+# commit).
 /jals-tests/vendor
 google-java-format-*.jar
