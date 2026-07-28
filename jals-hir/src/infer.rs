@@ -1135,7 +1135,12 @@ impl<'a> Inferer<'a> {
         {
             return self.def_types[id.0 as usize].clone();
         }
-        Ty::Unknown
+        // Nothing in the file declared it, which an **inherited** field never is: name resolution is
+        // file-local and a superclass's field may not even be in this file. So the name is looked up on
+        // the enclosing type, which is the implicit `this` a bare call already reads its callee from —
+        // and the member lookup walks the supertypes. Without this `own + 1` had an operand of no type
+        // at all, in a class where the read itself is perfectly ordinary.
+        self.member_ty(&self.self_ty(node), tok.text(), Namespace::Value)
     }
 
     /// The indexed type `name` resolves to from this file, or an external one by that name.

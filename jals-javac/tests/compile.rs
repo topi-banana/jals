@@ -3944,3 +3944,61 @@ public class Uses {
     }
     assert_eq!(run(source, "Uses"), "42\n7\n");
 }
+
+/// An unqualified name that reaches an **inherited** field.
+///
+/// File-local resolution binds a name to a declaration it can see, and a superclass's field is not one of
+/// those — it is reached through the index, the same way a call to an inherited method already was. Both
+/// `this.s` and `m()` worked for that reason; the bare `s` reported `Unresolved`, which is the one form
+/// that had no route. It is looked up on the enclosing type and then up the superclass chain, nearest
+/// first, which is the order that makes a shadowing field win.
+#[test]
+fn an_unqualified_name_reaches_an_inherited_field() {
+    let source = r"
+class Base {
+    int seed = 4;
+    static int shared = 9;
+    long wide = 100L;
+}
+
+class Middle extends Base {
+    int own = 1;
+}
+
+class Leaf extends Middle {
+    // A field of the same name shadows the inherited one, and the nearest declaration wins.
+    int seed = 7;
+
+    int shadowed() { return seed; }
+
+    int inherited() { return own; }
+
+    int statics() { return shared; }
+
+    long widened() { return wide; }
+
+    // Assignment, not only reading: `Place` takes the same route.
+    int bumped() {
+        wide += 5L;
+        own++;
+        shared = 20;
+        // An inherited name as an *operand*: inference recorded no type for it, so the promotion had
+        // nothing to promote.
+        own = own + 1;
+        return own + (int) wide + shared;
+    }
+}
+
+public class Inherit {
+    public static void main(String[] args) {
+        Leaf leaf = new Leaf();
+        System.out.println(leaf.shadowed());
+        System.out.println(leaf.inherited());
+        System.out.println(leaf.statics());
+        System.out.println(leaf.widened());
+        System.out.println(leaf.bumped());
+    }
+}
+";
+    assert_eq!(run(source, "Inherit"), "7\n1\n9\n100\n128\n");
+}

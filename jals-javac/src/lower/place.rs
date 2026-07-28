@@ -75,15 +75,23 @@ impl Place {
         if Expr::is_this(name.syntax()) {
             return Err(LowerError::Unsupported("an assignment to `this`"));
         }
-        let text = || LowerError::Unresolved(name.syntax().text().to_string().trim().into());
-        let id = context.def_at(name.syntax()).ok_or_else(text)?;
-        if let Some(slot) = emit.slots.slot_of(id) {
-            return Ok(Self::Local {
-                slot,
-                ty: context.inference.type_of_def(id).clone(),
-            });
-        }
-        let member = Expr::own_field(id, context).ok_or_else(text)?;
+        let written = name.syntax().text().to_string();
+        let text = || LowerError::Unresolved(written.trim().into());
+        let member = match context.def_at(name.syntax()) {
+            Some(id) => {
+                if let Some(slot) = emit.slots.slot_of(id) {
+                    return Ok(Self::Local {
+                        slot,
+                        ty: context.inference.type_of_def(id).clone(),
+                    });
+                }
+                Expr::own_field(id, context)
+            }
+            // Nothing in the file declared it, which an *inherited* field never is.
+            None => Expr::name_text(name.syntax())
+                .and_then(|written| Expr::inherited_field(&written, context)),
+        };
+        let member = member.ok_or_else(text)?;
         let (owner, field, descriptor) = Expr::field_ref(member, context)?;
         let ty = context.index.resolved_member_ty(member);
         if context.index.member(member).modifiers.is_static {

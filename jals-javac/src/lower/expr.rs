@@ -543,18 +543,26 @@ impl Expr {
         }
         let text = name.syntax().text().to_string();
         let unresolved = || LowerError::Unresolved(text.trim().into());
-        let id = context.def_at(name.syntax()).ok_or_else(unresolved)?;
-        if let Some(slot) = emit.slots.slot_of(id) {
-            emit.asm.load(slot)?;
-            return Ok(());
-        }
-        // A captured local is not a local *here*: it lives in a synthetic field the constructor filled.
-        if let Some(read) = Self::captured_read(id, context)? {
-            emit.load_this()?;
-            emit.asm.get_field(&context.this_class, &read.0, &read.1)?;
-            return Ok(());
-        }
-        let member = Self::own_field(id, context).ok_or_else(unresolved)?;
+        let member = match context.def_at(name.syntax()) {
+            Some(id) => {
+                if let Some(slot) = emit.slots.slot_of(id) {
+                    emit.asm.load(slot)?;
+                    return Ok(());
+                }
+                // A captured local is not a local *here*: it lives in a synthetic field the constructor
+                // filled.
+                if let Some(read) = Self::captured_read(id, context)? {
+                    emit.load_this()?;
+                    emit.asm.get_field(&context.this_class, &read.0, &read.1)?;
+                    return Ok(());
+                }
+                Self::own_field(id, context)
+            }
+            // Nothing in the file declared it, which an *inherited* field never is.
+            None => Self::name_text(name.syntax())
+                .and_then(|written| Self::inherited_field(&written, context)),
+        };
+        let member = member.ok_or_else(unresolved)?;
         let (owner, field, descriptor) = Self::field_ref(member, context)?;
         if context.index.member(member).modifiers.is_static {
             emit.asm.get_static(&owner, &field, &descriptor)?;
@@ -599,6 +607,49 @@ impl Expr {
         context
             .index
             .member_by_decl(context.file, declaration.name_range.start)
+    }
+
+    /// The identifier a name reference is written with, without the trivia the node carries.
+    ///
+    /// A `NAME_REF`'s text runs from the start of its leading trivia, so a comment on the line above is
+    /// part of it. The token is the name; everything else is layout.
+    pub(crate) fn name_text(node: &SyntaxNode) -> Option<String> {
+        node.children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+            .map(|token| token.text().to_owned())
+    }
+
+    /// The field an unqualified name reaches when nothing in the file declared it: one of a supertype's.
+    ///
+    /// File-local resolution binds a name to a declaration it can see, and a superclass's field is not
+    /// one of those — it is reached through the index, the same way a call to an inherited method is.
+    /// So a name that resolved to nothing is looked up by name on the enclosing type and then up the
+    /// superclass chain, nearest first, which is the order that makes a shadowing field win.
+    pub(crate) fn inherited_field(name: &str, context: &Context<'_>) -> Option<MemberId> {
+        let mut candidate = Some(context.this_item);
+        while let Some(item) = candidate {
+            if let Some(member) = context
+                .index
+                .own_members(item)
+                .iter()
+                .copied()
+                .find(|&member| {
+                    let info = context.index.member(member);
+                    info.kind == DefKind::Field && info.name == name
+                })
+            {
+                return Some(member);
+            }
+            candidate = context
+                .index
+                .item(item)
+                .supertypes
+                .iter()
+                .map(|supertype| supertype.id)
+                .find(|&id| context.index.item(id).kind != DefKind::Interface);
+        }
+        None
     }
 
     /// `receiver.name`: a field read, `static` or instance.
