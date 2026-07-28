@@ -46,7 +46,8 @@ use jals_hir::{
     DefId, DefKind, FileId, ItemId, MemberId, Primitive, ProjectIndex, Resolved, Ty, TypeInference,
 };
 use jals_syntax::SyntaxKind::{
-    CLASS_DECL, CONSTRUCTOR_DECL, FIELD_DECL, INITIALIZER, INTERFACE_DECL, METHOD_DECL, MODIFIERS,
+    CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL, ENUM_BODY, ENUM_CONSTANT, ENUM_DECL, FIELD_DECL,
+    INITIALIZER, INTERFACE_DECL, METHOD_DECL, MODIFIERS,
 };
 use jals_syntax::ast::{self, AstNode as _};
 use jals_syntax::{SyntaxNode, SyntaxToken};
@@ -177,6 +178,13 @@ impl CompileWasm {
         for input in inputs {
             layout.declare_statics(input, index, &mut module, &mut deferred)?;
         }
+        // An `enum`'s constants are `static final` fields of the enum's own type, and the source writes
+        // no initialiser for any of them: each one is an allocation, which is not a constant expression.
+        // So they get globals here and are built in the start function, in declaration order.
+        let mut constants = Vec::new();
+        for input in inputs {
+            layout.declare_constants(input, index, &mut module, &mut constants)?;
+        }
 
         // Pass 2: every method gets a signature and a function index, so a call emitted in pass 3
         // can name a function declared later in the source.
@@ -210,7 +218,7 @@ impl CompileWasm {
         // A `static` initialiser cannot live in a global's constant expression, so it runs in the
         // module's start function — which an engine calls before anything else, exactly as a JVM runs
         // `<clinit>` before the first use of the class.
-        Self::class_initializer(inputs, index, &layout, &deferred, &mut module)?;
+        Self::class_initializer(inputs, index, &layout, &deferred, &constants, &mut module)?;
         module.finish().ok_or(WasmError::TooLarge)
     }
 
@@ -221,6 +229,7 @@ impl CompileWasm {
         index: &ProjectIndex,
         layout: &Layout,
         deferred: &[(MemberId, ast::Expr)],
+        constants: &[(MemberId, ItemId)],
         module: &mut Module,
     ) -> Result<()> {
         let blocks: Vec<(usize, ast::Block)> = inputs
@@ -230,10 +239,20 @@ impl CompileWasm {
                 Self::static_initializers(input.root).map(move |block| (position, block))
             })
             .collect();
-        if deferred.is_empty() && blocks.is_empty() {
+        if deferred.is_empty() && blocks.is_empty() && constants.is_empty() {
             return Ok(());
         }
         let mut insn = Insn::new();
+        // Every constant first, before any user initialiser: a `static { … }` block or a field
+        // initialiser may name one, and §8.9.3 builds the constants before either runs.
+        for &(member, owner) in constants {
+            let global = *layout
+                .statics
+                .get(&member)
+                .ok_or(WasmError::Unsupported("an `enum` constant with no global"))?;
+            insn.struct_new_default(layout.structs[&owner]);
+            insn.global_set(global);
+        }
         let mut locals = Vec::new();
         for (position, input) in inputs.iter().enumerate() {
             let mut lowering = Lowering::for_static(input, index, layout, locals);
@@ -338,9 +357,8 @@ impl CompileWasm {
     /// `enum` and a `record` need the synthesised members the JVM backend builds. None is laid out yet,
     /// and every one of them would otherwise vanish without a word.
     const fn unrepresentable_kind(kind: jals_syntax::SyntaxKind) -> Option<&'static str> {
-        use jals_syntax::SyntaxKind::{ANNOTATION_TYPE_DECL, ENUM_DECL, RECORD_DECL};
+        use jals_syntax::SyntaxKind::{ANNOTATION_TYPE_DECL, RECORD_DECL};
         match kind {
-            ENUM_DECL => Some("an `enum` declaration"),
             RECORD_DECL => Some("a `record` declaration"),
             ANNOTATION_TYPE_DECL => Some("an `@interface` declaration"),
             _ => None,
@@ -427,10 +445,14 @@ impl CompileWasm {
             let item = index
                 .item_by_decl(input.file, usize::from(name.text_range().start()))
                 .ok_or_else(|| WasmError::Unresolved(name.text().into()))?;
-            let Some(body) = class.children().find_map(ast::ClassBody::cast) else {
+            // An `enum`'s members live under an `ENUM_BODY`, after the constants and the `;`.
+            let Some(body) = class
+                .children()
+                .find(|child| matches!(child.kind(), CLASS_BODY | ENUM_BODY))
+            else {
                 continue;
             };
-            for node in body.syntax().children() {
+            for node in body.children() {
                 if !matches!(node.kind(), METHOD_DECL | CONSTRUCTOR_DECL) {
                     continue;
                 }
@@ -629,6 +651,77 @@ impl Layout {
             }
         }
         Ok(())
+    }
+
+    /// Give every `enum` constant a global of its enum's own type.
+    ///
+    /// A constant is a `static final` field whose value the source never writes: it is an allocation,
+    /// which no constant expression can hold, so the global starts as `null` and the start function
+    /// builds it. A constant with arguments or a body is *reported* — the first needs the two synthetic
+    /// constructor parameters (`name`, `ordinal`) the index knows nothing about, and the second is an
+    /// anonymous subclass, which is its own type.
+    fn declare_constants(
+        &mut self,
+        input: &WasmInput<'_>,
+        index: &ProjectIndex,
+        module: &mut Module,
+        out: &mut Vec<(MemberId, ItemId)>,
+    ) -> Result<()> {
+        for node in input.root.descendants() {
+            if node.kind() != ENUM_DECL {
+                continue;
+            }
+            let owner = Self::owner_of(&node, input, index)?;
+            let body = node.children().find(|child| child.kind() == ENUM_BODY);
+            for member in body.iter().flat_map(SyntaxNode::children) {
+                if member.kind() != ENUM_CONSTANT {
+                    continue;
+                }
+                let constant = ast::EnumConstant::cast(member.clone())
+                    .ok_or(WasmError::Unsupported("a malformed `enum` constant"))?;
+                if constant.body().is_some() {
+                    return Err(WasmError::Unsupported("an `enum` constant with a body"));
+                }
+                if constant
+                    .args()
+                    .is_some_and(|list| list.args().next().is_some())
+                {
+                    return Err(WasmError::Unsupported("an `enum` constant with arguments"));
+                }
+                let name = member
+                    .children_with_tokens()
+                    .filter_map(jals_syntax::SyntaxElement::into_token)
+                    .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+                    .ok_or(WasmError::Unsupported("an `enum` constant with no name"))?;
+                let id = index
+                    .member_by_decl(input.file, usize::from(name.text_range().start()))
+                    .ok_or_else(|| WasmError::Unresolved(name.text().into()))?;
+                let ty = self.class_ref(owner)?;
+                let mut init = Insn::new();
+                Self::default_value(ty, &mut init);
+                module.globals.push(Global {
+                    ty,
+                    init: init.into_body(),
+                });
+                let global =
+                    u32::try_from(module.globals.len() - 1).map_err(|_| WasmError::TooLarge)?;
+                self.statics.insert(id, global);
+                out.push((id, owner));
+            }
+        }
+        Ok(())
+    }
+
+    /// The indexed item a type declaration declares.
+    fn owner_of(node: &SyntaxNode, input: &WasmInput<'_>, index: &ProjectIndex) -> Result<ItemId> {
+        let name = node
+            .children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+            .ok_or(WasmError::Unsupported("a type declaration with no name"))?;
+        index
+            .item_by_decl(input.file, usize::from(name.text_range().start()))
+            .ok_or_else(|| WasmError::Unresolved(name.text().into()))
     }
 
     /// The constant expression a `static` field's global is initialised with.

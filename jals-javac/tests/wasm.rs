@@ -1229,11 +1229,13 @@ public class Outer {
 #[test]
 fn each_unrepresentable_type_declaration_names_itself() {
     for (source, expected) in [
-        ("enum E { A, B }", "an `enum` declaration"),
         ("record R(int x) {}", "a `record` declaration"),
         ("@interface M {}", "an `@interface` declaration"),
         // Nested, which is where the silent drop used to happen.
-        ("public class O { enum E { A } }", "an `enum` declaration"),
+        (
+            "public class O { record R(int x) {} }",
+            "a `record` declaration",
+        ),
     ] {
         let error = compile(&[source]).expect_err("this declaration is not laid out yet");
         assert!(
@@ -1421,4 +1423,73 @@ public class Areas {
     assert_invoke(&[source], "the_other_one", &["4"], "12");
     assert_invoke(&[source], "as_a_parameter", &["3"], "15");
     assert_invoke(&[source], "through_a_field", &["2"], "10");
+}
+
+/// An `enum`: laid out like a class, with its constants as globals the start function builds.
+///
+/// A constant is a `static final` field whose value the source never writes — it is an *allocation*,
+/// which no constant expression can hold — so the global starts as `null` and the start function fills
+/// it, before any user initialiser, because §8.9.3 builds the constants first. Its declared fields and
+/// methods are a class's, and `==` on two constants is `ref.eq`, which is exactly what enum identity is.
+///
+/// What an enum cannot have here is anything from `java.lang.Enum`: `name()`, `toString()`, and
+/// `valueOf(String)` all involve a `String`, which has no wasm representation by this backend's existing
+/// design. A call to one reports rather than being guessed at.
+#[test]
+fn an_enum_gets_its_constants_as_globals() {
+    let source = r"
+public enum Colour {
+    RED, GREEN, BLUE;
+
+    int brightness;
+
+    int bright() { return brightness + 1; }
+}
+
+public class Palette {
+    // A declared field and a declared method, which are a class's.
+    public static int through_a_constant() {
+        Colour c = Colour.GREEN;
+        c.brightness = 4;
+        return c.bright();
+    }
+
+    // Enum identity is reference identity, and each constant is built exactly once.
+    public static int identity() {
+        return Colour.BLUE == Colour.BLUE ? 1 : 0;
+    }
+
+    public static int distinct() {
+        return Colour.RED == Colour.GREEN ? 1 : 0;
+    }
+}
+";
+    assert_invoke(&[source], "through_a_constant", &[], "5");
+    assert_invoke(&[source], "identity", &[], "1");
+    assert_invoke(&[source], "distinct", &[], "0");
+}
+
+/// The two `enum` shapes that need a wider constructor descriptor are reported.
+///
+/// A constant with arguments needs the two synthetic parameters (`name`, `ordinal`) prepended to a
+/// descriptor the index computed from the declaration; one with a body is an anonymous subclass, which is
+/// its own type. Both are the same reports the JVM backend gives, for the same reasons.
+#[test]
+fn the_enum_shapes_that_need_more_are_reported() {
+    for (source, expected) in [
+        (
+            "public enum E { A(1), B(2); int c; E(int c) { this.c = c; } }",
+            "an `enum` constant with arguments",
+        ),
+        (
+            "public enum E { A { int f() { return 1; } }, B; int f() { return 0; } }",
+            "an `enum` constant with a body",
+        ),
+    ] {
+        let error = compile(&[source]).expect_err("this enum needs more than a plain allocation");
+        assert!(
+            matches!(error, WasmError::Unsupported(what) if what == expected),
+            "`{source}` should report {expected:?}, got {error}"
+        );
+    }
 }
