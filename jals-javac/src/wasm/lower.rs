@@ -1281,9 +1281,12 @@ impl Lowering<'_> {
         Ok(slot)
     }
 
+    /// The local `id` is bound to, searched from the most recent binding: a `catch` arm rebinds its
+    /// variable once per declared type, and the copy being lowered must see its *own* local.
     fn slot_of(&self, id: DefId) -> Option<u32> {
         self.slots
             .iter()
+            .rev()
             .find(|(entry, _)| *entry == id)
             .map(|(_, slot)| *slot)
     }
@@ -1874,41 +1877,43 @@ impl Lowering<'_> {
             .find_map(ast::Block::cast)
             .ok_or(WasmError::Unsupported("a `catch` with no body"))?;
 
-        // Any of the declared types matching enters the handler, which is what a multi-catch means.
-        let mut heaps = Vec::with_capacity(types.len());
-        for ty in &types {
-            heaps.push(self.named_type(ty)?);
-        }
-        insn.i32_const(0);
-        for heap in heaps {
-            insn.local_get(caught);
-            insn.ref_test(heap, false);
-            insn.numeric(NumOp::Or, ValType::I32)
-                .ok_or(WasmError::Unsupported("a `catch` type test"))?;
-        }
-        insn.if_();
+        // A multi-catch is lowered as one arm *per declared type* rather than one arm testing several.
+        // The variable's type is the least upper bound of the declared types, so any member the source
+        // can legally reach through it is declared on that bound — and a struct's fields start with its
+        // supertype's, so the slot is the same in every one of them. Narrowing to the concrete type per
+        // copy is therefore sound, and it is the only way to give the variable a wasm type at all: there
+        // is no struct type for a bound this backend does not compute.
         let id = self
             .input
             .resolved
             .symbol_at(usize::from(name.text_range().start()))
             .ok_or_else(|| WasmError::Unresolved(name.text().into()))?;
-        let slot = self.declare_local(id)?;
-        insn.local_get(caught);
-        // The declared type narrows the payload, so the handler's variable has the type the source
-        // wrote rather than the top of the hierarchy. A multi-catch's variable is the *common*
-        // supertype, which this backend does not compute — so it is cast to the first declared type,
-        // which is right when there is one and reported when there is not.
-        if types.len() == 1 {
-            let heap = self.named_type(&types[0])?;
+        for ty in &types {
+            let heap = self.named_type(ty)?;
+            insn.local_get(caught);
+            insn.ref_test(heap, false);
+            insn.if_();
+            let declared = self.ty_of_type(ty)?;
+            let slot = self.scratch(declared);
+            insn.local_get(caught);
             insn.ref_cast(heap, true);
-        } else {
-            return Err(WasmError::Unsupported("a multi-catch variable"));
+            insn.local_set(slot);
+            self.slots.push((id, slot));
+            let lowered = self.block(&body, insn);
+            self.slots.pop();
+            lowered?;
+            insn.br(insn.depth() - out);
+            insn.end();
         }
-        insn.local_set(slot);
-        self.block(&body, insn)?;
-        insn.br(insn.depth() - out);
-        insn.end();
         Ok(())
+    }
+
+    /// The wasm type a written `TYPE` node names, for a binding the analysis records no type for.
+    fn ty_of_type(&self, ty: &ast::Type) -> Result<ValType> {
+        let HeapType::Concrete(index) = self.named_type(ty)? else {
+            return Err(WasmError::Unsupported("a `catch` type with no struct type"));
+        };
+        Ok(ValType::Ref(RefType::nullable(HeapType::Concrete(index))))
     }
 
     /// `switch (selector) { … }`, statement or expression.

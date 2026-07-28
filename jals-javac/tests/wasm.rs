@@ -1634,3 +1634,47 @@ public class Pick {
     assert_invoke(&[source], "layered", &["0"], "7");
     assert_invoke(&[source], "layered", &["3"], "9");
 }
+
+/// A multi-catch, lowered as one arm *per declared type*.
+///
+/// The variable's type is the least upper bound of the declared types, which this backend does not
+/// compute — and there is no struct type for a bound it cannot name. So each declared type gets its own
+/// copy of the handler with the variable narrowed to that type. It is sound because any member the source
+/// can legally reach through the variable is declared on the bound, and a struct's fields start with its
+/// supertype's, so the slot is the same in every one of them.
+#[test]
+fn a_multi_catch_binds_each_declared_type() {
+    let source = r"
+public class Base extends RuntimeException {
+    int code;
+    Base(int code) { this.code = code; }
+}
+
+public class Left extends Base {
+    Left(int code) { super(code); }
+}
+
+public class Right extends Base {
+    Right(int code) { super(code); }
+}
+
+public class Risky {
+    static void raise(int n) {
+        if (n > 0) { throw new Left(n); }
+        throw new Right(-n);
+    }
+
+    // `e.code` is declared on `Base`, so it is at the same slot in `Left` and in `Right`.
+    public static int caught(int n) {
+        try {
+            raise(n);
+            return 0;
+        } catch (Left | Right e) {
+            return e.code + 100;
+        }
+    }
+}
+";
+    assert_invoke(&[source], "caught", &["3"], "103");
+    assert_invoke(&[source], "caught", &["-4"], "104");
+}
