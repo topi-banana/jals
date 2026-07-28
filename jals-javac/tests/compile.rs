@@ -3301,3 +3301,75 @@ public class Host {
     }
     assert_eq!(run(source, "Host"), "12\n");
 }
+
+/// A bridge method, which is what makes an override of a *generic* supertype's method dispatch.
+///
+/// `Holder<T>.put(T)` erases to `put(Object)` in its own class file, so a class declaring `put(String)`
+/// does not override it as far as the JVM is concerned — the two descriptors differ, the class has no
+/// `put(Object)` at all, and a call through `Holder` finds nothing to dispatch to. That is an
+/// `AbstractMethodError` at run time and the one thing erasure cannot be left to sort out by itself.
+#[test]
+fn a_generic_override_gets_a_bridge() {
+    let source = r#"
+interface Holder<T> {
+    void put(T value);
+    T get();
+}
+
+public class Box implements Holder<String> {
+    String held;
+    public void put(String value) { held = value; }
+    public String get() { return held; }
+}
+
+public class Uses {
+    public static void main(String[] args) {
+        Holder<String> h = new Box();
+        h.put("kept");
+        System.out.println(h.get());
+    }
+}
+"#;
+    let classes = compile(source).expect("compile");
+    let boxed = classes
+        .iter()
+        .find(|class| class.internal_name == "Box")
+        .expect("the class");
+    let class = jals_exec::block_on_inline(jals_classfile::ClassFile::read(boxed.bytes.as_slice()))
+        .expect("reparse");
+    let name_of = |index| class.constant_pool.utf8(index).expect("utf8").into_owned();
+    let signatures: Vec<(String, String, u16)> = class
+        .methods
+        .iter()
+        .map(|method| {
+            (
+                name_of(method.name_index),
+                name_of(method.descriptor_index),
+                method.access_flags.0,
+            )
+        })
+        .collect();
+    // public | bridge | synthetic
+    assert!(
+        signatures.contains(&(
+            "put".to_owned(),
+            "(Ljava/lang/Object;)V".to_owned(),
+            0x0001 | 0x0040 | 0x1000
+        )),
+        "a bridge for the erased `put`: {signatures:?}"
+    );
+    assert!(
+        signatures.contains(&(
+            "get".to_owned(),
+            "()Ljava/lang/Object;".to_owned(),
+            0x0001 | 0x0040 | 0x1000
+        )),
+        "a bridge for the erased `get`: {signatures:?}"
+    );
+
+    if !java_available() {
+        return;
+    }
+    // Dispatching through the *interface* is what the bridge exists for.
+    assert_eq!(run(source, "Uses"), "kept\n");
+}

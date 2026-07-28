@@ -464,6 +464,11 @@ impl Compile {
             methods.push(class_init);
         }
 
+        // A generic supertype's method is *erased* in its own class file, so an override with a more
+        // specific parameter type does not override it at all as far as the JVM is concerned: the two
+        // descriptors differ. A bridge carries the erased signature and delegates.
+        Self::bridges(item, &context, &mut pool, &members, &mut methods)?;
+
         let mut nesting = Self::inner_classes(node, &context, &mut pool)?;
         // A generic declaration's type parameters survive erasure only in this attribute. Nothing at run
         // time reads it — the JVM links on descriptors — but every reflective reader does, and a class
@@ -730,6 +735,129 @@ impl Compile {
             }
         }
         out
+    }
+
+    /// One synthetic bridge per method whose erased descriptor differs from the inherited one it overrides.
+    ///
+    /// `class Box implements Holder<String> { public void put(String s) {} }` declares `put(String)`, and
+    /// `Holder.put` erases to `put(Object)`. Without a bridge the class has no `put(Object)` at all, so a
+    /// call through `Holder` finds nothing to dispatch to — an `AbstractMethodError` at run time, and the
+    /// one thing erasure cannot be left to sort out by itself.
+    fn bridges(
+        item: ItemId,
+        context: &Context<'_>,
+        pool: &mut ConstantPool,
+        members: &[SyntaxNode],
+        methods: &mut Vec<MethodInfo>,
+    ) -> Result<()> {
+        for member in members {
+            if member.kind() != METHOD_DECL {
+                continue;
+            }
+            let Some(name) = ast::MethodDecl::cast(member.clone()).and_then(|decl| decl.name())
+            else {
+                continue;
+            };
+            let Some(token) = member
+                .children_with_tokens()
+                .filter_map(jals_syntax::SyntaxElement::into_token)
+                .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+            else {
+                continue;
+            };
+            let own = context.member_at(&token)?;
+            if context.index.member(own).modifiers.is_static {
+                continue;
+            }
+            let own_text = MethodDescriptor::to_string(&Descriptor::method_descriptor(
+                own,
+                context.index,
+                false,
+            )?);
+            // Every inherited method of the same name and arity: an override of a *generic* one erases
+            // differently, and that difference is exactly what needs bridging.
+            for &inherited in &context.index.members_of(item) {
+                let info = context.index.member(inherited);
+                if inherited == own
+                    || info.owner == item
+                    || info.kind != DefKind::Method
+                    || info.name != name
+                    || info.params.len() != context.index.member(own).params.len()
+                {
+                    continue;
+                }
+                // The declaring type's own parameters, so `Holder<T>.put(T)` erases to `put(Object)`
+                // rather than failing on a name the index resolves to nothing.
+                let vars: Vec<String> = context
+                    .index
+                    .item(info.owner)
+                    .type_params
+                    .iter()
+                    .map(|param| param.name.clone())
+                    .collect();
+                let Ok(descriptor) =
+                    Descriptor::method_descriptor_erasing(inherited, context.index, false, &vars)
+                else {
+                    continue;
+                };
+                let text = MethodDescriptor::to_string(&descriptor);
+                if text == own_text {
+                    continue;
+                }
+                methods.push(Self::bridge(
+                    context,
+                    pool,
+                    &name,
+                    &text,
+                    &own_text,
+                    &descriptor,
+                )?);
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    /// One bridge: take the erased arguments, cast each to what the override declared, and call it.
+    fn bridge(
+        context: &Context<'_>,
+        pool: &mut ConstantPool,
+        name: &str,
+        erased: &str,
+        target: &str,
+        descriptor: &MethodDescriptor,
+    ) -> Result<MethodInfo> {
+        let name_index = pool.utf8_index(name).ok_or(AsmError::PoolFull)?;
+        let descriptor_index = pool.utf8_index(erased).ok_or(AsmError::PoolFull)?;
+        let target_descriptor = MethodDescriptor::parse(target)
+            .map_err(|_| LowerError::Unsupported("a bridge with an unreadable target"))?;
+        let mut asm = Assembler::new(pool, Receiver::Instance(&context.this_class), erased)?;
+        asm.load(0)?;
+        let mut slot = 1u16;
+        for (position, param) in descriptor.params.iter().enumerate() {
+            asm.load(slot)?;
+            // The override declared something narrower, so the erased argument is cast to it — which is
+            // the `checkcast` javac emits and the reason a bridge can throw `ClassCastException`.
+            if let Some(jals_classfile::FieldType::Object(narrower)) =
+                target_descriptor.params.get(position)
+                && matches!(param, jals_classfile::FieldType::Object(wider) if *wider != *narrower)
+            {
+                asm.check_cast(narrower)?;
+            }
+            slot += Slots::descriptor_width(&param.to_string());
+        }
+        asm.invoke_virtual(&context.this_class, name, target)?;
+        match asm.stack_top() {
+            Some(top) => asm.return_(Some(&top))?,
+            None => asm.return_(None)?,
+        }
+        Ok(MethodInfo {
+            // public | bridge | synthetic
+            access_flags: MethodAccessFlags(0x0001 | 0x0040 | 0x1000),
+            name_index,
+            descriptor_index,
+            attributes: alloc::vec![asm.finish()?],
+        })
     }
 
     /// The internal name of the class a nested declaration sits inside.
