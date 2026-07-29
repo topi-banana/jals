@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: taiki-e/install-action@v2.85.2
+      - uses: taiki-e/install-action@v2.85.3
         with:
           tool: ast-grep
       - name: Run ast-grep rule tests
@@ -78,7 +78,7 @@ jobs:
       # module skip themselves when the engine is absent (the same shape as `javac_available()`), so
       # without these installed the whole "a real engine executes it" half of `jals-javac` would
       # quietly pass by doing nothing.
-      - uses: taiki-e/install-action@v2.85.2
+      - uses: taiki-e/install-action@v2.85.3
         with:
           tool: nextest,wasm-tools,wasmtime
       - run: cargo nextest run --workspace --all-features
@@ -98,7 +98,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: taiki-e/install-action@v2.85.2
+      - uses: taiki-e/install-action@v2.85.3
         with:
           tool: cargo-machete
       - run: cargo machete
@@ -163,7 +163,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: taiki-e/install-action@v2.85.2
+      - uses: taiki-e/install-action@v2.85.3
         with:
           tool: typos
       - run: typos
@@ -324,7 +324,7 @@ jobs:
       # Installs the wasm-tools binary directly into the tool dir each run, so (unlike a
       # `cargo binstall` keyed off `.crates.toml`) the `rust-cache` step's restored install
       # metadata can't make it skip placing the binary the component-encode step needs.
-      - uses: taiki-e/install-action@v2.85.2
+      - uses: taiki-e/install-action@v2.85.3
         with:
           tool: wasm-tools
       - name: Build the extension (wasm32-wasip1 core module)
