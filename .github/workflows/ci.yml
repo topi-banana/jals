@@ -125,17 +125,21 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # cargo-hawk release to install, pinned like the workflow's other tools. Hawk uses
-      # `rustc_private`, so it is bound to one exact rustc: when bumping this, keep the
-      # `dtolnay/rust-toolchain` ref and the `cargo +…` invocation below in sync with the
-      # release's pinned compiler (cargo-hawk 0.1.9 targets rustc 1.97.1).
+      # `rustc_private`, so it is bound to one exact rustc: `HAWK_RUSTC` is that compiler, and
+      # bumping `HAWK_VERSION` means bumping it to whatever the new release pins.
       HAWK_VERSION: "0.1.9"
+      HAWK_RUSTC: "1.97.1"
     steps:
       - uses: actions/checkout@v7
-      # The plain 1.97.1 toolchain (minimal profile) is all the *prebuilt* hawk needs — it runs an
-      # instrumented workspace build under this exact compiler. No rustc-dev / RUSTC_BOOTSTRAP /
-      # source build (those are only for `cargo install`-ing hawk). The ref is hardcoded because a
-      # step-level `uses:` does not interpolate `env`; it is cargo-hawk 0.1.9's pinned rustc.
-      - uses: dtolnay/rust-toolchain@1.97.1
+      # The plain `HAWK_RUSTC` toolchain (minimal profile) is all the *prebuilt* hawk needs — it
+      # runs an instrumented workspace build under this exact compiler. No rustc-dev /
+      # RUSTC_BOOTSTRAP / source build (those are only for `cargo install`-ing hawk). The compiler
+      # is selected by the `toolchain` input, never by pinning the action ref to it: dependabot
+      # reads a `@1.97.1` ref as the *action's* version and would keep opening PRs bumping it off
+      # hawk's rustc.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.HAWK_RUSTC }}
       - uses: Swatinem/rust-cache@v2
       # Not in taiki-e/install-action's prebuilt set. The official cargo-dist installer drops
       # `cargo-hawk` and its `cargo-hawk-driver` into ~/.cargo/bin (on PATH); the version-pinned
@@ -149,10 +153,10 @@ jobs:
           cargo hawk --version
       # Closed-world visibility gate over the shipped binaries declared in hawk.toml. `-D warnings`
       # matches the locally-validated command and makes the gate explicit — every finding is an
-      # error. `+1.97.1` pins the instrumented build to hawk's compiler, independent of the repo's
-      # default toolchain or any future toolchain file. Default features / host target only, so the
-      # analysis set matches what hawk.toml was tuned against (do not add `--all-features`).
-      - run: cargo +1.97.1 hawk check -D warnings
+      # error. `+$HAWK_RUSTC` pins the instrumented build to hawk's compiler, independent of the
+      # repo's default toolchain or any future toolchain file. Default features / host target only,
+      # so the analysis set matches what hawk.toml was tuned against (do not add `--all-features`).
+      - run: cargo "+$HAWK_RUSTC" hawk check -D warnings
 
   typos:
     name: typos
