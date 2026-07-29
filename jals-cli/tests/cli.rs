@@ -1840,3 +1840,151 @@ fn running_a_wasm_backed_project_explains_itself() {
         "expected an explanation of the wasm backend, got: {stderr}"
     );
 }
+
+/// A host compiler's exit code reaches the shell unchanged.
+///
+/// `javac` distinguishes a compile error (1) from bad arguments (2) and a system error (3), so a
+/// build that reported only "nonzero" would leave a script unable to tell a broken invocation from
+/// broken source. The compile backend seam carries the code verbatim for exactly this.
+#[cfg(unix)]
+#[test]
+fn a_host_compilers_exit_code_reaches_the_shell() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = project("[package]\nname = \"exit-code\"\n");
+    let program = dir.path().join("exiting-javac");
+    // Exit 2, the code `javac` uses for a command line it cannot parse.
+    std::fs::write(&program, "#!/bin/sh\nexit 2\n").unwrap();
+    let mut permissions = std::fs::metadata(&program).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&program, permissions).unwrap();
+
+    let output = jals()
+        .env("JAVAC", &program)
+        .args(["build", "--manifest-path"])
+        .arg(dir.path().join("jals.toml"))
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "expected the compiler's own exit code, got {:?}",
+        output.status.code()
+    );
+}
+
+/// `jals run` honours `[build] backend`, rather than compiling with `javac` regardless.
+///
+/// The two steps are selected separately — the compile from `[build] backend`, the run from
+/// `[toolchain] runtime` — so asking for the in-process compiler must not silently reach for a JDK
+/// to compile with, while still running the classes it produced.
+#[cfg(unix)]
+#[test]
+fn running_a_jals_backed_project_never_reaches_for_javac() {
+    let dir = project(
+        "[package]\nname = \"demo\"\n\n[run]\nmain-class = \"com.example.Main\"\n\n\
+         [build]\nbackend = { type = \"jals\" }\n",
+    );
+
+    let javac_args = dir.path().join("run-javac.args");
+    let java_args = dir.path().join("run-java.args");
+    let output = jals()
+        .env("JAVAC", fake_javac(dir.path()))
+        .env("JAVA", fake_java(dir.path()))
+        .env("JALS_CAPTURE_ARGS", &javac_args)
+        .env("JALS_CAPTURE_ENV", dir.path().join("run-javac.env"))
+        .env("JALS_CAPTURE_CWD", dir.path().join("run-javac.cwd"))
+        .env("JALS_CAPTURE_JAVA_ARGS", &java_args)
+        .env("JALS_CAPTURE_RUN_ENV", dir.path().join("run-java.env"))
+        .env("JALS_CAPTURE_JAVA_CWD", dir.path().join("run-java.cwd"))
+        .args(["run", "--manifest-path"])
+        .arg(dir.path().join("jals.toml"))
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !javac_args.exists(),
+        "the in-process backend compiled, so `javac` should never have been spawned"
+    );
+    // The compile still happened, and its output is on disk where the run step looks for it.
+    assert!(
+        dir.path()
+            .join("target/classes/com/example/Main.class")
+            .is_file()
+    );
+    // And the run step went ahead, with the compiled classes on its classpath.
+    let args = read_arg_lines(&java_args);
+    let classpath = args[args.iter().position(|arg| arg == "-cp").unwrap() + 1].clone();
+    assert!(
+        classpath.contains("target/classes"),
+        "expected the classes dir on the run classpath, got {classpath}"
+    );
+    assert!(args.contains(&"com.example.Main".to_owned()));
+}
+
+/// A failed in-process compile stops `jals run` before the run step.
+///
+/// Both steps now share one path, so this is the join that has to hold: a compile that reported
+/// source it cannot lower must not fall through to `java`, which would otherwise happily run
+/// whatever class files an earlier successful build left in `classes-dir`.
+#[cfg(unix)]
+#[test]
+fn a_failed_in_process_compile_does_not_reach_the_run_step() {
+    let dir = project(
+        "[package]\nname = \"demo\"\n\n[run]\nmain-class = \"com.example.Main\"\n\n\
+         [build]\nbackend = { type = \"jals\" }\n",
+    );
+    let source = dir.path().join("src/main/java/com/example/Main.java");
+
+    let java_args = dir.path().join("stale-java.args");
+    let command = || {
+        let mut jals = jals();
+        jals.env("JAVAC", "/nonexistent/javac")
+            .env("JAVA", fake_java(dir.path()))
+            .env("JALS_CAPTURE_JAVA_ARGS", &java_args)
+            .env("JALS_CAPTURE_RUN_ENV", dir.path().join("stale-java.env"))
+            .env("JALS_CAPTURE_JAVA_CWD", dir.path().join("stale-java.cwd"))
+            .args(["run", "--manifest-path"])
+            .arg(dir.path().join("jals.toml"));
+        jals
+    };
+
+    // A first run succeeds and leaves class files behind — the stale output this guards against.
+    assert!(command().output().unwrap().status.success());
+    assert!(
+        dir.path()
+            .join("target/classes/com/example/Main.class")
+            .is_file()
+    );
+    std::fs::remove_file(&java_args).unwrap();
+
+    // Now edit the source into something `jals-javac` has no lowering for. The class file from the
+    // first run is still on disk and still runnable.
+    std::fs::write(
+        &source,
+        "package com.example;\n\
+         public class Main { public static void main(String[] a) { Runnable r = () -> {}; } }\n",
+    )
+    .unwrap();
+
+    let output = command().output().unwrap();
+    assert!(
+        !output.status.success(),
+        "a compile that reported unlowerable source must fail the run"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Main.java"),
+        "expected the file named: {stderr}"
+    );
+    assert!(
+        !java_args.exists(),
+        "the run step must not execute the previous build's class files"
+    );
+}

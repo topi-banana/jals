@@ -9,13 +9,17 @@
 //! roots, which is what makes "the backend only ever sees frontend output" a structural property
 //! rather than a convention.
 //!
-//! TODO(backend-tier): [`JalsBackend`](crate::JalsBackend) implements this contract and `jals
-//! build` reaches it — but by matching on `[build] backend` in `jals-cli` and constructing the
-//! backend directly, not through [`BackendSelection`]. Two things are therefore still unbuilt:
-//! the selection factory (which is what would let a host report [`BackendAbsence`] instead of
-//! failing later, and what `wasm32` needs to say "no host process" as a *result* rather than an
-//! error), and output memoization under `CacheNamespace::BackendOutput` — without which every
-//! build recompiles every source.
+//! Two adapters implement it: the portable [`JalsBackend`](crate::JalsBackend), which emits class
+//! files or one WebAssembly module in this process, and the `native`-gated
+//! `JavacBackend`, which runs the host's `javac` over the same tree materialized on disk. Hosts
+//! reach both through [`BackendSelection`] — [`in_process`](BackendSelection::in_process) where
+//! there is no process to spawn, `BackendSelection::for_host` where there is — so the
+//! `[build] backend` decision table exists in exactly one place.
+//!
+//! TODO(backend-tier): output memoization under `CacheNamespace::BackendOutput` is still unbuilt,
+//! and without it every build recompiles every source — `jals_frontend::BackendKey`, which folds
+//! [`config_digest`](Backend::config_digest), still has no caller. Each adapter names what it must
+//! fold before that can be switched on.
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -23,6 +27,7 @@ use alloc::vec::Vec;
 use core::future::Future;
 use core::pin::Pin;
 
+use jals_config::{BackendKind, Manifest};
 use jals_storage::{CacheKey, ContentDigest, RelativePath};
 
 /// The compile knobs a backend honours, drawn from `[build]`.
@@ -38,6 +43,21 @@ pub struct BackendOptions {
 }
 
 impl BackendOptions {
+    /// The `[build]` compile knobs, lifted out of a manifest.
+    ///
+    /// Lives here rather than in each host so the knob list is written once: a host that assembled
+    /// it itself would be a second place to update when `[build]` grows one. Lifting only — the
+    /// manifest is read here and not kept, so the struct still carries no reference to one and the
+    /// portable half still never sees the manifest's host-path resolution.
+    pub fn from_manifest(manifest: &Manifest) -> Self {
+        Self {
+            release: manifest.build.release,
+            source: manifest.build.source,
+            target: manifest.build.target,
+            extra_args: manifest.build.javac_flags.clone(),
+        }
+    }
+
     /// Everything about these options that affects output, folded to one digest.
     ///
     /// Crate-internal until backend output is memoized: the only caller that needs it outside is
@@ -95,10 +115,11 @@ pub struct BackendOutcome {
     /// reports `Some(0)` or `Some(1)`; the field exists because a host process is the case that
     /// can end without one.
     ///
-    /// Crate-internal, along with the two constructors that set it: an outcome is *built* here and
-    /// only *read* outside, through [`success`](Self::success). A caller that matched on the code
-    /// would be deciding what a signal means, which is the driver's job and not the same question
-    /// on every host.
+    /// Crate-internal, along with the constructors that set it: an outcome is *built* here and only
+    /// *read* outside. Most callers want [`success`](Self::success); [`code`](Self::code) exists for
+    /// the one driver that has to turn this into its own process's exit status, because deciding
+    /// what a signal — or a `javac` exit 2 — means is that driver's job and not the same question on
+    /// every host.
     code: Option<i32>,
     /// What the compile produced, by project-relative path: one class file per type, or one
     /// WebAssembly module for the whole project.
@@ -131,8 +152,34 @@ impl BackendOutcome {
         }
     }
 
+    /// A compile a host tool ran to completion, carrying its exit status verbatim.
+    ///
+    /// Neither artifacts nor messages: a process-based backend wrote its own output through
+    /// `javac -d` and reported its own diagnostics on the stderr it inherited. The code is kept as
+    /// the tool gave it because `javac` distinguishes a compile error (1) from bad arguments (2), a
+    /// system error (3) and abnormal termination (4) — collapsing those to one "failed" throws away
+    /// the only signal that separates a broken invocation from broken source.
+    // Only a process-based backend builds one of these, so a `--no-default-features` core has no
+    // caller — the seam is portable, the adapter that needs this constructor is not.
+    #[cfg_attr(not(feature = "native"), allow(dead_code))]
+    pub(crate) const fn from_code(code: Option<i32>) -> Self {
+        Self {
+            code,
+            artifacts: Vec::new(),
+            messages: Vec::new(),
+        }
+    }
+
     pub const fn success(&self) -> bool {
         matches!(self.code, Some(0))
+    }
+
+    /// The tool's exit code, or `None` when it was terminated by a signal.
+    ///
+    /// For the driver that maps a compile onto its own process's exit status, and nothing else —
+    /// every other question about an outcome is [`success`](Self::success).
+    pub const fn code(&self) -> Option<i32> {
+        self.code
     }
 }
 
@@ -174,6 +221,28 @@ pub enum BackendSelection {
     },
 }
 
+impl BackendSelection {
+    /// The backend `[build] backend` names, on a host with no process to spawn.
+    ///
+    /// Choosing this entry point *is* the declaration that this host cannot spawn one, which is why
+    /// `javac` comes back [`Absent`](Self::Absent) with [`BackendAbsence::NoHostProcess`] rather
+    /// than being probed for. A native host calls `BackendSelection::for_host` instead, which adds
+    /// the `javac` arm and delegates the other two straight back here — so every [`BackendKind`] is
+    /// answered in exactly one place.
+    pub fn in_process(backend: BackendKind, release: Option<u32>) -> Self {
+        match backend {
+            BackendKind::Jals {} => Self::Available(Box::new(crate::JalsBackend::new(release))),
+            // wasm is a different *target*, not just a different tool: one module for the whole
+            // project, and the host's collector rather than a JVM's.
+            BackendKind::JalsWasm {} => Self::Available(Box::new(crate::JalsBackend::wasm())),
+            BackendKind::Javac {} => Self::Absent {
+                id: backend.tag_name(),
+                reason: BackendAbsence::NoHostProcess,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendAbsence {
     /// This host cannot spawn processes at all — the browser.
@@ -213,5 +282,123 @@ impl core::fmt::Display for BackendError {
             }
             Self::Io(message) => write!(f, "build I/O failed: {message}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::borrow::ToOwned;
+    use alloc::vec;
+
+    use super::*;
+
+    /// The [`Available`](BackendSelection::Available) backend's id, or `None` when absent. Written as
+    /// a helper because [`BackendSelection`] holds a `Box<dyn Backend>` and so cannot derive
+    /// `Debug`: every assertion here matches rather than compares.
+    fn available_id(selection: &BackendSelection) -> Option<&'static str> {
+        match selection {
+            BackendSelection::Available(backend) => Some(backend.id()),
+            BackendSelection::Absent { .. } => None,
+        }
+    }
+
+    #[test]
+    fn an_unset_option_is_not_the_same_input_as_zero() {
+        // `--release 0` is nonsense, but a digest that cannot tell it from "no `--release` at all"
+        // would let one manifest's cached output answer for the other.
+        let unset = BackendOptions::default();
+        let zero = BackendOptions {
+            release: Some(0),
+            ..BackendOptions::default()
+        };
+        assert_ne!(unset.digest(), zero.digest());
+
+        // And the three version knobs are distinguishable from each other, not just from unset.
+        let source_zero = BackendOptions {
+            source: Some(0),
+            ..BackendOptions::default()
+        };
+        assert_ne!(zero.digest(), source_zero.digest());
+    }
+
+    #[test]
+    fn extra_argument_order_is_part_of_the_configuration() {
+        // `javac` reads its flags in sequence — `-Xlint:all -Xlint:none` and its reverse are two
+        // different compiles, so they must not share a cache identity.
+        let forward = BackendOptions {
+            extra_args: vec!["-Xlint:all".to_owned(), "-Xlint:none".to_owned()],
+            ..BackendOptions::default()
+        };
+        let reversed = BackendOptions {
+            extra_args: vec!["-Xlint:none".to_owned(), "-Xlint:all".to_owned()],
+            ..BackendOptions::default()
+        };
+        assert_ne!(forward.digest(), reversed.digest());
+    }
+
+    #[test]
+    fn only_a_zero_exit_code_is_a_success() {
+        assert!(BackendOutcome::from_code(Some(0)).success());
+        assert!(!BackendOutcome::from_code(Some(1)).success());
+        // Terminated by a signal: no code, and not a success.
+        assert!(!BackendOutcome::from_code(None).success());
+
+        assert!(BackendOutcome::compiled(Vec::new()).success());
+        assert!(!BackendOutcome::failed(vec!["not lowered yet".to_owned()]).success());
+    }
+
+    #[test]
+    fn a_host_tools_exit_code_survives_the_outcome() {
+        // `javac` uses 2 for bad arguments and 3 for a system error. Both are failures, and both
+        // have to stay distinguishable from 1 (a compile error) all the way to the driver.
+        for code in [1, 2, 3, 4, 130] {
+            assert_eq!(BackendOutcome::from_code(Some(code)).code(), Some(code));
+        }
+        assert_eq!(BackendOutcome::from_code(None).code(), None);
+    }
+
+    #[test]
+    fn a_process_free_host_gets_the_in_process_backends_and_no_javac() {
+        // Each arm answers with the backend whose `id` is the manifest tag that selected it, so the
+        // selection cannot silently route one backend's key to another's output.
+        assert_eq!(
+            available_id(&BackendSelection::in_process(BackendKind::Jals {}, None)),
+            Some(BackendKind::Jals {}.tag_name())
+        );
+        assert_eq!(
+            available_id(&BackendSelection::in_process(
+                BackendKind::JalsWasm {},
+                None
+            )),
+            Some(BackendKind::JalsWasm {}.tag_name())
+        );
+
+        // javac is absent as a *value* carrying its reason, not an error raised later.
+        match BackendSelection::in_process(BackendKind::Javac {}, None) {
+            BackendSelection::Absent { id, reason } => {
+                assert_eq!(id, BackendKind::Javac {}.tag_name());
+                assert_eq!(reason, BackendAbsence::NoHostProcess);
+            }
+            BackendSelection::Available(_) => {
+                panic!("a host with no process to spawn cannot supply javac")
+            }
+        }
+    }
+
+    #[test]
+    fn the_release_level_reaches_the_selected_backend() {
+        // `in_process` passes `release` through to the class-file backend, so two releases are two
+        // configurations rather than one shared cache identity.
+        let options = BackendOptions::default();
+        let request = BackendRequest {
+            tree: &[],
+            classpath: &[],
+            options: &options,
+        };
+        let digest = |release| match BackendSelection::in_process(BackendKind::Jals {}, release) {
+            BackendSelection::Available(backend) => backend.config_digest(&request),
+            BackendSelection::Absent { .. } => panic!("the jals backend is always available"),
+        };
+        assert_ne!(digest(Some(17)), digest(Some(21)));
     }
 }

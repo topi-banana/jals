@@ -1,22 +1,28 @@
 //! Writing a frontend's lowered tree to disk so a path-based compiler can read it.
 //!
-//! `javac` takes filesystem paths; a lowered tree is a manifest of cache keys. This module is the
+//! `javac` takes filesystem paths; a lowered tree is a [`BackendSource`] list. This module is the
 //! one place that converts between them, and it is also where "the backend only ever sees
-//! frontend output" stops being a comment: a [`StagedTree`] can only be produced by writing out a
-//! lowered tree, so a compile driven from [`StagedTree::sources`] cannot name an authored file.
+//! frontend output" stops being a comment: a [`StagedTree`] has no constructor other than
+//! [`write`](StagedTree::write), so one cannot exist for anything but a frontend's output.
 //!
 //! Staging lives here rather than inside [`Backend::compile`](crate::Backend) for the same reason
 //! the frontend driver owns the cache: `ArtifactCache<C>` is generic over a non-object-safe
-//! backend and cannot appear in a `&dyn` signature. The orchestrator reads the cache; the
-//! compiler receives bytes already on disk.
+//! backend and cannot appear in a `&dyn` signature. The orchestrator resolves the cache keys once
+//! and passes the same [`BackendSource`] list here and to the backend; this module only writes
+//! bytes out.
+//!
+//! TODO(backend-tier): with the bytes already resolved, `JavacBackend` could write them itself and
+//! stop the host from staging a tree the in-process backends never read. Two things make it a
+//! separate change rather than a detail: the `-sourcepath` override at the host would move into the
+//! adapter's manifest clone, and `--dry-run` would stop writing this directory at all — a
+//! behavioural change worth making deliberately instead of as a side effect.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use jals_exec::tokio_rt::on_blocking_pool;
-use jals_storage::{ArtifactCache, CacheBackend, CacheKey, RelativePath};
 
-use crate::backend::BackendError;
+use crate::backend::{BackendError, BackendSource};
 
 /// Where a lowered tree is written, relative to the project root.
 ///
@@ -34,30 +40,25 @@ pub struct StagedTree {
 impl StagedTree {
     /// Write `tree` under `root`, returning the staged paths in tree order.
     ///
+    /// Takes the resolved sources rather than the cache they came from: the same list feeds the
+    /// backend, so looking the keys up here as well would read and verify every lowered file a
+    /// second time. The trade is residency — the whole tree is in memory rather than one file at a
+    /// time — which the host pays regardless, for as long as its
+    /// [`BackendRequest`](crate::BackendRequest) lives.
+    ///
     /// Stale entries are removed afterwards: the destination is entirely jals-owned managed build
     /// output, so a file the current tree does not name is by definition a leftover. That is what
     /// makes this safe without the ownership journal that publishing into a *user* source root
     /// requires — there, an unknown file might be something a person wrote, and deleting it would
     /// destroy work. Here there is no such file.
-    pub async fn write<C: CacheBackend>(
-        cache: &ArtifactCache<C>,
-        tree: &[(RelativePath, CacheKey)],
-        root: PathBuf,
-    ) -> Result<Self, BackendError> {
+    pub async fn write(tree: &[BackendSource], root: PathBuf) -> Result<Self, BackendError> {
         let mut sources = Vec::with_capacity(tree.len());
 
-        for (path, key) in tree {
-            let bytes = cache
-                .lookup(key)
-                .await
-                .map_err(|error| BackendError::Io(format!("{error}")))?
-                .ok_or_else(|| BackendError::MissingArtifact(path.clone()))?;
-
-            let mut destination = root.clone();
-            for segment in path.segments() {
-                destination.push(segment.as_str());
-            }
-
+        for source in tree {
+            let destination = source.path.to_host_path(&root);
+            // The blocking task owns what it touches, so the bytes are copied rather than borrowed
+            // — a memcpy in place of the cache read and digest pass this loop used to run.
+            let bytes = source.bytes.clone();
             let target = destination.clone();
             on_blocking_pool(move || -> std::io::Result<()> {
                 if let Some(parent) = target.parent() {

@@ -30,7 +30,7 @@ use crate::builtin::BuiltinToolchain;
 use crate::invocation::Invocation;
 use crate::request::{CompileRequest, RunRequest};
 use crate::toolchain::{
-    BuildOutcome, Compiler, JdkInstall, Runtime, Tool, ToolResolver, ToolchainError,
+    BuildOutcome, Compiler, JdkInstall, Runtime, Tool, ToolIdentity, ToolResolver, ToolchainError,
     ToolchainFuture,
 };
 
@@ -44,7 +44,11 @@ impl dyn Compiler {
     /// [`BuiltinToolchain`] (over the host filesystem) and every `javac` selector to the host
     /// [`SubprocessToolchain`] — so a host drives one `&dyn Compiler`, whatever the manifest
     /// selects. The `exec` handle backs the builtin backend's native project storage.
-    pub async fn select(manifest: &Manifest, exec: &Exec) -> Box<dyn Compiler> {
+    ///
+    /// Crate-internal: the compile step's public entry point is
+    /// [`BackendSelection::for_host`](crate::BackendSelection), which selects a
+    /// [`Backend`](crate::Backend) and — for `javac` — wraps this beneath it.
+    pub(crate) async fn select(manifest: &Manifest, exec: &Exec) -> Box<dyn Compiler> {
         match &manifest.toolchain.compiler {
             CompilerSpec::Builtin => Box::new(BuiltinToolchain::host(exec.clone())),
             CompilerSpec::System | CompilerSpec::Path(_) | CompilerSpec::Distribution(_) => {
@@ -78,7 +82,7 @@ impl BuiltinToolchain {
     }
 }
 
-/// A [`Compiler`] + [`Runtime`] backend that spawns the host's `javac`/`java`, selected per the
+/// A `Compiler` + [`Runtime`] backend that spawns the host's `javac`/`java`, selected per the
 /// manifest's `[toolchain]`.
 ///
 /// Built with [`from_manifest`](SubprocessToolchain::from_manifest); the discovered JDK installs are
@@ -272,6 +276,13 @@ impl Compiler for SubprocessToolchain {
         Invocation::build(req, self.path_sep)
             .with_program(self.resolve_program_blocking(Tool::Javac, req.project_root))
             .display_command()
+    }
+
+    fn tool_identity(&self, project_root: &Path) -> ToolIdentity {
+        // The same resolution `describe_compile` renders, so the identity names the program that
+        // would actually run. It can be the bare `javac`, which is not a failure: see
+        // `BackendSelection::for_host` on why an unprobed candidate is not `ToolMissing`.
+        ToolIdentity::Program(self.resolve_program_blocking(Tool::Javac, project_root))
     }
 }
 

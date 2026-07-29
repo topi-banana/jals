@@ -17,19 +17,22 @@
 //!
 //! The one exception is the default-on **`native` feature**, which supplies the host
 //! `SubprocessToolchain` — the only piece that spawns `javac`/`java` and probes the filesystem to
-//! discover installed JDKs — plus the `<dyn Compiler>::select` / `<dyn Runtime>::select` factories
-//! that match a manifest's `[toolchain]` enums to the right boxed backend, one per step.
+//! discover installed JDKs — plus the `<dyn Runtime>::select` factory that matches a manifest's
+//! `[toolchain] runtime` enum to the right boxed backend for the run step.
 //!
-//! **The seam a future embedded or wasm compiler implements is [`Backend`], in the ungated
-//! [`backend`] module.** It takes a frontend's lowered tree — `(path, CacheKey)` pairs — rather
-//! than host paths, so it carries no `std::path` and compiles for `wasm32` unconditionally.
+//! **What compiles a project is [`Backend`], in the ungated [`backend`] module.** It takes a
+//! frontend's lowered tree — `(path, CacheKey)` pairs — rather than host paths, so the contract
+//! carries no `std::path` and compiles for `wasm32` unconditionally. Two adapters implement it:
+//! the portable [`JalsBackend`] and, under `native`, [`JavacBackend`]. A host picks one by calling
+//! [`BackendSelection`] once — [`in_process`](BackendSelection::in_process) in a browser,
+//! [`for_host`](BackendSelection::for_host) on a machine with a JDK — and never matches on
+//! `[build] backend` itself.
 //!
-//! [`Compiler`] / [`Runtime`] / [`CompileRequest`] / [`RunRequest`] / `ToolResolver` /
-//! [`BuiltinToolchain`] are **not** part of that portable core, despite what this doc used to
-//! claim: every one of them is `native`-gated and built on `std::path::PathBuf`. They remain the
-//! `javac`/`java` invocation layer, which the host backend adapter drives *beneath* [`Backend`]
-//! after materializing the lowered tree. Build with `--no-default-features` to see exactly what
-//! is portable.
+//! [`Runtime`] / [`RunRequest`] / [`BuiltinToolchain`] and the crate-internal `Compiler` /
+//! `CompileRequest` / `ToolResolver` are **not** part of that portable core: every one of them is
+//! `native`-gated and built on `std::path::PathBuf`. They are the `javac`/`java` invocation layer,
+//! which [`JavacBackend`] drives *beneath* [`Backend`] once the lowered tree is materialized. Build
+//! with `--no-default-features` to see exactly what is portable.
 
 #![cfg_attr(not(feature = "native"), no_std)]
 
@@ -45,6 +48,8 @@ mod init;
 #[cfg(feature = "native")]
 mod invocation;
 mod jals_backend;
+#[cfg(feature = "native")]
+mod javac_backend;
 #[cfg(feature = "native")]
 mod manifest_ext;
 #[cfg(feature = "native")]
@@ -70,16 +75,21 @@ pub use clean::CleanTargets;
 pub use init::{InitOptions, ScaffoldFile};
 pub use jals_backend::JalsBackend;
 #[cfg(feature = "native")]
-pub use manifest_ext::{ManifestError, ManifestExt};
+pub use javac_backend::{HostCompileInputs, JavacBackend};
 #[cfg(feature = "native")]
-pub use request::{CompileRequest, RunRequest};
+pub use manifest_ext::{ManifestError, ManifestExt};
+// Only `RunRequest` is exported. `CompileRequest` is crate-internal along with the `Compiler` trait
+// it feeds — hosts assemble a portable `BackendRequest` plus `HostCompileInputs` now, and the
+// `javac` adapter turns those into the compile request.
+#[cfg(feature = "native")]
+pub use request::RunRequest;
 #[cfg(feature = "native")]
 pub use staging::{FRONTEND_OUT_DIR, StagedTree};
 pub use target::{ResolveTargetError, RunTarget};
 #[cfg(feature = "native")]
 pub(crate) use toolchain::Candidates;
 #[cfg(feature = "native")]
-pub use toolchain::{BuildOutcome, Compiler, JdkInstall, Runtime, ToolchainError, ToolchainFuture};
+pub use toolchain::{BuildOutcome, JdkInstall, Runtime, ToolchainError, ToolchainFuture};
 
 #[cfg(feature = "native")]
 pub use native::SubprocessToolchain;

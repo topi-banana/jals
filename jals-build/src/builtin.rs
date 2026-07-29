@@ -21,9 +21,11 @@ use jals_storage::{
 
 use crate::manifest_ext::ManifestExt;
 use crate::request::{CompileRequest, RunRequest};
-use crate::toolchain::{BuildOutcome, Compiler, Runtime, ToolchainError, ToolchainFuture};
+use crate::toolchain::{
+    BuildOutcome, Compiler, Runtime, ToolIdentity, ToolchainError, ToolchainFuture,
+};
 
-/// A [`Compiler`] + [`Runtime`] backend realized in-process over [`ProjectStorage`] — today a dummy
+/// A `Compiler` + [`Runtime`] backend realized in-process over [`ProjectStorage`] — today a dummy
 /// that copies sources instead of compiling them and skips running entirely (see the module docs).
 pub struct BuiltinToolchain {
     /// The storage aggregate the backend reads and commits. Toolchain methods take `&self` while
@@ -229,6 +231,11 @@ impl Compiler for BuiltinToolchain {
             let _ = write!(out, "\n  {} -> {}", src.display(), dest.display());
         }
         out
+    }
+
+    fn tool_identity(&self, _project_root: &Path) -> ToolIdentity {
+        // No program, and output nothing like a compiler's — the discriminant is the whole identity.
+        ToolIdentity::Builtin
     }
 }
 

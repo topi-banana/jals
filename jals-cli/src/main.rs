@@ -17,7 +17,7 @@ use clap::{Args, Parser, Subcommand};
 use jals_build::build_script::{
     BuildScriptDiagnostic, BuildScriptEnvironment, BuildScriptLimits, BuildScriptSession,
 };
-use jals_build::{Compiler, ManifestExt, Runtime};
+use jals_build::{ManifestExt, Runtime};
 use jals_config::fmt::Config;
 use jals_config::lint::Config as LintConfig;
 use jals_config::{DiscoverableConfig, FeatureSet, Manifest, ResolvedBuildFeatures};
@@ -569,33 +569,25 @@ impl BuildArgs {
             },
         )
         .await?;
-        // `[build.backend]` picks *what* compiles the lowered tree. The in-process compiler needs
-        // no JDK and reads the sources straight from the artifact cache; `javac` needs them on
-        // disk and a host process to run in.
-        if matches!(
-            manifest.build.backend,
-            jals_config::BackendKind::Jals {} | jals_config::BackendKind::JalsWasm {}
-        ) {
-            return App::compile_in_process(&manifest, &root, &tree, self.dry_run, self.verbose)
-                .await;
-        }
-        let request = App::compile_request(&manifest, &root, sources.sources(), &inputs);
-        // Select the backend `[toolchain] compiler` names: `"builtin"` is the in-process dummy;
-        // anything else spawns `javac` (env override → discovered JDK → `$JAVA_HOME` → `PATH`).
-        let compiler = <dyn Compiler>::select(&manifest, exec).await;
+        // `[build] backend` picks *what* compiles the lowered tree, and the selection owns that
+        // decision — this host can spawn a process, so every backend kind is available to it.
+        let plan = CompilePlan::prepare(&manifest, &root, &sources, tree, &inputs, exec).await?;
+        let request = plan.request();
 
         if self.dry_run || self.verbose {
-            println!("{}", compiler.describe_compile(&request));
+            println!("{}", plan.backend.describe(&request));
         }
         if self.dry_run {
             return Ok(ExitCode::SUCCESS);
         }
 
-        let outcome = compiler
+        let outcome = plan
+            .backend
             .compile(&request)
             .await
             .map_err(|e| anyhow!("{e}"))?;
-        Ok(App::outcome_exit_code(outcome))
+        App::finish_compile(&manifest, &root, &outcome)?;
+        Ok(App::outcome_exit_code(outcome.code()))
     }
 }
 
@@ -630,7 +622,7 @@ impl RunArgs {
         };
         // Assemble the compile inputs once. Transitive sources compile into `classes-dir`, while every
         // verified graph classpath artifact is shared by the javac and java requests.
-        let (sources, _tree, inputs) = App::prepare_compile_inputs(
+        let (sources, tree, inputs) = App::prepare_compile_inputs(
             &mut manifest,
             &root,
             exec,
@@ -643,7 +635,6 @@ impl RunArgs {
             },
         )
         .await?;
-        let compile_request = App::compile_request(&manifest, &root, sources.sources(), &inputs);
         let run_request = jals_build::RunRequest {
             manifest: &manifest,
             project_root: &root,
@@ -653,33 +644,38 @@ impl RunArgs {
             extra_classpath: &inputs.extra_classpath,
             run_env: &inputs.run_env,
         };
-        // Each step's backend is selected independently from its own `[toolchain]` enum:
-        // `"builtin"` is the in-process dummy; anything else spawns `javac`/`java` per
-        // `compiler`/`runtime` (each: env override → discovered JDK → `$JAVA_HOME` → `PATH`).
-        let compiler = <dyn Compiler>::select(&manifest, exec).await;
+        // The compile step goes through the same `[build] backend` selection `jals build` uses, so a
+        // manifest asking for the in-process compiler gets it here too. The run step is selected
+        // independently from `[toolchain] runtime`: `"builtin"` is the in-process dummy, anything
+        // else spawns `java` (env override → discovered JDK → `$JAVA_HOME` → `PATH`).
+        let plan = CompilePlan::prepare(&manifest, &root, &sources, tree, &inputs, exec).await?;
         let runtime = <dyn Runtime>::select(&manifest, exec).await;
+        let compile_request = plan.request();
 
         if self.dry_run || self.verbose {
-            println!("{}", compiler.describe_compile(&compile_request));
+            println!("{}", plan.backend.describe(&compile_request));
             println!("{}", runtime.describe_run(&run_request));
         }
         if self.dry_run {
             return Ok(ExitCode::SUCCESS);
         }
 
-        // Compile first; only run when compilation succeeds.
-        let build_outcome = compiler
+        // Compile first; only run when compilation succeeds. `finish_compile` also persists whatever
+        // an in-process backend produced, so the classes are on disk before `java` looks for them.
+        let outcome = plan
+            .backend
             .compile(&compile_request)
             .await
             .map_err(|e| anyhow!("{e}"))?;
-        if !build_outcome.success() {
-            return Ok(App::outcome_exit_code(build_outcome));
+        App::finish_compile(&manifest, &root, &outcome)?;
+        if !outcome.success() {
+            return Ok(App::outcome_exit_code(outcome.code()));
         }
         let run_outcome = runtime
             .run(&run_request)
             .await
             .map_err(|e| anyhow!("{e}"))?;
-        Ok(App::outcome_exit_code(run_outcome))
+        Ok(App::outcome_exit_code(run_outcome.code))
     }
 }
 
@@ -950,6 +946,71 @@ impl HostProjectInputs {
     }
 }
 
+/// The compile step, selected and ready to run.
+///
+/// Owns what a [`BackendRequest`](jals_build::BackendRequest) borrows, which is the whole reason it
+/// exists: `jals build` and `jals run` assemble the step identically, and a plain helper returning
+/// the request would hand back borrows of its own locals.
+struct CompilePlan {
+    backend: Box<dyn jals_build::Backend>,
+    tree: Vec<jals_build::BackendSource>,
+    options: jals_build::BackendOptions,
+}
+
+impl CompilePlan {
+    /// Select the backend `[build] backend` names and gather what its request borrows.
+    ///
+    /// Absence is a value the selection returns rather than a failure raised somewhere downstream,
+    /// so this is the only place a missing backend has to be handled.
+    async fn prepare(
+        manifest: &Manifest,
+        root: &Path,
+        staged: &jals_build::StagedTree,
+        tree: Vec<jals_build::BackendSource>,
+        inputs: &HostProjectInputs,
+        exec: &Exec,
+    ) -> Result<Self> {
+        let selection = jals_build::BackendSelection::for_host(
+            manifest,
+            root,
+            staged,
+            // The compile inputs that cannot travel in a portable request — every one of them a
+            // resolved host path — for the `javac` adapter that needs them.
+            &jals_build::HostCompileInputs {
+                extra_sources: &inputs.extra_sources,
+                extra_classpath: &inputs.extra_classpath,
+                extra_javac_args: &inputs.javac_args,
+                compile_env: &inputs.compile_env,
+            },
+            exec,
+        )
+        .await;
+        match selection {
+            jals_build::BackendSelection::Available(backend) => Ok(Self {
+                backend,
+                tree,
+                options: jals_build::BackendOptions::from_manifest(manifest),
+            }),
+            jals_build::BackendSelection::Absent { id, reason } => {
+                bail!("`[build] backend` selects `{id}`, but {reason}")
+            }
+        }
+    }
+
+    /// What the selected backend compiles.
+    fn request(&self) -> jals_build::BackendRequest<'_> {
+        jals_build::BackendRequest {
+            tree: &self.tree,
+            // The in-process compiler reads its library signatures from the embedded stubs rather
+            // than from the classpath; wiring dependency classes in is what would let it compile
+            // against them. The `javac` adapter takes the real classpath as a host input instead,
+            // because its entries are paths and this request is portable.
+            classpath: &[],
+            options: &self.options,
+        }
+    }
+}
+
 #[derive(Default)]
 struct HostBuildScript {
     generated_sources: Vec<PathBuf>,
@@ -1114,7 +1175,7 @@ impl App {
         publications: jals_project::SourcePublication,
     ) -> Result<(
         jals_build::StagedTree,
-        Vec<(RelativePath, jals_storage::CacheKey)>,
+        Vec<jals_build::BackendSource>,
         HostProjectInputs,
     )> {
         let environment = Self::build_script_environment(manifest, features);
@@ -1384,10 +1445,7 @@ impl App {
         root: &Path,
         sources: &[PathBuf],
         features: &ResolvedBuildFeatures,
-    ) -> Result<(
-        jals_build::StagedTree,
-        Vec<(RelativePath, jals_storage::CacheKey)>,
-    )> {
+    ) -> Result<(jals_build::StagedTree, Vec<jals_build::BackendSource>)> {
         // Enabling a jals dialect feature (`[package] features`) drives the build to desugar it,
         // so it compiles without a separate `[build.frontend]` selection. When no dialect feature
         // is on, fall back to vanilla so the cache identity of ordinary projects is unchanged.
@@ -1434,99 +1492,56 @@ impl App {
             .await
             .map_err(|error| anyhow!("frontend `{}` failed: {error}", frontend.caps().id))?;
 
-        let tree: Vec<_> = lowered
-            .tree
-            .files()
-            .iter()
-            .map(|file| (file.path.clone(), file.key.clone()))
-            .collect();
+        // Resolve the published keys to bytes once, here: the [`Backend`](jals_build::Backend)
+        // contract is object-safe and `ArtifactCache` is not, so this is the host's job — and the
+        // same list is what both staging and the backend consume, so looking it up twice would
+        // read and verify every lowered file a second time.
+        let mut tree = Vec::with_capacity(lowered.tree.files().len());
+        for file in lowered.tree.files() {
+            let bytes = cache
+                .lookup(&file.key)
+                .await
+                .map_err(|error| anyhow!("reading lowered source `{}`: {error}", file.path))?
+                .ok_or_else(|| {
+                    anyhow!(
+                        "lowered source `{}` is not in the artifact cache",
+                        file.path
+                    )
+                })?;
+            tree.push(jals_build::BackendSource {
+                path: file.path.clone(),
+                key: file.key.clone(),
+                bytes,
+            });
+        }
 
         // The tree is staged for *both* backends: a process-based compiler needs the files on
         // disk, and having them there keeps `--verbose` and post-mortem debugging identical
         // whichever backend ran.
-        let staged =
-            jals_build::StagedTree::write(&cache, &tree, root.join(jals_build::FRONTEND_OUT_DIR))
-                .await
-                .map_err(|error| anyhow!("staging frontend output failed: {error}"))?;
+        let staged = jals_build::StagedTree::write(&tree, root.join(jals_build::FRONTEND_OUT_DIR))
+            .await
+            .map_err(|error| anyhow!("staging frontend output failed: {error}"))?;
         Ok((staged, tree))
     }
 
-    /// Resolve a lowered tree's cache keys to the bytes an in-process backend compiles.
+    /// Report what a compile said and persist what it produced.
     ///
-    /// The [`Backend`](jals_build::Backend) contract is object-safe and `ArtifactCache` is not, so
-    /// this resolution is the host's job rather than the backend's.
-    async fn backend_sources(
-        root: &Path,
-        tree: &[(RelativePath, jals_storage::CacheKey)],
-    ) -> Result<Vec<jals_build::BackendSource>> {
-        let cache = jals_storage::ArtifactCache::new(jals_storage::NativeCache::new(
-            root.join(NativeStorage::PROJECT_CACHE_DIR),
-        ));
-        let mut out = Vec::with_capacity(tree.len());
-        for (path, key) in tree {
-            let bytes = cache
-                .lookup(key)
-                .await
-                .map_err(|error| anyhow!("reading lowered source `{path}`: {error}"))?
-                .ok_or_else(|| anyhow!("lowered source `{path}` is not in the artifact cache"))?;
-            out.push(jals_build::BackendSource {
-                path: path.clone(),
-                key: key.clone(),
-                bytes,
-            });
-        }
-        Ok(out)
-    }
-
-    /// Compile with the in-process backend and write its class files under `classes_dir`.
-    ///
-    /// Output goes to the filesystem directly, exactly where `javac -d` would have put it: this is
-    /// build output, not tracked project source, and `jals clean` already owns removing it.
-    async fn compile_in_process(
+    /// Artifacts are only written on success, and only an in-process backend has any: a process-based
+    /// one already wrote its own output through `javac -d`, so the loop is a no-op for it and the two
+    /// backends need no branch here.
+    fn finish_compile(
         manifest: &Manifest,
         root: &Path,
-        tree: &[(RelativePath, jals_storage::CacheKey)],
-        dry_run: bool,
-        verbose: bool,
-    ) -> Result<ExitCode> {
-        let sources = Self::backend_sources(root, tree).await?;
-        let options = jals_build::BackendOptions {
-            release: manifest.build.release,
-            source: manifest.build.source,
-            target: manifest.build.target,
-            extra_args: manifest.build.javac_flags.clone(),
-        };
-        let request = jals_build::BackendRequest {
-            tree: &sources,
-            // The compiler reads its library signatures from the embedded stubs rather than from
-            // the classpath; wiring dependency classes in is what lets it compile against them.
-            classpath: &[],
-            options: &options,
-        };
-        let backend = match manifest.build.backend {
-            // wasm is a different *target*, not just a different tool: one module for the whole
-            // project, and the host's collector rather than a JVM's.
-            jals_config::BackendKind::JalsWasm {} => jals_build::JalsBackend::wasm(),
-            _ => jals_build::JalsBackend::new(manifest.build.release),
-        };
-
-        if dry_run || verbose {
-            println!("{}", jals_build::Backend::describe(&backend, &request));
-        }
-        if dry_run {
-            return Ok(ExitCode::SUCCESS);
-        }
-
-        let outcome = jals_build::Backend::compile(&backend, &request)
-            .await
-            .map_err(|error| anyhow!("{error}"))?;
+        outcome: &jals_build::BackendOutcome,
+    ) -> Result<()> {
         for message in &outcome.messages {
             eprintln!("error: {message}");
         }
         if !outcome.success() {
-            return Ok(ExitCode::FAILURE);
+            return Ok(());
         }
-
+        // Output goes to the filesystem directly, exactly where `javac -d` would have put it: this
+        // is build output, not tracked project source, and `jals clean` already owns removing it.
         let classes_dir = root.join(&manifest.build.classes_dir);
         for (path, bytes) in &outcome.artifacts {
             let target = classes_dir.join(path.to_string());
@@ -1537,7 +1552,7 @@ impl App {
             std::fs::write(&target, bytes)
                 .with_context(|| format!("writing {}", target.display()))?;
         }
-        Ok(ExitCode::SUCCESS)
+        Ok(())
     }
 
     /// The staged tree expressed as manifest `source-dirs`, relative to the project root when
@@ -1555,31 +1570,14 @@ impl App {
         vec![path.to_string_lossy().into_owned()]
     }
 
-    /// The compile inputs shared by `jals build` and `jals run`: the manifest plus its discovered
-    /// sources, with the resolved dependency jars on the classpath and the `git`/`path` source
-    /// dependencies' `.java` compiled alongside — one place that wires `ProjectInputs` into a
-    /// [`CompileRequest`](jals_build::CompileRequest).
-    fn compile_request<'a>(
-        manifest: &'a Manifest,
-        project_root: &'a Path,
-        sources: &'a [PathBuf],
-        inputs: &'a HostProjectInputs,
-    ) -> jals_build::CompileRequest<'a> {
-        jals_build::CompileRequest {
-            manifest,
-            project_root,
-            sources,
-            extra_sources: &inputs.extra_sources,
-            extra_classpath: &inputs.extra_classpath,
-            extra_javac_args: &inputs.javac_args,
-            compile_env: &inputs.compile_env,
-        }
-    }
-
-    /// Maps a toolchain [`BuildOutcome`](jals_build::BuildOutcome) to a CLI [`ExitCode`]: 0 succeeds,
-    /// any other code propagates, and a signal-terminated process (no code) fails with code 1.
-    fn outcome_exit_code(outcome: jals_build::BuildOutcome) -> ExitCode {
-        match outcome.code {
+    /// Maps a compile or run step's exit code to a CLI [`ExitCode`]: 0 succeeds, any other code
+    /// propagates, and a signal-terminated process (no code) fails with code 1.
+    ///
+    /// The mapping stays here because it is this driver's policy: `javac` distinguishes a compile
+    /// error (1) from bad arguments (2) and a system error (3), and a shell that sees only "nonzero"
+    /// cannot tell a broken invocation from broken source.
+    fn outcome_exit_code(code: Option<i32>) -> ExitCode {
+        match code {
             Some(0) => ExitCode::SUCCESS,
             // A `u8` exit code passes through; anything out of range (Windows codes, a signal) fails
             // as 1.
