@@ -18,6 +18,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use quick_xml::XmlVersion;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::reader::Reader;
 
@@ -29,12 +30,16 @@ struct Xml;
 
 impl Xml {
     /// Read one string attribute (`want`) off an element, unescaping entities.
+    ///
+    /// Normalization is pinned to [`XmlVersion::Implicit1_0`]: the two 1.0 spellings normalize
+    /// identically, exported Eclipse / IntelliJ documents are never 1.1, and it is what the
+    /// pre-0.41 `unescape_value` did, so no declaration needs to be tracked to reach it.
     fn attr(element: &BytesStart<'_>, want: &[u8]) -> Result<Option<String>, ImportError> {
         for attribute in element.attributes() {
             let attribute = attribute.map_err(|err| ImportError::Xml(err.to_string()))?;
             if attribute.key.as_ref() == want {
                 let value = attribute
-                    .unescape_value()
+                    .normalized_value(XmlVersion::Implicit1_0)
                     .map_err(|err| ImportError::Xml(err.to_string()))?;
                 return Ok(Some(value.into_owned()));
             }
