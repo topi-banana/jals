@@ -28,7 +28,7 @@ use jals_build::{
     ManifestExt,
     build_script::{
         BuildScriptDiagnostic, BuildScriptEnvironment, BuildScriptError, BuildScriptLimits,
-        BuildScriptOutput, BuildScriptPosition, BuildScriptSession,
+        BuildScriptPosition, BuildScriptSession,
     },
 };
 use jals_config::{BuildScript, Dependency, FeatureSet, Manifest, ResolvedBuildFeatures};
@@ -38,8 +38,8 @@ use jals_editor::{
 };
 use jals_exec::Exec;
 use jals_project::{
-    BuildTaskExecutor, BuildTaskHost, GraphError, GraphWarning, NativeProjectAssembly,
-    NativeProjectGraph, RootBuildScriptError, RootBuildScriptOptions,
+    BuildTaskHost, GraphError, GraphWarning, NativeProjectAssembly, ProjectAssembly, ProjectScript,
+    RootBuildScriptError, RootBuildScriptOptions,
 };
 use jals_storage::{DirKey, FileKey, NativeScope, NativeStorage, RelativePath};
 use tokio::sync::{mpsc, oneshot};
@@ -1839,9 +1839,8 @@ impl AssembledWorkspace {
             features: &features,
             limits: &limits,
         };
-        let mut task_classpath = Vec::new();
         let fetcher = jals_classpath::ReqwestFetcher::for_project(root.to_path_buf());
-        match BuildTaskExecutor::execute_root(
+        let script = match ProjectAssembly::script(
             &exec,
             &fetcher,
             &mut storage,
@@ -1865,9 +1864,8 @@ impl AssembledWorkspace {
         )
         .await
         {
-            Ok(root_output) => {
-                task_classpath = root_output.task_classpath;
-                if let Some(output) = root_output.script {
+            Ok(script) => {
+                if let Some(output) = script.output() {
                     for diagnostic in &output.diagnostics {
                         Self::record_build_script_diagnostic(
                             root,
@@ -1881,8 +1879,12 @@ impl AssembledWorkspace {
                         .rerun_files
                         .clone_from(&output.rerun_files);
                     project_sources.clone_from(&output.generated_sources);
-                    Self::augment_classpath(&mut effective_manifest, &output);
                 }
+                // The manifest retained here is what `watch_policy` classifies host changes
+                // against, so the script's classpath directives have to land on it and not only
+                // inside the assembly.
+                script.augment_classpath(&mut effective_manifest);
+                script
             }
             Err(RootBuildScriptError::BuildScript(BuildScriptError::ReportedErrors(
                 diagnostics,
@@ -1894,9 +1896,10 @@ impl AssembledWorkspace {
                         diagnostic,
                     );
                 }
+                ProjectScript::skipped()
             }
             Err(RootBuildScriptError::BuildScript(error)) => {
-                let script = error.script_path().cloned();
+                let script_path = error.script_path().cloned();
                 let position = error.position();
                 let message = error.to_string();
                 eprintln!(
@@ -1904,15 +1907,16 @@ impl AssembledWorkspace {
                          analysis: {message}",
                     root.display()
                 );
-                if let Some(script) = script {
+                if let Some(script_path) = script_path {
                     if position.is_some() {
                         let view = storage.view();
                         build_script_diagnostics.script_text =
-                            view.file_text(&script).ok().map(ToOwned::to_owned);
+                            view.file_text(&script_path).ok().map(ToOwned::to_owned);
                     }
-                    build_script_diagnostics.script = Some(script);
+                    build_script_diagnostics.script = Some(script_path);
                 }
                 build_script_diagnostics.push_failure(message, position);
+                ProjectScript::skipped()
             }
             Err(error) => {
                 let message = error.to_string();
@@ -1921,63 +1925,57 @@ impl AssembledWorkspace {
                     root.display()
                 );
                 build_script_diagnostics.push_failure(message, None);
-            }
-        }
-        let assembly = match Self::assemble_graph(
-            manifest,
-            &effective_manifest,
-            root,
-            &mut storage,
-            &scripts,
-            &task_classpath,
-        )
-        .await
-        {
-            Ok(assembly) => assembly,
-            Err(error) => {
-                let message = error.to_string();
-                let project_diagnostics = vec![Self::graph_error_diagnostic(&error)];
-                let mut root_only = effective_manifest.clone();
-                root_only.dependencies.clear();
-                let fallback_assembly = match Self::assemble_graph(
-                    &root_only,
-                    &root_only,
-                    root,
-                    &mut storage,
-                    &scripts,
-                    &task_classpath,
-                )
-                .await
-                {
-                    Ok(assembly) => assembly,
-                    Err(fallback_error) => {
-                        return Err(WorkspaceAssemblyFailure {
-                            message: format!(
-                                "{message}; root-only fallback failed: {fallback_error}"
-                            ),
-                            fallback: None,
-                            project_diagnostics,
-                        });
-                    }
-                };
-                let fallback = Self::finish_assembly(
-                    storage,
-                    &effective_manifest,
-                    root,
-                    project_sources,
-                    build_script_watch,
-                    build_script_diagnostics,
-                    fallback_assembly,
-                    features.into_features(),
-                )
-                .await;
-                return Err(WorkspaceAssemblyFailure {
-                    message,
-                    fallback: Some(Box::new(fallback)),
-                    project_diagnostics,
-                });
+                ProjectScript::skipped()
             }
         };
+        let assembly =
+            match Self::assemble_graph(&script, &effective_manifest, root, &mut storage, &scripts)
+                .await
+            {
+                Ok(assembly) => assembly,
+                Err(error) => {
+                    let message = error.to_string();
+                    let project_diagnostics = vec![Self::graph_error_diagnostic(&error)];
+                    let mut root_only = effective_manifest.clone();
+                    root_only.dependencies.clear();
+                    let fallback_assembly = match Self::assemble_graph(
+                        &script,
+                        &root_only,
+                        root,
+                        &mut storage,
+                        &scripts,
+                    )
+                    .await
+                    {
+                        Ok(assembly) => assembly,
+                        Err(fallback_error) => {
+                            return Err(WorkspaceAssemblyFailure {
+                                message: format!(
+                                    "{message}; root-only fallback failed: {fallback_error}"
+                                ),
+                                fallback: None,
+                                project_diagnostics,
+                            });
+                        }
+                    };
+                    let fallback = Self::finish_assembly(
+                        storage,
+                        &effective_manifest,
+                        root,
+                        project_sources,
+                        build_script_watch,
+                        build_script_diagnostics,
+                        fallback_assembly,
+                        features.into_features(),
+                    )
+                    .await;
+                    return Err(WorkspaceAssemblyFailure {
+                        message,
+                        fallback: Some(Box::new(fallback)),
+                        project_diagnostics,
+                    });
+                }
+            };
         Ok(Self::finish_assembly(
             storage,
             &effective_manifest,
@@ -1991,29 +1989,25 @@ impl AssembledWorkspace {
         .await)
     }
 
+    /// The graph phase, under the server's own policy.
+    ///
+    /// Analysis never reaches the network: opening a folder must not clone a remote the user has not
+    /// asked about, and a dependency's build tasks run under the same rule for the same reason. Git
+    /// dependencies and task artifacts resolve from what a real `jals build` already acquired and
+    /// verified.
     async fn assemble_graph(
-        discovery_manifest: &Manifest,
-        effective_manifest: &Manifest,
+        script: &ProjectScript,
+        manifest: &Manifest,
         root: &Path,
         storage: &mut NativeStorage,
         scripts: &GraphScriptInputs<'_>,
-        task_classpath: &[jals_storage::CacheKey],
     ) -> Result<NativeProjectAssembly, GraphError> {
-        // Analysis never reaches the network: opening a folder must not clone a remote the user
-        // has not asked about. Git dependencies resolve from what `jals build` already acquired.
-        let graph = NativeProjectGraph::discover(
-            discovery_manifest,
-            root,
-            storage.exec(),
-            jals_classpath::NetworkPolicy::Offline,
-        )
-        .await?;
-        // A dependency's build tasks run under the same offline rule, for the same reason: opening
-        // a folder must consume only what a real `jals build` already fetched and verified.
         let exec = storage.exec().clone();
-        let graph = graph
-            .preprocess(
-                storage.artifacts_mut(),
+        script
+            .resolve_native(
+                manifest,
+                root,
+                storage,
                 jals_project::GraphPreprocess {
                     exec: &exec,
                     fetcher: &jals_classpath::ReqwestFetcher::for_project(root.to_path_buf()),
@@ -2022,33 +2016,9 @@ impl AssembledWorkspace {
                     limits: scripts.limits,
                     network: jals_classpath::NetworkPolicy::Offline,
                 },
-            )
-            .await?;
-        let mut assembly = graph
-            .assemble_native(
-                effective_manifest,
-                root,
-                storage,
                 jals_classpath::ProjectInputOptions::Editor,
             )
-            .await;
-        if !task_classpath.is_empty() {
-            let entries: Vec<_> = task_classpath
-                .iter()
-                .cloned()
-                .map(jals_classpath::ClasspathEntry::Artifact)
-                .collect();
-            let load = jals_classpath::ClasspathLoad::load(
-                storage.exec(),
-                &storage.view(),
-                storage.artifacts(),
-                &entries,
-            )
-            .await;
-            assembly.inputs.classpath_classes.extend(load.classes);
-            assembly.inputs.warnings.extend(load.warnings);
-        }
-        Ok(assembly)
+            .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2221,18 +2191,6 @@ impl AssembledWorkspace {
             diagnostic.message()
         );
         update.push_reported(diagnostic);
-    }
-
-    /// Feed successful classpath directives to the existing native project plan without changing
-    /// the parsed manifest retained by any other host. Generated sources stay exact identities and
-    /// are passed separately through [`ProjectLayout`].
-    fn augment_classpath(manifest: &mut Manifest, output: &BuildScriptOutput) {
-        for classpath in &output.additional_classpath {
-            let classpath = classpath.to_string();
-            if !manifest.build.classpath.contains(&classpath) {
-                manifest.build.classpath.push(classpath);
-            }
-        }
     }
 
     fn watch_policy(

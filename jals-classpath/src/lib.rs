@@ -46,7 +46,9 @@ pub use load::{
 #[cfg(feature = "native")]
 pub use native::{NativeProjectPlan, ReqwestFetcher};
 #[cfg(feature = "archive")]
-pub use project::{ProjectInputOptions, ProjectInputPlan, ProjectInputs, SourceFile};
+pub use project::{
+    MemoryProjectPlan, ProjectInputOptions, ProjectInputPlan, ProjectInputs, SourceFile,
+};
 #[cfg(feature = "archive")]
 pub use remap::{JarMerge, JarRemap, NestedJar};
 
