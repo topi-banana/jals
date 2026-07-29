@@ -61,38 +61,13 @@ reason = "serde-read native config models; the non-file importers have no detect
 # `jals-fmt/tests/coverage.rs` guards from the other side.
 
 # --- Overrides --------------------------------------------------------------
-# `BackendSelection` / `BackendAbsence` are the one part of the backend tier the
-# CLI does not reach: it matches `[build] backend` and constructs the backend
-# directly, so nothing yet reports absence as a *result*. That is what `wasm32`
-# needs in order to run the frontend and stop without treating it as a failure.
-# See the `TODO(backend-tier)` note atop `jals-build/src/backend.rs`.
-[[override]]
-lint = "hawk::dead_public"
-crate = "jals_build"
-item = "BackendSelection"
-level = "allow"
-reason = "backend-tier selection factory not built yet; the CLI constructs backends directly"
-
-[[override]]
-lint = "hawk::dead_public"
-crate = "jals_build"
-item = "backend::BackendSelection::Available"
-level = "allow"
-reason = "backend-tier selection factory not built yet; the CLI constructs backends directly"
-
-[[override]]
-lint = "hawk::dead_public"
-crate = "jals_build"
-item = "backend::BackendSelection::Absent"
-level = "allow"
-reason = "backend-tier selection factory not built yet; the CLI constructs backends directly"
-
-[[override]]
-lint = "hawk::unnecessary_public"
-crate = "jals_build"
-item = "BackendAbsence"
-level = "allow"
-reason = "backend-tier selection factory not built yet; the CLI constructs backends directly"
+# `BackendSelection` / `BackendAbsence` needed overrides only while the factory
+# they belong to did not exist: the CLI matched `[build] backend` itself and
+# constructed the backend directly, so nothing reported absence as a *result* and
+# every variant looked unreachable. Both hosts now call the factory — `for_host`
+# in `jals-cli`, `in_process` in `jals-playground` — and both match on absence, so
+# the gate holds on its own and the overrides are gone. A backend kind the
+# selection stops answering is now a hawk finding.
 
 # `BackendKey` folds the frontend→backend pipeline provenance. Still unreached
 # because backend output is not memoized yet: every build recompiles every

@@ -34,6 +34,9 @@ pub const FRONTEND_OUT_DIR: &str = "target/jals/build/frontend";
 /// A lowered tree materialized on disk.
 pub struct StagedTree {
     root: PathBuf,
+    /// What reached disk, in tree order. Read only by [`sources`](StagedTree::sources), and so only
+    /// by tests — see that method for why nothing in a build needs it.
+    #[cfg_attr(not(test), allow(dead_code))]
     sources: Vec<PathBuf>,
 }
 
@@ -120,8 +123,15 @@ impl StagedTree {
         &self.root
     }
 
-    /// The staged files, in tree order — the only sources a compile should be given.
-    pub fn sources(&self) -> &[PathBuf] {
+    /// The staged files, in tree order.
+    ///
+    /// Not what drives a compile, and crate-internal because of it: `JavacBackend` derives the paths
+    /// it compiles from its `BackendRequest`'s tree instead, so the *request* stays the definition
+    /// of what compiles and a host that staged one tree and requested another gets a missing file
+    /// rather than a quietly different source set. What remains is a way to assert what reached
+    /// disk, which is a test's question — hence dead in a build, and allowed to be.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn sources(&self) -> &[PathBuf] {
         &self.sources
     }
 }

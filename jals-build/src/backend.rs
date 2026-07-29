@@ -34,12 +34,17 @@ use jals_storage::{CacheKey, ContentDigest, RelativePath};
 ///
 /// Carried as data rather than as a `Manifest` reference so the portable half never needs the
 /// manifest's host-path resolution.
+///
+/// The fields are crate-internal because [`from_manifest`](Self::from_manifest) is the only way a
+/// host builds one: with the knob list written once there, a host that set the fields itself would
+/// be the second place to update when `[build]` grows one. Only the backends in this crate read
+/// them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BackendOptions {
-    pub release: Option<u32>,
-    pub source: Option<u32>,
-    pub target: Option<u32>,
-    pub extra_args: Vec<String>,
+    pub(crate) release: Option<u32>,
+    pub(crate) source: Option<u32>,
+    pub(crate) target: Option<u32>,
+    pub(crate) extra_args: Vec<String>,
 }
 
 impl BackendOptions {

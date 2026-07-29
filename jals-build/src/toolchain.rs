@@ -335,7 +335,14 @@ pub struct BuildOutcome {
 
 impl BuildOutcome {
     /// Whether the step succeeded (exit code `0`).
-    pub const fn success(self) -> bool {
+    ///
+    /// Crate-internal: the compile step reports a [`BackendOutcome`](crate::BackendOutcome) now, and
+    /// the run step's driver maps [`code`](Self::code) onto its own process's exit status rather than
+    /// asking a yes/no question. What is left is the readable spelling of "exit 0" for tests — hence
+    /// dead in a build, and allowed to be rather than `#[cfg(test)]`, so the type reads the same way
+    /// whichever target is being compiled.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) const fn success(self) -> bool {
         matches!(self.code, Some(0))
     }
 }
@@ -418,9 +425,10 @@ pub(crate) enum ToolIdentity {
 /// embedded compiler fills. [`compile`](Compiler::compile) performs the work and reports a
 /// [`BuildOutcome`]; [`describe_compile`](Compiler::describe_compile) renders the planned action
 /// for `--dry-run`/`-v` output without performing it. A backend that cannot compile returns
-/// [`ToolchainError::Unsupported`]. The trait is object-safe: a host matches the manifest's
-/// [`Compiler`](jals_config::Compiler) selector to a backend and drives it as a `&dyn Compiler`
-/// (see `<dyn Compiler>::select` under the `native` feature).
+/// [`ToolchainError::Unsupported`]. The trait is object-safe: the manifest's
+/// [`Compiler`](jals_config::Compiler) selector is matched to a backend and driven as a
+/// `&dyn Compiler` (see `<dyn Compiler>::select` under the `native` feature) — by `JavacBackend`,
+/// which is the only thing that selects one.
 ///
 /// Crate-internal: this is the `javac`/`java` invocation layer *beneath*
 /// [`Backend`](crate::Backend), which `JavacBackend` drives once the lowered tree is on disk. Hosts

@@ -53,7 +53,11 @@ impl JalsBackend {
 
     /// A backend emitting class files for `release` (`--release N`), defaulting to Java 25 when the
     /// manifest names no level — the same default `jals init` scaffolds.
-    pub fn new(release: Option<u32>) -> Self {
+    ///
+    /// Crate-internal, like [`wasm`](Self::wasm): a host reaches this backend by calling
+    /// [`BackendSelection`](crate::BackendSelection), which is what keeps the `[build] backend`
+    /// decision table in one place. Constructing it directly is what that seam replaced.
+    pub(crate) fn new(release: Option<u32>) -> Self {
         // Java 25 when the manifest names no level, matching what `jals init` scaffolds.
         Self {
             target: Target::ClassFiles {
@@ -66,7 +70,7 @@ impl JalsBackend {
     ///
     /// `release` has no meaning here: there is no class-file version to pick, and no JVM to accept
     /// it. What bounds the output instead is the language subset with a wasm representation.
-    pub const fn wasm() -> Self {
+    pub(crate) const fn wasm() -> Self {
         Self {
             target: Target::Wasm,
         }
