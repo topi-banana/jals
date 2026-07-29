@@ -31,6 +31,10 @@ ignores:
   # Writes a frontend's lowered tree to disk so `javac` can read it — the one place cache keys
   # become host paths. `native`-gated; the `Backend` trait it feeds stays portable.
   - 'jals-build/src/staging.rs'
+  # The `javac` adapter: the only `Backend` implementation that needs a host process, so it is where
+  # the portable request meets host paths (the staged sources, the classpath, the project root).
+  # `native`-gated; the seam it implements stays ungated and `wasm32`-buildable.
+  - 'jals-build/src/javac_backend.rs'
   - 'jals-cli/src/**/*.rs'
   - 'jals-lsp/src/**/*.rs'
   - 'jals-tests/src/**/*.rs'

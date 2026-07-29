@@ -93,6 +93,13 @@ filesystem reads into portable interfaces.
   selects what compiles the lowered tree: `javac` (a host process), `jals` (in-process, one class
   file per type), or `jals-wasm` (in-process, one WebAssembly module). Only the `javac` adapter is
   host-gated — `JalsBackend` is portable, and builds for `wasm32` like the contract it implements.
+  All three are reached through `Backend`, and a host **never matches on `[build] backend` itself**:
+  it calls `BackendSelection` once — `in_process` where there is no process to spawn (the browser),
+  `for_host` where there is — so the decision table lives in one place and absence is a value
+  carrying a `BackendAbsence` rather than a failure raised later. `Compiler`/`CompileRequest` are the
+  crate-internal `javac` invocation layer *beneath* that seam, which `JavacBackend` drives once
+  `StagedTree` has materialized the tree; `[toolchain] compiler` still chooses which tool runs, and
+  `[toolchain] runtime` is selected independently for `jals run`'s run step.
 - `jals-cli`: the host boundary from clap `PathBuf` values to `NativeStorage` and typed keys. It
   also owns native-formatter-config **detection** (`migrate.rs`): portable crates cannot look at a
   filesystem, so the host decides which config file is there and reads its bytes through a

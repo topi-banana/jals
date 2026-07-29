@@ -335,7 +335,14 @@ pub struct BuildOutcome {
 
 impl BuildOutcome {
     /// Whether the step succeeded (exit code `0`).
-    pub const fn success(self) -> bool {
+    ///
+    /// Crate-internal: the compile step reports a [`BackendOutcome`](crate::BackendOutcome) now, and
+    /// the run step's driver maps [`code`](Self::code) onto its own process's exit status rather than
+    /// asking a yes/no question. What is left is the readable spelling of "exit 0" for tests — hence
+    /// dead in a build, and allowed to be rather than `#[cfg(test)]`, so the type reads the same way
+    /// whichever target is being compiled.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) const fn success(self) -> bool {
         matches!(self.code, Some(0))
     }
 }
@@ -397,6 +404,20 @@ impl std::error::Error for ToolchainError {
     }
 }
 
+/// Which tool a compile will actually run, as far as its cached output is concerned.
+///
+/// The `[toolchain] compiler` selector and `[build] backend` are independent, so `javac` as a
+/// *backend* can be served by either the host compiler or the builtin dummy. Those two produce
+/// completely unrelated output — one compiles, the other copies sources verbatim — so the
+/// discriminant has to be part of the identity even when there is no program path to name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ToolIdentity {
+    /// The in-process dummy (`[toolchain] compiler = "builtin"`), which has no program to name.
+    Builtin,
+    /// The host tool this compile resolved to.
+    Program(PathBuf),
+}
+
 /// A backend that can compile a project — the trait behind `[toolchain] compiler`.
 ///
 /// The native implementation (`SubprocessToolchain`) spawns `javac`; the in-process
@@ -404,21 +425,33 @@ impl std::error::Error for ToolchainError {
 /// embedded compiler fills. [`compile`](Compiler::compile) performs the work and reports a
 /// [`BuildOutcome`]; [`describe_compile`](Compiler::describe_compile) renders the planned action
 /// for `--dry-run`/`-v` output without performing it. A backend that cannot compile returns
-/// [`ToolchainError::Unsupported`]. The trait is object-safe: a host matches the manifest's
-/// [`Compiler`](jals_config::Compiler) selector to a backend and drives it as a `&dyn Compiler`
-/// (see `<dyn Compiler>::select` under the `native` feature).
-pub trait Compiler {
+/// [`ToolchainError::Unsupported`]. The trait is object-safe: the manifest's
+/// [`Compiler`](jals_config::Compiler) selector is matched to a backend and driven as a
+/// `&dyn Compiler` (see `<dyn Compiler>::select` under the `native` feature) — by `JavacBackend`,
+/// which is the only thing that selects one.
+///
+/// Crate-internal: this is the `javac`/`java` invocation layer *beneath*
+/// [`Backend`](crate::Backend), which `JavacBackend` drives once the lowered tree is on disk. Hosts
+/// select a compile backend through [`BackendSelection`](crate::BackendSelection), never here.
+pub(crate) trait Compiler {
     /// Compile the project described by `req`.
     fn compile<'a>(&'a self, req: &'a CompileRequest<'_>) -> ToolchainFuture<'a>;
 
     /// A human-readable description of what [`compile`](Compiler::compile) would do (for
     /// `--dry-run`/`-v`). Stays synchronous: rendering a plan is display-only and bounded.
     fn describe_compile(&self, req: &CompileRequest<'_>) -> String;
+
+    /// Which tool this backend would run for a project rooted at `project_root`, for the cache
+    /// identity of the compile that drives it.
+    ///
+    /// Answered here rather than derived by the caller because only the implementation knows
+    /// whether there is a program at all, and resolving one is its own precedence policy.
+    fn tool_identity(&self, project_root: &Path) -> ToolIdentity;
 }
 
 /// A backend that can run a project's main class — the trait behind `[toolchain] runtime`.
 ///
-/// The exact mirror of [`Compiler`] for the run step, selected independently of it (the manifest's
+/// The exact mirror of `Compiler` for the run step, selected independently of it (the manifest's
 /// two selectors may name *different* backends — a builtin dummy compile checked with the real
 /// `java`, or a real `javac` compile whose run is stubbed out — and each `select` factory matches
 /// its own enum, so no routing composite is needed). Implemented by the same two backends; driven

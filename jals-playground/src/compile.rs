@@ -2,9 +2,12 @@
 //!
 //! The same pipeline `jals build` runs, minus the filesystem. Sources go through the frontend
 //! ([`jals_frontend::Driver`]) so the backend only ever sees what a frontend emitted, then through
-//! [`jals_build::JalsBackend`] — the in-process compiler, portable by construction, which is why a
-//! browser tab can run it at all. Class files are packaged into a jar here; a WebAssembly module is
-//! already one artifact and passes straight through.
+//! whichever backend [`jals_build::BackendSelection::in_process`] hands back — the in-process
+//! compiler, portable by construction, which is why a browser tab can run it at all. That entry
+//! point is also how `javac` is *declined* rather than attempted: choosing it says this host has no
+//! process to spawn, so the answer comes back as an absence carrying its reason. Class files are
+//! packaged into a jar here; a WebAssembly module is already one artifact and passes straight
+//! through.
 //!
 //! Deliberately free of the workspace lock, Monaco, and the DOM: sources arrive as `(path, text)`
 //! and the result is bytes. That keeps the whole thing testable on the host and makes it impossible
@@ -18,7 +21,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use jals_build::{
-    Backend, BackendAbsence, BackendOptions, BackendRequest, BackendSource, JalsBackend, RunTarget,
+    BackendAbsence, BackendOptions, BackendRequest, BackendSelection, BackendSource, RunTarget,
 };
 use jals_classpath::JarPackage;
 use jals_config::{BackendKind, Manifest};
@@ -45,8 +48,14 @@ pub struct CompileArtifact {
 /// Why a compile produced no artifact. The [`Display`](fmt::Display) is what the pane shows.
 #[derive(Debug)]
 pub enum CompileFailure {
-    /// `[build] backend = { type = "javac" }` — a browser tab has no process to spawn.
-    NoHostProcess,
+    /// The selected `[build] backend` does not exist on this host — `javac` in a browser tab, which
+    /// has no process to spawn. Carries the selection's own verdict rather than restating it.
+    BackendUnavailable {
+        /// The `[build] backend` tag that was selected.
+        id: &'static str,
+        /// Why this host does not have it.
+        reason: BackendAbsence,
+    },
     /// A workspace path that is not a portable project-relative path.
     InvalidPath(String),
     /// The frontend rejected its input or could not publish its output.
@@ -65,14 +74,13 @@ pub enum CompileFailure {
 impl fmt::Display for CompileFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            // The absence is the shipped contract's own wording; the rest points at the two
-            // backends that *do* run here, since the manifest is one edit away.
-            Self::NoHostProcess => write!(
+            // The absence is the selection's own wording; the rest points at the two backends that
+            // *do* run here, since the manifest is one edit away.
+            Self::BackendUnavailable { id, reason } => write!(
                 f,
-                "javac needs a host process, and {}.\n\
+                "{id} needs a host process, and {reason}.\n\
                  Set `[build] backend = {{ type = \"jals\" }}` in jals.toml for a downloadable \
-                 .jar, or `{{ type = \"jals-wasm\" }}` for a WebAssembly module.",
-                BackendAbsence::NoHostProcess
+                 .jar, or `{{ type = \"jals-wasm\" }}` for a WebAssembly module."
             ),
             Self::InvalidPath(path) => write!(f, "`{path}` is not a project-relative path"),
             Self::Lower(message) => write!(f, "the frontend failed: {message}"),
@@ -102,24 +110,22 @@ impl Compile {
         manifest: &Manifest,
         files: &[(String, String)],
     ) -> Result<CompileArtifact, CompileFailure> {
-        // Decided before any work: `javac` is not a "compile then fail" case, it is a host this
-        // backend cannot exist on.
-        let wasm = match manifest.build.backend {
-            BackendKind::Javac {} => return Err(CompileFailure::NoHostProcess),
-            BackendKind::Jals {} => false,
-            BackendKind::JalsWasm {} => true,
-        };
+        // Decided before any work, and by the selection rather than here: `javac` is not a "compile
+        // then fail" case, it is a backend this host cannot have. `in_process` is the entry point
+        // for exactly that — choosing it declares there is no process to spawn.
+        let backend =
+            match BackendSelection::in_process(manifest.build.backend, manifest.build.release) {
+                BackendSelection::Available(backend) => backend,
+                BackendSelection::Absent { id, reason } => {
+                    return Err(CompileFailure::BackendUnavailable { id, reason });
+                }
+            };
         if files.is_empty() {
             return Err(CompileFailure::NoSources);
         }
 
         let sources = Self::lower(manifest, files).await?;
-        let options = BackendOptions {
-            release: manifest.build.release,
-            source: manifest.build.source,
-            target: manifest.build.target,
-            extra_args: manifest.build.javac_flags.clone(),
-        };
+        let options = BackendOptions::from_manifest(manifest);
         let request = BackendRequest {
             tree: &sources,
             // The in-process compiler reads library signatures from the embedded stubs rather than
@@ -128,22 +134,17 @@ impl Compile {
             classpath: &[],
             options: &options,
         };
-        // wasm is a different *target*, not just a different tool: one module for the whole project,
-        // and the host's collector rather than a JVM's.
-        let backend = if wasm {
-            JalsBackend::wasm()
-        } else {
-            JalsBackend::new(manifest.build.release)
-        };
-
-        let outcome = Backend::compile(&backend, &request)
+        let outcome = backend
+            .compile(&request)
             .await
             .map_err(|error| CompileFailure::Backend(error.to_string()))?;
         if !outcome.success() {
             return Err(CompileFailure::NotCompiled(outcome.messages));
         }
 
-        if wasm {
+        // How the output is *packaged* is still this host's question: one module for the whole
+        // project passes straight through, one class file per type goes into a jar.
+        if matches!(manifest.build.backend, BackendKind::JalsWasm {}) {
             let (_, bytes) = outcome.artifacts.into_iter().next().ok_or_else(|| {
                 CompileFailure::Backend("the wasm backend emitted no module".to_owned())
             })?;
@@ -343,18 +344,38 @@ mod tests {
 
     /// The default backend is `javac`, which needs a process this host cannot spawn. The message
     /// has to name the way out, not just the wall.
+    ///
+    /// Pinned in full: the wording is the whole value of this failure — a browser tab cannot grow a
+    /// JDK, so the only useful reply is which one-line manifest edit fixes it. The reason half now
+    /// comes from the selection's own verdict rather than being restated here, which is exactly the
+    /// kind of change that could silently reword it.
     #[test]
     fn the_javac_backend_reports_that_a_browser_has_no_host_process() {
-        let manifest = manifest("[package]\nname = \"demo\"\n");
-        let error = block_on_inline(Compile::workspace(&manifest, &subset_sources()))
-            .err()
-            .expect("javac cannot run here");
-        let message = error.to_string();
-        assert!(
-            message.contains("this host cannot run external compilers"),
-            "{message}"
-        );
-        assert!(message.contains("jals-wasm"), "{message}");
+        // Whether `javac` is the default or spelled out makes no difference to the answer.
+        for source in [
+            "[package]\nname = \"demo\"\n",
+            "[build]\nbackend = { type = \"javac\" }\n",
+        ] {
+            let error = block_on_inline(Compile::workspace(&manifest(source), &subset_sources()))
+                .err()
+                .expect("javac cannot run here");
+            assert!(
+                matches!(
+                    error,
+                    CompileFailure::BackendUnavailable {
+                        id: "javac",
+                        reason: BackendAbsence::NoHostProcess,
+                    }
+                ),
+                "{error}"
+            );
+            assert_eq!(
+                error.to_string(),
+                "javac needs a host process, and this host cannot run external compilers.\n\
+                 Set `[build] backend = { type = \"jals\" }` in jals.toml for a downloadable .jar, \
+                 or `{ type = \"jals-wasm\" }` for a WebAssembly module."
+            );
+        }
     }
 
     /// The whole point: packaged classes, compiled in-process, packaged into a named jar. Every
