@@ -73,7 +73,7 @@ num-traits = { version = "0.2.19" }
 # Host-only XML reader for `jals-fmt`'s Eclipse/IntelliJ config importers. It is std-based, so it
 # is pulled only behind `jals-fmt`'s `std` feature (never in the wasm playground build);
 # `default-features = false` drops its optional serde/async extras — we only stream events.
-quick-xml = { version = "0.37", default-features = false }
+quick-xml = { version = "0.41", default-features = false }
 rayon = { version = "1" }
 # Host-only (jals-classpath downloads dependency jars). `rustls-tls` for pure-Rust TLS (no system
 # OpenSSL, so it cross-compiles cleanly); the async client runs on the workspace's current-thread
