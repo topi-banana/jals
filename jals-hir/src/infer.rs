@@ -34,12 +34,12 @@ use jals_exec::Yielder;
 
 use jals_syntax::SyntaxKind::{
     AMP, AMP_AMP, ASSIGNMENT_EXPR, BANG, BANG_EQ, BOOLEAN_KW, BYTE_KW, CALL_EXPR, CARET,
-    CATCH_CLAUSE, CHAR_KW, CHAR_LITERAL, COMMA, CONSTRUCTOR_DECL, DOT, DOUBLE_KW, EQ, EQ_EQ,
-    FALSE_KW, FIELD_ACCESS, FIELD_DECL, FLOAT_KW, FLOAT_LITERAL, FOR_EACH_STMT, GT, IDENT,
+    CATCH_CLAUSE, CHAR_KW, CHAR_LITERAL, COMMA, CONSTRUCTOR_DECL, DOT, DOUBLE_KW, ELLIPSIS, EQ,
+    EQ_EQ, FALSE_KW, FIELD_ACCESS, FIELD_DECL, FLOAT_KW, FLOAT_LITERAL, FOR_EACH_STMT, GT, IDENT,
     INSTANCEOF_KW, INT_KW, INT_LITERAL, LAMBDA_EXPR, LBRACK, LOCAL_VAR_DECL, LONG_KW, LSHIFT, LT,
     LT_EQ, METHOD_DECL, MINUS, NEW_EXPR, NULL_KW, PARAM, PERCENT, PIPE, PIPE_PIPE, PLUS,
     RECORD_COMPONENT, RESOURCE, RETURN_STMT, SHORT_KW, SLASH, STAR, STRING_LITERAL, SUPER_KW,
-    TEXT_BLOCK, THIS_KW, TILDE, TRUE_KW, VAR_KW, VOID_KW,
+    TEXT_BLOCK, THIS_KW, TILDE, TRUE_KW, TYPE_PATTERN, VAR_KW, VOID_KW,
 };
 use jals_syntax::ast::{self, AstNode};
 use jals_syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
@@ -430,6 +430,9 @@ impl TypeInference {
                         && let Some(selected) = self
                             .resolve_call(&call, index, file)
                             .and_then(|resolution| resolution.selected)
+                            // A bare `this(…)` / `super(…)` is a constructor, which no name lookup
+                            // finds — so it resolves the way a `new` does.
+                            .or_else(|| self.resolve_explicit_constructor(&call, index, file))
                     {
                         calls.push(((span.start, span.end), selected));
                     }
@@ -472,9 +475,9 @@ impl TypeInference {
     /// before `println(String)` would swallow every string, and the mistake would surface as a
     /// run-time `NoSuchMethodError` from a descriptor nothing ever checked.
     ///
-    /// What is *not* modelled: the three phases (strict / loose / variable-arity) are collapsed
-    /// into one, boxing is whatever [`Ty::is_assignable_to`] admits, and a varargs candidate is
-    /// skipped entirely since its arity is not fixed.
+    /// What is *not* modelled: the first two phases (strict / loose) are collapsed into one and
+    /// boxing is whatever [`Ty::is_assignable_to`] admits. Variable arity *is* a separate phase,
+    /// because it has to be: it may only be consulted once fixed arity has found nothing.
     fn resolve_call(
         &self,
         call: &ast::CallExpr,
@@ -486,15 +489,31 @@ impl TypeInference {
             .args()
             .map(|list| list.args().collect())
             .unwrap_or_default();
-        // Candidates of the right arity (a varargs method is skipped — its arity is variable).
-        let candidates: Vec<MemberId> = index
-            .resolve_members_all(owner, &name, Namespace::Method)
-            .into_iter()
+        let reachable = index.resolve_members_all(owner, &name, Namespace::Method);
+        // Phase one: fixed arity, which is every non-varargs method taking exactly this many
+        // arguments.
+        let mut candidates: Vec<MemberId> = reachable
+            .iter()
+            .copied()
             .filter(|&id| {
                 let member = index.member(id);
                 !member.varargs && member.params.len() == args.len()
             })
             .collect();
+        // Phase two: variable arity (JLS §15.12.2.4), and *only* when phase one found nothing —
+        // which is the order the specification gives and the reason `f(Object[])` must not win over
+        // `f(String, String)`. A varargs method takes its fixed parameters plus any number more, so
+        // one argument short of its arity is legal (`f()` against `f(int...)`) and any number over is.
+        if candidates.is_empty() {
+            candidates = reachable
+                .iter()
+                .copied()
+                .filter(|&id| {
+                    let member = index.member(id);
+                    member.varargs && args.len() + 1 >= member.params.len()
+                })
+                .collect();
+        }
         if candidates.is_empty() {
             return None;
         }
@@ -536,17 +555,111 @@ impl TypeInference {
             .copied()
             .filter(|&id| {
                 let member = index.member(id);
-                arg_tys.iter().zip(&member.params).all(|(arg_ty, param)| {
-                    arg_ty.is_none_or(|ty| {
-                        ty.is_assignable_to(
-                            &index.member_type_to_ty(member.file, member.owner, &param.ty),
-                            Some(index),
-                        )
-                    })
-                })
+                let fits = |arg_ty: Option<&Ty>, target: &Ty| {
+                    arg_ty.is_none_or(|ty| ty.is_assignable_to(target, Some(index)))
+                };
+                let declared = |param: &crate::Param| {
+                    index.member_type_to_ty(member.file, member.owner, &param.ty)
+                };
+                if !member.varargs {
+                    return arg_tys
+                        .iter()
+                        .zip(&member.params)
+                        .all(|(arg_ty, param)| fits(*arg_ty, &declared(param)));
+                }
+                // A varargs method's *last* parameter stands for however many arguments are left, so
+                // each of those is checked against its **element** type rather than against the array.
+                // `zip` alone would compare a `String` to a `String[]` and reject the call.
+                let Some((last, fixed)) = member.params.split_last() else {
+                    return false;
+                };
+                if !arg_tys
+                    .iter()
+                    .zip(fixed)
+                    .all(|(arg_ty, param)| fits(*arg_ty, &declared(param)))
+                {
+                    return false;
+                }
+                let element = match declared(last) {
+                    Ty::Array(element) => *element,
+                    // A varargs parameter is an array by construction; anything else is an index that
+                    // could not work the type out, and staying lenient is this module's habit.
+                    other => other,
+                };
+                let rest = &arg_tys[fixed.len().min(arg_tys.len())..];
+                // Exactly one trailing argument may be the array itself rather than an element
+                // (JLS §15.12.4.2): `total(new int[] {1, 2})` passes straight through to `int...`.
+                if let [only] = rest
+                    && fits(*only, &declared(last))
+                {
+                    return true;
+                }
+                rest.iter().all(|arg_ty| fits(*arg_ty, &element))
             })
             .collect();
         Self::most_specific(&applicable, index)
+    }
+
+    /// The constructor a bare `this(args)` or `super(args)` binds to.
+    ///
+    /// Neither goes through [`call_target`](Self::call_target): a constructor is not reachable by name
+    /// lookup (it is indexed under its class's own name and in no name space a call searches), and
+    /// `this` / `super` carry no identifier token to look up either. So the candidate set is a type's
+    /// *own* constructors, exactly as a `new` uses — the enclosing type for `this(…)` and its class
+    /// supertype for `super(…)`.
+    ///
+    /// Without this a constructor's own delegation resolved to nothing, and `this(1)` was
+    /// indistinguishable from a call to a method named `this`.
+    fn resolve_explicit_constructor(
+        &self,
+        call: &ast::CallExpr,
+        index: &ProjectIndex,
+        file: FileId,
+    ) -> Option<MemberId> {
+        let Some(ast::Expr::NameRef(name)) = call.callee() else {
+            return None;
+        };
+        let keyword = name
+            .syntax()
+            .children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .find(|token| matches!(token.kind(), THIS_KW | SUPER_KW))?;
+        let enclosing = index.enclosing_item(file, call.syntax())?;
+        let owner = if keyword.kind() == THIS_KW {
+            enclosing
+        } else {
+            // The class supertype, which is the only one a `super(…)` can name. An interface has no
+            // constructor to reach.
+            index
+                .item(enclosing)
+                .supertypes
+                .iter()
+                .map(|supertype| supertype.id)
+                .find(|&id| index.item(id).kind != DefKind::Interface)?
+        };
+        let args: Vec<ast::Expr> = call
+            .args()
+            .map(|list| list.args().collect())
+            .unwrap_or_default();
+        let candidates: Vec<MemberId> = index
+            .own_members(owner)
+            .iter()
+            .copied()
+            .filter(|&id| {
+                let member = index.member(id);
+                member.kind == DefKind::Constructor
+                    && !member.varargs
+                    && member.params.len() == args.len()
+            })
+            .collect();
+        if candidates.is_empty() {
+            return None;
+        }
+        let arg_tys: Vec<Option<&Ty>> = args
+            .iter()
+            .map(|argument| self.type_of_expr(Collect::node_span(argument.syntax())))
+            .collect();
+        Self::select_overload(&candidates, &arg_tys, index)
     }
 
     /// The constructor `new C(args)` binds to.
@@ -700,7 +813,7 @@ impl TypeInference {
     /// cannot tell whether the value is a constant in range, so we never report these —
     /// under-reporting (missing `byte b = someInt;`) rather than risk a false positive on the legal,
     /// common `byte b = 1;`.
-    const fn rescued_by_constant_narrowing(expected: &Ty, found: &Ty) -> bool {
+    fn rescued_by_constant_narrowing(expected: &Ty, found: &Ty) -> bool {
         matches!(
             expected,
             Ty::Primitive(Primitive::Byte | Primitive::Short | Primitive::Char)
@@ -753,6 +866,9 @@ impl<'a> Inferer<'a> {
     async fn run(mut self) -> TypeInference {
         let root = self.root.clone();
         self.collect_declared_types(&root).await;
+        // After the written types, because a lambda's target is one of them.
+        self.collect_lambda_params(&root).await;
+        self.collect_pattern_components(&root).await;
         self.infer_in(&root).await;
         let project = self.project;
         let mut inference = TypeInference {
@@ -781,11 +897,139 @@ impl<'a> Inferer<'a> {
             if Self::declares_typed_bindings(node.kind()) {
                 let ty = node.children().find_map(ast::Type::cast);
                 if !ty.as_ref().is_some_and(Cst::is_var_type) {
-                    let t = self.ty_of_opt_type(ty.as_ref());
+                    let mut t = self.ty_of_opt_type(ty.as_ref());
+                    // A `...` parameter is an array binding inside the body: `int... xs` writes the
+                    // element type, and only the ellipsis says the local is an `int[]`. Without this
+                    // the body sees `xs` as an `int` and every use of it is typed one dimension short.
+                    if Self::is_variable_arity(&node) {
+                        t = Ty::Array(Box::new(t));
+                    }
                     for tok in Collect::direct_ident_tokens(&node) {
                         self.set_def_type(Collect::token_start(&tok), t.clone());
                     }
                 }
+            }
+        }
+    }
+
+    /// Type a `record` pattern's `var` components from the components they stand for.
+    ///
+    /// `case Point(var x, var y)` writes no type for either binding, and nothing else can supply one:
+    /// a component pattern's type *is* the record component's, position by position (JLS §14.30.1).
+    /// This is the ordinary spelling of a record pattern, and without it the binding has no type at all
+    /// — which is a report at the first use rather than anything a reader could act on.
+    async fn collect_pattern_components(&mut self, root: &SyntaxNode) {
+        use jals_syntax::SyntaxKind::{RECORD_PATTERN, TYPE_PATTERN, UNNAMED_PATTERN};
+        let Some((index, file)) = self.project else {
+            return;
+        };
+        let mut yielder = Yielder::new();
+        for pattern in root.descendants().filter(|n| n.kind() == RECORD_PATTERN) {
+            yielder.tick().await;
+            let Some(written) = pattern.children().find_map(ast::Type::cast) else {
+                continue;
+            };
+            let Some(name) = written.simple_name() else {
+                continue;
+            };
+            let qualified = written
+                .is_qualified()
+                .then(|| written.qualified_text())
+                .flatten();
+            let Some(item) = index
+                .resolve_type_name(file, &name, qualified.as_deref())
+                .project_id()
+            else {
+                continue;
+            };
+            let components: Vec<MemberId> = index
+                .own_members(item)
+                .iter()
+                .copied()
+                .filter(|&member| {
+                    let info = index.member(member);
+                    info.kind == DefKind::Field && !info.modifiers.is_static
+                })
+                .collect();
+            let subs: Vec<SyntaxNode> = pattern
+                .children()
+                .filter(|child| {
+                    matches!(
+                        child.kind(),
+                        TYPE_PATTERN | RECORD_PATTERN | UNNAMED_PATTERN
+                    )
+                })
+                .collect();
+            for (component, sub) in components.iter().zip(&subs) {
+                // Only a `var` one: an explicitly typed component pattern was typed by pass 1, and may
+                // narrow to something the component's declared type is not.
+                if sub.kind() != TYPE_PATTERN
+                    || !sub
+                        .children()
+                        .find_map(ast::Type::cast)
+                        .as_ref()
+                        .is_some_and(Cst::is_var_type)
+                {
+                    continue;
+                }
+                let ty = index.resolved_member_ty(*component);
+                for tok in Collect::direct_ident_tokens(sub) {
+                    self.set_def_type(Collect::token_start(&tok), ty.clone());
+                }
+            }
+        }
+    }
+
+    /// Type every lambda parameter from the interface the lambda is being converted to.
+    ///
+    /// `n -> n * 2` writes no type for `n`, and nothing else can supply one: the parameter's type *is* the
+    /// functional interface's, position by position (JLS §15.27.1). Without this the body cannot be typed at
+    /// all, which is what stopped a backend emitting one even with the target type known.
+    ///
+    /// Runs in pass 1, so it reads only what pass 1 has: a declaration's written type and a method's return
+    /// type. A lambda in an assignment or an argument keeps untyped parameters, for the same reason its own
+    /// type stays unknown there.
+    async fn collect_lambda_params(&mut self, root: &SyntaxNode) {
+        let Some((index, _)) = self.project else {
+            return;
+        };
+        let mut yielder = Yielder::new();
+        for lambda in root.descendants().filter(|n| n.kind() == LAMBDA_EXPR) {
+            yielder.tick().await;
+            let Some(item) = self.target_ty(&lambda).project_id() else {
+                continue;
+            };
+            // One method, or this is no functional interface and there is nothing to take a shape from.
+            let mut methods = index
+                .own_members(item)
+                .iter()
+                .copied()
+                .filter(|&id| index.member(id).kind == DefKind::Method);
+            let Some(method) = methods.next() else {
+                continue;
+            };
+            if methods.next().is_some() {
+                continue;
+            }
+            let params = index.member(method).params.clone();
+            let owner = index.member(method).owner;
+            let file = index.member(method).file;
+            let declared: Vec<SyntaxToken> = lambda
+                .descendants()
+                .filter(|node| node.kind() == PARAM)
+                .filter_map(|param| {
+                    param
+                        .children_with_tokens()
+                        .filter_map(SyntaxElement::into_token)
+                        .find(|token| token.kind() == IDENT)
+                })
+                .collect();
+            for (position, name) in declared.iter().enumerate() {
+                let Some(param) = params.get(position) else {
+                    continue;
+                };
+                let ty = index.member_type_to_ty(file, owner, &param.ty);
+                self.set_def_type(usize::from(name.text_range().start()), ty);
             }
         }
     }
@@ -872,14 +1116,55 @@ impl<'a> Inferer<'a> {
             ast::Expr::FieldAccess(f) => self.field_access_ty(f),
             ast::Expr::Call(c) => self.call_ty(c),
             ast::Expr::Switch(s) => self.switch_ty(s),
-            // Target-typed forms still need a later phase: a method reference / lambda takes its
-            // type from context.
-            ast::Expr::MethodRef(_) | ast::Expr::Lambda(_) => Ty::Unknown,
-            ast::Expr::ClassLiteral(_) => Ty::Class(ClassTy::external("Class")),
+            // A method reference and a lambda have no type of their own: they take one from the context
+            // they appear in, which is the whole meaning of "target-typed".
+            ast::Expr::MethodRef(e) => self.target_ty(e.syntax()),
+            ast::Expr::Lambda(e) => self.target_ty(e.syntax()),
+            ast::Expr::ClassLiteral(_) => self.java_lang_ty("Class"),
         }
     }
 
     /// The memoised type of the (already-visited) expression node, or [`Ty::Unknown`].
+    /// The type a target-typed expression takes from its context (JLS §15.27.3): a lambda and a method
+    /// reference are the two forms that have none of their own.
+    ///
+    /// Three contexts are read, which are the ones that name a type outright: a declaration's written type,
+    /// an assignment's target, and the enclosing method's return type. An *argument* position needs the
+    /// selected overload's parameter, and overload selection runs after this — so one stays `Unknown`
+    /// rather than being guessed at from a candidate that may not be the one chosen.
+    fn target_ty(&self, node: &SyntaxNode) -> Ty {
+        let Some(parent) = node.parent() else {
+            return Ty::Unknown;
+        };
+        match parent.kind() {
+            // `F f = …` / `F f; f = …`: the declared type is written right there.
+            LOCAL_VAR_DECL | FIELD_DECL => {
+                let ty = parent.children().find_map(ast::Type::cast);
+                if ty.as_ref().is_some_and(Cst::is_var_type) {
+                    // `var f = () -> …` is not a Java program: there is no type to infer *from*.
+                    return Ty::Unknown;
+                }
+                self.ty_of_opt_type(ty.as_ref())
+            }
+            ASSIGNMENT_EXPR => ast::AssignmentExpr::cast(parent)
+                .and_then(|assignment| assignment.target())
+                .map_or(Ty::Unknown, |target| self.expr_ty(target.syntax())),
+            // `return () -> …`: the method's own return type, which is where a `return` value is checked
+            // against anyway.
+            RETURN_STMT => node
+                .ancestors()
+                .find(|ancestor| ancestor.kind() == METHOD_DECL)
+                .and_then(|method| {
+                    method
+                        .children()
+                        .find_map(ast::Type::cast)
+                        .map(|ty| self.ty_of_opt_type(Some(&ty)))
+                })
+                .unwrap_or(Ty::Unknown),
+            _ => Ty::Unknown,
+        }
+    }
+
     fn expr_ty(&self, node: &SyntaxNode) -> Ty {
         let r = node.text_range();
         self.expr_by_span
@@ -894,17 +1179,77 @@ impl<'a> Inferer<'a> {
 
     fn nameref_ty(&self, node: &SyntaxNode) -> Ty {
         // A reference is keyed by its identifier *token* start, which excludes the leading trivia
-        // that the `NAME_REF` node carries; look that token up, not the node. `this` / `super` have
-        // no identifier token (and are never recorded as references), so they yield `Unknown`.
+        // that the `NAME_REF` node carries; look that token up, not the node.
         let Some(tok) = Collect::first_ident_token(node) else {
-            return Ty::Unknown;
+            // `this` has no identifier token and is never recorded as a reference, so its type has to
+            // come from where it appears: the enclosing type. That is what makes `this.field` and
+            // `this.method()` resolve at all — a constructor writing `this.x = x` is the ordinary
+            // shape, and without it the access binds to nothing.
+            //
+            // `super` is deliberately left unknown. Its member lookup has to start at the
+            // *superclass*, and answering it with the enclosing type would bind an overridden member
+            // to the override rather than to the one `super` names.
+            let is_this = node
+                .children_with_tokens()
+                .filter_map(jals_syntax::SyntaxElement::into_token)
+                .any(|token| token.kind() == THIS_KW);
+            return if is_this {
+                self.self_ty(node)
+            } else {
+                Ty::Unknown
+            };
         };
         if let Some(&ri) = self.ref_by_start.get(&Collect::token_start(&tok))
             && let Resolution::Def(id) = self.resolved.references[ri].resolution
         {
             return self.def_types[id.0 as usize].clone();
         }
-        Ty::Unknown
+        // Nothing in the file declared it, which an **inherited** field never is: name resolution is
+        // file-local and a superclass's field may not even be in this file. So the name is looked up on
+        // the enclosing type, which is the implicit `this` a bare call already reads its callee from —
+        // and the member lookup walks the supertypes. Without this `own + 1` had an operand of no type
+        // at all, in a class where the read itself is perfectly ordinary.
+        self.member_ty(&self.self_ty(node), tok.text(), Namespace::Value)
+    }
+
+    /// The indexed type `name` resolves to from this file, or an external one by that name.
+    ///
+    /// A `.class` literal's type is `java.lang.Class`, and reaching *its* members — `getName()` — needs
+    /// the indexed stub. An external type by that name has no members at all, so the access resolved
+    /// to nothing and the call after it with it.
+    fn java_lang_ty(&self, name: &str) -> Ty {
+        let Some((index, file)) = self.project else {
+            return Ty::Class(ClassTy::external(name));
+        };
+        index
+            .resolve_type_name(file, name, None)
+            .project_id()
+            .map_or_else(
+                || Ty::Class(ClassTy::external(name)),
+                |id| {
+                    Ty::Class(ClassTy::Project {
+                        id,
+                        name: name.to_owned(),
+                        args: Vec::new(),
+                    })
+                },
+            )
+    }
+
+    /// The type `this` has where `node` appears: the enclosing type declaration, raw.
+    ///
+    /// Raw — no type arguments — because inside a generic type's own body its parameters stand for
+    /// themselves, and a member read through `this` substitutes them by name.
+    fn self_ty(&self, node: &SyntaxNode) -> Ty {
+        let (Some(item), Some((index, _))) = (self.enclosing_item(node), self.project) else {
+            return Ty::Unknown;
+        };
+        let fqn = index.item(item).fqn.as_str();
+        Ty::Class(ClassTy::Project {
+            id: item,
+            name: fqn.rsplit('.').next().unwrap_or(fqn).to_owned(),
+            args: Vec::new(),
+        })
     }
 
     fn unary_ty(&self, u: &ast::UnaryExpr) -> Ty {
@@ -989,15 +1334,52 @@ impl<'a> Inferer<'a> {
         Self::join_exact(s.result_exprs().map(|e| self.expr_ty(e.syntax())))
     }
 
-    /// The exact-equality join shared by the branching expressions (ternary, switch): the arms'
-    /// common type when they all agree, else [`Ty::Unknown`] — also for an empty join or an
-    /// un-inferable arm. No numeric promotion, `null` widening, or least-upper-bound over a
-    /// common supertype (a mixed-numeric or subtype join is `Ty::Unknown`), which keeps the
-    /// "never a false type" guarantee. Short-circuits on the first disagreeing arm.
+    /// The join shared by the branching expressions (ternary, switch): the arms' common type when
+    /// they all agree, and [`Ty::Unknown`] for an empty join or an un-inferable arm.
+    ///
+    /// When the arms disagree, one case is still answerable without a class-hierarchy walk. JLS
+    /// §15.25 gives a *numeric* conditional the binary numeric promotion of its arms, and where that
+    /// promotion is `long` / `float` / `double` the answer is unambiguous: the wide type wins
+    /// outright, with none of §15.25's constant-narrowing special cases in play. `cond ? 1 : 2L` is a
+    /// `long`, and leaving it unknown made every overload taking it unselectable.
+    ///
+    /// Everything else stays `Ty::Unknown`, which keeps the "never a false type" guarantee. A
+    /// promotion among the sub-`long` integrals depends on whether an arm is a constant in range
+    /// (`cond ? aByte : aShort` is `short`, not `int`) and there is no constant evaluator here; a
+    /// mixed *reference* join needs a least upper bound over a hierarchy; `null` widening would need
+    /// the other arm to be known reference-typed.
     fn join_exact(tys: impl IntoIterator<Item = Ty>) -> Ty {
-        let mut tys = tys.into_iter();
-        match tys.next() {
-            Some(first) if tys.all(|t| t == first) => first,
+        let tys: Vec<Ty> = tys.into_iter().collect();
+        let Some(first) = tys.first() else {
+            return Ty::Unknown;
+        };
+        if tys.iter().all(|ty| ty == first) {
+            return first.clone();
+        }
+        Self::join_numeric(&tys)
+    }
+
+    /// The binary numeric promotion of every arm, when they are all numeric and it lands on one of
+    /// the three wide types. See [`join_exact`](Inferer::join_exact) for why the narrow ones do not.
+    fn join_numeric(tys: &[Ty]) -> Ty {
+        let mut widest = 0u8;
+        for ty in tys {
+            let Ty::Primitive(primitive) = ty else {
+                return Ty::Unknown;
+            };
+            widest = widest.max(match primitive {
+                Primitive::Double => 3,
+                Primitive::Float => 2,
+                Primitive::Long => 1,
+                Primitive::Byte | Primitive::Short | Primitive::Char | Primitive::Int => 0,
+                // `boolean` takes part in no numeric promotion at all.
+                Primitive::Boolean => return Ty::Unknown,
+            });
+        }
+        match widest {
+            3 => Ty::Primitive(Primitive::Double),
+            2 => Ty::Primitive(Primitive::Float),
+            1 => Ty::Primitive(Primitive::Long),
             _ => Ty::Unknown,
         }
     }
@@ -1070,7 +1452,14 @@ impl<'a> Inferer<'a> {
         let Some(expr) = fa.receiver() else {
             return Ty::Unknown;
         };
-        match self.child_ty(Some(expr.clone())) {
+        let receiver = self.child_ty(Some(expr.clone()));
+        // JLS §10.7: every array type has exactly one member, a `public final int length`. It is
+        // declared nowhere, so no index lookup can find it — leaving `a.length` untyped, which is
+        // the type every `for (int i = 0; i < a.length; i++)` in Java depends on.
+        if namespace == Namespace::Value && name == "length" && matches!(receiver, Ty::Array(_)) {
+            return Ty::Primitive(Primitive::Int);
+        }
+        match receiver {
             Ty::Unknown => match self.project {
                 // Not a value: `System.out` names the declaring class, not an instance of it.
                 Some((index, file)) => Cst::type_qualifier(&expr, index, file)
@@ -1292,7 +1681,19 @@ impl Inferer<'_> {
                 | FOR_EACH_STMT
                 | RESOURCE
                 | METHOD_DECL
+                // `x instanceof String s` writes the type beside the name, exactly as a local
+                // declaration does — the binding is a local, and this is where it gets its type.
+                | TYPE_PATTERN
         )
+    }
+
+    /// Whether `node` is a `PARAM` declared with `...`.
+    fn is_variable_arity(node: &SyntaxNode) -> bool {
+        node.kind() == PARAM
+            && node
+                .children_with_tokens()
+                .filter_map(SyntaxElement::into_token)
+                .any(|t| t.kind() == ELLIPSIS)
     }
 
     /// The [`Ty`] of a primitive (or `void`) type keyword, or `None` for any other token.

@@ -553,6 +553,22 @@ impl CodeAttribute {
 }
 
 impl ExceptionTableEntry {
+    /// One handler covering `[start_pc, end_pc)`, entered at `handler_pc`.
+    ///
+    /// `catch_type` is a `Class` index, or `0` for the catch-all a `finally` clause and a
+    /// `synchronized` block's unlock path both need (JVMS §4.7.3). The four offsets are the
+    /// emitter's to get right — this crate keeps them verbatim, exactly as it keeps a branch
+    /// offset — so a code generator constructing an entry is stating what it already resolved.
+    #[must_use]
+    pub const fn new(start_pc: u16, end_pc: u16, handler_pc: u16, catch_type: u16) -> Self {
+        Self {
+            start_pc,
+            end_pc,
+            handler_pc,
+            catch_type,
+        }
+    }
+
     async fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         Ok(Self {
             start_pc: r.u16().await?,
@@ -571,6 +587,36 @@ impl ExceptionTableEntry {
 }
 
 impl InnerClassEntry {
+    /// The access flags the *source* declared the nested type with.
+    ///
+    /// Not the class's own: a nested type's `ACC_PRIVATE` and `ACC_STATIC` have nowhere to live in a
+    /// `ClassFile`'s `access_flags`, so this entry is the only record of either.
+    #[must_use]
+    pub const fn inner_class_access_flags(&self) -> u16 {
+        self.inner_class_access_flags
+    }
+
+    /// One `InnerClasses` entry: the nested type, its enclosing type (`0` for a local or anonymous
+    /// one), its simple name (`0` for an anonymous one), and the access flags it was *declared* with.
+    ///
+    /// The declared flags are not the class's own: a nested type's `ACC_PRIVATE` cannot live in its
+    /// `access_flags`, because the JVM has nowhere to put it, so this is where it is recorded and where
+    /// reflection reads it back from.
+    #[must_use]
+    pub const fn new(
+        inner_class_info_index: u16,
+        outer_class_info_index: u16,
+        inner_name_index: u16,
+        inner_class_access_flags: u16,
+    ) -> Self {
+        Self {
+            inner_class_info_index,
+            outer_class_info_index,
+            inner_name_index,
+            inner_class_access_flags,
+        }
+    }
+
     async fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         Ok(Self {
             inner_class_info_index: r.u16().await?,

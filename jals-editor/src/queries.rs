@@ -364,12 +364,12 @@ impl<'a> ProjectQueries<'a> {
         let member = self
             .index
             .member(self.index.resolve_member(owner, &name, namespace)?);
-        Some(
-            member
-                .source_location
-                .clone()
-                .unwrap_or_else(|| (member.file, member.name_range.clone())),
-        )
+        // A member the *compiler* writes — an `enum`'s `values()`, a record's canonical constructor —
+        // has no declaration range, and `0..0` is the sentinel that says so rather than a position.
+        // Jumping there lands at the top of the file, which reads as an answer and is not one.
+        member.source_location.clone().or_else(|| {
+            (member.name_range != (0..0)).then(|| (member.file, member.name_range.clone()))
+        })
     }
 
     fn cross_file_type_at(&self, anchor: usize) -> Option<ItemId> {
@@ -715,6 +715,35 @@ mod tests {
                 .zip(&self.resolved)
                 .map(|((id, root), resolved)| QueryFile::new(*id, root.clone(), resolved))
         }
+    }
+
+    /// A record's accessor is written in the header, so that is where its definition is.
+    ///
+    /// Nothing in the body declares one, so the synthesised member carries `0..0` as its declaration
+    /// range — the sentinel that keeps it out of the declaration-site map, where the *field* for the
+    /// same component already sits. Read as a position instead of a sentinel, it sent "go to
+    /// definition" on `pt.x()` to the top of the file. The component's range now travels as the
+    /// member's source location, which an editor prefers and which no map is keyed by.
+    #[test]
+    fn definition_of_a_records_synthesised_accessor() {
+        block_on_inline(async {
+            let files = [
+                "package p; record Point(int x, int y) {}",
+                "package p; class Use { void f(Point pt) { int n = pt.y(); } }",
+            ];
+            let fixture = Fixture::new(&files).await;
+            let component = files[0].find("y)").unwrap();
+            assert_eq!(
+                fixture
+                    .queries(1)
+                    .definition(files[1].find("y()").unwrap())
+                    .await,
+                Some(FileRange {
+                    file: FileId(0),
+                    range: component..component + 1,
+                })
+            );
+        });
     }
 
     #[test]

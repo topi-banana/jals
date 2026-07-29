@@ -102,6 +102,67 @@ impl Primitive {
                 | (Float, Double)
         )
     }
+
+    /// This primitive's wrapper class, by simple name.
+    const fn wrapper(self) -> &'static str {
+        match self {
+            Self::Boolean => "Boolean",
+            Self::Byte => "Byte",
+            Self::Short => "Short",
+            Self::Int => "Integer",
+            Self::Long => "Long",
+            Self::Char => "Character",
+            Self::Float => "Float",
+            Self::Double => "Double",
+        }
+    }
+
+    /// The primitive a wrapper class's simple name wraps.
+    const fn unwrap_name(name: &str) -> Option<Self> {
+        Some(match name.as_bytes() {
+            b"Boolean" => Self::Boolean,
+            b"Byte" => Self::Byte,
+            b"Short" => Self::Short,
+            b"Integer" => Self::Int,
+            b"Long" => Self::Long,
+            b"Character" => Self::Char,
+            b"Float" => Self::Float,
+            b"Double" => Self::Double,
+            _ => return None,
+        })
+    }
+
+    /// Whether a value of this type boxes to the type spelled `name`.
+    ///
+    /// Boxing produces *this primitive's own* wrapper (JLS §5.1.7) and nothing else, so the only
+    /// other names it is assignable to are the ones every wrapper is a subtype of. Admitting any
+    /// external name made `int` assignable to `String`, which made `append(String)` an *applicable*
+    /// overload for `append(1)` — and overload selection, finding no candidate more specific than
+    /// every other, then took the first declared one.
+    fn boxes_to(self, name: &str) -> bool {
+        let simple = Self::simple(name);
+        simple == self.wrapper()
+            || matches!(simple, "Object" | "Comparable" | "Serializable")
+            // Only the numeric wrappers extend `Number`; `Boolean` and `Character` do not.
+            || (simple == "Number" && !matches!(self, Self::Boolean | Self::Char))
+    }
+
+    /// Whether the type spelled `name` unboxes to this primitive, possibly widening afterwards.
+    ///
+    /// Unboxing is defined on the eight wrapper classes (JLS §5.1.8); an `Integer` is therefore
+    /// usable where a `long` is due, and an `Object` is usable nowhere without a cast. A name that is
+    /// not a wrapper at all cannot unbox — an unindexed external type is still a *reference*, and no
+    /// spelling of one turns it into a number.
+    fn unboxes_from(self, name: &str) -> bool {
+        Self::unwrap_name(Self::simple(name))
+            .is_some_and(|source| source == self || source.widens_to(self))
+    }
+
+    /// The last segment of a possibly-qualified name: an external type carries whatever spelling the
+    /// source used, so `java.lang.Integer` and `Integer` both have to match.
+    fn simple(name: &str) -> &str {
+        name.rsplit('.').next().unwrap_or(name)
+    }
 }
 
 /// A nominal reference type, identified by name and carrying its type arguments as written.
@@ -158,9 +219,16 @@ impl Ty {
     }
 
     /// The numeric primitive this type is, if any (`boolean` excluded).
-    pub(crate) const fn as_numeric(&self) -> Option<Primitive> {
+    pub(crate) fn as_numeric(&self) -> Option<Primitive> {
         match self {
             Self::Primitive(p) if p.is_numeric() => Some(*p),
+            // A numeric wrapper unboxes before an operator sees it (JLS §5.6), so `someInteger + 1` is
+            // an `int` expression. Leaving it unknown made every overload taking it unselectable —
+            // `println(list.get(0) + 1)` bound to `println(boolean)` and printed `true`.
+            Self::Class(ClassTy::Project { name, .. } | ClassTy::External { name, .. }) => {
+                Primitive::unwrap_name(name.rsplit('.').next().unwrap_or(name))
+                    .filter(|primitive| primitive.is_numeric())
+            }
             _ => None,
         }
     }
@@ -236,13 +304,16 @@ impl Ty {
 
             // Widening primitive conversion; identity (equal primitives) handled above.
             (Primitive(s), Primitive(t)) => s.widens_to(*t),
-            // Boxing: a primitive may box to an external wrapper / `Object`, never to a user type
-            // or an array.
-            (Primitive(_), Class(External { .. })) => true,
+            // Boxing: a primitive may box to *its own* wrapper, or to one of the types every wrapper
+            // is a subtype of. Never to a user type, an array, or an arbitrary external name — `int`
+            // is not a `String`, and admitting that made `append(String)` an applicable overload for
+            // `append(1)`.
+            (Primitive(source), Class(External { name, .. })) => source.boxes_to(name),
             (Primitive(_), Class(Project { .. }) | Array(_) | Void) => false,
 
-            // Unboxing: an external reference may be a numeric wrapper; a user type or array is not.
-            (Class(External { .. }), Primitive(_)) => true,
+            // Unboxing: only a wrapper class unboxes, and then the result may widen. A user type, an
+            // array, and `Object` are all references and stay references.
+            (Class(External { name, .. }), Primitive(target)) => target.unboxes_from(name),
             (Class(Project { .. }) | Array(_), Primitive(_)) => false,
 
             // Reference subtyping between two project types: walk the indexed supertype chain. With
@@ -397,7 +468,7 @@ impl Ty {
 
     /// Unary numeric promotion (JLS §5.6.1): `byte` / `short` / `char` widen to `int`; other numeric
     /// types are unchanged; a non-numeric operand yields [`Ty::Unknown`].
-    pub(crate) const fn unary_promote(&self) -> Self {
+    pub(crate) fn unary_promote(&self) -> Self {
         match self.as_numeric() {
             Some(Primitive::Byte | Primitive::Short | Primitive::Char) => {
                 Self::Primitive(Primitive::Int)
@@ -549,9 +620,12 @@ mod tests {
         assert!(Ty::Null.is_assignable_to(&obj, None));
         assert!(!Ty::Null.is_assignable_to(&int, None));
 
-        // Boxing / unboxing against an external type stays lenient (no false mismatch).
+        // Boxing reaches `Object`, because every wrapper is one. Unboxing does *not* come back:
+        // `int i = someObject;` is not a Java program, and admitting it made every primitive
+        // argument applicable to every reference parameter — which overload selection then resolved
+        // by declaration order, picking `StringBuilder.append(String)` for `append(1)`.
         assert!(int.is_assignable_to(&obj, None));
-        assert!(obj.is_assignable_to(&int, None));
+        assert!(!obj.is_assignable_to(&int, None));
 
         // `Unknown` is compatible in both directions.
         assert!(Ty::Unknown.is_assignable_to(&int, None));
@@ -561,6 +635,48 @@ mod tests {
         assert!(Ty::Void.is_assignable_to(&Ty::Void, None));
         assert!(!Ty::Void.is_assignable_to(&int, None));
         assert!(!int.is_assignable_to(&Ty::Void, None));
+    }
+
+    /// Boxing names *one* wrapper per primitive, and unboxing names one primitive per wrapper.
+    ///
+    /// Both directions used to admit any external name at all. That is what an overload set mixing
+    /// primitives and references trips over: with `int` assignable to `String` and `Object`
+    /// assignable to `char`, every `StringBuilder.append` overload is applicable to every argument,
+    /// none is more specific than the rest, and selection falls back to the first one declared.
+    #[test]
+    fn boxing_names_the_wrapper_it_actually_boxes_to() {
+        let external = |name: &str| Ty::Class(ClassTy::external(name));
+
+        // The primitive's own wrapper, and the supertypes every wrapper has.
+        for name in [
+            "Integer",
+            "java.lang.Integer",
+            "Object",
+            "Comparable",
+            "Number",
+        ] {
+            assert!(
+                Ty::Primitive(Primitive::Int).is_assignable_to(&external(name), None),
+                "int should box to {name}"
+            );
+        }
+        // Another primitive's wrapper, and a class that is not a wrapper at all.
+        for name in ["Long", "Character", "String", "Runnable"] {
+            assert!(
+                !Ty::Primitive(Primitive::Int).is_assignable_to(&external(name), None),
+                "int should not box to {name}"
+            );
+        }
+        // `Boolean` and `Character` are not `Number`s.
+        assert!(!Ty::Primitive(Primitive::Boolean).is_assignable_to(&external("Number"), None));
+        assert!(!Ty::Primitive(Primitive::Char).is_assignable_to(&external("Number"), None));
+
+        // Unboxing: the wrapper's own primitive, and then a widening of it.
+        assert!(external("Integer").is_assignable_to(&Ty::Primitive(Primitive::Int), None));
+        assert!(external("Integer").is_assignable_to(&Ty::Primitive(Primitive::Long), None));
+        assert!(!external("Integer").is_assignable_to(&Ty::Primitive(Primitive::Short), None));
+        assert!(!external("String").is_assignable_to(&Ty::Primitive(Primitive::Int), None));
+        assert!(!external("Object").is_assignable_to(&Ty::Primitive(Primitive::Char), None));
     }
 
     #[test]

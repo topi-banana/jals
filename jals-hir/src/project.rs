@@ -32,7 +32,8 @@ use jals_exec::Yielder;
 use jals_syntax::SyntaxKind::{
     ANNOTATION_TYPE_DECL, CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL, ELLIPSIS, ENUM_BODY,
     ENUM_CONSTANT, ENUM_DECL, EXTENDS_CLAUSE, FIELD_DECL, IMPLEMENTS_CLAUSE, INTERFACE_DECL,
-    LBRACK, METHOD_DECL, MODIFIERS, PRIVATE_KW, RECORD_DECL, STATIC_KW,
+    LAMBDA_EXPR, LBRACK, METHOD_DECL, MODIFIERS, NEW_EXPR, PRIVATE_KW, RECORD_COMPONENT,
+    RECORD_DECL, RECORD_HEADER, STATIC_KW,
 };
 use jals_syntax::ast::{self, AstNode};
 use jals_syntax::cfg::CfgMap;
@@ -240,7 +241,9 @@ pub struct Member {
     pub params: Vec<Param>,
     /// Whether this method's last parameter is a varargs (`int... xs`). A varargs method accepts a
     /// variable arity, so argument checking skips it. Always `false` for non-methods.
-    pub(crate) varargs: bool,
+    /// Public because a *code generator* needs it: the JVM has no variable arity, so a varargs call
+    /// site is the thing that builds the array, and it cannot know to unless it can ask.
+    pub varargs: bool,
     /// The checked exceptions a method / constructor declares in its `throws` clause, captured like
     /// [`ty`](Member::ty) as resolvable data (each a named reference type). Empty for a non-executable
     /// member and for one that declares no `throws`. Consumed by the checked-exception analysis
@@ -313,6 +316,68 @@ pub enum MemberType {
     },
     /// No resolvable value type — a constructor, a `var` slot, or a type that could not be read.
     Unknown,
+}
+
+impl MemberType {
+    /// Whether two *written* types name the same erased one — the test for "is this constructor the
+    /// record's canonical one".
+    ///
+    /// Deliberately lenient about spelling: `String` and `java.lang.String` are one type here, and
+    /// generic arguments erase away. Lenient is the safe direction, because the two ways to be wrong
+    /// are not equally bad. Mistaking the canonical constructor for another one loses a synthesised
+    /// member and the record's own `new` stops resolving; mistaking another one for the canonical
+    /// constructor declares `<init>` twice under one descriptor, which no class file may hold.
+    fn same_erasure(&self, other: &Self) -> bool {
+        match (self.erasure_key(), other.erasure_key()) {
+            // A type that could not be read says nothing either way, so it does not rule the pair out.
+            (None, _) | (_, None) => true,
+            (Some(this), Some(that)) => this == that,
+        }
+    }
+
+    /// What erasure leaves of a written type: its own spelling and its array depth. `None` for a type
+    /// that could not be read.
+    ///
+    /// One namespace serves primitives and classes alike, because no class is spelled `int`. What is
+    /// deliberately absent is `qualified` — the spelling the source happened to use — and `args`,
+    /// which is exactly what erasure drops.
+    const fn erasure_key(&self) -> Option<(&str, u32)> {
+        match self {
+            Self::Primitive {
+                keyword: name,
+                dims,
+            }
+            | Self::Named { name, dims, .. } => Some((name.as_str(), *dims)),
+            Self::Void => Some(("void", 0)),
+            Self::Unknown => None,
+        }
+    }
+
+    /// This type with one more array level.
+    ///
+    /// What `int... xs` needs: the `...` is the only thing saying the parameter is an `int[]`, and both
+    /// its type inside the body and the method's descriptor depend on knowing that.
+    fn with_extra_dimension(self) -> Self {
+        match self {
+            Self::Primitive { keyword, dims } => Self::Primitive {
+                keyword,
+                dims: dims.saturating_add(1),
+            },
+            Self::Named {
+                name,
+                qualified,
+                dims,
+                args,
+            } => Self::Named {
+                name,
+                qualified,
+                dims: dims.saturating_add(1),
+                args,
+            },
+            // Nothing to add a dimension to, and inventing one would name a type the source did not.
+            other => other,
+        }
+    }
 }
 
 /// The cross-file resolution of a type-name reference.
@@ -913,7 +978,61 @@ impl ProjectIndex {
                 member.file = file;
                 self.register_member(owner, member);
             }
-            let (supertypes, has_external) = self.resolve_supertypes(file, &raw.raw_supertypes);
+            let (mut supertypes, has_external) = self.resolve_supertypes(file, &raw.raw_supertypes);
+            // Every `enum` extends `java.lang.Enum` implicitly, and the source never writes it — so
+            // there is no `extends` clause to have resolved. Without it `name()`, `ordinal()`, and
+            // `toString()` resolve to nothing on an enum value, which is most of what one is for.
+            if self.items[owner.0 as usize].kind == DefKind::Enum
+                && let TypeResolution::Project(id) = self.resolve_qualified(file, "java.lang.Enum")
+            {
+                supertypes.push(Supertype {
+                    id,
+                    args: Vec::new(),
+                });
+            }
+            // The same for a `record` and `java.lang.Record`, which is also where `equals`,
+            // `hashCode`, and `toString` come from on one.
+            if self.items[owner.0 as usize].kind == DefKind::Record
+                && let TypeResolution::Project(id) =
+                    self.resolve_qualified(file, "java.lang.Record")
+            {
+                supertypes.push(Supertype {
+                    id,
+                    args: Vec::new(),
+                });
+            }
+            // A lambda item's one member is the interface method it implements. Only its *name* and arity
+            // matter here — a dispatch built on subtyping looks the member up by those, and a backend makes
+            // the descriptor itself. Done after the supertypes resolve, because the interface is one of them.
+            if self.items[owner.0 as usize]
+                .fqn
+                .as_str()
+                .rsplit('.')
+                .next()
+                .is_some_and(|simple| simple.starts_with("lambda$"))
+                && let Some(implemented) = supertypes.first().map(|supertype| supertype.id)
+                && let Some(&method) = self
+                    .own_members(implemented)
+                    .iter()
+                    .find(|&&id| self.member(id).kind == DefKind::Method)
+            {
+                let shape = self.member(method);
+                let synthetic = Member {
+                    owner,
+                    name: shape.name.clone(),
+                    kind: DefKind::Method,
+                    file,
+                    // Nothing declares it, so there is no name range to point at.
+                    name_range: 0..0,
+                    ty: shape.ty.clone(),
+                    modifiers: MemberModifiers::default(),
+                    params: shape.params.clone(),
+                    varargs: false,
+                    throws: Vec::new(),
+                    source_location: None,
+                };
+                self.register_member(owner, synthetic);
+            }
             let item = &mut self.items[owner.0 as usize];
             item.supertypes = supertypes;
             item.has_external_supertype = has_external;
@@ -1060,7 +1179,20 @@ impl ProjectIndex {
             return TypeResolution::Project(id);
         }
 
-        // 3. On-demand imports `import a.b.*;`. A single hit binds; several distinct hits are
+        // 3. A *nested* type of a type declared in this file. `class Outer { static class Counter {} }`
+        //    puts `Counter` in scope inside `Outer` under its simple name, and its fully-qualified name
+        //    is `<package>.Outer.Counter` — which step 2 cannot find, because it only appends the name
+        //    to the *package*.
+        //
+        //    Every type declared in the file is tried as the enclosing one, longest name first, so a
+        //    nested type nested more deeply wins over a shallower one of the same name. That is wider
+        //    than JLS §6.5.5's scoping, which would only look at the *enclosing* declarations of the use
+        //    — but this crate does no checking, and a legal program has exactly one candidate anyway.
+        if let Some(id) = self.nested_in_file(file, name) {
+            return TypeResolution::Project(id);
+        }
+
+        // 4. On-demand imports `import a.b.*;`. A single hit binds; several distinct hits are
         //    ambiguous, so we stay conservative and treat it as external (no diagnostic).
         let mut hits = meta
             .on_demand
@@ -1074,7 +1206,7 @@ impl ProjectIndex {
             };
         }
 
-        // 4. Implicit `java.lang` import: an unqualified name is brought into every compilation unit
+        // 5. Implicit `java.lang` import: an unqualified name is brought into every compilation unit
         //    from `java.lang`. When the stubs are indexed (via `with_stdlib`) it binds to one;
         //    when they are not, `java.lang.*` is absent from `by_fqn` and this falls through to the
         //    external handling below — identical to the pre-stub behaviour.
@@ -1095,11 +1227,42 @@ impl ProjectIndex {
     /// Resolves a qualified type name (`a.b.C`) referenced from `file`. A name we have indexed binds
     /// to it; any other fully-qualified name is taken to be external (no diagnostic), since the JDK
     /// and third-party classpath are not indexed.
-    fn resolve_qualified(&self, qualified: &str) -> TypeResolution {
-        match self.by_fqn.get(qualified) {
-            Some(&id) => TypeResolution::Project(id),
-            None => TypeResolution::External,
+    fn resolve_qualified(&self, file: FileId, qualified: &str) -> TypeResolution {
+        if let Some(&id) = self.by_fqn.get(qualified) {
+            return TypeResolution::Project(id);
         }
+        // A *partly*-qualified nested name: `Outer.Counter` is not a fully-qualified name, but its first
+        // segment is a simple type name that resolves, and the rest is the nesting below it. Written
+        // this way from another file in the same package, it is the ordinary spelling.
+        let Some((head, rest)) = qualified.split_once('.') else {
+            return TypeResolution::External;
+        };
+        if let TypeResolution::Project(outer) = self.resolve_type(file, head)
+            && let Some(&id) = self.by_fqn.get(&format!(
+                "{}.{rest}",
+                self.items[outer.0 as usize].fqn.as_str()
+            ))
+        {
+            return TypeResolution::Project(id);
+        }
+        TypeResolution::External
+    }
+
+    /// A type nested inside one this file declares, by simple name.
+    ///
+    /// Longest enclosing name first, so a more deeply nested type wins over a shallower one sharing its
+    /// simple name.
+    fn nested_in_file(&self, file: FileId, name: &str) -> Option<ItemId> {
+        let mut enclosing: Vec<&str> = self
+            .items
+            .iter()
+            .filter(|item| item.file == file)
+            .map(|item| item.fqn.as_str())
+            .collect();
+        enclosing.sort_unstable_by_key(|fqn| core::cmp::Reverse(fqn.len()));
+        enclosing
+            .into_iter()
+            .find_map(|outer| self.by_fqn.get(&format!("{outer}.{name}")).copied())
     }
 
     /// Resolves the type-name `reference` (simple or qualified) from `file` against the project.
@@ -1120,7 +1283,7 @@ impl ProjectIndex {
     ) -> TypeResolution {
         qualified.map_or_else(
             || self.resolve_type(file, name),
-            |qualified| self.resolve_qualified(qualified),
+            |qualified| self.resolve_qualified(file, qualified),
         )
     }
 
@@ -1225,6 +1388,16 @@ impl ProjectIndex {
 
     /// The project item declared at `name_start` in `file`, if that position is a type declaration's
     /// name. Maps a file-local type definition back to its cross-file [`ItemId`].
+    /// The indexed item with this fully-qualified name.
+    ///
+    /// Every level of an [`Fqn`] is dotted — packages and enclosing types alike — so a consumer that
+    /// has to tell the two apart asks whether a *prefix* is itself a type. A class file's internal name
+    /// is exactly that consumer: it separates packages with `/` and nested types with `$`, and a dotted
+    /// name alone cannot say which boundary is which.
+    pub fn item_by_fqn(&self, fqn: &str) -> Option<ItemId> {
+        self.by_fqn.get(fqn).copied()
+    }
+
     pub fn item_by_decl(&self, file: FileId, name_start: usize) -> Option<ItemId> {
         self.decl_to_item.get(&(file, name_start)).copied()
     }
@@ -1491,11 +1664,98 @@ impl ProjectIndex {
         // `RawType`s in exactly the recursion's pre-order (the ItemId assignment order) — a
         // `cfg`-disabled host contributes nothing and is simply not pushed, so the surviving
         // pre-order (and thus the ItemId assignment) stays deterministic.
+        //
+        // One counter per enclosing type, so two anonymous classes in the same class get 1 and 2.
+        let mut anonymous: alloc::collections::BTreeMap<alloc::string::String, usize> =
+            alloc::collections::BTreeMap::new();
+        // Numbered per enclosing type as well, and separately: a lambda and an anonymous class in the same
+        // class must not both be `1`.
+        let mut lambdas: alloc::collections::BTreeMap<alloc::string::String, usize> =
+            alloc::collections::BTreeMap::new();
         let mut stack: Vec<(SyntaxNode, Option<alloc::rc::Rc<str>>)> = vec![(root.clone(), None)];
         while let Some((node, enclosing)) = stack.pop() {
             yielder.tick().await;
             if cfg.disables_node(&node) {
                 continue;
+            }
+            // A lambda and a method reference are, in every way the index cares about, one-method classes
+            // implementing the interface they are converted to. Giving each an item is what lets a backend
+            // with no `invokedynamic` — the wasm one — reach it through the same dispatch every class uses.
+            // They share one counter because they are the same kind of thing to everything downstream.
+            if matches!(node.kind(), LAMBDA_EXPR | SyntaxKind::METHOD_REF_EXPR) {
+                let enclosing_key = enclosing.as_deref().unwrap_or("").to_owned();
+                let ordinal = lambdas.entry(enclosing_key).or_insert(0_usize);
+                let simple = alloc::format!("lambda${ordinal}");
+                *ordinal += 1;
+                let fqn = Self::build_fqn(package, enclosing.as_deref(), &simple);
+                let start = usize::from(node.text_range().start());
+                out.push(RawType {
+                    fqn,
+                    kind: DefKind::Class,
+                    name_range: start..start,
+                    type_params: Vec::new(),
+                    members: Vec::new(),
+                    // The interface the lambda is converted to, read from the context that names it — the
+                    // same three places target typing reads (§15.27.3). Recording it as a supertype is what
+                    // makes the lambda a *subtype* of the interface, which is what a dispatch built on
+                    // subtyping needs to find it.
+                    raw_supertypes: Self::lambda_target_of(&node)
+                        .map(|ty| alloc::vec![MemberType::of(Some(ty))])
+                        .unwrap_or_default(),
+                });
+            }
+            // An anonymous class body is a type declaration with no name and no keyword. Nothing else
+            // indexes it, so `new I() { … }` had no item at all — and without an item there is no member
+            // resolution, no descriptor, and nothing a backend could emit.
+            // An `enum` constant with a body is an anonymous *subclass of the enum*, numbered and named
+            // exactly as one written with `new` is — and with the enclosing `enum` as its supertype,
+            // which the source never writes because the constant's position already says it.
+            if node.kind() == ENUM_CONSTANT
+                && node.children().any(|child| child.kind() == CLASS_BODY)
+            {
+                let enclosing_key = enclosing.as_deref().unwrap_or("").to_owned();
+                let ordinal = anonymous.entry(enclosing_key).or_insert(0_usize);
+                *ordinal += 1;
+                let simple = alloc::format!("{ordinal}");
+                let fqn = Self::build_fqn(package, enclosing.as_deref(), &simple);
+                let start = usize::from(node.text_range().start());
+                let supertype = enclosing
+                    .as_deref()
+                    .and_then(|fqn| fqn.rsplit('.').next())
+                    .map(|name| MemberType::Named {
+                        name: name.to_owned(),
+                        qualified: None,
+                        dims: 0,
+                        args: Vec::new(),
+                    });
+                out.push(RawType {
+                    fqn,
+                    kind: DefKind::Class,
+                    name_range: start..start,
+                    type_params: Vec::new(),
+                    members: Self::members_of_decl(ItemId(0), FileId(0), &node, &simple, cfg),
+                    raw_supertypes: supertype.into_iter().collect(),
+                });
+            }
+            if node.kind() == NEW_EXPR && node.children().any(|child| child.kind() == CLASS_BODY) {
+                let enclosing_key = enclosing.as_deref().unwrap_or("").to_owned();
+                let ordinal = anonymous.entry(enclosing_key).or_insert(0_usize);
+                *ordinal += 1;
+                // Numbered per enclosing type, as javac numbers them. The *name* is the ordinal because
+                // there is nothing else to call it.
+                let simple = alloc::format!("{ordinal}");
+                let fqn = Self::build_fqn(package, enclosing.as_deref(), &simple);
+                // The `new` keyword's own position: unique per site, which is what `item_by_decl` needs,
+                // and the closest thing to a declaration the source offers.
+                let start = usize::from(node.text_range().start());
+                out.push(RawType {
+                    fqn,
+                    kind: DefKind::Class,
+                    name_range: start..start,
+                    type_params: Vec::new(),
+                    members: Self::members_of_decl(ItemId(0), FileId(0), &node, &simple, cfg),
+                    raw_supertypes: Self::raw_supertypes_of(&node),
+                });
             }
             let next_enclosing = if let Some(kind) = Self::type_decl_kind(node.kind())
                 && let Some(name_tok) = Collect::first_ident_token(&node)
@@ -1641,6 +1901,156 @@ impl ProjectIndex {
                 _ => {}
             }
         }
+        // A record's components are written *once*, in its header, and stand for three declarations
+        // each: a `private final` field, an accessor of the same name, and one parameter of the
+        // canonical constructor. Nothing in the body declares any of them, so without this a
+        // component was not a member at all — `r.x()` resolved to nothing and the field had no type.
+        if node.kind() == RECORD_DECL {
+            let components: Vec<(SyntaxToken, MemberType)> = node
+                .children()
+                .find(|child| child.kind() == RECORD_HEADER)
+                .into_iter()
+                .flat_map(|header| header.children())
+                .filter(|child| child.kind() == RECORD_COMPONENT)
+                .filter_map(|component| {
+                    let name = Collect::first_ident_token(&component)?;
+                    let mut ty =
+                        MemberType::of(ast::RecordComponent::cast(component.clone())?.ty());
+                    if component
+                        .children_with_tokens()
+                        .filter_map(SyntaxElement::into_token)
+                        .any(|token| token.kind() == ELLIPSIS)
+                    {
+                        ty = ty.with_extra_dimension();
+                    }
+                    Some((name, ty))
+                })
+                .collect();
+            // An accessor or the canonical constructor may also be written out by hand, and then the
+            // declaration is the source's rather than a synthetic one.
+            let declared_accessors: Vec<String> = members
+                .iter()
+                .filter(|m| m.kind == DefKind::Method && m.params.is_empty())
+                .map(|m| m.name.clone())
+                .collect();
+            // Only an explicit *canonical* constructor replaces the synthesised one. "Some constructor
+            // exists" is not the test — `record P(int x) { P() { this(0); } }` declares one and still
+            // needs the canonical one for `this(0)` to resolve — and neither is arity:
+            // `record P(int x, int y) { P(int a, String b) { this(a, 0); } }` is a legal second
+            // two-parameter constructor, and suppressing the canonical one on its account left both
+            // `this(a, 0)` and `new P(1, 2)` with nothing to resolve to.
+            let declared_canonical = members.iter().any(|m| {
+                m.kind == DefKind::Constructor
+                    && m.params.len() == components.len()
+                    && m.params
+                        .iter()
+                        .zip(&components)
+                        .all(|(param, (_, ty))| param.ty.same_erasure(ty))
+            });
+            for (name, ty) in &components {
+                // The component's own name range: it *is* the field's declaration, which is what makes
+                // "go to definition" on the field land on the header rather than nowhere.
+                members.push(Member {
+                    modifiers: MemberModifiers {
+                        is_static: false,
+                        is_private: true,
+                    },
+                    ..new_member(name, DefKind::Field, ty.clone())
+                });
+                if !declared_accessors.iter().any(|have| have == name.text()) {
+                    members.push(Member {
+                        owner,
+                        name: name.text().to_owned(),
+                        kind: DefKind::Method,
+                        file,
+                        // No *declaration* range: the field above owns the header's, and two members
+                        // sharing one would collide in the declaration-site map, where first wins.
+                        name_range: 0..0,
+                        ty: ty.clone(),
+                        modifiers: MemberModifiers::default(),
+                        params: Vec::new(),
+                        varargs: false,
+                        throws: Vec::new(),
+                        // Where it is *written*, though, is the component — so "go to definition" on
+                        // `p.x()` lands on the header. This is the same field the classpath uses to
+                        // point a `.class` member at real source, and it is what an editor prefers.
+                        source_location: Some((file, Collect::byte_range(name))),
+                    });
+                }
+            }
+            if !declared_canonical {
+                members.push(Member {
+                    owner,
+                    name: owner_simple.to_owned(),
+                    kind: DefKind::Constructor,
+                    file,
+                    name_range: 0..0,
+                    ty: MemberType::Unknown,
+                    modifiers: MemberModifiers::default(),
+                    params: components
+                        .iter()
+                        .map(|(name, ty)| Param {
+                            name: Some(name.text().to_owned()),
+                            ty: ty.clone(),
+                        })
+                        .collect(),
+                    varargs: false,
+                    throws: Vec::new(),
+                    source_location: None,
+                });
+            }
+        }
+        // `values()` and `valueOf(String)` are written by the *compiler*, not by the source — so
+        // nothing above produces them, and a call to either resolved to nothing even though both are
+        // emitted and both work at run time. They are recorded here because this is where an enum's
+        // members are, and because the alternative is every consumer special-casing the two names.
+        if node.kind() == ENUM_DECL {
+            let own = MemberType::Named {
+                name: owner_simple.to_owned(),
+                qualified: None,
+                dims: 0,
+                args: Vec::new(),
+            };
+            let array = MemberType::Named {
+                name: owner_simple.to_owned(),
+                qualified: None,
+                dims: 1,
+                args: Vec::new(),
+            };
+            let string = MemberType::Named {
+                name: "String".to_owned(),
+                qualified: None,
+                dims: 0,
+                args: Vec::new(),
+            };
+            let synthetic = |name: &str, ty: MemberType, params: Vec<Param>| Member {
+                owner,
+                name: name.to_owned(),
+                kind: DefKind::Method,
+                file,
+                // Nothing declares them, so there is no name range to point at — which is also what
+                // keeps `member_by_decl` from ever finding one.
+                name_range: 0..0,
+                ty,
+                modifiers: MemberModifiers {
+                    is_static: true,
+                    is_private: false,
+                },
+                params,
+                varargs: false,
+                throws: Vec::new(),
+                source_location: None,
+            };
+            members.push(synthetic("values", array, Vec::new()));
+            members.push(synthetic(
+                "valueOf",
+                own,
+                alloc::vec![Param {
+                    name: Some("name".to_owned()),
+                    ty: string,
+                }],
+            ));
+        }
         members
     }
 }
@@ -1657,17 +2067,22 @@ impl ProjectIndex {
         // return none for one — leaving every constructor with an empty parameter list.
         if let Some(list) = method.children().find_map(ast::ParamList::cast) {
             for param in list.params() {
-                if param
+                let spread = param
                     .syntax()
                     .children_with_tokens()
                     .filter_map(SyntaxElement::into_token)
-                    .any(|t| t.kind() == ELLIPSIS)
-                {
-                    varargs = true;
+                    .any(|t| t.kind() == ELLIPSIS);
+                varargs |= spread;
+                // `int... xs` declares an `int[]`, and the `...` is the only thing that says so. Its
+                // *type* has to carry the dimension: the parameter is a local of that type inside the
+                // body, and the method's descriptor is `([I)V` rather than `(I)V`.
+                let mut ty = MemberType::of(param.ty());
+                if spread {
+                    ty = ty.with_extra_dimension();
                 }
                 params.push(Param {
                     name: param.name(),
-                    ty: MemberType::of(param.ty()),
+                    ty,
                 });
             }
         }
@@ -1699,6 +2114,15 @@ impl ProjectIndex {
     /// [`MemberType::Named`] for a well-formed clause. Pure.
     fn raw_supertypes_of(node: &SyntaxNode) -> Vec<MemberType> {
         let mut supertypes = Vec::new();
+        // An anonymous class writes neither clause: the type the `new` names *is* its supertype, and
+        // whether that becomes an `extends` or an `implements` is decided by what the name resolves to,
+        // which is not this function's business.
+        if node.kind() == NEW_EXPR {
+            if let Some(ty) = node.children().find_map(ast::Type::cast) {
+                supertypes.push(MemberType::of(Some(ty)));
+            }
+            return supertypes;
+        }
         for clause in node
             .children()
             .filter(|c| matches!(c.kind(), EXTENDS_CLAUSE | IMPLEMENTS_CLAUSE))
@@ -1779,6 +2203,26 @@ impl ProjectIndex {
             ENUM_DECL => Some(DefKind::Enum),
             RECORD_DECL => Some(DefKind::Record),
             ANNOTATION_TYPE_DECL => Some(DefKind::AnnotationType),
+            _ => None,
+        }
+    }
+
+    /// The written type of the context a lambda appears in: a declaration's type, an assignment's target's
+    /// declaration, or the enclosing method's return type.
+    ///
+    /// Read syntactically because this runs before anything is resolved. An argument position is not read, for
+    /// the same reason target typing does not read one: the parameter depends on an overload chosen later.
+    fn lambda_target_of(node: &SyntaxNode) -> Option<ast::Type> {
+        let parent = node.parent()?;
+        match parent.kind() {
+            SyntaxKind::LOCAL_VAR_DECL | SyntaxKind::FIELD_DECL => {
+                parent.children().find_map(ast::Type::cast)
+            }
+            SyntaxKind::RETURN_STMT => node
+                .ancestors()
+                .find(|ancestor| ancestor.kind() == METHOD_DECL)?
+                .children()
+                .find_map(ast::Type::cast),
             _ => None,
         }
     }

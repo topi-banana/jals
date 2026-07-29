@@ -94,6 +94,29 @@ impl State {
         self.stack.last()
     }
 
+    /// The value `depth` *values* below the top, without removing anything.
+    ///
+    /// Counted in values rather than words, like [`stack_len`](Self::stack_len): a call's receiver
+    /// sits exactly `params.len()` values down whatever the parameters' widths are, which is how
+    /// `invokespecial <init>` finds the reference it is about to initialise.
+    pub(crate) fn peek_at(&self, depth: usize) -> Option<&VerificationType> {
+        self.stack
+            .len()
+            .checked_sub(depth + 1)
+            .map(|index| &self.stack[index])
+    }
+
+    /// This state's locals with `stack` on the operand stack instead of whatever it held.
+    ///
+    /// An exception handler's entry state is exactly this: the locals of the protected range's
+    /// start, and the caught reference as the only value on the stack.
+    pub(crate) fn with_stack(&self, stack: Vec<VerificationType>) -> Self {
+        Self {
+            stack,
+            slots: self.slots.clone(),
+        }
+    }
+
     /// The type of the value starting at `index`, or `None` when the slot is unwritten or holds
     /// the orphaned upper half of a clobbered wide value.
     pub(crate) fn local(&self, index: u16) -> Option<&VerificationType> {
@@ -131,17 +154,22 @@ impl State {
         }
     }
 
-    /// Replace every `uninitializedThis` with `ty`, which is what running a constructor's
-    /// `invokespecial <init>` does to *every* copy of the receiver at once (JVMS §4.10.1.9).
-    pub(crate) fn initialize_this(&mut self, ty: &VerificationType) {
+    /// Replace every occurrence of `from` with `to`, wherever it is held.
+    ///
+    /// This is what `invokespecial <init>` does (JVMS §4.10.1.9), and it has to reach every copy
+    /// rather than just the one the call consumed: running a constructor initialises *the object*,
+    /// so a second reference to it that was duplicated onto the stack or stored into a local is
+    /// initialised too. `from` is either `uninitializedThis` in a constructor or the
+    /// `uninitialized(offset)` a `new` produced; both name one object exactly.
+    pub(crate) fn replace_type(&mut self, from: &VerificationType, to: &VerificationType) {
         for entry in &mut self.stack {
-            if *entry == VerificationType::UninitializedThis {
-                *entry = ty.clone();
+            if entry == from {
+                *entry = to.clone();
             }
         }
         for slot in &mut self.slots {
-            if *slot == Slot::Value(VerificationType::UninitializedThis) {
-                *slot = Slot::Value(ty.clone());
+            if *slot == Slot::Value(from.clone()) {
+                *slot = Slot::Value(to.clone());
             }
         }
     }

@@ -85,7 +85,7 @@ impl Bytes {
 
     /// The element count that prefixes every vector, and every other length the format spells as a
     /// `u32`. A `usize` that does not fit sets [`overflow`](Self::overflow) instead of wrapping.
-    fn count(&mut self, len: usize) -> &mut Self {
+    pub(crate) fn count(&mut self, len: usize) -> &mut Self {
         let Ok(len) = u32::try_from(len) else {
             self.overflow = true;
             return self.u32(u32::MAX);
@@ -117,14 +117,30 @@ impl Bytes {
 pub(crate) enum HeapType {
     /// A declared type, by index.
     Concrete(u32),
+    /// The top of the internal reference hierarchy: every struct and array reference is one.
+    ///
+    /// How an *interface*-typed value is held. An interface has no struct type of its own — wasm's
+    /// declared subtyping is single-inheritance, so it cannot be a supertype of two unrelated classes —
+    /// so the value is kept at the top of the hierarchy and narrowed with `ref.cast` at each use.
+    Any,
+    /// The bottom of the reference hierarchy, whose only inhabitant is `null`.
+    ///
+    /// The one abstract heap type this backend needs: a bare `null` has no type of its own in Java, and
+    /// `(ref null none)` is a subtype of *every* nullable reference — so it fits wherever the literal
+    /// does without the target type having to be known first.
+    None,
 }
 
 impl HeapType {
-    fn write_to(self, out: &mut Bytes) {
+    pub(crate) fn write_to(self, out: &mut Bytes) {
         match self {
             // A concrete heap type is the type index as a *signed* LEB, which is what keeps it
             // apart from the negatively-encoded abstract ones.
             Self::Concrete(index) => out.i32(index.cast_signed()),
+            // The abstract heap types occupy the negative range of the same signed encoding, which
+            // is what keeps them apart from an index.
+            Self::Any => out.byte(0x6E),
+            Self::None => out.byte(0x71),
         };
     }
 }
@@ -317,7 +333,27 @@ pub(crate) struct Module {
     /// otherwise be unorderable.
     types: Vec<SubType>,
     pub(crate) funcs: Vec<Func>,
+    /// Exception tags, by the index of the function type that gives each one's payload. One tag is
+    /// enough for Java: every thrown value is a reference, so the payload type is the same for all of
+    /// them and the *class* of the reference is what a `catch` tests.
+    pub(crate) tags: Vec<u32>,
+    pub(crate) globals: Vec<Global>,
     pub(crate) exports: Vec<(String, ExportKind, u32)>,
+    /// The function an engine runs before anything else, if the module has one. This is where a Java
+    /// `static` initialiser lives: a global's own initialiser is a constant expression and cannot
+    /// compute anything.
+    pub(crate) start: Option<u32>,
+}
+
+/// A module-level mutable variable, which is what a Java `static` field is.
+///
+/// Its initialiser is a *constant expression* — the format allows only a handful of instructions
+/// there, so anything a `<clinit>` would have to compute cannot live here.
+#[derive(Debug)]
+pub(crate) struct Global {
+    pub(crate) ty: ValType,
+    /// The encoded constant expression, without its terminating `end`.
+    pub(crate) init: Vec<u8>,
 }
 
 impl Module {
@@ -325,7 +361,10 @@ impl Module {
         Self {
             types: Vec::new(),
             funcs: Vec::new(),
+            tags: Vec::new(),
+            globals: Vec::new(),
             exports: Vec::new(),
+            start: None,
         }
     }
 
@@ -337,6 +376,26 @@ impl Module {
     pub(crate) fn add_type(&mut self, ty: SubType) -> u32 {
         self.types.push(ty);
         u32::try_from(self.types.len() - 1).unwrap_or(u32::MAX)
+    }
+
+    /// Reserve a type index whose body is filled in by [`set_type`](Self::set_type) later.
+    ///
+    /// Every type goes in one recursive group, so an index may be *referred to* before its body
+    /// exists — which is what lets a class's field mention an array type declared after it and an
+    /// array's element mention a class. The placeholder is a fieldless struct: if a caller forgets to
+    /// fill one, the module still encodes, and the empty struct is what a reader sees.
+    pub(crate) fn reserve_type(&mut self) -> u32 {
+        self.add_type(SubType::plain(CompType::Struct(Vec::new())))
+    }
+
+    /// Fill in a body reserved by [`reserve_type`](Self::reserve_type).
+    pub(crate) fn set_type(&mut self, index: u32, ty: SubType) {
+        if let Some(slot) = usize::try_from(index)
+            .ok()
+            .and_then(|index| self.types.get_mut(index))
+        {
+            *slot = ty;
+        }
     }
 
     /// The index a defined function will have. Nothing is imported yet, so the function index
@@ -372,6 +431,29 @@ impl Module {
             Self::section(&mut out, 3, &section);
         }
 
+        // The tag section comes before the global section, which is where the binary format puts it.
+        if !self.tags.is_empty() {
+            let mut section = Bytes::new();
+            section.count(self.tags.len());
+            for &ty in &self.tags {
+                // Attribute 0 is `exception`, the only one there is.
+                section.byte(0x00).u32(ty);
+            }
+            Self::section(&mut out, 13, &section);
+        }
+
+        if !self.globals.is_empty() {
+            let mut section = Bytes::new();
+            section.count(self.globals.len());
+            for global in &self.globals {
+                global.ty.write(&mut section);
+                // Every Java `static` field is assignable, so every global is mutable.
+                section.byte(0x01);
+                section.raw(&global.init).byte(0x0B);
+            }
+            Self::section(&mut out, 6, &section);
+        }
+
         if !self.exports.is_empty() {
             let mut section = Bytes::new();
             section.count(self.exports.len());
@@ -384,6 +466,12 @@ impl Module {
                     .u32(*index);
             }
             Self::section(&mut out, 7, &section);
+        }
+
+        if let Some(start) = self.start {
+            let mut section = Bytes::new();
+            section.u32(start);
+            Self::section(&mut out, 8, &section);
         }
 
         if !self.funcs.is_empty() {

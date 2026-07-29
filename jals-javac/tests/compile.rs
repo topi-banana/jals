@@ -4,6 +4,7 @@
 //! these prove the whole path — parse, resolve, infer, select overloads, erase to descriptors,
 //! lower, assemble — against the only authority that matters.
 
+use std::fmt::Write as _;
 use std::process::{Command, Stdio};
 
 use jals_hir::{FileId, ProjectIndex, Resolved, TypeInference};
@@ -64,6 +65,10 @@ fn run(source: &str, main_class: &str) -> String {
     }
 
     let output = Command::new("java")
+        // Two of these run at once under `cargo test`, and the JVM's shared perf-data file lives at a
+        // fixed path per process id — a recycled one makes the second JVM print a warning onto the
+        // stdout a test is comparing.
+        .arg("-XX:-UsePerfData")
         .arg("-cp")
         .arg(directory.path())
         .arg(main_class)
@@ -149,11 +154,11 @@ fn an_unsupported_construct_is_reported() {
     let source = r"
 public class Unsupported {
     public static void main(String[] args) {
-        int[] values = new int[3];
+        Runnable r = () -> {};
     }
 }
 ";
-    let error = compile(source).expect_err("array creation is not lowered yet");
+    let error = compile(source).expect_err("a lambda is not lowered yet");
     assert!(
         matches!(error, LowerError::Unsupported(_)),
         "expected an Unsupported error, got {error}"
@@ -161,77 +166,142 @@ public class Unsupported {
 }
 
 /// `x += 1` is the same node kind as `x = 1`, so nothing in a kind-driven lowering distinguishes
-/// them. Lowering it as a plain store computes `x = 1` instead — a class file that verifies, runs,
-/// and produces the wrong number, which is worse than any error.
+/// them, and lowering it as a plain store computes `x = 1` instead. Every operator gets its own
+/// arithmetic here, against a real JVM, because a wrong one produces a class that verifies, runs, and
+/// answers wrongly — which is worse than any error.
 #[test]
-fn a_compound_assignment_is_reported_rather_than_mis_emitted() {
-    for operator in ["+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>="] {
-        let source = format!(
-            r"
+fn every_compound_assignment_computes_what_it_says() {
+    if !java_available() {
+        return;
+    }
+    let mut body = String::new();
+    let mut expected = String::new();
+    for (operator, result) in [
+        ("+=", 12),
+        ("-=", 6),
+        ("*=", 27),
+        ("/=", 3),
+        ("%=", 0),
+        ("&=", 1),
+        ("|=", 11),
+        ("^=", 10),
+        ("<<=", 72),
+        (">>=", 1),
+        (">>>=", 1),
+    ] {
+        writeln!(
+            body,
+            "        {{ int i = 9; i {operator} 3; System.out.println(i); }}"
+        )
+        .expect("write to a String");
+        writeln!(expected, "{result}").expect("write to a String");
+    }
+    let source = format!(
+        r"
 public class Compound {{
     public static void main(String[] args) {{
-        int i = 5;
-        i {operator} 1;
-    }}
+{body}    }}
 }}
 "
-        );
-        let error = compile(&source).expect_err("compound assignment is not lowered yet");
-        assert!(
-            matches!(error, LowerError::Unsupported("a compound assignment")),
-            "`{operator}` should be reported, got {error}"
-        );
-    }
-    // The simple form still compiles: the check is on the operator, not on assignment as such.
-    compile(
-        r"
-public class Simple {
-    public static void main(String[] args) {
-        int i = 5;
-        i = 1;
-    }
-}
-",
-    )
-    .expect("a simple assignment still lowers");
+    );
+    assert_eq!(run(&source, "Compound"), expected);
 }
 
-/// A `long` / `float` / `double` comparison is not an `if_icmp*`. Emitting one produced a class
-/// file that loaded and then failed verification with *"Type `long_2nd` is not assignable to
-/// integer"* — the compiler had every fact needed to say so first.
+/// A compound assignment narrows its result back to the target's type.
+///
+/// JLS §15.26.2 defines `E1 op= E2` as `E1 = (T)((E1) op (E2))`, and both halves of that cast are
+/// load-bearing. `byte b = 127; b += 1` has to wrap to -128, and `int i; i += 1L` has to widen the
+/// `int` to a `long`, add, and narrow back — three instructions where a naive lowering emits one.
 #[test]
-fn a_wide_comparison_is_reported_rather_than_mis_emitted() {
-    for (ty, literal) in [("long", "1L"), ("double", "1.0"), ("float", "1.0f")] {
-        let source = format!(
-            r"
-public class Wide {{
-    static boolean f({ty} a) {{
-        return a == {literal};
-    }}
-
-    public static void main(String[] args) {{}}
-}}
-"
-        );
-        let error = compile(&source).expect_err("wide comparisons are not lowered yet");
-        assert!(
-            matches!(error, LowerError::Unsupported("a comparison of this type")),
-            "`{ty}` comparison should be reported, got {error}"
-        );
+fn a_compound_assignment_narrows_back_to_its_target() {
+    if !java_available() {
+        return;
     }
-    // An `int` comparison still lowers: the check is on the operand type, not on comparison itself.
-    compile(
-        r"
-public class Narrow {
-    static boolean f(int a) {
-        return a == 1;
-    }
+    let source = r"
+public class Narrowing {
+    static byte small = 127;
+    static int counter = 1;
+    int[] cells = null;
 
-    public static void main(String[] args) {}
+    public static void main(String[] args) {
+        small += 1;
+        System.out.println(small);
+        counter += 3000000000L;
+        System.out.println(counter);
+        char c = 'a';
+        c += 1;
+        System.out.println(c);
+        short s = 32767;
+        s += 1;
+        System.out.println(s);
+        double d = 1;
+        d /= 4;
+        System.out.println(d);
+        long big = 1;
+        big <<= 40;
+        System.out.println(big);
+    }
 }
-",
-    )
-    .expect("an `int` comparison still lowers");
+";
+    assert_eq!(
+        run(source, "Narrowing"),
+        // 127 + 1 wraps; 1 + 3000000000 as a `long` is 3000000001, whose low 32 bits are
+        // -1294967295; 'a' + 1 is 'b'; 32767 + 1 wraps; integer 1 / 4 as a `double` is 0.25.
+        "-128\n-1294967295\nb\n-32768\n0.25\n1099511627776\n"
+    );
+}
+
+/// A `long` / `float` / `double` comparison is not an `if_icmp*`: it reduces through `lcmp` /
+/// `fcmp?` / `dcmp?` first, and a reference one is an `if_acmp*`.
+///
+/// The NaN rows are the ones no verifier checks. JLS §15.20.1 makes every ordering comparison
+/// involving a NaN false in *both* directions, which only holds if `<` reduces with the `g` form and
+/// `>` with the `l` form. Swap them and the class still loads and still runs — and answers `true` for
+/// a NaN.
+#[test]
+fn every_width_of_comparison_answers_correctly() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Widths {
+    static double nan() { return 0.0 / 0.0; }
+
+    public static void main(String[] args) {
+        long a = 2, b = 1;
+        System.out.println(a > b);
+        System.out.println(a < b);
+        System.out.println(a == b);
+        System.out.println(a != b);
+        float f = 1.5f;
+        System.out.println(f <= 1.5f);
+        System.out.println(f >= 2.5f);
+        double d = nan();
+        System.out.println(d < 1.0);
+        System.out.println(d > 1.0);
+        System.out.println(d <= 1.0);
+        System.out.println(d >= 1.0);
+        System.out.println(d == d);
+        System.out.println(d != d);
+        String s = "x";
+        System.out.println(s == null);
+        System.out.println(s != null);
+        boolean t = true;
+        System.out.println(t == true);
+        char c = 'b';
+        System.out.println(c > 'a');
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Widths"),
+        "true\nfalse\nfalse\ntrue\n\
+         true\nfalse\n\
+         false\nfalse\nfalse\nfalse\nfalse\ntrue\n\
+         false\ntrue\n\
+         true\n\
+         true\n"
+    );
 }
 
 /// String and `char` literals reach the constant pool with their escapes resolved, and the JVM
@@ -276,28 +346,72 @@ public class BadEscape {
     );
 }
 
-/// `ladd` takes two `long`s, so `n + 1` on a `long` needs the literal widened first. Until binary
-/// numeric promotion is lowered, the mixed pair is reported — and it names the construct rather
-/// than surfacing as the assembler's bare `TypeMismatch`.
+/// `ladd` takes two `long`s, so `n + 1` on a `long` needs the literal widened first. Binary numeric
+/// promotion (JLS §5.6.2) is what supplies that `i2l`, and it is not a formality: one opcode names one
+/// type, so *every* mixed pair needs a conversion or the class does not verify.
 #[test]
-fn a_mixed_numeric_binary_is_reported() {
+fn binary_numeric_promotion_widens_the_narrower_side() {
+    if !java_available() {
+        return;
+    }
     let source = r"
 public class Mixed {
-    static long f(long n) {
-        return n + 1;
-    }
+    static long addLong(long n) { return n + 1; }
+    static double addDouble(int n) { return n + 0.5; }
+    static float addFloat(long n) { return n + 1.5f; }
+    static int addBytes(byte a, byte b) { return a + b; }
+    static long shiftLong(long n, long by) { return n << by; }
 
-    public static void main(String[] args) {}
+    public static void main(String[] args) {
+        System.out.println(addLong(4000000000L));
+        System.out.println(addDouble(3));
+        System.out.println(addFloat(2L));
+        System.out.println(addBytes((byte) 100, (byte) 100));
+        System.out.println(shiftLong(1L, 40L));
+        // A `char` promotes to `int` for arithmetic, and back down only through a cast.
+        char c = 'a';
+        System.out.println(c + 1);
+        System.out.println((char) (c + 1));
+    }
 }
 ";
-    let error = compile(source).expect_err("numeric promotion is not lowered yet");
-    assert!(
-        matches!(
-            error,
-            LowerError::Unsupported("a binary operator over two different numeric types")
-        ),
-        "expected the mixed-operand report, got {error}"
+    assert_eq!(
+        run(source, "Mixed"),
+        "4000000001\n3.5\n3.5\n200\n1099511627776\n98\nb\n"
     );
+}
+
+/// The `return` opcode comes from the *declared* return type, not from whatever the expression left
+/// on the stack.
+///
+/// Reading it off the stack emitted `ireturn` for `long f() { return 1; }` — a class file whose
+/// descriptor promises a `long` and whose body hands back an `int`. It only became reachable once
+/// conversions existed, which is why it is pinned here rather than left to the promotion tests.
+#[test]
+fn a_return_converts_to_the_declared_type() {
+    if !java_available() {
+        return;
+    }
+    let source = r"
+public class Returns {
+    static long asLong() { return 1; }
+    static double asDouble() { return 1; }
+    static float asFloat() { return 1; }
+    static byte asByte() { return (byte) 300; }
+    // A reference return needs no conversion, but it does need `areturn` rather than `ireturn`.
+    // `println(Object)` is not in the embedded stubs, so the value is tested rather than printed.
+    static Object asObject() { return null; }
+
+    public static void main(String[] args) {
+        System.out.println(asLong());
+        System.out.println(asDouble());
+        System.out.println(asFloat());
+        System.out.println(asByte());
+        System.out.println(asObject() == null);
+    }
+}
+";
+    assert_eq!(run(source, "Returns"), "1\n1.0\n1.0\n44\ntrue\n");
 }
 
 /// Access flags are what the source wrote, bit for bit.
@@ -362,6 +476,9 @@ public class Flags {
             ("main".to_owned(), 0x0001 | 0x0008),           // public | static
             // The default constructor takes the class's own access level (JLS §8.8.9).
             ("<init>".to_owned(), 0x0001),
+            // `OPEN`'s initialiser has to run somewhere, and `<clinit>` is the only place. It takes
+            // no access level at all — nothing can name it — and `ACC_STATIC` from version 51 on.
+            ("<clinit>".to_owned(), 0x0008),
         ]
     );
     // `public class` — and `ACC_SUPER`, which every emitted class carries.
@@ -474,55 +591,180 @@ public class Locals {
     assert_eq!(run(source, "Locals"), "16\n");
 }
 
-/// A nested type is its own class file. Dropping it silently would produce an outer class that
-/// loads and then throws `NoClassDefFoundError` at the first use of the inner one — a failure the
-/// compiler is in a position to report and the run time is not.
+/// A nested type is its own class file, named `Outer$Inner`.
+///
+/// Nothing in the dotted fully-qualified name says which boundary is a package and which is a nesting,
+/// so each one is decided by asking whether the prefix before it is itself a type. Getting it wrong
+/// produces a class that loads under one name and is referred to under another — a
+/// `NoClassDefFoundError` at the first use.
 #[test]
-fn a_nested_type_is_reported_rather_than_dropped() {
-    let source = r"
+fn a_nested_type_becomes_its_own_class_file() {
+    let source = r#"
+package com.example;
+
 public class Outer {
-    static class Inner {
+    static int shared = 10;
+
+    static class Counter {
         int value;
+
+        Counter(int value) { this.value = value; }
+
+        int doubled() { return value * 2; }
     }
 
-    public static void main(String[] args) {}
+    interface Named {
+        String name();
+    }
+
+    static class Person implements Named {
+        public String name() { return "person"; }
+
+        static class Nested {
+            int deep() { return 3; }
+        }
+    }
+
+    public static void main(String[] args) {
+        // Referred to by simple name from inside the enclosing type, and by a partly-qualified one —
+        // neither of which is a fully-qualified name, so neither resolves against packages alone.
+        Counter counted = new Counter(21);
+        System.out.println(counted.doubled());
+        Named named = new Person();
+        System.out.println(named.name());
+        System.out.println(new Person.Nested().deep());
+        System.out.println(new Outer.Counter(5).doubled());
+        System.out.println(Counter.class.getName());
+        // `getSimpleName` reads the `InnerClasses` entry; without one it answers `Outer$Counter`.
+        System.out.println(Counter.class.getSimpleName());
+        System.out.println(shared);
+    }
 }
-";
-    let error = compile(source).expect_err("nested types are not emitted yet");
-    assert!(
-        matches!(error, LowerError::Unsupported("a nested type declaration")),
-        "expected the nested-type report, got {error}"
+"#;
+    let classes = compile(source).expect("compile");
+    let names: Vec<&str> = classes
+        .iter()
+        .map(|class| class.internal_name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "com/example/Outer",
+            "com/example/Outer$Counter",
+            "com/example/Outer$Named",
+            "com/example/Outer$Person",
+            // Nesting is not one level: the `$` is at every boundary the index says is one.
+            "com/example/Outer$Person$Nested",
+        ]
+    );
+
+    // The `InnerClasses` attribute is where a nested type's `private` and `static` live — its own
+    // `access_flags` has nowhere to put either, so this is the only record of what the source wrote,
+    // and `getSimpleName` reads it back from here too.
+    let outer =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(classes[0].bytes.as_slice()))
+            .expect("reparse");
+    let entries = outer
+        .attributes
+        .iter()
+        .find_map(|attribute| match &attribute.body {
+            jals_classfile::AttributeBody::InnerClasses(entries) => Some(entries),
+            _ => None,
+        })
+        .expect("an InnerClasses attribute");
+    let listed: Vec<(String, u16)> = entries
+        .iter()
+        .map(|entry| {
+            (
+                outer
+                    .constant_pool
+                    .utf8(entry.inner_name_index)
+                    .expect("utf8")
+                    .into_owned(),
+                entry.inner_class_access_flags(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            ("Counter".to_owned(), 0x0008),
+            // An interface entry keeps `ACC_INTERFACE | ACC_ABSTRACT` and gains no `ACC_SUPER`.
+            ("Named".to_owned(), 0x0200 | 0x0400),
+            ("Person".to_owned(), 0x0008),
+        ]
+    );
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(
+        run(source, "com.example.Outer"),
+        "42\nperson\n3\n10\ncom.example.Outer$Counter\nCounter\n10\n"
     );
 }
 
-/// A constructor's prologue emits `super()` and the field initialisers. An explicit `this(…)` or
-/// `super(args)` replaces part of that, so emitting both would run one of them twice — a class that
-/// verifies and initialises wrongly. Reported until the delegation is lowered.
+/// `this(…)` and `super(args)` each replace part of what a constructor's prologue emits.
+///
+/// `super(args)` stands in for the no-argument `super()`; `this(…)` stands in for the field
+/// initialisers too, because the constructor it delegates to has already run them. Emitting the
+/// prologue *and* the invocation runs one of them twice — a class that verifies and initialises
+/// wrongly — so this is checked by what the fields hold rather than by whether it compiles.
 #[test]
-fn an_explicit_constructor_invocation_is_reported() {
-    for body in ["this(1);", "super();"] {
-        let source = format!(
-            r"
-public class Delegating {{
-    int v = 7;
-
-    Delegating(int v) {{}}
-
-    Delegating() {{ {body} }}
-
-    public static void main(String[] args) {{}}
-}}
-"
-        );
-        let error = compile(&source).expect_err("constructor delegation is not lowered yet");
-        assert!(
-            matches!(
-                error,
-                LowerError::Unsupported("an explicit constructor invocation")
-            ),
-            "`{body}` should be reported, got {error}"
-        );
+fn a_constructor_delegates_without_running_the_prologue_twice() {
+    if !java_available() {
+        return;
     }
+    let source = r#"
+public class Seeded {
+    int seed;
+    String tag = "tagged";
+    // Counts how many constructor *bodies* ran. The initialiser that zeroes it runs exactly once, so
+    // a doubled prologue would show up here as a 1 where a 2 belongs.
+    int bodies = 0;
+
+    Seeded() {
+        this(7);
+        bodies += 1;
+    }
+
+    Seeded(int seed) {
+        this.seed = seed;
+        bodies += 1;
+    }
+
+    int seed() { return seed; }
+    String tag() { return tag; }
+    int bodies() { return bodies; }
+}
+
+class Extended extends Seeded {
+    int extra = 5;
+
+    Extended() { super(11); }
+    Extended(int a, int b) { super(a + b); }
+
+    int total() { return seed() + extra; }
+}
+
+class Delegating {
+    public static void main(String[] args) {
+        System.out.println(new Seeded().seed());
+        System.out.println(new Seeded().tag());
+        System.out.println(new Seeded().bodies());
+        System.out.println(new Seeded(3).seed());
+        System.out.println(new Seeded(3).bodies());
+        System.out.println(new Extended().total());
+        System.out.println(new Extended(1, 2).total());
+        // The superclass's own initialiser still ran: `super(args)` replaces only `super()`.
+        System.out.println(new Extended().tag());
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Delegating"),
+        "7\ntagged\n2\n3\n1\n16\n8\ntagged\n"
+    );
 }
 
 /// The prologue's `super()` only exists if the superclass has one. Emitting it regardless produced
@@ -607,6 +849,9 @@ public interface Shape {
         [
             ("area".to_owned(), 0x0001 | 0x0400), // public | abstract
             ("zero".to_owned(), 0x0001 | 0x0008), // public | static
+            // `SIDES` is implicitly `static final` and still has an initialiser to run, so an
+            // interface gets a `<clinit>` like a class does (JVMS §2.9.2 allows one from version 51).
+            ("<clinit>".to_owned(), 0x0008),
         ]
     );
     // An interface has no `ACC_SUPER` and gets no default constructor.
@@ -623,6 +868,10 @@ public interface Shape {
     let directory = tempfile::tempdir().expect("temp dir");
     std::fs::write(directory.path().join("Shape.class"), &classes[0].bytes).expect("write");
     let output = Command::new("java")
+        // Two of these run at once under `cargo test`, and the JVM's shared perf-data file lives at a
+        // fixed path per process id — a recycled one makes the second JVM print a warning onto the
+        // stdout a test is comparing.
+        .arg("-XX:-UsePerfData")
         .arg("-cp")
         .arg(directory.path())
         .arg("Shape")
@@ -635,35 +884,3739 @@ public interface Shape {
     );
 }
 
-/// A method with no body has to say *why* it has none. `abstract` says so and an interface method
-/// says so implicitly; `native` says so with its own flag, and `ACC_NATIVE | ACC_ABSTRACT` is a
-/// pair JVMS §4.6 forbids — a JVM rejects the class with "illegal modifiers: 0x500".
+/// A method with no body has to say *why* it has none.
+///
+/// `abstract` says so and an interface method says so implicitly; `native` says so with its own flag.
+/// `ACC_NATIVE | ACC_ABSTRACT` is a pair JVMS §4.6 forbids — a JVM rejects the class with "illegal
+/// modifiers: 0x500" — so a `native` method takes `ACC_NATIVE` and *not* `ACC_ABSTRACT`.
 #[test]
-fn a_body_less_method_that_is_not_abstract_is_reported() {
-    let error = compile(
+fn a_body_less_method_says_why_it_has_none() {
+    let classes = compile(
         r"
-public class Bodyless {
+public abstract class Bodyless {
     native int f();
+    public static native synchronized long g(int n);
+    abstract int h();
 
     public static void main(String[] args) {}
 }
 ",
     )
-    .expect_err("`native` has no body this can lower, and no flag pair that would say so");
+    .expect("`native` explains itself with its own flag");
+    let class =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(classes[0].bytes.as_slice()))
+            .expect("reparse");
+    let name_of = |index| class.constant_pool.utf8(index).expect("utf8").into_owned();
+    let flags: Vec<(String, u16)> = class
+        .methods
+        .iter()
+        .map(|method| (name_of(method.name_index), method.access_flags.0))
+        .collect();
+    assert_eq!(
+        flags,
+        [
+            // native, package-private — and not abstract.
+            ("f".to_owned(), 0x0100),
+            // public | static | synchronized | native
+            ("g".to_owned(), 0x0001 | 0x0008 | 0x0020 | 0x0100),
+            // abstract, which is the other way to have no body.
+            ("h".to_owned(), 0x0400),
+            ("main".to_owned(), 0x0001 | 0x0008),
+            ("<init>".to_owned(), 0x0001),
+        ]
+    );
+
+    // Neither explanation is a declaration the JVM would refuse.
+    let error = compile(
+        r"
+public class Silent {
+    int f();
+
+    public static void main(String[] args) {}
+}
+",
+    )
+    .expect_err("nothing says why `f` has no body");
     assert!(
         matches!(error, LowerError::Unsupported("a method with no body")),
         "expected the body-less report, got {error}"
     );
-
-    // `abstract` does say why, and still compiles.
-    compile(
-        r"
-public abstract class Abstract {
-    abstract int f();
-
-    public static void main(String[] args) {}
 }
-",
+
+/// Every loop form, and `break` / `continue` with and without a label.
+///
+/// `continue` in a `for` is the one that goes wrong silently: it has to run the update section
+/// (JLS §14.14.1.3), and sending it to the condition instead is an infinite loop that only appears
+/// when a body actually contains one. So the `for` rows below all contain a `continue`.
+#[test]
+fn every_loop_form_runs() {
+    if !java_available() {
+        return;
+    }
+    let source = r"
+public class Loops {
+    static int sumWhile(int limit) {
+        int total = 0, i = 0;
+        while (i < limit) { total = total + i; i = i + 1; }
+        return total;
+    }
+
+    static int sumDo(int limit) {
+        int total = 0, i = 0;
+        do { total = total + i; i = i + 1; } while (i < limit);
+        return total;
+    }
+
+    static int sumFor(int limit) {
+        int total = 0;
+        for (int i = 0; i < limit; i++) { total += i; }
+        return total;
+    }
+
+    static int sumOddsFor(int limit) {
+        int total = 0;
+        for (int i = 0; i < limit; i++) {
+            if (i % 2 == 0) { continue; }
+            total += i;
+        }
+        return total;
+    }
+
+    static int firstOver(int[] values, int bound) {
+        for (int v : values) {
+            if (v > bound) { return v; }
+        }
+        return -1;
+    }
+
+    static int sumEach(int[] values) {
+        int total = 0;
+        for (int v : values) { total += v; }
+        return total;
+    }
+
+    static int untilBreak(int limit) {
+        int i = 0;
+        for (;;) {
+            if (i >= limit) { break; }
+            i++;
+        }
+        return i;
+    }
+
+    static int firstPair(int[] values, int target) {
+        outer:
+        for (int i = 0; i < values.length; i++) {
+            for (int j = 0; j < values.length; j++) {
+                if (i == j) { continue; }
+                if (values[i] + values[j] == target) { return i * 10 + j; }
+                if (values[j] > 100) { continue outer; }
+            }
+        }
+        return -1;
+    }
+
+    static int labelledBreak(int[] values) {
+        int found = -1;
+        search:
+        for (int v : values) {
+            if (v == 3) { found = v; break search; }
+        }
+        return found;
+    }
+
+    static int labelledBlock(int n) {
+        int out = 0;
+        done: {
+            out = 1;
+            if (n > 0) { break done; }
+            out = 2;
+        }
+        return out;
+    }
+
+    public static void main(String[] args) {
+        System.out.println(sumWhile(5));
+        System.out.println(sumDo(5));
+        System.out.println(sumDo(0));
+        System.out.println(sumFor(5));
+        System.out.println(sumOddsFor(6));
+        int[] values = null;
+        System.out.println(untilBreak(4));
+        System.out.println(labelledBlock(1));
+        System.out.println(labelledBlock(-1));
+    }
+}
+";
+    // `sumDo(0)` runs its body once, which is the whole difference from `while`.
+    assert_eq!(run(source, "Loops"), "10\n10\n0\n10\n9\n4\n1\n2\n");
+}
+
+/// A `for`-each over an array, and the arrays it walks — reached through `args`, which is the one
+/// array a `main` has without `new`.
+#[test]
+fn a_for_each_walks_an_array() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Walk {
+    public static void main(String[] args) {
+        System.out.println(args.length);
+        int count = 0;
+        for (String s : args) { count++; }
+        System.out.println(count);
+        for (int i = 0; i < args.length; i++) {
+            System.out.println(args[i]);
+        }
+        // An element assignment, which is `dup_x2` for the value to survive the store.
+        if (args.length > 0) {
+            System.out.println(args[0] = "replaced");
+            System.out.println(args[0]);
+        }
+    }
+}
+"#;
+    let classes = compile(source).expect("compile");
+    let directory = tempfile::tempdir().expect("temp dir");
+    std::fs::write(directory.path().join("Walk.class"), &classes[0].bytes).expect("write");
+    let output = Command::new("java")
+        // Two of these run at once under `cargo test`, and the JVM's shared perf-data file lives at a
+        // fixed path per process id — a recycled one makes the second JVM print a warning onto the
+        // stdout a test is comparing.
+        .arg("-XX:-UsePerfData")
+        .arg("-cp")
+        .arg(directory.path())
+        .arg("Walk")
+        .arg("one")
+        .arg("two")
+        .output()
+        .expect("run java");
+    assert!(
+        output.status.success(),
+        "the JVM rejected the class:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "2\n2\none\ntwo\nreplaced\nreplaced\n"
+    );
+}
+
+/// `++` and `--`, in both positions, over each kind of place.
+///
+/// The narrowing is what a naive lowering drops: `byte b = 127; b++` has to wrap, because JLS §15.14
+/// defines it as `b = (byte)(b + 1)`. And a postfix form has to yield the value from *before* the
+/// update, which for a field means re-seating the old value under the receiver.
+#[test]
+fn increments_update_and_yield_the_right_value() {
+    if !java_available() {
+        return;
+    }
+    let source = r"
+public class Steps {
+    int field = 10;
+    static int shared = 20;
+
+    int bumpField() { return field++; }
+    int preBumpField() { return ++field; }
+    int readField() { return field; }
+
+    public static void main(String[] args) {
+        int i = 5;
+        System.out.println(i++);
+        System.out.println(i);
+        System.out.println(++i);
+        System.out.println(i--);
+        System.out.println(--i);
+
+        byte b = 127;
+        b++;
+        System.out.println(b);
+        char c = 'y';
+        System.out.println(++c);
+        long l = 4294967296L;
+        l++;
+        System.out.println(l);
+        double d = 1.5;
+        System.out.println(d++);
+        System.out.println(d);
+
+        System.out.println(shared++);
+        System.out.println(shared);
+    }
+}
+";
+    assert_eq!(
+        run(source, "Steps"),
+        "5\n6\n7\n7\n5\n-128\nz\n4294967297\n1.5\n2.5\n20\n21\n"
+    );
+}
+
+/// Assignment to a field, and the value it yields.
+///
+/// An assignment is an *expression* whose value is the one assigned, so `println(o.f = 2)` has to
+/// leave the value behind after the `putfield` consumed it. That is `dup_x1` — the copy goes under
+/// the receiver, not on top of it.
+#[test]
+fn an_assignment_to_a_field_yields_its_value() {
+    if !java_available() {
+        return;
+    }
+    let source = r"
+public class Store {
+    int instance;
+    static int shared;
+    static long wide;
+
+    int setInstance(int v) { return instance = v; }
+    int getInstance() { return instance; }
+
+    public static void main(String[] args) {
+        System.out.println(shared = 7);
+        System.out.println(shared);
+        System.out.println(wide = 4294967296L);
+        // A chain assigns right to left and each link yields what it stored.
+        int a = 0, b = 0;
+        System.out.println(a = b = 3);
+        System.out.println(a + b);
+        // A compound assignment on a `static` field reads and writes the same place.
+        shared *= 6;
+        System.out.println(shared);
+    }
+}
+";
+    assert_eq!(run(source, "Store"), "7\n7\n4294967296\n3\n6\n42\n");
+}
+
+/// Casts, `instanceof`, the conditional operator, and the short-circuiting operators.
+#[test]
+fn casts_tests_and_conditionals_run() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Choose {
+    static boolean loud = false;
+
+    static boolean note(boolean value) { loud = true; return value; }
+
+    static String pick(int n) { return n > 0 ? "positive" : "other"; }
+
+    public static void main(String[] args) {
+        System.out.println(pick(1));
+        System.out.println(pick(-1));
+        // A conditional whose arms are different numeric types promotes to the wider one.
+        long chosen = args.length == 0 ? 1 : 2L;
+        System.out.println(chosen);
+
+        // `&&` must not evaluate its right operand once the left decided the answer.
+        loud = false;
+        System.out.println(false && note(true));
+        System.out.println(loud);
+        loud = false;
+        System.out.println(true || note(true));
+        System.out.println(loud);
+        // And it must evaluate it when the left did not.
+        loud = false;
+        System.out.println(true && note(false));
+        System.out.println(loud);
+
+        // The non-short-circuiting boolean operators, which are the same tokens as the bitwise ones.
+        System.out.println(true & false);
+        System.out.println(true | false);
+        System.out.println(true ^ true);
+        boolean flag = true;
+        flag &= false;
+        System.out.println(flag);
+
+        Object boxed = "text";
+        System.out.println(boxed instanceof String);
+        System.out.println(boxed instanceof Integer);
+        String back = (String) boxed;
+        System.out.println(back.length());
+        System.out.println(args instanceof Object);
+
+        // A primitive narrowing cast, which is the only place one appears without an assignment.
+        double big = 300.7;
+        System.out.println((byte) big);
+        System.out.println((int) big);
+        System.out.println((char) 66);
+        System.out.println(-big);
+        System.out.println(~5);
+        System.out.println(!false);
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Choose"),
+        "positive\nother\n1\n\
+         false\nfalse\n\
+         true\nfalse\n\
+         false\ntrue\n\
+         false\ntrue\nfalse\nfalse\n\
+         true\nfalse\n4\ntrue\n\
+         44\n300\nB\n-300.7\n-6\ntrue\n"
+    );
+}
+
+/// A `static` field's initialiser and a `static { … }` block both run in `<clinit>`, and an instance
+/// initialiser block runs in every constructor.
+///
+/// Nothing else runs them, so dropping them produced a class whose `static int n = 5;` read back as
+/// 0 — a class that verifies, runs, and answers wrongly.
+#[test]
+fn the_initializers_run_where_they_belong() {
+    if !java_available() {
+        return;
+    }
+    let source = r"
+public class Init {
+    static int first = 5;
+    static int second = first * 2;
+    static int third;
+
+    static {
+        third = second + 1;
+    }
+
+    public static void main(String[] args) {
+        System.out.println(first);
+        System.out.println(second);
+        System.out.println(third);
+    }
+}
+";
+    // The order matters: `second` reads `first`, and the block reads `second`.
+    assert_eq!(run(source, "Init"), "5\n10\n11\n");
+}
+
+/// `int a = 1, b = 2;` is one declaration and two initialisers. Taking the first expression for
+/// every name gave `b` the value of `a` — in a class file that verifies.
+#[test]
+fn each_declarator_takes_its_own_initializer() {
+    if !java_available() {
+        return;
+    }
+    let source = r"
+public class Several {
+    static int p = 1, q = 2, r = 3;
+    int a = 4, b = 5;
+
+    int sum() { return a * 10 + b; }
+
+    public static void main(String[] args) {
+        System.out.println(p);
+        System.out.println(q);
+        System.out.println(r);
+        int x = 6, y = 7;
+        System.out.println(x * 10 + y);
+    }
+}
+";
+    assert_eq!(run(source, "Several"), "1\n2\n3\n67\n");
+}
+
+/// `new Foo(args)`, with the overload the arguments selected.
+#[test]
+fn object_creation_runs_the_constructor_it_selected() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Point {
+    int x;
+    int y;
+    String tag = "made";
+
+    Point() {
+        x = 1;
+        y = 1;
+    }
+
+    Point(int both) {
+        x = both;
+        y = both;
+    }
+
+    Point(int x, long y) {
+        this.x = x;
+        this.y = (int) y;
+    }
+
+    int sum() { return x * 100 + y; }
+
+    public static void main(String[] args) {
+        System.out.println(new Point().sum());
+        System.out.println(new Point(3).sum());
+        // The `long` parameter is what makes this overload the one an `int` literal widens into.
+        System.out.println(new Point(4, 5).sum());
+        System.out.println(new Point().tag);
+        // A constructor's field initialisers run before its own body, so `tag` is set either way.
+        Point moved = new Point(7);
+        moved.x = 9;
+        System.out.println(moved.sum());
+        System.out.println(new StringBuilder("ab").append(1).append('c').toString());
+    }
+}
+"#;
+    assert_eq!(run(source, "Point"), "101\n303\n405\nmade\n907\nab1c\n");
+}
+
+/// A `new` whose argument list contains a branch keeps an *uninitialised* reference live across it.
+///
+/// That is the one shape where a stack-map frame has to name the `new`'s own bytecode offset — and the
+/// offset does not exist until branch widening has run, so it is carried as an item index and
+/// translated at the end. A wrong translation reparses perfectly and then fails to load.
+#[test]
+fn a_new_with_a_conditional_argument_verifies() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Fresh {
+    int value;
+
+    Fresh(int value) { this.value = value; }
+
+    public static void main(String[] args) {
+        Fresh chosen = new Fresh(args.length == 0 ? 10 : 20);
+        System.out.println(chosen.value);
+        System.out.println(new StringBuilder(args.length == 0 ? "none" : "some").append('!').toString());
+    }
+}
+"#;
+    assert_eq!(run(source, "Fresh"), "10\nnone!\n");
+}
+
+/// Every array-creation form, and the element types whose opcodes differ.
+#[test]
+fn every_array_creation_form_runs() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Made {
+    static int[] sized(int n) { return new int[n]; }
+
+    public static void main(String[] args) {
+        int[] a = new int[3];
+        a[2] = 42;
+        System.out.println(a[2] + a.length);
+
+        // Both levels at once, and only the outer one.
+        int[][] both = new int[2][3];
+        both[1][2] = 5;
+        System.out.println(both.length * 100 + both[0].length * 10 + both[1][2]);
+        int[][] outer = new int[2][];
+        System.out.println(outer.length);
+        outer[0] = sized(4);
+        System.out.println(outer[0].length);
+
+        // An initialiser, with and without the `new T[]` in front of it.
+        int[] listed = new int[]{1, 2, 3};
+        int[] bare = {4, 5};
+        System.out.println(listed[2] + bare[0] + bare[1]);
+        int[][] nested = {{1, 2}, {3}};
+        System.out.println(nested[0][1] * 100 + nested[1][0] * 10 + nested[1].length);
+
+        // The four narrow element types have their own opcodes, and `boolean` shares `byte`'s.
+        byte[] bytes = {1, (byte) 200};
+        System.out.println(bytes[1]);
+        char[] chars = {'x', (char) 65535};
+        System.out.println(chars[0]);
+        System.out.println((int) chars[1]);
+        short[] shorts = {(short) 40000};
+        System.out.println(shorts[0]);
+        boolean[] flags = {true, false};
+        System.out.println(flags[0]);
+        long[] longs = {4294967296L};
+        System.out.println(longs[0]);
+        double[] doubles = {1.5, 2.5};
+        System.out.println(doubles[0] + doubles[1]);
+        String[] names = {"first", "second"};
+        System.out.println(names[1]);
+        // An element assignment yields the value it wrote.
+        System.out.println(a[0] = 8);
+        a[1] += 3;
+        System.out.println(a[1]);
+        a[1]++;
+        System.out.println(a[1]);
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Made"),
+        "45\n235\n2\n4\n12\n231\n-56\nx\n65535\n-25536\ntrue\n4294967296\n4.0\nsecond\n8\n3\n4\n"
+    );
+}
+
+/// String concatenation, at every operand type and through the flattening a chain needs.
+///
+/// `a + b + c` parses as `(a + b) + c`. Lowering each `+` on its own builds the left string, hands it
+/// to a second builder, and throws it away — correct but quadratic. And which `append` overload an
+/// operand takes is not a verification question: sending a `char` to `append(int)` prints its code
+/// point in a class file that loads and runs.
+#[test]
+fn string_concatenation_appends_each_operand_at_its_own_type() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Joined {
+    static String describe(int n) { return "n=" + n; }
+
+    public static void main(String[] args) {
+        System.out.println("x" + 1 + 'c' + 2L + true + 1.5 + 1.5f);
+        System.out.println(describe(7));
+        // A `+` inside a concatenation whose own result is numeric is an *addition*.
+        System.out.println("sum=" + (1 + 2));
+        System.out.println("digits=" + 1 + 2);
+        // The other way round: a numeric prefix turns into a string as soon as one operand is one.
+        System.out.println(1 + 2 + "x");
+        // A `null` reference appends as the four characters, not as a thrown exception.
+        String missing = null;
+        System.out.println("[" + missing + "]");
+        Object boxed = null;
+        System.out.println("[" + boxed + "]");
+        // A `byte` and a `short` have no overload of their own; they are already `int`s.
+        byte b = 7;
+        short s = 8;
+        System.out.println("" + b + s);
+        // Compound concatenation reads the target and writes it back.
+        String acc = "a";
+        acc += "b";
+        acc += 1;
+        acc += 'c';
+        System.out.println(acc);
+        // And on a field, where the address has to survive the read.
+        System.out.println(new Joined().grow());
+    }
+
+    String label = "L";
+
+    String grow() {
+        label += "-";
+        label += 2;
+        return label;
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Joined"),
+        "x1c2true1.51.5\n\
+         n=7\n\
+         sum=3\n\
+         digits=12\n\
+         3x\n\
+         [null]\n\
+         [null]\n\
+         78\n\
+         ab1c\n\
+         L-2\n"
+    );
+}
+
+/// A `for`-each over an `Iterable`, which JLS §14.14.2 defines as a loop over `iterator()`.
+///
+/// `next()` returns `Object` after erasure, so the element needs a `checkcast` on the way into the
+/// loop variable — without it the variable holds an `Object` the frame says so about, and the first
+/// method call on it fails verification.
+#[test]
+fn a_for_each_over_an_iterable_runs() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Walked {
+    public static void main(String[] args) {
+        java.util.List<String> names = new java.util.ArrayList<String>();
+        names.add("one");
+        names.add("two");
+        int total = 0;
+        for (String name : names) {
+            System.out.println(name);
+            total += name.length();
+        }
+        System.out.println(total);
+        for (String name : names) {
+            if (name.equals("one")) { continue; }
+            System.out.println("kept " + name);
+        }
+    }
+}
+"#;
+    assert_eq!(run(source, "Walked"), "one\ntwo\n6\nkept two\n");
+}
+
+/// `throw`, and the handler chain that catches it.
+///
+/// The clause order is what the exception table has to preserve: the JVM takes the *first* entry whose
+/// range covers the throw and whose type matches, so a `catch (Exception)` written first swallows what
+/// follows it — exactly as the source says.
+#[test]
+fn a_thrown_exception_reaches_the_first_matching_clause() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Caught {
+    static int classify(int n) {
+        try {
+            if (n == 0) { throw new IllegalStateException("zero"); }
+            if (n == 1) { return 100 / (n - 1); }
+            return n;
+        } catch (IllegalStateException e) {
+            System.out.println("state: " + e.getMessage());
+            return -1;
+        } catch (ArithmeticException e) {
+            System.out.println("math");
+            return -2;
+        }
+    }
+
+    static String multi(int n) {
+        try {
+            if (n == 0) { throw new IllegalArgumentException("arg"); }
+            throw new IllegalStateException("state");
+        } catch (IllegalArgumentException | IllegalStateException e) {
+            // Both arms are `RuntimeException`s, so that is the type the binding has — and
+            // `getMessage()` is declared above it, on `Throwable`.
+            return e.getMessage();
+        }
+    }
+
+    public static void main(String[] args) {
+        System.out.println(classify(0));
+        System.out.println(classify(1));
+        System.out.println(classify(5));
+        System.out.println(multi(0));
+        System.out.println(multi(1));
+        // A local written before the `try` is still readable in the handler, because the handler's
+        // frame keeps the locals the protected range started with.
+        String before = "kept";
+        try {
+            throw new RuntimeException("x");
+        } catch (RuntimeException e) {
+            System.out.println(before);
+        }
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Caught"),
+        "state: zero\n-1\nmath\n-2\n5\narg\nstate\nkept\n"
+    );
+}
+
+/// A `finally` runs on *every* way out of the region it guards.
+///
+/// Falling off the end, each `return`, each `break` or `continue` that leaves it, and anything thrown
+/// — and it is duplicated at each of them, because `jsr` / `ret` is the alternative and no verifier
+/// since Java 6 accepts it. A `return`'s value is computed *before* the block runs and cannot be
+/// changed by it (JLS §14.20.2), which is why it goes into a slot of its own.
+#[test]
+fn a_finally_runs_on_every_exit() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Cleanup {
+    static void trace(String s) { System.out.println(s); }
+
+    static int returned() {
+        try { return 1; } finally { trace("f:returned"); }
+    }
+
+    static int caught(int n) {
+        try {
+            if (n == 0) { throw new IllegalStateException("zero"); }
+            return 10;
+        } catch (IllegalStateException e) {
+            return 20;
+        } finally {
+            trace("f:caught");
+        }
+    }
+
+    static int propagated() {
+        try {
+            trace("body");
+            throw new IllegalStateException("up");
+        } finally {
+            trace("f:propagated");
+        }
+    }
+
+    static int looped(int limit) {
+        int seen = 0;
+        for (int i = 0; i < limit; i++) {
+            try {
+                if (i == 2) { continue; }
+                if (i == 3) { break; }
+                seen += 1;
+            } finally {
+                trace("f:looped:" + i);
+            }
+        }
+        return seen;
+    }
+
+    static int nested() {
+        try {
+            try { return 7; } finally { trace("f:inner"); }
+        } finally {
+            trace("f:outer");
+        }
+    }
+
+    static long wide() {
+        // The held value takes two slots, which is the case a one-slot temporary would clobber.
+        try { return 4294967296L; } finally { trace("f:wide"); }
+    }
+
+    static int shadowed() {
+        int n = 1;
+        try { return n; } finally { n = 99; }
+    }
+
+    public static void main(String[] args) {
+        trace("returned=" + returned());
+        trace("caught0=" + caught(0));
+        trace("caught1=" + caught(1));
+        try { propagated(); } catch (IllegalStateException e) { trace("escaped:" + e.getMessage()); }
+        trace("looped=" + looped(5));
+        trace("nested=" + nested());
+        trace("wide=" + wide());
+        // The `finally` cannot change what was already computed.
+        trace("shadowed=" + shadowed());
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Cleanup"),
+        "f:returned\nreturned=1\n\
+         f:caught\ncaught0=20\n\
+         f:caught\ncaught1=10\n\
+         body\nf:propagated\nescaped:up\n\
+         f:looped:0\nf:looped:1\nf:looped:2\nf:looped:3\nlooped=2\n\
+         f:inner\nf:outer\nnested=7\n\
+         f:wide\nwide=4294967296\n\
+         shadowed=1\n"
+    );
+}
+
+/// `synchronized` releases its monitor however the block ends — the JVM refuses to return from a
+/// method still holding one it took, so a missing release fails at run time rather than at load.
+#[test]
+fn a_synchronized_block_releases_its_monitor() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Locked {
+    static int guarded(Object lock, int n) {
+        synchronized (lock) {
+            if (n == 0) { return -1; }
+            return n * 2;
+        }
+    }
+
+    public static void main(String[] args) {
+        System.out.println(guarded(args, 0));
+        System.out.println(guarded(args, 3));
+        synchronized (args) {
+            System.out.println("inside");
+        }
+        try {
+            synchronized (args) {
+                throw new IllegalStateException("thrown while held");
+            }
+        } catch (IllegalStateException e) {
+            System.out.println(e.getMessage());
+        }
+        // Reaching here at all means the monitor was released on the exceptional path too.
+        synchronized (args) {
+            System.out.println("again");
+        }
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Locked"),
+        "-1\n6\ninside\nthrown while held\nagain\n"
+    );
+}
+
+/// An `assert` is a no-op unless the JVM was started with `-ea`.
+///
+/// That is the whole reason for the synthetic `$assertionsDisabled` field: emitting the check unguarded
+/// would change what the program does, because a release build relies on assertions being skipped.
+#[test]
+fn an_assert_fires_only_under_ea() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Checked {
+    public static void main(String[] args) {
+        System.out.println("before");
+        assert args.length == 99 : "message " + args.length;
+        assert args.length == 99;
+        System.out.println("after");
+    }
+}
+"#;
+    // The field is synthetic, `static final`, and named the way javac names it — a debugger and a
+    // decompiler both recognise it, and a class read by javac has to agree.
+    let classes = compile(source).expect("compile");
+    let class =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(classes[0].bytes.as_slice()))
+            .expect("reparse");
+    let names: Vec<String> = class
+        .fields
+        .iter()
+        .map(|field| {
+            class
+                .constant_pool
+                .utf8(field.name_index)
+                .expect("utf8")
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(names, ["$assertionsDisabled"]);
+    // static | final | synthetic
+    assert_eq!(class.fields[0].access_flags.0, 0x0008 | 0x0010 | 0x1000);
+
+    // Off by default.
+    assert_eq!(run(source, "Checked"), "before\nafter\n");
+
+    // On with `-ea`, and the message is the concatenation the source wrote.
+    let directory = tempfile::tempdir().expect("temp dir");
+    std::fs::write(directory.path().join("Checked.class"), &classes[0].bytes).expect("write");
+    let output = Command::new("java")
+        .arg("-XX:-UsePerfData")
+        .arg("-ea")
+        .arg("-cp")
+        .arg(directory.path())
+        .arg("Checked")
+        .output()
+        .expect("run java");
+    assert!(!output.status.success(), "the assertion should have fired");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "before\n");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("java.lang.AssertionError: message 0"),
+        "{stderr}"
+    );
+}
+
+/// A try-with-resources closes what it acquired, in reverse order, on every way out.
+///
+/// The suppression is the part that is easy to get wrong and hard to notice. JLS §14.20.3.1 says an
+/// exception from `close()` is *added to* the one the body threw rather than replacing it — losing the
+/// body's exception is the whole reason the construct exists, so a lowering that lets `close()` win has
+/// undone it.
+#[test]
+fn a_try_with_resources_closes_and_suppresses() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Resourceful implements AutoCloseable {
+    String name;
+    boolean failOnClose;
+
+    Resourceful(String name) { this.name = name; }
+    Resourceful(String name, boolean failOnClose) {
+        this.name = name;
+        this.failOnClose = failOnClose;
+    }
+
+    public void close() {
+        System.out.println("close:" + name);
+        if (failOnClose) { throw new IllegalStateException("close:" + name); }
+    }
+
+    static void reverseOrder() {
+        try (Resourceful a = new Resourceful("a"); Resourceful b = new Resourceful("b")) {
+            System.out.println("body");
+        }
+    }
+
+    static int closedBeforeReturning() {
+        try (Resourceful a = new Resourceful("early")) { return 1; }
+    }
+
+    static void bodyThrows() {
+        try (Resourceful a = new Resourceful("s", true)) {
+            throw new IllegalArgumentException("body threw");
+        }
+    }
+
+    static void onlyCloseThrows() {
+        try (Resourceful a = new Resourceful("ct", true)) {
+            System.out.println("ran");
+        }
+    }
+
+    static void wrapped() {
+        try (Resourceful a = new Resourceful("c")) {
+            throw new IllegalArgumentException("inner");
+        } catch (IllegalArgumentException e) {
+            System.out.println("caught:" + e.getMessage());
+        } finally {
+            System.out.println("finally");
+        }
+    }
+
+    public static void main(String[] args) {
+        reverseOrder();
+        System.out.println("returned=" + closedBeforeReturning());
+        try {
+            bodyThrows();
+        } catch (IllegalArgumentException e) {
+            System.out.println("primary:" + e.getMessage());
+            System.out.println("suppressed=" + e.getSuppressed().length);
+        }
+        // With nothing thrown by the body, a failing `close()` is the exception.
+        try {
+            onlyCloseThrows();
+        } catch (IllegalStateException e) {
+            System.out.println("from close:" + e.getMessage());
+        }
+        wrapped();
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Resourceful"),
+        "body\nclose:b\nclose:a\n\
+         close:early\nreturned=1\n\
+         close:s\nprimary:body threw\nsuppressed=1\n\
+         ran\nclose:ct\nfrom close:close:ct\n\
+         close:c\ncaught:inner\nfinally\n"
+    );
+}
+
+/// `switch`, in both syntaxes, as a statement and as an expression.
+///
+/// The colon form *falls through* and the arrow form does not, which is the only difference between
+/// them and one `goto` per arm in the output. A `break` leaves the whole `switch`; a `continue` looks
+/// straight past it, because a `switch` is a `break` target that is not a loop.
+#[test]
+fn both_switch_syntaxes_run() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Selected {
+    static String fallsThrough(int n) {
+        String out = "";
+        switch (n) {
+            case 0:
+            case 1:
+                out = "low";
+                break;
+            case 2:
+                out = "two";
+                // No `break`: the next group runs too, which is what the colon form means.
+            case 3:
+                out = out + "three";
+                break;
+            default:
+                out = "other";
+        }
+        return out;
+    }
+
+    static String arrows(int n) {
+        String out = "";
+        switch (n) {
+            case 0, 1 -> out = "low";
+            case 2 -> out = "two";
+            default -> out = "other";
+        }
+        return out;
+    }
+
+    static int valued(int n) {
+        return switch (n) {
+            case 0 -> 10;
+            case 1 -> { yield 20; }
+            case 2 -> throw new IllegalStateException("two");
+            default -> 99;
+        };
+    }
+
+    static String narrow(char c) {
+        return switch (c) {
+            case 'x' -> "ex";
+            case 'y' -> "why";
+            default -> "?";
+        };
+    }
+
+    static int sparse(int n) {
+        // Keys 1000 apart take the `lookupswitch` form; the dense ones above take `tableswitch`.
+        switch (n) {
+            case -1: return 100;
+            case 1000: return 200;
+            default: return 300;
+        }
+    }
+
+    static int leaves(int limit) {
+        int total = 0;
+        for (int i = 0; i < limit; i++) {
+            switch (i) {
+                case 1: continue;
+                case 3: break;
+                default: total += i;
+            }
+            total += 100;
+        }
+        return total;
+    }
+
+    static int cleanedUp(int n) {
+        try {
+            return switch (n) {
+                case 0 -> { yield 1; }
+                default -> 2;
+            };
+        } finally {
+            System.out.println("cleanup");
+        }
+    }
+
+    public static void main(String[] args) {
+        for (int i = 0; i < 5; i++) { System.out.println(fallsThrough(i)); }
+        for (int i = 0; i < 4; i++) { System.out.println(arrows(i)); }
+        System.out.println(valued(0));
+        System.out.println(valued(1));
+        try {
+            valued(2);
+        } catch (IllegalStateException e) {
+            System.out.println("threw:" + e.getMessage());
+        }
+        System.out.println(valued(9));
+        System.out.println(narrow('y'));
+        System.out.println(sparse(-1) + sparse(1000) + sparse(7));
+        System.out.println(leaves(5));
+        System.out.println(cleanedUp(0));
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Selected"),
+        "low\nlow\ntwothree\nthree\nother\n\
+         low\nlow\ntwo\nother\n\
+         10\n20\nthrew:two\n99\n\
+         why\n\
+         600\n\
+         406\n\
+         cleanup\n1\n"
+    );
+}
+
+/// A `switch` on a `String` is a `switch` on `hashCode()` plus an `equals` per candidate.
+///
+/// The `equals` is not an optimisation to skip. Two different strings can hash alike — `"Aa"` and
+/// `"BB"` famously do — and a lowering that trusted the hash would send one of them to the other's
+/// arm, in a class file that verifies and runs and answers wrongly.
+#[test]
+fn a_string_switch_confirms_the_hash_with_equals() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Named {
+    static String pick(String s) {
+        switch (s) {
+            case "a": return "A";
+            case "b": return "B";
+            case "Aa": return "collides-Aa";
+            case "BB": return "collides-BB";
+            default: return "?";
+        }
+    }
+
+    static int arrowed(String s) {
+        return switch (s) {
+            case "one", "uno" -> 1;
+            case "two" -> 2;
+            default -> 0;
+        };
+    }
+
+    public static void main(String[] args) {
+        System.out.println(pick("a"));
+        System.out.println(pick("b"));
+        // The two keys with the same hash have to reach their own arms.
+        System.out.println(pick("Aa"));
+        System.out.println(pick("BB"));
+        System.out.println(pick("zz"));
+        System.out.println(arrowed("one") + arrowed("uno") + arrowed("two") + arrowed("x"));
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Named"),
+        "A\nB\ncollides-Aa\ncollides-BB\n?\n4\n"
+    );
+}
+
+/// A `switch` the lowering cannot build a jump table for is reported rather than approximated.
+#[test]
+fn a_switch_it_cannot_tabulate_is_reported() {
+    for (source, expected) in [
+        // A jump table is built now, so a label whose value is not known now cannot be in it.
+        (
+            "int k = 1; switch (args.length) { case k: break; }",
+            "a non-literal `case`",
+        ),
+        // A `switch` expression has to produce a value on every path, and exhaustiveness over an
+        // `enum` or a sealed hierarchy — the other way to satisfy that — is not lowered.
+        (
+            "int v = switch (args.length) { case 0 -> 1; };",
+            "a `switch` expression with no `default`",
+        ),
+        // A `long` selector is not a Java program, and narrowing it to an `int` would compile it into
+        // one that switches on the low 32 bits.
+        (
+            "long n = 1; switch ((int) n) { default: break; } switch (n) { default: break; }",
+            "a `switch` on this selector type",
+        ),
+    ] {
+        let program = format!(
+            r"
+public class Table {{
+    public static void main(String[] args) {{
+        {source}
+    }}
+}}
+"
+        );
+        let error = compile(&program).expect_err("this switch cannot be tabulated");
+        assert!(
+            matches!(error, LowerError::Unsupported(what) if what == expected),
+            "`{source}` should report {expected:?}, got {error}"
+        );
+    }
+}
+
+/// Boxing and unboxing, which are the one conversion no opcode performs.
+///
+/// A `valueOf` call and an `xxxValue` call, and *which* one depends on the names on either side rather
+/// than on the stack representations — which is why they sit outside the conversion table. Boxing never
+/// widens on the way: `Long l = 1;` is not a Java program precisely because that would take two
+/// conversions, so the wrapper is read off the value's own type.
+#[test]
+fn boxing_and_unboxing_run() {
+    if !java_available() {
+        return;
+    }
+    let source = r"
+public class Boxed {
+    static int unbox(Integer n) { return n; }
+    static Integer box(int n) { return n; }
+    // Unboxing may widen afterwards, which the accessor alone does not do.
+    static long widened(Integer n) { return n; }
+
+    public static void main(String[] args) {
+        System.out.println(unbox(box(5)));
+        System.out.println(widened(box(7)));
+        // Boxing to a supertype: `Integer.valueOf` first, and the widening reference conversion is free.
+        Object any = 3;
+        System.out.println(any.toString());
+        Long big = 4294967296L;
+        System.out.println(big.longValue());
+        Boolean flag = true;
+        System.out.println(flag.booleanValue());
+        Character letter = 'q';
+        System.out.println(letter.charValue());
+        Double fraction = 1.5;
+        System.out.println(fraction.doubleValue());
+        // Binary numeric promotion unboxes before it promotes, so a wrapper is an arithmetic operand.
+        Integer counted = 3;
+        int total = 0;
+        total += counted;
+        System.out.println(total);
+        java.util.List<Integer> numbers = new java.util.ArrayList<Integer>();
+        numbers.add(1);
+        numbers.add(2);
+        System.out.println(numbers.get(0) + 1);
+        int summed = 0;
+        for (Integer n : numbers) { summed += n; }
+        System.out.println(summed);
+    }
+}
+";
+    assert_eq!(
+        run(source, "Boxed"),
+        "5\n7\n3\n4294967296\ntrue\nq\n1.5\n3\n2\n3\n"
+    );
+}
+
+/// A `.class` literal.
+///
+/// A reference type's is an `ldc` over the same `Class` entry a `checkcast` names. A *primitive* has no
+/// such entry — there is no `Class` constant for `int` — so it reads the `TYPE` field its wrapper
+/// carries for exactly this purpose, and `void` reads `Void.TYPE`. A primitive *array* is a reference
+/// again, so `long[].class` goes back to the `ldc`.
+#[test]
+fn class_literals_name_every_kind_of_type() {
+    if !java_available() {
+        return;
+    }
+    let source = r"
+public class Named {
+    public static void main(String[] args) {
+        System.out.println(String.class.getName());
+        System.out.println(Named.class.getName());
+        System.out.println(int.class.getName());
+        System.out.println(void.class.getName());
+        System.out.println(String[].class.getName());
+        System.out.println(long[].class.getName());
+        System.out.println(int.class == Integer.TYPE);
+    }
+}
+";
+    assert_eq!(
+        run(source, "Named"),
+        "java.lang.String\nNamed\nint\nvoid\n[Ljava.lang.String;\n[J\ntrue\n"
+    );
+}
+
+/// An `assert` inside an interface's `default` method.
+///
+/// JVMS §4.5 requires every interface field to be `public static final`, with no exception for a
+/// synthetic one. Emitting `$assertionsDisabled` package-private made the interface a
+/// `ClassFormatError: Illegal field modifiers` at load — which nothing but a JVM would have caught,
+/// because the class reparses perfectly.
+#[test]
+fn an_assert_in_an_interface_gets_a_public_flag() {
+    let classes = compile(
+        r#"
+public interface Checkable {
+    default int checked(int n) {
+        assert n > 0 : "positive";
+        return n;
+    }
+}
+"#,
     )
-    .expect("an `abstract` method declares why it has no body");
+    .expect("compile");
+    let class =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(classes[0].bytes.as_slice()))
+            .expect("reparse");
+    // public | static | final | synthetic
+    assert_eq!(class.fields.len(), 1);
+    assert_eq!(
+        class.fields[0].access_flags.0,
+        0x0001 | 0x0008 | 0x0010 | 0x1000
+    );
+
+    if !java_available() {
+        return;
+    }
+    let directory = tempfile::tempdir().expect("temp dir");
+    std::fs::write(directory.path().join("Checkable.class"), &classes[0].bytes).expect("write");
+    let output = Command::new("java")
+        .arg("-XX:-UsePerfData")
+        .arg("-cp")
+        .arg(directory.path())
+        .arg("Checkable")
+        .output()
+        .expect("run java");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("ClassFormatError") && !stderr.contains("VerifyError"),
+        "the JVM rejected the interface: {stderr}"
+    );
+}
+
+/// An overload set mixing a specific reference parameter with `Object` picks the one the argument's
+/// static type names.
+///
+/// `StringBuilder.append` declares both, and the two are mutually assignable as far as the shallow
+/// stub model can see — so nothing *dominates*, and selection falls back to an order rather than to a
+/// rule. It lands on the right one today; this pins that, because the wrong one is an
+/// `invokevirtual append(String)` with an `Object` on the stack, which the assembler's
+/// reference-vs-reference check accepts and the JVM rejects at load.
+#[test]
+fn an_object_argument_does_not_bind_to_a_string_parameter() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Widened {
+    public static void main(String[] args) {
+        StringBuilder builder = new StringBuilder();
+        Object boxed = "x";
+        builder.append(boxed);
+        builder.append("y");
+        builder.append(1);
+        System.out.println(builder.toString());
+    }
+}
+"#;
+    assert_eq!(run(source, "Widened"), "xy1\n");
+}
+
+/// An `implements` clause reaches the class file's `interfaces` list.
+///
+/// Dropping it produced a class the JVM loads and then refuses to dispatch through: an
+/// `invokeinterface` on a type whose `interfaces` never mentioned the interface is an
+/// `IncompatibleClassChangeError` at the first call, not a load-time error — so only running it finds
+/// this.
+#[test]
+fn an_implements_clause_reaches_the_interfaces_list() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+interface Speaks {
+    void speak();
+}
+
+interface Ranks {
+    int rank();
+}
+
+public class Greeter implements Speaks, Ranks {
+    public void speak() {
+        System.out.println("spoke");
+    }
+
+    public int rank() {
+        return 7;
+    }
+
+    public static void main(String[] args) {
+        Greeter greeter = new Greeter();
+        Speaks talker = greeter;
+        talker.speak();
+        Ranks ordered = greeter;
+        System.out.println(ordered.rank());
+    }
+}
+"#;
+    let classes = compile(source).expect("compile");
+    let greeter = classes
+        .iter()
+        .find(|class| class.internal_name == "Greeter")
+        .expect("the implementing class");
+    let class =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(greeter.bytes.as_slice()))
+            .expect("reparse");
+    let named: Vec<String> = class
+        .interfaces
+        .iter()
+        .map(|&index| {
+            class
+                .constant_pool
+                .class_name(index)
+                .expect("a Class entry")
+                .into_owned()
+        })
+        .collect();
+    // In the order the source listed them, which is what a `Comparable` before a `Runnable` would
+    // change and nothing else would notice.
+    assert_eq!(named, ["Speaks", "Ranks"]);
+    assert_eq!(run(source, "Greeter"), "spoke\n7\n");
+}
+
+/// An `enum` is a class whose every interesting member the compiler synthesises.
+///
+/// The source writes constants and a body; the class file needs a field per constant, a `$VALUES` array
+/// holding them in declaration order, a `(String, int)` constructor reaching `Enum`'s, and
+/// `values()` / `valueOf()`. An `enum` that emitted only what its body declares would be a type with no
+/// constants at all.
+///
+/// The ordinal *is* the declaration position — it is what `ordinal()` returns, what `compareTo` orders
+/// by, and what a `switch` over the type indexes on — so numbering them any other way is a class that
+/// verifies and compares wrongly.
+#[test]
+fn an_enum_gets_its_constants_and_synthetic_members() {
+    let source = r#"
+enum Colour {
+    RED, GREEN, BLUE;
+
+    int brightness = 5;
+
+    int bright() { return brightness + ordinal(); }
+}
+
+public class Palette {
+    public static void main(String[] args) {
+        Colour picked = Colour.BLUE;
+        System.out.println(picked.name());
+        System.out.println(picked.ordinal());
+        System.out.println(picked.toString());
+        System.out.println(picked == Colour.BLUE);
+        System.out.println(Colour.RED.ordinal());
+        System.out.println(Colour.RED.compareTo(Colour.BLUE));
+        // The two synthetic methods, and a method the body declares.
+        System.out.println(Colour.values().length);
+        System.out.println(Colour.valueOf("GREEN").ordinal());
+        System.out.println(Colour.GREEN.bright());
+        for (Colour each : Colour.values()) { System.out.println(each.name()); }
+    }
+}
+"#;
+    let classes = compile(source).expect("compile");
+    let colour = classes
+        .iter()
+        .find(|class| class.internal_name == "Colour")
+        .expect("the enum");
+    let class =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(colour.bytes.as_slice()))
+            .expect("reparse");
+    let name_of = |index| class.constant_pool.utf8(index).expect("utf8").into_owned();
+
+    // `ACC_ENUM` is what makes `Enum.valueOf` and a `switch` over the type work at run time, and
+    // `ACC_FINAL` is what an enum with no constant bodies is.
+    assert_eq!(
+        class.access_flags.0,
+        0x0020 | 0x0010 | 0x4000,
+        "super | final | enum"
+    );
+    assert_eq!(
+        class
+            .constant_pool
+            .class_name(class.super_class)
+            .expect("a Class entry"),
+        "java/lang/Enum"
+    );
+    assert_eq!(
+        class
+            .fields
+            .iter()
+            .map(|field| (name_of(field.name_index), field.access_flags.0))
+            .collect::<Vec<_>>(),
+        [
+            // public | static | final | enum
+            ("brightness".to_owned(), 0x0000),
+            ("RED".to_owned(), 0x0001 | 0x0008 | 0x0010 | 0x4000),
+            ("GREEN".to_owned(), 0x0001 | 0x0008 | 0x0010 | 0x4000),
+            ("BLUE".to_owned(), 0x0001 | 0x0008 | 0x0010 | 0x4000),
+            // private | static | final | synthetic
+            ("$VALUES".to_owned(), 0x0002 | 0x0008 | 0x0010 | 0x1000),
+        ]
+    );
+    assert_eq!(
+        class
+            .methods
+            .iter()
+            .map(|method| name_of(method.name_index))
+            .collect::<Vec<_>>(),
+        ["bright", "<init>", "values", "valueOf", "<clinit>"]
+    );
+
+    if !java_available() {
+        return;
+    }
+    // `compareTo` orders by ordinal, so `RED` against `BLUE` is -2 — which is only right if the
+    // constants were numbered in declaration order.
+    assert_eq!(
+        run(source, "Palette"),
+        "BLUE\n2\nBLUE\ntrue\n0\n-2\n3\n1\n6\nRED\nGREEN\nBLUE\n"
+    );
+}
+
+/// A `record`: fields, the canonical constructor, accessors, and the `Record` attribute.
+///
+/// A component is written *once*, in the header, and stands for three declarations — a `private final`
+/// field, an accessor, and one constructor parameter. None of them is in the body, so a record that
+/// emitted only what its body declares would be a type with no state, no way to build one, and no way
+/// to read one. `java.lang.Record` is the superclass and the source never writes it; the `Record`
+/// attribute is what makes `Class.isRecord` true.
+#[test]
+fn a_record_gets_its_fields_constructor_and_accessors() {
+    let source = r#"
+record Point(int x, long span, String label) {
+    // `java.lang.Record` declares all three abstract, so a record that omits any of them loads and
+    // then throws `AbstractMethodError`.
+    public boolean equals(Object other) {
+        if (!(other instanceof Point)) { return false; }
+        Point that = (Point) other;
+        return x == that.x() && span == that.span() && label.equals(that.label());
+    }
+
+    public int hashCode() {
+        return x * 31 + label.hashCode();
+    }
+
+    public String toString() {
+        return "Point[x=" + x + ", span=" + span + ", label=" + label + "]";
+    }
+
+    // A component's accessor may be written by hand, and then it wins over the synthesised one.
+    int doubled() { return x * 2; }
+}
+
+public class Places {
+    public static void main(String[] args) {
+        Point p = new Point(3, 40L, "here");
+        System.out.println(p.x());
+        System.out.println(p.span());
+        System.out.println(p.label());
+        System.out.println(p.doubled());
+        System.out.println(p.toString());
+        System.out.println(p.equals(new Point(3, 40L, "here")));
+        System.out.println(p.equals(new Point(4, 40L, "here")));
+    }
+}
+"#;
+    let classes = compile(source).expect("compile");
+    let point = classes
+        .iter()
+        .find(|class| class.internal_name == "Point")
+        .expect("the record");
+    let class = jals_exec::block_on_inline(jals_classfile::ClassFile::read(point.bytes.as_slice()))
+        .expect("reparse");
+    let name_of = |index| class.constant_pool.utf8(index).expect("utf8").into_owned();
+
+    // Every record is implicitly final (§8.10), and the source never writes that either.
+    assert_eq!(class.access_flags.0, 0x0020 | 0x0010, "super | final");
+    assert_eq!(
+        class
+            .constant_pool
+            .class_name(class.super_class)
+            .expect("a Class entry"),
+        "java/lang/Record"
+    );
+    assert_eq!(
+        class
+            .fields
+            .iter()
+            .map(|field| (
+                name_of(field.name_index),
+                name_of(field.descriptor_index),
+                field.access_flags.0
+            ))
+            .collect::<Vec<_>>(),
+        [
+            // private | final
+            ("x".to_owned(), "I".to_owned(), 0x0002 | 0x0010),
+            ("span".to_owned(), "J".to_owned(), 0x0002 | 0x0010),
+            (
+                "label".to_owned(),
+                "Ljava/lang/String;".to_owned(),
+                0x0002 | 0x0010
+            ),
+        ]
+    );
+    // `doubled` is the body's own; `x`, `span`, and `label` are synthesised, and the canonical
+    // constructor takes all three components at their own widths.
+    assert_eq!(
+        class
+            .methods
+            .iter()
+            .map(|method| (name_of(method.name_index), name_of(method.descriptor_index)))
+            .collect::<Vec<_>>(),
+        [
+            ("equals".to_owned(), "(Ljava/lang/Object;)Z".to_owned()),
+            ("hashCode".to_owned(), "()I".to_owned()),
+            ("toString".to_owned(), "()Ljava/lang/String;".to_owned()),
+            ("doubled".to_owned(), "()I".to_owned()),
+            ("<init>".to_owned(), "(IJLjava/lang/String;)V".to_owned()),
+            ("x".to_owned(), "()I".to_owned()),
+            ("span".to_owned(), "()J".to_owned()),
+            ("label".to_owned(), "()Ljava/lang/String;".to_owned()),
+        ]
+    );
+    let components = class
+        .attributes
+        .iter()
+        .find_map(|attribute| match &attribute.body {
+            jals_classfile::AttributeBody::Record(components) => Some(components),
+            _ => None,
+        })
+        .expect("the `Record` attribute");
+    assert_eq!(
+        components
+            .iter()
+            .map(|component| (
+                name_of(component.name_index),
+                name_of(component.descriptor_index)
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("x".to_owned(), "I".to_owned()),
+            ("span".to_owned(), "J".to_owned()),
+            ("label".to_owned(), "Ljava/lang/String;".to_owned()),
+        ]
+    );
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(
+        run(source, "Places"),
+        "3\n40\nhere\n6\nPoint[x=3, span=40, label=here]\ntrue\nfalse\n"
+    );
+}
+
+/// A `record`'s `equals`, `hashCode`, and `toString`, all three synthesised.
+///
+/// `java.lang.Record` declares them abstract, so a record without them loads perfectly and then throws
+/// `AbstractMethodError` at the first call. javac derives them through `invokedynamic`; written out they
+/// are the same three methods. Two of the three have real semantics to get wrong: a `double` component
+/// compares with `Double.compare(a, b) == 0`, which makes two `NaN`s equal and `0.0` and `-0.0`
+/// different, and its hash is its *bits*, so the two values `equals` calls equal also hash alike.
+/// `toString`'s format §8.10.3 specifies exactly.
+#[test]
+fn a_record_synthesises_the_three_object_methods() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+record Full(int i, long l, double d, boolean b, char c, String s) {}
+
+record Empty() {}
+
+public class Records {
+    public static void main(String[] args) {
+        Full a = new Full(1, 2L, 3.5, true, 'x', "hi");
+        Full same = new Full(1, 2L, 3.5, true, 'x', "hi");
+        Full other = new Full(1, 2L, 3.5, true, 'x', "bye");
+        // `toString()` written out: `println(a)` selects `println(String)` over `println(Object)`,
+        // because a project class is conservatively assignable to an external name — a `jals-hir`
+        // leniency this test is not the place to change.
+        System.out.println(a.toString());
+        System.out.println(a.equals(same));
+        System.out.println(a.equals(other));
+        System.out.println(a.equals("not a record"));
+        System.out.println(a.hashCode() == same.hashCode());
+        // A `null` component has to be comparable and hashable, which is what `Objects.equals` and
+        // `Objects.hashCode` are for — `s.equals(...)` would throw and `s.hashCode()` too.
+        Full none = new Full(1, 2L, 3.5, true, 'x', null);
+        System.out.println(none.equals(new Full(1, 2L, 3.5, true, 'x', null)));
+        System.out.println(none.hashCode() == new Full(1, 2L, 3.5, true, 'x', null).hashCode());
+        System.out.println(none.toString());
+        // `Double.compare` calls two NaNs equal where `==` calls them different.
+        Full nan = new Full(1, 2L, 0.0 / 0.0, true, 'x', "hi");
+        System.out.println(nan.equals(new Full(1, 2L, 0.0 / 0.0, true, 'x', "hi")));
+        System.out.println(new Empty().equals(new Empty()));
+        System.out.println(new Empty().toString());
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Records"),
+        concat!(
+            "Full[i=1, l=2, d=3.5, b=true, c=x, s=hi]\n",
+            "true\nfalse\nfalse\ntrue\n",
+            "true\ntrue\n",
+            "Full[i=1, l=2, d=3.5, b=true, c=x, s=null]\n",
+            "true\ntrue\nEmpty[]\n",
+        )
+    );
+}
+
+/// A record's non-canonical constructor does not replace the canonical one.
+///
+/// "Some constructor exists" is not "the canonical constructor exists": `record P(int x) { P() {
+/// this(0); } }` declares a no-argument one and still needs `<init>(I)V` for `this(0)` to have a target.
+#[test]
+fn a_record_constructor_replaces_the_canonical_one_only_when_it_is_canonical() {
+    let source = r"
+record P(int x) {
+    // A convenience constructor that delegates: the canonical one must still be emitted for it to
+    // reach, and for `new P(3)` to link.
+    P() { this(0); }
+}
+
+public class Both {
+    public static void main(String[] args) {
+        System.out.println(new P(3).x());
+        System.out.println(new P().x());
+    }
+}
+";
+    let classes = compile(source).expect("compile");
+    let point = classes
+        .iter()
+        .find(|class| class.internal_name == "P")
+        .expect("the record");
+    let class = jals_exec::block_on_inline(jals_classfile::ClassFile::read(point.bytes.as_slice()))
+        .expect("reparse");
+    let descriptors: Vec<String> = class
+        .methods
+        .iter()
+        .filter(|method| class.constant_pool.utf8(method.name_index).as_deref() == Some("<init>"))
+        .map(|method| {
+            class
+                .constant_pool
+                .utf8(method.descriptor_index)
+                .expect("utf8")
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(descriptors, ["()V".to_owned(), "(I)V".to_owned()]);
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Both"), "3\n0\n");
+}
+
+/// A compact constructor **is** the canonical one, and its body sees the parameters.
+///
+/// `P { … }` declares no parameter list and no assignments, and means both: the components are its
+/// parameters, and the field writes follow whatever the body did to them (JLS §8.10.4.2). So each
+/// component's name has to bind to the *parameter* inside the body — binding it to the field would
+/// read zero and then have the trailing write overwrite whatever the body stored.
+///
+/// The descriptor check is the other half: emitting the declaration as written gives `<init>()V`, which
+/// is the wrong descriptor *and* a record whose components are all zero.
+#[test]
+fn a_compact_record_constructor_normalises_its_components() {
+    let source = r#"
+record Range(int lo, int hi) {
+    Range {
+        // Reads and writes of `lo` are the parameter, not the field: the field is still zero here, and
+        // what this stores is what gets written to it.
+        if (lo > hi) {
+            int swap = lo;
+            lo = hi;
+            hi = swap;
+        }
+        if (lo < 0) {
+            lo = 0;
+        }
+    }
+
+    int span() {
+        return hi - lo;
+    }
+}
+
+record Widths(long l, double d, String s) {
+    Widths {
+        // A `long` and a `double` each take two slots, so a component after one of them is read at the
+        // wrong offset if the widths are not accounted for.
+        l = l * 2;
+        d = d + 0.5;
+        s = s + "!";
+    }
+}
+
+public class Compact {
+    public static void main(String[] args) {
+        Range r = new Range(9, 4);
+        System.out.println(r.lo() + " " + r.hi() + " " + r.span());
+        System.out.println(new Range(-3, 5).lo());
+        System.out.println(new Range(2, 7).span());
+        Widths w = new Widths(21L, 3.0, "hi");
+        System.out.println(w.l() + " " + w.d() + " " + w.s());
+    }
+}
+"#;
+    let classes = compile(source).expect("compile");
+    let range = classes
+        .iter()
+        .find(|class| class.internal_name == "Range")
+        .expect("the record");
+    let class = jals_exec::block_on_inline(jals_classfile::ClassFile::read(range.bytes.as_slice()))
+        .expect("reparse");
+    let descriptors: Vec<String> = class
+        .methods
+        .iter()
+        .filter(|method| class.constant_pool.utf8(method.name_index).as_deref() == Some("<init>"))
+        .map(|method| {
+            class
+                .constant_pool
+                .utf8(method.descriptor_index)
+                .expect("utf8")
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(descriptors, ["(II)V".to_owned()]);
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Compact"), "4 9 5\n0\n5\n42 3.5 hi!\n");
+}
+
+/// A `return` in a compact constructor is reported rather than lowered.
+///
+/// It would jump over the implicit field writes, leaving every component at its default — which is why
+/// JLS §8.10.4.2 makes one a compile-time error. There is no correct lowering to pick.
+#[test]
+fn a_return_in_a_compact_record_constructor_is_reported() {
+    let source = "record P(int x) { P { if (x < 0) { return; } } }";
+    let error = compile(source).expect_err("a `return` there has no lowering");
+    assert!(
+        matches!(
+            error,
+            LowerError::Unsupported("a `return` in a compact `record` constructor")
+        ),
+        "got {error}"
+    );
+}
+
+/// An `enum` whose constants carry arguments, through a constructor the source declares.
+///
+/// Every `enum` constructor takes two parameters the source never writes — the constant's name and its
+/// ordinal — because they are what `Enum`'s own constructor needs, and nothing else can set what
+/// `name()`, `ordinal()`, and `compareTo` return. So a declared one is emitted two parameters *wider*
+/// than the index computed from its declaration, the implicit delegation passes those two straight
+/// through, and each constant's written arguments follow them at the call in `<clinit>`.
+#[test]
+fn an_enum_constant_carries_its_arguments_to_a_declared_constructor() {
+    let source = r#"
+enum Planet {
+    MERCURY(3.3e23, 2.44e6),
+    EARTH(5.976e24, 6.378e6);
+
+    private final double mass;
+    private final double radius;
+    // A field initialiser still runs, after the delegation and before the body.
+    private final int tag = 7;
+
+    Planet(double mass, double radius) {
+        this.mass = mass;
+        this.radius = radius;
+    }
+
+    double surfaceGravity() {
+        return 6.67300E-11 * mass / (radius * radius);
+    }
+
+    int tag() { return tag; }
+}
+
+// A second `enum` whose constructor has a different arity, so the two synthetic parameters are not
+// simply "the first two of every constructor".
+enum Size {
+    SMALL(1, "s"), LARGE(9, "l");
+
+    final int weight;
+    final String code;
+
+    Size(int weight, String code) {
+        this.weight = weight;
+        this.code = code;
+    }
+}
+
+public class Enums {
+    public static void main(String[] args) {
+        System.out.println(Planet.EARTH.ordinal());
+        System.out.println(Planet.EARTH.name());
+        System.out.println(Planet.EARTH.tag());
+        System.out.println((long) (Planet.EARTH.surfaceGravity() * 100.0));
+        System.out.println((long) (Planet.MERCURY.surfaceGravity() * 100.0));
+        System.out.println(Planet.values().length);
+        System.out.println(Planet.valueOf("MERCURY").ordinal());
+        System.out.println(Size.LARGE.weight + Size.LARGE.code);
+        System.out.println(Size.SMALL.compareTo(Size.LARGE));
+    }
+}
+"#;
+    let classes = compile(source).expect("compile");
+    let planet = classes
+        .iter()
+        .find(|class| class.internal_name == "Planet")
+        .expect("the enum");
+    let class =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(planet.bytes.as_slice()))
+            .expect("reparse");
+    let descriptors: Vec<String> = class
+        .methods
+        .iter()
+        .filter(|method| class.constant_pool.utf8(method.name_index).as_deref() == Some("<init>"))
+        .map(|method| {
+            class
+                .constant_pool
+                .utf8(method.descriptor_index)
+                .expect("utf8")
+                .into_owned()
+        })
+        .collect();
+    // The declared `(double, double)` one, and no synthesised `(String, int)` beside it.
+    assert_eq!(descriptors, ["(Ljava/lang/String;IDD)V".to_owned()]);
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(
+        run(source, "Enums"),
+        "1\nEARTH\n7\n980\n369\n2\n0\n9l\n-1\n"
+    );
+}
+
+/// The `enum` shapes that are still reported, each because a *descriptor* would come out wrong.
+///
+/// A `this(…)` between two constructors would be lowered from the descriptor the index computed, which
+/// is two parameters short of the one emitted.
+#[test]
+fn the_enum_shapes_that_need_another_class_file_are_reported() {
+    for (source, expected) in [
+        (
+            "enum E { A(1); E(int code) {} E() { this(0); } }",
+            "an explicit constructor invocation in an `enum`",
+        ),
+        (
+            "enum E { A(1, 2); E(int a) {} }",
+            "an `enum` constant with no matching constructor",
+        ),
+    ] {
+        let error = compile(source).expect_err("this enum has no lowering");
+        assert!(
+            matches!(error, LowerError::Unsupported(what) if what == expected),
+            "`{source}` should report {expected:?}, got {error}"
+        );
+    }
+}
+
+/// Variable arity, end to end (JLS §15.12.2.4, §15.12.4.2).
+///
+/// Four separate things have to hold together for this to run: the index has to give `int... values`
+/// the array dimension the `...` implies (or the descriptor is `(I)V`), the body has to see that
+/// parameter as an `int[]` (or `for (int v : values)` does not compile), overload resolution has to
+/// consult variable arity only *after* fixed arity finds nothing (or `pick(9)` calls the wrong one),
+/// and the call site has to pack the trailing arguments into a fresh array — except when a single
+/// array argument is passed straight through.
+#[test]
+fn a_variable_arity_method_packs_its_trailing_arguments() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Sums {
+    static int total(int... values) {
+        int sum = 0;
+        for (int v : values) { sum += v; }
+        return sum;
+    }
+
+    static String join(String separator, String... parts) {
+        String out = "";
+        for (String part : parts) { out = out + separator + part; }
+        return out;
+    }
+
+    // A fixed-arity overload wins over the varargs one for the argument list they both accept.
+    static int pick(int a) { return 1; }
+    static int pick(int... a) { return 2; }
+
+    public static void main(String[] args) {
+        System.out.println(total());
+        System.out.println(total(1));
+        System.out.println(total(1, 2, 3));
+        System.out.println(join("-", "a", "b"));
+        // No trailing arguments at all still builds the empty array.
+        System.out.println(join("-").isEmpty());
+        System.out.println(pick(9));
+        System.out.println(pick(9, 9));
+        // An array argument passes through instead of being wrapped in another array.
+        int[] already = {4, 5};
+        System.out.println(total(already));
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Sums"),
+        "0\n1\n6\n-a-b\ntrue\n1\n2\n9\n",
+        "each varargs call site"
+    );
+}
+
+/// An `@interface` is an interface with one extra flag and one extra supertype.
+///
+/// `ACC_ANNOTATION` is what makes `Class.isAnnotation` true, and `java.lang.annotation.Annotation` is
+/// what every reflective reader dispatches through — neither is written in the source, and a class file
+/// missing either loads perfectly and is then invisible to every annotation processor. Its elements are
+/// interface methods: implicitly `public abstract`, with no body.
+#[test]
+fn an_annotation_type_is_an_interface_with_the_annotation_flag() {
+    let source = r#"
+public @interface Marker {
+    String value();
+    int count() default 3;
+    boolean on() default true;
+    char sign() default 'x';
+    byte small() default 7;
+    long wide() default 9L;
+    double wider() default 1.5;
+    String text() default "hi";
+}
+
+public class Holder {
+    // A nested one, to pin the `InnerClasses` entry as well.
+    @interface Inner {}
+
+    public static void main(String[] args) {
+        System.out.println("ran");
+    }
+}
+"#;
+    let classes = compile(source).expect("compile");
+    let names: Vec<&str> = classes
+        .iter()
+        .map(|class| class.internal_name.as_str())
+        .collect();
+    assert_eq!(names, ["Marker", "Holder", "Holder$Inner"]);
+
+    let marker = classes
+        .iter()
+        .find(|c| c.internal_name == "Marker")
+        .unwrap();
+    let class =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(marker.bytes.as_slice()))
+            .expect("reparse");
+    assert_eq!(
+        class.access_flags.0,
+        // public | interface | abstract | annotation
+        0x0001 | 0x0200 | 0x0400 | 0x2000,
+    );
+    assert_eq!(
+        class
+            .constant_pool
+            .class_name(class.super_class)
+            .expect("a Class entry"),
+        "java/lang/Object"
+    );
+    assert_eq!(
+        class
+            .interfaces
+            .iter()
+            .map(|&index| class
+                .constant_pool
+                .class_name(index)
+                .expect("a Class entry"))
+            .collect::<Vec<_>>(),
+        ["java/lang/annotation/Annotation"]
+    );
+    assert_eq!(
+        class
+            .methods
+            .iter()
+            .map(|method| (
+                class
+                    .constant_pool
+                    .utf8(method.name_index)
+                    .expect("utf8")
+                    .into_owned(),
+                method.access_flags.0
+            ))
+            .collect::<Vec<_>>(),
+        [
+            // public | abstract
+            ("value".to_owned(), 0x0001 | 0x0400),
+            ("count".to_owned(), 0x0001 | 0x0400),
+            ("on".to_owned(), 0x0001 | 0x0400),
+            ("sign".to_owned(), 0x0001 | 0x0400),
+            ("small".to_owned(), 0x0001 | 0x0400),
+            ("wide".to_owned(), 0x0001 | 0x0400),
+            ("wider".to_owned(), 0x0001 | 0x0400),
+            ("text".to_owned(), 0x0001 | 0x0400),
+        ]
+    );
+    // The tag comes from the element's declared type, not from the literal: `byte small() default 7`
+    // is tag `B` over an `Integer` entry, and a reader that trusted the literal would see an `int`.
+    let tags: Vec<Option<u8>> = class
+        .methods
+        .iter()
+        .map(|method| {
+            method
+                .attributes
+                .iter()
+                .find_map(|attribute| match &attribute.body {
+                    jals_classfile::AttributeBody::AnnotationDefault(
+                        jals_classfile::ElementValue::Const { tag, .. },
+                    ) => Some(*tag),
+                    _ => None,
+                })
+        })
+        .collect();
+    assert_eq!(
+        tags,
+        [
+            None,
+            Some(b'I'),
+            Some(b'Z'),
+            Some(b'C'),
+            Some(b'B'),
+            Some(b'J'),
+            Some(b'D'),
+            Some(b's'),
+        ]
+    );
+
+    if !java_available() {
+        return;
+    }
+    // The JVM has to load and verify all three, `Marker` included.
+    assert_eq!(run(source, "Holder"), "ran\n");
+}
+
+/// A method reference to a `static` method.
+///
+/// It needs no synthetic method: the handle points straight at the method the source named, which is the whole
+/// difference from a lambda. The call site is otherwise identical, which is why both go through the same map.
+#[test]
+fn a_method_reference_points_at_the_method_it_names() {
+    let source = r"
+interface Doubler {
+    int apply(int n);
+}
+
+public class Uses {
+    static int twice(int n) { return n * 2; }
+
+    public static void main(String[] args) {
+        Doubler d = Uses::twice;
+        System.out.println(d.apply(21));
+    }
+}
+";
+    let classes = compile(source).expect("compile");
+    let uses = classes
+        .iter()
+        .find(|class| class.internal_name == "Uses")
+        .expect("the class");
+    let class = jals_exec::block_on_inline(jals_classfile::ClassFile::read(uses.bytes.as_slice()))
+        .expect("reparse");
+    let name_of = |index| class.constant_pool.utf8(index).expect("utf8").into_owned();
+    // No `lambda$N`: the handle names `twice` itself.
+    assert!(
+        !class
+            .methods
+            .iter()
+            .any(|method| name_of(method.name_index).starts_with("lambda$")),
+        "a method reference synthesises nothing"
+    );
+    let bootstraps = class
+        .attributes
+        .iter()
+        .find_map(|attribute| match &attribute.body {
+            jals_classfile::AttributeBody::BootstrapMethods(methods) => Some(methods),
+            _ => None,
+        })
+        .expect("the `BootstrapMethods` attribute");
+    assert_eq!(bootstraps.len(), 1);
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Uses"), "42\n");
+}
+
+/// A generic type declaration's `Signature`.
+///
+/// Type parameters survive erasure only in this attribute. Nothing at run time reads it — the JVM links
+/// on descriptors — but every reflective reader does, and a class whose `Signature` is missing reports
+/// `Box` where the source wrote `Box<T>`. A parameter with no `extends` is bounded by `Object`, and the
+/// bound is not optional in the encoding: `<T>` is written `<T:Ljava/lang/Object;>`.
+#[test]
+fn a_generic_declaration_carries_its_signature() {
+    let source = r"
+interface Named {}
+
+class Box<T> {}
+
+class Bounded<T extends Named> {}
+
+class Several<A, B extends Named> implements Named {}
+
+// A generic supertype keeps the arguments the `extends` clause wrote.
+class Derived<T> extends Box<T> {}
+
+class Wrapped<T> extends Box<Named> implements Named {}
+
+class Plain {}
+";
+    let classes = compile(source).expect("compile");
+    let signature = |name: &str| {
+        let compiled = classes
+            .iter()
+            .find(|class| class.internal_name == name)
+            .expect("the class");
+        let class =
+            jals_exec::block_on_inline(jals_classfile::ClassFile::read(compiled.bytes.as_slice()))
+                .expect("reparse");
+        class
+            .attributes
+            .iter()
+            .find_map(|attribute| match &attribute.body {
+                jals_classfile::AttributeBody::Signature { signature_index } => Some(
+                    class
+                        .constant_pool
+                        .utf8(*signature_index)
+                        .expect("utf8")
+                        .into_owned(),
+                ),
+                _ => None,
+            })
+    };
+    assert_eq!(
+        signature("Box").as_deref(),
+        Some("<T:Ljava/lang/Object;>Ljava/lang/Object;")
+    );
+    assert_eq!(
+        signature("Bounded").as_deref(),
+        Some("<T:LNamed;>Ljava/lang/Object;")
+    );
+    assert_eq!(
+        signature("Several").as_deref(),
+        Some("<A:Ljava/lang/Object;B:LNamed;>Ljava/lang/Object;LNamed;")
+    );
+    assert_eq!(
+        signature("Derived").as_deref(),
+        Some("<T:Ljava/lang/Object;>LBox<TT;>;")
+    );
+    assert_eq!(
+        signature("Wrapped").as_deref(),
+        Some("<T:Ljava/lang/Object;>LBox<LNamed;>;LNamed;")
+    );
+    // A declaration with no type parameters carries no attribute at all, rather than an empty one.
+    assert_eq!(signature("Plain"), None);
+
+    if !java_available() {
+        return;
+    }
+    // The JVM has to load and verify every one of them.
+    let program = format!(
+        "{source}\npublic class Uses {{ public static void main(String[] a) {{ System.out.println(\"ok\"); }} }}\n"
+    );
+    assert_eq!(run(&program, "Uses"), "ok\n");
+}
+
+/// A generic method's and a generic field's `Signature`.
+///
+/// Erasure writes a type variable's *bound* into the descriptor, so `T value` and `Object value` are the
+/// same field, and `T first(List<T> xs)` and `Object first(List xs)` the same method, without this. A
+/// member that mentions no variable and declares none carries no attribute at all.
+///
+/// A method declaring type parameters *of its own* is here too: the index resolves its `E` as an external
+/// name it has never heard of, so the descriptor is told which names the declaration bound and erases each
+/// to `Object`.
+#[test]
+fn a_generic_member_carries_its_signature() {
+    let source = r"
+interface Named {}
+
+class Holder<T> {
+    T value;
+    int plain;
+
+    T get() { return value; }
+
+    void put(T next) { value = next; }
+
+    int ungeneric(int n) { return n; }
+
+    T[] many() { return null; }
+
+    // The method's own type parameter, which is not the class's.
+    static <E extends Named> E pick(E first, E second) { return first; }
+
+    static <U> U identity(U value) { return value; }
+
+    // A written type argument survives here too, not just on the declaration.
+    Holder<T> self() { return this; }
+
+    // Wildcards: `*` unbounded, `+X` for `? extends X`, `-X` for `? super X`.
+    Holder<?> any() { return this; }
+
+    Holder<? extends T> covariant() { return this; }
+
+    Holder<? super T> contravariant() { return this; }
+
+    // A thrown *type variable* is the one case the encoding needs a `throws` part for.
+    T risky() throws java.io.IOException { return value; }
+}
+";
+    let classes = compile(source).expect("compile");
+    let holder = classes
+        .iter()
+        .find(|class| class.internal_name == "Holder")
+        .expect("the class");
+    let class =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(holder.bytes.as_slice()))
+            .expect("reparse");
+    let read = |attributes: &[jals_classfile::Attribute]| {
+        attributes
+            .iter()
+            .find_map(|attribute| match &attribute.body {
+                jals_classfile::AttributeBody::Signature { signature_index } => Some(
+                    class
+                        .constant_pool
+                        .utf8(*signature_index)
+                        .expect("utf8")
+                        .into_owned(),
+                ),
+                _ => None,
+            })
+    };
+    let fields: Vec<(String, Option<String>)> = class
+        .fields
+        .iter()
+        .map(|field| {
+            (
+                class
+                    .constant_pool
+                    .utf8(field.name_index)
+                    .expect("utf8")
+                    .into_owned(),
+                read(&field.attributes),
+            )
+        })
+        .collect();
+    assert_eq!(
+        fields,
+        [
+            ("value".to_owned(), Some("TT;".to_owned())),
+            ("plain".to_owned(), None),
+        ]
+    );
+    let methods: Vec<(String, Option<String>)> = class
+        .methods
+        .iter()
+        .map(|method| {
+            (
+                class
+                    .constant_pool
+                    .utf8(method.name_index)
+                    .expect("utf8")
+                    .into_owned(),
+                read(&method.attributes),
+            )
+        })
+        .collect();
+    assert_eq!(
+        methods,
+        [
+            ("get".to_owned(), Some("()TT;".to_owned())),
+            ("put".to_owned(), Some("(TT;)V".to_owned())),
+            ("ungeneric".to_owned(), None),
+            ("many".to_owned(), Some("()[TT;".to_owned())),
+            ("pick".to_owned(), Some("<E:LNamed;>(TE;TE;)TE;".to_owned())),
+            (
+                "identity".to_owned(),
+                Some("<U:Ljava/lang/Object;>(TU;)TU;".to_owned())
+            ),
+            ("self".to_owned(), Some("()LHolder<TT;>;".to_owned())),
+            ("any".to_owned(), Some("()LHolder<*>;".to_owned())),
+            ("covariant".to_owned(), Some("()LHolder<+TT;>;".to_owned())),
+            (
+                "contravariant".to_owned(),
+                Some("()LHolder<-TT;>;".to_owned())
+            ),
+            ("risky".to_owned(), Some("()TT;".to_owned())),
+            ("<init>".to_owned(), None),
+        ]
+    );
+
+    if !java_available() {
+        return;
+    }
+    let program = format!(
+        "{source}\npublic class Uses {{ public static void main(String[] a) \
+         {{ System.out.println(new Holder<String>().get()); }} }}\n"
+    );
+    assert_eq!(run(&program, "Uses"), "null\n");
+}
+
+/// A non-`static` inner class, which holds its enclosing instance in a synthetic field.
+///
+/// `this$0` is `final synthetic` and the source never writes it; every constructor takes the enclosing
+/// instance as an extra *first* parameter, so the descriptor the index computed from the declaration is
+/// one parameter short without this. The store happens after `super()` — before it, `this` is still
+/// `UninitializedThis` and a `putfield` on it is not something the verifier accepts — and before the field
+/// initialisers, so one of them can already read it.
+#[test]
+fn an_inner_class_holds_its_enclosing_instance() {
+    let source = r"
+public class Outer {
+    int base;
+
+    Outer(int base) { this.base = base; }
+
+    class Inner {
+        int extra;
+        Inner(int extra) { this.extra = extra; }
+        int total() { return extra; }
+    }
+
+    class Plain {
+        int flag = 5;
+    }
+
+    int build(int n) {
+        Inner i = new Inner(n);
+        return i.total() + base;
+    }
+
+    int defaulted() { return new Plain().flag; }
+
+    // A *qualified* creation names an enclosing instance that is not `this`.
+    int fromAnother(Outer other, int n) {
+        Inner i = other.new Inner(n);
+        return i.total();
+    }
+}
+
+public class Uses {
+    public static void main(String[] args) {
+        Outer o = new Outer(10);
+        System.out.println(o.build(3));
+        System.out.println(o.defaulted());
+        System.out.println(o.fromAnother(new Outer(70), 2));
+    }
+}
+";
+    let classes = compile(source).expect("compile");
+    let inner = classes
+        .iter()
+        .find(|class| class.internal_name == "Outer$Inner")
+        .expect("the inner class");
+    let class = jals_exec::block_on_inline(jals_classfile::ClassFile::read(inner.bytes.as_slice()))
+        .expect("reparse");
+    let name_of = |index| class.constant_pool.utf8(index).expect("utf8").into_owned();
+    assert_eq!(
+        class
+            .fields
+            .iter()
+            .map(|field| (
+                name_of(field.name_index),
+                name_of(field.descriptor_index),
+                field.access_flags.0
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("extra".to_owned(), "I".to_owned(), 0x0000),
+            // final | synthetic
+            ("this$0".to_owned(), "LOuter;".to_owned(), 0x0010 | 0x1000),
+        ]
+    );
+    // The enclosing instance comes first, before the parameter the source wrote.
+    assert!(
+        class.methods.iter().any(|method| {
+            name_of(method.name_index) == "<init>"
+                && name_of(method.descriptor_index) == "(LOuter;I)V"
+        }),
+        "the constructor takes the enclosing instance first"
+    );
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Uses"), "13\n5\n2\n");
+}
+
+/// A local class — one declared inside a method body — is its own class file.
+///
+/// It was reported where it appeared, because a captured local needs a synthetic constructor parameter the
+/// index knows nothing about. One that captures nothing needs none, and is a class like any other; only the
+/// capture is reported now, and as what it is.
+#[test]
+fn a_local_class_is_its_own_class_file() {
+    let source = r"
+public class Host {
+    public static void main(String[] args) {
+        class Counter {
+            int total;
+            Counter(int start) { total = start; }
+            int bumped(int by) { return total + by; }
+        }
+        Counter c = new Counter(7);
+        System.out.println(c.bumped(5));
+    }
+}
+";
+    let classes = compile(source).expect("compile");
+    assert!(
+        classes
+            .iter()
+            .any(|class| class.internal_name.ends_with("Counter")),
+        "the local class is emitted: {:?}",
+        classes
+            .iter()
+            .map(|class| class.internal_name.as_str())
+            .collect::<Vec<_>>()
+    );
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Host"), "12\n");
+}
+
+/// A bridge method, which is what makes an override of a *generic* supertype's method dispatch.
+///
+/// `Holder<T>.put(T)` erases to `put(Object)` in its own class file, so a class declaring `put(String)`
+/// does not override it as far as the JVM is concerned — the two descriptors differ, the class has no
+/// `put(Object)` at all, and a call through `Holder` finds nothing to dispatch to. That is an
+/// `AbstractMethodError` at run time and the one thing erasure cannot be left to sort out by itself.
+#[test]
+fn a_generic_override_gets_a_bridge() {
+    let source = r#"
+interface Holder<T> {
+    void put(T value);
+    T get();
+}
+
+public class Box implements Holder<String> {
+    String held;
+    public void put(String value) { held = value; }
+    public String get() { return held; }
+}
+
+public class Uses {
+    public static void main(String[] args) {
+        Holder<String> h = new Box();
+        h.put("kept");
+        System.out.println(h.get());
+    }
+}
+"#;
+    let classes = compile(source).expect("compile");
+    let boxed = classes
+        .iter()
+        .find(|class| class.internal_name == "Box")
+        .expect("the class");
+    let class = jals_exec::block_on_inline(jals_classfile::ClassFile::read(boxed.bytes.as_slice()))
+        .expect("reparse");
+    let name_of = |index| class.constant_pool.utf8(index).expect("utf8").into_owned();
+    let signatures: Vec<(String, String, u16)> = class
+        .methods
+        .iter()
+        .map(|method| {
+            (
+                name_of(method.name_index),
+                name_of(method.descriptor_index),
+                method.access_flags.0,
+            )
+        })
+        .collect();
+    // public | bridge | synthetic
+    assert!(
+        signatures.contains(&(
+            "put".to_owned(),
+            "(Ljava/lang/Object;)V".to_owned(),
+            0x0001 | 0x0040 | 0x1000
+        )),
+        "a bridge for the erased `put`: {signatures:?}"
+    );
+    assert!(
+        signatures.contains(&(
+            "get".to_owned(),
+            "()Ljava/lang/Object;".to_owned(),
+            0x0001 | 0x0040 | 0x1000
+        )),
+        "a bridge for the erased `get`: {signatures:?}"
+    );
+
+    if !java_available() {
+        return;
+    }
+    // Dispatching through the *interface* is what the bridge exists for.
+    assert_eq!(run(source, "Uses"), "kept\n");
+}
+
+/// A local class that *captures* a local, which outlives the frame the local lived in.
+///
+/// Each capture becomes a `final synthetic` field and a *trailing* constructor parameter — trailing so a
+/// declared parameter keeps its slot — and every `new` of the class passes the values from wherever they
+/// live at that point. Inside the class the name is not a local at all: it reads the field the constructor
+/// filled.
+#[test]
+fn a_local_class_captures_the_locals_it_reads() {
+    let source = r#"
+public class Host {
+    public static void main(String[] args) {
+        int seen = 7;
+        long wide = 40L;
+        String tag = "kept";
+        class Reader {
+            int extra;
+            Reader(int extra) { this.extra = extra; }
+            int read() { return seen + extra; }
+            long widened() { return wide + seen; }
+            String tagged() { return tag; }
+        }
+        Reader r = new Reader(5);
+        System.out.println(r.read());
+        System.out.println(r.widened());
+        System.out.println(r.tagged());
+    }
+}
+"#;
+    let classes = compile(source).expect("compile");
+    let reader = classes
+        .iter()
+        .find(|class| class.internal_name.ends_with("Reader"))
+        .expect("the local class");
+    let class =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(reader.bytes.as_slice()))
+            .expect("reparse");
+    let name_of = |index| class.constant_pool.utf8(index).expect("utf8").into_owned();
+    let fields: Vec<(String, String, u16)> = class
+        .fields
+        .iter()
+        .map(|field| {
+            (
+                name_of(field.name_index),
+                name_of(field.descriptor_index),
+                field.access_flags.0,
+            )
+        })
+        .collect();
+    // final | synthetic, one per capture, in the order the class reads them.
+    assert_eq!(
+        fields,
+        [
+            ("extra".to_owned(), "I".to_owned(), 0x0000),
+            ("val$seen".to_owned(), "I".to_owned(), 0x0010 | 0x1000),
+            ("val$wide".to_owned(), "J".to_owned(), 0x0010 | 0x1000),
+            (
+                "val$tag".to_owned(),
+                "Ljava/lang/String;".to_owned(),
+                0x0010 | 0x1000
+            ),
+        ]
+    );
+    // The declared parameter comes first, the captures after it.
+    assert!(
+        class.methods.iter().any(|method| {
+            name_of(method.name_index) == "<init>"
+                && name_of(method.descriptor_index) == "(IIJLjava/lang/String;)V"
+        }),
+        "the captures are trailing parameters: {:?}",
+        class
+            .methods
+            .iter()
+            .map(|m| name_of(m.descriptor_index))
+            .collect::<Vec<_>>()
+    );
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Host"), "12\n47\nkept\n");
+}
+
+/// An anonymous class — `new I() { … }` — is its own class file.
+///
+/// It has no name and no declaration keyword, so the index had nothing to make an item from until it was
+/// taught to; without an item there is no member resolution and no descriptor. Now the body is compiled
+/// like any other class and the `new` builds *that* type rather than the one it named — which is what the
+/// expression means, and why the two are the same `new` in the source and two different types underneath.
+#[test]
+fn an_anonymous_class_is_its_own_class_file() {
+    let source = r#"
+interface Greeter {
+    String greet();
+}
+
+public class Outer {
+    static Greeter first() {
+        return new Greeter() {
+            public String greet() { return "one"; }
+        };
+    }
+
+    // A second one in the same class gets its own number, and its own type.
+    static Greeter second() {
+        return new Greeter() {
+            public String greet() { return "two"; }
+        };
+    }
+
+    public static void main(String[] args) {
+        System.out.println(first().greet());
+        System.out.println(second().greet());
+    }
+}
+"#;
+    let classes = compile(source).expect("compile");
+    let names: Vec<&str> = classes
+        .iter()
+        .map(|class| class.internal_name.as_str())
+        .collect();
+    assert_eq!(names, ["Greeter", "Outer", "Outer$1", "Outer$2"]);
+
+    let anonymous = classes
+        .iter()
+        .find(|class| class.internal_name == "Outer$1")
+        .expect("the first anonymous class");
+    let class =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(anonymous.bytes.as_slice()))
+            .expect("reparse");
+    // The type the `new` named becomes an *interface* of the anonymous class, not its superclass.
+    assert_eq!(
+        class
+            .constant_pool
+            .class_name(class.super_class)
+            .expect("a Class entry"),
+        "java/lang/Object"
+    );
+    assert_eq!(
+        class
+            .interfaces
+            .iter()
+            .map(|&index| class
+                .constant_pool
+                .class_name(index)
+                .expect("a Class entry"))
+            .collect::<Vec<_>>(),
+        ["Greeter"]
+    );
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Outer"), "one\ntwo\n");
+}
+
+/// `new Base(1) { … }`: the arguments go to the **superclass** constructor.
+///
+/// The body declares no constructor and has nowhere to write `super(…)`, so the anonymous class's own
+/// synthesised constructor takes that constructor's parameters and forwards them. Both sides read the
+/// selection from the same span — the class file's, and the `new`'s — so neither can pick a different
+/// constructor than the other, which is what would otherwise produce a `NoSuchMethodError` at the `new`.
+#[test]
+fn an_anonymous_class_carries_its_arguments_to_the_superclass() {
+    let source = r"
+class Base {
+    final int seed;
+    final long scale;
+
+    Base(int seed, long scale) {
+        this.seed = seed;
+        this.scale = scale;
+    }
+
+    int value() { return seed; }
+
+    long scaled() { return scale; }
+}
+
+public class Anon {
+    static Base make(int n) {
+        // A capture *and* superclass arguments: the captured local is a trailing parameter, after the
+        // forwarded ones, and a field initialiser runs after both.
+        return new Base(n * 2, 10L) {
+            int extra = 100;
+
+            @Override
+            int value() { return n + extra; }
+        };
+    }
+
+    public static void main(String[] args) {
+        Base b = make(3);
+        System.out.println(b.value());
+        // The `long` argument reached the superclass at the right slot: reading it back through an
+        // inherited method is what says the width of the forwarded parameter was accounted for.
+        System.out.println(b.scaled());
+        System.out.println(new Base(7, 2L) { }.value());
+    }
+}
+";
+    let classes = compile(source).expect("compile");
+    let anonymous = classes
+        .iter()
+        .find(|class| class.internal_name == "Anon$1")
+        .expect("the first anonymous class");
+    let class =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(anonymous.bytes.as_slice()))
+            .expect("reparse");
+    let descriptors: Vec<String> = class
+        .methods
+        .iter()
+        .filter(|method| class.constant_pool.utf8(method.name_index).as_deref() == Some("<init>"))
+        .map(|method| {
+            class
+                .constant_pool
+                .utf8(method.descriptor_index)
+                .expect("utf8")
+                .into_owned()
+        })
+        .collect();
+    // The superclass's two parameters, then the captured `n`.
+    assert_eq!(descriptors, ["(IJI)V".to_owned()]);
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Anon"), "103\n10\n7\n");
+}
+
+/// A lambda, compiled to an `invokedynamic` that `LambdaMetafactory` links.
+///
+/// The body cannot turn itself into a method — expression lowering has no channel for adding one — so every
+/// lambda is found, numbered, and synthesised before any body is lowered, the same way nested classes and
+/// captures already are. What is left at the use site is the call site itself: no arguments, because nothing
+/// is captured, returning the functional interface the context asked for.
+#[test]
+fn a_lambda_becomes_an_invokedynamic() {
+    let source = r"
+interface Doubler {
+    int apply(int n);
+}
+
+public class Uses {
+    // A lambda in a `return`, whose target is the method's own return type.
+    static Doubler made() { return n -> n * 2; }
+
+    public static void main(String[] args) {
+        // And one in a declaration, whose target is the written type.
+        Doubler d = n -> n + 1;
+        System.out.println(d.apply(41));
+        System.out.println(made().apply(21));
+        // A block body, which returns for itself.
+        Doubler blocked = n -> { return n * 3; };
+        System.out.println(blocked.apply(14));
+        // And one that captures a local: the capture leads both the synthetic method's parameters and the
+        // arguments the call site pushes.
+        int bump = 40;
+        Doubler capturing = n -> n + bump;
+        System.out.println(capturing.apply(2));
+    }
+}
+";
+    let classes = compile(source).expect("compile");
+    let uses = classes
+        .iter()
+        .find(|class| class.internal_name == "Uses")
+        .expect("the class");
+    let class = jals_exec::block_on_inline(jals_classfile::ClassFile::read(uses.bytes.as_slice()))
+        .expect("reparse");
+    let name_of = |index| class.constant_pool.utf8(index).expect("utf8").into_owned();
+    // One synthetic method per lambda, `private static synthetic`, taking the interface's own descriptor.
+    let synthetic: Vec<(String, String, u16)> = class
+        .methods
+        .iter()
+        .filter(|method| name_of(method.name_index).starts_with("lambda$"))
+        .map(|method| {
+            (
+                name_of(method.name_index),
+                name_of(method.descriptor_index),
+                method.access_flags.0,
+            )
+        })
+        .collect();
+    assert_eq!(
+        synthetic,
+        [
+            (
+                "lambda$0".to_owned(),
+                "(I)I".to_owned(),
+                0x0002 | 0x0008 | 0x1000
+            ),
+            (
+                "lambda$1".to_owned(),
+                "(I)I".to_owned(),
+                0x0002 | 0x0008 | 0x1000
+            ),
+            (
+                "lambda$2".to_owned(),
+                "(I)I".to_owned(),
+                0x0002 | 0x0008 | 0x1000
+            ),
+            // The capture leads: `(int bump, int n)`.
+            (
+                "lambda$3".to_owned(),
+                "(II)I".to_owned(),
+                0x0002 | 0x0008 | 0x1000
+            ),
+        ]
+    );
+    // Every call site indexes into this attribute; without it the class does not even load.
+    let bootstraps = class
+        .attributes
+        .iter()
+        .find_map(|attribute| match &attribute.body {
+            jals_classfile::AttributeBody::BootstrapMethods(methods) => Some(methods),
+            _ => None,
+        })
+        .expect("the `BootstrapMethods` attribute");
+    assert_eq!(bootstraps.len(), 4, "one entry per lambda");
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Uses"), "42\n42\n42\n42\n");
+}
+
+/// An *unbound* instance method reference: `Type::method`, where the interface supplies the receiver.
+///
+/// The referenced method takes one fewer parameter than the interface declares, because the interface's first
+/// argument *is* the receiver. The handle is `invokeVirtual` for the same reason a bound reference's is — the
+/// method is called on a receiver either way, and the handle cannot tell where that receiver came from.
+#[test]
+fn an_unbound_instance_reference_takes_its_receiver_as_the_first_argument() {
+    let source = r"
+interface Reader {
+    int read(Box b);
+}
+
+class Box {
+    int value = 9;
+    int get() { return value; }
+}
+
+public class Uses {
+    public static void main(String[] args) {
+        Reader r = Box::get;
+        System.out.println(r.read(new Box()));
+    }
+}
+";
+    if !java_available() {
+        compile(source).expect("compile");
+        return;
+    }
+    assert_eq!(run(source, "Uses"), "9\n");
+}
+
+/// A *bound* method reference and a constructor reference.
+///
+/// `u::scaled` captures its receiver, so the call site takes it as an argument and the handle is
+/// `invokeVirtual` — the method is called *on* the captured value. `Holder::new` captures nothing and its
+/// handle is `newInvokeSpecial`, which allocates as well as initialises, and that is what makes it the
+/// factory the interface asks for.
+#[test]
+fn a_bound_and_a_constructor_reference_run() {
+    let source = r"
+interface Doubler {
+    int apply(int n);
+}
+
+interface Maker {
+    Holder make();
+}
+
+class Holder {
+    int tag = 7;
+}
+
+public class Uses {
+    int factor;
+
+    Uses(int factor) { this.factor = factor; }
+
+    int scaled(int n) { return n * factor; }
+
+    public static void main(String[] args) {
+        Uses u = new Uses(3);
+        Doubler bound = u::scaled;
+        System.out.println(bound.apply(14));
+        Maker made = Holder::new;
+        System.out.println(made.make().tag);
+    }
+}
+";
+    let classes = compile(source).expect("compile");
+    let uses = classes
+        .iter()
+        .find(|class| class.internal_name == "Uses")
+        .expect("the class");
+    let class = jals_exec::block_on_inline(jals_classfile::ClassFile::read(uses.bytes.as_slice()))
+        .expect("reparse");
+    let bootstraps = class
+        .attributes
+        .iter()
+        .find_map(|attribute| match &attribute.body {
+            jals_classfile::AttributeBody::BootstrapMethods(methods) => Some(methods),
+            _ => None,
+        })
+        .expect("the `BootstrapMethods` attribute");
+    assert_eq!(bootstraps.len(), 2, "one entry per reference");
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Uses"), "42\n7\n");
+}
+
+/// An unqualified name that reaches an **inherited** field.
+///
+/// File-local resolution binds a name to a declaration it can see, and a superclass's field is not one of
+/// those — it is reached through the index, the same way a call to an inherited method already was. Both
+/// `this.s` and `m()` worked for that reason; the bare `s` reported `Unresolved`, which is the one form
+/// that had no route. It is looked up on the enclosing type and then up the superclass chain, nearest
+/// first, which is the order that makes a shadowing field win.
+#[test]
+fn an_unqualified_name_reaches_an_inherited_field() {
+    let source = r"
+class Base {
+    int seed = 4;
+    static int shared = 9;
+    long wide = 100L;
+}
+
+class Middle extends Base {
+    int own = 1;
+}
+
+class Leaf extends Middle {
+    // A field of the same name shadows the inherited one, and the nearest declaration wins.
+    int seed = 7;
+
+    int shadowed() { return seed; }
+
+    int inherited() { return own; }
+
+    int statics() { return shared; }
+
+    long widened() { return wide; }
+
+    // Assignment, not only reading: `Place` takes the same route.
+    int bumped() {
+        wide += 5L;
+        own++;
+        shared = 20;
+        // An inherited name as an *operand*: inference recorded no type for it, so the promotion had
+        // nothing to promote.
+        own = own + 1;
+        return own + (int) wide + shared;
+    }
+}
+
+public class Inherit {
+    public static void main(String[] args) {
+        Leaf leaf = new Leaf();
+        System.out.println(leaf.shadowed());
+        System.out.println(leaf.inherited());
+        System.out.println(leaf.statics());
+        System.out.println(leaf.widened());
+        System.out.println(leaf.bumped());
+    }
+}
+";
+    assert_eq!(run(source, "Inherit"), "7\n1\n9\n100\n128\n");
+}
+
+/// `x instanceof T t`: a `boolean` that also binds.
+///
+/// The binding is not a flow-sensitive scoping problem for a *compiler* — whether `t` is legal at a
+/// given use is what `jals-lint` decides, and this crate never checks. What it does need is a slot the
+/// verifier calls definitely assigned, and only the matching path writes one. So the binding is set to
+/// `null` first: `null` joins into any reference type, which leaves the slot assigned with the pattern's
+/// own type on both paths and needs no second branch to arrange.
+#[test]
+fn an_instanceof_pattern_binds_the_narrowed_value() {
+    let source = r#"
+public class Patterns {
+    static String describe(Object o) {
+        if (o instanceof String s) {
+            return "string of " + s.length();
+        }
+        if (o instanceof Integer n) {
+            return "int " + n;
+        }
+        return "other";
+    }
+
+    public static void main(String[] args) {
+        System.out.println(describe("hello"));
+        System.out.println(describe(Integer.valueOf(7)));
+        System.out.println(describe(new Object()));
+        // The negated form binds on the branch the test did *not* take, which is the `else`.
+        Object o = "abc";
+        if (!(o instanceof String t)) {
+            System.out.println("no");
+        } else {
+            System.out.println(t.length());
+        }
+        // Two patterns in one condition: the second is evaluated only when the first matched.
+        Object p = "xy";
+        if (p instanceof String u && u.length() == 2) {
+            System.out.println("two");
+        }
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Patterns"),
+        "string of 5\nint 7\nother\n3\ntwo\n"
+    );
+}
+
+/// A pattern `switch`, both syntaxes, with a guard.
+///
+/// A pattern is not a constant, so there is nothing for a jump table to index on: the arms' types are
+/// tested in source order and the first match wins, which is what §14.11.1 says. The guard runs after
+/// its pattern bound, because it is written in terms of the binding.
+///
+/// Every binding is set to `null` before the chain rather than only on its own matching path. Java
+/// scopes a pattern variable to its arm so nothing can read another's, but the verifier merges every
+/// edge into an arm's entry and refuses a slot some edge left unwritten.
+#[test]
+fn a_case_pattern_dispatches_on_the_selector_type() {
+    let source = r#"
+public class Cases {
+    static String describe(Object o) {
+        return switch (o) {
+            case String s when s.length() > 3 -> "long " + s;
+            case String s -> "text " + s.length();
+            case Integer n -> "int " + n;
+            default -> "other";
+        };
+    }
+
+    // The colon form dispatches the same way; only what happens after the arm is entered differs.
+    static int colon(Object o) {
+        switch (o) {
+            case String s:
+                return s.length();
+            case Integer n:
+                return n;
+            default:
+                return -1;
+        }
+    }
+
+    public static void main(String[] args) {
+        System.out.println(describe(Integer.valueOf(42)));
+        System.out.println(describe("abcde"));
+        System.out.println(describe("hey"));
+        System.out.println(describe(new Object()));
+        System.out.println(colon("abcd"));
+        System.out.println(colon(Integer.valueOf(9)));
+        System.out.println(colon(new Object()));
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Cases"),
+        "int 42\nlong abcde\ntext 3\nother\n4\n9\n-1\n"
+    );
+}
+
+/// A comparison unboxes, and knows when not to.
+///
+/// §15.20.1 gives `<` and its relatives binary numeric promotion outright, so both sides unbox. §15.21
+/// gives `==` numeric equality only when at least one side *is* a number: two references compare as
+/// references, which is why `a == b` on two `Integer`s is identity and must not become an `intValue`
+/// pair. The last line is the one that tells the two apart — 200 is outside `Integer`'s cache, so the
+/// two boxes are distinct objects and numeric equality would have said `true`.
+#[test]
+fn a_comparison_unboxes_a_wrapper_but_keeps_reference_equality() {
+    let source = r#"
+public class Boxed {
+    public static void main(String[] args) {
+        Integer n = Integer.valueOf(200);
+        Integer m = Integer.valueOf(200);
+        Long l = Long.valueOf(9L);
+        Double d = Double.valueOf(1.5);
+        System.out.println(n > 3);
+        System.out.println(n == 200);
+        System.out.println(200 == n);
+        System.out.println(n < 3 ? "lt" : "ge");
+        System.out.println(l > 8);
+        System.out.println(d < 2.0);
+        System.out.println(n <= m);
+        System.out.println(n == m);
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Boxed"),
+        "true\ntrue\ntrue\nge\ntrue\ntrue\ntrue\nfalse\n"
+    );
+}
+
+/// The three `AnnotationDefault` forms that are not a constant.
+///
+/// Each has its own encoding, and the tag is what tells a reader which one it is looking at. An enum
+/// constant carries the enum's *descriptor* and the constant's name; a class literal carries the
+/// descriptor rather than the internal name; an array carries one value per element, each at the
+/// *component* type — which is the only thing that says what tag each of them has.
+#[test]
+fn an_annotation_default_encodes_an_enum_a_class_and_an_array() {
+    let source = r"
+enum Colour { RED, GREEN }
+
+public @interface Wide {
+    Colour hue() default Colour.GREEN;
+    Class<?> kind() default String.class;
+    int[] sizes() default {1, 2, 3};
+    String[] names() default {};
+}
+
+public class Uses {
+    public static void main(String[] args) {
+        // Something has to reference it for the JVM to load and verify the annotation class at all.
+        System.out.println(Wide.class.getName());
+    }
+}
+";
+    let classes = compile(source).expect("compile");
+    let wide = classes
+        .iter()
+        .find(|class| class.internal_name == "Wide")
+        .expect("the annotation type");
+    let class = jals_exec::block_on_inline(jals_classfile::ClassFile::read(wide.bytes.as_slice()))
+        .expect("reparse");
+    let utf8 = |index| class.constant_pool.utf8(index).expect("utf8").into_owned();
+    let defaults: Vec<(String, String)> = class
+        .methods
+        .iter()
+        .filter_map(|method| {
+            let name = utf8(method.name_index);
+            let value = method
+                .attributes
+                .iter()
+                .find_map(|attribute| match &attribute.body {
+                    jals_classfile::AttributeBody::AnnotationDefault(value) => Some(value),
+                    _ => None,
+                })?;
+            let rendered = match value {
+                jals_classfile::ElementValue::Enum {
+                    type_name_index,
+                    const_name_index,
+                } => format!(
+                    "enum {} {}",
+                    utf8(*type_name_index),
+                    utf8(*const_name_index)
+                ),
+                jals_classfile::ElementValue::Class { class_info_index } => {
+                    format!("class {}", utf8(*class_info_index))
+                }
+                jals_classfile::ElementValue::Array(items) => format!(
+                    "array {}",
+                    items
+                        .iter()
+                        .map(|item| match item {
+                            jals_classfile::ElementValue::Const { tag, .. } =>
+                                char::from(*tag).to_string(),
+                            _ => "?".to_owned(),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+                jals_classfile::ElementValue::Const { tag, .. } => {
+                    format!("const {}", char::from(*tag))
+                }
+                jals_classfile::ElementValue::Annotation(_) => "annotation".to_owned(),
+            };
+            Some((name, rendered))
+        })
+        .collect();
+    assert_eq!(
+        defaults,
+        [
+            ("hue".to_owned(), "enum LColour; GREEN".to_owned()),
+            ("kind".to_owned(), "class Ljava/lang/String;".to_owned()),
+            ("sizes".to_owned(), "array I,I,I".to_owned()),
+            ("names".to_owned(), "array ".to_owned()),
+        ]
+    );
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Uses"), "Wide\n");
+}
+
+/// An `enum` constant with a body, which is an anonymous subclass of the enum.
+///
+/// Three things follow from that and nothing else says them. The enum is not `final` — a `final` class
+/// with a subclass is a `VerifyError` at load — and is `abstract` when a constant body implements
+/// something the enum declares `abstract`. The constant's `new` builds *its own* class, though its
+/// field still has the enum's type. And the enum's constructors widen to package-private, because a
+/// subclass cannot reach a `private` one without the nestmate attributes this does not emit; `new` on an
+/// enum is not a Java program, so nothing observes the difference.
+///
+/// The wasm test compiles the same enum, so the two backends' answers are compared against each other
+/// and against a real JVM's.
+#[test]
+fn an_enum_constant_with_a_body_is_its_own_subclass() {
+    let source = r#"
+enum Op {
+    ADD { int apply(int a, int b) { return a + b; } },
+    MUL(2) { int extra = 7; int apply(int a, int b) { return a * b * scale + extra; } };
+
+    final int scale;
+
+    Op() { this.scale = 1; }
+
+    Op(int scale) { this.scale = scale; }
+
+    abstract int apply(int a, int b);
+
+    // A concrete member the bodies inherit rather than override.
+    int twice(int n) { return apply(n, n); }
+}
+
+public class Bodies {
+    public static void main(String[] args) {
+        System.out.println(Op.ADD.apply(2, 3));
+        System.out.println(Op.MUL.apply(2, 3));
+        System.out.println(Op.ADD.twice(4));
+        System.out.println(Op.MUL.twice(4));
+        System.out.println(Op.MUL.ordinal() + " " + Op.MUL.name());
+        System.out.println(Op.values().length);
+    }
+}
+"#;
+    let classes = compile(source).expect("compile");
+    let names: Vec<&str> = classes
+        .iter()
+        .map(|class| class.internal_name.as_str())
+        .collect();
+    assert_eq!(names, ["Op", "Op$1", "Op$2", "Bodies"]);
+
+    let op = classes
+        .iter()
+        .find(|class| class.internal_name == "Op")
+        .expect("the enum");
+    let class = jals_exec::block_on_inline(jals_classfile::ClassFile::read(op.bytes.as_slice()))
+        .expect("reparse");
+    // enum | abstract, and *not* final.
+    assert_eq!(class.access_flags.0 & 0x4000, 0x4000, "enum");
+    assert_eq!(class.access_flags.0 & 0x0400, 0x0400, "abstract");
+    assert_eq!(class.access_flags.0 & 0x0010, 0, "not final");
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Bodies"), "5\n19\n8\n39\n1 MUL\n2\n");
+}
+
+/// A `record` pattern, which deconstructs.
+///
+/// The recursive case: test the type, then read each component through its *accessor* — which is what a
+/// deconstruction calls (§14.30.1), a record being free to declare one by hand — and match the component
+/// pattern against that. So a nested pattern is one test and a chain of reads rather than anything the
+/// source has to spell out. `_` matches anything and binds nothing, so it emits nothing at all.
+///
+/// Two component patterns carry no test at all: a primitive one, because there is no narrowing to do,
+/// and one of the component's *own* type, because it matches unconditionally (§14.30.2) — including a
+/// `null` component, which an `instanceof` would reject and so drop a match Java makes. `var` is the same
+/// case spelled without the type, and its binding takes the component's.
+#[test]
+fn a_record_pattern_deconstructs() {
+    let source = r#"
+record Point(int x, int y) {}
+record Line(Point a, Point b) {}
+
+public class Deconstruct {
+    static String describe(Object o) {
+        if (o instanceof Point(int x, int y)) {
+            return "point " + x + "," + y;
+        }
+        return "other";
+    }
+
+    static int total(Object o) {
+        return switch (o) {
+            case Line(Point(int x, int y), Point a) -> x + y + a.x() + a.y();
+            case Point(int x, _) -> x;
+            default -> -1;
+        };
+    }
+
+    // `var` is the ordinary spelling: the component pattern's type *is* the component's.
+    static int summed(Object o) {
+        return switch (o) {
+            case Point(var x, var y) -> x + y;
+            case Line(var a, var b) -> (a == null ? 100 : 0) + (b == null ? 20 : 0);
+            default -> -1;
+        };
+    }
+
+    public static void main(String[] args) {
+        System.out.println(describe(new Point(1, 2)));
+        System.out.println(describe("no"));
+        System.out.println(total(new Line(new Point(1, 2), new Point(3, 4))));
+        System.out.println(total(new Point(9, 8)));
+        System.out.println(total("no"));
+        System.out.println(summed(new Point(3, 4)));
+        // A `null` component still matches a pattern of the component's own type (§14.30.2), which an
+        // `instanceof` would have rejected.
+        System.out.println(summed(new Line(null, new Point(1, 1))));
+        System.out.println(summed(new Line(new Point(1, 1), null)));
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Deconstruct"),
+        "point 1,2\nother\n10\n9\n-1\n7\n100\n20\n"
+    );
+}
+
+#[test]
+fn probe_var_component() {
+    let source = r#"
+record Point(int x, int y) {}
+record Line(Point a, Point b) {}
+public class P {
+    static int f(Object o) {
+        return switch (o) {
+            case Point(var x, var y) -> x + y;
+            case Line(Point a, Point b) -> a == null ? 100 : 200;
+            default -> -1;
+        };
+    }
+    public static void main(String[] a) {
+        System.out.println(f(new Point(3, 4)));
+        System.out.println(f(new Line(null, new Point(1, 1))));
+        System.out.println(f(new Line(new Point(1, 1), null)));
+        System.out.println(f("no"));
+    }
+}
+"#;
+    match compile(source) {
+        Ok(_) => println!("PROBE compiled"),
+        Err(e) => println!("PROBE err {e}"),
+    }
+    if java_available() && compile(source).is_ok() {
+        println!("PROBE run {:?}", run(source, "P"));
+    }
+}
+
+/// A field whose type is a type variable, and a conditional with a `null` arm.
+///
+/// Both were found by sweeping for reports that are *not* `Unsupported` — the first showed up as a
+/// `VerifyError` from a real JVM, the second as `Descriptor(Unknown)`.
+///
+/// A field of a type variable is erased in its descriptor exactly as a return type is, so the read
+/// leaves an `Object` where the analysis has a `String`, and the next use of it is verified against
+/// `Object` and rejected. The `checkcast` a generic *call* already got belongs here for the same reason.
+///
+/// A `null` arm makes a conditional a reference one whatever the other arm is (§15.25): the other arm's
+/// type when that is a reference, and its *boxed* form when it is a primitive — the one case where the
+/// result type is written nowhere in the source. It needs no `checkcast` either way, because the frame
+/// joins `null` into any reference and the merge already says the other arm's type.
+#[test]
+fn erasure_and_a_null_conditional_arm_keep_their_types() {
+    let source = r#"
+class Holder<T> {
+    T value;
+}
+
+public class Erased {
+    public static void main(String[] args) {
+        Holder<String> h = new Holder<>();
+        h.value = "z";
+        System.out.println(h.value.length());
+
+        Integer n = true ? 1 : null;
+        Integer m = false ? 2 : null;
+        Long wide = true ? 5L : null;
+        String s = args.length > 0 ? "x" : null;
+        System.out.println(n + " " + m + " " + wide + " " + s);
+        // Every wrapper, because the boxed form is looked up by name and a missing stub would fall
+        // back to the primitive — which is the shape that stores a `null` into an `int`.
+        Boolean flag = args.length > 0 ? true : null;
+        Character ch = args.length > 0 ? 'x' : null;
+        Byte small = args.length > 0 ? (byte) 1 : null;
+        Short mid = args.length > 0 ? (short) 1 : null;
+        Float thin = args.length > 0 ? 1.5f : null;
+        Double fat = args.length > 0 ? 1.5 : null;
+        System.out.println(
+            (flag == null) + " " + (ch == null) + " " + (small == null) + " "
+                + (mid == null) + " " + (thin == null) + " " + (fat == null));
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Erased"),
+        "1\n1 null 5 null\ntrue true true true true true\n"
+    );
+}
+
+/// A declared local keeps its *declared* type across a reassignment, so every frame that has to
+/// describe the slot agrees about it.
+///
+/// Three shapes, one defect. An exception handler's frame is the locals as they stood where its
+/// protected range began, so a range that reassigns `o` to an unrelated class described the slot as
+/// whatever was written first and the JVM answered `VerifyError: Stack map does not match the one at
+/// exception handler`. A `synchronized` block and a try-with-resources build the same kind of range.
+/// A loop is the same defect one step earlier: the back edge carries the reassigned type into a
+/// header that recorded the first one, which the assembler itself rejects as an incompatible frame.
+#[test]
+fn a_reassigned_local_keeps_its_declared_type() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Retyped {
+    interface Shape { String name(); }
+    static class Square implements Shape { public String name() { return "square"; } }
+    static class Circle implements Shape { public String name() { return "circle"; } }
+    static class Res implements AutoCloseable { public void close() {} }
+
+    public static void main(String[] args) {
+        Object o = "start";
+        try {
+            o = Integer.valueOf(7);
+            throw new RuntimeException("boom");
+        } catch (RuntimeException e) {
+            System.out.println("caught " + o.toString());
+        }
+
+        Shape s = new Square();
+        try {
+            s = new Circle();
+            throw new IllegalStateException("x");
+        } catch (IllegalStateException e) {
+            System.out.println(s.name());
+        }
+
+        Object guarded = "before";
+        Object lock = new Object();
+        synchronized (lock) {
+            guarded = Integer.valueOf(1);
+        }
+        System.out.println(guarded.toString());
+
+        Object held = "before";
+        try (Res r = new Res()) {
+            held = Integer.valueOf(2);
+        }
+        System.out.println(held.toString());
+
+        Object looped = "start";
+        for (int i = 0; i < 2; i++) {
+            System.out.println(looped.toString());
+            looped = Integer.valueOf(i);
+        }
+
+        // A for-each binding declared wider than the array it walks is the same slot question.
+        String[] names = { "a", "b" };
+        for (Object each : names) {
+            System.out.println(each.toString());
+        }
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Retyped"),
+        "caught 7\ncircle\n1\n2\nstart\n0\na\nb\n"
+    );
+}
+
+/// A record's canonical constructor is the one whose parameters are its components — not merely one
+/// with as many of them.
+///
+/// `R(int a, String b)` is a legal second two-component constructor, and matching on arity alone
+/// took it for the canonical one. Nothing then synthesised the real canonical constructor, so both
+/// the `this(…)` delegation and `new R(…)` had nothing to resolve to.
+#[test]
+fn a_records_canonical_constructor_is_matched_by_component_types() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Records2 {
+    record Pair(int x, int y) {
+        // Same arity as the header, different types: a delegating constructor, not the canonical one.
+        Pair(int a, String b) {
+            this(a, b.length());
+        }
+    }
+
+    // An explicitly written canonical constructor must still replace the synthesised one, however
+    // it spells its parameter types — declaring `<init>` twice under one descriptor is not a class
+    // file a JVM loads.
+    record Named(java.lang.String label) {
+        Named(String label) {
+            this.label = label;
+        }
+    }
+
+    public static void main(String[] args) {
+        Pair viaCanonical = new Pair(1, 2);
+        Pair viaDelegate = new Pair(3, "abcd");
+        System.out.println(viaCanonical.x() + "," + viaCanonical.y());
+        System.out.println(viaDelegate.x() + "," + viaDelegate.y());
+        System.out.println(new Named("hi").label() + ".");
+    }
+}
+"#;
+    assert_eq!(run(source, "Records2"), "1,2\n3,4\nhi.\n");
+}
+
+/// A `finally` that completes abruptly replaces the exit it interrupted (JLS §14.20.2).
+///
+/// The cleanups a `return` or a `break` runs are emitted inline, so a jump inside one leaves the
+/// path unreachable — and everything the interrupted exit still had to emit (the outer cleanups, the
+/// held return value, the transfer itself) became code after an unconditional transfer, which the
+/// assembler reported rather than compiled. The answers here are `javac`'s.
+#[test]
+fn a_finally_that_jumps_replaces_the_exit_it_interrupted() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Unwind {
+    static int returnsFromFinally() {
+        try {
+            return 1;
+        } finally {
+            return 2;
+        }
+    }
+
+    static int breakDiscardsAReturn() {
+        for (int i = 0; i < 3; i++) {
+            try {
+                return 1;
+            } finally {
+                break;
+            }
+        }
+        return 0;
+    }
+
+    static int outerCleanupStillRuns() {
+        int n = 0;
+        try {
+            try {
+                n += 1;
+                return n;
+            } finally {
+                n += 10;
+                return n;
+            }
+        } finally {
+            n += 100;
+        }
+    }
+
+    static void voidReturnsFromFinally() {
+        try {
+            return;
+        } finally {
+            System.out.println("cleanup");
+            return;
+        }
+    }
+
+    static int continuesFromFinally() {
+        int n = 0;
+        for (int i = 0; i < 3; i++) {
+            try {
+                n += 1;
+                break;
+            } finally {
+                continue;
+            }
+        }
+        return n;
+    }
+
+    public static void main(String[] args) {
+        System.out.println(returnsFromFinally());
+        System.out.println(breakDiscardsAReturn());
+        System.out.println(outerCleanupStillRuns());
+        voidReturnsFromFinally();
+        System.out.println(continuesFromFinally());
+    }
+}
+"#;
+    assert_eq!(run(source, "Unwind"), "2\n0\n11\ncleanup\n3\n");
 }

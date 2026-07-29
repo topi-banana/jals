@@ -388,24 +388,24 @@ mod tests {
         assert!(artifact.bytes.starts_with(b"\0asm"), "not a wasm module");
     }
 
-    /// The playground's seed project uses `new`, string concatenation and arrays, none of which
-    /// the JVM lowering compiles yet. That it *reports* rather than mis-emits is the behaviour the
-    /// default experience shows off — pinned here so it stays deliberate.
+    /// The playground's seed project — `new`, string concatenation, arrays and all — compiles.
+    ///
+    /// This is the default experience, so it is the one that has to work rather than report. It used
+    /// to be pinned as *not* compiled, back when the lowering had none of those three.
     #[test]
-    fn the_seed_java_is_reported_as_not_compiled_yet() {
-        let manifest = manifest("[build]\nbackend = { type = \"jals\" }\n");
+    fn the_seed_java_compiles_in_process() {
+        let manifest = manifest(
+            "[package]\nname = \"seed\"\n\n\
+             [build]\nbackend = { type = \"jals\" }\n",
+        );
         let files: Vec<(String, String)> = SAMPLE_FILES
             .iter()
             .map(|(path, text)| ((*path).to_owned(), (*text).to_owned()))
             .collect();
-        let error = block_on_inline(Compile::workspace(&manifest, &files))
-            .err()
-            .expect("the seed is outside the compiled subset");
-        assert!(
-            matches!(error, CompileFailure::NotCompiled(_)),
-            "expected a report, got: {error}"
-        );
-        assert!(error.to_string().contains("not compiled yet"), "{error}");
+        let artifact = block_on_inline(Compile::workspace(&manifest, &files))
+            .expect("the seed project compiles");
+        assert_eq!(artifact.name, "seed.jar");
+        assert!(artifact.bytes.starts_with(b"PK\x03\x04"), "not a zip");
     }
 
     /// A path the storage layer would refuse is rejected with the path named, not unwrapped.

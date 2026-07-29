@@ -261,11 +261,15 @@ mod tests {
     }
 
     /// A source the lowering cannot compile is reported, not silently dropped.
+    ///
+    /// The fixture is a lambda: a construct the lowering still reports rather than emits. It used to
+    /// be `new int[1]`, which now compiles — so any replacement has to be something the lowering
+    /// genuinely refuses, or the test would assert nothing.
     #[test]
     fn an_uncompilable_source_is_reported() {
         let tree = [source(
             "Arrays.java",
-            "public class Arrays { public static void main(String[] a) { int[] x = new int[1]; } }",
+            "public class Arrays { public static void main(String[] a) { Runnable r = () -> {}; } }",
         )];
         let options = BackendOptions::default();
         let request = BackendRequest {
