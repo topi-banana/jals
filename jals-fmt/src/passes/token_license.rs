@@ -411,6 +411,39 @@ impl License {
         })
     }
 
+    /// Whether any row names `kind` among the kinds it may change.
+    ///
+    /// The complement is what an independent checker can hold to exact equality without knowing
+    /// anything else about the table: a kind no row claims is one no operation may add, remove, or
+    /// respell. [`invariants`](crate::invariants) uses it to state the token property without
+    /// reimplementing the lanes — the policy is shared, the comparison is not.
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "read by the invariant properties")
+    )]
+    pub(crate) fn claims(self, kind: SyntaxKind) -> bool {
+        self.rows().any(|(_, op)| match op.effect {
+            Effect::Removes { kinds, .. }
+            | Effect::Inserts { kinds }
+            | Effect::Respells { kinds, .. }
+            | Effect::Redistributes { kinds, .. } => kinds.contains(&kind),
+            // Claims every kind inside its scope rather than any kind by name.
+            Effect::RemovesSubtrees { .. } | Effect::Reorders => false,
+        })
+    }
+
+    /// The node kinds inside which a row may remove tokens wholesale.
+    #[cfg_attr(
+        not(test),
+        allow(dead_code, reason = "read by the invariant properties")
+    )]
+    pub(crate) fn removable_scopes(self) -> impl Iterator<Item = SyntaxKind> {
+        self.rows().filter_map(|(_, op)| match op.effect {
+            Effect::RemovesSubtrees { kind } => Some(kind),
+            _ => None,
+        })
+    }
+
     /// Whether `content` is compared, because some row scoped its tokens out of the multiset.
     pub(crate) fn checks(self, content: Content) -> bool {
         self.rows().any(|(_, op)| match op.effect {

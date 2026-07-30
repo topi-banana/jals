@@ -491,9 +491,22 @@ trait Visit { fn visit(&self, node: &SyntaxNode, ops: &mut Ops) -> FormatResult<
    のいずれか。`jals-tests` の host-only harness に閉じ込めるのが妥当。
 
 ### 7.2 不変条件テスト
-冪等（`fmt(fmt(x))==fmt(x)`）と、4 変換 + 2 rule（§9）以外での有意トークン多重集合保存を
-property test に。golden diff と併走させ、**全プロファイルで**走らせる（不変条件はプロファイルに
-依存しない）。
+`jals-fmt/src/invariants.rs`（`#[cfg(test)]`）。golden diff と併走させ、**全プロファイルで**走らせる
+（不変条件はプロファイルに依存しない）。5 つの property:
+
+1. 冪等 `fmt(fmt(x))==fmt(x)`。
+2. **fail-safe が発火しない**。他の 4 つは *preservation* property で、全体 fallback（`出力==入力`）は
+   その全部を同時に満たしてしまう。これが *progress* property で、これが無かったために「ファイルが
+   丸ごと未整形で返る」欠陥がテストの網をすり抜けた。
+3. §20 のどの行も claim していない kind のトークンは個数が完全一致。**許諾は `License` から読む**
+   （config フィールドから再導出すると fail-safe と乖離する — 実際に `force-if` 単独を読んでいた）。
+   比較機構だけは独立実装のまま残し、fail-safe が自分自身に同意するだけの状態を避ける。
+4. コメントは 1 つも落ちない。
+5. never-panic / 空入力と非空入力の対応。
+
+`src` に置くのは `#[cfg(test)]` のエクスポートが integration test から構造上不可視なため
+（`cargo test` は lib を 2 回コンパイルする）。テストのために 5 項目の公開表面を広げるより、
+テストを内側に置く方を採った。
 
 ---
 

@@ -54,6 +54,8 @@ mod comments;
 mod engine;
 pub mod generate;
 pub mod import;
+#[cfg(test)]
+mod invariants;
 mod ir;
 mod javadoc;
 mod ops;
