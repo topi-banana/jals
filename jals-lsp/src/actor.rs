@@ -38,8 +38,8 @@ use jals_editor::{
 };
 use jals_exec::Exec;
 use jals_project::{
-    BuildTaskHost, GraphError, GraphWarning, NativeProjectAssembly, ProjectAssembly, ProjectScript,
-    RootBuildScriptError, RootBuildScriptOptions,
+    BuildTaskHost, GraphError, GraphResolveError, GraphWarning, NativeProjectAssembly,
+    ProjectAssembly, ProjectScript, RootBuildScriptError, RootBuildScriptOptions,
 };
 use jals_storage::{DirKey, FileKey, NativeScope, NativeStorage, RelativePath};
 use tokio::sync::{mpsc, oneshot};
@@ -1933,9 +1933,21 @@ impl AssembledWorkspace {
                 .await
             {
                 Ok(assembly) => assembly,
-                Err(error) => {
-                    let message = error.to_string();
-                    let project_diagnostics = vec![Self::graph_error_diagnostic(&error)];
+                Err(failure) => {
+                    let message = failure.error.to_string();
+                    // The root-only fallback below rediscovers without `[dependencies]`, so every
+                    // warning about a dependency is reported here or nowhere. Shape them exactly as
+                    // `finish_assembly` shapes a successful assembly's, so a reader cannot tell
+                    // whether resolution succeeded from the form of the diagnostic alone.
+                    let mut project_diagnostics =
+                        vec![Self::graph_error_diagnostic(&failure.error)];
+                    project_diagnostics.extend(failure.warnings.iter().map(|warning| {
+                        Self::project_diagnostic(
+                            DiagnosticSeverity::WARNING,
+                            "dependency-resolution",
+                            Self::graph_warning_message(warning),
+                        )
+                    }));
                     let mut root_only = effective_manifest.clone();
                     root_only.dependencies.clear();
                     let fallback_assembly = match Self::assemble_graph(
@@ -2001,7 +2013,7 @@ impl AssembledWorkspace {
         root: &Path,
         storage: &mut NativeStorage,
         scripts: &GraphScriptInputs<'_>,
-    ) -> Result<NativeProjectAssembly, GraphError> {
+    ) -> Result<NativeProjectAssembly, GraphResolveError> {
         let exec = storage.exec().clone();
         script
             .resolve_native(

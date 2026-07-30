@@ -1102,6 +1102,16 @@ impl App {
                 options,
             )
             .await
+            .map_err(|failure| {
+                // Discovery had already found something worth saying about this project before a
+                // later phase failed, and it is usually the half that explains the other: the
+                // dependency preprocessing could not resolve is often the one discovery warned was
+                // unavailable. Print them in the same shape a successful run would, then fail.
+                for warning in &failure.warnings {
+                    Self::print_graph_warning(warning);
+                }
+                failure.error
+            })
             .context("resolving the project dependency graph")?;
 
         for warning in &assembly.warnings {

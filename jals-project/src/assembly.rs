@@ -14,6 +14,7 @@ use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::string::ToString;
 use alloc::vec::Vec;
+use core::fmt;
 
 use jals_build::build_script::{BuildScriptOutput, BuildScriptSession};
 use jals_classpath::{
@@ -119,7 +120,7 @@ impl ProjectScript {
         storage: &mut ProjectStorage<S, C>,
         preprocess: GraphPreprocess<'_, F>,
         options: ProjectInputOptions,
-    ) -> Result<MemoryProjectAssembly, GraphError>
+    ) -> Result<MemoryProjectAssembly, GraphResolveError>
     where
         F: Fetcher,
         S: SourceBackend,
@@ -128,10 +129,14 @@ impl ProjectScript {
         // `preprocess` is consumed by the phase it names, but the graph plan needs the same fetch
         // capability again when it resolves. The field is a shared reference, so copy it out first.
         let fetcher = preprocess.fetcher;
-        let graph = MemoryProjectGraph::discover(manifest, &storage.view()).await?;
+        let graph = MemoryProjectGraph::discover(manifest, &storage.view())
+            .await
+            .map_err(GraphResolveError::unreported)?;
+        let discovered = graph.warnings.clone();
         let graph = graph
             .preprocess(storage.artifacts_mut(), preprocess)
-            .await?;
+            .await
+            .map_err(|error| GraphResolveError::reporting(error, discovered))?;
         let graph_assembly = graph.assemble(storage.artifacts_mut()).await;
         let (inputs, source_roots) =
             MemoryProjectPlan::assemble(&Self::root_only(manifest), storage, fetcher, options)
@@ -270,6 +275,51 @@ pub struct MemoryProjectAssembly {
     pub(crate) compile_classpath: Vec<CompileClasspathEntry>,
     pub warnings: Vec<GraphWarning>,
     pub errors: Vec<ProjectAssemblyError>,
+}
+
+/// A graph phase that failed, carrying the warnings the phases before it had already produced.
+///
+/// A successful phase returns its warnings inside the assembly, so before this type existed a
+/// failure was the one outcome that discarded them — exactly when a host most needs them, because
+/// the warning is often what explains the error. Discovery reporting `classpath entry is
+/// unavailable` for a dependency, and preprocessing then failing on that same dependency, is one
+/// diagnostic split across two values; a host that only prints the error prints half of it.
+///
+/// [`warnings`](Self::warnings) is empty when the failure happened *inside* discovery: the phase
+/// that produces them did not finish, so there is nothing to carry rather than something withheld.
+#[derive(Debug)]
+pub struct GraphResolveError {
+    pub error: GraphError,
+    pub warnings: Vec<GraphWarning>,
+}
+
+impl GraphResolveError {
+    /// A failure with nothing to report alongside it, because discovery itself did not complete.
+    pub(crate) const fn unreported(error: GraphError) -> Self {
+        Self {
+            error,
+            warnings: Vec::new(),
+        }
+    }
+
+    /// A failure after discovery, carrying what discovery had already reported.
+    pub(crate) const fn reporting(error: GraphError, warnings: Vec<GraphWarning>) -> Self {
+        Self { error, warnings }
+    }
+}
+
+impl fmt::Display for GraphResolveError {
+    /// The error alone. Warnings are a separate list because a host shapes them separately — the
+    /// CLI prints one `warning:` line each, the server turns each into its own diagnostic.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl core::error::Error for GraphResolveError {
+    fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
+        Some(&self.error)
+    }
 }
 
 #[cfg(test)]
@@ -419,6 +469,84 @@ mod tests {
                     "{options:?} decides whether a dependency's sources reach the caller"
                 );
             }
+        });
+    }
+
+    /// Discovery and preprocessing report one diagnostic between them: the dependency discovery
+    /// could not read is often the one preprocessing then fails on. A host that receives only the
+    /// error prints half of it, so the failure carries the earlier phase's warnings — and says so
+    /// when it has none, rather than leaving a host unable to tell "nothing to report" from "report
+    /// discarded".
+    #[test]
+    fn a_failed_graph_phase_carries_what_the_earlier_phase_reported() {
+        block_on_inline(async {
+            let manifest: Manifest = "[dependencies]\n\
+                 remote = { git = \"https://example.invalid/repo.git\" }\n\
+                 child = { path = \"deps/child\", features = [\"nope\"] }\n"
+                .parse()
+                .expect("test manifest is valid");
+            let mut storage = MemoryStorage::memory(
+                CodeTree::new([
+                    Entry::File(
+                        FileKey::parse("deps/child/jals.toml").expect("portable key"),
+                        b"[build]\nsource-dirs = [\"src\"]\n".to_vec(),
+                    ),
+                    // Present so the Git entry below is the *only* thing discovery has to warn
+                    // about: an absent source root would warn too, and the count is the assertion.
+                    Entry::File(
+                        FileKey::parse("deps/child/src/Child.java").expect("portable key"),
+                        b"class Child {}".to_vec(),
+                    ),
+                ])
+                .expect("tree is valid"),
+            );
+
+            // Discovery warns about the Git entry a portable graph cannot acquire and carries on;
+            // preprocessing then rejects the feature the child does not declare.
+            let failure = ProjectScript::skipped()
+                .resolve_memory(
+                    &manifest,
+                    &mut storage,
+                    inert!(),
+                    ProjectInputOptions::Editor,
+                )
+                .await
+                .expect_err("`nope` is not a feature the child declares");
+
+            assert!(
+                matches!(failure.error, GraphError::InvalidDependency { .. }),
+                "{:?}",
+                failure.error
+            );
+            let messages: Vec<_> = failure
+                .warnings
+                .iter()
+                .map(|warning| warning.message.clone())
+                .collect();
+            assert_eq!(messages.len(), 1, "{messages:?}");
+            assert!(messages[0].contains("Git dependencies"), "{messages:?}");
+
+            // A failure *inside* discovery is the one case with nothing to carry: the phase that
+            // produces warnings never finished.
+            // Built rather than parsed: parsing validates, and the point here is a manifest that
+            // only `discover` gets to reject.
+            let mut invalid = Manifest::default();
+            invalid.build.classes_dir = String::new();
+            let failure = ProjectScript::skipped()
+                .resolve_memory(
+                    &invalid,
+                    &mut storage,
+                    inert!(),
+                    ProjectInputOptions::Editor,
+                )
+                .await
+                .expect_err("the project root is not a usable `classes-dir`");
+            assert!(
+                matches!(failure.error, GraphError::InvalidRootManifest { .. }),
+                "{:?}",
+                failure.error
+            );
+            assert!(failure.warnings.is_empty(), "{:?}", failure.warnings);
         });
     }
 

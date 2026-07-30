@@ -26,7 +26,7 @@ pub use assemble::{
     CompileClasspathEntry, CompileClasspathFile, CompileClasspathTree, CompileClasspathTreeMember,
     ProjectAssemblyError,
 };
-pub use assembly::{MemoryProjectAssembly, ProjectAssembly, ProjectScript};
+pub use assembly::{GraphResolveError, MemoryProjectAssembly, ProjectAssembly, ProjectScript};
 pub use graph::{
     CycleEdge, GraphEdge, GraphError, GraphMetadata, GraphNodeMetadata, GraphPreprocess,
     GraphWarning, NodeId, NodeKind,

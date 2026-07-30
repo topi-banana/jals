@@ -1010,7 +1010,16 @@ impl App {
                 ProjectInputOptions::Editor,
             )
             .await
-            .map_err(|error| error.to_string())?;
+            // The status line is this host's only channel, so a failed phase's warnings have to
+            // ride along in the message or they are gone — there is no second place to print them.
+            .map_err(|failure| {
+                let mut message = failure.error.to_string();
+                for warning in &failure.warnings {
+                    message.push_str("; ");
+                    message.push_str(&Self::graph_warning_message(warning));
+                }
+                message
+            })?;
         if !assembly.errors.is_empty() {
             return Err(assembly
                 .errors

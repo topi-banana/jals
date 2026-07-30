@@ -20,7 +20,7 @@ use jals_storage::{
 };
 
 use crate::assemble::{CompileClasspathEntry, ProjectAssemblyError};
-use crate::assembly::{ProjectScript, RootProjection};
+use crate::assembly::{GraphResolveError, ProjectScript, RootProjection};
 use crate::graph::{
     BinaryInput, CapturedClasspathEntry, CapturedFile, CycleEdge, DeclaredEdgeFeatures, GraphEdge,
     GraphError, GraphMetadata, GraphPreprocess, GraphWarning, NodeBody, NodeId,
@@ -173,13 +173,16 @@ impl ProjectScript {
         storage: &mut NativeStorage,
         preprocess: GraphPreprocess<'_, F>,
         options: ProjectInputOptions,
-    ) -> Result<NativeProjectAssembly, GraphError> {
+    ) -> Result<NativeProjectAssembly, GraphResolveError> {
         let graph =
             NativeProjectGraph::discover(manifest, root, preprocess.exec, preprocess.network)
-                .await?;
+                .await
+                .map_err(GraphResolveError::unreported)?;
+        let discovered = graph.warnings.clone();
         let graph = graph
             .preprocess(storage.artifacts_mut(), preprocess)
-            .await?;
+            .await
+            .map_err(|error| GraphResolveError::reporting(error, discovered))?;
         Ok(self
             .project_native(&graph, manifest, root, storage, options)
             .await)
