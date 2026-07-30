@@ -550,19 +550,31 @@ mod tests {
         });
     }
 
-    /// The merge concatenates the root's resolved inputs ahead of the graph's, which is what decides
-    /// index precedence when two groups carry the same fully-qualified name. Root output is closer to
-    /// the project than a dependency, so it has to come first.
+    /// The whole classpath in the order a host gets it: the root's authored `[build] classpath`,
+    /// then the root's task artifacts, then the graph's dependencies.
+    ///
+    /// All three groups carry *the same* fully-qualified name, which is what makes this a
+    /// precedence test rather than a list-concatenation test — with distinct names the order proves
+    /// nothing about what a downstream index binds, because nothing collides. `minor_version` tells
+    /// the three copies apart: a lossless parse carries it through verbatim, and it is not part of
+    /// the name that makes them collide.
+    ///
+    /// `Editor` so the entries are actually loaded. `the_root_tasks_classpath_leads_the_graphs_own`
+    /// makes the narrower statement for `Compile`, where the entry is placed but never parsed.
     #[test]
-    fn root_classpath_classes_precede_the_graphs() {
-        const ROOT_CLASS: &[u8] = include_bytes!(concat!(
+    fn the_three_classpath_groups_resolve_in_host_order() {
+        const BOX_CLASS: &[u8] = include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/../jals-classpath/tests/fixtures/Box.class"
         ));
-        const DEPENDENCY_CLASS: &[u8] = include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../jals-classpath/tests/fixtures/Consts.class"
-        ));
+
+        /// `Box.class` with `minor_version` (the `u16` right after the 4-byte magic) set to `group`,
+        /// so a loaded class says which of the three placed it without changing its name.
+        fn stamped(group: u8) -> Vec<u8> {
+            let mut bytes = BOX_CLASS.to_vec();
+            bytes[5] = group;
+            bytes
+        }
 
         block_on_inline(async {
             let manifest: Manifest = "[build]\nclasspath = [\"lib/Box.class\"]\n\
@@ -573,21 +585,45 @@ mod tests {
                 CodeTree::new([
                     Entry::File(
                         FileKey::parse("lib/Box.class").expect("portable key"),
-                        ROOT_CLASS.to_vec(),
+                        stamped(1),
                     ),
                     Entry::File(
                         FileKey::parse("deps/child/jals.toml").expect("portable key"),
-                        b"[build]\nclasspath = [\"lib/Consts.class\"]\n".to_vec(),
+                        b"[build]\nclasspath = [\"lib/Box.class\"]\n".to_vec(),
                     ),
                     Entry::File(
-                        FileKey::parse("deps/child/lib/Consts.class").expect("portable key"),
-                        DEPENDENCY_CLASS.to_vec(),
+                        FileKey::parse("deps/child/lib/Box.class").expect("portable key"),
+                        stamped(3),
                     ),
                 ])
                 .expect("tree is valid"),
             );
+            // A task terminal's verified jar. It has to be a real archive: the fold places task
+            // artifacts as `ClasspathEntry::Artifact`, which a classpath load reads as a jar.
+            let task_jar = jals_classpath::JarPackage::write(
+                &[(
+                    RelativePath::parse("Box.class").expect("portable path"),
+                    stamped(2),
+                )],
+                None,
+            )
+            .expect("packaging one class is infallible");
+            let task_key = jals_storage::CacheKey::new(
+                CacheNamespace::BuildTaskArtifact,
+                ProvenanceFold::new(b"assembly-test\0").finish(),
+                ContentDigest::of(&task_jar),
+            );
+            storage
+                .artifacts_mut()
+                .publish(&task_key, &task_jar)
+                .await
+                .expect("an in-memory publication is infallible");
+            let script = ProjectScript {
+                output: None,
+                task_classpath: vec![task_key],
+            };
 
-            let assembly = ProjectScript::skipped()
+            let assembly = script
                 .resolve_memory(
                     &manifest,
                     &mut storage,
@@ -598,7 +634,7 @@ mod tests {
                 .expect("an in-tree path dependency resolves offline");
 
             assert!(assembly.errors.is_empty(), "{:?}", assembly.errors);
-            let names: Vec<_> = assembly
+            let names: BTreeSet<_> = assembly
                 .inputs
                 .classpath_classes
                 .iter()
@@ -610,7 +646,22 @@ mod tests {
                         .into_owned()
                 })
                 .collect();
-            assert_eq!(names, vec!["Box", "demo/Consts"]);
+            assert_eq!(
+                names.len(),
+                1,
+                "the three groups have to collide for order to mean precedence: {names:?}"
+            );
+            let groups: Vec<_> = assembly
+                .inputs
+                .classpath_classes
+                .iter()
+                .map(|class| class.minor_version)
+                .collect();
+            assert_eq!(
+                groups,
+                vec![1, 2, 3],
+                "the root's authored entry, then the root's task artifact, then the graph's"
+            );
         });
     }
 
