@@ -164,18 +164,18 @@ pub(crate) struct Operation {
     /// Carried so the table stands on its own instead of needing the prose beside it, and read by
     /// the coherence tests below — which is the only reason the compiler sees it used at all.
     #[cfg_attr(not(test), allow(dead_code, reason = "the row's own documentation"))]
-    pub(crate) id: &'static str,
+    id: &'static str,
     /// The config key that turns it on, or `None` when it is unconditional.
     ///
     /// The one row with no key is the whole reason this table exists: an operation the old check had
     /// nothing to read. Stated as an absence rather than as a sentinel string, so a reader learns
     /// what it means from the type instead of from the one place that compares it.
     #[cfg_attr(not(test), allow(dead_code, reason = "the row's own documentation"))]
-    pub(crate) gate: Option<&'static str>,
+    gate: Option<&'static str>,
     /// Whether `cfg` turns it on.
-    pub(crate) enabled: fn(&Config) -> bool,
+    enabled: fn(&Config) -> bool,
     /// What it may change.
-    pub(crate) effect: Effect,
+    effect: Effect,
 }
 
 /// Which comparison rule answers for a token.
