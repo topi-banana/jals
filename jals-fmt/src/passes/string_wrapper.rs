@@ -225,6 +225,11 @@ impl StringWrapper {
                 edits.push((range, text));
             }
         }
+        // `splice` walks the source once and drops any edit that starts behind where it already
+        // is, so the two families have to be merged rather than appended: text-block edits are
+        // collected first, and a concatenation earlier in the file would otherwise be discarded
+        // silently. Sorting is stable, so an edit's family no longer decides whether it survives.
+        edits.sort_by_key(|(range, _)| range.start());
         edits
     }
 
