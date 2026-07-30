@@ -72,11 +72,13 @@ pub struct ProjectAssemblyError {
 /// subsequently executed by `ProjectInputs`.
 #[derive(Debug)]
 pub struct ProjectGraphAssembly {
-    pub graph: GraphMetadata,
-    pub plan: ProjectInputPlan,
-    pub compile_classpath: Vec<CompileClasspathEntry>,
-    pub warnings: Vec<GraphWarning>,
-    pub errors: Vec<ProjectAssemblyError>,
+    pub(crate) graph: GraphMetadata,
+    pub(crate) plan: ProjectInputPlan,
+    pub(crate) compile_classpath: Vec<CompileClasspathEntry>,
+    /// Crate-internal: the projection folds these into the assembly a host receives, so a host that
+    /// read them here would be reporting the graph's warnings without the root's.
+    pub(crate) warnings: Vec<GraphWarning>,
+    pub(crate) errors: Vec<ProjectAssemblyError>,
 }
 
 struct Assembler<'a, C: CacheBackend> {
@@ -96,7 +98,7 @@ struct Assembler<'a, C: CacheBackend> {
 impl PreprocessedProjectGraph {
     /// Publish captured source/classpath bytes and project a complete transitive classpath plan.
     /// This operation is mode-independent and never mutates a dependency source backend.
-    pub async fn assemble<C: CacheBackend>(
+    pub(crate) async fn assemble<C: CacheBackend>(
         &self,
         cache: &mut ArtifactCache<C>,
     ) -> ProjectGraphAssembly {

@@ -10,7 +10,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use jals_classpath::{
-    NativeProjectPlan, NetworkPolicy, ProjectInputOptions, ProjectInputs, ReqwestFetcher,
+    Fetcher, NativeProjectPlan, NetworkPolicy, ProjectInputOptions, ProjectInputs, ReqwestFetcher,
 };
 use jals_config::{Dependency, GitDependency, Manifest, PathDependency};
 use jals_exec::{Exec, LocalBoxFuture};
@@ -19,11 +19,12 @@ use jals_storage::{
     ProjectStorage, ProjectView, RelativePath,
 };
 
-use crate::assemble::{CompileClasspathEntry, CompileClasspathFile, ProjectAssemblyError};
+use crate::assemble::{CompileClasspathEntry, ProjectAssemblyError};
+use crate::assembly::{GraphResolveError, ProjectScript, RootProjection};
 use crate::graph::{
     BinaryInput, CapturedClasspathEntry, CapturedFile, CycleEdge, DeclaredEdgeFeatures, GraphEdge,
-    GraphError, GraphMetadata, GraphWarning, NodeBody, NodeId, PreprocessedProjectGraph,
-    ResolvedNode, ResolvedProjectGraph, SourceNode,
+    GraphError, GraphMetadata, GraphPreprocess, GraphWarning, NodeBody, NodeId,
+    PreprocessedProjectGraph, ResolvedNode, ResolvedProjectGraph, SourceNode,
 };
 
 /// Native entry point for recursive dependency graph discovery.
@@ -53,7 +54,11 @@ impl NativeProjectGraph {
 pub struct NativeProjectAssembly {
     #[allow(dead_code)]
     graph: GraphMetadata,
-    pub plan: jals_classpath::ProjectInputPlan,
+    /// The graph's plan, already executed into [`inputs`](Self::inputs). Nothing downstream
+    /// re-runs it, so only this crate's projection tests read it — they assert that a
+    /// [`ProjectInputOptions`] applies to the plan and not merely to the resolved inputs.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) plan: jals_classpath::ProjectInputPlan,
     pub inputs: ProjectInputs,
     pub source_roots: Vec<DirKey>,
     pub compile_classpath: Vec<CompileClasspathEntry>,
@@ -120,7 +125,7 @@ struct GraphBuilder {
 impl NativeProjectGraph {
     /// Discover all root path/Git dependencies recursively. The root manifest is never searched
     /// upward; every dependency probes exactly its selected root's `jals.toml`.
-    pub async fn discover(
+    pub(crate) async fn discover(
         root_manifest: &Manifest,
         root_directory: &Path,
         exec: &Exec,
@@ -155,67 +160,94 @@ impl NativeProjectGraph {
     }
 }
 
-impl PreprocessedProjectGraph {
-    /// Assemble the mode-independent graph plan, then apply `mode` only while projecting root and
-    /// graph plans through the existing classpath pipeline.
-    pub async fn assemble_native(
+impl ProjectScript {
+    /// The graph phase over a native project root: discover, preprocess, project, and resolve the
+    /// root's and the graph's inputs against `storage`.
+    ///
+    /// `preprocess.network` governs the whole phase, discovery included — a host cannot ask the graph
+    /// to be discovered online and preprocessed offline. `preprocess.exec` likewise drives both.
+    pub async fn resolve_native<F: Fetcher>(
         &self,
+        manifest: &Manifest,
+        root: &Path,
+        storage: &mut NativeStorage,
+        preprocess: GraphPreprocess<'_, F>,
+        options: ProjectInputOptions,
+    ) -> Result<NativeProjectAssembly, GraphResolveError> {
+        let graph =
+            NativeProjectGraph::discover(manifest, root, preprocess.exec, preprocess.network)
+                .await
+                .map_err(GraphResolveError::unreported)?;
+        let discovered = graph.warnings.clone();
+        let graph = graph
+            .preprocess(storage.artifacts_mut(), preprocess)
+            .await
+            .map_err(|error| GraphResolveError::reporting(error, discovered))?;
+        Ok(self
+            .project_native(&graph, manifest, root, storage, options)
+            .await)
+    }
+
+    /// The root manifest with its `[dependencies]` removed.
+    ///
+    /// Unlike the portable sibling, [`NativeProjectPlan::assemble_native`] *does* lower a
+    /// `[dependencies]` jar entry — it has to, because a host path or URL is exactly what it exists
+    /// to classify. Every declared dependency is already a graph node, so leaving the table in place
+    /// would resolve each jar a second time and double-count it on the classpath. That makes this
+    /// stripping the native path's own precondition, not a rule about root plans in general, which
+    /// is why it lives here and `resolve_memory` hands its manifest over whole.
+    fn root_only(manifest: &Manifest) -> Manifest {
+        let mut root_only = manifest.clone();
+        root_only.dependencies.clear();
+        root_only
+    }
+
+    /// The native half of the projection: lower the root plan through the host path pipeline, then
+    /// hand both plans to the shared merge.
+    ///
+    /// The projection step on its own, reachable inside the crate so a test can project one
+    /// preprocessed graph under more than one [`ProjectInputOptions`] without rediscovering it.
+    /// A host has no such need and reaches it through
+    /// [`resolve_native`](Self::resolve_native), which owns the order of the phases before it.
+    pub(crate) async fn project_native(
+        &self,
+        graph: &PreprocessedProjectGraph,
         root_manifest: &Manifest,
         root_directory: &Path,
         storage: &mut NativeStorage,
         mode: ProjectInputOptions,
     ) -> NativeProjectAssembly {
-        let graph_assembly = self.assemble(storage.artifacts_mut()).await;
-        let mut root_only = root_manifest.clone();
-        root_only.dependencies.clear();
-        let (mut inputs, source_roots) =
-            NativeProjectPlan::assemble_native(&root_only, root_directory, storage, mode).await;
+        let graph_assembly = graph.assemble(storage.artifacts_mut()).await;
+        let (inputs, source_roots) = NativeProjectPlan::assemble_native(
+            &Self::root_only(root_manifest),
+            root_directory,
+            storage,
+            mode,
+        )
+        .await;
         let fetcher = ReqwestFetcher::for_project(root_directory.to_path_buf());
-        let graph_inputs =
-            ProjectInputs::assemble(&fetcher, storage, &graph_assembly.plan, mode).await;
-
-        let binary_nodes: BTreeSet<_> = self
-            .nodes
-            .iter()
-            .filter(|node| matches!(node.body, NodeBody::Binary(_)))
-            .map(|node| node.id.clone())
-            .collect();
-        let mut compile_classpath = graph_assembly.compile_classpath;
-        compile_classpath
-            .retain(|entry| entry.node().is_none_or(|node| !binary_nodes.contains(node)));
-        for key in &graph_inputs.dependency_jars {
-            let path = RelativePath::new([
-                Name::new("dependencies").expect("constant is portable"),
-                Name::new("resolved").expect("constant is portable"),
-                Name::new(format!("{}.jar", key.content().to_hex()))
-                    .expect("digest-derived file name is portable"),
-            ]);
-            compile_classpath.push(CompileClasspathEntry::File(CompileClasspathFile {
-                node: None,
-                path,
-                key: key.clone(),
-            }));
-        }
-
-        inputs.dependency_jars.extend(graph_inputs.dependency_jars);
-        inputs
-            .classpath_classes
-            .extend(graph_inputs.classpath_classes);
-        inputs.library_sources.extend(graph_inputs.library_sources);
-        inputs
-            .source_dep_sources
-            .extend(graph_inputs.source_dep_sources);
-        inputs.warnings.extend(graph_inputs.warnings);
-
+        let projected = self
+            .project(
+                graph,
+                graph_assembly,
+                RootProjection {
+                    inputs,
+                    source_roots,
+                },
+                &fetcher,
+                storage,
+                mode,
+            )
+            .await;
         NativeProjectAssembly {
-            graph: graph_assembly.graph,
-            plan: graph_assembly.plan,
-            inputs,
-            source_roots,
-            compile_classpath,
-            warnings: graph_assembly.warnings,
-            errors: graph_assembly.errors,
-            watch_paths: self.native.watch_paths.clone(),
+            graph: projected.graph,
+            plan: projected.plan,
+            inputs: projected.inputs,
+            source_roots: projected.source_roots,
+            compile_classpath: projected.compile_classpath,
+            warnings: projected.warnings,
+            errors: projected.errors,
+            watch_paths: graph.native.watch_paths.clone(),
         }
     }
 }

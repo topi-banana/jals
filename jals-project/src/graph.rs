@@ -38,7 +38,7 @@ impl NodeId {
     }
 
     /// Stable token suitable for collision-free logical artifact paths.
-    pub fn token(&self) -> String {
+    pub(crate) fn token(&self) -> String {
         self.0.to_hex()
     }
 }
@@ -68,7 +68,7 @@ pub enum NodeKind {
 pub struct GraphEdge {
     /// `None` denotes the root project, which is not itself a dependency node.
     pub(crate) from: Option<NodeId>,
-    pub dependency: String,
+    pub(crate) dependency: String,
     pub(crate) to: NodeId,
     /// Whether a binary dependency requests recursive nested-jar extraction.
     pub(crate) recursive: bool,
@@ -122,15 +122,15 @@ impl DeclaredEdgeFeatures {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CycleEdge {
     pub(crate) from: NodeId,
-    pub dependency: String,
+    pub(crate) dependency: String,
     pub(crate) to: NodeId,
 }
 
 /// Stable read-only node metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphNodeMetadata {
-    pub id: NodeId,
-    pub kind: NodeKind,
+    pub(crate) id: NodeId,
+    pub(crate) kind: NodeKind,
 }
 
 /// Read-only graph projection retained by assembly products.
@@ -155,12 +155,14 @@ impl GraphMetadata {
     }
 
     /// Nodes in deterministic parent/discovery order.
-    pub fn nodes(&self) -> &[GraphNodeMetadata] {
+    #[cfg(test)]
+    pub(crate) fn nodes(&self) -> &[GraphNodeMetadata] {
         &self.nodes
     }
 
     /// Edges in deterministic manifest traversal order.
-    pub fn edges(&self) -> &[GraphEdge] {
+    #[cfg(test)]
+    pub(crate) fn edges(&self) -> &[GraphEdge] {
         &self.edges
     }
 }
@@ -545,11 +547,17 @@ struct UndeclaredEdgeFeature {
 }
 
 impl ResolvedProjectGraph {
-    pub fn metadata(&self) -> GraphMetadata {
+    /// The discovered shape, before preprocessing. Production only ever projects the *preprocessed*
+    /// graph ([`PreprocessedProjectGraph::metadata`]), so this exists for the crate's own tests.
+    #[cfg(test)]
+    pub(crate) fn metadata(&self) -> GraphMetadata {
         GraphMetadata::from_graph(&self.nodes, &self.edges)
     }
 
-    pub fn warnings(&self) -> &[GraphWarning] {
+    /// Discovery warnings. The procedure reads the field directly when it has to carry them past
+    /// a failed phase; this borrow is for the crate's own tests.
+    #[cfg(test)]
+    pub(crate) fn warnings(&self) -> &[GraphWarning] {
         &self.warnings
     }
 
@@ -701,7 +709,7 @@ impl ResolvedProjectGraph {
     /// belongs to the root's script (which the host runs, not this graph), and its
     /// [`dependencies`](ResolvedBuildFeatures::dependencies) half is what the root's `[features]`
     /// forwards into this graph.
-    pub async fn preprocess<F: Fetcher, C: CacheBackend>(
+    pub(crate) async fn preprocess<F: Fetcher, C: CacheBackend>(
         self,
         cache: &mut ArtifactCache<C>,
         options: GraphPreprocess<'_, F>,

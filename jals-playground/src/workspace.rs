@@ -11,9 +11,11 @@
 
 use std::collections::BTreeSet;
 
+#[cfg(test)]
+use jals_build::build_script::BuildScriptOutput;
 use jals_build::build_script::{
-    BuildScriptEnvironment, BuildScriptError, BuildScriptLimits, BuildScriptOutput,
-    BuildScriptSession, clear_build_script_outputs,
+    BuildScriptEnvironment, BuildScriptError, BuildScriptLimits, BuildScriptSession,
+    clear_build_script_outputs,
 };
 use jals_config::fmt::Config as FmtConfig;
 use jals_config::lint::Config as LintConfig;
@@ -23,7 +25,7 @@ use jals_exec::Exec;
 use jals_fmt::FormatOutput;
 use jals_hir::LoweredClasspath;
 use jals_project::{
-    BuildTaskExecutor, BuildTaskHost, RootBuildScriptError, RootBuildScriptOptions,
+    BuildTaskHost, ProjectAssembly, ProjectScript, RootBuildScriptError, RootBuildScriptOptions,
 };
 use jals_storage::{
     ArtifactCache, CodeTree, DirKey, Entry, FileKey, MemoryCache, MemorySource, MemoryStorage,
@@ -164,8 +166,11 @@ impl Workspace {
         manifest_text: &str,
         script_text: &str,
     ) -> Result<Option<BuildScriptOutput>, BuildScriptError> {
-        self.run_build_script_with_proxy(manifest, manifest_text, script_text, "")
-            .await
+        Ok(self
+            .run_build_script_with_proxy(manifest, manifest_text, script_text, "")
+            .await?
+            .output()
+            .cloned())
     }
 
     /// [`run_build_script`](Self::run_build_script), routing build-task fetches through `proxy`.
@@ -173,13 +178,16 @@ impl Workspace {
     /// `fetch` is same-origin restricted, so a task fetching from a host without permissive CORS
     /// headers (Maven Central among them) fails outright without the proxy the header already
     /// collects for dependency resolution.
+    ///
+    /// The returned [`ProjectScript`] is what carries this phase into the dependency graph phase,
+    /// which the caller runs off a detached snapshot with the workspace lock released.
     pub async fn run_build_script_with_proxy(
         &mut self,
         manifest: &Manifest,
         manifest_text: &str,
         script_text: &str,
         proxy: &str,
-    ) -> Result<Option<BuildScriptOutput>, BuildScriptError> {
+    ) -> Result<ProjectScript, BuildScriptError> {
         let manifest_key = FileKey::parse(MANIFEST_PATH).expect("manifest pseudo-path is valid");
         let configured_script = match manifest.build.script.as_ref() {
             Some(BuildScript::Rhai { file }) => {
@@ -225,7 +233,7 @@ impl Workspace {
             overlays.push((script.clone(), script_text.as_bytes().to_vec()));
         }
 
-        let output = {
+        let script = {
             let workspace = self.editor.workspace_mut();
             let storage = workspace.storage_mut();
             storage
@@ -245,9 +253,9 @@ impl Workspace {
                 BuildScriptEnvironment::new().for_project(manifest, features.into_features());
             if manifest.build.script.is_none() {
                 clear_build_script_outputs(storage, &mut self.build_script_session).await?;
-                None
+                ProjectScript::skipped()
             } else {
-                let root_output = BuildTaskExecutor::execute_root(
+                let script = ProjectAssembly::script(
                     &Self::exec(),
                     // Build-task fetches go through the same CORS proxy as dependency
                     // resolution; without it every `tasks.fetch_*` to a non-permissive host
@@ -276,18 +284,18 @@ impl Workspace {
                         message: other.to_string(),
                     },
                 })?;
-                debug_assert!(root_output.task_classpath.is_empty());
-                root_output.script
+                debug_assert!(script.task_classpath().is_empty());
+                script
             }
         };
-        let project_sources = output.as_ref().map_or_else(Vec::new, |output| {
+        let project_sources = script.output().map_or_else(Vec::new, |output| {
             output.generated_sources.iter().cloned().collect()
         });
         let workspace = self.editor.workspace_mut();
         workspace.set_project_sources(project_sources);
         workspace.reload_project_files().await;
         self.ensure_active_indexed();
-        Ok(output)
+        Ok(script)
     }
 
     /// Keep the active anchor inside the reloaded Java index. Generated-file cleanup falls back to

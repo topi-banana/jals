@@ -50,4 +50,8 @@ ignores:
   - '**/build.rs'
   - '**/benches/**/*.rs'
   - '**/tests/**/*.rs'
+  # Was `jals-project/tests/project_graph.rs`, which `**/tests/**` covered. It moved into `src` so
+  # that exercising one step of project assembly no longer requires making that step `pub`; it is
+  # still a test adapter that writes real project trees to temporary directories.
+  - 'jals-project/src/graph_tests.rs'
   - '**/examples/**/*.rs'

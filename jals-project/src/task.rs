@@ -92,10 +92,13 @@ impl fmt::Display for BuildTaskRunError {
 impl core::error::Error for BuildTaskRunError {}
 
 /// Root build-script result after task execution and combined project publication.
+///
+/// Crate-internal: a host receives this as [`ProjectScript`](crate::ProjectScript), which is also
+/// what carries it into the graph phase.
 #[derive(Debug)]
-pub struct RootBuildScriptOutput {
-    pub script: Option<BuildScriptOutput>,
-    pub task_classpath: Vec<CacheKey>,
+pub(crate) struct RootBuildScriptOutput {
+    pub(crate) script: Option<BuildScriptOutput>,
+    pub(crate) task_classpath: Vec<CacheKey>,
 }
 
 /// Runtime policy for one task-plan execution.
@@ -302,7 +305,11 @@ impl BuildTaskExecutor {
     }
 
     /// Prepare and execute one root build script, then atomically publish ordinary and task output.
-    pub async fn execute_root<F, S, C>(
+    ///
+    /// Reached from [`ProjectAssembly::script`](crate::ProjectAssembly::script), which is the sole
+    /// public entry: a host that ran the script is holding the token the graph phase requires, so
+    /// the two phases cannot be ordered the wrong way round.
+    pub(crate) async fn execute_root<F, S, C>(
         exec: &Exec,
         fetcher: &F,
         storage: &mut ProjectStorage<S, C>,

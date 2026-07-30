@@ -31,15 +31,12 @@ use jals_build::build_script::{
     BuildScriptDiagnostic, BuildScriptEnvironment, BuildScriptError, BuildScriptLimits,
     BuildScriptOutput,
 };
-use jals_classpath::{ClasspathEntry, LibrarySource, ProjectInputOptions, SourceFile};
+use jals_classpath::{LibrarySource, ProjectInputOptions, SourceFile};
 use jals_config::fmt::Config;
 use jals_config::{FeatureSet, Manifest, ManifestParseError};
 use jals_hir::{LoweredClasspath, ProjectIndex};
-use jals_project::{GraphWarning, MemoryProjectGraph};
-use jals_storage::{
-    ArtifactCache, DirKey, EntryRef, FileKey, MemoryCache, MemoryStorage, Name, ProjectView,
-    RelativePath,
-};
+use jals_project::{GraphWarning, ProjectScript};
+use jals_storage::{ArtifactCache, DirKey, FileKey, MemoryCache, MemoryStorage};
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::spawn_local;
 use yew::prelude::*;
@@ -865,15 +862,11 @@ impl App {
                     .run_build_script_with_proxy(&manifest, &manifest_text, &script_text, &proxy)
                     .await
                 {
-                    Ok(output) => {
-                        let status = Self::build_status(output.as_ref());
-                        let diagnostics = output
-                            .as_ref()
+                    Ok(script) => {
+                        let status = Self::build_status(script.output());
+                        let diagnostics = script
+                            .output()
                             .map_or_else(Vec::new, |output| output.diagnostics.clone());
-                        let additional_classpath =
-                            output.as_ref().map_or_else(Vec::new, |output| {
-                                output.additional_classpath.iter().cloned().collect()
-                            });
                         let entries = Self::tree_entries(&ws);
                         let files = ws.file_texts();
                         let active_path = ws.active().to_string();
@@ -883,7 +876,7 @@ impl App {
                         Ok((
                             status,
                             diagnostics,
-                            additional_classpath,
+                            script,
                             entries,
                             files,
                             active_path,
@@ -902,7 +895,7 @@ impl App {
             let (
                 build_status,
                 diagnostics,
-                additional_classpath,
+                script,
                 entries,
                 files,
                 active_path,
@@ -936,7 +929,7 @@ impl App {
             });
             link.send_message(markers);
 
-            let result = Self::resolve_classpath(manifest, proxy, storage, additional_classpath)
+            let result = Self::resolve_classpath(manifest, proxy, storage, script)
                 .await
                 .map(|mut resolution| {
                     resolution.status = format!("{build_status}; {}", resolution.status);
@@ -984,15 +977,15 @@ impl App {
     /// successful result carries its verified cache and detached dependency source texts back as one
     /// generation-guarded application.
     async fn resolve_classpath(
-        manifest: Manifest,
+        mut manifest: Manifest,
         proxy: String,
         mut storage: MemoryStorage,
-        additional_classpath: Vec<FileKey>,
+        script: ProjectScript,
     ) -> Result<ClasspathResolution, String> {
         let fetcher = BrowserFetcher::new(proxy);
-        let graph = MemoryProjectGraph::discover(&manifest, &storage.view())
-            .await
-            .map_err(|error| error.to_string())?;
+        // The script's `add_classpath` entries are lowered by exactly the rule that lowers the
+        // manifest's own, and land after them — the group order a browser build has always had.
+        script.augment_classpath(&mut manifest);
         // No command line here either, so what the root forwards to its dependencies comes from its
         // own `default` list — the same selection the root script above ran under. With nothing
         // selected, resolution cannot fail.
@@ -1000,23 +993,33 @@ impl App {
             .resolve_build_features(&[], false, false)
             .unwrap_or_default();
         let exec = storage.exec().clone();
-        let graph = graph
-            .preprocess(
-                storage.artifacts_mut(),
+        let assembly = script
+            .resolve_memory(
+                &manifest,
+                &mut storage,
                 jals_project::GraphPreprocess {
                     exec: &exec,
                     // A dependency's build-task fetches go through the same CORS proxy as
-                    // dependency resolution below; nothing else in the browser can reach a host.
+                    // dependency resolution; nothing else in the browser can reach a host.
                     fetcher: &fetcher,
                     environment: &BuildScriptEnvironment::new(),
                     root_features: &features,
                     limits: &BuildScriptLimits::default(),
                     network: jals_classpath::NetworkPolicy::Online,
                 },
+                ProjectInputOptions::Editor,
             )
             .await
-            .map_err(|error| error.to_string())?;
-        let mut assembly = graph.assemble(storage.artifacts_mut()).await;
+            // The status line is this host's only channel, so a failed phase's warnings have to
+            // ride along in the message or they are gone — there is no second place to print them.
+            .map_err(|failure| {
+                let mut message = failure.error.to_string();
+                for warning in &failure.warnings {
+                    message.push_str("; ");
+                    message.push_str(&Self::graph_warning_message(warning));
+                }
+                message
+            })?;
         if !assembly.errors.is_empty() {
             return Err(assembly
                 .errors
@@ -1028,22 +1031,7 @@ impl App {
                 .collect::<Vec<_>>()
                 .join("; "));
         }
-        assembly.plan.feature_set = manifest.feature_set();
-        let graph_classpath = std::mem::take(&mut assembly.plan.classpath);
-        let (classpath_entries, root_classpath_warnings) = Self::ordered_classpath_entries(
-            &manifest,
-            &storage.view(),
-            additional_classpath,
-            graph_classpath,
-        );
-        assembly.plan.classpath = classpath_entries;
-        let inputs = jals_classpath::ProjectInputs::assemble(
-            &fetcher,
-            &mut storage,
-            &assembly.plan,
-            ProjectInputOptions::Editor,
-        )
-        .await;
+        let inputs = assembly.inputs;
         let classpath = ProjectIndex::lower_classpath(&inputs.classpath_classes).await;
         let sources = Self::dependency_source_texts(&storage, &inputs).await?;
         let mut status = format!(
@@ -1051,9 +1039,14 @@ impl App {
             inputs.classpath_classes.len(),
             inputs.dependency_jars.len()
         );
-        let mut warnings = root_classpath_warnings;
-        warnings.extend(assembly.warnings.iter().map(Self::graph_warning_message));
-        warnings.extend(inputs.warnings.into_iter().map(|warning| warning.message));
+        let mut warnings: Vec<_> = assembly
+            .warnings
+            .iter()
+            .map(Self::graph_warning_message)
+            .collect();
+        // Rendered whole: the status line is this host's only channel, and a lowering warning that
+        // does not name the `[build]` entry it came from is not actionable in a browser.
+        warnings.extend(inputs.warnings.iter().map(ToString::to_string));
         if !warnings.is_empty() {
             status.push_str(&format!(
                 " — {} warning(s): {}",
@@ -1069,76 +1062,6 @@ impl App {
             artifacts: storage.into_artifacts(),
             sources,
         })
-    }
-
-    /// Lower root-project classpath strings and place all browser classpath groups in host order.
-    fn ordered_classpath_entries(
-        manifest: &Manifest,
-        view: &ProjectView,
-        additional_classpath: Vec<FileKey>,
-        dependency_classpath: Vec<ClasspathEntry>,
-    ) -> (Vec<ClasspathEntry>, Vec<String>) {
-        let mut entries = Vec::new();
-        let mut warnings = Vec::new();
-        for raw in &manifest.build.classpath {
-            let path = match Self::normalize_root_path(raw) {
-                Ok(path) => path,
-                Err(message) => {
-                    warnings.push(format!("root classpath `{raw}` is invalid: {message}"));
-                    continue;
-                }
-            };
-            let found = FileKey::new(path.clone())
-                .ok()
-                .as_ref()
-                .and_then(|key| view.tree().lookup_file(key))
-                .or_else(|| view.tree().lookup_dir(&DirKey::new(path)));
-            match found {
-                Some(EntryRef::File(file)) => {
-                    entries.push(ClasspathEntry::ProjectFile(file.key().clone()))
-                }
-                Some(EntryRef::Directory(directory)) => {
-                    entries.push(ClasspathEntry::ProjectDirectory(directory.clone()))
-                }
-                None => warnings.push(format!("root classpath `{raw}` is missing or invalid")),
-            }
-        }
-        entries.extend(
-            additional_classpath
-                .into_iter()
-                .map(ClasspathEntry::ProjectFile),
-        );
-        entries.extend(dependency_classpath);
-        (entries, warnings)
-    }
-
-    /// Normalize one root-relative portable path, accepting `.` while rejecting root escape.
-    fn normalize_root_path(raw: &str) -> Result<RelativePath, String> {
-        if raw.starts_with('/')
-            || raw.starts_with('\\')
-            || (raw.as_bytes().get(1) == Some(&b':') && raw.as_bytes()[0].is_ascii_alphabetic())
-        {
-            return Err("path must be relative to the project root".to_string());
-        }
-        if raw.contains('\\') {
-            return Err("path must use portable `/` separators".to_string());
-        }
-        let mut segments = Vec::new();
-        for part in raw.split('/') {
-            match part {
-                "." | "" => {}
-                ".." => {
-                    if segments.pop().is_none() {
-                        return Err("path leaves the project root".to_string());
-                    }
-                }
-                part => segments.push(
-                    Name::new(part)
-                        .map_err(|error| format!("path contains an invalid segment: {error:?}"))?,
-                ),
-            }
-        }
-        Ok(RelativePath::new(segments))
     }
 
     fn graph_warning_message(warning: &GraphWarning) -> String {
@@ -1886,92 +1809,40 @@ mod tests {
         assert!(!token.is_current());
     }
 
+    /// The lowering rules themselves are pinned in `jals-classpath`; what this asserts is the
+    /// playground's own contract — that a root-plan warning reaches the status line the header shows.
     #[test]
-    fn root_classpath_files_directories_and_group_order_are_portable() {
-        block_on_inline(async {
-            let class = include_bytes!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../jals-classpath/tests/fixtures/Box.class"
-            ));
-            let root_file = FileKey::parse("lib/Box.class").unwrap();
-            let directory_file = FileKey::parse("classes/Box.class").unwrap();
-            let script_file = FileKey::parse("generated/Script.class").unwrap();
-            let dependency_file = FileKey::parse("dependency/Graph.class").unwrap();
-            let storage = MemoryStorage::memory(
-                CodeTree::new([
-                    Entry::File(root_file.clone(), class.to_vec()),
-                    Entry::File(directory_file, class.to_vec()),
-                    Entry::File(script_file.clone(), class.to_vec()),
-                    Entry::File(dependency_file.clone(), class.to_vec()),
-                ])
-                .unwrap(),
-            );
-            let mut manifest = Manifest::default();
-            manifest.build.classpath = vec!["lib/./Box.class".to_string(), "classes".to_string()];
-
-            let (entries, warnings) = App::ordered_classpath_entries(
-                &manifest,
-                &storage.view(),
-                vec![script_file.clone()],
-                vec![ClasspathEntry::ProjectFile(dependency_file.clone())],
-            );
-
-            assert!(warnings.is_empty(), "{warnings:?}");
-            assert_eq!(
-                entries,
-                vec![
-                    ClasspathEntry::ProjectFile(root_file),
-                    ClasspathEntry::ProjectDirectory(DirKey::parse("classes").unwrap()),
-                    ClasspathEntry::ProjectFile(script_file),
-                    ClasspathEntry::ProjectFile(dependency_file),
-                ],
-                "root manifest, root script, then graph dependency classpath"
-            );
-            let load = jals_classpath::ClasspathLoad::load(
-                storage.exec(),
-                &storage.view(),
-                storage.artifacts(),
-                &entries,
-            )
-            .await;
-            assert!(load.warnings.is_empty(), "{:?}", load.warnings);
-            assert_eq!(load.classes.len(), 4);
-        });
-    }
-
-    #[test]
-    fn malformed_root_classpath_warnings_are_visible_and_ordered() {
+    fn root_classpath_lowering_warnings_reach_the_status_line() {
         block_on_inline(async {
             let mut manifest = Manifest::default();
-            manifest.build.classpath = vec![
-                "../escape.class".to_string(),
-                "bad:name.class".to_string(),
-                "missing.class".to_string(),
-            ];
+            manifest.build.classpath = vec!["../escape.class".to_string()];
             let resolution = App::resolve_classpath(
                 manifest,
                 String::new(),
                 MemoryStorage::memory(CodeTree::default()),
-                Vec::new(),
+                ProjectScript::skipped(),
             )
             .await
             .unwrap();
 
             assert!(
-                resolution.status.contains("3 warning(s)"),
+                resolution.status.contains("1 warning(s)"),
                 "{}",
                 resolution.status
             );
-            let escape = resolution.status.find("`../escape.class`").unwrap();
-            let invalid = resolution.status.find("`bad:name.class`").unwrap();
-            let missing = resolution.status.find("`missing.class`").unwrap();
             assert!(
-                escape < invalid && invalid < missing,
+                resolution.status.contains("path leaves the project root"),
                 "{}",
                 resolution.status
             );
-            assert!(resolution.status.contains("path leaves the project root"));
-            assert!(resolution.status.contains("is missing or invalid"));
+            // The entry the user wrote, which this host reports only because it renders the whole
+            // warning: the lowering's message names no path, so a status line without the locator
+            // tells a browser user their classpath is broken and nothing about where.
+            assert!(
+                resolution.status.contains("`../escape.class`"),
+                "{}",
+                resolution.status
+            );
         });
     }
 
@@ -1988,7 +1859,7 @@ mod tests {
             storage.artifacts_mut().publish(&key, &bytes).await.unwrap();
             let inputs = jals_classpath::ProjectInputs {
                 library_sources: vec![LibrarySource {
-                    path: RelativePath::parse("Invalid.java").unwrap(),
+                    path: jals_storage::RelativePath::parse("Invalid.java").unwrap(),
                     key,
                 }],
                 ..jals_classpath::ProjectInputs::default()
@@ -2036,9 +1907,10 @@ mod tests {
             );
 
             let expected_features = manifest.feature_set();
-            let resolution = App::resolve_classpath(manifest, String::new(), storage, Vec::new())
-                .await
-                .unwrap();
+            let resolution =
+                App::resolve_classpath(manifest, String::new(), storage, ProjectScript::skipped())
+                    .await
+                    .unwrap();
 
             assert_eq!(resolution.feature_set, expected_features);
             assert!(

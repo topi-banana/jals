@@ -860,7 +860,9 @@ impl ProjectLintContext {
             root,
             jals_classpath::ProjectInputOptions::Analysis,
             exec,
-            HostBuildScript::default(),
+            // Lint analyses what is already on disk; opening a project to report diagnostics must
+            // not execute an unreviewed `build.rhai`.
+            RootScript::skipped(),
             &RootScriptInputs {
                 environment: &environment,
                 features: &features,
@@ -1021,6 +1023,24 @@ struct HostBuildScript {
     run_env: BTreeMap<String, String>,
 }
 
+/// The root script phase's two products: the token that carries it into the graph phase, and the
+/// host-path inputs it contributed. They are meaningless apart — a caller holding one without the
+/// other is either assembling a graph the script did not run for, or dropping the script's flags.
+struct RootScript {
+    assembled: jals_project::ProjectScript,
+    host: HostBuildScript,
+}
+
+impl RootScript {
+    /// A run that deliberately executed no script.
+    fn skipped() -> Self {
+        Self {
+            assembled: jals_project::ProjectScript::skipped(),
+            host: HostBuildScript::default(),
+        }
+    }
+}
+
 impl From<HostBuildScript> for HostProjectInputs {
     fn from(script: HostBuildScript) -> Self {
         Self {
@@ -1054,26 +1074,21 @@ impl App {
         root: &Path,
         options: jals_classpath::ProjectInputOptions,
         exec: &Exec,
-        script: HostBuildScript,
+        script: RootScript,
         scripts: &RootScriptInputs<'_>,
         network: jals_classpath::NetworkPolicy,
     ) -> Result<HostProjectInputs> {
-        let mut result = HostProjectInputs::from(script);
-        let graph = jals_project::NativeProjectGraph::discover(manifest, root, exec, network)
-            .await
-            .context("discovering project dependency graph")?;
-        let discovery_warning_count = graph.warnings().len();
-        for warning in graph.warnings() {
-            Self::print_graph_warning(warning);
-        }
-
+        let mut result = HostProjectInputs::from(script.host);
         let scopes = jals_classpath::NativeProjectPlan::snapshot_scopes(manifest, root);
         let mut storage = NativeStorage::for_project_scoped(root, scopes, exec.clone())
             .await
             .context("opening project storage")?;
-        let graph = graph
-            .preprocess(
-                storage.artifacts_mut(),
+        let assembly = script
+            .assembled
+            .resolve_native(
+                manifest,
+                root,
+                &mut storage,
                 jals_project::GraphPreprocess {
                     exec,
                     // A dependency's build tasks fetch under the same policy as the root's, from
@@ -1084,18 +1099,28 @@ impl App {
                     limits: &BuildScriptLimits::default(),
                     network,
                 },
+                options,
             )
             .await
-            .context("preprocessing project dependency graph")?;
-        let assembly = graph
-            .assemble_native(manifest, root, &mut storage, options)
-            .await;
+            .map_err(|failure| {
+                // Discovery had already found something worth saying about this project before a
+                // later phase failed, and it is usually the half that explains the other: the
+                // dependency preprocessing could not resolve is often the one discovery warned was
+                // unavailable. Print them in the same shape a successful run would, then fail.
+                for warning in &failure.warnings {
+                    Self::print_graph_warning(warning);
+                }
+                failure.error
+            })
+            .context("resolving the project dependency graph")?;
 
-        for warning in assembly.warnings.iter().skip(discovery_warning_count) {
+        for warning in &assembly.warnings {
             Self::print_graph_warning(warning);
         }
         for warning in &assembly.inputs.warnings {
-            eprintln!("warning: {}", warning.message);
+            // The whole warning, not just its message: several of these name their subject only in
+            // the origin, so printing the message alone drops the entry the user has to go and fix.
+            eprintln!("warning: {warning}");
         }
         if !assembly.errors.is_empty() {
             let messages = assembly
@@ -1182,12 +1207,13 @@ impl App {
         let script =
             Self::run_build_script(manifest, root, exec, &environment, offline, publications)
                 .await?;
-        let sources = Self::discover_sources(manifest, root, !script.generated_sources.is_empty())?;
+        let sources =
+            Self::discover_sources(manifest, root, !script.host.generated_sources.is_empty())?;
         // The root build script's output is root project source, so it goes through the root
         // frontend alongside the authored files. Dependency-contributed sources, which land in
         // `extra_sources` further down, deliberately do not: a dependency is lowered under its
         // own manifest's frontend, never re-expanded by whoever consumes it.
-        let generated = script.generated_sources.clone();
+        let generated = script.host.generated_sources.clone();
         let mut inputs = Self::project_inputs(
             manifest,
             root,
@@ -1285,7 +1311,7 @@ impl App {
         environment: &BuildScriptEnvironment,
         offline: bool,
         publications: jals_project::SourcePublication,
-    ) -> Result<HostBuildScript> {
+    ) -> Result<RootScript> {
         let mut storage = NativeStorage::for_project_scoped(
             root,
             [NativeScope::all(RelativePath::ROOT)],
@@ -1300,7 +1326,7 @@ impl App {
         } else {
             jals_classpath::NetworkPolicy::Online
         };
-        let root_output = jals_project::BuildTaskExecutor::execute_root(
+        let assembled = jals_project::ProjectAssembly::script(
             exec,
             &fetcher,
             &mut storage,
@@ -1333,7 +1359,7 @@ impl App {
             other => anyhow!(other),
         })?;
         let mut task_classpath = Vec::new();
-        for (index, key) in root_output.task_classpath.iter().enumerate() {
+        for (index, key) in assembled.task_classpath().iter().enumerate() {
             let logical = RelativePath::parse(&format!("build-task/{index}.jar"))
                 .expect("build-task materialization path is portable");
             task_classpath.push(
@@ -1346,32 +1372,36 @@ impl App {
                     })?,
             );
         }
-        let Some(output) = root_output.script else {
-            return Ok(HostBuildScript::default());
-        };
-        for diagnostic in &output.diagnostics {
-            if let BuildScriptDiagnostic::Warning(message) = diagnostic {
-                eprintln!("warning: build script: {message}");
-            }
-        }
-        let mut additional_classpath: Vec<_> = output
-            .additional_classpath
-            .iter()
-            .map(|key| key.path().to_host_path(root))
-            .collect();
-        additional_classpath.extend(task_classpath);
-        Ok(HostBuildScript {
-            generated_sources: output
-                .generated_sources
-                .iter()
-                .map(|key| key.path().to_host_path(root))
-                .collect(),
-            additional_classpath,
-            javac_args: output.javac_args,
-            jvm_args: output.jvm_args,
-            compile_env: output.compile_env,
-            run_env: output.run_env,
-        })
+        // A project with no script declares no task plan either, so there is nothing materialized
+        // above to carry forward on that path.
+        let host = assembled
+            .output()
+            .map_or_else(HostBuildScript::default, |output| {
+                for diagnostic in &output.diagnostics {
+                    if let BuildScriptDiagnostic::Warning(message) = diagnostic {
+                        eprintln!("warning: build script: {message}");
+                    }
+                }
+                let mut additional_classpath: Vec<_> = output
+                    .additional_classpath
+                    .iter()
+                    .map(|key| key.path().to_host_path(root))
+                    .collect();
+                additional_classpath.extend(task_classpath);
+                HostBuildScript {
+                    generated_sources: output
+                        .generated_sources
+                        .iter()
+                        .map(|key| key.path().to_host_path(root))
+                        .collect(),
+                    additional_classpath,
+                    javac_args: output.javac_args.clone(),
+                    jvm_args: output.jvm_args.clone(),
+                    compile_env: output.compile_env.clone(),
+                    run_env: output.run_env.clone(),
+                }
+            });
+        Ok(RootScript { assembled, host })
     }
 
     /// Resolves the manifest from an explicit path or by discovering `jals.toml` upward from the cwd,

@@ -74,7 +74,13 @@ filesystem reads into portable interfaces.
   keeping `StoredZip`/`WriteMember` sealed.
   Mojang/ProGuard mappings parsing, hierarchy-aware jar remapping, and compile-oriented jar
   decompilation into source trees live under `archive` too. HTTP/local locator lowering is in its
-  native adapter.
+  native adapter. A manifest's `[build]` section is lowered into `ProjectInputPlan` by exactly two
+  siblings — portable `MemoryProjectPlan` and host-path `NativeProjectPlan` — and there must never
+  be a third: a host that lowers `[build] classpath` itself is a second rule that will drift.
+  `MemoryProjectPlan` has no external fallback because an in-memory project has one address space;
+  an entry reaching outside it is a warning, not a host path. A `Warning` carries its subject in
+  `origin`, not in `message` — several messages name no location at all — so a host reports one by
+  rendering the whole `Warning` through its `Display`, never `warning.message` alone.
 - `jals-project`: transitive path/Git/JAR project-graph discovery, stable node identity,
   dependency-first preprocessing, and artifact-only projection into `jals-classpath`. The portable
   memory graph operates on one captured `CodeTree`; only the `native` adapter may acquire host path
@@ -84,6 +90,22 @@ filesystem reads into portable interfaces.
   navigation-only `library_source_artifacts`) instead of being published to the project they were
   declared in. Each such execution is memoized in `CacheNamespace::BuildTaskState` under the node
   identity, plan digest, and resolved features, and re-verified before reuse.
+  `ProjectAssembly` owns the **order and preconditions** of the whole procedure, and a host
+  **cannot sequence the steps itself**: it calls `ProjectAssembly::script` for the root build
+  script and its task plan, then `ProjectScript::resolve_memory` / `resolve_native` for discovery,
+  preprocessing, projection, and input resolution. Those are the crate's *only* public entries into
+  the procedure — `discover`, `preprocess`, `assemble`, `execute_root`, and the two projections are
+  crate-internal, and `ProjectGraphAssembly`/`ResolvedProjectGraph`/`PreprocessedProjectGraph` are
+  not exported at all, so the intermediate states cannot be held outside and re-ordered. Keep it
+  that way: a step that becomes `pub` for one caller is the hand-sequencing this seam removed, and
+  the crate's own tests live in `src` (`graph_tests.rs`) precisely so exercising a single step never
+  requires publishing it. `ProjectScript` is the only way from the first phase into the second
+  (`skipped()` for a host that deliberately runs no script, such as `jals lint`). It is deliberately
+  *two* calls rather than one: the aggregate hand-over point belongs to the host — `jals-cli`
+  reopens storage under narrower scopes for the graph phase, and the playground releases its
+  workspace lock so a jar download never blocks the editor. The policy each phase takes is the whole
+  difference between hosts (`BuildTaskHost`/`SourcePublication`/`blocked_files` on the first,
+  `GraphPreprocess` plus `ProjectInputOptions` on the second); the steps between them exist once.
 - `jals-exec`: the execution context (`Exec`, fan-out, yields, runtime adapters). Only its
   `tokio`-feature module may name tokio; the portable core is `no_std`.
 - `jals-editor`: protocol-neutral workspace and query facade over `ProjectStorage`; file identity is
@@ -104,13 +126,21 @@ filesystem reads into portable interfaces.
   also owns native-formatter-config **detection** (`migrate.rs`): portable crates cannot look at a
   filesystem, so the host decides which config file is there and reads its bytes through a
   `ProjectView`, then hands the text to `jals_fmt::import` and the result to
-  `jals_fmt::generate`.
-- `jals-lsp`: the only URI↔native-root adapter; watched-file notifications call `refresh()`.
+  `jals_fmt::generate`. What it keeps of project assembly is only what a host path forces:
+  `NativeScope` selection, `materialize_file`/`materialize_tree`, `to_host_path`, and promoting a
+  structured failure to `anyhow`.
+- `jals-lsp`: the only URI↔native-root adapter; watched-file notifications call `refresh()`. What it
+  keeps of project assembly is diagnostic shaping, overlay mounting of navigation sources, the watch
+  policy, and its own root-only fallback (a second `resolve_native` call, deliberately not folded in
+  — it has one consumer).
 - `jals-playground`: one `MemoryStorage` aggregate backs sidebar, editor overlays, and dependency
   artifacts. `compile.rs` is the *Build* pipeline — frontend seam, then `JalsBackend`, then
   `JarPackage` — taking sources as `(path, text)` and returning bytes, so it is host-testable and
   cannot reach the DOM; `download.rs` is the browser-only shim that saves those bytes. It honours
-  `[build] backend`, and passes an empty classpath exactly as `jals-cli` does.
+  `[build] backend`, and passes an empty classpath exactly as `jals-cli` does. The script phase runs
+  under the workspace lock in `workspace.rs` and the graph phase off a detached snapshot in
+  `app.rs`; the `ProjectScript` crossing between them is what keeps that split from also splitting
+  the procedure.
 - `jals-javac`: the compiler. Java source to executable code, for two targets off one front end
   (the CST plus `jals-hir`'s resolution, with no compiler IR between): JVM class files per declared
   type, and a single WasmGC module for a whole project. The two lowerings are separate because the
