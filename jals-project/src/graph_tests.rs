@@ -14,7 +14,7 @@ use jals_build::build_script::{BuildScriptEnvironment, BuildScriptLimits};
 use jals_classpath::{DependencyLocation, ProjectInputOptions};
 use jals_config::{Manifest, ResolvedBuildFeatures};
 use jals_exec::Exec;
-use jals_storage::{CodeTree, Entry, FileKey, MemoryStorage, NativeStorage, RelativePath};
+use jals_storage::{CodeTree, DirKey, Entry, FileKey, MemoryStorage, NativeStorage, RelativePath};
 
 use crate::memory::MemoryProjectGraph;
 use crate::native::NativeProjectGraph;
@@ -836,6 +836,83 @@ fn native_projection_returns_watch_paths_and_applies_mode_downstream() {
             )
             .await;
         assert_eq!(editor.inputs.source_dep_sources.len(), 1);
+    })
+    .unwrap();
+}
+
+/// The native graph phase as a host actually calls it: one `resolve_native`, no step named by the
+/// caller.
+///
+/// Every other test here drives the steps individually, because that is how it can pin one of them.
+/// This one exists because `resolve_native` is what `jals-cli` and `jals-lsp` both call, and nothing
+/// in this crate exercised it — its only coverage was through the host crates, which is thin cover
+/// for the composition itself: a step dropped from the sequence, or a task classpath that stopped
+/// reaching the projection, would show up first in someone else's test suite.
+#[test]
+fn resolve_native_runs_the_whole_graph_phase_in_one_call() {
+    const CLASS: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../jals-classpath/tests/fixtures/Box.class"
+    ));
+
+    jals_exec::tokio_rt::run(|exec| async move {
+        let project = tempfile::tempdir().unwrap();
+        write(project.path(), "dep/src/D.java", "class D {}\n");
+        write(project.path(), "src/main/java/Root.java", "class Root {}\n");
+        write(project.path(), "lib/Box.class", CLASS);
+        let root = manifest(
+            "[build]\nsource-dirs = [\"src/main/java\"]\nclasspath = [\"lib/Box.class\"]\n\
+             [dependencies]\ndep = { path = \"dep\" }\n",
+        );
+        let mut root_storage = storage(project.path(), &exec).await;
+
+        // Stand in for a task terminal's output: a verified jar on the root's classpath. Published
+        // directly because what is under test is whether the phase carries it into the projection,
+        // not how a terminal acquired it.
+        let task_jar = jar(&[("Box.class", CLASS)]);
+        let task_key = jals_storage::CacheKey::new(
+            jals_storage::CacheNamespace::BuildTaskArtifact,
+            jals_storage::ProvenanceFold::new(b"resolve-native-test\0").finish(),
+            jals_storage::ContentDigest::of(&task_jar),
+        );
+        root_storage
+            .artifacts_mut()
+            .publish(&task_key, &task_jar)
+            .await
+            .unwrap();
+
+        let assembly = ProjectScript::from_parts(None, vec![task_key.clone()])
+            .resolve_native(
+                &root,
+                project.path(),
+                &mut root_storage,
+                inert!(),
+                ProjectInputOptions::Editor,
+            )
+            .await
+            .unwrap();
+
+        assert!(assembly.errors.is_empty(), "{:?}", assembly.errors);
+        // Discovery ran: the declared path dependency became a watched directory, which only
+        // discovery produces.
+        assert_eq!(
+            assembly.watch_paths,
+            [fs::canonicalize(project.path().join("dep")).unwrap()]
+        );
+        // Preprocessing and projection ran: the dependency's sources are resolved inputs.
+        assert_eq!(assembly.inputs.source_dep_sources.len(), 1);
+        // The root plan was lowered through the host path pipeline, not skipped.
+        assert_eq!(
+            assembly.source_roots,
+            [DirKey::parse("src/main/java").unwrap()]
+        );
+        // The script phase's task classpath reached the projection and leads the graph's own.
+        // Asserted on the key rather than a materialized path: this host canonicalizes `/var` to
+        // `/private/var`, so a path comparison here would be testing the temporary directory.
+        assert_eq!(
+            assembly.plan.classpath.first(),
+            Some(&jals_classpath::ClasspathEntry::Artifact(task_key))
+        );
     })
     .unwrap();
 }

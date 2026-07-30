@@ -84,6 +84,21 @@ impl ProjectScript {
         }
     }
 
+    /// A script phase rebuilt from what it produced.
+    ///
+    /// For a test that needs a task classpath without running a terminal that fetches — the fold in
+    /// [`project`](Self::project) is what is under test, not how the artifacts were acquired.
+    #[cfg(test)]
+    pub(crate) const fn from_parts(
+        output: Option<BuildScriptOutput>,
+        task_classpath: Vec<CacheKey>,
+    ) -> Self {
+        Self {
+            output,
+            task_classpath,
+        }
+    }
+
     /// What the script reported, or `None` when the manifest declares none.
     pub const fn output(&self) -> Option<&BuildScriptOutput> {
         self.output.as_ref()
@@ -618,10 +633,7 @@ mod tests {
                 .publish(&task_key, &task_jar)
                 .await
                 .expect("an in-memory publication is infallible");
-            let script = ProjectScript {
-                output: None,
-                task_classpath: vec![task_key],
-            };
+            let script = ProjectScript::from_parts(None, vec![task_key]);
 
             let assembly = script
                 .resolve_memory(
@@ -682,10 +694,7 @@ mod tests {
                 .expect("an in-memory publication is infallible");
             // What `ProjectAssembly::script` would have produced for a root plan whose terminal
             // added one verified artifact to the classpath.
-            let script = ProjectScript {
-                output: None,
-                task_classpath: vec![key.clone()],
-            };
+            let script = ProjectScript::from_parts(None, vec![key.clone()]);
 
             // `Compile` so the entry is placed but not parsed: what is under test is where the fold
             // puts it, not what a classpath loader makes of these bytes.
