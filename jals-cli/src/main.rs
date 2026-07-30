@@ -1118,7 +1118,9 @@ impl App {
             Self::print_graph_warning(warning);
         }
         for warning in &assembly.inputs.warnings {
-            eprintln!("warning: {}", warning.message);
+            // The whole warning, not just its message: several of these name their subject only in
+            // the origin, so printing the message alone drops the entry the user has to go and fix.
+            eprintln!("warning: {warning}");
         }
         if !assembly.errors.is_empty() {
             let messages = assembly

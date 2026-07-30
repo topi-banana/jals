@@ -459,8 +459,8 @@ mod tests {
         );
         assert!(messages[1].contains("invalid segment"), "{messages:?}");
         assert!(messages[2].contains("missing or invalid"), "{messages:?}");
-        // The locator each warning is attributed to is what a host prints, so it has to name the
-        // entry the user wrote rather than the normalized path.
+        // None of the three messages names the offending entry, so the locator is the only thing
+        // that does: it has to be the entry the user wrote rather than the normalized path.
         let origins: Vec<_> = lowered
             .warnings
             .iter()
@@ -472,6 +472,19 @@ mod tests {
                 WarningOrigin::External(ExternalLocator::new("../escape.class")),
                 WarningOrigin::External(ExternalLocator::new("bad:name.class")),
                 WarningOrigin::External(ExternalLocator::new("missing.class")),
+            ]
+        );
+        // And a host prints that locator, because it renders the whole warning. Asserted here
+        // rather than left to each host: three of them report these, and the reason the message
+        // alone is not enough is a property of the warning, not of any one host.
+        let rendered: Vec<_> = lowered.warnings.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            rendered,
+            vec![
+                "`../escape.class`: path leaves the project root".to_owned(),
+                "`bad:name.class`: path contains an invalid segment: WindowsReservedCharacter"
+                    .to_owned(),
+                "`missing.class`: classpath entry is missing or invalid".to_owned(),
             ]
         );
     }

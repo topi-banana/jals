@@ -1044,7 +1044,9 @@ impl App {
             .iter()
             .map(Self::graph_warning_message)
             .collect();
-        warnings.extend(inputs.warnings.into_iter().map(|warning| warning.message));
+        // Rendered whole: the status line is this host's only channel, and a lowering warning that
+        // does not name the `[build]` entry it came from is not actionable in a browser.
+        warnings.extend(inputs.warnings.iter().map(ToString::to_string));
         if !warnings.is_empty() {
             status.push_str(&format!(
                 " — {} warning(s): {}",
@@ -1830,6 +1832,14 @@ mod tests {
             );
             assert!(
                 resolution.status.contains("path leaves the project root"),
+                "{}",
+                resolution.status
+            );
+            // The entry the user wrote, which this host reports only because it renders the whole
+            // warning: the lowering's message names no path, so a status line without the locator
+            // tells a browser user their classpath is broken and nothing about where.
+            assert!(
+                resolution.status.contains("`../escape.class`"),
                 "{}",
                 resolution.status
             );

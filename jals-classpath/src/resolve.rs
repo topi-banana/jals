@@ -4,6 +4,7 @@ use alloc::borrow::ToOwned;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::fmt;
 
 use jals_storage::{
     ArtifactCache, CacheBackend, CacheKey, CacheNamespace, ContentDigest, FileKey, Name,
@@ -41,6 +42,14 @@ impl ExternalLocator {
         ["http://", "https://"]
             .iter()
             .any(|scheme| value.starts_with(scheme))
+    }
+}
+
+/// The locator verbatim, which is what a warning attributed to it has to name: the user wrote this
+/// string, so it is the one form they can find in their own manifest.
+impl fmt::Display for ExternalLocator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 

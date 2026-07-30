@@ -53,6 +53,8 @@ pub use project::{
 pub use remap::{JarMerge, JarRemap, NestedJar};
 
 use alloc::string::String;
+use core::fmt;
+
 use jals_storage::{CacheKey, DirKey, FileKey, RelativePath};
 
 /// A navigation source stored as a verified cache artifact: an extracted `sources`-jar member, a
@@ -86,5 +88,41 @@ impl Warning {
             origin,
             message: message.into(),
         }
+    }
+}
+
+/// The location a host reports a warning against.
+///
+/// Many messages name no location at all — `classpath artifact is not cached` and `unrecognized
+/// classpath file` carry their subject only in the origin — so a host that renders the message
+/// alone drops the one piece of a warning a user can act on. That is why this rendering lives here
+/// instead of in each host: the alternative is every producer restating its locator inside its own
+/// message, which is the same fact written twice.
+impl fmt::Display for WarningOrigin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ProjectFile(key) => write!(f, "`{key}`"),
+            Self::ProjectDirectory(key) => write!(f, "`{key}`"),
+            // A cached artifact has no name a user wrote, so this names it the way the cache does.
+            // The content digest is truncated because it is here to be recognized, not resolved.
+            Self::Artifact(key) => write!(
+                f,
+                "cached {:?} {:.12}",
+                key.namespace(),
+                key.content().to_hex()
+            ),
+            // Verbatim, and deliberately not as a path: an external locator is whatever the user
+            // wrote — a URL, a host path, or a `[build]` entry that turned out to be neither.
+            Self::External(locator) => write!(f, "`{locator}`"),
+            Self::Skeleton => f.write_str("generated source"),
+        }
+    }
+}
+
+/// `<origin>: <message>` — what a host prints. Every host that reports these renders them through
+/// this, so the attribution a producer chose is the attribution a user sees.
+impl fmt::Display for Warning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.origin, self.message)
     }
 }

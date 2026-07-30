@@ -78,7 +78,9 @@ filesystem reads into portable interfaces.
   siblings — portable `MemoryProjectPlan` and host-path `NativeProjectPlan` — and there must never
   be a third: a host that lowers `[build] classpath` itself is a second rule that will drift.
   `MemoryProjectPlan` has no external fallback because an in-memory project has one address space;
-  an entry reaching outside it is a warning, not a host path.
+  an entry reaching outside it is a warning, not a host path. A `Warning` carries its subject in
+  `origin`, not in `message` — several messages name no location at all — so a host reports one by
+  rendering the whole `Warning` through its `Display`, never `warning.message` alone.
 - `jals-project`: transitive path/Git/JAR project-graph discovery, stable node identity,
   dependency-first preprocessing, and artifact-only projection into `jals-classpath`. The portable
   memory graph operates on one captured `CodeTree`; only the `native` adapter may acquire host path

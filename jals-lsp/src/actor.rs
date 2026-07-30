@@ -2084,7 +2084,10 @@ impl AssembledWorkspace {
             ));
         }
         for warning in &inputs.warnings {
-            eprintln!("jals-lsp: {}", warning.message);
+            // Rendered whole. The graph warnings folded in above are already attributed to
+            // `jals.toml`, and the classpath ones name a `[build]` entry or a cached artifact the
+            // message itself does not repeat.
+            eprintln!("jals-lsp: {warning}");
         }
 
         // Navigation sources are cache artifacts, not host paths. Mount them as overlay files in
