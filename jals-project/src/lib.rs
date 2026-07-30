@@ -27,10 +27,9 @@ pub use assemble::{
     ProjectAssemblyError,
 };
 pub use assembly::{GraphResolveError, MemoryProjectAssembly, ProjectAssembly, ProjectScript};
-pub use graph::{
-    CycleEdge, GraphEdge, GraphError, GraphMetadata, GraphNodeMetadata, GraphPreprocess,
-    GraphWarning, NodeId, NodeKind,
-};
+// `CycleEdge` and `NodeId` are here because a public error names them — `GraphError::Cycle` carries
+// the chain, `GraphWarning` and `ProjectAssemblyError` carry the node.
+pub use graph::{CycleEdge, GraphError, GraphPreprocess, GraphWarning, NodeId};
 #[cfg(feature = "native")]
 pub use native::NativeProjectAssembly;
 // `ProjectGraphAssembly`, `ResolvedProjectGraph`, `PreprocessedProjectGraph`, `MemoryProjectGraph`,
@@ -38,6 +37,11 @@ pub use native::NativeProjectAssembly;
 // sequences and the intermediate values that only exist between them; a host hands over policy and
 // an aggregate and receives an assembly, so naming any of them outside this crate would mean
 // hand-sequencing the phases again.
+//
+// `GraphMetadata`, `GraphNodeMetadata`, `GraphEdge`, and `NodeKind` are not re-exported for the same
+// reason one step further on: the assemblies retain the discovered shape, but every accessor into it
+// is now the crate's own, so exporting the types would publish names with nothing readable behind
+// them. A host that needs to ask about the graph should get an accessor on the assembly, not these.
 pub use task::{
     BuildTaskExecutor, BuildTaskHost, BuildTaskRunError, RootBuildScriptError,
     RootBuildScriptOptions, SourcePublication,

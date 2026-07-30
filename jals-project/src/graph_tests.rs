@@ -16,9 +16,10 @@ use jals_config::{Manifest, ResolvedBuildFeatures};
 use jals_exec::Exec;
 use jals_storage::{CodeTree, DirKey, Entry, FileKey, MemoryStorage, NativeStorage, RelativePath};
 
+use crate::graph::NodeKind;
 use crate::memory::MemoryProjectGraph;
 use crate::native::NativeProjectGraph;
-use crate::{CompileClasspathEntry, GraphError, GraphPreprocess, NodeKind, ProjectScript};
+use crate::{CompileClasspathEntry, GraphError, GraphPreprocess, ProjectScript};
 
 /// A fetch capability for graphs that declare no task plan. Reaching it is the failure.
 struct UnreachableFetcher;

@@ -198,6 +198,14 @@ impl ProjectScript {
         // The root's task terminals produced verified jars, and they sit between the root's authored
         // `[build] classpath` and the graph's dependencies. `root_inputs` carries the first group and
         // is concatenated ahead of the graph's below, so prepending here puts them in that order.
+        //
+        // Putting them *in the plan* rather than loading them afterwards is also what gives them the
+        // rest of the plan's treatment, and under `Editor` that includes skeleton synthesis: a task
+        // jar's classes now get navigation sources like any other classpath entry, so a definition
+        // in a task-provided library is openable instead of being a dead jump. That is the point of
+        // the fold, not a side effect of it — `task_classpath_classes_get_navigation_sources` pins
+        // it — but it does mean a host with a large task jar publishes skeleton artifacts it did not
+        // publish before.
         let mut classpath: Vec<_> = self
             .task_classpath
             .iter()
@@ -273,13 +281,19 @@ pub(crate) struct RootProjection {
 /// why those fields have no reader at all once `native` is compiled out. That is the shape of the
 /// projection, not an oversight, so the portable build allows it rather than widening them back to
 /// `pub` for a consumer that does not exist.
+///
+/// The allowance is per-field rather than on the struct: these four are the ones whose only reader
+/// is behind `native`, and a fifth that went unread would be a mistake worth hearing about.
 #[derive(Debug)]
-#[cfg_attr(not(feature = "native"), allow(dead_code))]
 pub struct MemoryProjectAssembly {
+    #[cfg_attr(not(feature = "native"), allow(dead_code))]
     pub(crate) graph: GraphMetadata,
+    #[cfg_attr(not(feature = "native"), allow(dead_code))]
     pub(crate) plan: ProjectInputPlan,
     pub inputs: ProjectInputs,
+    #[cfg_attr(not(feature = "native"), allow(dead_code))]
     pub(crate) source_roots: Vec<DirKey>,
+    #[cfg_attr(not(feature = "native"), allow(dead_code))]
     pub(crate) compile_classpath: Vec<CompileClasspathEntry>,
     pub warnings: Vec<GraphWarning>,
     pub errors: Vec<ProjectAssemblyError>,
@@ -706,6 +720,85 @@ mod tests {
                 Some(&ClasspathEntry::Artifact(key)),
                 "a task artifact precedes the graph's dependency classpath"
             );
+        });
+    }
+
+    /// Folding the task classpath into the plan rather than loading it afterwards is what earns a
+    /// task jar's classes the rest of the plan's treatment, and under `Editor` that means skeleton
+    /// synthesis: a definition in a task-provided library becomes an openable navigation source
+    /// instead of a dead jump.
+    ///
+    /// Pinned because it is the visible half of the fold that is easiest to lose again — placing
+    /// these entries anywhere downstream of [`ProjectInputs::assemble`] restores the old behavior
+    /// and no ordering assertion notices.
+    #[test]
+    fn task_classpath_classes_get_navigation_sources() {
+        const BOX_CLASS: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../jals-classpath/tests/fixtures/Box.class"
+        ));
+
+        block_on_inline(async {
+            // No `[build] classpath` and a dependency that contributes sources rather than classes,
+            // so the task jar is the only thing on the classpath and the only thing a skeleton can
+            // have come from.
+            let manifest = root_manifest();
+            let task_jar = jals_classpath::JarPackage::write(
+                &[(
+                    RelativePath::parse("Box.class").expect("portable path"),
+                    BOX_CLASS.to_vec(),
+                )],
+                None,
+            )
+            .expect("packaging one class is infallible");
+            let task_key = jals_storage::CacheKey::new(
+                CacheNamespace::BuildTaskArtifact,
+                ProvenanceFold::new(b"assembly-test\0").finish(),
+                ContentDigest::of(&task_jar),
+            );
+
+            let mut skeletons = Vec::new();
+            for options in [ProjectInputOptions::Editor, ProjectInputOptions::Analysis] {
+                let mut storage = project();
+                storage
+                    .artifacts_mut()
+                    .publish(&task_key, &task_jar)
+                    .await
+                    .expect("an in-memory publication is infallible");
+                let assembly = ProjectScript::from_parts(None, vec![task_key.clone()])
+                    .resolve_memory(&manifest, &mut storage, inert!(), options)
+                    .await
+                    .expect("an in-tree path dependency resolves offline");
+
+                assert_eq!(
+                    assembly.inputs.classpath_classes.len(),
+                    1,
+                    "{options:?}: the task jar's one class is the whole classpath"
+                );
+                skeletons.push(
+                    assembly
+                        .inputs
+                        .library_sources
+                        .iter()
+                        .filter(|source| source.key.namespace() == CacheNamespace::Skeleton)
+                        .map(|source| source.path.to_string())
+                        .collect::<Vec<_>>(),
+                );
+            }
+
+            let [editor, analysis] = <[Vec<String>; 2]>::try_from(skeletons).expect("two modes");
+            assert_eq!(
+                editor.len(),
+                1,
+                "the task jar's class is navigable under `Editor`: {editor:?}"
+            );
+            assert!(
+                editor[0].ends_with("Box.java"),
+                "the skeleton is the task jar's own type: {editor:?}"
+            );
+            // The mode still decides. `Analysis` loads the same class for the index and synthesizes
+            // nothing, so the fold widened what navigation covers, not what every host pays for.
+            assert!(analysis.is_empty(), "{analysis:?}");
         });
     }
 

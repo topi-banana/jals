@@ -599,8 +599,7 @@ mod tests {
     use jals_storage::{CodeTree, Entry, FileKey, MemoryStorage};
 
     use super::*;
-    use crate::NodeKind;
-    use crate::graph::{GraphPreprocess, PreprocessedProjectGraph};
+    use crate::graph::{GraphPreprocess, NodeKind, PreprocessedProjectGraph};
 
     /// A fetch capability for graphs that declare no task plan. Reaching it is the failure.
     struct UnreachableFetcher;
