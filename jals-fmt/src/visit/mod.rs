@@ -17,11 +17,12 @@
 //! token pair and their parents, so a `[spacing]` rule cannot be honored in one construct and
 //! forgotten in another.
 //!
-//! # The pipeline driver
+//! # What this module does *not* do
 //!
-//! [`Formatter::run`] is also where the whole crate's pipeline is wired: L0 plans, this lowering,
-//! the engine, then L4. It ends with [`TokenBudget`], the fail-safe that returns the input
-//! untouched rather than hand back an output it cannot vouch for.
+//! It does not decide what runs. [`Ctx::new`] → [`Ctx::visit`] → [`Ctx::finish`] is one stage of a
+//! pipeline that [`Formatter`](crate::passes::Formatter) drives; the L0 plans this lowering reads
+//! and the L4 passes that follow it are sequenced there, so a rule here never has to know the
+//! order.
 
 mod chain;
 mod decl;
@@ -45,79 +46,13 @@ use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 use text_size::TextRange;
 
 use crate::comments::{Comment, CommentMap};
-use crate::engine::Engine;
 use crate::ir::Indent;
 use crate::javadoc::CommentFormatter;
 use crate::ops::Ops;
-use crate::passes::{Finalize, LiteralRewrite, OffOn, StringWrapper, TokenBudget, UnusedImports};
+use crate::passes::{LiteralRewrite, OffOn};
 use crate::style::Style;
 
 pub(crate) use spacing::Spacing;
-
-/// Drives the whole formatting pipeline.
-pub(crate) struct Formatter;
-
-impl Formatter {
-    /// Format a parsed tree, falling back to `src` if the result cannot be vouched for.
-    pub(crate) async fn run(
-        root: &SyntaxNode,
-        src: &str,
-        src_errors: usize,
-        style: &Style,
-    ) -> String {
-        let laid_out = Self::format_tree(root, src, style).await;
-
-        // L4: re-wrap long string concatenations, but only when re-formatting the candidate
-        // reproduces it exactly (`DESIGN.md` §R4.1) *and* the result still holds the input's
-        // tokens. Checking the budget here rather than only at the end is what keeps a rewrap the
-        // formatter cannot vouch for from costing the whole file: it costs the rewrap.
-        let text = match StringWrapper::candidate(&laid_out, style).await {
-            Some(candidate) => {
-                // The candidate is a re-split concatenation on one logical line; the engine
-                // places the breaks. Adopt its formatting only if formatting *that* is a fixed
-                // point, which is the guarantee `DESIGN.md` §R4.1 asks for.
-                let wrapped = Self::format_source_text(&candidate, style).await;
-                if Self::format_source_text(&wrapped, style).await == wrapped
-                    && TokenBudget::accepts(src, root, src_errors, &wrapped, style.license).await
-                {
-                    wrapped
-                } else {
-                    laid_out
-                }
-            }
-            None => laid_out,
-        };
-
-        if TokenBudget::accepts(src, root, src_errors, &text, style.license).await {
-            text
-        } else {
-            src.to_owned()
-        }
-    }
-
-    /// Parse and format a string, without the string-wrapping pass — the verification path.
-    async fn format_source_text(src: &str, style: &Style) -> String {
-        let parse = jals_syntax::Parse::parse(src).await;
-        Self::format_tree(&parse.syntax(), src, style).await
-    }
-
-    /// L0 → L2 → L1 → finalize, with no fail-safe and no string wrapping.
-    async fn format_tree(root: &SyntaxNode, src: &str, style: &Style) -> String {
-        let disabled = OffOn::scan(root, style);
-        let used = if style.cfg.imports.remove_unused {
-            Some(UnusedImports::used_names(root).await)
-        } else {
-            None
-        };
-
-        let mut ctx = Ctx::new(root, src, style, used, disabled).await;
-        ctx.visit(root).await;
-        let (mut doc, tags) = ctx.finish();
-
-        let rendered = Engine::new(style, tags).render(&mut doc).await;
-        Finalize::apply(&rendered, style)
-    }
-}
 
 /// The emission context threaded through the whole lowering walk.
 pub(crate) struct Ctx<'a> {
@@ -168,7 +103,7 @@ pub(crate) struct Ctx<'a> {
 
 impl<'a> Ctx<'a> {
     /// A context for one format run.
-    async fn new(
+    pub(crate) async fn new(
         root: &SyntaxNode,
         src: &'a str,
         style: &'a Style,
@@ -205,7 +140,7 @@ impl<'a> Ctx<'a> {
     }
 
     /// Finish, returning the document and its break-tag count.
-    fn finish(mut self) -> (crate::ir::Doc, usize) {
+    pub(crate) fn finish(mut self) -> (crate::ir::Doc, usize) {
         // Emit any disabled region that covered no significant token, so `@formatter:off` around
         // a comment-only span still reaches the output.
         for (at, region) in self.disabled.clone().iter().enumerate() {
@@ -233,7 +168,7 @@ impl<'a> Ctx<'a> {
     ///
     /// The one boxed shim of the lowering recursion: every rule recurses back through here, so
     /// the async cycle has a single choke point rather than a box per call.
-    fn visit<'n>(&'n mut self, node: &'n SyntaxNode) -> LocalBoxFuture<'n, ()> {
+    pub(crate) fn visit<'n>(&'n mut self, node: &'n SyntaxNode) -> LocalBoxFuture<'n, ()> {
         Box::pin(self.visit_impl(node))
     }
 

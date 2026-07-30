@@ -79,7 +79,9 @@ impl FormatOutput {
         let errors = parse.errors().len();
         warnings.extend(parse.errors().iter().map(Warning::from_syntax_error));
 
-        let formatted = visit::Formatter::run(&parse.syntax(), src, errors, &style).await;
+        let formatted = passes::Formatter::run(&parse.syntax(), src, errors, &style)
+            .await
+            .text();
         Self {
             formatted,
             warnings,

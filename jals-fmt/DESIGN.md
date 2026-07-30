@@ -512,7 +512,7 @@ GJF エンジン (`Break` の UNIFIED/INDEPENDENT/FORCED + BreakTag) は prettie
 | **S1 エンジン定数** | 列上限、indent 幅、継続 indent、tab/space、行終端 | `computeBreaks` の `maxWidth` と `Indent::Const` の焼き込み値 | `[layout]` |
 | **S2 発行の形** | どこで `Level` を開くか、その `plus_indent`、break の `FillMode`（`Unified`/`Independent`/`Forced`）、break を token の**前**に置くか**後**に置くか、`Space` を出すか | L2 visitor の分岐 | `[wrapping]`, `[spacing]`, `[braces]` の brace position |
 | **S3 強制改行・空行** | `Forced` break の挿入（brace 強制・1 行化の可否）、`blankLineWanted` の本数 | L2 visitor + `OpsBuilder` | `[braces]` の force/keep-on-one-line, `[blank-lines]` |
-| **S4 パスの on/off とパラメータ** | L0/L3/L4 の各パスを走らせるか、走らせる時の順序規則 | パイプライン段 | `[imports]`, `[comments]`, `[literals]` |
+| **S4 パスの on/off とパラメータ** | L0/L3/L4 の各パスを走らせるか、走らせる時の順序規則 | `passes::Formatter`（パイプライン段）と `passes::token_license`（トークンを変える操作の宣言、§20） | `[imports]`, `[comments]`, `[literals]`, `[wrapping] reflow-long-strings`, `[braces] force-*`, `[layout] formatter-tags` |
 
 **変えないもの（＝「単一エンジン」の定義）**: `computeBreaks`/`computeBroken`/`computeBreakAndSplit`/
 `getWidth` の**解決アルゴリズムそのもの**。greedy・単一パス・バックトラックなし・Level 境界で止まる

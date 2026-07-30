@@ -8,7 +8,7 @@
 //! | **S1** engine constants | column limit, block / continuation indent, tab rendering, terminator | [`engine`](crate::engine) |
 //! | **S2** emission shape | where a level opens, break fill mode and side, whether a space is emitted | [`visit`](crate::visit) |
 //! | **S3** forced breaks and blank lines | brace forcing, one-line collapsing, blank-line counts | [`visit`](crate::visit) |
-//! | **S4** pass gating | which L0 / L3 / L4 passes run | [`passes`](crate::passes) |
+//! | **S4** pass gating | which L0 / L3 / L4 passes run | [`passes::Formatter`](crate::passes::Formatter) |
 //!
 //! What is **not** here is the resolution algorithm: `compute_breaks` is the same code at every
 //! setting. Nothing in this file can make the engine backtrack, search, or read input whitespace.
