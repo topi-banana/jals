@@ -75,7 +75,9 @@ pub struct ProjectGraphAssembly {
     pub graph: GraphMetadata,
     pub plan: ProjectInputPlan,
     pub compile_classpath: Vec<CompileClasspathEntry>,
-    pub warnings: Vec<GraphWarning>,
+    /// Crate-internal: the projection folds these into the assembly a host receives, so a host that
+    /// read them here would be reporting the graph's warnings without the root's.
+    pub(crate) warnings: Vec<GraphWarning>,
     pub errors: Vec<ProjectAssemblyError>,
 }
 

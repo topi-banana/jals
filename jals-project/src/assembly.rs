@@ -254,22 +254,22 @@ pub(crate) struct RootProjection {
 }
 
 /// Fully projected portable root plus its preprocessed dependency graph.
+///
+/// What a portable host reads is `inputs`, `warnings`, and `errors`. The rest is what the native
+/// adapter carries into `NativeProjectAssembly`, where a host path gives it a consumer — which is
+/// why those fields have no reader at all once `native` is compiled out. That is the shape of the
+/// projection, not an oversight, so the portable build allows it rather than widening them back to
+/// `pub` for a consumer that does not exist.
 #[derive(Debug)]
+#[cfg_attr(not(feature = "native"), allow(dead_code))]
 pub struct MemoryProjectAssembly {
     pub(crate) graph: GraphMetadata,
-    pub plan: ProjectInputPlan,
+    pub(crate) plan: ProjectInputPlan,
     pub inputs: ProjectInputs,
-    pub source_roots: Vec<DirKey>,
-    pub compile_classpath: Vec<CompileClasspathEntry>,
+    pub(crate) source_roots: Vec<DirKey>,
+    pub(crate) compile_classpath: Vec<CompileClasspathEntry>,
     pub warnings: Vec<GraphWarning>,
     pub errors: Vec<ProjectAssemblyError>,
-}
-
-impl MemoryProjectAssembly {
-    /// Read-only projection of the graph this assembly came from.
-    pub const fn graph(&self) -> &GraphMetadata {
-        &self.graph
-    }
 }
 
 #[cfg(test)]
@@ -381,7 +381,7 @@ mod tests {
                 "the root's own `[build] source-dirs` come back from the root plan"
             );
             assert_eq!(
-                assembly.graph().nodes().len(),
+                assembly.graph.nodes().len(),
                 1,
                 "the declared path dependency is exactly one graph node"
             );

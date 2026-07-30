@@ -241,11 +241,20 @@ impl ProjectInputs {
 /// Host paths never enter here, so there is no external fallback to lower them into: an in-memory
 /// project has exactly one address space, and an entry reaching outside it names nothing that could
 /// be read. Such an entry is a warning.
+///
+/// That is also why the lowered halves stay private while [`NativeProjectPlan`]'s are public: a
+/// native caller has to materialize git and out-of-tree `path` sources *between* lowering and
+/// assembly, so it needs the plan in hand. Nothing comes between the two steps here, so
+/// [`assemble`](Self::assemble) is the whole surface — and a consumer reaching past it for
+/// `from_manifest` plus the fields would be re-implementing exactly the lowering this type exists to
+/// be the only copy of.
+///
+/// [`NativeProjectPlan`]: crate::NativeProjectPlan
 #[derive(Debug, Default)]
 pub struct MemoryProjectPlan {
-    pub plan: ProjectInputPlan,
-    pub source_roots: Vec<DirKey>,
-    pub warnings: Vec<Warning>,
+    plan: ProjectInputPlan,
+    source_roots: Vec<DirKey>,
+    warnings: Vec<Warning>,
 }
 
 impl MemoryProjectPlan {
@@ -275,7 +284,7 @@ impl MemoryProjectPlan {
     /// `[dependencies]` are deliberately *not* lowered. A caller assembling a dependency graph
     /// projects each declared dependency as a graph node, so lowering them here as well would
     /// resolve every jar twice and double-count it on the classpath.
-    pub fn from_manifest(manifest: &Manifest, view: &ProjectView) -> Self {
+    fn from_manifest(manifest: &Manifest, view: &ProjectView) -> Self {
         let mut result = Self {
             plan: ProjectInputPlan {
                 feature_set: manifest.feature_set(),
