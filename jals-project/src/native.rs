@@ -188,6 +188,20 @@ impl ProjectScript {
             .await)
     }
 
+    /// The root manifest with its `[dependencies]` removed.
+    ///
+    /// Unlike the portable sibling, [`NativeProjectPlan::assemble_native`] *does* lower a
+    /// `[dependencies]` jar entry — it has to, because a host path or URL is exactly what it exists
+    /// to classify. Every declared dependency is already a graph node, so leaving the table in place
+    /// would resolve each jar a second time and double-count it on the classpath. That makes this
+    /// stripping the native path's own precondition, not a rule about root plans in general, which
+    /// is why it lives here and `resolve_memory` hands its manifest over whole.
+    fn root_only(manifest: &Manifest) -> Manifest {
+        let mut root_only = manifest.clone();
+        root_only.dependencies.clear();
+        root_only
+    }
+
     /// The native half of the projection: lower the root plan through the host path pipeline, then
     /// hand both plans to the shared merge.
     ///

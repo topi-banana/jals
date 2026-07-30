@@ -153,9 +153,12 @@ impl ProjectScript {
             .await
             .map_err(|error| GraphResolveError::reporting(error, discovered))?;
         let graph_assembly = graph.assemble(storage.artifacts_mut()).await;
+        // The manifest goes in whole. `MemoryProjectPlan` does not lower `[dependencies]` — that is
+        // its documented contract and the thing `declared_dependencies_are_left_to_the_graph` pins —
+        // so stripping the table here as well would state the same rule a second time, in the one
+        // place a reader cannot check it from.
         let (inputs, source_roots) =
-            MemoryProjectPlan::assemble(&Self::root_only(manifest), storage, fetcher, options)
-                .await;
+            MemoryProjectPlan::assemble(manifest, storage, fetcher, options).await;
         Ok(self
             .project(
                 &graph,
@@ -169,16 +172,6 @@ impl ProjectScript {
                 options,
             )
             .await)
-    }
-
-    /// The root manifest with its `[dependencies]` removed.
-    ///
-    /// Every declared dependency is already a graph node, so lowering the root plan with the table
-    /// still in place would resolve each jar a second time and double-count it on the classpath.
-    pub(crate) fn root_only(manifest: &Manifest) -> Manifest {
-        let mut root_only = manifest.clone();
-        root_only.dependencies.clear();
-        root_only
     }
 
     /// The projection steps shared by both adapters, independent of how the root plan was lowered:

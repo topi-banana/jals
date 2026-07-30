@@ -261,6 +261,11 @@ impl MemoryProjectPlan {
     /// Lower and execute the whole portable input assembly against one aggregate, merging the
     /// lowering warnings into the result's. Returns the resolved inputs plus the manifest's source
     /// roots.
+    ///
+    /// `manifest` is the root manifest as written. A caller does *not* strip `[dependencies]` first:
+    /// this lowering never reads that table (see [`from_manifest`](Self::from_manifest)), so a caller
+    /// that cleared it would be restating the rule somewhere a reader cannot check it — and would
+    /// clone a whole manifest to do it.
     pub async fn assemble<F, S, C>(
         manifest: &Manifest,
         storage: &mut ProjectStorage<S, C>,
@@ -281,9 +286,12 @@ impl MemoryProjectPlan {
 
     /// Lower `manifest`'s `[build] source_dirs` and `[build] classpath` against one immutable view.
     ///
-    /// `[dependencies]` are deliberately *not* lowered. A caller assembling a dependency graph
-    /// projects each declared dependency as a graph node, so lowering them here as well would
-    /// resolve every jar twice and double-count it on the classpath.
+    /// `[dependencies]` are deliberately *not* lowered, and this is the only place that decides so:
+    /// a caller assembling a dependency graph projects each declared dependency as a graph node, so
+    /// lowering them here as well would resolve every jar twice and double-count it on the classpath.
+    /// Anything added here that reads `manifest.dependencies` breaks callers that hand over the
+    /// manifest whole, which is all of them — `declared_dependencies_are_left_to_the_graph` is what
+    /// holds the line.
     fn from_manifest(manifest: &Manifest, view: &ProjectView) -> Self {
         let mut result = Self {
             plan: ProjectInputPlan {
@@ -499,6 +507,8 @@ mod tests {
         );
     }
 
+    /// Guards a *caller's* invariant, not merely a local one: `ProjectScript::resolve_memory` hands
+    /// its root manifest over with `[dependencies]` still in place, on the strength of this.
     #[test]
     fn declared_dependencies_are_left_to_the_graph() {
         let storage = MemoryStorage::memory(CodeTree::default());
