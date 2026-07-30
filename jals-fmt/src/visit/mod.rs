@@ -78,7 +78,7 @@ impl Formatter {
                 // point, which is the guarantee `DESIGN.md` §R4.1 asks for.
                 let wrapped = Self::format_source_text(&candidate, style).await;
                 if Self::format_source_text(&wrapped, style).await == wrapped
-                    && TokenBudget::accepts(src, root, src_errors, &wrapped, style).await
+                    && TokenBudget::accepts(src, root, src_errors, &wrapped, style.license).await
                 {
                     wrapped
                 } else {
@@ -88,7 +88,7 @@ impl Formatter {
             None => laid_out,
         };
 
-        if TokenBudget::accepts(src, root, src_errors, &text, style).await {
+        if TokenBudget::accepts(src, root, src_errors, &text, style.license).await {
             text
         } else {
             src.to_owned()

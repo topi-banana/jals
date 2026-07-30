@@ -22,8 +22,10 @@ build front end (`jals build` / `run` / `clean` / `init`) wraps the JDK's `javac
   and the parser always produces a tree — neither ever panics, even on malformed input.
 - **Java 26 grammar.** Classes, interfaces, enums, records, sealed types, annotations,
   lambdas, switch expressions, patterns (including record patterns and guards), and more.
-- **A formatter with guarantees.** Significant tokens are never changed, comments are never
-  dropped or reordered, and formatting is idempotent (`format(format(x)) == format(x)`).
+- **A formatter with guarantees.** Comments are never dropped or reordered, formatting is idempotent
+  (`format(format(x)) == format(x)`), and the significant-token multiset changes only where a
+  declared operation says it may — every one of them off by default bar the dialect's own. An output
+  that fails that check is discarded and the input handed back untouched.
 - **A linter with real semantics.** Beyond syntactic checks, `jals lint` catches unused
   locals, type mismatches, unreported checked exceptions, and dead conditionals, using name
   resolution and type inference over the CST — not just pattern matching.
@@ -594,8 +596,10 @@ for any change to the syntax or formatting layers:
 
 - The lexer is lossless and never panics.
 - The parser always returns a tree and never panics.
-- The formatter preserves the significant-token sequence, never drops or reorders comments,
-  and is idempotent.
+- The formatter preserves the significant-token multiset except where an operation declared in
+  `jals_fmt::passes::token_license::OPERATIONS` (`jals-fmt/DESIGN.md` §20) applies, never drops or
+  reorders comments, and is idempotent. The fail-safe reads that table, and a run it cannot vouch
+  for returns the input unchanged.
 - `jals-editor`, `jals-syntax`, `jals-fmt`, `jals-lint`, `jals-hir`, `jals-classfile`,
   `jals-decompile`, `jals-javac`, `jals-storage`, and `jals-config` build for
   `wasm32-unknown-unknown` as `no_std` crates;

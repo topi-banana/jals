@@ -196,11 +196,16 @@ its `lib.rs`; every other module imports with `use alloc::...`. The
 ## Invariants
 
 - Parsing is lossless and never panics on malformed input.
-- Formatting is idempotent. It preserves the significant token multiset except where an
-  explicitly configured rule applies: the four token-changing passes — import ordering,
-  unused-import removal, modifier ordering, and long-string rewrapping — plus the opt-in literal
-  normalizations and brace forcing. Only unused-import removal removes tokens, and only brace
-  forcing adds them.
+- Formatting is idempotent. It preserves the significant token multiset except where a **declared
+  token-changing operation** applies. The operations are enumerated as data in
+  `jals_fmt::passes::token_license::OPERATIONS` — `jals-fmt/DESIGN.md` §20's table — and the
+  fail-safe reads that table rather than reconstructing the list from config keys. Seven rows are
+  configured and every one is off (or `preserve`) by default: import ordering, unused-import
+  removal, modifier ordering, long-string rewrapping, text-block re-indentation, the literal
+  normalizations, and brace forcing. The eighth is **unconditional** — the jals dialect drops a
+  grouped import's trailing comma — so "explicitly configured" is not a complete qualifier, and a
+  new token-changing pass belongs in the table, not in prose. Long-string rewrapping *adds* `+`
+  tokens when it splits a lone literal; what it preserves is what each concatenation spells.
 - All project and artifact enumeration is deterministic.
 - File/directory collisions, duplicate entries, file ancestors, root escape, unsafe archive
   members, and cache digest mismatches must be rejected or diagnosed structurally.

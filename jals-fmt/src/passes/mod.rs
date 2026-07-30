@@ -3,18 +3,22 @@
 //! `DESIGN.md`'s L0 and L4: everything that is not "lower a node into a document". They fall into
 //! three groups.
 //!
-//! **Token-changing (L0).** [`ImportPlan`], [`UnusedImports`], and [`ModifierOrder`] are the only
-//! passes that touch the significant-token sequence, and each is a *plan* over the original nodes
-//! rather than a tree rewrite — so the multiset is preserved by construction and comments travel
-//! with the tokens they are anchored to. [`LiteralRewrite`] changes a token's spelling and nothing
-//! else. All four are off or `preserve` by default.
+//! **Token-changing (L0).** [`ImportPlan`], [`UnusedImports`], and [`ModifierOrder`] each build a
+//! *plan* over the original nodes rather than rewriting the tree, so comments travel with the tokens
+//! they are anchored to. [`LiteralRewrite`] changes a token's spelling; it runs inside
+//! `Ctx::token` rather than as a tree pass, which is why it is filed by what it changes and not by
+//! when it runs.
 //!
 //! **Text (L4).** [`StringWrapper`] re-parses the formatted output and re-splits over-long string
-//! concatenations, adopting the result only if it is a fixed point. [`Finalize`] applies
+//! concatenations, adopting the result only if it is a fixed point — and it *does* add `+` operators
+//! when it splits a lone literal, so it is not multiset-preserving. [`Finalize`] applies
 //! `[layout]`'s line-level rules.
 //!
-//! **Guards.** [`OffOn`] locates regions that must survive byte-identical; [`TokenBudget`] is the
-//! fail-safe that decides whether the whole run is trustworthy.
+//! **Guards.** [`OffOn`] locates regions that must survive byte-identical. [`TokenBudget`] is the
+//! fail-safe that decides whether the whole run is trustworthy, and [`token_license`] is the
+//! declaration of what it will accept — the one place that enumerates the token-changing
+//! operations, including the one with no config key. Which of these passes changes tokens, and how,
+//! is that table's answer and not this paragraph's.
 
 pub(crate) mod finalize;
 pub(crate) mod import_order;
@@ -23,6 +27,7 @@ pub(crate) mod modifier_order;
 pub(crate) mod off_on;
 pub(crate) mod string_wrapper;
 pub(crate) mod token_budget;
+pub(crate) mod token_license;
 pub(crate) mod unused_imports;
 
 pub(crate) use finalize::Finalize;

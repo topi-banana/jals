@@ -20,13 +20,23 @@ use jals_syntax::SyntaxKind;
 pub(crate) struct LiteralRewrite;
 
 impl LiteralRewrite {
+    /// The token kinds `[literals]` can respell.
+    ///
+    /// Read by [`apply`](Self::apply) and by this operation's row in
+    /// [`OPERATIONS`](super::token_license::OPERATIONS), so the license can never come out narrower
+    /// than the pass. Adding a rewrite over a third kind without adding it here would make the pass
+    /// change a token no row claims — which the fail-safe answers by returning the whole file
+    /// unformatted.
+    pub(crate) const KINDS: &'static [SyntaxKind] =
+        &[SyntaxKind::INT_LITERAL, SyntaxKind::FLOAT_LITERAL];
+
     /// The final text of a literal token, borrowing when nothing changes.
     ///
     /// The three rewrites compose in a fixed order — hex digits, then the trailing zero, then the
     /// suffix letter — and they operate on disjoint parts of a literal, so the order does not
     /// affect the result. It is fixed anyway, so the composition stays idempotent by inspection.
     pub(crate) fn apply(text: &str, kind: SyntaxKind, rules: Literals) -> Cow<'_, str> {
-        if !matches!(kind, SyntaxKind::INT_LITERAL | SyntaxKind::FLOAT_LITERAL) {
+        if !Self::KINDS.contains(&kind) {
             return Cow::Borrowed(text);
         }
         let mut current = Cow::Borrowed(text);

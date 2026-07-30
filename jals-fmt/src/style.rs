@@ -28,6 +28,7 @@ use jals_config::fmt::{Comments, Config, IndentStyle, KeepOnOneLine, ParenPositi
 
 use crate::ir::Indent;
 use crate::output::Warning;
+use crate::passes::token_license::License;
 
 /// A [`Config`] resolved for one format run.
 #[derive(Debug, Clone)]
@@ -41,6 +42,8 @@ pub(crate) struct Style {
     indent_cols: usize,
     /// Columns in one continuation indent.
     pub(crate) continuation_cols: usize,
+    /// What token changes this run is authorized to make — seam **S4**, resolved once.
+    pub(crate) license: License,
 }
 
 impl Style {
@@ -58,6 +61,11 @@ impl Style {
             newline: cfg.layout.newline(src),
             indent_cols: cfg.layout.indent_cols(),
             continuation_cols: cfg.layout.continuation_cols(),
+            // Resolved from the *rounded* config, not the caller's. No rounded rule gates a
+            // token-changing pass today, but resolving from the un-reified value would put the
+            // license and the passes on two different configs — which is the class of divergence
+            // this seam exists to remove.
+            license: License::of(&cfg),
             cfg,
         };
         (style, warnings)

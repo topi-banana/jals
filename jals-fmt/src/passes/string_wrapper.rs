@@ -13,11 +13,24 @@
 //! keep it only if it is already formatted. A candidate that fails is discarded and the original
 //! output stands, so the pass can never make a file worse, and `fmt ∘ fmt = fmt` survives.
 //!
+//! # It does add tokens
+//!
+//! A lone literal too long for its line **is** split into a concatenation of its own, which adds
+//! `+` operators the source never had ([`plan`](Self::plan)'s `LITERAL` arm). Re-chunking a chain
+//! can also return fewer pieces than it took, so the `STRING_LITERAL` count moves in both
+//! directions too. This is therefore not a rearrangement, and the `+`/string-piece multiset is *not*
+//! preserved — a claim this header used to make, and one `DESIGN.md` §10 recorded as an open
+//! question that the code had already answered.
+//!
+//! What survives instead is what each site **spells**, which is what
+//! [`token_license`](super::token_license) declares and [`TokenBudget`](super::TokenBudget) checks:
+//! where the pieces are cut is layout, what they spell together is the program.
+//!
 //! # What it will not do
 //!
-//! Split a *single* literal into new tokens. That would add `+` operators the source never had,
-//! and google-java-format is not confirmed to do it either (`DESIGN.md` §10). The `+` and
-//! string-piece multiset is therefore preserved and only the arrangement changes.
+//! Reach outside a site. [`sites`](Self::sites) is the single definition of which node this pass may
+//! touch, and the fail-safe licenses exactly those, so an arithmetic `+` — or a `+` in a chain with
+//! a non-literal operand — is still held to exact equality.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -182,29 +195,40 @@ impl StringWrapper {
         stripped.join("\n").replace("\\\n", "")
     }
 
+    /// Every node this pass may re-split, in source order, with the pieces it is built from.
+    ///
+    /// This is [`plan`](Self::plan)'s own eligibility test, lifted so that
+    /// [`TokenBudget`](super::TokenBudget) licenses exactly the nodes the pass can touch. The two
+    /// cannot disagree about which `+` is a string `+`, because there is one predicate — and that
+    /// disagreement is the shape of defect this seam exists to make impossible.
+    pub(crate) fn sites(root: &SyntaxNode) -> Vec<(SyntaxNode, Vec<String>)> {
+        root.descendants()
+            // Outermost only: a nested chain is handled by its root, and editing both would
+            // produce overlapping ranges. A lone literal inside one is likewise its root's.
+            .filter(|node| {
+                node.parent()
+                    .is_none_or(|parent| parent.kind() != SyntaxKind::BINARY_EXPR)
+            })
+            .filter_map(|node| Self::site_pieces(&node).map(|pieces| (node, pieces)))
+            .collect()
+    }
+
+    /// The pieces `node` is built from, or `None` when it is not a site.
+    fn site_pieces(node: &SyntaxNode) -> Option<Vec<String>> {
+        match node.kind() {
+            SyntaxKind::BINARY_EXPR => Self::concatenation(node),
+            // A single literal too long for its line is split into a concatenation of its own —
+            // this is the case `reflow-long-strings` mostly exists for, and the one place in the
+            // crate where `+` operators are added.
+            SyntaxKind::LITERAL => Self::literal_body(node).map(|body| alloc::vec![body]),
+            _ => None,
+        }
+    }
+
     /// The replacements to make, in source order and non-overlapping.
     fn plan(root: &SyntaxNode, src: &str, style: &Style) -> Vec<(TextRange, String)> {
         let mut edits = Self::text_block_edits(root, src);
-        for node in root.descendants() {
-            // Outermost only: a nested chain is handled by its root, and editing both would
-            // produce overlapping ranges. A lone literal inside one is likewise its root's.
-            if node
-                .parent()
-                .is_some_and(|parent| parent.kind() == SyntaxKind::BINARY_EXPR)
-            {
-                continue;
-            }
-            let pieces = match node.kind() {
-                SyntaxKind::BINARY_EXPR => Self::concatenation(&node),
-                // A single literal too long for its line is split into a concatenation of its
-                // own — this is the case `reflow-long-strings` mostly exists for, and the one
-                // place in the crate where `+` operators are added.
-                SyntaxKind::LITERAL => Self::literal_body(&node).map(|body| alloc::vec![body]),
-                _ => continue,
-            };
-            let Some(pieces) = pieces else {
-                continue;
-            };
+        for (node, pieces) in Self::sites(root) {
             let range = node.text_range();
             if !Self::overflows(src, range, style) {
                 continue;

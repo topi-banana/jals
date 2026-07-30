@@ -556,13 +556,12 @@ rule は最初から置かない**（`MAPPING.md` §2 の基準に「到達可�
 
 ## 9. 不変条件の再整理（エンジンのネイティブ挙動の下で）
 
-- **有意トークン保存**: GJF は 4 変換（import 整列 / 未使用 import 削除 / modifier 整列 / 長文字列
-  再折り）でのみトークン列を変える。よって不変条件は「**この 4 変換を除き有意トークンの多重集合は
-  保存**」へ緩める。import/modifier は多重集合保存（順序のみ）、未使用 import 削除は**部分集合**
-  （削除を許す唯一の箇所）、StringWrapper は `+`/文字列片の多重集合を保存（再配置のみ）。
-  rule で追加される例外は 2 つ、いずれも非既定値でのみ発生する: `[literals]`（トークンの**綴り**を
-  変える）と `[braces] force-*`（`{` `}` を**挿入する** — 有意トークンが増える唯一の箇所）。
-  この 4 + 2 が例外の全体である（§20）。
+- **有意トークン保存**: 不変条件は「**§20 の表に宣言された操作を除き有意トークンの多重集合は保存**」。
+  例外を散文で数え上げるのはやめ、**`passes::token_license::OPERATIONS` を唯一の定義とする**
+  （fail-safe はその表だけを読み、`Config` を見ない）。表の 8 行のうち 7 行は config gate 付きで
+  すべて既定 off、8 行目（方言のグループ import 末尾カンマ削除）は**無条件**である。
+  なお StringWrapper は「再配置のみ」ではない — 単一リテラルを分割して `+` を**追加する**（§10 参照）。
+  保存されるのは各 site が**綴るもの**であり、多重集合ではない。
 - **never-panic / lossless**: 未対応ノード・ERROR ノードは **verbatim 出力**へ fallback。最上位に
   fail-safe（出力再パースで新規 syntax error か有意トークン減があれば入力そのまま返す）。
 - **冪等**: `computeBreaks` は greedy 純関数、StringWrapper は不動点検証つき。両者とも決定的。
@@ -578,7 +577,11 @@ rule は最初から置かない**（`MAPPING.md` §2 の基準に「到達可�
 - `//` vs `/* */` の FillMode 割当の細部（trailing block の `breakAndIndentTrailingComment` 条件）。
 - `normalize-parameter-comments` 相当を GJF が行うか（`/*name=*/` の空白正規化の有無）。
 - text block 内部の再 indent を GJF が行うか（GJSG は「内容は保持」寄り、実測要）。
-- StringWrapper が単一リテラルを新トークンへ割ることがあるか（一次情報未確認、既定は「やらない」想定）。
+- ~~StringWrapper が単一リテラルを新トークンへ割ることがあるか~~ → **解決（やる）**。列幅を超える単一
+  リテラルは自前の連結へ分割され、`+` が増える。これが `reflow-long-strings` の主目的であり、
+  `passes/string_wrapper.rs` の `LITERAL` アームがその実装である。§9 / §20 / `[wrapping]` の doc が
+  「多重集合を保存」と書いていたのはこの未解決事項を「やらない」側に賭けていた結果で、いずれも訂正済み。
+  結果として §20 の R4.1 行の「変更の種類」は *再配置* ではなく **再分配**（増減あり、site が綴る内容のみ保存）。
 - **入力の既存改行を読む rule を再び認めるか（唯一の再検討ポイント）**: `KeepOnOneLine::Preserve` /
   `join-wrapped-lines` / `wrap-long-lines` は「既存の改行を見る」rule で、単一エンジンでは §17 の
   とおり canonical 値へ丸める。丸めが実用上受け入れられないという実測が出た場合に限り、
@@ -876,7 +879,7 @@ call-arguments = "if-long-per-item"  # alignment_for_arguments_in_method_invocat
 帰結として:
 
 - **Part I §9 の不変条件がそのまま全プロファイルで成立する。** 冪等 `fmt∘fmt=fmt`、有意トークン
-  多重集合保存（§9 の 4 変換 + 2 rule を除く）、never-panic、verbatim fallback、off/on 領域、
+  多重集合保存（§20 の表に宣言された操作を除く）、never-panic、verbatim fallback、off/on 領域、
   コメント完全性。
 - **入力の既存改行を読む rule は採らない。** 該当 rule は `Config` に存在する（native モデルからの
   射影先として必要）が、エンジンは**同族で最も意図に近い canonical 値へ丸める**。丸めは `Warning`
@@ -980,34 +983,56 @@ CLAUDE.md は**ハード不変条件**として明記している:
 
 - **解消した半分（空白依存）**: whitespace-retaining モードを採らないので、冪等は**無条件に**成立し、
   レイアウトは入力空白の関数にならない（§17）。
-- **残る半分（トークン列）**: それでも次の 4 パスは**有意トークン列を変える**。しかも
-  **どれも text-normalization ではない** — 3 つは並べ替え / 再配置、1 つは削除である。
+- **残る半分（トークン列）**: それでも次の操作は**有意トークン列を変える**。しかも
+  **どれも text-normalization ではない**。
 
-  | パス | 変更の種類 | gate |
-  |---|---|---|
-  | import 整列 (R0.1) | 並べ替え（多重集合保存） | `[imports] order` |
-  | 未使用 import 削除 (R0.2) | **削除**（部分集合） | `[imports] remove-unused` |
-  | modifier 整列 (R0.3) | 並べ替え（多重集合保存） | `[imports] reorder-modifiers` |
-  | 長文字列再折り (R4.1) | 再配置（`+`/文字列片の多重集合は保存） | `[wrapping] reflow-long-strings` |
-  **いずれも `gjf` プロファイルでは既定 on** であり、GJF のネイティブ挙動そのものである。
-  加えて rule の非既定値が 2 つ: `[literals]`（綴りを変える）と `[braces] force-*`（`{` `}` を
-  挿入する。**トークンが増える唯一の箇所**）。どちらも既定では発生しない。
+### 20.1 表（`passes::token_license::OPERATIONS` の実体）
 
-したがって「不変条件が今や満たされた」とは書けない。**ワークスペースの中核契約を編集する意思決定**
-であり、下の改訂を**採用済み**である（4 パスすべてに config ゲートが付き、実装された時点で確定した）。
+**この表はコードである。** `jals-fmt/src/passes/token_license.rs` の `OPERATIONS` が定義で、
+本節はその読み物。fail-safe（`TokenBudget`）は `Config` を一切見ず、この表から導出した `License`
+だけを読む。**トークン変更パスを追加するとは、この表に行を足すことである。**
 
-**採用した改訂（最小）**: 例外の限定子を "text-normalization rule" の一語から**列挙**へ置き換える。
+行の順序は**狭いスコープ優先**で、これは load-bearing。グループ import の末尾カンマは `IMPORT_DECL`
+の内側にあるので、広い行（未使用 import 削除）が先に来ると狭い行が一度も参照されず、
+「import 宣言から何が消えてもよい」という許諾がそのカンマを飲み込む。
 
-> *Formatting is idempotent. It preserves the significant token multiset except where an
-> explicitly configured rule applies: the four token-changing passes — import ordering,
-> unused-import removal, modifier ordering, and long-string rewrapping — plus the opt-in literal
-> normalizations and brace forcing. Only unused-import removal removes tokens, and only brace
-> forcing adds them.*
+  | # | 操作 | 変更の種類 | gate |
+  |---|---|---|---|
+  | 1 | **方言 グループ import 末尾カンマ削除** | 削除（`IMPORT_GROUP` 内の `COMMA` 1 個） | **なし（無条件）** |
+  | 2 | 長文字列再折り (R4.1) | **再分配**（`+`/文字列片は増減する。site が綴る内容のみ保存） | `[wrapping] reflow-long-strings` |
+  | 3 | 未使用 import 削除 (R0.2) | 部分木削除（`IMPORT_DECL`） | `[imports] remove-unused` |
+  | 4 | text block 再インデント (R4.1) | 綴り変更（個数は保存） | `[wrapping] reflow-long-strings` |
+  | 5 | `[literals]` 数値書換え | 綴り変更（`INT_LITERAL`/`FLOAT_LITERAL` のみ） | `[literals]` |
+  | 6 | `[braces] force-*` | **挿入**（`{` `}`） | `[braces] force-*` ×4 |
+  | 7 | import 整列 (R0.1) | 並べ替え（多重集合保存 = 免除不要） | `[imports] order` |
+  | 8 | modifier 整列 (R0.3) | 並べ替え（多重集合保存 = 免除不要） | `[imports] reorder-modifiers` |
 
-「sequence（順序）」を「multiset（多重集合）」へ緩めたうえで、例外を「4 パス + `[literals]` +
-`[braces] force-*`」に固定する。旧文言の "text-normalization rule" は `[literals]` しか指していない
-のに、実際に不変条件を破るのは主に 4 パスの方である、という食い違いを解く。
-**この文言は `CLAUDE.md` の Invariants に反映済み。**
+  R0.1 / R0.2 / R0.3 / R4.1 は **`gjf` プロファイルでは既定 on** であり、GJF のネイティブ挙動そのもの。
+  2 と 4 が同じ gate で別行なのは、text block は**個数が保存され綴りだけが変わる**別種の効果だから。
+  畳んでいた間、消えた text block は多重集合から抜けていて内容検査しか番人が無かった。
+
+  **1 行目が表の存在理由である。** config キーを持たないので、config フィールドから例外を再構成する
+  検査には読むものが無く、`[imports] remove-unused` が偶然 on の時だけ（その許諾に相乗りして）
+  通っていた。既定 config では拒否され、**ファイル全体が黙って未整形で返っていた**。
+
+### 20.2 採用した改訂
+
+**ワークスペースの中核契約を編集する意思決定**であり、下を**採用済み**（`CLAUDE.md` の Invariants に反映）。
+
+> *Formatting is idempotent. It preserves the significant token multiset except where a declared
+> token-changing operation applies. The operations are enumerated as data in
+> `jals_fmt::passes::token_license::OPERATIONS` … Seven rows are configured and every one is off (or
+> `preserve`) by default … The eighth is unconditional — the jals dialect drops a grouped import's
+> trailing comma — so "explicitly configured" is not a complete qualifier, and a new token-changing
+> pass belongs in the table, not in prose.*
+
+旧文言（"the four token-changing passes … plus the opt-in literal normalizations and brace forcing"）
+からの変更点は 2 つ:
+
+1. **"explicitly configured" を落とした。** 無条件の操作が 1 つあるので、限定子として成立しない。
+2. **列挙を散文から表への参照に置き換えた。** 散文の列挙は 4 箇所（§9・§17・§7.2・`lib.rs`）に
+   複製されていて、そのすべてが 4 パスと書いたまま実装は 8 操作になっていた。定義を 1 つにすれば
+   複製は参照になる。
 
 ---
 

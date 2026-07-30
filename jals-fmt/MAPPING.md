@@ -55,8 +55,14 @@ rule 単位で次の 1 行を適用する。
 
 「多くのベンダーが持っている option を採る」ではないことが重要。`tabular-array-initializers` /
 `case-labels-wrap` / `paren-positions = common-lines` は **GJF が固定挙動として持ち Eclipse/IntelliJ が
-別挙動を持つ**から必要になる。逆に `trailing-comma` は 4 ベンダー全員が「原文保存」で一致するので、
-option ではなく不変条件（有意トークン列保存）そのものにする。
+別挙動を持つ**から必要になる。逆に **Java の** `trailing-comma`（配列初期化子・enum 定数・引数リスト）は
+4 ベンダー全員が「原文保存」で一致するので、option ではなく不変条件（有意トークン多重集合の保存）その
+ものにする。
+
+> ただし jals 方言の**グループ import** はこの一致の外にある。`import a.{B,};` の末尾カンマは
+> 無条件に落とされる — どのベンダーにも対応構文が無いので比較対象が存在せず、option 化は
+> 「どの target も生成できない knob はモデル化しない」（`jals_config::fmt` の採否基準）に反する。
+> 例外の全体は `DESIGN.md` §20 の表にあり、`jals_fmt::passes::token_license` がその表の実体である。
 
 この基準がそのまま §4 の切る/足す一覧と、各 rule の存在理由になっている。
 

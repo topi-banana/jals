@@ -22,8 +22,10 @@ linter・language server（LSP）を提供しており、いずれも名前解�
   不正な入力に対しても必ず木を返します。どちらも panic しません。
 - **Java 26 文法に対応。** class / interface / enum / record、sealed 型、アノテーション、lambda、
   switch 式、パターン（record パターンや guard を含む）などをサポートします。
-- **保証付きのフォーマッタ。** 意味のあるトークンは決して変更せず、コメントを削除・並べ替え
-  することもなく、冪等です（`format(format(x)) == format(x)`）。
+- **保証付きのフォーマッタ。** コメントを削除・並べ替えすることがなく、冪等
+  （`format(format(x)) == format(x)`）で、意味のあるトークンの多重集合が変わるのは**宣言された操作**が
+  それを許す箇所だけです（方言自身のものを除き、すべて既定 off）。この検査を通らなかった出力は破棄され、
+  入力がそのまま返ります。
 - **本物のセマンティクスを持つ linter。** 構文的なチェックにとどまらず、`jals lint` は名前解決と
   型推論を CST 上で行い、未使用のローカル変数・型不一致・報告されていない検査例外・到達しない
   条件分岐を検出します（単なるパターンマッチではありません）。
@@ -584,7 +586,9 @@ free function はできる限り避けます。associated function は親とな�
 
 - lexer は無損失で、panic しない。
 - parser は常に木を返し、panic しない。
-- フォーマッタは意味のあるトークン列を保持し、コメントを削除・並べ替えせず、冪等である。
+- フォーマッタは、`jals_fmt::passes::token_license::OPERATIONS`（`jals-fmt/DESIGN.md` §20）に宣言された
+  操作が適用される箇所を除いて意味のあるトークンの多重集合を保持し、コメントを削除・並べ替えせず、
+  冪等である。fail-safe はその表を読み、保証できない実行では入力をそのまま返す。
 - `jals-editor` / `jals-syntax` / `jals-fmt` / `jals-lint` / `jals-hir` / `jals-classfile` /
   `jals-decompile` / `jals-javac` / `jals-storage` / `jals-config` は `no_std` crate として
   `wasm32-unknown-unknown` 向けにビルドできる。
