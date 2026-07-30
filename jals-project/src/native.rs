@@ -54,7 +54,11 @@ impl NativeProjectGraph {
 pub struct NativeProjectAssembly {
     #[allow(dead_code)]
     graph: GraphMetadata,
-    pub plan: jals_classpath::ProjectInputPlan,
+    /// The graph's plan, already executed into [`inputs`](Self::inputs). Nothing downstream
+    /// re-runs it, so only this crate's projection tests read it — they assert that a
+    /// [`ProjectInputOptions`] applies to the plan and not merely to the resolved inputs.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) plan: jals_classpath::ProjectInputPlan,
     pub inputs: ProjectInputs,
     pub source_roots: Vec<DirKey>,
     pub compile_classpath: Vec<CompileClasspathEntry>,
@@ -121,7 +125,7 @@ struct GraphBuilder {
 impl NativeProjectGraph {
     /// Discover all root path/Git dependencies recursively. The root manifest is never searched
     /// upward; every dependency probes exactly its selected root's `jals.toml`.
-    pub async fn discover(
+    pub(crate) async fn discover(
         root_manifest: &Manifest,
         root_directory: &Path,
         exec: &Exec,
@@ -156,26 +160,6 @@ impl NativeProjectGraph {
     }
 }
 
-impl PreprocessedProjectGraph {
-    /// Assemble the mode-independent graph plan, then apply `mode` only while projecting root and
-    /// graph plans through the existing classpath pipeline.
-    ///
-    /// This is the projection step on its own, with no root build script behind it. A host reaches it
-    /// through [`ProjectScript::resolve_native`], which also runs discovery and preprocessing and
-    /// carries the script's task classpath into the projection.
-    pub async fn assemble_native(
-        &self,
-        root_manifest: &Manifest,
-        root_directory: &Path,
-        storage: &mut NativeStorage,
-        mode: ProjectInputOptions,
-    ) -> NativeProjectAssembly {
-        ProjectScript::skipped()
-            .project_native(self, root_manifest, root_directory, storage, mode)
-            .await
-    }
-}
-
 impl ProjectScript {
     /// The graph phase over a native project root: discover, preprocess, project, and resolve the
     /// root's and the graph's inputs against `storage`.
@@ -203,7 +187,12 @@ impl ProjectScript {
 
     /// The native half of the projection: lower the root plan through the host path pipeline, then
     /// hand both plans to the shared merge.
-    async fn project_native(
+    ///
+    /// The projection step on its own, reachable inside the crate so a test can project one
+    /// preprocessed graph under more than one [`ProjectInputOptions`] without rediscovering it.
+    /// A host has no such need and reaches it through
+    /// [`resolve_native`](Self::resolve_native), which owns the order of the phases before it.
+    pub(crate) async fn project_native(
         &self,
         graph: &PreprocessedProjectGraph,
         root_manifest: &Manifest,

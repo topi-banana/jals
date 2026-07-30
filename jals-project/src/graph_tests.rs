@@ -1,4 +1,10 @@
-#![cfg(feature = "native")]
+//! Graph discovery, preprocessing, and projection over real host projects.
+//!
+//! These were an integration test until the assembly seam landed. They live inside the crate now
+//! because what they exercise is the seam's *inside*: `discover`, `preprocess`, and the projection
+//! are crate-internal steps that [`ProjectAssembly`](crate::ProjectAssembly) sequences, so a test
+//! reaching them from outside would be the very hand-sequencing the seam exists to prevent. The
+//! module is `native`-gated, which is the same range the integration test built in.
 
 use std::fs;
 use std::path::Path;
@@ -8,11 +14,11 @@ use jals_build::build_script::{BuildScriptEnvironment, BuildScriptLimits};
 use jals_classpath::{DependencyLocation, ProjectInputOptions};
 use jals_config::{Manifest, ResolvedBuildFeatures};
 use jals_exec::Exec;
-use jals_project::{
-    CompileClasspathEntry, GraphError, GraphPreprocess, MemoryProjectGraph, NativeProjectGraph,
-    NodeKind,
-};
 use jals_storage::{CodeTree, Entry, FileKey, MemoryStorage, NativeStorage, RelativePath};
+
+use crate::memory::MemoryProjectGraph;
+use crate::native::NativeProjectGraph;
+use crate::{CompileClasspathEntry, GraphError, GraphPreprocess, NodeKind, ProjectScript};
 
 /// A fetch capability for graphs that declare no task plan. Reaching it is the failure.
 struct UnreachableFetcher;
@@ -493,8 +499,9 @@ fn native_compile_classpath_keeps_mixed_local_and_remote_order() {
         .preprocess(root_storage.artifacts_mut(), inert!())
         .await
         .unwrap();
-        let assembly = graph
-            .assemble_native(
+        let assembly = ProjectScript::skipped()
+            .project_native(
+                &graph,
                 &root,
                 project.path(),
                 &mut root_storage,
@@ -803,8 +810,9 @@ fn native_projection_returns_watch_paths_and_applies_mode_downstream() {
         .preprocess(root_storage.artifacts_mut(), inert!())
         .await
         .unwrap();
-        let analysis = graph
-            .assemble_native(
+        let analysis = ProjectScript::skipped()
+            .project_native(
+                &graph,
                 &root,
                 project.path(),
                 &mut root_storage,
@@ -818,8 +826,9 @@ fn native_projection_returns_watch_paths_and_applies_mode_downstream() {
         assert!(analysis.inputs.source_dep_sources.is_empty());
         assert_eq!(analysis.plan.source_dependency_artifacts.len(), 1);
 
-        let editor = graph
-            .assemble_native(
+        let editor = ProjectScript::skipped()
+            .project_native(
+                &graph,
                 &root,
                 project.path(),
                 &mut root_storage,

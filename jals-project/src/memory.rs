@@ -54,7 +54,7 @@ impl MemoryProjectGraph {
     ///
     /// Path dependencies select subtrees of `root_view`. Their manifests and scripts see a view
     /// rooted at that selected subtree, so every key remains project-relative.
-    pub async fn discover(
+    pub(crate) async fn discover(
         root_manifest: &Manifest,
         root_view: &ProjectView,
     ) -> Result<ResolvedProjectGraph, GraphError> {

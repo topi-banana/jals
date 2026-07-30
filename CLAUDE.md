@@ -89,17 +89,21 @@ filesystem reads into portable interfaces.
   declared in. Each such execution is memoized in `CacheNamespace::BuildTaskState` under the node
   identity, plan digest, and resolved features, and re-verified before reuse.
   `ProjectAssembly` owns the **order and preconditions** of the whole procedure, and a host
-  **never sequences the steps itself**: it calls `ProjectAssembly::script` for the root build
+  **cannot sequence the steps itself**: it calls `ProjectAssembly::script` for the root build
   script and its task plan, then `ProjectScript::resolve_memory` / `resolve_native` for discovery,
-  preprocessing, projection, and input resolution. `ProjectScript` is the only way from the first
-  phase into the second (`skipped()` for a host that deliberately runs no script, such as
-  `jals lint`), so the order cannot be forgotten. It is deliberately *two* calls rather than one:
-  the aggregate hand-over point belongs to the host — `jals-cli` reopens storage under narrower
-  scopes for the graph phase, and the playground releases its workspace lock so a jar download
-  never blocks the editor. The policy each phase takes is the whole difference between hosts
-  (`BuildTaskHost`/`SourcePublication`/`blocked_files` on the first, `GraphPreprocess` plus
-  `ProjectInputOptions` on the second); the steps between them exist once. `BuildTaskExecutor`'s
-  `execute_root` is crate-internal beneath that seam.
+  preprocessing, projection, and input resolution. Those are the crate's *only* public entries into
+  the procedure — `discover`, `preprocess`, `assemble`, `execute_root`, and the two projections are
+  crate-internal, and `ProjectGraphAssembly`/`ResolvedProjectGraph`/`PreprocessedProjectGraph` are
+  not exported at all, so the intermediate states cannot be held outside and re-ordered. Keep it
+  that way: a step that becomes `pub` for one caller is the hand-sequencing this seam removed, and
+  the crate's own tests live in `src` (`graph_tests.rs`) precisely so exercising a single step never
+  requires publishing it. `ProjectScript` is the only way from the first phase into the second
+  (`skipped()` for a host that deliberately runs no script, such as `jals lint`). It is deliberately
+  *two* calls rather than one: the aggregate hand-over point belongs to the host — `jals-cli`
+  reopens storage under narrower scopes for the graph phase, and the playground releases its
+  workspace lock so a jar download never blocks the editor. The policy each phase takes is the whole
+  difference between hosts (`BuildTaskHost`/`SourcePublication`/`blocked_files` on the first,
+  `GraphPreprocess` plus `ProjectInputOptions` on the second); the steps between them exist once.
 - `jals-exec`: the execution context (`Exec`, fan-out, yields, runtime adapters). Only its
   `tokio`-feature module may name tokio; the portable core is `no_std`.
 - `jals-editor`: protocol-neutral workspace and query facade over `ProjectStorage`; file identity is
