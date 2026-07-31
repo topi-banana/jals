@@ -11,6 +11,39 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
+  # Every gate below (clippy, test, build, build-release) runs on linux, macOS, Windows *and* wasm.
+  # The three host platforms take `--workspace`; wasm cannot, because the host crates (the CLI, the
+  # LSP, the corpus harness) do not build for wasm32 at all — a whole-workspace wasm build is not a
+  # thing that exists. So the wasm cells select packages, and the sets are defined once here rather
+  # than per job: clippy, build, and build-release must judge *the same* package set as each other,
+  # and a per-job copy of a nine-package list is exactly what drifts. The matrices reference them as
+  # shell variables, which is also why every cargo step below is `shell: bash` — one command string
+  # then means the same thing on all three hosts.
+  #
+  # Built as their own package set (no host crate in it), so the `std` features of jals-fmt /
+  # jals-lint stay off and `#![no_std]` is enforced for the whole set.
+  WASM_PACKAGES: >-
+    --package jals-editor --package jals-syntax --package jals-classfile --package jals-hir
+    --package jals-decompile --package jals-fmt --package jals-lint --package jals-storage
+    --package jals-config
+  # jals-classpath's HTTP/archive adapters are behind features; `--no-default-features` builds its
+  # `no_std + alloc` storage-driven core. jals-build's host half (`SubprocessToolchain`, JDK
+  # discovery + spawning) is likewise behind its `native` feature, so its no-`native` core is built
+  # here too — the seam a future in-browser compiler implements. Both portable cores build together
+  # here without host features.
+  WASM_CORE_PACKAGES: >-
+    --package jals-classpath --package jals-build --no-default-features
+  # The `test (wasm)` cell: the crates whose *tests* need no host at all. Every other workspace
+  # member tests a native adapter, and its dev-dependencies say so — they pull `jals-exec/tokio`
+  # (tokio refuses to compile its `net` feature for wasm) or a `tempfile` scratch directory
+  # (`std::env::temp_dir` is unimplemented on wasi). Including them would not fail a test, it would
+  # fail the build, so the set is the portable computation crates: lexer/parser, HIR, lint, fmt,
+  # config, decompile, editor, frontend, javac, classfile.
+  WASM_TEST_PACKAGES: >-
+    --package jals-syntax --package jals-hir --package jals-lint --package jals-fmt
+    --package jals-config --package jals-decompile --package jals-editor --package jals-frontend
+    --package jals-javac --package jals-classfile
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -52,21 +85,66 @@ jobs:
       - run: cargo run -p xtask -- codegen --check
 
   clippy:
-    name: clippy
-    runs-on: ubuntu-latest
+    name: clippy (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            runner: ubuntu-latest
+            args: --workspace --all-targets --all-features
+          - name: macos
+            runner: macos-latest
+            args: --workspace --all-targets --all-features
+          - name: windows
+            runner: windows-latest
+            args: --workspace --all-targets --all-features
+          # The two wasm cells lint exactly what the `build` gate builds — same package sets, same
+          # default target selection (lib + bin). Deliberately no `--all-targets`: that would pull in
+          # the dev-dependency closure (tempfile, tokio's `net`, the `zip` fixture oracle), none of
+          # which links for wasm32, so it would fail on the test *targets* rather than on any lint.
+          - name: wasm
+            runner: ubuntu-latest
+            target: wasm32-unknown-unknown
+            args: --target wasm32-unknown-unknown $WASM_PACKAGES
+          - name: wasm-core
+            runner: ubuntu-latest
+            target: wasm32-unknown-unknown
+            args: --target wasm32-unknown-unknown $WASM_CORE_PACKAGES
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        with:
+          # Keyed by cell, not by target: with three host platforms in one matrix a target-only key
+          # would have macOS and Windows fighting over the same cache entry.
+          key: clippy-${{ matrix.name }}
+      - name: Run clippy
+        shell: bash
+        run: cargo clippy ${{ matrix.args }} -- -D warnings
 
   test:
-    name: test
-    runs-on: ubuntu-latest
+    name: test (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            runner: ubuntu-latest
+          - name: macos
+            runner: macos-latest
+          - name: windows
+            runner: windows-latest
     steps:
       - uses: actions/checkout@v7
+      # On every host, not only linux: the JDK-backed tests stand themselves down when `javac` /
+      # `java` is absent (`javac_available()` and friends), so a cell without a JDK is a cell that
+      # passes by checking less — the same failure mode the `wasm-tools` note below guards against.
       - name: Set up JDK (for generated-source type checks)
         uses: actions/setup-java@v5
         with:
@@ -74,6 +152,8 @@ jobs:
           java-version: "25"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: test-${{ matrix.name }}
       # `wasm-tools` and `wasmtime` are the WasmGC backend's oracles: the tests that run a compiled
       # module skip themselves when the engine is absent (the same shape as `javac_available()`), so
       # without these installed the whole "a real engine executes it" half of `jals-javac` would
@@ -81,9 +161,41 @@ jobs:
       - uses: taiki-e/install-action@v2.85.4
         with:
           tool: nextest,wasm-tools,wasmtime
-      - run: cargo nextest run --workspace --all-features
+      - name: Run the test suite
+        shell: bash
+        run: cargo nextest run --workspace --all-features
       # nextest does not run doctests, so keep them covered with a separate `cargo test --doc`.
-      - run: cargo test --workspace --all-features --doc
+      - name: Run the doctests
+        shell: bash
+        run: cargo test --workspace --all-features --doc
+
+  test-wasm:
+    name: test (wasm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: test-wasm
+      - uses: taiki-e/install-action@v2.85.4
+        with:
+          tool: wasmtime
+      # `wasm32-wasip1`, not the shipped `wasm32-unknown-unknown`: the latter has no way to *run* a
+      # test — no entry point, no stdout, no exit status — so testing on it would mean rewriting
+      # every `#[test]` as a `wasm_bindgen_test` behind a headless browser. wasip1 runs the ordinary
+      # libtest harness (doctests included) inside a real wasm engine, which is what this cell
+      # claims and all it claims: the portable crates' own tests, executing as wasm.
+      #
+      # `--dir /::/` maps the host filesystem in unchanged. The fixture loaders bake
+      # `env!("CARGO_MANIFEST_DIR")` in at compile time, so the guest opens absolute host paths.
+      - name: Run the portable crates' tests under wasmtime
+        shell: bash
+        env:
+          CARGO_TARGET_WASM32_WASIP1_RUNNER: "wasmtime --dir /::/"
+        run: cargo test --target wasm32-wasip1 $WASM_TEST_PACKAGES
 
   taplo:
     name: taplo fmt
@@ -121,8 +233,24 @@ jobs:
       - run: cargo unused-allow --all-targets -- --workspace --all-features
 
   hawk:
-    name: cargo hawk
-    runs-on: ubuntu-latest
+    # One cell per host platform. There is deliberately no wasm cell: hawk's reachability roots are
+    # the `[[production]]` binaries in hawk.toml — the `jals` CLI, both corpus harnesses, xtask —
+    # and none of those build for wasm32, so a wasm closed-world analysis would have no closed
+    # world to analyse. What the three host cells *do* differ on is which `#[cfg]` arms exist, which
+    # is the whole reason to run the gate more than once: an item reachable only from
+    # `#[cfg(unix)]` code is unreachable on Windows, and hawk is what says so.
+    name: cargo hawk (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            runner: ubuntu-latest
+          - name: macos
+            runner: macos-latest
+          - name: windows
+            runner: windows-latest
     env:
       # cargo-hawk release to install, pinned like the workflow's other tools. Hawk uses
       # `rustc_private`, so it is bound to one exact rustc: `HAWK_RUSTC` is that compiler, and
@@ -132,31 +260,60 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       # The plain `HAWK_RUSTC` toolchain (minimal profile) is all the *prebuilt* hawk needs — it
-      # runs an instrumented workspace build under this exact compiler. No rustc-dev /
-      # RUSTC_BOOTSTRAP / source build (those are only for `cargo install`-ing hawk). The compiler
-      # is selected by the `toolchain` input, never by pinning the action ref to it: dependabot
-      # reads a `@1.97.1` ref as the *action's* version and would keep opening PRs bumping it off
-      # hawk's rustc.
+      # runs an instrumented workspace build under this exact compiler. The compiler is selected by
+      # the `toolchain` input, never by pinning the action ref to it: dependabot reads a `@1.97.1`
+      # ref as the *action's* version and would keep opening PRs bumping it off hawk's rustc.
+      #
+      # `rustc-dev` is requested on Windows only, where hawk has to be built from source (see
+      # below) and therefore compiles against `rustc_private`. The prebuilt unix cells need no such
+      # component, and rustup does not download one it was not asked for, so they stay as cheap as
+      # they were.
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.HAWK_RUSTC }}
+          components: ${{ runner.os == 'Windows' && 'rustc-dev' || '' }}
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: hawk-${{ matrix.name }}
       # Not in taiki-e/install-action's prebuilt set. The official cargo-dist installer drops
       # `cargo-hawk` and its `cargo-hawk-driver` into ~/.cargo/bin (on PATH); the version-pinned
       # release URL keeps the gate reproducible against the hawk.toml this workspace was tuned to.
       # A prebuilt release needs no rustc-dev, so this is far cheaper than a source install.
       - name: Install cargo-hawk ${{ env.HAWK_VERSION }} (prebuilt)
+        if: runner.os != 'Windows'
         run: |
           curl --proto '=https' --tlsv1.2 -LsSf \
             "https://github.com/astral-sh/hawk/releases/download/${HAWK_VERSION}/cargo-hawk-installer.sh" | sh
           # Fail fast here (not mid-analysis) if the installer did not land the binary on PATH.
+          cargo hawk --version
+      # Windows gets the documented source install instead, because there is no prebuilt to fetch:
+      # every hawk release to date (0.1.10 included) publishes linux and darwin tarballs plus the
+      # `sh` installer and nothing else — no Windows archive, no `.ps1`. So this cell pays for
+      # `rustc-dev` above and `RUSTC_BOOTSTRAP=1` here, which is what lets a stable `cargo install`
+      # compile a crate that links `rustc_private`. The driver then loads `rustc_driver-*.dll` at
+      # run time, and on Windows that means the DLL must be on PATH: it lives in the toolchain's own
+      # bin directory, which the rustup shim does not add.
+      - name: Install cargo-hawk ${{ env.HAWK_VERSION }} (from source)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          RUSTC_BOOTSTRAP: "1"
+        run: |
+          cargo "+$HAWK_RUSTC" install --locked cargo-hawk --version "$HAWK_VERSION"
+          sysroot="$(rustc "+$HAWK_RUSTC" --print sysroot)"
+          printf '%s\\bin\n' "$sysroot" >> "$GITHUB_PATH"
+          # Same fail-fast check as the prebuilt cells; `$GITHUB_PATH` only takes effect in later
+          # steps, so this shell needs the directory exported directly.
+          export PATH="$sysroot/bin:$PATH"
           cargo hawk --version
       # Closed-world visibility gate over the shipped binaries declared in hawk.toml. `-D warnings`
       # matches the locally-validated command and makes the gate explicit — every finding is an
       # error. `+$HAWK_RUSTC` pins the instrumented build to hawk's compiler, independent of the
       # repo's default toolchain or any future toolchain file. Default features / host target only,
       # so the analysis set matches what hawk.toml was tuned against (do not add `--all-features`).
-      - run: cargo "+$HAWK_RUSTC" hawk check -D warnings
+      - name: Run the closed-world visibility gate
+        shell: bash
+        run: cargo "+$HAWK_RUSTC" hawk check -D warnings
 
   typos:
     name: typos
@@ -184,49 +341,67 @@ jobs:
       - run: biome ci --error-on-warnings
 
   build:
-    name: build (${{ matrix.name }})
-    runs-on: ubuntu-latest
+    # `build` and `build-release` are one job with a `profile` dimension, not two jobs with the same
+    # eight-cell platform list written out twice — the second copy is where a target gets added to
+    # one gate and not the other. The job *name* still resolves to the two gate names, so the checks
+    # read `build (linux-x64)` and `build-release (linux-x64)`.
+    name: ${{ matrix.profile == 'release' && 'build-release' || 'build' }} (${{ matrix.platform.name }})
+    runs-on: ${{ matrix.platform.runner }}
     strategy:
       fail-fast: false
       matrix:
-        include:
+        profile: [debug, release]
+        # Both architectures of all three host platforms, on native runners wherever GitHub has one
+        # — a native build is a stronger signal than a cross build, and it drops the cross-linker
+        # step this job used to need for aarch64 linux. The one exception is x86_64 macOS: there is
+        # no separate runner to ask for, and the arm64 image's Xcode toolchain links both
+        # architectures, so that cell cross-compiles (the same way the `lsp-binary` job below does).
+        platform:
           - name: linux-x64
+            runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             packages: --workspace
           - name: linux-arm
+            runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             packages: --workspace
-          # Built as their own package set (no host crate in it), so the `std` features of
-          # jals-fmt / jals-lint stay off and `#![no_std]` is enforced for the whole set.
+          - name: macos-arm
+            runner: macos-latest
+            target: aarch64-apple-darwin
+            packages: --workspace
+          - name: macos-x64
+            runner: macos-latest
+            target: x86_64-apple-darwin
+            packages: --workspace
+          - name: windows-x64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            packages: --workspace
+          - name: windows-arm
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            packages: --workspace
           - name: wasm
+            runner: ubuntu-latest
             target: wasm32-unknown-unknown
-            packages: --package jals-editor --package jals-syntax --package jals-classfile --package jals-hir --package jals-decompile --package jals-fmt --package jals-lint --package jals-storage --package jals-config
-          # jals-classpath's HTTP/archive adapters are behind features;
-          # `--no-default-features` builds its `no_std + alloc` storage-driven core. jals-build's
-          # host half (`SubprocessToolchain`, JDK
-          # discovery + spawning) is likewise behind its `native` feature, so its no-`native` core
-          # is built here too — the seam a future in-browser compiler implements. Both are
-          # portable cores build together here without host features.
-          - name: wasm-classpath
+            packages: $WASM_PACKAGES
+          - name: wasm-core
+            runner: ubuntu-latest
             target: wasm32-unknown-unknown
-            packages: --package jals-classpath --package jals-build --no-default-features
+            packages: $WASM_CORE_PACKAGES
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.platform.target }}
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
-      - name: Install aarch64 cross linker
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          key: build-${{ matrix.profile }}-${{ matrix.platform.name }}
       - name: Build
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-        run: cargo build --release --target ${{ matrix.target }} ${{ matrix.packages }}
+        shell: bash
+        run: >-
+          cargo build ${{ matrix.profile == 'release' && '--release' || '' }}
+          --target ${{ matrix.platform.target }} ${{ matrix.platform.packages }}
 
   portable-core:
     name: portable core and feature audit
