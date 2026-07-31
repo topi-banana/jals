@@ -371,10 +371,17 @@ impl FmtArgs {
             }
         }
 
-        // A fallback fails `--check` unconditionally, not only under `-D warnings`: `--check` answers
-        // "is every file formatted", and a file the formatter refused to touch is not a file it
-        // formatted. Reporting it clean is what let the defect this guards against go unnoticed.
-        let fail = (self.check && (any_changed || any_fallback)) || (deny_warnings && any_warning);
+        // A fallback fails `--check` even though nothing changed: `--check` answers "is every file
+        // formatted", and a file the formatter refused to touch is not a file it formatted. Reporting
+        // it clean is what let the defect this guards against go unnoticed.
+        //
+        // It fails `-D warnings` too, whatever the mode. `report_format_fallback` announces it on the
+        // one line every other file-less diagnostic uses — prefixed `warning:` — so leaving it out of
+        // the flag that denies warnings would have the prefix promise something the flag does not
+        // honor, and `jals fmt -D warnings` would exit 0 on a file it just declined to format.
+        let fail = (self.check && any_changed)
+            || (any_fallback && (self.check || deny_warnings))
+            || (deny_warnings && any_warning);
         Ok(if fail {
             ExitCode::from(1)
         } else {

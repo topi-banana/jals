@@ -346,7 +346,7 @@ work.
 | ----------------- | --------------------------------------------------------------------------------------------------------------------------- |
 | `[PATHS]...`      | Files or directories to format. Directories are searched recursively for `.java` files. No paths → stdin/stdout.            |
 | `--check`         | Do not write anything; exit non-zero if any file would change, or if the formatter refused its own output.                   |
-| `-D <LINT>`       | Deny lints (repeatable). Only `warnings` is recognized: fail when any file has syntax warnings.                             |
+| `-D <LINT>`       | Deny lints (repeatable). Only `warnings` is recognized: fail when any file has syntax warnings, or when the formatter refused its own output. |
 | `--config <PATH>` | Use this config file instead of discovering `jalsfmt.toml`.                                                                 |
 | `--no-migrate`    | Do not generate a `jalsfmt.toml` from a detected native formatter config. The detected settings are still used for the run. |
 
