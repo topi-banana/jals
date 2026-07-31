@@ -138,10 +138,19 @@ impl Ctx<'_> {
     /// A break stands where a space would otherwise be decided, so the operator's own `[spacing]`
     /// rule has to travel with it — otherwise `space-around-additive-operators = false` would be
     /// honored on an expression that fits and ignored on one that wraps.
+    ///
+    /// The pair asked about is the *emitted* one, [`Ctx::previous`](crate::visit::Ctx), not
+    /// `prev_token()`: the break replaces exactly the space
+    /// [`token`](crate::visit::Ctx::token) would have emitted for that pair, and the source's own
+    /// whitespace sits between them in the tree. Handing `Spacing` a `WHITESPACE` token instead
+    /// looks harmless while every rule here answers from the operator alone — but it silently
+    /// withholds the left operand from the guards that need it, and gluing `x` to `instanceof`
+    /// spells `xinstanceof`.
     fn operator_flat(&self, child: &SyntaxElement) -> &'static str {
         let space = child.as_token().is_some_and(|tok| {
-            let previous = tok.prev_token();
-            previous.is_none_or(|previous| Spacing::between(&previous, tok, self.style))
+            self.previous
+                .as_ref()
+                .is_none_or(|previous| Spacing::between(previous, tok, self.style))
         });
         Self::flat_space(space)
     }
