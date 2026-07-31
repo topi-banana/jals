@@ -163,7 +163,17 @@ fn run(name: &str, class: &ClassFile) -> String {
         "the JVM rejected the assembled class:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    String::from_utf8(output.stdout).expect("utf-8 stdout")
+    printed(output.stdout)
+}
+
+/// What a JVM printed, with the host's line separator normalized to `\n`.
+///
+/// `println` terminates a line with `System.lineSeparator()`, which is CRLF on Windows. The
+/// expectations here spell what the program printed, not how the host ends a line.
+fn printed(stdout: Vec<u8>) -> String {
+    String::from_utf8(stdout)
+        .expect("utf-8 stdout")
+        .replace("\r\n", "\n")
 }
 
 /// The `Code` body of the method at `index`, and its stack map.

@@ -3072,7 +3072,8 @@ mod tests {
             let path = location.uri.to_file_path().unwrap();
             assert!(path.ends_with("p/Generated.java"));
             assert!(
-                path.to_string_lossy().contains("/dependencies/"),
+                path.components()
+                    .any(|component| component.as_os_str() == "dependencies"),
                 "the materialized URI retains the stable node-token path: {path:?}"
             );
             assert!(

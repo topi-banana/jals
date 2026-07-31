@@ -2,7 +2,7 @@
 
 #[cfg(unix)]
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use tempfile::tempdir;
@@ -81,6 +81,16 @@ fn project(manifest: &str) -> tempfile::TempDir {
     )
     .unwrap();
     dir
+}
+
+/// `base` extended by each `/`-separated segment of `relative`, spelled with the host's separator.
+///
+/// `Path::join` keeps a `/` inside the string it is handed, so a joined path only *reads* like a
+/// host path — matching it against one the CLI printed needs every separator to be the host's.
+fn host_join(base: &Path, relative: &str) -> PathBuf {
+    relative
+        .split('/')
+        .fold(base.to_path_buf(), |path, segment| path.join(segment))
 }
 
 /// Run the `jals` binary with `args`, returning (stdout, exit code).
@@ -380,8 +390,11 @@ fn build_dry_run_executes_and_publishes_build_script_outputs() {
     // staging tree, each exactly once.
     let staged = dir.path().join("target/jals/build/frontend");
     for source in [
-        staged.join("src/main/java/com/example/Main.java"),
-        staged.join("target/jals/build/rhai/out/com/example/DryRunGenerated.java"),
+        host_join(&staged, "src/main/java/com/example/Main.java"),
+        host_join(
+            &staged,
+            "target/jals/build/rhai/out/com/example/DryRunGenerated.java",
+        ),
     ] {
         assert_eq!(
             stdout.matches(source.to_string_lossy().as_ref()).count(),
@@ -907,8 +920,10 @@ fn lint_warns_and_uses_default_context_when_the_dependency_graph_is_invalid() {
 #[test]
 fn host_paths_in_classes_dir_and_source_dirs_still_build() {
     let out = tempdir().unwrap();
+    // A TOML *literal* string: a Windows path is full of backslashes, and a basic string would
+    // read each one as the start of an escape sequence.
     let dir = project(&format!(
-        "[package]\nname = \"hosty\"\n[build]\nclasses-dir = \"{}\"\n",
+        "[package]\nname = \"hosty\"\n[build]\nclasses-dir = '{}'\n",
         out.path().display()
     ));
     let (stdout, code) = run(&[
@@ -1747,7 +1762,11 @@ fn the_jals_backend_compiles_without_a_jdk() {
         "the JVM rejected the compiled class: {}",
         String::from_utf8_lossy(&run.stderr)
     );
-    assert_eq!(String::from_utf8(run.stdout).unwrap(), "42\n");
+    // `println` writes the host's line separator, which is CRLF on Windows.
+    assert_eq!(
+        String::from_utf8(run.stdout).unwrap().replace("\r\n", "\n"),
+        "42\n"
+    );
 }
 
 /// `[build] backend = { type = "jals-wasm" }` compiles the whole project into one WebAssembly
