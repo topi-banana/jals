@@ -237,12 +237,24 @@ jobs:
       - run: cargo unused-allow --all-targets -- --workspace --all-features
 
   hawk:
-    # One cell per host platform. There is deliberately no wasm cell: hawk's reachability roots are
-    # the `[[production]]` binaries in hawk.toml — the `jals` CLI, both corpus harnesses, xtask —
-    # and none of those build for wasm32, so a wasm closed-world analysis would have no closed
-    # world to analyse. What the three host cells *do* differ on is which `#[cfg]` arms exist, which
-    # is the whole reason to run the gate more than once: an item reachable only from
-    # `#[cfg(unix)]` code is unreachable on Windows, and hawk is what says so.
+    # One cell per *supported* host platform. There is deliberately no wasm cell: hawk's
+    # reachability roots are the `[[production]]` binaries in hawk.toml — the `jals` CLI, both
+    # corpus harnesses, xtask — and none of those build for wasm32, so a wasm closed-world analysis
+    # would have no closed world to analyse. What the host cells differ on is which `#[cfg]` arms
+    # exist, which is the reason to run the gate more than once at all.
+    #
+    # There is no Windows cell, and the reason is the tool rather than the workspace. hawk ships
+    # linux and darwin tarballs plus the `sh` installer and nothing else — no Windows archive, no
+    # `.ps1` — so a Windows cell has to build it from source against `rustc_private` under
+    # `RUSTC_BOOTSTRAP=1` and hand the driver its `rustc_driver-*.dll`. That build runs, and then
+    # answers wrong: it reported 201 findings against a tree both unix cells scored 0 on, and the
+    # findings are not a `#[cfg]` difference. Every one of them lands in a *library* crate and none
+    # in any of the five production roots, which is the shape of lost cross-crate edges rather than
+    # of unreachable code — hence `jals_storage::cache`, which carries no platform `cfg` at all,
+    # having its whole public surface (`ArtifactCache::publish`, `CacheKey`, `ContentDigest`)
+    # called dead, alongside the playground-only `ProjectScript::resolve_memory`. A gate that
+    # cannot see a call from `jals-cli` into `jals-storage` is not measuring visibility. Restore
+    # the cell if hawk starts publishing a Windows build.
     name: cargo hawk (${{ matrix.name }})
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -253,8 +265,6 @@ jobs:
             runner: ubuntu-latest
           - name: macos
             runner: macos-latest
-          - name: windows
-            runner: windows-latest
     env:
       # cargo-hawk release to install, pinned like the workflow's other tools. Hawk uses
       # `rustc_private`, so it is bound to one exact rustc: `HAWK_RUSTC` is that compiler, and
@@ -263,64 +273,32 @@ jobs:
       HAWK_RUSTC: "1.97.1"
     steps:
       - uses: actions/checkout@v7
-      # The plain `HAWK_RUSTC` toolchain (minimal profile) is all the *prebuilt* hawk needs — it
-      # runs an instrumented workspace build under this exact compiler. The compiler is selected by
-      # the `toolchain` input, never by pinning the action ref to it: dependabot reads a `@1.97.1`
-      # ref as the *action's* version and would keep opening PRs bumping it off hawk's rustc.
-      #
-      # `rustc-dev` is requested on Windows only, where hawk has to be built from source (see
-      # below) and therefore compiles against `rustc_private`. The prebuilt unix cells need no such
-      # component, and rustup does not download one it was not asked for, so they stay as cheap as
-      # they were.
+      # The plain `HAWK_RUSTC` toolchain (minimal profile) is all a prebuilt hawk needs — it runs an
+      # instrumented workspace build under this exact compiler. The compiler is selected by the
+      # `toolchain` input, never by pinning the action ref to it: dependabot reads a `@1.97.1` ref
+      # as the *action's* version and would keep opening PRs bumping it off hawk's rustc.
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.HAWK_RUSTC }}
-          components: ${{ runner.os == 'Windows' && 'rustc-dev' || '' }}
       - uses: Swatinem/rust-cache@v2
         with:
           key: hawk-${{ matrix.name }}
       # Not in taiki-e/install-action's prebuilt set. The official cargo-dist installer drops
       # `cargo-hawk` and its `cargo-hawk-driver` into ~/.cargo/bin (on PATH); the version-pinned
       # release URL keeps the gate reproducible against the hawk.toml this workspace was tuned to.
-      # A prebuilt release needs no rustc-dev, so this is far cheaper than a source install.
-      - name: Install cargo-hawk ${{ env.HAWK_VERSION }} (prebuilt)
-        if: runner.os != 'Windows'
+      # A prebuilt release links no `rustc_private`, so it needs neither the `rustc-dev` component
+      # nor `RUSTC_BOOTSTRAP=1` — which is the whole reason both cells here are unix.
+      - name: Install cargo-hawk ${{ env.HAWK_VERSION }}
         run: |
           curl --proto '=https' --tlsv1.2 -LsSf \
             "https://github.com/astral-sh/hawk/releases/download/${HAWK_VERSION}/cargo-hawk-installer.sh" | sh
           # Fail fast here (not mid-analysis) if the installer did not land the binary on PATH.
           cargo hawk --version
-      # Windows gets the documented source install instead, because there is no prebuilt to fetch:
-      # every hawk release to date (0.1.10 included) publishes linux and darwin tarballs plus the
-      # `sh` installer and nothing else — no Windows archive, no `.ps1`. So this cell pays for
-      # `rustc-dev` above and `RUSTC_BOOTSTRAP=1` here, which is what lets a stable `cargo install`
-      # compile a crate that links `rustc_private`. The driver then loads `rustc_driver-*.dll` at
-      # run time, and on Windows that means the DLL must be on PATH: it lives in the toolchain's own
-      # bin directory, which the rustup shim does not add.
-      - name: Install cargo-hawk ${{ env.HAWK_VERSION }} (from source)
-        if: runner.os == 'Windows'
-        shell: bash
-        env:
-          RUSTC_BOOTSTRAP: "1"
-        run: |
-          cargo "+$HAWK_RUSTC" install --locked cargo-hawk --version "$HAWK_VERSION"
-          sysroot="$(rustc "+$HAWK_RUSTC" --print sysroot)"
-          printf '%s\\bin\n' "$sysroot" >> "$GITHUB_PATH"
-          # Same fail-fast check as the prebuilt cells; `$GITHUB_PATH` only takes effect in later
-          # steps, so this shell needs the directory exported directly.
-          export PATH="$sysroot/bin:$PATH"
-          rustup run "$HAWK_RUSTC" cargo hawk --version
       # Closed-world visibility gate over the shipped binaries declared in hawk.toml. `-D warnings`
       # matches the locally-validated command and makes the gate explicit — every finding is an
       # error. `rustup run $HAWK_RUSTC` pins the instrumented build to hawk's compiler, independent
       # of the repo's default toolchain or any future toolchain file. Default features / host target
       # only, so the analysis set matches what hawk.toml was tuned against (no `--all-features`).
-      #
-      # `rustup run`, not `cargo "+$HAWK_RUSTC"`: the Windows cell puts the toolchain's own bin
-      # directory on `$GITHUB_PATH` for the driver's DLL, and that directory holds a real
-      # `cargo.exe` — not the rustup shim — which rejects a `+toolchain` directive outright.
-      # Selecting the toolchain through rustup itself means the gate does not depend on which
-      # `cargo` happens to come first on `PATH`.
       - name: Run the closed-world visibility gate
         shell: bash
         run: rustup run "$HAWK_RUSTC" cargo hawk check -D warnings

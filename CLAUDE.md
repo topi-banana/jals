@@ -241,9 +241,11 @@ cargo check -p jals-javac --no-default-features --target wasm32-unknown-unknown
 cargo build -p jals-playground --target wasm32-unknown-unknown
 ```
 
-CI runs clippy, test, build, build-release, and hawk on linux, macOS, Windows **and** wasm. The three
-host platforms take `--workspace`; the wasm cells take a package set, and the sets are defined once
-in `.github/workflows/ci.yml`'s `env` block (`WASM_PACKAGES`, `WASM_CORE_PACKAGES`,
+CI runs clippy, test, build, and build-release on linux, macOS, Windows **and** wasm; hawk runs on
+linux and macOS only, because the tool publishes no Windows build and the from-source one answers
+wrong (see the job's comment in `.github/workflows/ci.yml`). The three host platforms take
+`--workspace`; the wasm cells take a package set, and the sets are defined once in
+`.github/workflows/ci.yml`'s `env` block (`WASM_PACKAGES`, `WASM_CORE_PACKAGES`,
 `WASM_TEST_PACKAGES`) rather than per job. Two consequences for local work:
 
 - A `dead_code` finding can exist in one configuration only. An item reachable solely from a
