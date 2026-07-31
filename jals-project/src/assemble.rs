@@ -64,9 +64,9 @@ impl CompileClasspathEntry {
 /// Structured non-script assembly failure. Other nodes continue to assemble deterministically.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectAssemblyError {
-    pub node: NodeId,
-    pub path: Option<RelativePath>,
-    pub message: String,
+    node: NodeId,
+    path: Option<RelativePath>,
+    message: String,
 }
 
 /// `dependency project <node> could not assemble[ <path>]: <message>` — what a host reports.

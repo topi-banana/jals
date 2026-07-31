@@ -28,7 +28,9 @@ pub use assemble::{
 };
 pub use assembly::{GraphResolveError, MemoryProjectAssembly, ProjectAssembly, ProjectScript};
 // `CycleEdge` and `NodeId` are here because a public error names them — `GraphError::Cycle` carries
-// the chain, `GraphWarning` and `ProjectAssemblyError` carry the node.
+// the chain and `GraphError::InvalidDependency` the declaring node. `GraphWarning` and
+// `ProjectAssemblyError` carry a node too, but a host reads neither: both render through their
+// `Display`, which is the whole of what they say.
 pub use graph::{CycleEdge, GraphError, GraphPreprocess, GraphWarning, NodeId};
 #[cfg(feature = "native")]
 pub use native::NativeProjectAssembly;

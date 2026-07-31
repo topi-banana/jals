@@ -170,9 +170,9 @@ impl GraphMetadata {
 /// Non-fatal graph discovery or preprocessing diagnostic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphWarning {
-    pub node: Option<NodeId>,
-    pub dependency: Option<String>,
-    pub message: String,
+    pub(crate) node: Option<NodeId>,
+    pub(crate) dependency: Option<String>,
+    pub(crate) message: String,
 }
 
 impl GraphWarning {
@@ -193,17 +193,18 @@ impl GraphWarning {
     }
 }
 
-/// `<subject>: <message>` — what a host prints.
+/// `<subject>: <message>` — the whole of what a host can say about one of these, which is why the
+/// node and the entry a warning is attributed to are not readable separately.
 ///
 /// Several messages name no subject at all — a snapshot diagnostic and `source directory is
-/// unavailable` carry theirs only in [`node`](Self::node)/[`dependency`](Self::dependency) — so a
-/// host that renders the message alone drops the half a user can act on. Every host that reports
-/// these renders them through this, exactly as one is rendered for
-/// [`jals_classpath::Warning`]; the attribution a producer chose is the attribution a user sees.
+/// unavailable` carry theirs only in the attribution — so a host that rendered the message alone
+/// would drop the half a user can act on. Every host reports these through this, exactly as one is
+/// reported for [`jals_classpath::Warning`]; the attribution a producer chose is the attribution a
+/// user sees.
 ///
-/// The two fields are independent, so all four combinations are spelled out. A warning that names
-/// both is a declaring project's entry gone wrong, and both halves are reported: the entry alone
-/// does not say which project wrote it.
+/// The node and the entry are independent, so all four combinations are spelled out. A warning that
+/// names both is a declaring project's entry gone wrong, and both halves are reported: the entry
+/// alone does not say which project wrote it.
 impl fmt::Display for GraphWarning {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match (&self.dependency, &self.node) {
