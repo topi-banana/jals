@@ -344,6 +344,11 @@ pub enum Msg {
     SelectFile(String),
     /// Format the active file in place.
     Format,
+    /// A format run finished (either entry point: the *Format* button or Monaco's *Format
+    /// Document*), carrying whether `jals-fmt`'s fail-safe refused its own output. Reported rather
+    /// than inferred: the refusal hands back the input, so it is byte-identical to "already
+    /// formatted" and the buffer cannot show the difference.
+    Formatted { fell_back: bool },
     /// Dump the active file's syntax tree into the right pane.
     Syntax,
     /// An async handler re-dumped the active file's syntax tree for the right pane.
@@ -438,6 +443,10 @@ pub struct App {
     result_tab: PaneTab,
     /// The latest build-script/classpath status line shown in the [`Header`], if any.
     deps_status: Option<String>,
+    /// Set while the last format run was one the formatter could not vouch for, cleared by the next
+    /// one that is. The [`Header`]'s only channel for it — this host has no diagnostic to publish,
+    /// since the fail-safe's subject is the whole file rather than a range in it.
+    format_notice: Option<String>,
     /// The `jals.toml` editor buffer. Held here (not in the workspace's Java file tree) so it is
     /// never analysed/indexed; its `[dependencies]` are re-resolved on edit.
     manifest_src: String,
@@ -526,6 +535,7 @@ impl App {
             compile_artifact: None,
             result_tab: PaneTab::Syntax,
             deps_status: None,
+            format_notice: None,
             manifest_src: ConfigKind::Manifest.seed().to_string(),
             fmt_src: ConfigKind::Fmt.seed().to_string(),
             build_src: ConfigKind::Script.seed().to_string(),
@@ -1294,16 +1304,32 @@ impl Component for App {
                     let mut ws = workspace.lock().await;
                     // Flush the live buffer, format it, and rewrite the editor in place.
                     ws.sync_active(&live).await;
-                    let formatted = ws.format_active(&config).await.formatted;
+                    let out = ws.format_active(&config).await;
+                    let fell_back = out.fell_back();
+                    let formatted = out.formatted;
                     if !selection.is_current() {
                         return;
                     }
+                    link.send_message(Msg::Formatted { fell_back });
                     monaco::update_model(&formatted);
                     ws.sync_active(&formatted).await;
                     let path = ws.active().to_string();
                     Self::report_active(&ws, &link, path, formatted, want_syntax, &selection).await;
                 });
                 false
+            }
+            Msg::Formatted { fell_back } => {
+                let notice = fell_back.then(|| {
+                    "format: jals-fmt could not vouch for its output; the file was left unchanged"
+                        .to_string()
+                });
+                // Repainting on every successful format would re-render the header for nothing, so
+                // only a change of verdict is worth a render.
+                if self.format_notice == notice {
+                    return false;
+                }
+                self.format_notice = notice;
+                true
             }
             Msg::Syntax => {
                 if self.active_config.is_some() {
@@ -1628,6 +1654,7 @@ impl Component for App {
                     on_change={link.callback(Msg::EditorChanged)}
                     on_ready={link.callback(|_| Msg::EditorReady)}
                     on_open={link.callback(Msg::ModelOpened)}
+                    on_formatted={link.callback(|fell_back| Msg::Formatted { fell_back })}
                     config={self.config.clone()}
                 />
             }
@@ -1646,6 +1673,7 @@ impl Component for App {
                     on_compile={link.callback(|_| Msg::Compile)}
                     on_proxy_change={link.callback(Msg::SetProxy)}
                     deps_status={self.deps_status.clone()}
+                    format_notice={self.format_notice.clone()}
                 />
                 <div class="flex min-h-0 flex-1">
                     <FileTree

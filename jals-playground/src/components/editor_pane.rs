@@ -25,6 +25,10 @@ pub struct EditorPaneProps {
     pub on_ready: Callback<()>,
     /// Emitted when a cross-file navigation switches the editor to another file (its path).
     pub on_open: Callback<String>,
+    /// Emitted after each *Format Document*, with whether `jals-fmt`'s fail-safe refused its own
+    /// output. The provider below has to hand Monaco *some* text either way, and on a refusal that
+    /// text is the buffer it was given — so this is the only way the outcome leaves the closure.
+    pub on_formatted: Callback<bool>,
     /// Shared formatter config the once-registered *Format Document* provider reads.
     pub config: Rc<RefCell<Config>>,
 }
@@ -89,14 +93,16 @@ impl Component for EditorPane {
         // is async, so the closure bridges to a Promise; the config is cloned out of the
         // `RefCell` before the future runs — no borrow is held across an await.
         let config = props.config.clone();
+        let on_formatted = props.on_formatted.clone();
         let formatter =
             Closure::<dyn FnMut(String) -> js_sys::Promise>::new(move |text: String| {
                 let cfg = config.borrow().clone();
+                // Cloned per invocation: the closure is `FnMut` and the future takes ownership.
+                let on_formatted = on_formatted.clone();
                 wasm_bindgen_futures::future_to_promise(async move {
-                    let formatted = jals_fmt::FormatOutput::format_source(&text, &cfg)
-                        .await
-                        .formatted;
-                    Ok(JsValue::from(formatted))
+                    let out = jals_fmt::FormatOutput::format_source(&text, &cfg).await;
+                    on_formatted.emit(out.fell_back());
+                    Ok(JsValue::from(out.formatted))
                 })
             });
 
