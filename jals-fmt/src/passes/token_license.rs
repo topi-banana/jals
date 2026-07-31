@@ -281,6 +281,21 @@ pub(crate) const OPERATIONS: [Operation; 8] = [
     },
 ];
 
+/// The table has to fit both widths that index it: [`License`]'s bitmask and [`Lane`]'s row payload.
+///
+/// A compile error rather than a runtime one, because the failure it prevents is *silent*. `active
+/// |= 1 << nth` past `u16::BITS` shifts out of range, and a `Lane` payload past `u8::MAX` would let
+/// two rows share one row number and pool their allowances — the exact masking the narrowest-first
+/// order exists to prevent. Neither shows up in a test: `every_row_is_reachable_from_some_config`
+/// reads the mask through the same shift, so it cannot witness the mask being wrong.
+///
+/// `u16::BITS` is the binding limit of the two, so satisfying it makes the `Lane` payload
+/// lossless by construction.
+const _: () = assert!(
+    OPERATIONS.len() <= u16::BITS as usize,
+    "OPERATIONS outgrew License::active; widen the bitmask and Lane's row payload together",
+);
+
 /// The nodes a reflow may re-split, in one tree.
 ///
 /// Computed once per tree rather than per token: deciding purity per token would re-walk each `+`
@@ -376,7 +391,12 @@ impl License {
     /// before a broader one and the broad allowance can never absorb a token the narrow row named.
     pub(crate) fn lane(self, tok: &SyntaxToken, sites: &Sites) -> Lane {
         for (nth, op) in self.rows() {
-            let row = u8::try_from(nth).unwrap_or(u8::MAX);
+            // Unreachable: the table is capped at `u16::BITS` rows above. Held to `Exact` anyway
+            // rather than folded into `u8::MAX`'s lane — an index that cannot be represented must
+            // cost an allowance, never share one with another row.
+            let Ok(row) = u8::try_from(nth) else {
+                return Lane::Exact;
+            };
             match op.effect {
                 Effect::Removes { kinds, site }
                     if kinds.contains(&tok.kind()) && site.holds(tok, sites) =>
