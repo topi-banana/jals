@@ -34,11 +34,10 @@ use crate::visit::Ctx;
 /// rule pass `every_rule_reaches_the_formatter` by tripping the fail-safe instead of changing a
 /// layout.
 ///
-/// That rules out the *warning* route, not every route. A third [`FormatOutput`](crate::FormatOutput)
-/// field would not trip that check at all — it reads `formatted` and `warnings` — so surfacing the
-/// distinction to callers is open, and worth doing: on a fallback `formatted == src`, so `jals fmt
-/// --check` exits 0 and calls the file clean when the formatter refused to touch it. It is a public
-/// API addition plus an exit-code change in `jals-cli` and `jals-lsp`, which is why it is not here.
+/// That rules out the *warning* route, not every route, and the distinction does reach callers: it
+/// becomes [`FormatOutput::fell_back`](crate::FormatOutput::fell_back), which the coverage test does
+/// not read. `jals fmt --check` fails on a fallback instead of calling the file clean, and the LSP
+/// says so rather than looking like it found nothing to do.
 #[derive(Debug)]
 pub(crate) enum Formatted {
     /// The output holds everything the input did, under the license the config granted.
@@ -53,6 +52,11 @@ impl Formatted {
         match self {
             Self::Vouched(text) | Self::FellBack(text) => text,
         }
+    }
+
+    /// Whether the formatter could vouch for the text.
+    pub(crate) const fn vouched(&self) -> bool {
+        matches!(self, Self::Vouched(_))
     }
 }
 

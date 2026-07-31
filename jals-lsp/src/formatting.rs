@@ -12,10 +12,22 @@ pub(crate) struct Formatting;
 impl Formatting {
     /// Format the whole document. Returns a single full-range text edit, or no edits when the
     /// document is already formatted. Async because formatting yields cooperatively.
+    ///
+    /// A run the formatter cannot vouch for also produces no edits — the text it hands back *is* the
+    /// document — but for the opposite reason, so it is logged. Both cases look identical to the
+    /// editor, which is precisely why the server has to be the one that can tell them apart; there is
+    /// no diagnostic to publish, since the fail-safe's subject is the whole file and not a range in
+    /// it.
     pub(crate) async fn formatting_edits(doc: &Document, config: &Config) -> Vec<TextEdit> {
-        let formatted = jals_fmt::FormatOutput::format_source(&doc.text, config)
-            .await
-            .formatted;
+        let out = jals_fmt::FormatOutput::format_source(&doc.text, config).await;
+        if out.fell_back() {
+            eprintln!(
+                "jals-lsp: the formatter could not vouch for its output; the document was left \
+                 unchanged"
+            );
+            return Vec::new();
+        }
+        let formatted = out.formatted;
         if formatted == *doc.text {
             return Vec::new();
         }

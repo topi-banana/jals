@@ -27,7 +27,9 @@
 //!
 //! - **Never panics, never loses input.** A node with no bespoke rule falls through to a generic
 //!   path that still emits all of its tokens; an `ERROR` node is emitted verbatim. If the output
-//!   fails [`TokenBudget`](passes::TokenBudget)'s check, the input is returned unchanged.
+//!   fails [`TokenBudget`](passes::TokenBudget)'s check, the input is returned unchanged and
+//!   [`FormatOutput::fell_back`] says so — the one way to tell that outcome from "already
+//!   formatted", which it is otherwise byte-identical to.
 //! - **Idempotent.** `format(format(x)) == format(x)`.
 //! - **Significant tokens are preserved as a multiset**, except where an operation declared in
 //!   [`OPERATIONS`](passes::token_license::OPERATIONS) applies. Seven of the eight rows are
@@ -81,11 +83,10 @@ impl FormatOutput {
         let errors = parse.errors().len();
         warnings.extend(parse.errors().iter().map(Warning::from_syntax_error));
 
-        let formatted = passes::Formatter::run(&parse.syntax(), src, errors, &style)
-            .await
-            .text();
+        let outcome = passes::Formatter::run(&parse.syntax(), src, errors, &style).await;
         Self {
-            formatted,
+            vouched: outcome.vouched(),
+            formatted: outcome.text(),
             warnings,
         }
     }

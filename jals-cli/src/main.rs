@@ -266,6 +266,9 @@ impl FmtArgs {
         let mut discovery = HostConfigs::new(explicit_config);
         let mut any_changed = false;
         let mut any_warning = false;
+        // A file the fail-safe refused is byte-identical to a file that was already formatted, so
+        // `any_changed` cannot see it and `--check` would call it clean. Tracked separately.
+        let mut any_fallback = false;
 
         if self.paths.is_empty() {
             // stdin -> stdout
@@ -284,7 +287,9 @@ impl FmtArgs {
             let changed = out.formatted != src;
             any_changed |= changed;
             any_warning |= out.has_warnings();
+            any_fallback |= out.fell_back();
             Reporter::report_format_warnings("<stdin>", &src, &out);
+            Reporter::report_format_fallback("<stdin>", &out);
             if show_diff {
                 Reporter::print_diff("<stdin>", &src, &out.formatted);
             } else {
@@ -351,8 +356,10 @@ impl FmtArgs {
                     let changed = out.formatted != src;
                     any_changed |= changed;
                     any_warning |= out.has_warnings();
+                    any_fallback |= out.fell_back();
                     let label = path.display().to_string();
                     Reporter::report_format_warnings(&label, &src, &out);
+                    Reporter::report_format_fallback(&label, &out);
 
                     if show_diff {
                         Reporter::print_diff(&label, &src, &out.formatted);
@@ -364,7 +371,10 @@ impl FmtArgs {
             }
         }
 
-        let fail = (self.check && any_changed) || (deny_warnings && any_warning);
+        // A fallback fails `--check` unconditionally, not only under `-D warnings`: `--check` answers
+        // "is every file formatted", and a file the formatter refused to touch is not a file it
+        // formatted. Reporting it clean is what let the defect this guards against go unnoticed.
+        let fail = (self.check && (any_changed || any_fallback)) || (deny_warnings && any_warning);
         Ok(if fail {
             ExitCode::from(1)
         } else {

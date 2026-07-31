@@ -22,6 +22,11 @@
 //! - **Never panics.** Malformed input is formatted best-effort or returned unchanged, never dropped
 //!   and never a crash.
 //!
+//! Alongside them, one thing that is *not* a property of the formatter but of this file's own
+//! position: the fail-safe's verdict has to survive the trip out through
+//! [`FormatOutput`](crate::FormatOutput). The corpus is the only place that can compare the two, since
+//! it is the only place that can see both [`Formatted`] and the public output.
+//!
 //! # Why this lives in `src`
 //!
 //! It reads its allowances off a [`License`], and `cargo test` compiles the library twice — once
@@ -225,6 +230,31 @@ fn the_fail_safe_never_fires_on_the_corpus() {
                 "{name}: the fail-safe rejected the output for {src:?}, so the whole file came back \
                  unformatted. Either a pass changed a token no row licenses, or a row is missing \
                  from `OPERATIONS`.",
+            );
+        }
+    }
+}
+
+#[test]
+fn the_public_output_reports_the_verdict_the_pipeline_reached() {
+    // Not a property of the formatter — a check that the one bit callers act on is still wired to the
+    // decision it names. `jals fmt --check` fails on a fallback, so a `vouched` that silently went
+    // constant would put the CLI back to reporting a refused file as clean, which is the symptom the
+    // whole fail-safe audit started from.
+    for (name, config) in Corpus::configurations() {
+        for src in Corpus::SOURCES {
+            let internal = Corpus::run(src, &config);
+            let public =
+                jals_exec::block_on_inline(crate::FormatOutput::format_source(src, &config));
+            assert_eq!(
+                public.vouched,
+                internal.vouched(),
+                "{name}: `FormatOutput::vouched` disagrees with the pipeline for {src:?}",
+            );
+            assert_eq!(
+                public.formatted,
+                internal.text(),
+                "{name}: `FormatOutput::formatted` is not the pipeline's text for {src:?}",
             );
         }
     }

@@ -25,7 +25,8 @@ build front end (`jals build` / `run` / `clean` / `init`) wraps the JDK's `javac
 - **A formatter with guarantees.** Comments are never dropped or reordered, formatting is idempotent
   (`format(format(x)) == format(x)`), and the significant-token multiset changes only where a
   declared operation says it may — every one of them off by default bar the dialect's own. An output
-  that fails that check is discarded and the input handed back untouched.
+  that fails that check is discarded and the input handed back untouched — and the run *says* so,
+  because a file that was refused is byte-identical to one that needed nothing.
 - **A linter with real semantics.** Beyond syntactic checks, `jals lint` catches unused
   locals, type mismatches, unreported checked exceptions, and dead conditionals, using name
   resolution and type inference over the CST — not just pattern matching.
@@ -178,6 +179,11 @@ reformatted are listed on stderr:
 ```sh
 jals fmt --check src/
 ```
+
+It also fails when the formatter **refused its own output** — the fail-safe rejected the layout and
+handed the input back, so the file is byte-identical without having been formatted. That is a bug in
+`jals-fmt` rather than in the source, and it is reported as such; `--check` fails because its
+question is "is every file formatted", and this file was not.
 
 ### Treat syntax warnings as errors
 
@@ -339,7 +345,7 @@ work.
 | Option            | Description                                                                                                                 |
 | ----------------- | --------------------------------------------------------------------------------------------------------------------------- |
 | `[PATHS]...`      | Files or directories to format. Directories are searched recursively for `.java` files. No paths → stdin/stdout.            |
-| `--check`         | Do not write anything; exit non-zero if any file would change.                                                              |
+| `--check`         | Do not write anything; exit non-zero if any file would change, or if the formatter refused its own output.                   |
 | `-D <LINT>`       | Deny lints (repeatable). Only `warnings` is recognized: fail when any file has syntax warnings.                             |
 | `--config <PATH>` | Use this config file instead of discovering `jalsfmt.toml`.                                                                 |
 | `--no-migrate`    | Do not generate a `jalsfmt.toml` from a detected native formatter config. The detected settings are still used for the run. |
