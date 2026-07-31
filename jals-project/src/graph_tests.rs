@@ -966,14 +966,24 @@ fn snapshot_diagnostics_warn_but_unreadable_manifest_is_hard() {
     jals_exec::tokio_rt::run(|exec| async move {
         let project = tempfile::tempdir().unwrap();
         write(project.path(), "warn/src/W.java", "class W {}\n");
-        std::fs::write(
+        // A trailing `0xff` is not valid UTF-8. Linux filesystems store the bytes as given; APFS and
+        // HFS+ reject the name outright (`EILSEQ`), so the entry is *attempted* and the warning it
+        // drives is asserted only where the fixture could be created. The stand-down is loud,
+        // because a fixture that silently failed to exist reads as a pass.
+        let non_utf8_entry = std::fs::write(
             project
                 .path()
                 .join("warn")
                 .join(OsString::from_vec(vec![b'b', b'a', b'd', 0xff])),
             b"ignored",
         )
-        .unwrap();
+        .is_ok();
+        if !non_utf8_entry {
+            eprintln!(
+                "note: this filesystem rejects non-UTF-8 names; the `NonUtf8Entry` half of this \
+                 test is checking nothing"
+            );
+        }
         let warning_root = manifest("[dependencies]\nwarn = { path = \"warn\" }\n");
         let graph = NativeProjectGraph::discover(
             &warning_root,
@@ -984,10 +994,11 @@ fn snapshot_diagnostics_warn_but_unreadable_manifest_is_hard() {
         .await
         .unwrap();
         assert!(
-            graph
-                .warnings()
-                .iter()
-                .any(|warning| warning.message.contains("NonUtf8Entry"))
+            !non_utf8_entry
+                || graph
+                    .warnings()
+                    .iter()
+                    .any(|warning| warning.message.contains("NonUtf8Entry"))
         );
 
         std::fs::create_dir(project.path().join("hard")).unwrap();

@@ -2734,12 +2734,16 @@ mod tests {
                     .reassemble_inputs
                     .contains(&canonical_transitive)
             );
+            // Canonical, like the two assertions above: the watch policy records the resolved
+            // dependency root, and a temporary directory is reached through a symlink on macOS
+            // (`/var` → `/private/var`), so the unresolved path would compare unequal and the
+            // policy would read as `Ignore`.
             for path in [
-                transitive.join("jals.toml"),
-                transitive.join("build.rhai"),
-                transitive.join("schema.rerun"),
-                transitive.join("src/Transitive.java"),
-                transitive.join("lib/local.jar"),
+                canonical_transitive.join("jals.toml"),
+                canonical_transitive.join("build.rhai"),
+                canonical_transitive.join("schema.rerun"),
+                canonical_transitive.join("src/Transitive.java"),
+                canonical_transitive.join("lib/local.jar"),
             ] {
                 assert_eq!(
                     Actor::watched_project_action(
