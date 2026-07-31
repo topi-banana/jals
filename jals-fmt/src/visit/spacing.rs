@@ -189,7 +189,7 @@ impl Spacing {
         clippy::suspicious_operation_groupings,
         reason = "`prev.end() == next.start()` is source adjacency, not a mismatched pair"
     )]
-    fn fused(prev: &SyntaxToken, next: &SyntaxToken) -> bool {
+    pub(super) fn fused(prev: &SyntaxToken, next: &SyntaxToken) -> bool {
         prev.kind() == S::GT
             && matches!(next.kind(), S::GT | S::EQ)
             && prev.text_range().end() == next.text_range().start()
