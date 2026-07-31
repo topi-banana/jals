@@ -193,6 +193,23 @@ impl GraphWarning {
     }
 }
 
+impl fmt::Display for GraphWarning {
+    /// The whole warning, subject included.
+    ///
+    /// A host renders one by printing this, never `message` alone: the subject is carried by
+    /// `dependency` / `node`, and some warnings name no subject at all, so a host that formatted the
+    /// message by itself would drop the entry the user has to go and fix — and each of the three
+    /// hosts had reached a slightly different wording for the same warning. The
+    /// `jals_classpath::Warning` this sits beside follows the same rule.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (&self.dependency, &self.node) {
+            (Some(dependency), _) => write!(f, "dependency `{dependency}`: {}", self.message),
+            (None, Some(node)) => write!(f, "dependency project {node}: {}", self.message),
+            (None, None) => f.write_str(&self.message),
+        }
+    }
+}
+
 /// Structured hard failure from graph discovery or preprocessing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GraphError {

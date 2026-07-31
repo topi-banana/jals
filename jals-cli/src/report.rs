@@ -5,9 +5,8 @@ use std::io::{IsTerminal, Write};
 use std::ops::Range;
 
 use ariadne::{Color, Config, IndexType, Label, Report, ReportKind, Source};
-use jals_config::Severity;
+use jals_editor::{DiagnosticSeverity, FileDiagnostic};
 use jals_fmt::FormatOutput;
-use jals_lint::LintOutput;
 use similar::{ChangeTag, TextDiff};
 
 const RESET: &str = "\x1b[0m";
@@ -183,28 +182,47 @@ impl Reporter {
         }
     }
 
-    /// Render every lint diagnostic (and parser error) for one source through `ariadne`.
-    /// Returns whether anything was reported.
-    pub(crate) fn report_lint(label: &str, src: &str, out: &LintOutput) -> bool {
+    /// Render one file's canonical diagnostics — syntax errors, lint findings, and unresolved
+    /// symbols, already assembled and ordered by [`jals_editor::FileDiagnostics`] — through
+    /// `ariadne`. Returns whether anything was reported.
+    ///
+    /// This is the CLI's whole share of the diagnostics seam: the policy (which passes run, what a
+    /// broken parse suppresses, the order) belongs to `jals-editor`, and mapping each
+    /// [`FileDiagnostic`] onto a terminal report is the part that is this host's.
+    ///
+    /// [`Hint`](DiagnosticSeverity::Hint) diagnostics are skipped, in the output *and* in the
+    /// return value. They exist for hosts that can fade code in place (a dead branch, a
+    /// `cfg`-disabled region); a terminal has nothing to fade, and `jals-lint`'s `unnecessary` /
+    /// `unnecessary_range` docs already record that the CLI ignores them.
+    pub(crate) fn report_diagnostics(
+        label: &str,
+        src: &str,
+        diagnostics: &[FileDiagnostic],
+    ) -> bool {
         let use_color = Self::color_for(std::io::stderr().is_terminal());
         let mut cache = (label, Source::from(src));
-        for d in out.diagnostics.iter().chain(&out.parse_errors) {
+        let mut reported = false;
+        for d in diagnostics {
             let (kind, color) = match d.severity {
-                Severity::Error => (ReportKind::Error, Color::Red),
-                _ => (ReportKind::Warning, Color::Yellow),
+                DiagnosticSeverity::Error => (ReportKind::Error, Color::Red),
+                DiagnosticSeverity::Warning => (ReportKind::Warning, Color::Yellow),
+                DiagnosticSeverity::Hint => continue,
             };
+            reported = true;
             Self::emit(
                 &mut cache,
                 label,
                 src,
                 kind,
                 color,
-                Some(d.rule),
+                // A syntax error carries no rule; it is reported under the name the linter's own
+                // parser-error diagnostics have always used.
+                Some(d.code.unwrap_or("syntax-error")),
                 &d.message,
                 &d.range,
                 use_color,
             );
         }
-        out.has_diagnostics()
+        reported
     }
 }

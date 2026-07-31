@@ -73,10 +73,13 @@ pub struct ProjectScript {
 }
 
 impl ProjectScript {
-    /// The graph-phase entry for a host that deliberately runs no script.
+    /// The graph-phase entry for a run with no script phase to carry forward.
     ///
-    /// `jals lint` analyses what is already on disk: opening a folder must not execute an unreviewed
-    /// `build.rhai`, so it enters the graph phase with nothing published and no task classpath.
+    /// Every host runs the root script when the manifest declares one — the language server and
+    /// `jals lint` both do, offline, because a project whose types are generated is not analysable
+    /// otherwise. What this exists for is the *failure* path: a `build.rhai` that could not be
+    /// prepared, or whose task plan could not execute, still has to let analysis continue. The graph
+    /// phase is then entered with nothing published and no task classpath.
     pub const fn skipped() -> Self {
         Self {
             output: None,

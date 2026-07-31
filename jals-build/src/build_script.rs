@@ -33,7 +33,12 @@ const BUILD_SCRIPT_STATE_VERSION: u32 = 5;
 const BUILD_ARTIFACT_ROOT: &str = "target/jals/build";
 /// Everything `jals` owns under the project: build artifacts, the verified cache, acquired
 /// dependencies. All of it is derived, so none of it is an input to a script's fingerprint.
-const MANAGED_ROOT: &str = "target/jals";
+///
+/// Public because a host that walks the project for source files has to skip it for the same
+/// reason: nothing under here is authored, so nothing under here is a file the user asked about.
+/// `jals lint <dir>` runs the build script, which publishes into this root, so a walk that
+/// descended into it would report findings in files the command itself had just written.
+pub const MANAGED_ROOT: &str = "target/jals";
 const MANIFEST_FILE: &str = "jals.toml";
 
 /// Directory under `target/jals/build/rhai` where script-generated files are published.

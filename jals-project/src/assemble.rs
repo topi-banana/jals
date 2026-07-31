@@ -5,6 +5,7 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::fmt;
 
 use jals_classpath::{
     ClasspathEntry, DependencyLocation, DependencySpec, ExternalLocator, LibrarySource,
@@ -66,6 +67,22 @@ pub struct ProjectAssemblyError {
     pub node: NodeId,
     pub path: Option<RelativePath>,
     pub message: String,
+}
+
+impl fmt::Display for ProjectAssemblyError {
+    /// The whole failure: which dependency project could not assemble, which of its paths (when the
+    /// failure names one), and why.
+    ///
+    /// Like [`GraphWarning`], this exists so a host renders one by printing it. Three hosts had
+    /// three wordings for the same failure, which meant the CLI, the language server, and the
+    /// playground each described one project's broken dependency differently.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "dependency project {} could not assemble", self.node)?;
+        if let Some(path) = &self.path {
+            write!(f, " `{path}`")?;
+        }
+        write!(f, ": {}", self.message)
+    }
 }
 
 /// Mode-independent graph projection. `ProjectInputOptions` is applied only when this plan is

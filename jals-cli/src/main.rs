@@ -452,6 +452,22 @@ impl FmtArgs {
 }
 
 impl LintArgs {
+    /// Lint the requested files (or stdin) and report their diagnostics, exiting non-zero if any
+    /// were reported.
+    ///
+    /// The diagnostics themselves come out of [`jals_editor::FileDiagnostics`], the one
+    /// protocol-neutral assembly the language server and the browser playground also render. That
+    /// is what makes the same file answer the same way in all three: a broken parse suppresses the
+    /// resolution-dependent passes (a spurious `type-mismatch` on a half-parsed tree is noise), and
+    /// unresolved type names are reported as `cannot-resolve`.
+    ///
+    /// What stays here is the host's share: reading the files, owning which set of them forms the
+    /// project index, discovering each file's `jalslint.toml`, and rendering the result to a
+    /// terminal.
+    ///
+    /// The index is the requested files **plus** whatever the root build script generated (see
+    /// [`ProjectLintContext`]). Only the requested files are reported; the generated ones are there
+    /// so their types resolve.
     async fn run(&self, exec: &Exec) -> Result<ExitCode> {
         let explicit_config = App::load_explicit::<LintConfig>(self.config.as_deref())?;
 
@@ -474,16 +490,25 @@ impl LintArgs {
             // features`) so the feature-gated rules run — exactly as the multi-file path does.
             let ctx = ProjectLintContext::load(&cwd, exec, &self.features).await;
             cfg.features = ctx.feature_set;
-            let cfgs = [(FileId(0), ctx.cfg_map(&parse))];
-            let index = ctx.build_index(&[(FileId(0), parse.syntax())], &cfgs).await;
-            let out = jals_lint::LintOutput::lint_parse_with_index(
+            // The script's generated sources join the index behind stdin, so a type it generated
+            // resolves for the document being linted.
+            let generated = ctx.generated_index_inputs(1, &[]).await;
+            let mut inputs = vec![(FileId(0), parse.syntax())];
+            let mut cfgs = vec![(FileId(0), ctx.cfg_map(&parse))];
+            for (id, generated) in &generated {
+                inputs.push((*id, generated.syntax()));
+                cfgs.push((*id, ctx.cfg_map(generated)));
+            }
+            let index = ctx.build_index(&inputs, &cfgs).await;
+            let diagnostics = jals_editor::FileDiagnostics::assemble(
                 &parse,
-                &cfg,
+                None,
                 Some((&index, FileId(0))),
+                &cfg,
                 Some(&cfgs[0].1),
             )
             .await;
-            any_finding |= Reporter::report_lint("<stdin>", &src, &out);
+            any_finding |= Reporter::report_diagnostics("<stdin>", &src, &diagnostics);
         } else {
             // Read and parse every file once, then build a project-wide symbol index from the parsed
             // trees so the `type-mismatch` rule resolves reference types across files (project
@@ -497,7 +522,7 @@ impl LintArgs {
                 let parse = jals_syntax::Parse::parse(&src).await;
                 files.push((path, src, parse));
             }
-            let inputs: Vec<_> = files
+            let mut inputs: Vec<_> = files
                 .iter()
                 .enumerate()
                 .map(|(i, (_, _, parse))| (FileId(i as u32), parse.syntax()))
@@ -508,33 +533,45 @@ impl LintArgs {
                 .first()
                 .and_then(|(path, _, _)| path.parent())
                 .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-            // Discover the project once: its classpath (folded into the cross-file `type-mismatch`
-            // index so a method whose argument type comes from a dependency jar resolves) and its
-            // feature set (`[package] features`, shared across the project's files), from a single
-            // manifest parse.
+            // Discover the project once: its build script's output, its classpath (folded into the
+            // cross-file `type-mismatch` index so a method whose argument type comes from a
+            // dependency jar resolves) and its feature set (`[package] features`, shared across the
+            // project's files), from a single manifest parse.
             let ctx = ProjectLintContext::load(&start_dir, exec, &self.features).await;
             // Each file's `#[cfg(...)]` evaluation (empty maps when the `attributes` dialect is
-            // off): the index skips disabled declarations, and each file's lint run drops
+            // off): the index skips disabled declarations, and each file's diagnostics drop
             // findings inside them — matching what the compile frontend will blank.
-            let cfgs: Vec<_> = files
+            let mut cfgs: Vec<_> = files
                 .iter()
                 .enumerate()
                 .map(|(i, (_, _, parse))| (FileId(i as u32), ctx.cfg_map(parse)))
                 .collect();
+            // The script's generated sources join the index behind the requested files. They are
+            // never reported (the loop below walks `files`), but their types resolve.
+            let linted: Vec<_> = files.iter().map(|(path, _, _)| path.clone()).collect();
+            let generated = ctx
+                .generated_index_inputs(files.len() as u32, &linted)
+                .await;
+            for (id, generated) in &generated {
+                inputs.push((*id, generated.syntax()));
+                cfgs.push((*id, ctx.cfg_map(generated)));
+            }
             let index = ctx.build_index(&inputs, &cfgs).await;
 
             for (i, (path, src, parse)) in files.iter().enumerate() {
                 let parent = path.parent().unwrap_or_else(|| Path::new("."));
                 let mut cfg = discovery.for_dir(parent)?;
                 cfg.features = ctx.feature_set;
-                let out = jals_lint::LintOutput::lint_parse_with_index(
+                let diagnostics = jals_editor::FileDiagnostics::assemble(
                     parse,
-                    &cfg,
+                    None,
                     Some((&index, FileId(i as u32))),
+                    &cfg,
                     Some(&cfgs[i].1),
                 )
                 .await;
-                any_finding |= Reporter::report_lint(&path.display().to_string(), src, &out);
+                any_finding |=
+                    Reporter::report_diagnostics(&path.display().to_string(), src, &diagnostics);
             }
         }
 
@@ -824,11 +861,14 @@ impl InitArgs {
 }
 
 /// The project context the linter folds in for the `jals.toml` discovered upward from `start_dir`:
-/// its lowered classpath (so the cross-file `type-mismatch` rule resolves external library types) and
+/// its lowered classpath (so the cross-file `type-mismatch` rule resolves external library types),
 /// the resolved language feature set from `[package] features` (so feature-gated rules like
-/// `compact-source-file` run). Both come from a **single** best-effort assembly of the project's
-/// analysis inputs. A missing manifest defaults silently; malformed manifests and graph failures
-/// emit a warning before falling back to an empty classpath and feature set.
+/// `compact-source-file` run), and the source files the root build script generated. All of it comes
+/// from a **single** best-effort pass over the project — one script run, one graph assembly.
+///
+/// A missing manifest defaults silently; malformed manifests, build-script failures, and graph
+/// failures emit a warning and degrade rather than failing the lint run: weaker analysis of a real
+/// file is worth more than no analysis at all.
 #[derive(Default)]
 struct ProjectLintContext {
     classpath: LoweredClasspath,
@@ -836,6 +876,9 @@ struct ProjectLintContext {
     /// The resolved build features `#[cfg(feature = "…")]` evaluates against. Meaningful only
     /// when `feature_set` enables the `attributes` dialect.
     build_features: BTreeSet<String>,
+    /// Host paths of the `.java` the root build script generated, for folding into the project
+    /// index. Empty when the project declares no script or its run failed.
+    generated_sources: Vec<PathBuf>,
 }
 
 impl ProjectLintContext {
@@ -843,7 +886,7 @@ impl ProjectLintContext {
         let Some(manifest_path) = Manifest::discover_path(start_dir).await else {
             return Self::default();
         };
-        let manifest = match Manifest::from_file(&manifest_path).await {
+        let mut manifest = match Manifest::from_file(&manifest_path).await {
             Ok(manifest) => manifest,
             Err(error) => {
                 eprintln!("warning: project analysis inputs unavailable: {error}");
@@ -872,14 +915,47 @@ impl ProjectLintContext {
                 .unwrap_or_default()
         });
         let environment = App::build_script_environment(&manifest, &features);
+        // Run the root build script, exactly as the language server does when it opens a folder. A
+        // project whose types are generated, or whose classpath a script assembles, is not analysable
+        // without it: every reference to a generated type would be `cannot-resolve` and every library
+        // type a script put on the classpath would be external. Both hosts report the same project,
+        // so both run the same phase.
+        //
+        // What is withheld is the *network*, not the script: `NetworkPolicy::Offline` means an
+        // unreviewed `build.rhai` cannot pull (or send) anything from a lint run. `jals build`
+        // populates the verified cache; lint picks it up from there, and a task that would have had
+        // to fetch degrades to a warning.
+        let script = match App::run_build_script(
+            &manifest,
+            root,
+            exec,
+            &environment,
+            true,
+            jals_project::SourcePublication::Apply,
+        )
+        .await
+        {
+            Ok(script) => script,
+            Err(error) => {
+                eprintln!(
+                    "warning: build script did not run ({error:#}); continuing with ordinary \
+                     project analysis"
+                );
+                RootScript::skipped()
+            }
+        };
+        // The script's `add_classpath` directives join the manifest's own, so the graph phase lowers
+        // them through the one rule that classifies a `[build] classpath` entry — and unlike the
+        // compile modes, `Analysis` actually reads that plan, so this is what puts a
+        // script-contributed library's `.class` into the index.
+        script.assembled.augment_classpath(&mut manifest);
+        let generated_sources = script.host.generated_sources.clone();
         let inputs = match App::project_inputs(
             &manifest,
             root,
             jals_classpath::ProjectInputOptions::Analysis,
             exec,
-            // Lint analyses what is already on disk; opening a project to report diagnostics must
-            // not execute an unreviewed `build.rhai`.
-            RootScript::skipped(),
+            script,
             &RootScriptInputs {
                 environment: &environment,
                 features: &features,
@@ -899,7 +975,52 @@ impl ProjectLintContext {
             classpath: ProjectIndex::lower_classpath(&inputs.classpath_classes).await,
             feature_set: inputs.feature_set,
             build_features: features.into_features(),
+            generated_sources,
         }
+    }
+
+    /// Parse the root build script's generated sources for folding into the project index, as
+    /// `(FileId, Parse)` numbered from `first_id`.
+    ///
+    /// They are **index inputs only**. `jals lint` reports the files it was asked about, and a
+    /// generated file is not one of them — but a type the script generated has to *resolve*, or every
+    /// authored reference to it is a `cannot-resolve` and every call through it is a type mismatch.
+    /// This is the same standing the language server gives them ([`ProjectLayout::project_sources`]:
+    /// "project source files outside the source-root walk … selected by identity").
+    ///
+    /// A path already on the command line is skipped: indexing one file under two [`FileId`]s would
+    /// declare its types twice, and `by_fqn` would then hold one of two equally good answers.
+    /// Identity is compared through the filesystem rather than by spelling — a command line says
+    /// `./target/…` where a script's key resolves to `<root>/target/…`, and those are the same file.
+    /// An unreadable generated file warns and drops out, exactly as it would if it had been asked
+    /// for directly.
+    ///
+    /// [`ProjectLayout::project_sources`]: jals_editor::ProjectLayout::project_sources
+    async fn generated_index_inputs(
+        &self,
+        first_id: u32,
+        linted: &[PathBuf],
+    ) -> Vec<(FileId, jals_syntax::Parse)> {
+        let identity =
+            |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+        let linted: HashSet<PathBuf> = linted.iter().map(|path| identity(path)).collect();
+        let mut out = Vec::new();
+        for path in &self.generated_sources {
+            if linted.contains(&identity(path)) {
+                continue;
+            }
+            match std::fs::read_to_string(path) {
+                Ok(src) => {
+                    let id = FileId(first_id + out.len() as u32);
+                    out.push((id, jals_syntax::Parse::parse(&src).await));
+                }
+                Err(error) => eprintln!(
+                    "warning: reading generated source {} failed: {error}",
+                    path.display()
+                ),
+            }
+        }
+        out
     }
 
     /// The `#[cfg(...)]` evaluation of one parsed file under this context: computed against the
@@ -1033,7 +1154,15 @@ impl CompilePlan {
 #[derive(Default)]
 struct HostBuildScript {
     generated_sources: Vec<PathBuf>,
-    additional_classpath: Vec<PathBuf>,
+    /// Materialized host paths for the jars the root's *task* terminals produced.
+    ///
+    /// The script's own `add_classpath` directives are deliberately absent: those are project files,
+    /// and folding them into the manifest through
+    /// [`augment_classpath`](jals_project::ProjectScript::augment_classpath) is what gets them
+    /// classified by the one rule that classifies a `[build] classpath` entry. A task jar has no
+    /// such spelling — it is a verified cache artifact — so materializing it to a host path is
+    /// genuinely this host's work.
+    task_classpath: Vec<PathBuf>,
     javac_args: Vec<String>,
     jvm_args: Vec<String>,
     compile_env: BTreeMap<String, String>,
@@ -1049,7 +1178,11 @@ struct RootScript {
 }
 
 impl RootScript {
-    /// A run that deliberately executed no script.
+    /// A run with no script phase to carry forward.
+    ///
+    /// Every command runs the root script when the manifest declares one, so this is the *failure*
+    /// path: `jals lint` degrades to it and analyses the project without the script's contributions
+    /// rather than refusing to lint at all.
     fn skipped() -> Self {
         Self {
             assembled: jals_project::ProjectScript::skipped(),
@@ -1061,7 +1194,7 @@ impl RootScript {
 impl From<HostBuildScript> for HostProjectInputs {
     fn from(script: HostBuildScript) -> Self {
         Self {
-            extra_classpath: script.additional_classpath,
+            extra_classpath: script.task_classpath,
             extra_sources: script.generated_sources,
             javac_args: script.javac_args,
             jvm_args: script.jvm_args,
@@ -1125,30 +1258,28 @@ impl App {
                 // dependency preprocessing could not resolve is often the one discovery warned was
                 // unavailable. Print them in the same shape a successful run would, then fail.
                 for warning in &failure.warnings {
-                    Self::print_graph_warning(warning);
+                    eprintln!("warning: {warning}");
                 }
                 failure.error
             })
             .context("resolving the project dependency graph")?;
 
+        // Every warning below is rendered whole, through its own `Display`. Several name their
+        // subject only in the structured half — a graph warning's dependency or node, a lowering
+        // warning's origin — so printing the message alone drops the entry the user has to go and
+        // fix, and formatting it here is how three hosts ended up with three wordings for one
+        // warning.
         for warning in &assembly.warnings {
-            Self::print_graph_warning(warning);
+            eprintln!("warning: {warning}");
         }
         for warning in &assembly.inputs.warnings {
-            // The whole warning, not just its message: several of these name their subject only in
-            // the origin, so printing the message alone drops the entry the user has to go and fix.
             eprintln!("warning: {warning}");
         }
         if !assembly.errors.is_empty() {
             let messages = assembly
                 .errors
                 .iter()
-                .map(|error| {
-                    error.path.as_ref().map_or_else(
-                        || format!("{}: {}", error.node, error.message),
-                        |path| format!("{} `{path}`: {}", error.node, error.message),
-                    )
-                })
+                .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join("; ");
             return Err(anyhow!("project dependency assembly failed: {messages}"));
@@ -1224,6 +1355,14 @@ impl App {
         let script =
             Self::run_build_script(manifest, root, exec, &environment, offline, publications)
                 .await?;
+        // The script's `add_classpath` entries join the manifest's own, so the graph phase lowers
+        // them through the one rule that classifies a `[build] classpath` entry — and they land
+        // after the authored ones, which is the group order the compiler line has always had.
+        //
+        // This has to happen before `project_inputs`, whose first act is to derive the native
+        // snapshot scopes from this manifest: an entry added afterwards would name a path the
+        // snapshot never captured.
+        script.assembled.augment_classpath(manifest);
         let sources =
             Self::discover_sources(manifest, root, !script.host.generated_sources.is_empty())?;
         // The root build script's output is root project source, so it goes through the root
@@ -1283,19 +1422,6 @@ impl App {
         Ok((staged, tree, inputs))
     }
 
-    fn print_graph_warning(warning: &jals_project::GraphWarning) {
-        if let Some(dependency) = &warning.dependency {
-            eprintln!(
-                "warning: project dependency `{dependency}`: {}",
-                warning.message
-            );
-        } else if let Some(node) = &warning.node {
-            eprintln!("warning: project dependency {node}: {}", warning.message);
-        } else {
-            eprintln!("warning: project dependency graph: {}", warning.message);
-        }
-    }
-
     /// Construct the explicit environment visible to both root and dependency build scripts.
     ///
     /// Only `JALS_`-prefixed host variables cross the boundary. The rest of the host environment
@@ -1321,6 +1447,12 @@ impl App {
     /// Execute the manifest's optional Rhai pre-build phase against a project snapshot. The host
     /// supplies environment values as plain data; scripts only read and publish through typed
     /// `jals-storage` keys.
+    ///
+    /// `blocked_files` is empty: a command line has no open documents, so there is nothing to protect
+    /// from an owned-root republish. That is the one place this differs from the language server,
+    /// which passes its open documents so a publication cannot overwrite a file being edited — worth
+    /// knowing for a `jals lint` wired into an editor's on-save hook, where the editor's unsaved
+    /// buffer is invisible to this process.
     async fn run_build_script(
         manifest: &Manifest,
         root: &Path,
@@ -1399,19 +1531,18 @@ impl App {
                         eprintln!("warning: build script: {message}");
                     }
                 }
-                let mut additional_classpath: Vec<_> = output
-                    .additional_classpath
-                    .iter()
-                    .map(|key| key.path().to_host_path(root))
-                    .collect();
-                additional_classpath.extend(task_classpath);
                 HostBuildScript {
                     generated_sources: output
                         .generated_sources
                         .iter()
                         .map(|key| key.path().to_host_path(root))
                         .collect(),
-                    additional_classpath,
+                    // `output.additional_classpath` is *not* lowered here. Those keys are project
+                    // files, and `ProjectScript::augment_classpath` folds them into the manifest the
+                    // graph phase lowers, so they are classified by exactly the rule that classifies
+                    // an authored `[build] classpath` entry. A host that resolved them itself would
+                    // be the second such rule, and it would drift.
+                    task_classpath,
                     javac_args: output.javac_args.clone(),
                     jvm_args: output.jvm_args.clone(),
                     compile_env: output.compile_env.clone(),
@@ -1643,6 +1774,15 @@ impl App {
             entries.sort();
             for path in entries {
                 if path.is_dir() {
+                    // Never descend into what `jals` owns. Everything under the managed root is
+                    // derived — build artifacts, the verified cache, acquired dependencies — so none
+                    // of it is a file the user asked about. `jals lint <dir>` runs the build script,
+                    // which publishes its generated sources in there, so a walk that descended would
+                    // report findings in a file the same command had just written: run once, clean;
+                    // run again, a finding in generated code.
+                    if path.ends_with(jals_build::build_script::MANAGED_ROOT) {
+                        continue;
+                    }
                     collect_dir(&path, out)?;
                 } else if path
                     .extension()

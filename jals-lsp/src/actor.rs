@@ -38,8 +38,8 @@ use jals_editor::{
 };
 use jals_exec::Exec;
 use jals_project::{
-    BuildTaskHost, GraphError, GraphResolveError, GraphWarning, NativeProjectAssembly,
-    ProjectAssembly, ProjectScript, RootBuildScriptError, RootBuildScriptOptions,
+    BuildTaskHost, GraphError, GraphResolveError, NativeProjectAssembly, ProjectAssembly,
+    ProjectScript, RootBuildScriptError, RootBuildScriptOptions,
 };
 use jals_storage::{DirKey, FileKey, NativeScope, NativeStorage, RelativePath};
 use tokio::sync::{mpsc, oneshot};
@@ -1958,7 +1958,7 @@ impl AssembledWorkspace {
                         Self::project_diagnostic(
                             DiagnosticSeverity::WARNING,
                             "dependency-resolution",
-                            Self::graph_warning_message(warning),
+                            warning.to_string(),
                         )
                     }));
                     let mut root_only = effective_manifest.clone();
@@ -2067,8 +2067,12 @@ impl AssembledWorkspace {
         } = assembly;
         let manifest_key = FileKey::parse("jals.toml").expect("constant is a portable file key");
         let mut project_diagnostics = Vec::new();
+        // Both loops render the structured value whole, through its own `Display`: the subject of a
+        // graph warning (its dependency or node) and of an assembly error (the dependency project,
+        // and the path when it names one) lives outside `message`, and shaping it here is how the
+        // three hosts came to describe one broken dependency three ways.
         for warning in warnings {
-            let message = Self::graph_warning_message(&warning);
+            let message = warning.to_string();
             inputs.warnings.push(jals_classpath::Warning::new(
                 jals_classpath::WarningOrigin::ProjectFile(manifest_key.clone()),
                 message.clone(),
@@ -2080,20 +2084,10 @@ impl AssembledWorkspace {
             ));
         }
         for error in errors {
-            let message = match error.path {
-                Some(path) => format!(
-                    "dependency project {} could not assemble `{path}`: {}",
-                    error.node, error.message
-                ),
-                None => format!(
-                    "dependency project {} could not assemble: {}",
-                    error.node, error.message
-                ),
-            };
             project_diagnostics.push(Self::project_diagnostic(
                 DiagnosticSeverity::ERROR,
                 "dependency-assembly",
-                message,
+                error.to_string(),
             ));
         }
         for warning in &inputs.warnings {
@@ -2164,16 +2158,6 @@ impl AssembledWorkspace {
             watch_policy,
             build_script_diagnostics,
             project_diagnostics,
-        }
-    }
-
-    fn graph_warning_message(warning: &GraphWarning) -> String {
-        match (&warning.dependency, &warning.node) {
-            (Some(dependency), _) => {
-                format!("dependency `{dependency}`: {}", warning.message)
-            }
-            (None, Some(node)) => format!("dependency project {node}: {}", warning.message),
-            (None, None) => warning.message.clone(),
         }
     }
 

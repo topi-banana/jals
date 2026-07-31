@@ -1198,6 +1198,48 @@ fn run_applies_script_jvm_args_environment_and_ordered_classpath() {
     );
 }
 
+/// A root script's `add_classpath` entries reach the compiler through the manifest — the one rule
+/// that classifies a `[build] classpath` entry — rather than being resolved to a host path by this
+/// host. `add_classpath` takes two shapes, and the sibling test above covers only the first: a
+/// pre-existing project file. This is the other, a path the script itself wrote, whose key lands
+/// under the managed output root.
+///
+/// The distinction matters because the manifest entry is now looked up in the project snapshot: an
+/// entry the snapshot did not capture would be reported as `classpath entry is missing or invalid`.
+/// Managed output is published even when source publications are skipped, so `--dry-run` reaches it
+/// too — which is what makes checking a silent stderr here worth a test.
+#[test]
+fn build_puts_a_script_written_classpath_jar_on_the_compiler_line() {
+    let dir = project(
+        "[package]\nname = \"cpout\"\n[build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+    );
+    std::fs::write(
+        dir.path().join("build.rhai"),
+        r#"
+            let jar = output.write("script.jar", [1, 2, 3]);
+            build.add_classpath(jar);
+        "#,
+    )
+    .unwrap();
+
+    let (stdout, stderr, code) = run_full(&[
+        "build",
+        "--dry-run",
+        "--manifest-path",
+        dir.path().join("jals.toml").to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let expected = dir.path().join("target/jals/build/rhai/out/script.jar");
+    assert!(
+        stdout.contains(expected.to_str().unwrap()),
+        "the script's own jar belongs on the compiler line: {stdout}"
+    );
+    assert!(
+        stderr.is_empty(),
+        "the entry is in the snapshot, so lowering it must warn about nothing: {stderr}"
+    );
+}
+
 #[test]
 fn run_bin_flag_selects_main_class() {
     let dir = project(&two_bin_manifest(""));
@@ -1404,6 +1446,274 @@ fn lint_features_flag_selects_cfg_analysis() {
         stdout.contains("unknown attribute `derive`")
             || stderr.contains("unknown attribute `derive`"),
         "stdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+/// `jals lint` had its own private copy of the diagnostics assembly, and the copy was missing the
+/// unresolved-types pass entirely: `ProjectIndex::unresolved_types` had exactly one non-test caller,
+/// in `jals-editor`. So the language server flagged a name that is nameable from nowhere and the CLI
+/// never did. Both go through the one assembly now.
+///
+/// The pass is deliberately conservative — a single-type import, an on-demand import, or a
+/// `java.lang` name all resolve to *external* with no diagnostic — so what it reports is a genuine
+/// typo or a missing import, which is why it is worth an error and a non-zero exit.
+#[test]
+fn lint_reports_a_name_that_is_nameable_from_nowhere() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("Nowhere.java");
+    // `Nope` is declared nowhere and imported from nowhere; `Exception` is `java.lang`, `Helper` is
+    // declared right here. Only `Nope` is unresolvable.
+    std::fs::write(
+        &file,
+        "class Helper {}\nclass Nowhere { Nope n; Helper h; Exception e; }\n",
+    )
+    .unwrap();
+
+    let (stdout, stderr, code) = run_full(&["lint", file.to_str().unwrap()]);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    let out = format!("{stdout}{stderr}");
+    assert!(
+        out.contains("cannot resolve symbol `Nope`"),
+        "output: {out}"
+    );
+    assert!(!out.contains("`Helper`"), "output: {out}");
+    assert!(!out.contains("`Exception`"), "output: {out}");
+}
+
+/// The private copy also handed the project index to the rule engine unconditionally, where the
+/// shared assembly forces `type-mismatch` off and withholds the index on a broken parse. A
+/// half-parsed tree yields spurious types, so `jals lint` was reporting type errors that the file
+/// does not have — on top of the syntax errors that explain them.
+#[test]
+fn lint_suppresses_resolution_noise_on_a_broken_parse() {
+    let dir = tempdir().unwrap();
+    let file = dir.path().join("Broken.java");
+    // A syntax error, plus what would be a `type-mismatch` and a `cannot-resolve` on a clean parse.
+    std::fs::write(&file, "class Broken { void m( { int x = \"s\"; Nope n; }\n").unwrap();
+
+    let (stdout, stderr, code) = run_full(&["lint", file.to_str().unwrap()]);
+    assert_eq!(code, 1, "the syntax errors still fail the run");
+    let out = format!("{stdout}{stderr}");
+    assert!(out.contains("syntax-error"), "output: {out}");
+    assert!(!out.contains("type-mismatch"), "output: {out}");
+    assert!(!out.contains("cannot-resolve"), "output: {out}");
+}
+
+/// `jals lint` used to enter the graph phase with no script phase at all, so a project whose types
+/// are generated was unanalysable: every reference to a generated type was nameable from nowhere.
+/// It runs the root script now, under the language server's policy — the two hosts report the same
+/// project, so they see the same project.
+///
+/// Two things are pinned here. The script's `add_source` output is parsed into the lint index, so
+/// `Generated` resolves; and the generated file is **not** itself reported, even though it carries a
+/// finding of its own (an unused local) — `jals lint` reports the files it was asked about, and a
+/// generated file is in the index so its types resolve, not so it can be linted.
+#[test]
+fn lint_resolves_a_type_the_build_script_generates() {
+    let dir = project(
+        "[package]\nname = \"gen-lint\"\n\
+         [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+    );
+    std::fs::write(
+        dir.path().join("build.rhai"),
+        r#"
+            let source = output.write_text(
+                "com/example/Generated.java",
+                "package com.example;\npublic class Generated { void m() { int unused = 1; } }\n",
+            );
+            build.add_source(source);
+        "#,
+    )
+    .unwrap();
+    let main = dir.path().join("src/main/java/com/example/Main.java");
+    std::fs::write(
+        &main,
+        "package com.example;\npublic class Main { Generated g; }\n",
+    )
+    .unwrap();
+
+    let (stdout, stderr, code) = run_full(&["lint", main.to_str().unwrap()]);
+    let out = format!("{stdout}{stderr}");
+    assert!(
+        !out.contains("cannot resolve symbol"),
+        "the generated type has to resolve: {out}"
+    );
+    assert!(
+        !out.contains("unused") && !out.contains("Generated.java"),
+        "the generated source is an index input, never a reported file: {out}"
+    );
+    assert_eq!(code, 0, "output: {out}");
+}
+
+/// The other half of a script's contribution: `add_classpath`. Under `ProjectInputOptions::Analysis`
+/// the lowered plan's classpath is what becomes `classpath_classes`, so folding the script's entries
+/// into the manifest (rather than resolving them to host paths here) is what puts a
+/// script-contributed library's types into the lint index. The compile modes never read that half of
+/// the plan, which is why this only shows up in `lint`.
+///
+/// Needs a real class file for `jals-classfile` to decode, so it is gated on a host `javac` the same
+/// way the other end-to-end compile tests are.
+#[test]
+fn lint_resolves_a_class_the_build_script_puts_on_the_classpath() {
+    if !javac_available() {
+        return;
+    }
+    let dir = project(
+        "[package]\nname = \"cp-lint\"\n\
+         [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+    );
+    // Same package as `Main`: a default-package class is not nameable from a named package in Java
+    // either, so the fixture has to put the vendored type where the reference can see it.
+    let vendor = dir.path().join("vendor");
+    std::fs::create_dir_all(&vendor).unwrap();
+    let source = dir.path().join("Vendored.java");
+    std::fs::write(&source, "package com.example;\npublic class Vendored {}\n").unwrap();
+    assert!(
+        Command::new("javac")
+            .arg("-d")
+            .arg(&vendor)
+            .arg(&source)
+            .status()
+            .unwrap()
+            .success()
+    );
+    std::fs::remove_file(&source).unwrap();
+    std::fs::write(
+        dir.path().join("build.rhai"),
+        r#"build.add_classpath("vendor/com/example/Vendored.class");"#,
+    )
+    .unwrap();
+    let main = dir.path().join("src/main/java/com/example/Main.java");
+    std::fs::write(
+        &main,
+        "package com.example;\npublic class Main { Vendored v; }\n",
+    )
+    .unwrap();
+
+    let (stdout, stderr, code) = run_full(&["lint", main.to_str().unwrap()]);
+    let out = format!("{stdout}{stderr}");
+    assert!(
+        !out.contains("cannot resolve symbol"),
+        "the script's classpath class has to resolve: {out}"
+    );
+    assert_eq!(code, 0, "output: {out}");
+}
+
+/// `jals lint <dir>` runs the build script, which publishes into the managed root *under the
+/// directory being walked*. So the walk has to skip that root, or the command is not idempotent: the
+/// first run is clean, and the second reports findings in a file the first run created. The walk skips
+/// everything `jals` owns, which is also why `jals build && jals lint .` no longer surfaces generated
+/// code.
+///
+/// An explicitly named generated file is still linted — the exclusion is about what a *walk* reaches,
+/// not about the file being untouchable — and it is indexed exactly once, so the run reports one
+/// finding rather than two.
+#[test]
+fn lint_over_a_directory_is_idempotent_across_the_build_script() {
+    let dir = project(
+        "[package]\nname = \"walk-lint\"\n\
+         [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+    );
+    std::fs::write(
+        dir.path().join("build.rhai"),
+        r#"
+            let source = output.write_text(
+                "com/example/Generated.java",
+                "package com.example;\npublic class Generated { void m() { int unused = 1; } }\n",
+            );
+            build.add_source(source);
+        "#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("src/main/java/com/example/Main.java"),
+        "package com.example;\npublic class Main { Generated g; }\n",
+    )
+    .unwrap();
+
+    let root = dir.path().to_str().unwrap();
+    for run in 1..=3 {
+        let (stdout, stderr, code) = run_full(&["lint", root]);
+        let out = format!("{stdout}{stderr}");
+        assert_eq!(code, 0, "run {run}: {out}");
+        assert!(out.is_empty(), "run {run} must report nothing: {out}");
+    }
+
+    // Named outright it *is* linted, and its one finding is reported once — not twice, which is what
+    // a second `FileId` over the same file would produce.
+    let generated = dir
+        .path()
+        .join("target/jals/build/rhai/out/com/example/Generated.java");
+    let (stdout, stderr, code) = run_full(&["lint", generated.to_str().unwrap()]);
+    let out = format!("{stdout}{stderr}");
+    assert_eq!(code, 1, "output: {out}");
+    // One `ariadne` report per diagnostic; the message itself appears twice inside each (header and
+    // label), so the report header is what counts them.
+    assert_eq!(
+        out.matches("[unused-local]").count(),
+        1,
+        "reported exactly once: {out}"
+    );
+}
+
+/// The half of the script phase that `SourcePublication` actually gates: a **task plan** publishing a
+/// source tree into a root it owns. `output.write` output is published either way, so the two
+/// publication modes are indistinguishable without a task plan — this is the fixture that tells them
+/// apart, and `jals lint` runs under `Apply` like the language server.
+///
+/// The consequence is the reason for that choice: on a fresh checkout, with nothing built, `jals lint`
+/// alone populates the owned root and the published type resolves. Under `Skip` the root would stay
+/// empty and every reference to `Vendored` would be a `cannot-resolve`.
+///
+/// A task plan needs a jar; `tasks.project_jar` takes one from the project, so this reaches the
+/// publishing path with no network at all.
+#[test]
+fn lint_populates_an_owned_source_root_from_a_task_plan() {
+    let dir = project(
+        "[package]\nname = \"pub-lint\"\n\
+         [build]\nsource-dirs = [\"src/main/java\"]\n\
+         script = { type = \"rhai\", file = \"build.rhai\" }\n",
+    );
+    write_source_jar(
+        &dir.path().join("sources.jar"),
+        &[(
+            "com/example/vendored/Vendored.java",
+            b"package com.example.vendored;\npublic class Vendored {}\n",
+        )],
+    );
+    std::fs::write(
+        dir.path().join("build.rhai"),
+        r#"
+            let jar = tasks.project_jar("sources.jar");
+            let sources = tasks.extract_java(jar, "com/example/vendored");
+            tasks.publish_tree("vendored", sources, "src/main/java/com/example/vendored", "replace-root");
+        "#,
+    )
+    .unwrap();
+    let main = dir.path().join("src/main/java/com/example/Main.java");
+    std::fs::write(
+        &main,
+        "package com.example;\n\
+         import com.example.vendored.Vendored;\n\
+         public class Main { Vendored v; }\n",
+    )
+    .unwrap();
+
+    let published = dir
+        .path()
+        .join("src/main/java/com/example/vendored/Vendored.java");
+    assert!(!published.exists(), "nothing is built yet");
+
+    let (stdout, stderr, code) = run_full(&["lint", main.to_str().unwrap()]);
+    let out = format!("{stdout}{stderr}");
+    assert_eq!(code, 0, "output: {out}");
+    assert!(
+        published.exists(),
+        "`Apply` is what lets a lint run populate the owned root: {out}"
+    );
+    assert!(
+        !out.contains("cannot resolve symbol"),
+        "the published type has to resolve: {out}"
     );
 }
 

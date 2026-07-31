@@ -100,16 +100,26 @@ filesystem reads into portable interfaces.
   that way: a step that becomes `pub` for one caller is the hand-sequencing this seam removed, and
   the crate's own tests live in `src` (`graph_tests.rs`) precisely so exercising a single step never
   requires publishing it. `ProjectScript` is the only way from the first phase into the second
-  (`skipped()` for a host that deliberately runs no script, such as `jals lint`). It is deliberately
+  (`skipped()` is the *failure* path — a script that could not be prepared or executed still has to
+  let analysis continue; no host deliberately runs no script). It is deliberately
   *two* calls rather than one: the aggregate hand-over point belongs to the host — `jals-cli`
   reopens storage under narrower scopes for the graph phase, and the playground releases its
   workspace lock so a jar download never blocks the editor. The policy each phase takes is the whole
   difference between hosts (`BuildTaskHost`/`SourcePublication`/`blocked_files` on the first,
   `GraphPreprocess` plus `ProjectInputOptions` on the second); the steps between them exist once.
+  `GraphWarning` and `ProjectAssemblyError` follow the same rule `jals-classpath`'s `Warning` does:
+  the subject lives outside `message` (a dependency, a node, a path), so a host renders one through
+  its `Display` and never formats the fields itself — three hosts formatting them was three wordings
+  for one broken dependency.
 - `jals-exec`: the execution context (`Exec`, fan-out, yields, runtime adapters). Only its
   `tokio`-feature module may name tokio; the portable core is `no_std`.
 - `jals-editor`: protocol-neutral workspace and query facade over `ProjectStorage`; file identity is
-  `FileKey`, and source/config invalidation follows storage revisions.
+  `FileKey`, and source/config invalidation follows storage revisions. `FileDiagnostics::assemble` is
+  the **one** diagnostics policy — which passes run, in what order, what a broken parse suppresses —
+  and it has **three** adapters: `jals-lsp`, `jals-playground`, and `jals lint`. A host maps each
+  `FileDiagnostic` onto its own shape (LSP `Diagnostic`, Monaco marker, `ariadne` report) and decides
+  nothing else; a fourth host that sequenced the passes itself would answer the same file differently,
+  which is exactly what the CLI used to do.
 - `jals-build`: portable target/scaffold planning plus native JDK/process adapters. OS arguments,
   environment variables, and classpath separators stay in native/host code. `[build] backend`
   selects what compiles the lowered tree: `javac` (a host process), `jals` (in-process, one class
@@ -128,7 +138,19 @@ filesystem reads into portable interfaces.
   `ProjectView`, then hands the text to `jals_fmt::import` and the result to
   `jals_fmt::generate`. What it keeps of project assembly is only what a host path forces:
   `NativeScope` selection, `materialize_file`/`materialize_tree`, `to_host_path`, and promoting a
-  structured failure to `anyhow`.
+  structured failure to `anyhow`. A build script's `add_classpath` entries are **not** among them:
+  they reach the classpath only through `ProjectScript::augment_classpath`, before the manifest is
+  handed to `project_inputs` (whose first act derives the snapshot scopes from it). `jals lint`
+  renders `jals-editor`'s diagnostics assembly rather than driving the rule engine itself, and it
+  runs the root build script under the same policy the language server does —
+  `SourcePublication::Apply` with `NetworkPolicy::Offline`, so a project whose types are generated is
+  analysable while an unreviewed `build.rhai` still cannot reach the network from a lint run. Two
+  asymmetries with the server are deliberate: `blocked_files` is empty (a command line has no open
+  documents to protect from an owned-root republish), and a directory walk skips
+  `build_script::MANAGED_ROOT` — everything under it is derived, so a walk that descended would report
+  findings in files the same command had just written. The script's generated sources are folded into
+  the lint index but never reported: `jals lint` reports the files it was asked about, and a generated
+  file is there so its types resolve.
 - `jals-lsp`: the only URI↔native-root adapter; watched-file notifications call `refresh()`. What it
   keeps of project assembly is diagnostic shaping, overlay mounting of navigation sources, the watch
   policy, and its own root-only fallback (a second `resolve_native` call, deliberately not folded in
