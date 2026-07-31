@@ -123,6 +123,23 @@ pub(crate) enum Effect {
         site: Site,
     },
     /// Tokens of `kinds` may appear that the input did not have.
+    ///
+    /// **The granted allowance is looser than this effect**, the same way
+    /// [`RemovesSubtrees`](Self::RemovesSubtrees)' is. There is no [`Site`], so a `force-*` rule that
+    /// wraps one statement buys the file-wide right to gain a `{` — an extra brace around a block
+    /// that already had one, or a duplicated class body, costs the count nothing. Declared here so
+    /// the gap is chosen rather than inherited.
+    ///
+    /// It is the mildest of the three gaps, for a reason worth stating: a brace in the wrong place is
+    /// usually not a *parse* of the input at all, and `TokenBudget`'s other half — no new syntax
+    /// error — is unconditional. That narrows it to insertions that happen to keep the file parsing;
+    /// it does not close it.
+    ///
+    /// Scoping it would need what `Site::Reflow` has: a predicate shared with the pass, naming the
+    /// statements a `force-*` rule may wrap. Unlike the reflow's, that predicate does not exist yet —
+    /// brace forcing is decided inside the lowering walk from `Style`, per construct, and one of the
+    /// four values (`if-multiline`) reads the engine's own result, so the input tree cannot answer
+    /// where a brace was allowed to appear. That is the work, and it is not a doc comment's.
     Inserts { kinds: &'static [SyntaxKind] },
     /// Tokens of `kinds` keep their kind and their count, but may be spelled differently.
     Respells {
