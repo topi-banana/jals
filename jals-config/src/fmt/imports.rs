@@ -59,8 +59,11 @@ pub struct Imports {
     /// google-java-format has. IntelliJ's optimize-imports resolves the classpath instead and
     /// therefore does not project here (`jals-fmt/MAPPING.md` §7).
     ///
-    /// The only rule in this crate that *removes* significant tokens, so it defaults to `false`
-    /// and the strict token invariant holds unless opted into.
+    /// The only *configurable* rule in this crate that removes significant tokens, so it defaults
+    /// to `false`. It is not the only operation that removes one: the jals dialect drops a grouped
+    /// import's trailing comma unconditionally, which is why the formatter's exemptions are
+    /// enumerated in `jals-fmt`'s own table (`jals-fmt/DESIGN.md` §20) rather than being read off
+    /// this section's keys.
     pub remove_unused: bool,
 }
 

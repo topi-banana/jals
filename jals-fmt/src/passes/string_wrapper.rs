@@ -13,11 +13,28 @@
 //! keep it only if it is already formatted. A candidate that fails is discarded and the original
 //! output stands, so the pass can never make a file worse, and `fmt ∘ fmt = fmt` survives.
 //!
+//! # It does add tokens
+//!
+//! A lone literal too long for its line **is** split into a concatenation of its own, which adds
+//! `+` operators the source never had ([`plan`](StringWrapper::plan)'s `LITERAL` arm).
+//! Re-chunking a chain can also return fewer pieces than it took, so the `STRING_LITERAL` count
+//! moves in both directions too. This is therefore not a rearrangement, and the `+`/string-piece
+//! multiset is *not* preserved — a claim this header used to make, and one `DESIGN.md` §10 recorded
+//! as an open question that the code had already answered.
+//!
+//! What survives instead is what each site **spells**, which is what
+//! [`token_license`](super::token_license) declares and [`TokenBudget`](super::TokenBudget) checks:
+//! where the pieces are cut is layout, what they spell together is the program.
+//!
 //! # What it will not do
 //!
-//! Split a *single* literal into new tokens. That would add `+` operators the source never had,
-//! and google-java-format is not confirmed to do it either (`DESIGN.md` §10). The `+` and
-//! string-piece multiset is therefore preserved and only the arrangement changes.
+//! Reach outside a site. [`sites`](StringWrapper::sites) is the single definition of which node this
+//! pass may touch, and the fail-safe licenses exactly those, so an arithmetic `+` — or a `+` in a
+//! chain with a non-literal operand — is still held to exact equality.
+//!
+//! Reach into a formatter-disabled region either. Being the *last* stage means being the last one
+//! able to break `@formatter:off`, and unlike every other stage this one does not run through
+//! [`Ctx`](crate::visit::Ctx), so it needs [`OffOn`] of its own ([`plan`](StringWrapper::plan)).
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -26,6 +43,7 @@ use jals_syntax::{SyntaxElement, SyntaxKind, SyntaxNode};
 use text_size::TextRange;
 
 use crate::ir::Width;
+use crate::passes::OffOn;
 use crate::style::Style;
 
 /// Re-wraps over-long string concatenations.
@@ -182,29 +200,52 @@ impl StringWrapper {
         stripped.join("\n").replace("\\\n", "")
     }
 
-    /// The replacements to make, in source order and non-overlapping.
-    fn plan(root: &SyntaxNode, src: &str, style: &Style) -> Vec<(TextRange, String)> {
-        let mut edits = Self::text_block_edits(root, src);
-        for node in root.descendants() {
+    /// Every node this pass may re-split, in source order, with the pieces it is built from.
+    ///
+    /// This is [`plan`](Self::plan)'s own eligibility test, lifted so that
+    /// [`TokenBudget`](super::TokenBudget) licenses exactly the nodes the pass can touch. The two
+    /// cannot disagree about which `+` is a string `+`, because there is one predicate — and that
+    /// disagreement is the shape of defect this seam exists to make impossible.
+    pub(crate) fn sites(root: &SyntaxNode) -> Vec<(SyntaxNode, Vec<String>)> {
+        root.descendants()
             // Outermost only: a nested chain is handled by its root, and editing both would
             // produce overlapping ranges. A lone literal inside one is likewise its root's.
-            if node
-                .parent()
-                .is_some_and(|parent| parent.kind() == SyntaxKind::BINARY_EXPR)
-            {
-                continue;
-            }
-            let pieces = match node.kind() {
-                SyntaxKind::BINARY_EXPR => Self::concatenation(&node),
-                // A single literal too long for its line is split into a concatenation of its
-                // own — this is the case `reflow-long-strings` mostly exists for, and the one
-                // place in the crate where `+` operators are added.
-                SyntaxKind::LITERAL => Self::literal_body(&node).map(|body| alloc::vec![body]),
-                _ => continue,
-            };
-            let Some(pieces) = pieces else {
-                continue;
-            };
+            .filter(|node| {
+                node.parent()
+                    .is_none_or(|parent| parent.kind() != SyntaxKind::BINARY_EXPR)
+            })
+            .filter_map(|node| Self::site_pieces(&node).map(|pieces| (node, pieces)))
+            .collect()
+    }
+
+    /// The pieces `node` is built from, or `None` when it is not a site.
+    fn site_pieces(node: &SyntaxNode) -> Option<Vec<String>> {
+        match node.kind() {
+            SyntaxKind::BINARY_EXPR => Self::concatenation(node),
+            // A single literal too long for its line is split into a concatenation of its own —
+            // this is the case `reflow-long-strings` mostly exists for, and the one place in the
+            // crate where `+` operators are added.
+            SyntaxKind::LITERAL => Self::literal_body(node).map(|body| alloc::vec![body]),
+            _ => None,
+        }
+    }
+
+    /// The replacements to make, in source order.
+    ///
+    /// **Not guaranteed non-overlapping.** A text-block edit's range reaches back to the start of the
+    /// block's opening line, so it can cover a concatenation site that shares that line; the two
+    /// families are otherwise disjoint, since a `TEXT_BLOCK` is never a site
+    /// ([`literal_body`](Self::literal_body) demands a `STRING_LITERAL`). Sorting decides which of
+    /// such a pair comes first, and [`splice`](Self::splice) drops the other rather than corrupt the
+    /// file — so the cost is one re-indent or one rewrap not happening, on a shape the formatter has
+    /// already put on separate lines by the time this pass runs.
+    ///
+    /// What the sort *does* fix is that the survivor used to be decided by collection order rather
+    /// than position: a concatenation earlier in the file than any text block was dropped for no
+    /// other reason.
+    fn plan(root: &SyntaxNode, src: &str, style: &Style) -> Vec<(TextRange, String)> {
+        let mut edits = Self::text_block_edits(root, src);
+        for (node, pieces) in Self::sites(root) {
             let range = node.text_range();
             if !Self::overflows(src, range, style) {
                 continue;
@@ -225,7 +266,36 @@ impl StringWrapper {
                 edits.push((range, text));
             }
         }
+        // `splice` walks the source once and drops any edit that starts behind where it already
+        // is, so the two families have to be merged rather than appended: text-block edits are
+        // collected first, and a concatenation earlier in the file would otherwise be discarded
+        // silently. Sorting is stable, so an edit's family no longer decides whether it survives.
+        edits.sort_by_key(|(range, _)| range.start());
+        // A formatter-disabled region has to survive byte-identical, and this is L4 — the last stage
+        // that can still write into one. `OffOn` reaches the lowering walk through `Ctx`, which this
+        // pass runs *after* and over re-parsed text, so the veto has to be applied here as well.
+        let disabled = OffOn::scan(root, style);
+        edits.retain(|(range, _)| !Self::disabled(&disabled, *range));
         edits
+    }
+
+    /// Whether `range` reaches into a formatter-disabled region.
+    ///
+    /// Any overlap at all disqualifies the edit, not just containment: an edit that starts outside a
+    /// region and ends inside it would rewrite the region's opening just as surely.
+    ///
+    /// The regions are a *veto* over [`sites`](Self::sites), deliberately not folded into it. `sites`
+    /// is the predicate the fail-safe shares, and it answers over one tree; a disabled region is a
+    /// property of the run's config, and the input's regions and the output's live in different
+    /// coordinates. Keeping it here leaves the license **wider** than the pass, which is the safe
+    /// direction — a pass that changes less than it is licensed to can never trip the fail-safe,
+    /// whereas a license narrower than the pass is exactly the defect the table was written to fix.
+    fn disabled(regions: &[TextRange], range: TextRange) -> bool {
+        regions.iter().any(|region| {
+            region
+                .intersect(range)
+                .is_some_and(|shared| !shared.is_empty())
+        })
     }
 
     /// The string literals of a pure `+` concatenation, or `None` when the node is anything else.
@@ -433,5 +503,68 @@ impl StringWrapper {
         }
         out.push_str(&src[at..]);
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use jals_config::fmt::Config;
+
+    use super::StringWrapper;
+    use crate::style::Style;
+
+    /// A literal past the column limit, and the `class` wrapper to hold it.
+    const LONG: &str =
+        "\"a single very long literal that runs well past the hundred column limit and then some\"";
+
+    /// [`LONG`] inside an `@formatter:off` region — the same source for both `formatter-tags` values,
+    /// so the only difference between the two tests is the rule.
+    fn in_disabled_region() -> String {
+        alloc::format!(
+            "class X {{\n  // @formatter:off\n  String k = {LONG};\n  // @formatter:on\n}}\n"
+        )
+    }
+
+    /// `candidate` under a config with `reflow-long-strings` on and `formatter-tags` as given.
+    fn candidate(src: &str, tags: bool) -> Option<String> {
+        let mut cfg = Config::default();
+        cfg.wrapping.reflow_long_strings = true;
+        cfg.layout.formatter_tags = tags;
+        let (style, _) = Style::reify(&cfg, src);
+        jals_exec::block_on_inline(StringWrapper::candidate(src, &style))
+    }
+
+    #[test]
+    fn a_literal_inside_a_disabled_region_is_never_re_split() {
+        // L4 runs over re-parsed text and never sees `Ctx`, so before this veto existed it happily
+        // rewrote `@formatter:off` — and did it badly, eating the space after `=`, because nothing
+        // re-formats a disabled region afterwards to tidy up.
+        assert_eq!(
+            candidate(&in_disabled_region(), true),
+            None,
+            "a disabled region must survive byte-identical, so there is nothing to splice",
+        );
+    }
+
+    #[test]
+    fn the_same_literal_outside_one_is_still_re_split() {
+        // The control: the veto has to cost the region and nothing else, or "nothing applies" would
+        // be indistinguishable from "the pass stopped working".
+        let src = alloc::format!("class X {{\n  String k = {LONG};\n}}\n");
+        let rewrapped = candidate(&src, true).expect("an over-long literal is a site");
+        assert!(
+            rewrapped.contains(" + "),
+            "the literal should have been split into a concatenation:\n{rewrapped}",
+        );
+    }
+
+    #[test]
+    fn the_region_is_only_spared_while_formatter_tags_is_on() {
+        // `OffOn::scan` returns nothing when the rule is off, so the marker is an ordinary comment
+        // and the literal inside it is an ordinary site. Pins the veto to the rule that means it.
+        assert!(
+            candidate(&in_disabled_region(), false).is_some(),
+            "with `formatter-tags` off there is no region to respect",
+        );
     }
 }

@@ -40,7 +40,7 @@ impl Spacing {
         // Two operators written against each other would spell a third: `+ + +x` is three unary
         // pluses, `+++x` is `++` applied to `+x`. Separating them is not a `[spacing]` decision —
         // it is what keeps the output's token stream the input's.
-        if Self::glues(prev.text(), next.text()) {
+        if Self::glues(prev.text(), next.text()) || Self::runs_together(prev.text(), next.text()) {
             return true;
         }
 
@@ -157,6 +157,30 @@ impl Spacing {
         )
     }
 
+    /// Whether gluing `prev` to `next` would run two word tokens into one.
+    ///
+    /// [`glues`](Self::glues)' case for words rather than punctuation, and mandatory for the same
+    /// reason: `label instanceof String` written tight is the single identifier
+    /// `labelinstanceofString`, which is three tokens becoming one — a loss the fail-safe answers
+    /// by returning the whole file unformatted.
+    ///
+    /// It matters because `instanceof` is the one **keyword** the operator table routes through a
+    /// configurable rule (`[spacing] around-relational-operators`, beside `<` / `>` / `<=`), and a
+    /// symbol operator can lose its spaces where a word operator cannot. Eclipse spells the same
+    /// setting and has the same constraint: `insert_space_*_relational_operator` never emits
+    /// invalid Java either.
+    ///
+    /// Word characters rather than token kinds, because the question is about the rendered text: a
+    /// literal ends in `"` or a digit, punctuation ends in a symbol, and only two identifier-shaped
+    /// edges can merge.
+    fn runs_together(prev: &str, next: &str) -> bool {
+        let word = |ch: char| ch.is_alphanumeric() || ch == '_' || ch == '$';
+        let (Some(last), Some(first)) = (prev.chars().last(), next.chars().next()) else {
+            return false;
+        };
+        word(last) && word(first)
+    }
+
     /// Whether the two tokens spell one fused `>`-family operator (`>>`, `>=`, `>>>=`).
     ///
     /// Requires source adjacency *and* a shared parent, so the two `>` closing `Map<K, List<V>>`
@@ -165,7 +189,7 @@ impl Spacing {
         clippy::suspicious_operation_groupings,
         reason = "`prev.end() == next.start()` is source adjacency, not a mismatched pair"
     )]
-    fn fused(prev: &SyntaxToken, next: &SyntaxToken) -> bool {
+    pub(super) fn fused(prev: &SyntaxToken, next: &SyntaxToken) -> bool {
         prev.kind() == S::GT
             && matches!(next.kind(), S::GT | S::EQ)
             && prev.text_range().end() == next.text_range().start()
@@ -512,5 +536,40 @@ impl Spacing {
             S::ARROW => rules.around_lambda_arrow,
             _ => return None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use jals_config::fmt::Config;
+
+    #[test]
+    fn a_word_operator_keeps_its_spaces_however_its_rule_is_set() {
+        // `instanceof` is the one *keyword* `operator_rule` routes through a configurable rule
+        // (`around-relational-operators`, beside `<` / `>` / `<=`). A symbol operator can lose its
+        // spaces; a word one cannot — `label instanceof String` written tight is the single
+        // identifier `labelinstanceofString`, three tokens becoming one.
+        let mut cfg = Config::default();
+        cfg.spacing.around_relational_operators = false;
+
+        let out = jals_exec::block_on_inline(crate::FormatOutput::format_source(
+            "class Z { void m() { if (label instanceof String s && total > 0) { report(); } } }\n",
+            &cfg,
+        ));
+        assert!(
+            !out.fell_back(),
+            "the fail-safe refused the output, so nothing was formatted",
+        );
+        assert!(
+            out.formatted.contains("label instanceof String s"),
+            "the keyword was glued to its operands:\n{}",
+            out.formatted,
+        );
+        // The rule still applies where it can: a symbol operator does lose its spaces.
+        assert!(
+            out.formatted.contains("total>0"),
+            "`around-relational-operators` stopped reaching `>`:\n{}",
+            out.formatted,
+        );
     }
 }

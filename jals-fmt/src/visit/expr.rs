@@ -108,29 +108,57 @@ impl Ctx<'_> {
     /// Emit a node's children, placing a break on the chosen side of each operator token.
     async fn emit_operator_run(&mut self, node: &SyntaxNode, policy: WrapPolicy, before: bool) {
         let children = Self::children(node);
+        // The `!before` break waits until the operator is fully spelled. `>>`, `>=`, and `>>>=`
+        // arrive as several adjacent tokens (`spacing`'s module header), so a break placed after
+        // the first of them lands *inside* the operator: `total >> 1` came out `total > > 1`, and
+        // `x >= 1` came out `x > = 1`. That is a different token stream, which the fail-safe
+        // answers by returning the whole file unformatted.
+        let mut deferred: Option<&'static str> = None;
         for (nth, child) in children.iter().enumerate() {
             let is_operator = child
                 .as_token()
                 .is_some_and(|tok| Self::is_binary_operator(tok.kind()));
             // A fused `>>` arrives as several `GT` tokens; only the first one takes the break.
-            let fused_tail = is_operator
-                && nth > 0
-                && children[nth - 1]
-                    .as_token()
-                    .is_some_and(|previous| previous.kind() == S::GT);
+            let fused_tail = is_operator && Self::fuses_with_previous(&children, nth);
             if is_operator && !fused_tail {
                 let flat = self.operator_flat(child);
                 if before {
                     self.list_break_flat(policy, flat, Indent::ZERO);
+                } else {
+                    deferred = Some(flat);
                 }
                 self.visit_element(child).await;
-                if !before {
-                    self.list_break_flat(policy, flat, Indent::ZERO);
-                }
                 continue;
+            }
+            // The first child that is not another piece of the operator: the deferred break falls
+            // here, in front of the right operand, which is the gap it always stood for.
+            if !Self::fuses_with_previous(&children, nth)
+                && let Some(flat) = deferred.take()
+            {
+                self.list_break_flat(policy, flat, Indent::ZERO);
             }
             self.visit_element(child).await;
         }
+        // An operator with no right operand — error recovery — still gets its break, so the
+        // deferred one is never simply dropped.
+        if let Some(flat) = deferred {
+            self.list_break_flat(policy, flat, Indent::ZERO);
+        }
+    }
+
+    /// Whether `children[nth]` is another token of the fused operator `children[nth - 1]` opens.
+    ///
+    /// [`Spacing::fused`] is the single definition of "these two tokens spell one operator" — it
+    /// is what keeps them emitted tight — so the break placement asks it rather than re-deriving
+    /// the answer from `GT` alone. Two questions about one operator, answered once.
+    fn fuses_with_previous(children: &[SyntaxElement], nth: usize) -> bool {
+        let (Some(previous), Some(current)) = (
+            nth.checked_sub(1).and_then(|at| children[at].as_token()),
+            children[nth].as_token(),
+        ) else {
+            return false;
+        };
+        Spacing::fused(previous, current)
     }
 
     /// The flat rendering of the break placed against an operator token.
@@ -138,10 +166,19 @@ impl Ctx<'_> {
     /// A break stands where a space would otherwise be decided, so the operator's own `[spacing]`
     /// rule has to travel with it — otherwise `space-around-additive-operators = false` would be
     /// honored on an expression that fits and ignored on one that wraps.
+    ///
+    /// The pair asked about is the *emitted* one, [`Ctx::previous`](crate::visit::Ctx), not
+    /// `prev_token()`: the break replaces exactly the space
+    /// [`token`](crate::visit::Ctx::token) would have emitted for that pair, and the source's own
+    /// whitespace sits between them in the tree. Handing `Spacing` a `WHITESPACE` token instead
+    /// looks harmless while every rule here answers from the operator alone — but it silently
+    /// withholds the left operand from the guards that need it, and gluing `x` to `instanceof`
+    /// spells `xinstanceof`.
     fn operator_flat(&self, child: &SyntaxElement) -> &'static str {
         let space = child.as_token().is_some_and(|tok| {
-            let previous = tok.prev_token();
-            previous.is_none_or(|previous| Spacing::between(&previous, tok, self.style))
+            self.previous
+                .as_ref()
+                .is_none_or(|previous| Spacing::between(previous, tok, self.style))
         });
         Self::flat_space(space)
     }
@@ -308,5 +345,71 @@ impl Ctx<'_> {
             }
             self.visit_element(&child).await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use jals_config::fmt::Config;
+
+    /// Format with the break placed *after* the operator.
+    fn breaking_after(src: &str) -> crate::FormatOutput {
+        let mut cfg = Config::default();
+        cfg.wrapping.before_binary_operator = false;
+        jals_exec::block_on_inline(crate::FormatOutput::format_source(src, &cfg))
+    }
+
+    #[test]
+    fn a_fused_operator_never_takes_a_break_inside_itself() {
+        // `>>`, `>=`, and `>>>=` are several adjacent `GT`-family tokens. The run takes one break,
+        // and on this side it belongs after the *last* of them: a break after the first re-lexes
+        // the operator, which the fail-safe answers by returning the whole file unformatted — so
+        // before this fix the rule was inert on every source containing one.
+        for (src, spelled) in [
+            ("class Z { void m() { int a = t >> 1; } }\n", ">> 1"),
+            ("class Z { void m() { int a = t >>> 1; } }\n", ">>> 1"),
+            ("class Z { void m() { boolean a = t >= 1; } }\n", ">= 1"),
+        ] {
+            let out = breaking_after(src);
+            assert!(
+                !out.fell_back(),
+                "the fail-safe refused {src:?}, so nothing was formatted",
+            );
+            assert!(
+                out.formatted.contains(spelled),
+                "the operator was split apart in:\n{}",
+                out.formatted,
+            );
+        }
+    }
+
+    #[test]
+    fn a_compound_shift_assignment_survives_its_own_break() {
+        // `>>=` and `>>>=` are the same multi-token shape one method over, in `visit_assignment`,
+        // which places its break the same way — and under the *default* config, since
+        // `before-assignment-operator` is off. The operator has to come out spelled as one piece.
+        //
+        // What this deliberately does not assert is the space *after* it: `x >>= 2` is currently
+        // rendered `x >>=2`, because `operator_flat` asks about the pair (previous token,
+        // operator) while a `!before` break stands for (operator, right operand) — and on a fused
+        // operator the first of those pairs is *inside* it, so `Spacing::fused` answers "tight".
+        // That is a separate, pre-existing spacing defect, not a token loss, and pinning today's
+        // output here would make it look intended.
+        let out = jals_exec::block_on_inline(crate::FormatOutput::format_source(
+            "class Z { void m() { int x = 1; x >>= 2; x >>>= 3; } }\n",
+            &Config::default(),
+        ));
+        assert!(!out.fell_back(), "the fail-safe refused the output");
+        assert!(out.formatted.contains(">>="), "{}", out.formatted);
+        assert!(out.formatted.contains(">>>="), "{}", out.formatted);
+    }
+
+    #[test]
+    fn the_break_still_falls_after_an_unfused_operator() {
+        // The control: deferring the break must cost the fused runs and nothing else, or "no break
+        // is misplaced" would also be satisfied by placing none at all.
+        let out = breaking_after("class Z { void m() { int a = t << 1; } }\n");
+        assert!(!out.fell_back());
+        assert!(out.formatted.contains("t << 1"), "{}", out.formatted);
     }
 }

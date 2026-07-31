@@ -20,6 +20,11 @@ pub struct HeaderProps {
     pub on_proxy_change: Callback<String>,
     /// The latest build-script/classpath status, shown beside the proxy input.
     pub deps_status: Option<String>,
+    /// Set when the last *Format* left the file unchanged because `jals-fmt`'s fail-safe refused its
+    /// own output — the one outcome a formatter cannot show in the buffer, since the buffer is what
+    /// it handed back. A slot of its own rather than [`deps_status`](Self::deps_status): the two
+    /// answer different actions, and a build status must not silently overwrite it.
+    pub format_notice: Option<String>,
 }
 
 /// The top application bar: the `jals playground` wordmark on the left, and — on the right — the
@@ -70,6 +75,9 @@ impl Component for Header {
                     <span class="text-sm text-mute">{ "playground" }</span>
                 </div>
                 <div class="flex items-center gap-2">
+                    if let Some(notice) = &props.format_notice {
+                        <span class="font-mono text-xs text-error">{ notice }</span>
+                    }
                     if let Some(status) = &props.deps_status {
                         <span class="font-mono text-xs text-mute">{ status }</span>
                     }

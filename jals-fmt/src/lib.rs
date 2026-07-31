@@ -27,13 +27,18 @@
 //!
 //! - **Never panics, never loses input.** A node with no bespoke rule falls through to a generic
 //!   path that still emits all of its tokens; an `ERROR` node is emitted verbatim. If the output
-//!   fails [`TokenBudget`](passes::TokenBudget)'s check, the input is returned unchanged.
+//!   fails [`TokenBudget`](passes::TokenBudget)'s check, the input is returned unchanged and
+//!   [`FormatOutput::fell_back`] says so — the one way to tell that outcome from "already
+//!   formatted", which it is otherwise byte-identical to.
 //! - **Idempotent.** `format(format(x)) == format(x)`.
-//! - **Significant tokens are preserved as a multiset**, except for the four configured
-//!   token-changing passes — import ordering, unused-import removal, modifier ordering,
-//!   long-string rewrapping — plus the opt-in `[literals]` rewrites and `[braces] force-*`. Only
-//!   unused-import removal removes tokens; only brace forcing adds them. Every one of the six is
-//!   off (or `preserve`) in [`Config::default`].
+//! - **Significant tokens are preserved as a multiset**, except where an operation declared in
+//!   [`OPERATIONS`](passes::token_license::OPERATIONS) applies. Seven of the eight rows are
+//!   configured and every one of them is off (or `preserve`) in [`Config::default`]: import
+//!   ordering, unused-import removal, modifier ordering, long-string rewrapping, text-block
+//!   re-indentation, the `[literals]` rewrites, and `[braces] force-*`. The eighth is
+//!   **unconditional** — the dialect drops a grouped import's trailing comma — so "except where an
+//!   explicitly configured rule applies" is not the whole story, and the table rather than this
+//!   sentence is what [`TokenBudget`](passes::TokenBudget) reads.
 //! - **Comments are never dropped.** Each is anchored to exactly one token and emitted with it.
 //! - **Layout never reads input whitespace**, with one exception the engine shares with
 //!   google-java-format: whether two significant tokens had a blank line between them. Rules that
@@ -51,6 +56,8 @@ mod comments;
 mod engine;
 pub mod generate;
 pub mod import;
+#[cfg(test)]
+mod invariants;
 mod ir;
 mod javadoc;
 mod ops;
@@ -76,9 +83,10 @@ impl FormatOutput {
         let errors = parse.errors().len();
         warnings.extend(parse.errors().iter().map(Warning::from_syntax_error));
 
-        let formatted = visit::Formatter::run(&parse.syntax(), src, errors, &style).await;
+        let outcome = passes::Formatter::run(&parse.syntax(), src, errors, &style).await;
         Self {
-            formatted,
+            vouched: outcome.vouched(),
+            formatted: outcome.text(),
             warnings,
         }
     }

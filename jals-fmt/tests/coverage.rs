@@ -223,9 +223,51 @@ fn alloc_groups() -> Vec<String> {
     vec!["java.".into(), "*".into()]
 }
 
-/// Format `src` under `config`.
+/// Format `src` under `config`, and require the formatter to have vouched for the result.
+///
+/// A run the fail-safe refused is not a formatting of `src` — it *is* `src`. This test reads "the
+/// output did not change" as "the rule is inert", so a fallback would surface here as exactly the
+/// failure the test exists to detect, named against a rule that is in fact implemented. The
+/// progress property `jals-fmt` states in `src/invariants.rs` therefore has to hold here too, and
+/// this is the wider sweep of the two: that corpus is five profiles, this one moves every schema
+/// leaf off its default in turn.
+///
+/// Asserted in the helper rather than at the two call sites so a third one cannot skip it.
 fn format(src: &str, config: &Config) -> jals_fmt::FormatOutput {
-    jals_exec::block_on_inline(jals_fmt::FormatOutput::format_source(src, config))
+    let out = jals_exec::block_on_inline(jals_fmt::FormatOutput::format_source(src, config));
+    assert!(
+        !out.fell_back(),
+        "the fail-safe refused its own output, so this run formatted nothing and every rule under \
+         it would be reported inert. Either a pass changed a token no `OPERATIONS` row licenses, \
+         or a row is missing.\n--- config off its default ---\n  {}\n--- source ---\n{src}",
+        off_default(config).join("\n  "),
+    );
+    out
+}
+
+/// The `section.key = value` pairs where `config` differs from [`Config::default`].
+///
+/// The sweep moves one leaf at a time, so this is normally one entry — plus whatever
+/// [`base_for`] had to turn on first. Enough to reproduce a failure without printing all 176 rules.
+fn off_default(config: &Config) -> Vec<String> {
+    let Value::Object(current) = serde_json::to_value(config).expect("serializable") else {
+        panic!("the config is a table of tables");
+    };
+    let defaults = schema();
+    let mut out = Vec::new();
+    for (section, values) in &current {
+        let (Some(values), Some(Value::Object(defaults))) =
+            (values.as_object(), defaults.get(section))
+        else {
+            continue;
+        };
+        for (key, value) in values {
+            if defaults.get(key) != Some(value) {
+                out.push(format!("{section}.{key} = {value}"));
+            }
+        }
+    }
+    out
 }
 
 /// The default config as a two-level JSON object.

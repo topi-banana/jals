@@ -17,10 +17,10 @@ use async_lsp::lsp_types::{
     CompletionItem, CompletionResponse, Diagnostic, DiagnosticSeverity,
     DidChangeTextDocumentParams, DidChangeWatchedFilesParams, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, DocumentHighlight, DocumentSymbolResponse, FileChangeType,
-    FoldingRange, GotoDefinitionResponse, Hover, Location, NumberOrString, Position,
+    FoldingRange, GotoDefinitionResponse, Hover, Location, MessageType, NumberOrString, Position,
     PrepareRenameResponse, PublishDiagnosticsParams, Range, SelectionRange, SemanticToken,
     SemanticTokens, SemanticTokensDelta, SemanticTokensFullDeltaResult, SemanticTokensResult,
-    SignatureHelp, TextEdit, Url, WorkspaceEdit, notification,
+    ShowMessageParams, SignatureHelp, TextEdit, Url, WorkspaceEdit, notification,
 };
 use async_lsp::{ClientSocket, ErrorCode, ResponseError};
 use futures::FutureExt;
@@ -1531,9 +1531,22 @@ impl Actor {
             return Ok(None);
         };
         let config = self.discovery.for_uri(uri).await;
-        Ok(Some(
-            Formatting::formatting_edits(&doc.content, &config).await,
-        ))
+        let formatted = Formatting::formatting_edits(&doc.content, &config).await;
+        // No edits is the *same* response as "already formatted", so a refusal has to say so out of
+        // band or the command looks like it did nothing. `window/showMessage` rather than a
+        // diagnostic: the fail-safe's subject is the whole file, and there is no range to point at.
+        if formatted.fell_back {
+            let _ = self
+                .client
+                .notify::<notification::ShowMessage>(ShowMessageParams {
+                    typ: MessageType::WARNING,
+                    message: format!(
+                        "jals: the formatter could not vouch for its output for {uri}, so the \
+                         document was left unchanged. This is a bug in jals-fmt, not in the source.",
+                    ),
+                });
+        }
+        Ok(Some(formatted.edits))
     }
 
     fn folding_range(&self, uri: &Url) -> Option<Vec<FoldingRange>> {

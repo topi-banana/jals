@@ -6,18 +6,15 @@
 //!
 //! # Why this is not "no tokens were lost"
 //!
-//! The naive check would defeat half the feature set. `imports.remove-unused` deletes
-//! declarations by design; `[literals]` rewrites a token's spelling; `[braces] force-*` inserts
-//! braces. Each is a *configured* exception, so the check carries the same exemption list the
-//! invariant does (`DESIGN.md` §9, §20):
+//! The naive check would defeat half the feature set. `imports.remove-unused` deletes declarations
+//! by design; `[literals]` rewrites a token's spelling; `[braces] force-*` inserts braces. Each is
+//! a declared exception, and the declarations live in
+//! [`token_license`](super::token_license) — `DESIGN.md` §20's table as data.
 //!
-//! | when | comparison |
-//! |---|---|
-//! | always | the token **multiset**, not the sequence — so import and modifier reordering pass |
-//! | `[literals]` non-`preserve` | by token **kind**, since a literal's text is allowed to change |
-//! | `imports.remove-unused` | output ⊆ input instead of equality |
-//! | `[braces] force-*` ≠ `never` | extra `{` / `}` in the output are allowed |
-//! | `wrapping.reflow-long-strings` | the literals and the `+` between them leave the multiset; what the concatenation *spells* is compared instead. A text block leaves it too: `indentTextBlocks` rewrites its incidental whitespace, which is layout rather than content |
+//! This module reads **only** a [`License`]. It does not see [`Config`](jals_config::fmt::Config),
+//! and that is the point: reconstructing "what was allowed" from config fields is what let an
+//! operation with no config key slip through unlicensed. Adding a token-changing pass means adding
+//! a row to the table, not a branch here.
 //!
 //! The new-syntax-error half of the check is unconditional: no rule may make a file stop parsing.
 
@@ -25,41 +22,105 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use jals_config::fmt::ForceBraces;
 use jals_syntax::{SyntaxElement, SyntaxKind, SyntaxNode};
 
-use crate::passes::StringWrapper;
-use crate::passes::literals::LiteralRewrite;
-use crate::style::Style;
+use super::StringWrapper;
+use super::token_license::{Content, Lane, License, Sites};
 
-/// A significant-token multiset, keyed either by `(kind, text)` or by kind alone.
-type Budget = BTreeMap<(SyntaxKind, String), usize>;
+/// A significant-token multiset, keyed by the lane that answers for each token.
+///
+/// The lane comes first so the lanes are disjoint partitions of the key space: [`Ledger::covers`]
+/// dispatches on it and gives each one its own rule in a single pass.
+type Budget = BTreeMap<(Lane, SyntaxKind, String), usize>;
 
-/// Which part of a compilation unit a [`Budget`] covers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Scope {
-    /// Every significant token.
-    Everything,
-    /// Only tokens inside an `import` declaration.
-    ImportsOnly,
-    /// Everything except those.
-    OutsideImports,
+/// One tree, reduced to everything the comparison needs.
+struct Ledger {
+    /// Every counted token, by lane.
+    flat: Budget,
+    /// What the tokens a scoped allowance removed from the count must nonetheless still spell.
+    concatenations: String,
+    text_blocks: String,
 }
 
-impl Scope {
-    /// Whether this scope counts `tok`.
-    fn admits(self, tok: &jals_syntax::SyntaxToken) -> bool {
-        match self {
-            Self::Everything => true,
-            Self::ImportsOnly => Self::in_import(tok),
-            Self::OutsideImports => !Self::in_import(tok),
+impl Ledger {
+    /// Reduce `root` under `license`.
+    fn of(root: &SyntaxNode, license: License) -> Self {
+        let sites = Sites::of(root, license);
+        let mut flat = Budget::new();
+        for tok in root
+            .descendants_with_tokens()
+            .filter_map(SyntaxElement::into_token)
+            .filter(|tok| !tok.kind().is_trivia())
+        {
+            let lane = license.lane(&tok, &sites);
+            if matches!(lane, Lane::Redistributed(_)) {
+                // Not counted at all: the pass may add and remove these, so only the content check
+                // can answer for them.
+                continue;
+            }
+            // A respelled kind drops its text, and *only* that kind does. Emptying every kind's
+            // text — one flag for the whole file — hid a renamed identifier too.
+            let text = if license.respells(tok.kind()) {
+                String::new()
+            } else {
+                tok.text().into()
+            };
+            *flat.entry((lane, tok.kind(), text)).or_insert(0) += 1;
+        }
+        Self {
+            flat,
+            concatenations: sites.into_content(),
+            // Only gathered when a row scoped a text block's spelling out of the count. Otherwise
+            // `covers` never reads it, and collecting it would walk the whole tree a second time to
+            // build a string nothing compares.
+            text_blocks: if license.checks(Content::TextBlocks) {
+                Self::text_block_content(root)
+            } else {
+                String::new()
+            },
         }
     }
 
-    /// Whether a token sits inside an `import` declaration.
-    fn in_import(tok: &jals_syntax::SyntaxToken) -> bool {
-        tok.parent_ancestors()
-            .any(|node| node.kind() == SyntaxKind::IMPORT_DECL)
+    /// Every text block's body, in source order, separated.
+    ///
+    /// The one thing re-indenting a text block may not change: what it spells once its incidental
+    /// whitespace is stripped.
+    fn text_block_content(root: &SyntaxNode) -> String {
+        root.descendants_with_tokens()
+            .filter_map(SyntaxElement::into_token)
+            .filter(|tok| tok.kind() == SyntaxKind::TEXT_BLOCK)
+            .map(|tok| StringWrapper::text_block_content(tok.text()))
+            .collect::<Vec<_>>()
+            .join("\u{1}")
+    }
+
+    /// Whether `after` is a rendering of `self` that `license` authorizes.
+    fn covers(&self, after: &Self, license: License) -> bool {
+        // Both key sets are walked, so a key present on only one side is judged rather than
+        // skipped.
+        for key in self.flat.keys().chain(after.flat.keys()) {
+            let before = self.flat.get(key).copied().unwrap_or(0);
+            let now = after.flat.get(key).copied().unwrap_or(0);
+            let ok = match key.0 {
+                Lane::Exact => now == before,
+                Lane::Insertable(_) => now >= before,
+                Lane::Removable(_) => now <= before,
+                // Never entered `flat`.
+                Lane::Redistributed(_) => true,
+            };
+            if !ok {
+                return false;
+            }
+        }
+
+        // What the scoped-out tokens must nonetheless still spell.
+        if license.checks(Content::Concatenations) && self.concatenations != after.concatenations {
+            return false;
+        }
+        if license.checks(Content::TextBlocks) && self.text_blocks != after.text_blocks {
+            return false;
+        }
+        true
     }
 }
 
@@ -67,13 +128,13 @@ impl Scope {
 pub(crate) struct TokenBudget;
 
 impl TokenBudget {
-    /// Whether `formatted` is an acceptable rendering of `src` under `style`.
+    /// Whether `formatted` is a rendering of `src` that `license` authorizes.
     pub(crate) async fn accepts(
         src: &str,
         src_tree: &SyntaxNode,
         src_errors: usize,
         formatted: &str,
-        style: &Style,
+        license: License,
     ) -> bool {
         // An output that no longer parses is never acceptable, whatever the input's own state.
         let reparsed = jals_syntax::Parse::parse(formatted).await;
@@ -85,138 +146,297 @@ impl TokenBudget {
             return false;
         }
 
-        let by_kind = LiteralRewrite::is_active(style.cfg.literals);
-        let allow_extra_braces = Self::forces_braces(style);
-
-        // A reflowed concatenation is re-split at different boundaries, so neither the literals'
-        // texts nor the number of `+` between them survives. What does survive — and what the
-        // pass is actually promising — is the *text* the concatenation evaluates to, so that is
-        // what gets compared, and the two token kinds it rearranges leave the multiset.
-        let reflows = style.cfg.wrapping.reflow_long_strings;
-        if reflows
-            && Self::text_block_content(src_tree) != Self::text_block_content(&reparsed.syntax())
-        {
-            return false;
-        }
-        if reflows && Self::string_content(src_tree) != Self::string_content(&reparsed.syntax()) {
-            return false;
-        }
-
-        if !style.cfg.imports.remove_unused {
-            let before = Self::collect(src_tree, by_kind, Scope::Everything, reflows);
-            let after = Self::collect(&reparsed.syntax(), by_kind, Scope::Everything, reflows);
-            return Self::compare(&before, &after, false, allow_extra_braces);
-        }
-
-        // Unused-import removal deletes whole declarations, so the import block is checked as a
-        // *subset* — but only the import block. Splitting the two scopes keeps the allowance from
-        // masking a token dropped anywhere else, which is exactly the class of bug this check
-        // exists to catch.
-        let before_code = Self::collect(src_tree, by_kind, Scope::OutsideImports, reflows);
-        let after_code = Self::collect(&reparsed.syntax(), by_kind, Scope::OutsideImports, reflows);
-        if !Self::compare(&before_code, &after_code, false, allow_extra_braces) {
-            return false;
-        }
-        let before_imports = Self::collect(src_tree, by_kind, Scope::ImportsOnly, reflows);
-        let after_imports = Self::collect(&reparsed.syntax(), by_kind, Scope::ImportsOnly, reflows);
-        Self::compare(&before_imports, &after_imports, true, false)
+        let before = Ledger::of(src_tree, license);
+        let after = Ledger::of(&reparsed.syntax(), license);
+        before.covers(&after, license)
     }
+}
 
-    /// Whether any `[braces] force-*` rule can insert a brace.
-    fn forces_braces(style: &Style) -> bool {
-        let braces = &style.cfg.braces;
-        [
-            braces.force_if,
-            braces.force_for,
-            braces.force_while,
-            braces.force_do_while,
-        ]
-        .iter()
-        .any(|force| *force != ForceBraces::Never)
-    }
+#[cfg(test)]
+mod tests {
+    use jals_config::fmt::{Config, ForceBraces, HexLiteralCase};
 
-    /// The significant-token multiset of a tree, restricted to `scope`.
-    ///
-    /// `by_kind` drops the text, which is what makes the check survive `[literals]` rewriting a
-    /// literal's spelling while still catching a literal that turned into something else.
-    fn collect(root: &SyntaxNode, by_kind: bool, scope: Scope, reflows: bool) -> Budget {
-        let mut budget = Budget::new();
-        for tok in root
-            .descendants_with_tokens()
-            .filter_map(SyntaxElement::into_token)
-            .filter(|tok| !tok.kind().is_trivia())
-            .filter(|tok| scope.admits(tok))
-            .filter(|tok| {
-                !reflows
-                    || !matches!(
-                        tok.kind(),
-                        SyntaxKind::STRING_LITERAL | SyntaxKind::PLUS | SyntaxKind::TEXT_BLOCK
-                    )
+    use super::TokenBudget;
+    use crate::style::Style;
+
+    /// One `accepts` call, spelled the way [`Formatter::run`](crate::passes::Formatter) spells it.
+    struct Verdict;
+
+    impl Verdict {
+        /// Whether `formatted` is an acceptable rendering of `src` under `config`.
+        fn of(src: &str, formatted: &str, config: &Config) -> bool {
+            jals_exec::block_on_inline(async {
+                let (style, _) = Style::reify(config, src);
+                let parse = jals_syntax::Parse::parse(src).await;
+                let errors = parse.errors().len();
+                TokenBudget::accepts(src, &parse.syntax(), errors, formatted, style.license).await
             })
-        {
-            let text = if by_kind {
-                String::new()
-            } else {
-                tok.text().into()
-            };
-            *budget.entry((tok.kind(), text)).or_insert(0) += 1;
         }
-        budget
+
+        /// A config with only `braces.force-do-while` moved off its default.
+        fn only_force_do_while() -> Config {
+            let mut cfg = Config::default();
+            cfg.braces.force_do_while = ForceBraces::Always;
+            cfg
+        }
+
+        /// A config with only `imports.remove-unused` moved off its default.
+        fn removing_unused_imports() -> Config {
+            let mut cfg = Config::default();
+            cfg.imports.remove_unused = true;
+            cfg
+        }
+
+        /// A config with only `[literals] hex-case` moved off its default.
+        fn respelling_literals() -> Config {
+            let mut cfg = Config::default();
+            cfg.literals.hex_case = HexLiteralCase::Upper;
+            cfg
+        }
+
+        /// A config with only `wrapping.reflow-long-strings` moved off its default.
+        fn reflowing_strings() -> Config {
+            let mut cfg = Config::default();
+            cfg.wrapping.reflow_long_strings = true;
+            cfg
+        }
     }
 
-    /// Every string literal's body, in source order, concatenated.
-    ///
-    /// The one thing a reflow may not change: where the pieces are cut is layout, what they spell
-    /// together is the program.
-    /// The one thing re-indenting a text block may not change: what it spells once its
-    /// incidental whitespace is stripped.
-    fn text_block_content(root: &SyntaxNode) -> String {
-        root.descendants_with_tokens()
-            .filter_map(SyntaxElement::into_token)
-            .filter(|tok| tok.kind() == SyntaxKind::TEXT_BLOCK)
-            .map(|tok| StringWrapper::text_block_content(tok.text()))
-            .collect::<Vec<_>>()
-            .join("\u{1}")
+    // ===== Unconditional halves: no config can waive these =====
+
+    #[test]
+    fn an_output_that_stopped_parsing_is_never_acceptable() {
+        assert!(!Verdict::of(
+            "class A { int x; }",
+            "class A { int x;",
+            &Config::default(),
+        ));
     }
 
-    fn string_content(root: &SyntaxNode) -> String {
-        root.descendants_with_tokens()
-            .filter_map(SyntaxElement::into_token)
-            .filter(|tok| tok.kind() == SyntaxKind::STRING_LITERAL)
-            .map(|tok| {
-                let text = tok.text();
-                let body = text
-                    .strip_prefix('"')
-                    .and_then(|inner| inner.strip_suffix('"'))
-                    .unwrap_or(text);
-                String::from(body)
-            })
-            .collect()
+    #[test]
+    fn emptying_a_nonempty_file_is_never_acceptable() {
+        assert!(!Verdict::of("class A {}", "", &Config::default()));
     }
 
-    /// Compare two multisets under the configured allowances.
-    fn compare(
-        before: &Budget,
-        after: &Budget,
-        allow_missing: bool,
-        allow_extra_braces: bool,
-    ) -> bool {
-        for (key, &count) in after {
-            let expected = before.get(key).copied().unwrap_or(0);
-            if count > expected
-                && !(allow_extra_braces && matches!(key.0, SyntaxKind::LBRACE | SyntaxKind::RBRACE))
-            {
-                return false;
-            }
+    #[test]
+    fn an_empty_input_may_stay_empty() {
+        assert!(Verdict::of("", "", &Config::default()));
+    }
+
+    // ===== `DESIGN.md` §20 R0.1 / R0.3: reordering is multiset-neutral =====
+
+    #[test]
+    fn reordering_imports_is_accepted_because_the_check_is_a_multiset() {
+        assert!(Verdict::of(
+            "import b.C;\nimport a.B;\nclass A {}\n",
+            "import a.B;\nimport b.C;\nclass A {}\n",
+            &Config::default(),
+        ));
+    }
+
+    #[test]
+    fn reordering_modifiers_is_accepted_for_the_same_reason() {
+        assert!(Verdict::of(
+            "class A { final static public int X = 1; }",
+            "class A { public static final int X = 1; }",
+            &Config::default(),
+        ));
+    }
+
+    #[test]
+    fn a_token_lost_under_the_default_config_is_rejected() {
+        assert!(!Verdict::of(
+            "class A { int x; int y; }",
+            "class A { int x; }",
+            &Config::default(),
+        ));
+    }
+
+    // ===== `[literals]`: compare by kind, since a literal's text may change =====
+
+    #[test]
+    fn a_respelled_hex_literal_is_accepted_when_literals_is_active() {
+        assert!(Verdict::of(
+            "class A { int x = 0xff; }",
+            "class A { int x = 0xFF; }",
+            &Verdict::respelling_literals(),
+        ));
+    }
+
+    #[test]
+    fn the_same_respelling_is_rejected_when_literals_is_preserve() {
+        assert!(!Verdict::of(
+            "class A { int x = 0xff; }",
+            "class A { int x = 0xFF; }",
+            &Config::default(),
+        ));
+    }
+
+    #[test]
+    fn a_renamed_identifier_is_rejected_even_when_literals_is_active() {
+        // The guard for scoping the respelling to the two kinds `LiteralRewrite::apply` can touch.
+        // A single by-kind flag for the whole file made *every* token's spelling unverifiable the
+        // moment any `[literals]` rule was switched on, so a renamed identifier went unnoticed.
+        assert!(!Verdict::of(
+            "class A { int counted = 0xff; }",
+            "class A { int renamed = 0xff; }",
+            &Verdict::respelling_literals(),
+        ));
+    }
+
+    #[test]
+    fn a_respelled_string_is_rejected_even_when_literals_is_active() {
+        // Same scoping, the other kind a whole-file flag used to blind: no row licenses a string's
+        // spelling unless a reflow is on, and then only what it *spells* may survive re-cutting.
+        assert!(!Verdict::of(
+            "class A { String s = \"a\"; int x = 0xff; }",
+            "class A { String s = \"b\"; int x = 0xFF; }",
+            &Verdict::respelling_literals(),
+        ));
+    }
+
+    #[test]
+    fn a_text_block_that_vanished_is_rejected_even_under_reflow() {
+        // `reflow-long-strings` licenses re-indenting a text block, not losing one. Folding the
+        // re-indent into the rewrap's row took `TEXT_BLOCK` out of the count altogether, leaving a
+        // whole-file content string as the only witness; as its own respelling row the count is
+        // checked again.
+        assert!(!Verdict::of(
+            "class A { String a = \"\"\"\n    x\n    \"\"\"; String b = \"\"\"\n    x\n    \"\"\"; }",
+            "class A { String a = \"\"\"\n    x\n    \"\"\"; String b = \"\"; }",
+            &Verdict::reflowing_strings(),
+        ));
+    }
+
+    #[test]
+    fn a_literal_that_became_another_kind_is_rejected_even_by_kind() {
+        assert!(!Verdict::of(
+            "class A { int x = 1; }",
+            "class A { int x = \"s\"; }",
+            &Verdict::respelling_literals(),
+        ));
+    }
+
+    // ===== `DESIGN.md` §20 R0.2: unused-import removal deletes declarations =====
+
+    #[test]
+    fn remove_unused_accepts_a_dropped_import() {
+        assert!(Verdict::of(
+            "import a.B;\nclass A {}\n",
+            "class A {}\n",
+            &Verdict::removing_unused_imports(),
+        ));
+    }
+
+    #[test]
+    fn remove_unused_still_rejects_a_token_lost_outside_the_import_block() {
+        assert!(!Verdict::of(
+            "import a.B;\nclass A { int x; int y; }\n",
+            "import a.B;\nclass A { int x; }\n",
+            &Verdict::removing_unused_imports(),
+        ));
+    }
+
+    // ===== `[braces] force-*`: the only rule that adds tokens =====
+
+    #[test]
+    fn force_do_while_alone_accepts_the_braces_it_inserts() {
+        // The guard for `forces_braces`' four-way OR. The invariant properties used to read
+        // `force_if` alone, so a profile that set only this key held the formatter to an allowance
+        // it does not have; they read the license now, and this is what keeps the license honest.
+        assert!(Verdict::of(
+            "class A { void m() { do x(); while (c); } }",
+            "class A { void m() { do { x(); } while (c); } }",
+            &Verdict::only_force_do_while(),
+        ));
+    }
+
+    #[test]
+    fn a_brace_is_still_never_allowed_to_go_missing() {
+        assert!(!Verdict::of(
+            "class A { void m() { do { x(); } while (c); } }",
+            "class A { void m() { do x(); while (c); } }",
+            &Verdict::only_force_do_while(),
+        ));
+    }
+
+    #[test]
+    fn extra_braces_are_rejected_when_no_force_rule_is_on() {
+        assert!(!Verdict::of(
+            "class A { void m() { do x(); while (c); } }",
+            "class A { void m() { do { x(); } while (c); } }",
+            &Config::default(),
+        ));
+    }
+
+    // ===== `DESIGN.md` §20 R4.1: a reflow re-cuts the pieces, so content is compared =====
+
+    #[test]
+    fn reflow_accepts_a_concatenation_re_split_at_other_boundaries() {
+        assert!(Verdict::of(
+            "class A { String s = \"ab\" + \"c\"; }",
+            "class A { String s = \"a\" + \"bc\"; }",
+            &Verdict::reflowing_strings(),
+        ));
+    }
+
+    #[test]
+    fn reflow_rejects_a_concatenation_whose_content_changed() {
+        assert!(!Verdict::of(
+            "class A { String s = \"ab\" + \"c\"; }",
+            "class A { String s = \"a\" + \"bd\"; }",
+            &Verdict::reflowing_strings(),
+        ));
+    }
+
+    #[test]
+    fn the_same_re_split_is_rejected_when_reflow_is_off() {
+        assert!(!Verdict::of(
+            "class A { String s = \"ab\" + \"c\"; }",
+            "class A { String s = \"a\" + \"bc\"; }",
+            &Config::default(),
+        ));
+    }
+
+    // ===== The dialect's grouped-import trailing comma =====
+
+    #[test]
+    fn the_dialect_comma_drop_is_licensed_under_every_config() {
+        // `visit/dialect.rs` drops this comma unconditionally, so the row that licenses it is
+        // unconditional too. Before the row existed the fail-safe rejected the drop and the whole
+        // file came back unformatted — and only under the *default* config, because
+        // `imports.remove-unused` happened to waive the import block when it was on.
+        for cfg in [Config::default(), Verdict::removing_unused_imports()] {
+            assert!(
+                Verdict::of(
+                    "import a.{B,};\nclass A {}\n",
+                    "import a.{B};\nclass A {}\n",
+                    &cfg,
+                ),
+                "the drop must be licensed by its own row, not by another operation's allowance",
+            );
         }
-        if allow_missing {
-            return true;
-        }
-        for (key, &count) in before {
-            if after.get(key).copied().unwrap_or(0) < count {
-                return false;
-            }
-        }
-        true
+    }
+
+    #[test]
+    fn the_comma_licence_does_not_reach_a_comma_outside_a_grouped_import() {
+        // The site predicate is what keeps the allowance from spreading. An argument list's comma
+        // is not a grouped import's trailing comma, whatever the config says.
+        assert!(!Verdict::of(
+            "class A { void m() { f(1, 2); } }",
+            "class A { void m() { f(1 2); } }",
+            &Config::default(),
+        ));
+    }
+
+    #[test]
+    fn a_separator_comma_may_never_go_missing() {
+        // The guard against a filter greedy enough to eat a separator once the trailing comma is
+        // licensed.
+        assert!(!Verdict::of(
+            "import a.{B, C};\nclass A {}\n",
+            "import a.{B C};\nclass A {}\n",
+            &Config::default(),
+        ));
     }
 }

@@ -149,6 +149,25 @@ impl Reporter {
         }
     }
 
+    /// Announce that the formatter refused its own output for one source.
+    ///
+    /// Not an `ariadne` report and not a `Warning`: the fail-safe compares the whole file against
+    /// the whole file, so there is no span to point at, and `jals-fmt` keeps this off its warning
+    /// list on purpose (a range-less warning means something else there). It follows the CLI's plain
+    /// `warning:` convention like the other file-less diagnostics.
+    ///
+    /// Worth saying out loud rather than leaving to the exit code, because the symptom is *absence*:
+    /// the file comes back byte-identical, so without this line the run looks like a run that found
+    /// nothing to do.
+    pub(crate) fn report_format_fallback(label: &str, out: &FormatOutput) {
+        if out.fell_back() {
+            eprintln!(
+                "warning: {label}: the formatter could not vouch for its output, so the file was \
+                 left unchanged (this is a bug in jals-fmt, not in the source)",
+            );
+        }
+    }
+
     /// Announce a migrated native formatter config on stderr, with any note it carried.
     ///
     /// Not an `ariadne` report: these have no source span to point at, and they belong to the run

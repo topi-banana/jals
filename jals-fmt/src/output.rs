@@ -47,11 +47,35 @@ pub struct FormatOutput {
     pub formatted: String,
     /// Warnings collected during formatting.
     pub warnings: Vec<Warning>,
+    /// Whether the formatter could vouch for [`formatted`](Self::formatted).
+    ///
+    /// `false` means the fail-safe refused the layout it produced and this is the **input**,
+    /// unchanged (`DESIGN.md` §9, §20).
+    ///
+    /// Read from outside through [`fell_back`](Self::fell_back) rather than directly: every consumer
+    /// acts on the refusal, none on the success, so the negative is the whole public surface this
+    /// needs and the field stays crate-internal.
+    pub(crate) vouched: bool,
 }
 
 impl FormatOutput {
     /// Whether any warnings were produced.
     pub const fn has_warnings(&self) -> bool {
         !self.warnings.is_empty()
+    }
+
+    /// Whether the fail-safe rejected the run, so [`formatted`](Self::formatted) is the input.
+    ///
+    /// Without this, that outcome is indistinguishable from "already formatted": `formatted == src`
+    /// either way, so `--check` finds no diff and reports the file clean. A formatter that quietly
+    /// declines to format is worth telling a caller about, and telling them is the only thing this is
+    /// for — [`formatted`](Self::formatted) is still the text to use, because the input is the one
+    /// output that is certainly safe.
+    ///
+    /// Deliberately **not** a [`Warning`]: `jals-fmt`'s own coverage test counts a range-less warning
+    /// as "the formatter noticed this rule", so a fallback warning would let a genuinely inert rule
+    /// pass by tripping the fail-safe instead of changing a layout. A method is invisible to it.
+    pub const fn fell_back(&self) -> bool {
+        !self.vouched
     }
 }

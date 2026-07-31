@@ -236,9 +236,12 @@ pub struct Wrapping {
     ///
     /// This is a *second pass* over the formatted text, not part of the layout engine: the
     /// output is re-parsed, the concatenation flattened and re-split at word / escape
-    /// boundaries, and the result adopted only when re-formatting it is a fixed point. It
-    /// never splits a single literal into new tokens, so the `+` and string-piece multiset is
-    /// preserved and only their arrangement changes. Eclipse and IntelliJ have no equivalent.
+    /// boundaries, and the result adopted only when re-formatting it is a fixed point.
+    ///
+    /// It **does** add tokens: a lone literal too long for its line is split into a concatenation
+    /// of its own, so the `+` and string-piece multiset is not preserved. What is preserved is what
+    /// each concatenation *spells*, and that is what the formatter's fail-safe compares. Eclipse
+    /// and IntelliJ have no equivalent.
     pub reflow_long_strings: bool,
 }
 

@@ -2,10 +2,17 @@
 //!
 //! Eclipse's `@formatter:off` / `@formatter:on`, IntelliJ's `FORMATTER_OFF_TAG`, and Spotless's `toggleOffOn`.
 //!
-//! A region marked this way
-//! `toggleOffOn()`. A region marked this way has to survive **every** stage untouched: L0 must
-//! not reorder anything inside it, L2 must not re-space it, L1 must not re-wrap it, and L4 must
-//! not trim it.
+//! A region marked this way has to survive **every** stage untouched: L0 must not reorder anything
+//! inside it, L2 must not re-space it, L1 must not re-wrap it, and L4 must not trim or re-split it.
+//!
+//! # Two readers, because L4 is not a visitor
+//!
+//! L0 through L1 all reach this through [`Ctx`](crate::visit::Ctx), which holds one
+//! [`scan`](Self::scan) for the run and suppresses whatever a disabled token would have emitted.
+//! [`StringWrapper`](super::StringWrapper) does not: it re-parses the *formatted* text and splices
+//! into it, so it is the one stage that can still write into a region after every earlier stage left
+//! it alone, and it scans for itself. Adding a further stage over rendered text means giving it the
+//! same veto — the guarantee is per-stage, and nothing enforces it centrally.
 //!
 //! # Why it is not a pipeline stage
 //!
