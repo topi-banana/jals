@@ -79,7 +79,17 @@ fn run(source: &str, main_class: &str) -> String {
         "the JVM rejected the compiled class:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    String::from_utf8(output.stdout).expect("utf-8 stdout")
+    printed(output.stdout)
+}
+
+/// What a JVM printed, with the host's line separator normalized to `\n`.
+///
+/// `println` terminates a line with `System.lineSeparator()`, which is CRLF on Windows. The
+/// expectations here spell what the program printed, not how the host ends a line.
+fn printed(stdout: Vec<u8>) -> String {
+    String::from_utf8(stdout)
+        .expect("utf-8 stdout")
+        .replace("\r\n", "\n")
 }
 
 const HELLO: &str = r#"
@@ -1098,7 +1108,7 @@ public class Walk {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
+        printed(output.stdout),
         "2\n2\none\ntwo\nreplaced\nreplaced\n"
     );
 }
@@ -1803,7 +1813,7 @@ public class Checked {
         .output()
         .expect("run java");
     assert!(!output.status.success(), "the assertion should have fired");
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "before\n");
+    assert_eq!(printed(output.stdout), "before\n");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("java.lang.AssertionError: message 0"),

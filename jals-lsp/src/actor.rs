@@ -2722,28 +2722,32 @@ mod tests {
 
             let canonical_child = std::fs::canonicalize(&child).unwrap();
             let canonical_transitive = std::fs::canonicalize(&transitive).unwrap();
-            assert!(
+            // The policy records each resolved dependency root. Match by canonicalizing the
+            // policy's own paths rather than by comparing spellings: a temporary directory is
+            // reached through a symlink on macOS (`/var` → `/private/var`), so the unresolved path
+            // would compare unequal, and Windows canonicalization adds the verbatim prefix that
+            // the graph adapter strips before handing a watch path out.
+            let watched_root = |canonical: &std::path::Path| {
                 assembled
                     .watch_policy
                     .reassemble_inputs
-                    .contains(&canonical_child)
-            );
-            assert!(
-                assembled
-                    .watch_policy
-                    .reassemble_inputs
-                    .contains(&canonical_transitive)
-            );
-            // Canonical, like the two assertions above: the watch policy records the resolved
-            // dependency root, and a temporary directory is reached through a symlink on macOS
-            // (`/var` → `/private/var`), so the unresolved path would compare unequal and the
-            // policy would read as `Ignore`.
+                    .iter()
+                    .find(|input| {
+                        std::fs::canonicalize(input).is_ok_and(|input| input == canonical)
+                    })
+                    .cloned()
+            };
+            assert!(watched_root(&canonical_child).is_some());
+            // Joined onto the path the policy itself holds, so the inputs below are spelled the way
+            // a watcher would report them.
+            let transitive_root = watched_root(&canonical_transitive)
+                .expect("the transitive dependency root is watched");
             for path in [
-                canonical_transitive.join("jals.toml"),
-                canonical_transitive.join("build.rhai"),
-                canonical_transitive.join("schema.rerun"),
-                canonical_transitive.join("src/Transitive.java"),
-                canonical_transitive.join("lib/local.jar"),
+                transitive_root.join("jals.toml"),
+                transitive_root.join("build.rhai"),
+                transitive_root.join("schema.rerun"),
+                transitive_root.join("src/Transitive.java"),
+                transitive_root.join("lib/local.jar"),
             ] {
                 assert_eq!(
                     Actor::watched_project_action(
@@ -3072,7 +3076,8 @@ mod tests {
             let path = location.uri.to_file_path().unwrap();
             assert!(path.ends_with("p/Generated.java"));
             assert!(
-                path.to_string_lossy().contains("/dependencies/"),
+                path.components()
+                    .any(|component| component.as_os_str() == "dependencies"),
                 "the materialized URI retains the stable node-token path: {path:?}"
             );
             assert!(

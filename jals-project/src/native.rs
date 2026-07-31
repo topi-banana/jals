@@ -1,7 +1,7 @@
 //! Native recursive path/Git acquisition and root-project input projection.
 
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path, PathBuf, Prefix};
 use std::process::Command;
 
 use alloc::collections::{BTreeMap, BTreeSet};
@@ -629,12 +629,12 @@ impl GraphBuilder {
                     .map_err(|_| "Git HEAD is not UTF-8".to_owned())?
                     .trim()
                     .to_owned();
-                let checkout = fs::canonicalize(&checkout)
+                let checkout = Self::canonicalize(&checkout)
                     .map_err(|error| format!("canonicalizing Git checkout: {error}"))?;
                 let selected = selected_dir
                     .as_deref()
                     .map_or_else(|| checkout.clone(), |dir| checkout.join(dir));
-                let selected = fs::canonicalize(&selected)
+                let selected = Self::canonicalize(&selected)
                     .map_err(|error| format!("selecting Git dependency root: {error}"))?;
                 if !selected.is_dir() || !selected.starts_with(&checkout) {
                     return Err("selected Git dependency root leaves the checkout".to_owned());
@@ -1085,10 +1085,35 @@ impl GraphBuilder {
             })
     }
 
+    /// `fs::canonicalize`, minus the Windows *verbatim* spelling.
+    ///
+    /// Windows canonicalization answers with an extended-length path (`\\?\C:\…`). Two things
+    /// here cannot live with that: Git for Windows does not recognise the spelling as a
+    /// repository, so a local `git = "…"` dependency fails to clone; and a node identity built
+    /// from the text would record how a path was spelled rather than where it points. Every
+    /// canonicalization in this adapter goes through this function, so both sides of every prefix
+    /// comparison — and every watch path handed to a host — agree on one spelling.
+    ///
+    /// Only a verbatim *disk* prefix is rewritten. `\\?\UNC\…` and the device namespace mean
+    /// something the plain form cannot express, so they are left exactly as the OS gave them.
+    fn canonicalize(path: &Path) -> std::io::Result<PathBuf> {
+        let canonical = fs::canonicalize(path)?;
+        let mut components = canonical.components();
+        let Some(Component::Prefix(prefix)) = components.next() else {
+            return Ok(canonical);
+        };
+        let Prefix::VerbatimDisk(drive) = prefix.kind() else {
+            return Ok(canonical);
+        };
+        let mut plain = PathBuf::from(format!("{}:\\", char::from(drive)));
+        plain.extend(components.filter(|component| !matches!(component, Component::RootDir)));
+        Ok(plain)
+    }
+
     async fn canonical_directory(path: &Path) -> Result<PathBuf, String> {
         let path = path.to_path_buf();
         jals_exec::tokio_rt::on_blocking_pool(move || {
-            let canonical = fs::canonicalize(&path)
+            let canonical = Self::canonicalize(&path)
                 .map_err(|error| format!("canonicalizing directory: {error}"))?;
             if !canonical.is_dir() {
                 return Err("selected dependency root is not a directory".to_owned());
@@ -1109,7 +1134,7 @@ impl GraphBuilder {
     async fn canonical_existing(path: &Path) -> Result<PathBuf, String> {
         let path = path.to_path_buf();
         jals_exec::tokio_rt::on_blocking_pool(move || {
-            fs::canonicalize(&path)
+            Self::canonicalize(&path)
                 .map_err(|error| format!("canonicalizing dependency path: {error}"))
         })
         .await

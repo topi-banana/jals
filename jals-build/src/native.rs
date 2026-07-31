@@ -520,9 +520,12 @@ mod tests {
             return;
         };
 
+        // Both sides are canonicalized: the parent canonicalized the directory it asked for (macOS
+        // reaches a temporary directory through a symlink), and Windows canonicalization answers
+        // with a verbatim path that `current_dir` never reports.
         assert_eq!(
-            std::env::current_dir().unwrap(),
-            PathBuf::from(expected_cwd)
+            std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap(),
+            std::fs::canonicalize(expected_cwd).unwrap()
         );
         assert_eq!(
             std::env::var("JALS_BUILD_SUBPROCESS_TEST_EXPLICIT").unwrap(),
