@@ -64,6 +64,18 @@ fn manifest(text: &str) -> Manifest {
     text.parse().unwrap()
 }
 
+/// `paths` put back through `fs::canonicalize`, so a comparison against a freshly canonicalized
+/// expectation is about *where* each path points rather than how it is spelled.
+///
+/// The adapter hands out canonical paths with the Windows verbatim prefix already stripped, which
+/// is the spelling a host wants and not the one `fs::canonicalize` returns.
+fn canonicalized(paths: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
+    paths
+        .iter()
+        .map(|path| fs::canonicalize(path).unwrap())
+        .collect()
+}
+
 fn classpath_contains(entry: &CompileClasspathEntry, suffix: &str) -> bool {
     match entry {
         CompileClasspathEntry::File(file) => file.path.to_string().ends_with(suffix),
@@ -821,7 +833,7 @@ fn native_projection_returns_watch_paths_and_applies_mode_downstream() {
             )
             .await;
         assert_eq!(
-            analysis.watch_paths,
+            canonicalized(&analysis.watch_paths),
             [fs::canonicalize(project.path().join("dep")).unwrap()]
         );
         assert!(analysis.inputs.source_dep_sources.is_empty());
@@ -897,7 +909,7 @@ fn resolve_native_runs_the_whole_graph_phase_in_one_call() {
         // Discovery ran: the declared path dependency became a watched directory, which only
         // discovery produces.
         assert_eq!(
-            assembly.watch_paths,
+            canonicalized(&assembly.watch_paths),
             [fs::canonicalize(project.path().join("dep")).unwrap()]
         );
         // Preprocessing and projection ran: the dependency's sources are resolved inputs.
