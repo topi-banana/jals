@@ -91,6 +91,13 @@ impl Corpus {
         // The same construct with the comma separating something, so an allowance greedy enough to
         // swallow a separator shows up here rather than in the field.
         "import a.{B, C};\nclass  A  {  }\n",
+        // Recovery debris in the one construct whose comma the dialect drops. A lane is decided per
+        // tree, so a licensed edit must not move an *unrelated* token's lane — drop the comma these
+        // shapes end in and a surviving comma could become the trailing one on the re-parse, which
+        // would put it in a different lane than it was counted in and fall the whole file back.
+        // `the_fail_safe_never_fires_on_the_corpus` is what would say so.
+        "import a.{B,,};\nclass  A  {  }\n",
+        "import a.{,};\nclass  A  {  }\n",
         // Long enough for `reflow-long-strings` to fire, which the `gjf` profile turns on — so the
         // reflow path is walked here, and held to idempotence. It does *not* stand in for the
         // allowance: withdrawing the reflow row makes `Formatter::run` discard the rewrap and keep

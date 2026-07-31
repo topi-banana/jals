@@ -455,6 +455,22 @@ impl License {
     ///
     /// First match over [`OPERATIONS`]' narrowest-first order, so a scoped row always answers
     /// before a broader one and the broad allowance can never absorb a token the narrow row named.
+    ///
+    /// # It is asked of each tree separately
+    ///
+    /// [`TokenBudget`](super::TokenBudget) builds one ledger per tree, so a token's lane is decided
+    /// twice — once over the input, once over the re-parsed output — and a lane is part of the key.
+    /// A licensed edit that moved some *other* token into a different lane would therefore look like
+    /// one token lost and one gained, and cost the whole file a fallback. So a site predicate has to
+    /// be **stable under the edits its own row licenses**: a token the row does not touch must land in
+    /// the same lane on both sides.
+    ///
+    /// Both of today's sites are, for opposite reasons. [`Site::Reflow`] deliberately applies no
+    /// `overflows` filter, which is what keeps the site set from moving with the layout the run is
+    /// deciding. [`Site::TrailingGroupComma`] names the last comma of a group, and dropping it could
+    /// in principle promote the comma before it — but recovery never leaves two droppable commas in
+    /// one group (`tests::recovery_debris_never_makes_a_separator_look_trailing`), and the corpus
+    /// carries the shapes that would show otherwise.
     pub(crate) fn lane(self, tok: &SyntaxToken, sites: &Sites) -> Lane {
         for (nth, op) in self.rows() {
             // Unreachable: the table is capped at `u16::BITS` rows above. Held to `Exact` anyway
@@ -599,7 +615,9 @@ impl License {
     ///
     /// Error-recovery debris cannot disguise a separator as a trailing comma — see
     /// `tests::recovery_debris_never_makes_a_separator_look_trailing`, which pins the two independent
-    /// reasons `import a.{B,,C};` keeps both commas.
+    /// reasons `import a.{B,,C};` keeps both commas — nor leave two droppable commas in one group,
+    /// which is the stability [`lane`](Self::lane) needs
+    /// (`tests::no_group_ever_offers_two_droppable_commas`).
     pub(crate) fn is_group_trailing_comma(tok: &SyntaxToken) -> bool {
         if tok.kind() != SyntaxKind::COMMA {
             return false;
@@ -651,6 +669,39 @@ mod tests {
                 "the comma at {:?} separates something, so dropping it would lose a token no row \
                  licenses",
                 comma.text_range(),
+            );
+        }
+    }
+
+    #[test]
+    fn no_group_ever_offers_two_droppable_commas() {
+        // The stability [`License::lane`] needs. A lane is decided per tree, so dropping one comma
+        // must not *promote* another: if two commas in one group were droppable, the survivor of the
+        // drop would be a trailing comma on the re-parse and a separator on the input, land in two
+        // different lanes, and read as one token lost plus one gained — a fallback on the whole file
+        // for an edit the table licenses.
+        //
+        // What rules it out is that the predicate asks about members, and recovery puts a
+        // zero-width `QUALIFIED_NAME` or an `ERROR` between any two adjacent commas. `invariants`
+        // carries these same shapes through the whole pipeline; this is why they come out clean.
+        for src in [
+            "import a.{B,};\n",
+            "import a.{B,,};\n",
+            "import a.{,};\n",
+            "import a.{B, C,};\n",
+            "import a.{B,,C};\n",
+        ] {
+            let parse = jals_exec::block_on_inline(jals_syntax::Parse::parse(src));
+            let droppable = parse
+                .syntax()
+                .descendants_with_tokens()
+                .filter_map(SyntaxElement::into_token)
+                .filter(License::is_group_trailing_comma)
+                .count();
+            assert!(
+                droppable <= 1,
+                "{src:?} offers {droppable} droppable commas, so dropping one leaves another the \
+                 re-parse would classify differently than the input did",
             );
         }
     }
