@@ -29,6 +29,12 @@
 //! structurally unreachable from an integration test. The alternative was widening a five-item
 //! public surface for a test.
 //!
+//! The cost of being inside is that these drive [`Formatter::run`] directly instead of the public
+//! [`FormatOutput::format_source`](crate::FormatOutput::format_source), which is the only stage that
+//! entry point adds today. Should it ever grow a second one, that stage would sit outside every
+//! property here — so a step added there belongs in [`Formatter::run`], or this corpus needs a second
+//! driver.
+//!
 //! The split is deliberate: the **policy** (which changes are allowed) comes from the license, so it
 //! cannot disagree with the fail-safe. The **comparison** is this module's own, so a bug in
 //! [`TokenBudget`](crate::passes::TokenBudget) cannot hide behind itself. Sharing the policy and

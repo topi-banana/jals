@@ -16,11 +16,11 @@
 //! # It does add tokens
 //!
 //! A lone literal too long for its line **is** split into a concatenation of its own, which adds
-//! `+` operators the source never had ([`plan`](Self::plan)'s `LITERAL` arm). Re-chunking a chain
-//! can also return fewer pieces than it took, so the `STRING_LITERAL` count moves in both
-//! directions too. This is therefore not a rearrangement, and the `+`/string-piece multiset is *not*
-//! preserved — a claim this header used to make, and one `DESIGN.md` §10 recorded as an open
-//! question that the code had already answered.
+//! `+` operators the source never had ([`plan`](StringWrapper::plan)'s `LITERAL` arm).
+//! Re-chunking a chain can also return fewer pieces than it took, so the `STRING_LITERAL` count
+//! moves in both directions too. This is therefore not a rearrangement, and the `+`/string-piece
+//! multiset is *not* preserved — a claim this header used to make, and one `DESIGN.md` §10 recorded
+//! as an open question that the code had already answered.
 //!
 //! What survives instead is what each site **spells**, which is what
 //! [`token_license`](super::token_license) declares and [`TokenBudget`](super::TokenBudget) checks:
@@ -28,9 +28,9 @@
 //!
 //! # What it will not do
 //!
-//! Reach outside a site. [`sites`](Self::sites) is the single definition of which node this pass may
-//! touch, and the fail-safe licenses exactly those, so an arithmetic `+` — or a `+` in a chain with
-//! a non-literal operand — is still held to exact equality.
+//! Reach outside a site. [`sites`](StringWrapper::sites) is the single definition of which node this
+//! pass may touch, and the fail-safe licenses exactly those, so an arithmetic `+` — or a `+` in a
+//! chain with a non-literal operand — is still held to exact equality.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -225,7 +225,19 @@ impl StringWrapper {
         }
     }
 
-    /// The replacements to make, in source order and non-overlapping.
+    /// The replacements to make, in source order.
+    ///
+    /// **Not guaranteed non-overlapping.** A text-block edit's range reaches back to the start of the
+    /// block's opening line, so it can cover a concatenation site that shares that line; the two
+    /// families are otherwise disjoint, since a `TEXT_BLOCK` is never a site
+    /// ([`literal_body`](Self::literal_body) demands a `STRING_LITERAL`). Sorting decides which of
+    /// such a pair comes first, and [`splice`](Self::splice) drops the other rather than corrupt the
+    /// file — so the cost is one re-indent or one rewrap not happening, on a shape the formatter has
+    /// already put on separate lines by the time this pass runs.
+    ///
+    /// What the sort *does* fix is that the survivor used to be decided by collection order rather
+    /// than position: a concatenation earlier in the file than any text block was dropped for no
+    /// other reason.
     fn plan(root: &SyntaxNode, src: &str, style: &Style) -> Vec<(TextRange, String)> {
         let mut edits = Self::text_block_edits(root, src);
         for (node, pieces) in Self::sites(root) {

@@ -57,6 +57,19 @@ pub(crate) enum Site {
     /// A `COMMA` in an `IMPORT_GROUP` that separates nothing.
     TrailingGroupComma,
     /// Inside a node [`StringWrapper::sites`](super::StringWrapper::sites) reports.
+    ///
+    /// **How wide this really is**: `sites` is the pass's *eligibility* test, and it applies no
+    /// `overflows` filter — that is `plan`'s, one step later. So nearly every string literal in the
+    /// file is a site, and under a reflow the licensed set is "the string literals" rather than "the
+    /// over-long ones". What the site scope buys over the file-wide `STRING_LITERAL` / `PLUS`
+    /// exclusion it replaced is narrower than it sounds: an arithmetic `+`, and a literal in a chain
+    /// with a non-literal operand, are held to exact equality again. Both were exempt before and are
+    /// not now, which is a real tightening — but it is that, not per-token precision.
+    ///
+    /// Scoping to the over-long sites instead would be tighter still and is *not* done, because
+    /// `overflows` measures columns in the tree it is given: the input's and the output's answers
+    /// differ by exactly the layout the run is deciding, so the two ledgers would be built over
+    /// different site sets and disagree for reasons that are not losses.
     Reflow,
 }
 
@@ -138,7 +151,7 @@ impl Effect {
     /// best, which is next to the row sharing their config key.
     ///
     /// The lane-producing rows must appear in descending order. See
-    /// [`the_lanes_are_declared_narrowest_first`](tests::the_lanes_are_declared_narrowest_first).
+    /// `tests::the_lanes_are_declared_narrowest_first`.
     ///
     /// [`License::lane`] enforces the ordering by *using* it — first match wins — so this states the
     /// rule the table has to satisfy for that to be correct, and the test below is what holds the
@@ -435,8 +448,24 @@ impl License {
     ///
     /// The complement is what an independent checker can hold to exact equality without knowing
     /// anything else about the table: a kind no row claims is one no operation may add, remove, or
-    /// respell. [`invariants`](crate::invariants) uses it to state the token property without
-    /// reimplementing the lanes — the policy is shared, the comparison is not.
+    /// respell. The `invariants` module uses it to state the token property without reimplementing
+    /// the lanes — the policy is shared, the comparison is not.
+    ///
+    /// # It is deliberately coarser than [`lane`](Self::lane)
+    ///
+    /// This answers by **kind alone**, so a row scoped to a site claims its kinds *file-wide*. The
+    /// dialect's row is unconditional and names `COMMA`, which means every comma in the file — an
+    /// argument list's, an array initializer's — leaves the invariant property's view under **every**
+    /// config, not just the one comma the row can actually reach. That is structurally the same
+    /// file-wide looseness [`TokenBudget`](super::TokenBudget) no longer has.
+    ///
+    /// It is the right trade here and not a hole, for two reasons. Asking [`lane`](Self::lane)
+    /// instead would make the property re-run the fail-safe's own dispatch, and then the two would
+    /// only ever agree — the independent comparison is the whole point of duplicating the mechanism.
+    /// And the loss is still caught, one property over: a comma the fail-safe holds to `Lane::Exact`
+    /// makes the run fall back, and `the_fail_safe_never_fires_on_the_corpus` is what fires. The
+    /// coarse view is a *token* property that no longer sees commas; it is not the corpus going
+    /// unchecked.
     #[cfg_attr(
         not(test),
         allow(dead_code, reason = "read by the invariant properties")
@@ -512,8 +541,8 @@ impl License {
     /// what counts as a member is `java.ungram`'s answer and not a second one kept in step by hand.
     ///
     /// Error-recovery debris cannot disguise a separator as a trailing comma — see
-    /// [`recovery_debris_never_makes_a_separator_look_trailing`](tests::recovery_debris_never_makes_a_separator_look_trailing),
-    /// which pins the two independent reasons `import a.{B,,C};` keeps both commas.
+    /// `tests::recovery_debris_never_makes_a_separator_look_trailing`, which pins the two independent
+    /// reasons `import a.{B,,C};` keeps both commas.
     pub(crate) fn is_group_trailing_comma(tok: &SyntaxToken) -> bool {
         if tok.kind() != SyntaxKind::COMMA {
             return false;
