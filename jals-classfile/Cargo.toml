@@ -16,7 +16,7 @@ serde = { workspace = true }
 expect-test = "1.5"
 # `std-io` for the File/BufReader streaming tests.
 jals-storage = { workspace = true, features = ["std-io"] }
-proptest = "1"
+proptest.workspace = true
 serde_json = { workspace = true }
 # Scratch directory for the constructed-class test, which hands a `.class` to a real `java`.
 tempfile = "3"

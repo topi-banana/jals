@@ -70,6 +70,15 @@ miniz_oxide = { version = "0.9", default-features = false, features = [
 ] }
 num-derive = { version = "0.5.1" }
 num-traits = { version = "0.2.19" }
+# Dev-only property testing, shared so every crate gets the same feature set. `default` minus
+# `fork`/`timeout`: those two shell a child process out through rusty-fork/wait-timeout, neither of
+# which builds for `wasm32-wasip1`, and no test configures either (nothing names `ProptestConfig`),
+# so dropping them costs nothing and is what lets the portable crates' tests run under a wasm
+# engine in CI. `bit-set` is kept — it is a default feature the `bits`/`subsequence` strategies need.
+proptest = { version = "1", default-features = false, features = [
+  "std",
+  "bit-set",
+] }
 # Host-only XML reader for `jals-fmt`'s Eclipse/IntelliJ config importers. It is std-based, so it
 # is pulled only behind `jals-fmt`'s `std` feature (never in the wasm playground build);
 # `default-features = false` drops its optional serde/async extras — we only stream events.
