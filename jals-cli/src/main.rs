@@ -1125,30 +1125,26 @@ impl App {
                 // dependency preprocessing could not resolve is often the one discovery warned was
                 // unavailable. Print them in the same shape a successful run would, then fail.
                 for warning in &failure.warnings {
-                    Self::print_graph_warning(warning);
+                    eprintln!("warning: {warning}");
                 }
                 failure.error
             })
             .context("resolving the project dependency graph")?;
 
+        // Every warning below is rendered whole, not by its message: several of these name their
+        // subject only in the attribution, so printing the message alone drops the entry the user
+        // has to go and fix.
         for warning in &assembly.warnings {
-            Self::print_graph_warning(warning);
+            eprintln!("warning: {warning}");
         }
         for warning in &assembly.inputs.warnings {
-            // The whole warning, not just its message: several of these name their subject only in
-            // the origin, so printing the message alone drops the entry the user has to go and fix.
             eprintln!("warning: {warning}");
         }
         if !assembly.errors.is_empty() {
             let messages = assembly
                 .errors
                 .iter()
-                .map(|error| {
-                    error.path.as_ref().map_or_else(
-                        || format!("{}: {}", error.node, error.message),
-                        |path| format!("{} `{path}`: {}", error.node, error.message),
-                    )
-                })
+                .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join("; ");
             return Err(anyhow!("project dependency assembly failed: {messages}"));
@@ -1281,19 +1277,6 @@ impl App {
         // original source-dir prefix instead.
         manifest.build.source_dirs = Self::staged_source_dirs(root, &staged);
         Ok((staged, tree, inputs))
-    }
-
-    fn print_graph_warning(warning: &jals_project::GraphWarning) {
-        if let Some(dependency) = &warning.dependency {
-            eprintln!(
-                "warning: project dependency `{dependency}`: {}",
-                warning.message
-            );
-        } else if let Some(node) = &warning.node {
-            eprintln!("warning: project dependency {node}: {}", warning.message);
-        } else {
-            eprintln!("warning: project dependency graph: {}", warning.message);
-        }
     }
 
     /// Construct the explicit environment visible to both root and dependency build scripts.

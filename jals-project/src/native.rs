@@ -758,12 +758,20 @@ impl GraphBuilder {
             })
     }
 
+    /// `node` is `None` for the root project's own snapshot ([`NativeProjectGraph::discover`]),
+    /// which is why the subject is not the constant it reads like: the root is not one of its own
+    /// dependencies, and calling it one is a claim about where the user should go and look.
     fn push_snapshot_warnings(&mut self, node: Option<&NodeId>, diagnostics: Vec<Diagnostic>) {
+        let subject = if node.is_some() {
+            "dependency snapshot"
+        } else {
+            "project snapshot"
+        };
         self.warnings
             .extend(diagnostics.into_iter().map(|diagnostic| GraphWarning {
                 node: node.cloned(),
                 dependency: None,
-                message: format!("dependency snapshot: {diagnostic:?}"),
+                message: format!("{subject}: {diagnostic:?}"),
             }));
     }
 

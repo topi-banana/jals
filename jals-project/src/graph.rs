@@ -193,6 +193,31 @@ impl GraphWarning {
     }
 }
 
+/// `<subject>: <message>` — what a host prints.
+///
+/// Several messages name no subject at all — a snapshot diagnostic and `source directory is
+/// unavailable` carry theirs only in [`node`](Self::node)/[`dependency`](Self::dependency) — so a
+/// host that renders the message alone drops the half a user can act on. Every host that reports
+/// these renders them through this, exactly as one is rendered for
+/// [`jals_classpath::Warning`]; the attribution a producer chose is the attribution a user sees.
+///
+/// The two fields are independent, so all four combinations are spelled out. A warning that names
+/// both is a declaring project's entry gone wrong, and both halves are reported: the entry alone
+/// does not say which project wrote it.
+impl fmt::Display for GraphWarning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (&self.dependency, &self.node) {
+            (Some(dependency), Some(node)) => {
+                write!(f, "dependency `{dependency}` of project {node}: ")
+            }
+            (Some(dependency), None) => write!(f, "dependency `{dependency}`: "),
+            (None, Some(node)) => write!(f, "dependency project {node}: "),
+            (None, None) => f.write_str("project graph: "),
+        }?;
+        f.write_str(&self.message)
+    }
+}
+
 /// Structured hard failure from graph discovery or preprocessing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GraphError {
@@ -767,5 +792,55 @@ pub struct PreprocessedProjectGraph {
 impl PreprocessedProjectGraph {
     pub(crate) fn metadata(&self) -> GraphMetadata {
         GraphMetadata::from_graph(&self.nodes, &self.edges)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::borrow::ToOwned;
+    use alloc::format;
+    use alloc::string::ToString;
+
+    use super::{GraphWarning, NodeId};
+
+    /// Every arm names its subject. The one a host used to reach by reading `message` directly —
+    /// neither field set, which the root project's own snapshot diagnostics produce — is the
+    /// reason this is a `Display` and not three copies in three hosts.
+    #[test]
+    fn warning_display_names_its_subject() {
+        let node = NodeId::from_identity(b"node");
+        assert_eq!(
+            GraphWarning::dependency("lib", "source directory is unavailable").to_string(),
+            "dependency `lib`: source directory is unavailable"
+        );
+        assert_eq!(
+            GraphWarning::node(node.clone(), "build script wrote nothing").to_string(),
+            format!("dependency project {node}: build script wrote nothing")
+        );
+        assert_eq!(
+            GraphWarning {
+                node: None,
+                dependency: None,
+                message: "project snapshot: unreadable".to_owned(),
+            }
+            .to_string(),
+            "project graph: project snapshot: unreadable"
+        );
+    }
+
+    /// A warning that names both keeps both: the declaring project is not recoverable from the
+    /// entry, and dropping it is what every host's precedence chain used to do.
+    #[test]
+    fn warning_display_keeps_both_halves() {
+        let node = NodeId::from_identity(b"declaring");
+        let warning = GraphWarning {
+            node: Some(node.clone()),
+            dependency: Some("lib".to_owned()),
+            message: "dependency name is not a portable name".to_owned(),
+        };
+        assert_eq!(
+            warning.to_string(),
+            format!("dependency `lib` of project {node}: dependency name is not a portable name")
+        );
     }
 }

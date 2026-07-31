@@ -35,7 +35,7 @@ use jals_classpath::{LibrarySource, ProjectInputOptions, SourceFile};
 use jals_config::fmt::Config;
 use jals_config::{FeatureSet, Manifest, ManifestParseError};
 use jals_hir::{LoweredClasspath, ProjectIndex};
-use jals_project::{GraphWarning, ProjectScript};
+use jals_project::ProjectScript;
 use jals_storage::{ArtifactCache, DirKey, FileKey, MemoryCache, MemoryStorage};
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::spawn_local;
@@ -1026,7 +1026,7 @@ impl App {
                 let mut message = failure.error.to_string();
                 for warning in &failure.warnings {
                     message.push_str("; ");
-                    message.push_str(&Self::graph_warning_message(warning));
+                    message.push_str(&warning.to_string());
                 }
                 message
             })?;
@@ -1034,10 +1034,7 @@ impl App {
             return Err(assembly
                 .errors
                 .iter()
-                .map(|error| match &error.path {
-                    Some(path) => format!("dependency {} `{path}`: {}", error.node, error.message),
-                    None => format!("dependency {}: {}", error.node, error.message),
-                })
+                .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join("; "));
         }
@@ -1049,13 +1046,9 @@ impl App {
             inputs.classpath_classes.len(),
             inputs.dependency_jars.len()
         );
-        let mut warnings: Vec<_> = assembly
-            .warnings
-            .iter()
-            .map(Self::graph_warning_message)
-            .collect();
-        // Rendered whole: the status line is this host's only channel, and a lowering warning that
-        // does not name the `[build]` entry it came from is not actionable in a browser.
+        // Rendered whole: the status line is this host's only channel, and a warning that does not
+        // name the dependency or the `[build]` entry it came from is not actionable in a browser.
+        let mut warnings: Vec<_> = assembly.warnings.iter().map(ToString::to_string).collect();
         warnings.extend(inputs.warnings.iter().map(ToString::to_string));
         if !warnings.is_empty() {
             status.push_str(&format!(
@@ -1072,14 +1065,6 @@ impl App {
             artifacts: storage.into_artifacts(),
             sources,
         })
-    }
-
-    fn graph_warning_message(warning: &GraphWarning) -> String {
-        match (&warning.dependency, &warning.node) {
-            (Some(dependency), _) => format!("dependency `{dependency}`: {}", warning.message),
-            (None, Some(node)) => format!("dependency project {node}: {}", warning.message),
-            (None, None) => warning.message.clone(),
-        }
     }
 
     async fn dependency_source_texts(

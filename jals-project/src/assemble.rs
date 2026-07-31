@@ -5,6 +5,7 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::fmt;
 
 use jals_classpath::{
     ClasspathEntry, DependencyLocation, DependencySpec, ExternalLocator, LibrarySource,
@@ -67,6 +68,24 @@ pub struct ProjectAssemblyError {
     pub path: Option<RelativePath>,
     pub message: String,
 }
+
+/// `dependency project <node> could not assemble[ <path>]: <message>` — what a host reports.
+///
+/// One rendering for every host, for the same reason [`GraphWarning`] has one: a message names its
+/// file at most, never the node, and a host that restates the node in its own words states it
+/// differently from the next host. It reads as a whole sentence because it is also this type's
+/// [`Error`](core::error::Error) rendering, which nothing wraps.
+impl fmt::Display for ProjectAssemblyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "dependency project {} could not assemble", self.node)?;
+        if let Some(path) = &self.path {
+            write!(f, " `{path}`")?;
+        }
+        write!(f, ": {}", self.message)
+    }
+}
+
+impl core::error::Error for ProjectAssemblyError {}
 
 /// Mode-independent graph projection. `ProjectInputOptions` is applied only when this plan is
 /// subsequently executed by `ProjectInputs`.
@@ -558,5 +577,44 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::borrow::ToOwned;
+    use alloc::format;
+    use alloc::string::ToString;
+
+    use jals_storage::RelativePath;
+
+    use super::ProjectAssemblyError;
+    use crate::graph::NodeId;
+
+    /// The file is optional, the node never is: a host that reported only the message would say
+    /// which file failed for one node and nothing at all for the other.
+    #[test]
+    fn assembly_error_display_names_node_and_file() {
+        let node = NodeId::from_identity(b"node");
+        assert_eq!(
+            ProjectAssemblyError {
+                node: node.clone(),
+                path: None,
+                message: "classpath entry is not cached".to_owned(),
+            }
+            .to_string(),
+            format!("dependency project {node} could not assemble: classpath entry is not cached")
+        );
+        assert_eq!(
+            ProjectAssemblyError {
+                node: node.clone(),
+                path: Some(RelativePath::parse("src/Main.java").expect("a portable relative path")),
+                message: "publishing failed".to_owned(),
+            }
+            .to_string(),
+            format!(
+                "dependency project {node} could not assemble `src/Main.java`: publishing failed"
+            )
+        );
     }
 }
