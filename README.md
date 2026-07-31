@@ -183,7 +183,8 @@ jals fmt --check src/
 It also fails when the formatter **refused its own output** — the fail-safe rejected the layout and
 handed the input back, so the file is byte-identical without having been formatted. That is a bug in
 `jals-fmt` rather than in the source, and it is reported as such; `--check` fails because its
-question is "is every file formatted", and this file was not.
+question is "is every file formatted", and this file was not. `-D warnings` fails on it too, in
+either mode, because it is reported as a warning.
 
 ### Treat syntax warnings as errors
 

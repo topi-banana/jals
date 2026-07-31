@@ -498,9 +498,12 @@ trait Visit { fn visit(&self, node: &SyntaxNode, ops: &mut Ops) -> FormatResult<
 2. **fail-safe が発火しない**。他の 4 つは *preservation* property で、全体 fallback（`出力==入力`）は
    その全部を同時に満たしてしまう。これが *progress* property で、これが無かったために「ファイルが
    丸ごと未整形で返る」欠陥がテストの網をすり抜けた。
-3. §20 のどの行も claim していない kind のトークンは個数が完全一致。**許諾は `License` から読む**
-   （config フィールドから再導出すると fail-safe と乖離する — 実際に `force-if` 単独を読んでいた）。
-   比較機構だけは独立実装のまま残し、fail-safe が自分自身に同意するだけの状態を避ける。
+3. §20 のどの行も**到達できない**トークンは個数が完全一致。加えて `RemovesSubtrees` のスコープ内は
+   「消えてよいが増えてはならない」（部分多重集合）。**許諾は `License` から読む**（config フィールドから
+   再導出すると fail-safe と乖離する — 実際に `force-if` 単独を読んでいた）。到達判定は kind だけでなく
+   **row 自身の site 述語**まで見る（kind だけだと無条件行が `COMMA` を claim するので全カンマが視界から
+   消える）。共有するのは *scope* までで、**どの lane が答えるか**は共有しない — 比較機構は独立実装のまま
+   残し、fail-safe が自分自身に同意するだけの状態を避ける。
 4. コメントは 1 つも落ちない。
 5. never-panic / 空入力と非空入力の対応。
 
