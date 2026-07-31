@@ -91,6 +91,10 @@ impl Corpus {
         // the plain layout, which is still vouched for, so the loss is invisible from out here. What
         // pins the allowance is `token_budget`'s unit test, which asks `accepts` directly.
         "class T {\n  void m() {\n    throw new RuntimeException(\"a single very long literal that runs well past the hundred column limit and then some more\");\n  }\n}\n",
+        // An over-long literal inside a formatter-disabled region, which only the `formatter-tags`
+        // profile below actually disables. L4 runs after the lowering walk and over re-parsed text,
+        // so it is the one stage that can still write into a region every earlier stage left alone.
+        "class D {\n  // @formatter:off\n  String k = \"a single very long literal that runs well past the hundred column limit\";\n  // @formatter:on\n  int  y  =  1;\n}\n",
         // Malformed on purpose: the parser is error-resilient and the formatter must survive it.
         "class Broken { void m( { int x = ; } }",
         "class Unterminated { /* never closed",
@@ -111,6 +115,13 @@ impl Corpus {
         grouped.imports.reorder_modifiers = true;
         grouped.imports.remove_unused = true;
 
+        // `formatter-tags` with a reflow on: the combination that reaches L4's own copy of the
+        // disabled-region veto. Without the reflow the only stage that could write into a region is
+        // the lowering walk, which has honored `OffOn` all along.
+        let mut tagged = Config::default();
+        tagged.layout.formatter_tags = true;
+        tagged.wrapping.reflow_long_strings = true;
+
         alloc::vec![
             ("default", Config::default()),
             (
@@ -119,6 +130,7 @@ impl Corpus {
             ),
             ("force-if-multiline", force),
             ("imports", grouped),
+            ("formatter-tags", tagged),
         ]
     }
 

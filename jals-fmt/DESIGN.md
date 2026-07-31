@@ -580,6 +580,12 @@ rule は最初から置かない**（`MAPPING.md` §2 の基準に「到達可�
 - **冪等**: `computeBreaks` は greedy 純関数、StringWrapper は不動点検証つき。両者とも決定的。
   `fmt∘fmt=fmt` を第一級テストに。
 - **コメント完全性**: 付着枠組みは「全コメント Tok を丁度 1 回描画」を debug-assert（biome 由来）。
+- **off/on 領域はバイト同一**: `OffOn` は L2 の lowering walk に `Ctx` 経由で効くが、**L4 はそこを
+  通らない**。StringWrapper は整形済みテキストを再パースして編集するので、`@formatter:off` を
+  破れる最後の段であり、`plan` が自分で `OffOn::scan` を読んで領域に触れる編集を捨てる。
+  領域は `sites` に畳まない: `sites` は fail-safe と共有する述語で単一の木の上で答えるが、
+  無効領域は run の config の性質で、入力の領域と出力の領域は座標系が違う。ここに置くことで
+  **license がパスより広い**側に倒れる — 許諾より少なく変えるパスは fail-safe を踏めない。
 
 ---
 
