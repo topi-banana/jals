@@ -1,11 +1,15 @@
 //! Integration tests driving the built `jals` binary.
 
+#[cfg(unix)]
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
 use tempfile::tempdir;
 
+/// Only the `#[cfg(unix)]` build-script tests below package a jar, so the helper carries the same
+/// gate: on Windows an ungated one is an item with no caller, which `-D warnings` rejects.
+#[cfg(unix)]
 fn write_source_jar(path: &Path, entries: &[(&str, &[u8])]) {
     let file = std::fs::File::create(path).unwrap();
     let mut archive = zip::ZipWriter::new(file);

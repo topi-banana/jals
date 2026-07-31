@@ -491,9 +491,19 @@ impl SelectionHost for LspHost {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use jals_exec::block_on_inline;
 
     use super::*;
+
+    /// A host-absolute project root. `Url::from_file_path` rejects any path that is not absolute
+    /// *for the host*, and on Windows a leading `/` is not — it names no drive — so a POSIX-spelled
+    /// root would make [`LspHost::url`] panic there rather than map a location.
+    #[cfg(windows)]
+    const ROOT: &str = r"C:\proj";
+    #[cfg(not(windows))]
+    const ROOT: &str = "/proj";
 
     /// Parse `text` into the shared per-file document (text + line index + CST).
     fn doc(text: &str) -> Document {
@@ -662,14 +672,14 @@ mod tests {
     #[test]
     fn locations_carry_file_urls() {
         let document = doc("class C {}");
-        let location = LspHost::for_root(PathBuf::from("/proj")).location(
+        let location = LspHost::for_root(PathBuf::from(ROOT)).location(
             &FileKey::parse("src/C.java").unwrap(),
             &document,
             6..7,
         );
         assert_eq!(
             location.uri,
-            Url::from_file_path("/proj/src/C.java").unwrap()
+            Url::from_file_path(Path::new(ROOT).join("src/C.java")).unwrap()
         );
         assert_eq!(location.range.start, Position::new(0, 6));
     }
@@ -680,14 +690,17 @@ mod tests {
     fn materialized_navigation_sources_resolve_to_their_cache_files() {
         let document = doc("class Lib {}");
         let key = FileKey::parse(".jals/library/dep/Lib.java").unwrap();
-        let target = PathBuf::from("/proj/target/jals/cache/source-view/aa/bb/dep/Lib.java");
-        let host = LspHost::for_root(PathBuf::from("/proj"))
+        let target = Path::new(ROOT).join("target/jals/cache/source-view/aa/bb/dep/Lib.java");
+        let host = LspHost::for_root(PathBuf::from(ROOT))
             .with_materialized(BTreeMap::from([(key.clone(), target.clone())]));
         let location = host.location(&key, &document, 6..9);
         assert_eq!(location.uri, Url::from_file_path(&target).unwrap());
         // Unmapped keys still resolve against the project root.
         let plain = host.location(&FileKey::parse("src/C.java").unwrap(), &document, 0..1);
-        assert_eq!(plain.uri, Url::from_file_path("/proj/src/C.java").unwrap());
+        assert_eq!(
+            plain.uri,
+            Url::from_file_path(Path::new(ROOT).join("src/C.java")).unwrap()
+        );
     }
 
     // ---- Semantic-token encoding ----------------------------------------------------------------

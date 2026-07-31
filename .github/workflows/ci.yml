@@ -161,9 +161,13 @@ jobs:
       - uses: taiki-e/install-action@v2.85.4
         with:
           tool: nextest,wasm-tools,wasmtime
+      # `--no-fail-fast`: with three host cells the first failure is the least interesting thing a
+      # run can report. Stopping there hides the other 1600 tests' verdict on that platform, so a
+      # platform-specific break costs one full CI round per failure to enumerate. The gate is
+      # unchanged — a failed test still fails the job — only the report is complete.
       - name: Run the test suite
         shell: bash
-        run: cargo nextest run --workspace --all-features
+        run: cargo nextest run --workspace --all-features --no-fail-fast
       # nextest does not run doctests, so keep them covered with a separate `cargo test --doc`.
       - name: Run the doctests
         shell: bash
@@ -305,15 +309,21 @@ jobs:
           # Same fail-fast check as the prebuilt cells; `$GITHUB_PATH` only takes effect in later
           # steps, so this shell needs the directory exported directly.
           export PATH="$sysroot/bin:$PATH"
-          cargo hawk --version
+          rustup run "$HAWK_RUSTC" cargo hawk --version
       # Closed-world visibility gate over the shipped binaries declared in hawk.toml. `-D warnings`
       # matches the locally-validated command and makes the gate explicit — every finding is an
-      # error. `+$HAWK_RUSTC` pins the instrumented build to hawk's compiler, independent of the
-      # repo's default toolchain or any future toolchain file. Default features / host target only,
-      # so the analysis set matches what hawk.toml was tuned against (do not add `--all-features`).
+      # error. `rustup run $HAWK_RUSTC` pins the instrumented build to hawk's compiler, independent
+      # of the repo's default toolchain or any future toolchain file. Default features / host target
+      # only, so the analysis set matches what hawk.toml was tuned against (no `--all-features`).
+      #
+      # `rustup run`, not `cargo "+$HAWK_RUSTC"`: the Windows cell puts the toolchain's own bin
+      # directory on `$GITHUB_PATH` for the driver's DLL, and that directory holds a real
+      # `cargo.exe` — not the rustup shim — which rejects a `+toolchain` directive outright.
+      # Selecting the toolchain through rustup itself means the gate does not depend on which
+      # `cargo` happens to come first on `PATH`.
       - name: Run the closed-world visibility gate
         shell: bash
-        run: cargo "+$HAWK_RUSTC" hawk check -D warnings
+        run: rustup run "$HAWK_RUSTC" cargo hawk check -D warnings
 
   typos:
     name: typos

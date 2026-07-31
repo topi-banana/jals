@@ -297,7 +297,31 @@ mod tests {
     use super::*;
     use jals_config::Manifest;
 
+    /// A host-absolute project root. [`Invocation::resolved`] prefixes a manifest-relative argument
+    /// only when the root is absolute, and a leading `/` is *not* absolute on Windows — it carries
+    /// no drive prefix — so a POSIX-spelled root would quietly exercise the relative-root branch
+    /// there and assert nothing these tests are about.
+    #[cfg(windows)]
+    const ROOT: &str = r"C:\proj";
+    #[cfg(not(windows))]
     const ROOT: &str = "/proj";
+
+    /// A path under [`ROOT`], rendered as a command-line argument exactly as the invocation renders
+    /// one: joined onto the root, so the expectation carries the host's separator instead of a
+    /// literal `/`.
+    fn at(rel: &str) -> String {
+        Path::new(ROOT).join(rel).to_string_lossy().into_owned()
+    }
+
+    /// The same path as an input to a request.
+    fn under_root(rel: &str) -> PathBuf {
+        Path::new(ROOT).join(rel)
+    }
+
+    /// Classpath-style join of paths under [`ROOT`], with the separator these tests pass in.
+    fn joined(rels: &[&str]) -> String {
+        rels.iter().map(|rel| at(rel)).collect::<Vec<_>>().join(":")
+    }
 
     fn has_pair(args: &[String], flag: &str, value: &str) -> bool {
         args.windows(2).any(|w| w[0] == flag && w[1] == value)
@@ -374,20 +398,20 @@ mod tests {
 
         m.build.classpath = vec!["a.jar".to_owned(), "b".to_owned()];
         let inv = build(&m, &[], &[], &[]);
-        assert!(has_pair(&inv.args, "-classpath", "/proj/a.jar:/proj/b"));
+        assert!(has_pair(&inv.args, "-classpath", &joined(&["a.jar", "b"])));
     }
 
     #[test]
     fn sources_come_last_in_order() {
         let m = Manifest::default();
         let sources = vec![
-            PathBuf::from("/proj/src/main/java/A.java"),
-            PathBuf::from("/proj/src/main/java/B.java"),
+            under_root("src/main/java/A.java"),
+            under_root("src/main/java/B.java"),
         ];
         let inv = build(&m, &sources, &[], &[]);
         let n = inv.args.len();
-        assert_eq!(inv.args[n - 2], "/proj/src/main/java/A.java");
-        assert_eq!(inv.args[n - 1], "/proj/src/main/java/B.java");
+        assert_eq!(inv.args[n - 2], at("src/main/java/A.java"));
+        assert_eq!(inv.args[n - 1], at("src/main/java/B.java"));
     }
 
     #[test]
@@ -395,32 +419,33 @@ mod tests {
         // Source-dependency (`git`/`path`) `.java` are compiled alongside the project's own sources,
         // appended after them (source-file order is irrelevant to `javac`).
         let m = Manifest::default();
-        let sources = vec![PathBuf::from("/proj/src/main/java/A.java")];
+        let sources = vec![under_root("src/main/java/A.java")];
+        let outside = PathBuf::from("/other/local-lib/src/Helper.java");
         let extra_sources = vec![
-            PathBuf::from("/proj/target/jals/deps/git/mylib-abc/src/main/java/Lib.java"),
-            PathBuf::from("/other/local-lib/src/Helper.java"),
+            under_root("target/jals/deps/git/mylib-abc/src/main/java/Lib.java"),
+            outside.clone(),
         ];
         let inv = build(&m, &sources, &extra_sources, &[]);
         let n = inv.args.len();
-        assert_eq!(inv.args[n - 3], "/proj/src/main/java/A.java");
+        assert_eq!(inv.args[n - 3], at("src/main/java/A.java"));
         assert_eq!(
             inv.args[n - 2],
-            "/proj/target/jals/deps/git/mylib-abc/src/main/java/Lib.java"
+            at("target/jals/deps/git/mylib-abc/src/main/java/Lib.java")
         );
-        assert_eq!(inv.args[n - 1], "/other/local-lib/src/Helper.java");
+        assert_eq!(inv.args[n - 1], outside.to_string_lossy());
     }
 
     #[test]
     fn javac_flags_passed_verbatim_before_sources() {
         let mut m = Manifest::default();
         m.build.javac_flags = vec!["-Xlint:all".to_owned(), "-g".to_owned()];
-        let sources = vec![PathBuf::from("/proj/src/main/java/A.java")];
+        let sources = vec![under_root("src/main/java/A.java")];
         let inv = build(&m, &sources, &[], &[]);
         let lint = inv.args.iter().position(|a| a == "-Xlint:all").unwrap();
         let src = inv
             .args
             .iter()
-            .position(|a| a == "/proj/src/main/java/A.java")
+            .position(|a| *a == at("src/main/java/A.java"))
             .unwrap();
         assert!(lint < src);
     }
@@ -429,7 +454,7 @@ mod tests {
     fn extra_javac_args_follow_manifest_flags_and_precede_sources() {
         let mut manifest = Manifest::default();
         manifest.build.javac_flags = vec!["-Xlint:all".to_owned()];
-        let sources = vec![PathBuf::from("/proj/src/main/java/A.java")];
+        let sources = vec![under_root("src/main/java/A.java")];
         let extra_javac_args = vec!["-Afirst=1".to_owned(), "-Asecond=2".to_owned()];
         let invocation = Invocation::build(
             &CompileRequest {
@@ -449,12 +474,8 @@ mod tests {
             .iter()
             .map(String::as_str)
             .collect::<Vec<_>>();
-        assert!(tail.ends_with(&[
-            "-Xlint:all",
-            "-Afirst=1",
-            "-Asecond=2",
-            "/proj/src/main/java/A.java",
-        ]));
+        let source = at("src/main/java/A.java");
+        assert!(tail.ends_with(&["-Xlint:all", "-Afirst=1", "-Asecond=2", source.as_str()]));
     }
 
     #[test]
@@ -464,25 +485,25 @@ mod tests {
         m.build.classpath = vec!["libs/guava.jar".to_owned(), "libs/extra".to_owned()];
         m.build.javac_flags = vec!["-Xlint:all".to_owned()];
         let sources = vec![
-            PathBuf::from("/proj/src/main/java/com/example/A.java"),
-            PathBuf::from("/proj/src/main/java/com/example/B.java"),
+            under_root("src/main/java/com/example/A.java"),
+            under_root("src/main/java/com/example/B.java"),
         ];
         let inv = build(&m, &sources, &[], &[]);
         assert_eq!(inv.program, "javac");
         assert_eq!(
-            inv.args.iter().map(String::as_str).collect::<Vec<_>>(),
+            inv.args,
             vec![
-                "-d",
-                "/proj/target/classes",
-                "--release",
-                "21",
-                "-classpath",
-                "/proj/libs/guava.jar:/proj/libs/extra",
-                "-sourcepath",
-                "/proj/src/main/java",
-                "-Xlint:all",
-                "/proj/src/main/java/com/example/A.java",
-                "/proj/src/main/java/com/example/B.java",
+                "-d".to_owned(),
+                at("target/classes"),
+                "--release".to_owned(),
+                "21".to_owned(),
+                "-classpath".to_owned(),
+                joined(&["libs/guava.jar", "libs/extra"]),
+                "-sourcepath".to_owned(),
+                at("src/main/java"),
+                "-Xlint:all".to_owned(),
+                at("src/main/java/com/example/A.java"),
+                at("src/main/java/com/example/B.java"),
             ]
         );
     }
@@ -494,12 +515,12 @@ mod tests {
         let inv = run(&m, "com.example.Main", &["arg1".to_owned()], &[]);
         assert_eq!(inv.program, "java");
         assert_eq!(
-            inv.args.iter().map(String::as_str).collect::<Vec<_>>(),
+            inv.args,
             vec![
-                "-cp",
-                "/proj/target/classes:/proj/libs/x.jar",
-                "com.example.Main",
-                "arg1",
+                "-cp".to_owned(),
+                joined(&["target/classes", "libs/x.jar"]),
+                "com.example.Main".to_owned(),
+                "arg1".to_owned(),
             ]
         );
     }
@@ -522,17 +543,13 @@ mod tests {
         );
 
         assert_eq!(
-            invocation
-                .args
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>(),
+            invocation.args,
             vec![
-                "-ea",
-                "-Dmode=test",
-                "-cp",
-                "/proj/target/classes",
-                "com.example.Main",
+                "-ea".to_owned(),
+                "-Dmode=test".to_owned(),
+                "-cp".to_owned(),
+                at("target/classes"),
+                "com.example.Main".to_owned(),
             ]
         );
     }
@@ -581,17 +598,19 @@ mod tests {
     fn extra_classpath_appended_after_manifest_classpath() {
         let mut m = Manifest::default();
         m.build.classpath = vec!["libs/guava.jar".to_owned()];
-        let extra = vec![
-            PathBuf::from("/proj/target/jals/deps/dep.jar"),
-            PathBuf::from("/abs/other.jar"),
-        ];
+        let outside = PathBuf::from("/abs/other.jar");
+        let extra = vec![under_root("target/jals/deps/dep.jar"), outside.clone()];
+        let outside = outside.to_string_lossy().into_owned();
 
         // build: manifest classpath first, then the resolved extra jars (verbatim, not re-rooted).
         let inv = build(&m, &[], &[], &extra);
         assert!(has_pair(
             &inv.args,
             "-classpath",
-            "/proj/libs/guava.jar:/proj/target/jals/deps/dep.jar:/abs/other.jar",
+            &format!(
+                "{}:{outside}",
+                joined(&["libs/guava.jar", "target/jals/deps/dep.jar"])
+            ),
         ));
 
         // run: classes-dir, then manifest classpath, then the extra jars.
@@ -599,7 +618,14 @@ mod tests {
         assert!(has_pair(
             &inv.args,
             "-cp",
-            "/proj/target/classes:/proj/libs/guava.jar:/proj/target/jals/deps/dep.jar:/abs/other.jar",
+            &format!(
+                "{}:{outside}",
+                joined(&[
+                    "target/classes",
+                    "libs/guava.jar",
+                    "target/jals/deps/dep.jar"
+                ])
+            ),
         ));
     }
 
