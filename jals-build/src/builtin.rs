@@ -383,10 +383,24 @@ mod tests {
         let sources = vec![PathBuf::from("/proj/src/main/java/A.java")];
 
         let description = toolchain.describe_compile(&compile_req(&manifest, &sources, &[]));
-        assert!(description.starts_with(
-            "builtin: copy 1 source file(s) into /proj/target/classes (dummy compiler; nothing is compiled)"
-        ));
-        assert!(description.contains("/proj/src/main/java/A.java -> /proj/target/classes/A.java"));
+        // The plan renders host paths, so the expected text is joined the same way the plan joins
+        // it rather than spelled with `/`: on Windows every joined separator is `\`.
+        let classes = Path::new("/proj").join("target/classes");
+        assert!(
+            description.starts_with(&format!(
+                "builtin: copy 1 source file(s) into {} (dummy compiler; nothing is compiled)",
+                classes.display()
+            )),
+            "got {description}"
+        );
+        assert!(
+            description.contains(&format!(
+                "{} -> {}",
+                sources[0].display(),
+                classes.join("A.java").display()
+            )),
+            "got {description}"
+        );
     }
 
     #[test]

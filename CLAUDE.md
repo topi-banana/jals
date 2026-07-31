@@ -241,5 +241,22 @@ cargo check -p jals-javac --no-default-features --target wasm32-unknown-unknown
 cargo build -p jals-playground --target wasm32-unknown-unknown
 ```
 
+CI runs clippy, test, build, build-release, and hawk on linux, macOS, Windows **and** wasm. The three
+host platforms take `--workspace`; the wasm cells take a package set, and the sets are defined once
+in `.github/workflows/ci.yml`'s `env` block (`WASM_PACKAGES`, `WASM_CORE_PACKAGES`,
+`WASM_TEST_PACKAGES`) rather than per job. Two consequences for local work:
+
+- A `dead_code` finding can exist in one configuration only. An item reachable solely from a
+  `std`/`native`-gated module must carry that gate itself — the wasm clippy cells run `-D warnings`
+  against the portable configuration, where such an item has no caller.
+- Tests run as wasm under `wasm32-wasip1` (`wasm32-unknown-unknown` has no way to run a test
+  harness), so a test in one of those crates must reach for no host: no process spawn, and no
+  `tempfile` (`std::env::temp_dir` is unimplemented on wasi). Reproduce that cell with
+  `CARGO_TARGET_WASM32_WASIP1_RUNNER="wasmtime --dir /::/" cargo test --target wasm32-wasip1 …`.
+- A host-dependent test stands itself down loudly (`javac_available()` and its siblings) rather than
+  failing where the host cannot supply what it needs — a filesystem that rejects a non-UTF-8 name,
+  or a temporary directory reached through a symlink (macOS `/var` → `/private/var`, so compare
+  canonicalized paths).
+
 Run `cargo run -p xtask -- codegen` after changing `jals-syntax/java.ungram`, and commit generated
 AST changes with the grammar change.

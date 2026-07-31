@@ -1,11 +1,15 @@
 //! Integration tests driving the built `jals` binary.
 
+#[cfg(unix)]
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 
 use tempfile::tempdir;
 
+/// Only the `#[cfg(unix)]` build-script tests below package a jar, so the helper carries the same
+/// gate: on Windows an ungated one is an item with no caller, which `-D warnings` rejects.
+#[cfg(unix)]
 fn write_source_jar(path: &Path, entries: &[(&str, &[u8])]) {
     let file = std::fs::File::create(path).unwrap();
     let mut archive = zip::ZipWriter::new(file);
@@ -1055,23 +1059,27 @@ fn build_with_relative_manifest_path_uses_project_root_once() {
     );
     let args = read_arg_lines(&captured_args);
     let output_index = args.iter().position(|arg| arg == "-d").unwrap() + 1;
+    // The whole point of the test is that a relative `--manifest-path` is resolved *once*, and
+    // resolving it is what `canonicalize` does — so the expectations are canonical too. On macOS a
+    // temporary directory is reached through a symlink (`/var` → `/private/var`), and the raw
+    // `dir.path()` would disagree with every path the CLI emitted. It matters most for the negative
+    // assertion below, which would otherwise hold for the wrong reason.
+    let root = std::fs::canonicalize(dir.path()).unwrap();
     assert_eq!(
         args[output_index],
-        dir.path().join("target/classes").to_string_lossy()
+        root.join("target/classes").to_string_lossy()
     );
     // `javac` is given the frontend's staged output, never the authored file. With the default
     // vanilla frontend the bytes are identical, so this asserts the *path* through the seam
     // rather than any change in what gets compiled.
     assert!(args.iter().any(|arg| {
         Path::new(arg)
-            == dir
-                .path()
-                .join("target/jals/build/frontend/src/main/java/com/example/Main.java")
+            == root.join("target/jals/build/frontend/src/main/java/com/example/Main.java")
     }));
     assert!(
         !args
             .iter()
-            .any(|arg| Path::new(arg) == dir.path().join("src/main/java/com/example/Main.java")),
+            .any(|arg| Path::new(arg) == root.join("src/main/java/com/example/Main.java")),
         "the authored source must not reach javac; it would bypass the frontend"
     );
     assert_eq!(

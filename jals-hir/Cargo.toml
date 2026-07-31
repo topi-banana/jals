@@ -12,7 +12,7 @@ jals-syntax.workspace = true
 
 [dev-dependencies]
 expect-test = "1.5"
-proptest = "1"
+proptest.workspace = true
 
 [lints]
 workspace = true

@@ -468,6 +468,15 @@ pub trait Runtime {
 mod tests {
     use super::*;
 
+    /// A host-absolute JDK home. [`ToolResolver::resolve_path`] re-roots a *relative* selector
+    /// against the project root, and a leading `/` is not absolute on Windows — it carries no
+    /// drive prefix — so a POSIX-spelled home would be re-rooted there and the two tests below
+    /// would assert the opposite of what they are named for.
+    #[cfg(windows)]
+    const JDK_HOME: &str = r"C:\opt\jdk-21";
+    #[cfg(not(windows))]
+    const JDK_HOME: &str = "/opt/jdk-21";
+
     fn install(home: &str, dist: Option<&str>, version: Option<u32>) -> JdkInstall {
         JdkInstall {
             home: PathBuf::from(home),
@@ -526,24 +535,25 @@ mod tests {
         // reverting to PATH.
         let out = resolver(&[], Some(Path::new("/sys/jdk"))).resolve(
             Tool::Javac,
-            Some(ToolSpec::Path("/opt/jdk-21")),
+            Some(ToolSpec::Path(JDK_HOME)),
             None,
         );
-        assert_eq!(out.preferred, vec![PathBuf::from("/opt/jdk-21")]);
-        assert_eq!(out.fallback, PathBuf::from("/opt/jdk-21/bin/javac"));
+        assert_eq!(out.preferred, vec![PathBuf::from(JDK_HOME)]);
+        assert_eq!(out.fallback, Path::new(JDK_HOME).join("bin").join("javac"));
     }
 
     #[test]
     fn binary_path_is_used_verbatim() {
         // A path ending in the tool name is the binary itself: nothing to probe, so a non-existent
         // explicit binary is spawned verbatim (and fails naming it).
+        let binary = Path::new(JDK_HOME).join("bin").join("javac");
         let out = resolver(&[], None).resolve(
             Tool::Javac,
-            Some(ToolSpec::Path("/opt/jdk/bin/javac")),
+            Some(ToolSpec::Path(binary.to_str().unwrap())),
             None,
         );
         assert!(out.preferred.is_empty());
-        assert_eq!(out.fallback, PathBuf::from("/opt/jdk/bin/javac"));
+        assert_eq!(out.fallback, binary);
     }
 
     #[test]

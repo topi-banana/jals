@@ -28,7 +28,11 @@ impl ExternalLocator {
     }
 
     /// Whether `value` is a URL-shaped locator rather than a plain path — the one scheme set the
-    /// host adapters share when deciding how a locator's bytes are obtained.
+    /// host adapters share when deciding how a locator's bytes are obtained. Gated like the
+    /// `native` module that is its only caller: without the gate, a `--no-default-features` build
+    /// compiles a function nothing in that configuration can reach, which the wasm clippy gate
+    /// reports as `dead_code` rather than something to suppress.
+    #[cfg(feature = "native")]
     pub(crate) fn is_url(value: &str) -> bool {
         ["http://", "https://", "file://"]
             .iter()

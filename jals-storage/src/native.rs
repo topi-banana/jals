@@ -1915,12 +1915,22 @@ mod tests {
             fs::create_dir(dir.path().join("loop")).unwrap();
             symlink(outside.path(), dir.path().join("escape")).unwrap();
             symlink(dir.path().join("loop"), dir.path().join("loop/back")).unwrap();
-            fs::write(
+            // A trailing `0xff` is not valid UTF-8. Linux filesystems store the bytes as given;
+            // APFS and HFS+ reject the name outright (`EILSEQ`), so the entry is *attempted* and
+            // the diagnostic it drives is asserted only where the fixture could be created. The
+            // stand-down is loud, because a fixture that silently failed to exist reads as a pass.
+            let non_utf8_entry = fs::write(
                 dir.path()
                     .join(OsString::from_vec(vec![b'b', b'a', b'd', 0xff])),
                 b"ignored",
             )
-            .unwrap();
+            .is_ok();
+            if !non_utf8_entry {
+                eprintln!(
+                    "note: this filesystem rejects non-UTF-8 names; the `NonUtf8Entry` half of \
+                     this test is checking nothing"
+                );
+            }
 
             let storage = ProjectStorage::native(dir.path(), dir.path().join(".cache"), exec)
                 .await
@@ -1938,10 +1948,11 @@ mod tests {
                     .any(|diagnostic| matches!(diagnostic, Diagnostic::SymlinkCycle(_)))
             );
             assert!(
-                storage
-                    .diagnostics()
-                    .iter()
-                    .any(|diagnostic| matches!(diagnostic, Diagnostic::NonUtf8Entry(_)))
+                !non_utf8_entry
+                    || storage
+                        .diagnostics()
+                        .iter()
+                        .any(|diagnostic| matches!(diagnostic, Diagnostic::NonUtf8Entry(_)))
             );
         });
     }
