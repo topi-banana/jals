@@ -284,6 +284,11 @@ impl DirKey {
         self.0.name()
     }
 
+    /// Descend by one name. Only the native scanner walks a host tree a name at a time, so this
+    /// carries the same gate as the `native` module: without it a `no_std` build compiles a method
+    /// that has no caller in that configuration, which is a `dead_code` error under the wasm
+    /// clippy gate rather than something to suppress.
+    #[cfg(any(feature = "std", test))]
     #[must_use]
     pub(crate) fn directory(&self, name: Name) -> Self {
         Self(self.0.join(name))
