@@ -156,6 +156,15 @@ impl Effect {
     /// [`License::lane`] enforces the ordering by *using* it — first match wins — so this states the
     /// rule the table has to satisfy for that to be correct, and the test below is what holds the
     /// table to it.
+    ///
+    /// # It ranks by variant, so it does not order a tier
+    ///
+    /// Two rows of the same variant get the same rank, and nothing about their relative position is
+    /// stated here — which is fine only while no token can satisfy both, since `lane` would hand
+    /// such a token to whichever row the table happens to list first. That is the same masking the
+    /// descending order exists to prevent, one tier down, so it needs its own guard:
+    /// `tests::equal_specificity_rows_cannot_mask_each_other` requires the rows in a tier to name
+    /// disjoint [`kinds`](Self::kinds).
     #[cfg_attr(
         not(test),
         allow(dead_code, reason = "states the table's ordering rule")
@@ -166,6 +175,21 @@ impl Effect {
             Self::RemovesSubtrees { .. } => Some(2),
             Self::Inserts { .. } => Some(1),
             Self::Reorders | Self::Respells { .. } => None,
+        }
+    }
+
+    /// The token kinds this effect names, or `None` when it scopes by node kind instead.
+    ///
+    /// The decidable half of "can two rows reach the same token": disjoint kinds settle it without
+    /// having to reason about whether two sites can overlap.
+    const fn kinds(self) -> Option<&'static [SyntaxKind]> {
+        match self {
+            Self::Removes { kinds, .. }
+            | Self::Inserts { kinds }
+            | Self::Respells { kinds, .. }
+            | Self::Redistributes { kinds, .. } => Some(kinds),
+            // Claims every kind inside its scope rather than any kind by name.
+            Self::RemovesSubtrees { .. } | Self::Reorders => None,
         }
     }
 }
@@ -471,14 +495,8 @@ impl License {
         allow(dead_code, reason = "read by the invariant properties")
     )]
     pub(crate) fn claims(self, kind: SyntaxKind) -> bool {
-        self.rows().any(|(_, op)| match op.effect {
-            Effect::Removes { kinds, .. }
-            | Effect::Inserts { kinds }
-            | Effect::Respells { kinds, .. }
-            | Effect::Redistributes { kinds, .. } => kinds.contains(&kind),
-            // Claims every kind inside its scope rather than any kind by name.
-            Effect::RemovesSubtrees { .. } | Effect::Reorders => false,
-        })
+        self.rows()
+            .any(|(_, op)| op.effect.kinds().is_some_and(|kinds| kinds.contains(&kind)))
     }
 
     /// The node kinds inside which a row may remove tokens wholesale.
@@ -634,6 +652,49 @@ mod tests {
                 op.id,
                 op.gate.unwrap_or("—"),
             );
+        }
+    }
+
+    #[test]
+    fn equal_specificity_rows_cannot_mask_each_other() {
+        // `the_lanes_are_declared_narrowest_first` orders the *tiers*, and `specificity` ranks by
+        // effect variant — so it says nothing about two rows that share a rank. `lane` still takes
+        // the first match, so within a tier the table's own order silently decides which row answers
+        // for a token both could reach: exactly the masking the narrowest-first rule exists to
+        // prevent, one level down and invisible to the test above.
+        //
+        // Disjoint kinds is what makes a tier order-independent, and it is decidable here; two
+        // *sites* over the same kind are not (whether `Site::Reflow` can ever hold for a grouped
+        // import's trailing comma is a question about the tree, not about the table). So a tier with
+        // more than one row has to separate them by kind, and a row that scopes by node kind instead
+        // — it names no kinds at all — can only be alone in its tier.
+        let ranked: Vec<(&super::Operation, u8)> = OPERATIONS
+            .iter()
+            .filter_map(|op| op.effect.specificity().map(|rank| (op, rank)))
+            .collect();
+
+        for (nth, (op, rank)) in ranked.iter().enumerate() {
+            for (other, theirs) in &ranked[nth + 1..] {
+                if rank != theirs {
+                    continue;
+                }
+                let (Some(ours), Some(theirs)) = (op.effect.kinds(), other.effect.kinds()) else {
+                    panic!(
+                        "{} and {} share specificity {rank}, and one of them scopes by node kind, \
+                         so nothing but the table's order separates them",
+                        op.id, other.id,
+                    );
+                };
+                let shared: Vec<&SyntaxKind> =
+                    ours.iter().filter(|kind| theirs.contains(kind)).collect();
+                assert!(
+                    shared.is_empty(),
+                    "{} and {} share specificity {rank} and both claim {shared:?}, so whichever is \
+                     listed first absorbs that token and the other is never consulted for it",
+                    op.id,
+                    other.id,
+                );
+            }
         }
     }
 

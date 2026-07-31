@@ -1015,6 +1015,13 @@ CLAUDE.md は**ハード不変条件**として明記している:
 の内側にあるので、広い行（未使用 import 削除）が先に来ると狭い行が一度も参照されず、
 「import 宣言から何が消えてもよい」という許諾がそのカンマを飲み込む。
 
+ただし `Effect::specificity` が与える順位は**variant 単位**なので、同順位の行どうしの前後は規定
+されない。`License::lane` は first-match-wins のままなので、同順位の 2 行が同じトークンに届くと
+「表に先に書いた方が勝つ」という同じ masking が 1 段下で起きる。したがって**同順位の行は名指しする
+kind が互いに素**でなければならず（site の重なりは表からは決定できない）、node kind でスコープする行
+（`RemovesSubtrees`）はその順位に 1 行しか置けない。`equal_specificity_rows_cannot_mask_each_other`
+がこれを保証する。
+
   | # | 操作 | 変更の種類 | gate |
   |---|---|---|---|
   | 1 | **方言 グループ import 末尾カンマ削除** | 削除（`IMPORT_GROUP` 内の `COMMA` 1 個） | **なし（無条件）** |
