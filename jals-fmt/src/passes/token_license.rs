@@ -192,6 +192,18 @@ impl Effect {
             Self::RemovesSubtrees { .. } | Self::Reorders => None,
         }
     }
+
+    /// The site this effect is scoped to, or `None` when it reaches its [`kinds`](Self::kinds)
+    /// wherever they appear.
+    const fn site(self) -> Option<Site> {
+        match self {
+            Self::Removes { site, .. } | Self::Redistributes { site, .. } => Some(site),
+            Self::RemovesSubtrees { .. }
+            | Self::Inserts { .. }
+            | Self::Respells { .. }
+            | Self::Reorders => None,
+        }
+    }
 }
 
 /// One row of `DESIGN.md` §20.
@@ -468,35 +480,45 @@ impl License {
         })
     }
 
-    /// Whether any row names `kind` among the kinds it may change.
+    /// Whether any row can reach `tok`: it names the kind, and its site — where it has one — holds.
     ///
     /// The complement is what an independent checker can hold to exact equality without knowing
-    /// anything else about the table: a kind no row claims is one no operation may add, remove, or
+    /// anything else about the table: a token no row claims is one no operation may add, remove, or
     /// respell. The `invariants` module uses it to state the token property without reimplementing
     /// the lanes — the policy is shared, the comparison is not.
     ///
-    /// # It is deliberately coarser than [`lane`](Self::lane)
+    /// # It shares the scope, not the dispatch
     ///
-    /// This answers by **kind alone**, so a row scoped to a site claims its kinds *file-wide*. The
-    /// dialect's row is unconditional and names `COMMA`, which means every comma in the file — an
-    /// argument list's, an array initializer's — leaves the invariant property's view under **every**
-    /// config, not just the one comma the row can actually reach. That is structurally the same
-    /// file-wide looseness [`TokenBudget`](super::TokenBudget) no longer has.
+    /// Answering by **kind alone** would be much looser than it sounds: the dialect's row is
+    /// unconditional and names `COMMA`, so every comma in the file — an argument list's, an array
+    /// initializer's — would leave the property's view under *every* config, not just the one comma
+    /// the row can actually reach. That is the same file-wide looseness
+    /// [`TokenBudget`](super::TokenBudget) no longer has, and the defense that
+    /// `the_fail_safe_never_fires_on_the_corpus` catches the loss anyway is circular: it only fires
+    /// when the fail-safe *rejects*, so a fail-safe that wrongly accepts a lost comma leaves nobody
+    /// looking.
     ///
-    /// It is the right trade here and not a hole, for two reasons. Asking [`lane`](Self::lane)
-    /// instead would make the property re-run the fail-safe's own dispatch, and then the two would
-    /// only ever agree — the independent comparison is the whole point of duplicating the mechanism.
-    /// And the loss is still caught, one property over: a comma the fail-safe holds to `Lane::Exact`
-    /// makes the run fall back, and `the_fail_safe_never_fires_on_the_corpus` is what fires. The
-    /// coarse view is a *token* property that no longer sees commas; it is not the corpus going
-    /// unchecked.
+    /// So this consults [`Site::holds`] — the predicate a row already shares with the pass that
+    /// performs it. What it deliberately does **not** answer is *which* rule then applies, which is
+    /// all of [`lane`](Self::lane): the property still builds its own multiset and holds it to plain
+    /// equality, rather than partitioning by lane and applying a per-lane inequality. The scope is
+    /// shared because a scope both sides must agree on is policy; the comparison stays duplicated
+    /// because that is the part that must not agree with itself.
+    ///
+    /// [`Effect::RemovesSubtrees`] is not answered here — it claims every kind inside a node kind
+    /// rather than any kind by name, and [`removable_scopes`](Self::removable_scopes) is what reports
+    /// it.
     #[cfg_attr(
         not(test),
         allow(dead_code, reason = "read by the invariant properties")
     )]
-    pub(crate) fn claims(self, kind: SyntaxKind) -> bool {
-        self.rows()
-            .any(|(_, op)| op.effect.kinds().is_some_and(|kinds| kinds.contains(&kind)))
+    pub(crate) fn claims(self, tok: &SyntaxToken, sites: &Sites) -> bool {
+        self.rows().any(|(_, op)| {
+            op.effect
+                .kinds()
+                .is_some_and(|kinds| kinds.contains(&tok.kind()))
+                && op.effect.site().is_none_or(|site| site.holds(tok, sites))
+        })
     }
 
     /// The node kinds inside which a row may remove tokens wholesale.

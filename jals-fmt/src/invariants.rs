@@ -14,8 +14,9 @@
 //!   once — `output == input` is exactly what preservation permits. This is the *progress* property,
 //!   and its absence is why a bug that returned whole files unformatted had no test-shaped hole to
 //!   fall into.
-//! - **Significant tokens.** A kind no [`OPERATIONS`](crate::passes::token_license::OPERATIONS) row
-//!   claims must come out with an identical count.
+//! - **Significant tokens.** A token no [`OPERATIONS`](crate::passes::token_license::OPERATIONS) row
+//!   can reach must come out with an identical count, and a token inside a scope a row may *empty*
+//!   may go missing but never appear.
 //! - **Comments.** Every comment in the input appears in the output. A profile that deletes unused
 //!   imports takes their comments with them, so the *import block* is excluded rather than the whole
 //!   profile.
@@ -57,7 +58,7 @@ use jals_syntax::{SyntaxElement, SyntaxKind, SyntaxToken};
 
 use crate::comments::CommentMap;
 use crate::passes::pipeline::{Formatted, Formatter};
-use crate::passes::token_license::License;
+use crate::passes::token_license::{License, Sites};
 use crate::style::Style;
 
 /// A significant-token multiset, counted rather than collected.
@@ -167,20 +168,47 @@ impl Corpus {
 
     /// The significant tokens of `src` that `license` promises to leave alone, with their counts.
     ///
-    /// Two exclusions, both read off the table rather than off a config field: a kind some row
-    /// claims, and anything inside a scope some row may empty. What is left is the part of the file
-    /// no operation is allowed to touch, so it is held to exact equality.
+    /// Two exclusions, both read off the table rather than off a config field: a token some row can
+    /// reach, and anything inside a scope some row may empty. What is left is the part of the file no
+    /// operation is allowed to touch, so it is held to exact equality.
     fn untouched(src: &str, license: License) -> Tokens {
+        Self::counted(src, license, |tok, license, sites, scopes| {
+            !license.claims(tok, sites) && !Self::within(tok, scopes)
+        })
+    }
+
+    /// The significant tokens of `src` inside a scope `license` lets a row empty, with their counts.
+    ///
+    /// The other half of [`untouched`](Self::untouched)'s second exclusion. Those tokens are outside
+    /// exact equality because a row may *delete* them — but deletion is all it may do, so nothing may
+    /// **appear** there, and that much is still checkable. Without it an import declaration's tokens
+    /// leave this file's view entirely, and a token materializing inside one is left to the fail-safe
+    /// alone.
+    fn removable(src: &str, license: License) -> Tokens {
+        Self::counted(src, license, |tok, _, _, scopes| Self::within(tok, scopes))
+    }
+
+    /// The significant tokens of `src` that `keep` selects, with their counts.
+    ///
+    /// The two selections share this walk so they cannot come apart on what a *significant* token is,
+    /// or on how the table's scopes are resolved.
+    fn counted(
+        src: &str,
+        license: License,
+        keep: impl Fn(&SyntaxToken, License, &Sites, &[SyntaxKind]) -> bool,
+    ) -> Tokens {
         let scopes: Vec<SyntaxKind> = license.removable_scopes().collect();
         let parse = jals_exec::block_on_inline(jals_syntax::Parse::parse(src));
+        let root = parse.syntax();
+        // The reflow row scopes its kinds to these nodes, so resolving them is part of asking the
+        // table which tokens it claims — through the same `StringWrapper::sites` the pass reads.
+        let sites = Sites::of(&root, license);
         let mut out = Tokens::new();
-        for tok in parse
-            .syntax()
+        for tok in root
             .descendants_with_tokens()
             .filter_map(SyntaxElement::into_token)
             .filter(|tok| !tok.kind().is_trivia())
-            .filter(|tok| !license.claims(tok.kind()))
-            .filter(|tok| !Self::within(tok, &scopes))
+            .filter(|tok| keep(tok, license, &sites, &scopes))
         {
             *out.entry((tok.kind(), tok.text().to_owned())).or_insert(0) += 1;
         }
@@ -274,6 +302,18 @@ fn a_token_no_operation_claims_is_never_touched() {
                 Corpus::untouched(&formatted, license),
                 "{name}: a token no row claims changed for {src:?}\n--- output ---\n{formatted}",
             );
+
+            // A `RemovesSubtrees` row licenses *deletion* inside its scope and nothing else, so what
+            // survives there has to be a sub-multiset of what went in. Exact equality is not
+            // available — the row may empty the scope — but "appeared from nowhere" still is.
+            let given = Corpus::removable(src, license);
+            for (token, count) in Corpus::removable(&formatted, license) {
+                assert!(
+                    given.get(&token).copied().unwrap_or(0) >= count,
+                    "{name}: {token:?} appeared inside a removable scope for {src:?}\n\
+                     --- output ---\n{formatted}",
+                );
+            }
         }
     }
 }
