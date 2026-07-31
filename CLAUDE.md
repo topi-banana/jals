@@ -110,6 +110,19 @@ filesystem reads into portable interfaces.
   `tokio`-feature module may name tokio; the portable core is `no_std`.
 - `jals-editor`: protocol-neutral workspace and query facade over `ProjectStorage`; file identity is
   `FileKey`, and source/config invalidation follows storage revisions.
+- `jals-frontend`: the compile frontend seam — project sources lowered to the Java sources a backend
+  compiles. Featureless and portable in every configuration. `[build.frontend]` selects the
+  lowering, and the dialect features in `[package] features` (`grouped-imports`, `attributes`)
+  override it onto `DialectFrontend`; a host **never matches on `[build.frontend]` itself**, exactly
+  as it never matches on `[build] backend`: it calls `FrontendSelection::for_manifest` once —
+  `vanilla()` for a source tree with no manifest — so the decision table lives in one place, and
+  with it the two rules that are cache identity rather than style (no dialect feature selects
+  `VanillaFrontend` and not a flagless dialect, and `build_features` is folded in only when
+  `attributes` is on). `FrontendSelection::lower` is the only way to run one: it imposes
+  `FrontendKey::canonical_order` itself, so the driver that publishes into the artifact cache — and
+  the ordering its digests depend on — is crate-internal rather than a precondition each host
+  remembers. The `Frontend` trait is the seam for implementors; the flag sets they take are plain
+  data, and `selection.rs` is the only module here that reads `jals-config`.
 - `jals-build`: portable target/scaffold planning plus native JDK/process adapters. OS arguments,
   environment variables, and classpath separators stay in native/host code. `[build] backend`
   selects what compiles the lowered tree: `javac` (a host process), `jals` (in-process, one class

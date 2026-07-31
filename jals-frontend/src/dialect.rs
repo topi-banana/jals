@@ -16,9 +16,9 @@
 //! A structural error — a parse error overlapping a construct this pass would rewrite, an unknown
 //! attribute, a malformed `cfg` — is never best-effort desugared. The file is emitted verbatim —
 //! the output stays one entry per input — together with error diagnostics, which make
-//! [`Driver::lower`](crate::driver::Driver::lower) reject the whole lowering and publish nothing.
-//! That is a deliberate fail-fast: `javac` never runs, so nothing downstream will report the
-//! problem for us and the diagnostics have to carry it themselves.
+//! [`FrontendSelection::lower`](crate::FrontendSelection::lower) reject the whole lowering and
+//! publish nothing. That is a deliberate fail-fast: `javac` never runs, so nothing downstream will
+//! report the problem for us and the diagnostics have to carry it themselves.
 
 use alloc::borrow::ToOwned;
 use alloc::boxed::Box;
@@ -38,39 +38,41 @@ use crate::level::IrLevel;
 
 /// Which jals dialect desugarings this frontend applies.
 ///
-/// A plain flag set — deliberately *not* `jals-config` types — so `jals-frontend` stays
-/// config-free and `no_std`. The caller (which holds the manifest) projects the resolved feature
-/// set onto these flags.
+/// A plain flag set — deliberately *not* `jals-config` types — so a [`Frontend`] implementation
+/// never reads a manifest. The projection from `[package] features` onto these flags happens in
+/// [`FrontendSelection::for_manifest`](crate::FrontendSelection::for_manifest), which is the one
+/// module in this crate that knows `jals.toml` exists; everything below it, this type included,
+/// stays config-free.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct DialectFlags {
+pub(crate) struct DialectFlags {
     /// Desugar grouped imports (`import a.b.{X, Y};`) into one plain import per member.
-    pub grouped_imports: bool,
+    pub(crate) grouped_imports: bool,
     /// Strip jals attributes (`#[...]`) and apply `#[cfg(...)]` conditional compilation.
-    pub attributes: bool,
+    pub(crate) attributes: bool,
     /// The resolved build features `#[cfg(feature = "...")]` tests. Populated by the caller only
     /// when `attributes` is on; a name absent here is simply false (Cargo/Rust cfg semantics).
-    pub build_features: BTreeSet<String>,
+    pub(crate) build_features: BTreeSet<String>,
 }
 
 impl DialectFlags {
     /// Whether any dialect desugaring is enabled. When `false`, the dialect frontend is
     /// behaviourally identical to [`VanillaFrontend`](crate::VanillaFrontend), so callers can pick
     /// vanilla instead and keep the cache identity stable.
-    pub const fn any(&self) -> bool {
+    pub(crate) const fn any(&self) -> bool {
         self.grouped_imports || self.attributes
     }
 }
 
 /// Lowers jals dialect sources to plain Java sources per [`DialectFlags`].
 #[derive(Debug, Clone)]
-pub struct DialectFrontend {
+pub(crate) struct DialectFrontend {
     flags: DialectFlags,
 }
 
 impl DialectFrontend {
     const ID: &'static str = "jals-dialect";
 
-    pub const fn new(flags: DialectFlags) -> Self {
+    pub(crate) const fn new(flags: DialectFlags) -> Self {
         Self { flags }
     }
 }
