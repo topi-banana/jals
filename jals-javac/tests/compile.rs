@@ -3948,6 +3948,9 @@ public class Uses {
 /// first, which is the order that makes a shadowing field win.
 #[test]
 fn an_unqualified_name_reaches_an_inherited_field() {
+    if !java_available() {
+        return;
+    }
     let source = r"
 class Base {
     int seed = 4;
@@ -4006,6 +4009,9 @@ public class Inherit {
 /// own type on both paths and needs no second branch to arrange.
 #[test]
 fn an_instanceof_pattern_binds_the_narrowed_value() {
+    if !java_available() {
+        return;
+    }
     let source = r#"
 public class Patterns {
     static String describe(Object o) {
@@ -4054,6 +4060,9 @@ public class Patterns {
 /// edge into an arm's entry and refuses a slot some edge left unwritten.
 #[test]
 fn a_case_pattern_dispatches_on_the_selector_type() {
+    if !java_available() {
+        return;
+    }
     let source = r#"
 public class Cases {
     static String describe(Object o) {
@@ -4103,6 +4112,9 @@ public class Cases {
 /// two boxes are distinct objects and numeric equality would have said `true`.
 #[test]
 fn a_comparison_unboxes_a_wrapper_but_keeps_reference_equality() {
+    if !java_available() {
+        return;
+    }
     let source = r#"
 public class Boxed {
     public static void main(String[] args) {
@@ -4298,6 +4310,9 @@ public class Bodies {
 /// case spelled without the type, and its binding takes the component's.
 #[test]
 fn a_record_pattern_deconstructs() {
+    if !java_available() {
+        return;
+    }
     let source = r#"
 record Point(int x, int y) {}
 record Line(Point a, Point b) {}
@@ -4392,6 +4407,9 @@ public class P {
 /// joins `null` into any reference and the merge already says the other arm's type.
 #[test]
 fn erasure_and_a_null_conditional_arm_keep_their_types() {
+    if !java_available() {
+        return;
+    }
     let source = r#"
 class Holder<T> {
     T value;
