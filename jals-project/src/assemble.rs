@@ -347,12 +347,13 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
         let generated = exports.map(|exports| &exports.sources);
         let mut seen = BTreeSet::new();
         let mut files = Vec::new();
-        for (path, bytes) in &published {
+        // Consumed rather than borrowed: `IrFile` needs an `Arc<[u8]>`, which is a copy whichever
+        // way the bytes arrive, but borrowing would keep every publication's `Vec` alive beside its
+        // copy until this function returns. A decompiled tree is thousands of files, so the
+        // difference is holding one whole tree twice against holding it once and a file twice.
+        for (path, bytes) in published {
             if seen.insert(path.clone()) {
-                files.push(jals_frontend::IrFile::new(
-                    path.clone(),
-                    bytes.as_slice().into(),
-                ));
+                files.push(jals_frontend::IrFile::new(path, bytes.into()));
             }
         }
         // An authored source inside a publication destination is not authored. `replace-root` owns
