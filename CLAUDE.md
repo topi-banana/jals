@@ -86,10 +86,23 @@ filesystem reads into portable interfaces.
   memory graph operates on one captured `CodeTree`; only the `native` adapter may acquire host path
   trees or temporary Git checkouts. Dependency snapshots are immutable and must never receive
   generated output: a dependency's build tasks run under `BuildTaskHost::Snapshot`, so their JARs
-  and declared source trees are projected into the *consumer's* artifact cache (classpath, and
-  navigation-only `library_source_artifacts`) instead of being published to the project they were
-  declared in. Each such execution is memoized in `CacheNamespace::BuildTaskState` under the node
-  identity, plan digest, and resolved features, and re-verified before reuse.
+  and declared source trees are projected into the *consumer's* artifact cache instead of being
+  published to the project they were declared in. Which channel a published tree lands in is the
+  `intent` its `tasks.publish_tree` declared, and a host never infers it: `navigation` becomes
+  `library_source_artifacts` (a *view* of types the classpath defines, never a compile input),
+  `compile` joins the node's authored sources through its own frontend and becomes
+  `source_dependency_artifacts`. It is a routing and never a fan-out — a tree in both channels is
+  one type mounted twice. A `replace-root` destination is owned by its publication in a dependency
+  too, so an authored source captured under one is residue of a previous run and not an input; that
+  is what keeps a consumer's compile set independent of whether anyone ever built the dependency in
+  place. The premise the `navigation` routing rests on is not enforced by the task graph, so
+  preprocessing folds the node's own classpath into a `jals_classpath::ClasspathCoverage` and warns
+  against the declaration when nothing defines a class under a published package — a *consumer-side*
+  check, since discovery gives the root project no node. That answer is memoized in
+  `CacheNamespace::PublicationCoverage`, deliberately not in `BuildTaskState`: `[build] classpath`
+  is an input to one and not the other. Each task execution is memoized in
+  `CacheNamespace::BuildTaskState` under the node identity, plan digest, and resolved features, and
+  re-verified before reuse.
   `ProjectAssembly` owns the **order and preconditions** of the whole procedure, and a host
   **cannot sequence the steps itself**: it calls `ProjectAssembly::script` for the root build
   script and its task plan, then `ProjectScript::resolve_memory` / `resolve_native` for discovery,

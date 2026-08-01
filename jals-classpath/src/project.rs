@@ -33,12 +33,24 @@ pub struct ProjectInputPlan {
     pub source_archives: Vec<DependencySpec>,
     pub classpath: Vec<ClasspathEntry>,
     pub source_dependency_roots: Vec<DirKey>,
-    /// Source files already published by a host adapter, such as a native Git checkout.
+    /// Source files already published by a host adapter, such as a native Git checkout, or a
+    /// dependency build task's `publish_tree` output declared as a compile input.
     pub source_dependency_artifacts: Vec<LibrarySource>,
     /// Navigation-only sources already published into the verified cache, such as a dependency
-    /// build task's `publish_tree` output. Unlike
+    /// build task's `publish_tree` output declared for reading. Unlike
     /// [`source_dependency_artifacts`](Self::source_dependency_artifacts) these are never handed to
     /// the compiler — they exist so a reader can open the real source behind a classpath type.
+    ///
+    /// That is a contract, not an implementation detail: a dependency exports its types through the
+    /// classpath, and such a publication is a *view* of types defined there. Handing `javac` both a
+    /// decompiled tree and the jar it was decompiled from is how a working build acquires
+    /// duplicates, and by the time publications are flattened to here nothing could tell one from
+    /// another anyway. A tree that is the only carrier of its package says so in the script that
+    /// publishes it and arrives in the field above instead.
+    ///
+    /// The premise the contract rests on — that something on the classpath carries the same types —
+    /// is checked where it is still attributable, in `jals-project`'s preprocessing, which warns
+    /// against the declaration when nothing does.
     pub library_source_artifacts: Vec<LibrarySource>,
     pub feature_set: FeatureSet,
 }
