@@ -554,6 +554,7 @@ impl ResolvedNode {
         //
         // The manifest's own `[build] classpath` is read from what discovery captured, not from the
         // view: a native node may have taken it from a host path that is in no project revision.
+        let mut yielder = jals_exec::Yielder::new();
         for entry in &source.classpath {
             if coverage.is_complete() {
                 break;
@@ -568,8 +569,16 @@ impl ResolvedNode {
                         )
                         .await;
                 }
+                // The walk `ClasspathCoverage` runs over an archive's central directory and over a
+                // project one, here over a tree discovery already captured: as many members as a
+                // jar has, settling as early, so it stops mid-walk and yields on the way rather
+                // than holding the thread for a directory whose answer arrived at its first entry.
                 CapturedClasspathEntry::Tree { members, .. } => {
                     for member in members {
+                        if coverage.is_complete() {
+                            break;
+                        }
+                        yielder.tick().await;
                         coverage.add_class(&member.path);
                     }
                 }

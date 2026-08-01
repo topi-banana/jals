@@ -365,13 +365,18 @@ impl ClasspathCoverage {
                     return;
                 }
                 // A classpath directory *is* a package root, so a member's path under it already
-                // spells the binary name and no class file has to be parsed to learn it.
+                // spells the binary name and no class file has to be parsed to learn it. A built
+                // tree holds as many of them as a jar holds members, and the answer settles just as
+                // early, so this stops mid-walk exactly the way the archive walk does.
                 let mut yielder = jals_exec::Yielder::new();
                 for file in view
                     .tree()
                     .files_under(key)
                     .filter(|file| file.key().has_extension("class"))
                 {
+                    if self.is_complete() {
+                        return;
+                    }
                     yielder.tick().await;
                     if let Some(member) = file.key().path().strip_prefix(key.path()) {
                         self.add_class(&member);
