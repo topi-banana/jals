@@ -446,7 +446,7 @@ impl BuildTaskExecutor {
     }
 
     /// Digest of the whole plan, which is what makes one execution's identity differ from another's.
-    fn plan_fingerprint(plan: &TaskPlan) -> Result<ContentDigest, BuildTaskRunError> {
+    pub(crate) fn plan_fingerprint(plan: &TaskPlan) -> Result<ContentDigest, BuildTaskRunError> {
         serde_json::to_vec(plan)
             .map(|bytes| ContentDigest::of(&bytes))
             .map_err(|error| {

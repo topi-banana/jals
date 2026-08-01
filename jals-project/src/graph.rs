@@ -19,8 +19,8 @@ use jals_classpath::{
 use jals_config::{Dependency, Manifest, ResolvedBuildFeatures};
 use jals_exec::Exec;
 use jals_storage::{
-    ArtifactCache, CacheBackend, CacheKey, ContentDigest, DirKey, FileKey, ProjectView,
-    RelativePath,
+    ArtifactCache, CacheBackend, CacheKey, CacheNamespace, ContentDigest, DirKey, FileKey,
+    ProjectView, ProvenanceFold, RelativePath,
 };
 
 use crate::task::{
@@ -325,6 +325,39 @@ pub(crate) struct CapturedFile {
     pub(crate) bytes: Vec<u8>,
 }
 
+/// Everything one node puts on its own classpath, in the three shapes it arrives in.
+///
+/// Kept together so the scan and the cache key it is recorded under can never see different sets:
+/// keying on a subset is how a stale answer gets served for a classpath that changed.
+#[derive(Clone, Copy)]
+struct NodeClasspath<'a> {
+    /// The manifest's own `[build] classpath`, as discovery captured it — read from the capture
+    /// rather than from the view because a native node may have taken it from a host path that is
+    /// in no project revision.
+    captured: &'a [CapturedClasspathEntry],
+    /// What the build script registered, already read out of the view into `NodeExports`.
+    registered: &'a [CapturedFile],
+    /// What a build *task* put there, as keys in the verified cache. The expensive half to read,
+    /// and free to name.
+    tasks: &'a [CacheKey],
+}
+
+/// Wire version of a recorded coverage scan. Bump it whenever the record's meaning changes for
+/// unchanged bytes; a mismatch is a miss, never a misread.
+const PUBLICATION_COVERAGE_VERSION: u32 = 1;
+
+/// One classpath scan's answer, recorded so an editor reload does not re-digest a game JAR to
+/// re-derive it.
+///
+/// Only the *covered* half is stored. The roots, their intents and the `[dependencies]` caveat are
+/// rebuilt from live data on every hit, so a record holds exactly what cost something to learn.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CoverageRecord {
+    version: u32,
+    covered: Vec<String>,
+}
+
 /// One published root nothing on the declaring project's own classpath defines a class under.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UnbackedPublication {
@@ -575,10 +608,13 @@ impl ResolvedNode {
             exports.unbacked_publications = self
                 .diagnose_unbacked_publications(
                     cache,
-                    source,
                     manifest,
-                    &exports.classpath,
-                    &exports.task_classpath,
+                    &output.task_plan,
+                    NodeClasspath {
+                        captured: &source.classpath,
+                        registered: &exports.classpath,
+                        tasks: &exports.task_classpath,
+                    },
                     &execution.publications,
                 )
                 .await;
@@ -708,11 +744,10 @@ impl ResolvedNode {
     /// caveat to `jar` would be the same overreach in the other direction.
     async fn diagnose_unbacked_publications<C: CacheBackend>(
         &self,
-        cache: &ArtifactCache<C>,
-        source: &SourceNode,
+        cache: &mut ArtifactCache<C>,
         manifest: &Manifest,
-        script_classpath: &[CapturedFile],
-        task_classpath: &[CacheKey],
+        plan: &TaskPlan,
+        classpath: NodeClasspath<'_>,
         publications: &[BuildTaskPublication],
     ) -> Option<PublicationDiagnosis> {
         let mut roots = Vec::new();
@@ -735,6 +770,25 @@ impl ResolvedNode {
             return None;
         }
 
+        // `run_task_plan` already serialized this plan to key its own record, so `None` is
+        // unreachable rather than a second policy — and if it ever happened, the answer would still
+        // be computed, just never recorded.
+        let provenance = BuildTaskExecutor::plan_fingerprint(plan)
+            .ok()
+            .map(|plan| Self::coverage_provenance(plan, &roots, classpath));
+        if let Some(provenance) = provenance
+            && let Some(covered) = Self::cached_coverage(cache, provenance).await
+        {
+            roots.retain(|root| !covered.contains(&root.prefix));
+            return (!roots.is_empty()).then(|| PublicationDiagnosis {
+                roots,
+                // Only a scan that read the whole classpath is ever recorded, so a hit has nothing
+                // to qualify.
+                unread: Vec::new(),
+                dependencies_unseen: !manifest.dependencies.is_empty(),
+            });
+        }
+
         let mut coverage = ClasspathCoverage::seeking(roots.iter().map(|root| root.prefix.clone()));
         // Held bytes first, cache keys last, because the scan stops as soon as every prefix is
         // covered and the cheap half of a classpath can settle a question the expensive half is
@@ -746,7 +800,7 @@ impl ResolvedNode {
         // The manifest's own `[build] classpath` is read from what discovery captured, not from the
         // view: a native node may have taken it from a host path that is in no project revision.
         let mut yielder = jals_exec::Yielder::new();
-        for entry in &source.classpath {
+        for entry in classpath.captured {
             if coverage.is_complete() {
                 break;
             }
@@ -773,7 +827,7 @@ impl ResolvedNode {
         // The build script's registered classpath was already read out of the view above, into
         // `NodeExports::classpath`. Asking the same revision the same question would copy the
         // answer a second time.
-        for file in script_classpath {
+        for file in classpath.registered {
             if coverage.is_complete() {
                 break;
             }
@@ -785,11 +839,25 @@ impl ResolvedNode {
             );
             coverage.add_resident(origin, &file.path, &file.bytes).await;
         }
-        for key in task_classpath {
+        for key in classpath.tasks {
             if coverage.is_complete() {
                 break;
             }
             coverage.add_cached_artifact(cache, key).await;
+        }
+
+        // Recorded only when the whole classpath was readable. An unreadable entry is a transient
+        // state of the host, not a property of the plan, and a recorded "could not tell" would keep
+        // answering that after the jar was fixed.
+        if coverage.warnings().is_empty()
+            && let Some(provenance) = provenance
+        {
+            let covered: Vec<_> = roots
+                .iter()
+                .filter(|root| coverage.covers(&root.prefix))
+                .map(|root| root.prefix.clone())
+                .collect();
+            Self::record_coverage(cache, provenance, &covered).await;
         }
 
         roots.retain(|root| !coverage.covers(&root.prefix));
@@ -808,6 +876,108 @@ impl ResolvedNode {
             unread: coverage.warnings().to_vec(),
             dependencies_unseen: !manifest.dependencies.is_empty(),
         })
+    }
+
+    /// Identity of one coverage answer: the question, and every classpath entry that could have
+    /// changed it.
+    ///
+    /// Deliberately *not* folded into the task execution's own key. The declaring project's
+    /// `[build] classpath` and its build script's registered classpath are inputs here and are no
+    /// part of a task execution's identity; adding them there would make editing one
+    /// `[build] classpath` line re-fetch, re-remap and re-decompile a whole plan for an answer
+    /// about package names.
+    ///
+    /// Nothing is opened to compute this. Captured bytes are already in memory, and a `CacheKey`
+    /// already carries its own content digest — so the half of the classpath that costs an
+    /// `open_verified` to *read* costs nothing to *name*.
+    fn coverage_provenance(
+        plan: ContentDigest,
+        roots: &[UnbackedPublication],
+        classpath: NodeClasspath<'_>,
+    ) -> ContentDigest {
+        let mut fold = ProvenanceFold::new(b"jals.project.publication-coverage\0");
+        fold.version(PUBLICATION_COVERAGE_VERSION).digest(plan);
+        // The question, not only its inputs: a record answers about the prefixes it was asked
+        // about, and the plan digest alone would not distinguish two source-root layouts that put
+        // one destination under different packages.
+        for root in roots {
+            fold.bytes(root.prefix.to_string().as_bytes());
+        }
+        for entry in classpath.captured {
+            fold.bytes(entry.declared.as_bytes());
+            match &entry.kind {
+                CapturedClasspathKind::File(file) => {
+                    fold.bytes(file.path.to_string().as_bytes())
+                        .digest(ContentDigest::of(&file.bytes));
+                }
+                // Only member *names* are read from a captured tree, so only they can change the
+                // answer — but a member appearing or disappearing changes the set, so the whole
+                // list is folded rather than its length.
+                CapturedClasspathKind::Tree { path, members } => {
+                    fold.bytes(path.to_string().as_bytes());
+                    for member in members {
+                        fold.bytes(member.path.to_string().as_bytes());
+                    }
+                }
+            }
+        }
+        for file in classpath.registered {
+            fold.bytes(file.path.to_string().as_bytes())
+                .digest(ContentDigest::of(&file.bytes));
+        }
+        for key in classpath.tasks {
+            fold.parent(key);
+        }
+        fold.finish()
+    }
+
+    /// The prefixes a recorded scan found covered, or `None` for a miss.
+    ///
+    /// A record that cannot be read, decoded, or that was written by another version is a miss and
+    /// never an error: re-running the scan reproduces it.
+    async fn cached_coverage<C: CacheBackend>(
+        cache: &ArtifactCache<C>,
+        provenance: ContentDigest,
+    ) -> Option<BTreeSet<RelativePath>> {
+        let key = cache
+            .indexed_key(CacheNamespace::PublicationCoverage, provenance)
+            .await
+            .ok()
+            .flatten()?;
+        let bytes = cache.lookup(&key).await.ok().flatten()?;
+        let record: CoverageRecord = serde_json::from_slice(&bytes).ok()?;
+        if record.version != PUBLICATION_COVERAGE_VERSION {
+            return None;
+        }
+        record
+            .covered
+            .iter()
+            .map(|prefix| RelativePath::parse(prefix).ok())
+            .collect()
+    }
+
+    /// Record one scan's answer. A failure to write it is not a failure to answer, so it is
+    /// dropped rather than reported: the next preprocess simply scans again.
+    async fn record_coverage<C: CacheBackend>(
+        cache: &mut ArtifactCache<C>,
+        provenance: ContentDigest,
+        covered: &[RelativePath],
+    ) {
+        let record = CoverageRecord {
+            version: PUBLICATION_COVERAGE_VERSION,
+            covered: covered.iter().map(ToString::to_string).collect(),
+        };
+        let Ok(bytes) = serde_json::to_vec(&record) else {
+            return;
+        };
+        let key = CacheKey::new(
+            CacheNamespace::PublicationCoverage,
+            provenance,
+            ContentDigest::of(&bytes),
+        );
+        if cache.publish(&key, &bytes).await.is_ok() {
+            let _ = cache.record_index(&key).await;
+        }
     }
 
     /// The package prefix a publication destination lies at, or an error if it lies outside every

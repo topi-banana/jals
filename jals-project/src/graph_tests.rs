@@ -1251,6 +1251,15 @@ async fn publication_diagnoses(
     storage: &MemoryStorage,
 ) -> Vec<crate::graph::PublicationDiagnosis> {
     let mut cache = MemoryStorage::memory(CodeTree::default());
+    publication_diagnoses_in(root, storage, &mut cache).await
+}
+
+/// The same against a caller-owned cache, so a test can preprocess twice into one.
+async fn publication_diagnoses_in(
+    root: &Manifest,
+    storage: &MemoryStorage,
+    cache: &mut MemoryStorage,
+) -> Vec<crate::graph::PublicationDiagnosis> {
     let graph = MemoryProjectGraph::discover(root, &storage.view())
         .await
         .unwrap()
@@ -2289,5 +2298,42 @@ fn the_root_project_is_never_diagnosed() {
         let root = manifest("[build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n");
 
         assert!(publication_diagnoses(&root, &storage).await.is_empty());
+    });
+}
+
+/// A coverage answer is recorded so an editor reload does not re-digest the classpath to re-derive
+/// it — and the classpath is part of what the record is keyed on, so putting the missing jar there
+/// answers differently rather than serving the old answer back.
+#[test]
+fn a_recorded_coverage_answer_is_reused_and_a_classpath_edit_invalidates_it() {
+    jals_exec::block_on_inline(async {
+        let mut cache = MemoryStorage::memory(CodeTree::default());
+        let (root, unbacked) = publishing_dependency("navigation", &[]);
+
+        // Twice into one cache: the second run reads the record the first one wrote, and has to
+        // reach the same conclusion from it.
+        let first = publication_diagnoses_in(&root, &unbacked, &mut cache).await;
+        let second = publication_diagnoses_in(&root, &unbacked, &mut cache).await;
+        assert_eq!(first.len(), 1);
+        assert_eq!(first, second);
+
+        // Same node, same plan, same features — only `[build] classpath` differs, and that is
+        // enough for the recorded answer not to apply.
+        let classes = jar(&[("net/example/Api.class", b"class bytes")]);
+        let (root, backed) = publishing_dependency(
+            "navigation",
+            &[
+                (
+                    "dep/jals.toml",
+                    &manifest_with_classpath(&["vendor/lib.jar"]),
+                ),
+                ("dep/vendor/lib.jar", &classes),
+            ],
+        );
+        assert!(
+            publication_diagnoses_in(&root, &backed, &mut cache)
+                .await
+                .is_empty()
+        );
     });
 }
