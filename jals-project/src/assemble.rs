@@ -153,7 +153,7 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
             if let Some(exports) = self.graph.exports.get(&node.id) {
                 for warning in &exports.warnings {
                     self.warnings
-                        .push(GraphWarning::node(node.id.clone(), warning.clone()));
+                        .push(GraphWarning::node(node.location.clone(), warning.clone()));
                 }
             }
         }
@@ -516,11 +516,25 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
         RelativePath::new([dependencies, token, group]).concat(path)
     }
 
+    /// A node's [`location`](crate::graph::ResolvedNode::location), which is what a diagnostic
+    /// names it by. `None` cannot happen for a node the graph carries, and reads as one fewer
+    /// clause rather than as a digest if it ever does.
+    fn node_location(&self, node: &NodeId) -> Option<String> {
+        self.graph
+            .nodes
+            .iter()
+            .find(|candidate| &candidate.id == node)
+            .map(|candidate| candidate.location.clone())
+    }
+
     fn project_binary_edges(&mut self) {
         struct ProjectedBinary {
             node: NodeId,
             dependency: String,
-            from: Option<NodeId>,
+            /// Where the project that declared this edge came from, captured here because the
+            /// warning below names it and a `NodeId` names nothing a reader can act on. `None` is
+            /// the root declaring its own edge, which reads as the entry alone.
+            declared_by: Option<String>,
             location: DependencyLocation,
             source_archive: bool,
             recursive: bool,
@@ -546,7 +560,7 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
             projected.push(ProjectedBinary {
                 node: edge.to.clone(),
                 dependency: edge.dependency.clone(),
-                from: edge.from.clone(),
+                declared_by: edge.from.as_ref().and_then(|from| self.node_location(from)),
                 location,
                 source_archive,
                 recursive: edge.recursive,
@@ -556,7 +570,7 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
         for projected in projected {
             let Ok(name) = Name::new(&projected.dependency) else {
                 self.warnings.push(GraphWarning {
-                    node: projected.from,
+                    node: projected.declared_by,
                     dependency: Some(projected.dependency),
                     message: "dependency name is not a portable name".to_owned(),
                 });

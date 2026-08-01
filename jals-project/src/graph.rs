@@ -170,7 +170,11 @@ impl GraphMetadata {
 /// Non-fatal graph discovery or preprocessing diagnostic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphWarning {
-    pub(crate) node: Option<NodeId>,
+    /// The attributed node's [`location`](ResolvedNode::location), never its [`NodeId`]: a digest
+    /// names nothing a reader can go and look at, which is why [`GraphError::BuildScript`] carries
+    /// one too. Two nodes may describe themselves identically — identity is the digest, and it is
+    /// deliberately not what a diagnostic shows — so two warnings can read the same.
+    pub(crate) node: Option<String>,
     pub(crate) dependency: Option<String>,
     pub(crate) message: String,
 }
@@ -184,9 +188,9 @@ impl GraphWarning {
         }
     }
 
-    pub(crate) fn node(node: NodeId, message: impl Into<String>) -> Self {
+    pub(crate) fn node(location: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
-            node: Some(node),
+            node: Some(location.into()),
             dependency: None,
             message: message.into(),
         }
@@ -209,10 +213,10 @@ impl fmt::Display for GraphWarning {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match (&self.dependency, &self.node) {
             (Some(dependency), Some(node)) => {
-                write!(f, "dependency `{dependency}` of project {node}: ")
+                write!(f, "dependency `{dependency}` of project `{node}`: ")
             }
             (Some(dependency), None) => write!(f, "dependency `{dependency}`: "),
-            (None, Some(node)) => write!(f, "dependency project {node}: "),
+            (None, Some(node)) => write!(f, "dependency project `{node}`: "),
             (None, None) => f.write_str("project graph: "),
         }?;
         f.write_str(&self.message)
@@ -799,24 +803,23 @@ impl PreprocessedProjectGraph {
 #[cfg(test)]
 mod tests {
     use alloc::borrow::ToOwned;
-    use alloc::format;
     use alloc::string::ToString;
 
-    use super::{GraphWarning, NodeId};
+    use super::GraphWarning;
 
-    /// Every arm names its subject. The one a host used to reach by reading `message` directly —
-    /// neither field set, which the root project's own snapshot diagnostics produce — is the
-    /// reason this is a `Display` and not three copies in three hosts.
+    /// Every arm names its subject, and the node arms name it by where the node came from. The one
+    /// a host used to reach by reading `message` directly — neither field set, which the root
+    /// project's own snapshot diagnostics produce — is the reason this is a `Display` and not three
+    /// copies in three hosts.
     #[test]
     fn warning_display_names_its_subject() {
-        let node = NodeId::from_identity(b"node");
         assert_eq!(
             GraphWarning::dependency("lib", "source directory is unavailable").to_string(),
             "dependency `lib`: source directory is unavailable"
         );
         assert_eq!(
-            GraphWarning::node(node.clone(), "build script wrote nothing").to_string(),
-            format!("dependency project {node}: build script wrote nothing")
+            GraphWarning::node("../shared", "build script wrote nothing").to_string(),
+            "dependency project `../shared`: build script wrote nothing"
         );
         assert_eq!(
             GraphWarning {
@@ -833,15 +836,15 @@ mod tests {
     /// entry, and dropping it is what every host's precedence chain used to do.
     #[test]
     fn warning_display_keeps_both_halves() {
-        let node = NodeId::from_identity(b"declaring");
         let warning = GraphWarning {
-            node: Some(node.clone()),
+            node: Some("https://example.invalid/declaring.git".to_owned()),
             dependency: Some("lib".to_owned()),
             message: "dependency name is not a portable name".to_owned(),
         };
         assert_eq!(
             warning.to_string(),
-            format!("dependency `lib` of project {node}: dependency name is not a portable name")
+            "dependency `lib` of project `https://example.invalid/declaring.git`: dependency name \
+             is not a portable name"
         );
     }
 }

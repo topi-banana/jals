@@ -388,7 +388,7 @@ impl GraphBuilder {
 
         let snapshot = Self::snapshot(&acquired.root, &self.exec).await?;
         let manifest = Self::probe_manifest(&acquired, &snapshot)?;
-        self.push_snapshot_warnings(Some(&acquired.id), snapshot.diagnostics);
+        self.push_snapshot_warnings(Some(&Self::node_location(&acquired)), snapshot.diagnostics);
         let view = snapshot.view;
         let declaring = DeclaringProject {
             root: acquired.root.clone(),
@@ -758,18 +758,18 @@ impl GraphBuilder {
             })
     }
 
-    /// `node` is `None` for the root project's own snapshot ([`NativeProjectGraph::discover`]),
+    /// `location` is `None` for the root project's own snapshot ([`NativeProjectGraph::discover`]),
     /// which is why the subject is not the constant it reads like: the root is not one of its own
     /// dependencies, and calling it one is a claim about where the user should go and look.
-    fn push_snapshot_warnings(&mut self, node: Option<&NodeId>, diagnostics: Vec<Diagnostic>) {
-        let subject = if node.is_some() {
+    fn push_snapshot_warnings(&mut self, location: Option<&str>, diagnostics: Vec<Diagnostic>) {
+        let subject = if location.is_some() {
             "dependency snapshot"
         } else {
             "project snapshot"
         };
         self.warnings
             .extend(diagnostics.into_iter().map(|diagnostic| GraphWarning {
-                node: node.cloned(),
+                node: location.map(ToOwned::to_owned),
                 dependency: None,
                 message: format!("{subject}: {diagnostic:?}"),
             }));
