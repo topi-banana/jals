@@ -11,14 +11,16 @@ This example uses the build-task DAG to:
    26.1, which ships deobfuscated and declares no mappings.
 5. **Decompile** every class under `net/minecraft` into compile-oriented Java skeletons.
 6. Publish the tree at `src/main/java/net/minecraft` (`replace-root`).
-7. With the default `mixin` feature, fetch SpongePowered Mixin 0.8.7's **sources** jar and publish
-   its real `org/spongepowered` sources at `src/main/java/org/spongepowered` under a second owner
-   (`extract_java`, not `decompile_java` — Mixin ships actual `.java`).
-8. With the default `mixinextras` feature, do the same once more for MixinExtras 0.5.4's **sources**
-   jar, published at `src/main/java/com/llamalad7` under a third owner.
+7. With the default `mixin` feature, fetch **both** SpongePowered Mixin 0.8.7 jars: the classes onto
+   the classpath, and the real `org/spongepowered` sources published at
+   `src/main/java/org/spongepowered` under a second owner (`extract_java`, not `decompile_java` —
+   Mixin ships actual `.java`).
+8. With the default `mixinextras` feature, do the same once more for MixinExtras 0.5.4, published at
+   `src/main/java/com/llamalad7` under a third owner.
 
-The release, the distribution, and the two source libraries all come from the `[features]` declared
-in `jals.toml`.
+The release, the distribution, and the two libraries all come from the `[features]` declared in
+`jals.toml`. Every axis contributes the same pair — bytecode on the classpath, source to read — which
+is what lets another project depend on this one and _compile_ against all three.
 
 ## Version selection
 
@@ -38,7 +40,7 @@ release:
 ```
 
 They are mutually **exclusive**: at most one may be active. `jals.toml` therefore keeps
-`default = ["server", "mixin", "mixinextras"]` — the default list carries a side and the two source
+`default = ["server", "mixin", "mixinextras"]` — the default list carries a side and the two
 libraries, but deliberately no version — and `build.rhai` falls back to `DEFAULT_VERSION` (26.2, the
 newest release) when no version feature is selected. Selecting a version needs nothing else:
 
@@ -92,7 +94,7 @@ keeps the default `server` and therefore builds the _merged_ jar. Drop `server` 
 | (none)                                    | `server`, `mixin`, `mixinextras`           | server jar only (26.2 — no mappings, no remap)              |
 | `--features client`                       | `server`, `client`, `mixin`, `mixinextras` | remap both if obfuscated, then `merge_jars(server, client)` |
 | `--features server,client`                | `server`, `client`, `mixin`, `mixinextras` | same as above                                               |
-| `--no-default-features --features client` | `client`                                   | client jar only — and neither library's sources             |
+| `--no-default-features --features client` | `client`                                   | client jar only — and neither library at all                |
 | `--features 1.16.5`                       | `server`, `mixin`, `mixinextras`, `1.16.5` | 1.16.5 server jar + server mappings                         |
 | `--no-default-features --features 1.16.5` | `1.16.5`                                   | same — no side selected falls back to `server`              |
 
@@ -107,7 +109,8 @@ metadata's `libraries` list, which this example does not walk — so `net/minecr
 referencing them stay unresolved in a merged build too.
 
 ```sh
-# First run downloads ~50 MiB and then remaps + decompiles (slow).
+# First run downloads ~52 MiB (the game plus the two library jars) and then remaps +
+# decompiles (slow).
 cargo run -p jals-cli -- build
 
 # Another release, in place of the default.
@@ -117,7 +120,7 @@ cargo run -p jals-cli -- build --features 1.20.1
 cargo run -p jals-cli -- build --features client
 
 # Client only — and, because `--no-default-features` also drops `mixin` and `mixinextras`, neither
-# library's sources.
+# library on the classpath nor either published root.
 cargo run -p jals-cli -- build --no-default-features --features client
 
 # Subsequent runs reuse the verified SHA-256 project cache.
@@ -126,50 +129,57 @@ cargo run -p jals-cli -- build --offline
 cargo run -p jals-cli -- clean   # removes every owned publication root too
 ```
 
-## Mixin sources
+## Mixin
 
 The default `mixin` feature is a **third axis**, independent of both the side and the release: it
 fetches no Minecraft artifact at all, and composes freely with any combination of the two. When it
-is on, `build.rhai` fetches [SpongePowered Mixin](https://github.com/SpongePowered/Mixin) 0.8.7's
-_sources_ jar from the SpongePowered Maven repository, pinned by SHA-1 exactly like every other
-fetch here, and publishes it under its own owner:
+is on, `build.rhai` fetches [SpongePowered Mixin](https://github.com/SpongePowered/Mixin) 0.8.7 from
+the SpongePowered Maven repository — **both jars**, each pinned by SHA-1 exactly like every other
+fetch here:
 
 | item        | value                                                                           |
 | ----------- | ------------------------------------------------------------------------------- |
-| coordinate  | `org.spongepowered:mixin:0.8.7` (classifier `sources`)                          |
-| SHA-1       | `b5fd91c657404b1712a612ece6c8ddf66069be0f` (989 KiB, capped at 2 MiB)           |
+| coordinate  | `org.spongepowered:mixin:0.8.7`                                                 |
+| classes     | `8ab114ac385e6dbdad5efafe28aba4df8120915f` (1.1 MiB, capped at 2 MiB) — classpath |
+| sources     | `b5fd91c657404b1712a612ece6c8ddf66069be0f` (989 KiB, capped at 2 MiB) — published |
 | owner       | `mixin-0.8.7`                                                                   |
 | destination | `src/main/java/org/spongepowered` (`replace-root`)                              |
 | contents    | 443 real `.java` — the `asm/**` runtime and the `tools/**` annotation processor |
 
-Because Mixin publishes actual sources, this half of the script uses **`extract_java`** rather
-than `decompile_java`: the same fetch → publish contract as the game, minus the skeleton rendering,
-so the published tree is the library's own code rather than a reconstruction of it.
+The two halves do different jobs, and a consumer needs both. The **classes** jar goes on the compile
+classpath with `add_classpath`, which is the only reason `org.spongepowered.asm.*` resolves anywhere
+— a dependency's published trees are navigation sources for a reader and never compile inputs, so a
+publication on its own would leave a consumer's `javac` with nothing. The **sources** jar is what
+that reader opens. Because Mixin ships actual sources, this half of the script uses **`extract_java`**
+rather than `decompile_java`: the same fetch → publish contract as the game, minus the skeleton
+rendering, so the published tree is the library's own code rather than a reconstruction of it.
 
-The Mixin **jar** is deliberately not added to the classpath. Mixin 0.8.7 is unshaded — its sources
-need asm, guava, gson, commons-io, log4j2 and modlauncher, and all of `org/spongepowered/tools` is
-an annotation processor — none of which `mixin-0.8.7.jar` carries. Adding it would define every
-published `org.spongepowered.*` type a second time without making the tree compile, so the feature
-publishes sources only. Treat them, like the game tree, as **reference sources** to browse in the
-LSP.
+The published tree still does not compile, and that is a property of the tree rather than of the
+classpath entry. Mixin 0.8.7 is unshaded, so its sources need asm, guava, gson, commons-io, log4j2
+and modlauncher, and all of `org/spongepowered/tools` is an annotation processor; none of that is
+fetched here. A consumer compiling against `mixin-0.8.7.jar` never sees any of it. Nor is anything
+defined twice: javac resolves a type it is handed both as a source file and as a classpath class to
+the source, and `duplicate class` is what two *sources* declaring one name produce.
 
-Turning the feature off removes the tree again: with `mixin` unselected the script never registers
-the `mixin-0.8.7` owner, and dropping an owner removes its root. So
+Turning the feature off removes both halves: with `mixin` unselected the script fetches neither jar,
+so nothing reaches the classpath and the `mixin-0.8.7` owner is never registered — and dropping an
+owner removes its root. So
 `--no-default-features --features 1.20.1` deletes `src/main/java/org/spongepowered` on its next
 successful build — the same exclusive-ownership rule that swaps the game tree on a version switch.
 
-## MixinExtras sources
+## MixinExtras
 
 The default `mixinextras` feature is the **fourth axis**, and the second one that fetches no
 Minecraft artifact: [MixinExtras](https://github.com/LlamaLad7/MixinExtras), the companion library
 whose `@WrapOperation` / `@ModifyExpressionValue` / `@Local` injectors and sugar every recent mod
-applies on top of Mixin. It is published as a _sources_ jar too, so it goes through exactly the same
-fetch → `extract_java` → `publish_tree` contract:
+applies on top of Mixin. It goes through exactly the same two-jar shape — classes on the classpath,
+sources through `extract_java` → `publish_tree`:
 
 | item        | value                                                                             |
 | ----------- | --------------------------------------------------------------------------------- |
-| coordinate  | `io.github.llamalad7:mixinextras-common:0.5.4` (classifier `sources`)             |
-| SHA-1       | `fd5d27cff1c8118f5a4a037e7f549b606d117caf` (215 KiB, capped at 512 KiB)           |
+| coordinate  | `io.github.llamalad7:mixinextras-common:0.5.4`                                    |
+| classes     | `0626e00b72e3879a07e6653d8015cd3466ff5b75` (709 KiB, capped at 1 MiB) — classpath |
+| sources     | `fd5d27cff1c8118f5a4a037e7f549b606d117caf` (215 KiB, capped at 512 KiB) — published |
 | owner       | `mixinextras-0.5.4`                                                               |
 | destination | `src/main/java/com/llamalad7` (`replace-root`)                                    |
 | contents    | 216 real `.java` — the injectors, the sugar, and the `ap/**` annotation processor |
@@ -189,9 +199,12 @@ libraries, which is the combination worth browsing: MixinExtras' sources refer t
 `org.spongepowered.asm.*` throughout, so having Mixin's own tree open next to them is what makes
 them readable.
 
-Like Mixin's, the MixinExtras **jar** is deliberately not added to the classpath: its sources
-compile against Mixin, asm and the loader APIs, none of which this example resolves, and
-`mixinextras/ap` is an annotation processor. These are **reference sources** for the LSP as well.
+Like Mixin's, the published tree does not compile — it is written against Mixin, asm and the loader
+APIs this example never fetches, and `mixinextras/ap` is an annotation processor — and, like Mixin's,
+that says nothing about the classes jar a consumer actually compiles against. The two are verified
+together: `@Mixin`, `@Shadow`, `@Inject`, `@At`, `CallbackInfo`, `CallbackInfoReturnable`,
+`@ModifyExpressionValue`, `@WrapOperation` and `Operation` all resolve with
+`mixin-0.8.7.jar` and `mixinextras-common-0.5.4.jar` alone — no asm, guava or log4j2 needed.
 
 ## What it demonstrates
 
@@ -206,7 +219,14 @@ compile against Mixin, asm and the loader APIs, none of which this example resol
 - `tasks.extract_java(jar, prefix)` — its counterpart for a library that ships real `.java`: the
   Mixin and MixinExtras sources jars go through the same fetch → publish contract with no
   reconstruction step.
-- `tasks.publish_tree(..., "replace-root")` + `tasks.add_classpath` for the resolved game jar.
+- `tasks.publish_tree(..., "replace-root", "navigation")` + `tasks.add_classpath` — **paired three
+  times**, once per root: the resolved game jar behind the decompiled tree, `mixin-0.8.7.jar` behind
+  `org/spongepowered`, and `mixinextras-common-0.5.4.jar` behind `com/llamalad7`. Pairing them is
+  what makes this project usable as a dependency at all, and `"navigation"` is the half of the pair
+  the script states: every tree here is a *view* of types the classpath already carries, so a
+  consumer reads them and compiles against the jars. (The other intent, `"compile"`, is for a tree
+  that is the only carrier of its package — which none of these is, and none of which would compile
+  anyway.)
 - **Three independent publication roots from one script**: `src/main/java/net/minecraft` (owner
   `minecraft-<version>`), `src/main/java/org/spongepowered` (owner `mixin-0.8.7`), and
   `src/main/java/com/llamalad7` (owner `mixinextras-0.5.4`). They are produced by disjoint task
@@ -247,8 +267,9 @@ exclusive publish); a cleanly compiling tree is best-effort.
 None of this applies to the `mixin` and `mixinextras` trees, which are the libraries' own source
 rather than skeletons — but they do not compile either, for the unrelated reason given above:
 Mixin's dependencies (asm, guava, gson, commons-io, log4j2, modlauncher) are never fetched, and
-MixinExtras needs those plus Mixin itself, whose jar this example keeps off the classpath as well.
-`jals build` reports unresolved references in both trees.
+MixinExtras needs those plus the parts of Mixin its own `ap/**` uses. `jals build` reports
+unresolved references in both trees. Compiling *against* the two libraries is a different question
+and works: that goes through their classes jars, which are on the classpath.
 
 The target release also sets the JDK the optional `javac` step needs: 26.x declares
 `javaVersion.majorVersion` 25 (1.21.11 declares 21), so its class files are major version 69.
@@ -275,29 +296,49 @@ Another project can depend on this one and get the game without running any of i
 minecraft = { path = "../jals/examples/minecraft", features = ["client", "26.2"] }
 ```
 
-The consumer's `jals build` runs this build script under its _own_ feature selection and receives:
+The consumer's `jals build` runs this build script under its _own_ feature selection and receives
+**three classpath jars and three navigation trees**, one pair per feature axis:
 
-- the resolved game jar (plus, for a 1.18+ server bundler, its flattened libraries) on the compile
-  classpath, so `net.minecraft.*` types resolve and compile;
-- the decompiled tree as read-only navigation sources, so an editor can open the real skeleton
-  behind a type. They are not compile inputs — the classpath jar already defines those types, and
-  handing `javac` both would be a duplicate-class error rather than an improvement;
-- and, unless the entry sets `default-features = false`, the `mixin` and `mixinextras` trees the
-  same way — the libraries' real `org.spongepowered.*` and `com.llamalad7.mixinextras.*` sources as
-  navigation-only artifacts in the consumer's cache. Since this example puts neither library jar on
-  the classpath, that is all a consumer gets from those two features: to actually _compile_ against
-  Mixin or MixinExtras, declare them as ordinary `[dependencies]` jars.
+| feature       | on the compile classpath                                       | as navigation sources     |
+| ------------- | -------------------------------------------------------------- | ------------------------- |
+| side/release  | the resolved game jar (+ a 1.18+ bundler's flattened libraries) | `net/minecraft/**`        |
+| `mixin`       | `mixin-0.8.7.jar`                                               | `org/spongepowered/**`    |
+| `mixinextras` | `mixinextras-common-0.5.4.jar`                                  | `com/llamalad7/**`        |
+
+The classpath column is where a consumer's types actually come from: a dependency's published trees
+reach an editor and stop there — they are never compile inputs, because handing `javac` a decompiled
+skeleton next to the jar it was decompiled from is a duplicate, not an improvement. So a Minecraft
+mod depending on this example compiles `net.minecraft.*`, `org.spongepowered.asm.*` and
+`com.llamalad7.mixinextras.*` out of the box, and can open the real source behind any of them.
+
+That pairing is the point, and jals says so when it is missing: a dependency that publishes a root no
+classpath entry backs is reported against the publication, not left to fail as
+`package … does not exist` in the consumer several layers away.
 
 Everything lands in the _consumer's_ `target/jals/cache`. This directory is not written to:
 `src/main/java/net/minecraft` is only ever physically published when this project is built as the
-root. A consumer that has never built it directly still gets the full classpath, so the two uses do
-not interfere — but note that if you _have_ built it as a root, those 6000-odd published files are
-ordinary sources of a `path` dependency and the consumer will compile them alongside its own. Run
-`jals clean` here first if you want the dependency to contribute the classpath jar only.
+root, and whether you have ever done that makes no difference to a consumer. A `replace-root`
+destination belongs to its publication, so the 6000-odd files a root build leaves there are read as
+what they are — output of the same plan, which the consumer already has as navigation sources — and
+never compiled a second time as if somebody had written them.
 
-The first consumer build pays the same download-and-decompile cost documented above; after that the
-whole task execution is memoized under the resolved feature set, so rebuilds and editor reloads
-reuse it.
+There is deliberately no `Main.java` and no `[run]` section here, for the same reason: a source
+dependency's authored files are compiled into whoever consumes it, so a type in the default package
+would collide with the consumer's own. Only `src/main/java/README.md` is tracked, so the declared
+source root exists before the first build has published anything into it — which also means
+`jals build --dry-run` on a fresh clone reports `no .java files found`, because `--dry-run` skips the
+publication that would otherwise fill the root. A real `jals build` publishes first and is fine.
+
+In an editor, the extra classpath jars mean skeletons are now synthesized for Mixin's and
+MixinExtras' classes as well. They do not displace the published sources: a type is addressed by one
+package-relative path whichever producer offers it, and the assembled navigation set keeps the first
+producer to claim that path — a library's own `.java`, then a published tree, then a synthesized
+skeleton. So `org.spongepowered.asm.mixin.Mixin` still resolves to the real source, and the skeleton
+for it is the fallback that never gets used.
+
+The first consumer build pays the same download-and-decompile cost documented above, plus ~1.8 MiB
+for the two library jars; after that the whole task execution is memoized under the resolved feature
+set, so rebuilds and editor reloads reuse it.
 
 ## Legal note
 
