@@ -312,6 +312,10 @@ with the tree, which is the one thing the task graph cannot infer — a tree wit
 a tree that is the only carrier of its package are written identically. It changes nothing for the
 root, where a publication becomes real files either way; see the dependency section below.
 
+The four-argument form every script spelled before the intent existed is still registered, and fails
+naming the argument to add. A script that omits it is one whose author has not decided, so there is
+nothing to default to — but what they meet has to be that, and not a signature dump.
+
 `replace-root` is deliberately explicit and destructive: after every non-empty task result succeeds,
 the complete destination is replaced, including files manually added or edited below it. The
 destination must be a strict descendant of a configured source root and may not overlap another

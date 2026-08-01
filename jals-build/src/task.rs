@@ -964,6 +964,27 @@ impl TasksApi {
         api.terminal(TaskTerminal::AddNestedClasspath { jar: jar.0.id })
     }
 
+    /// The four-argument form every `build.rhai` written before the intent existed spells.
+    ///
+    /// Registered rather than left absent: Rhai resolves an overload by arity, so without this the
+    /// whole of what a script author meets is `Function not found: publish_tree (…)` — a signature
+    /// dump, when the thing they have to do is add one word. Every argument is discarded; the
+    /// error is the entire body. This is deliberately *not* a default intent, which is the
+    /// ambiguity the fifth argument exists to remove.
+    fn publish_tree_without_intent(
+        _api: &mut Self,
+        _owner: ImmutableString,
+        _tree: SourceTreeTask,
+        _destination: ImmutableString,
+        _mode: ImmutableString,
+    ) -> RhaiResult<()> {
+        Err(Self::rhai_error(
+            "tasks.publish_tree needs a fifth argument saying what a consumer does with the tree: \
+             `compile` (a consumer compiles it) or `navigation` (a consumer only reads it; the \
+             classpath defines these types)",
+        ))
+    }
+
     /// `intent` has no default on purpose. What a consumer does with a published tree is the one
     /// thing the task graph cannot infer — a tree with a JAR behind it and a tree that is the only
     /// carrier of its package are written identically — and a script that does not say is a script
@@ -1027,6 +1048,7 @@ impl TasksApi {
             .register_fn("decompile_java", Self::decompile_java)
             .register_fn("add_classpath", Self::add_classpath)
             .register_fn("add_nested_classpath", Self::add_nested_classpath)
+            .register_fn("publish_tree", Self::publish_tree_without_intent)
             .register_fn("publish_tree", Self::publish_tree);
     }
 }
@@ -1145,6 +1167,34 @@ mod tests {
                 ("view", TaskPublishIntent::Navigation),
                 ("carrier", TaskPublishIntent::Compile),
             ]
+        );
+    }
+
+    /// The fifth argument is a breaking change to every `build.rhai` in existence, so the four-
+    /// argument form is registered to fail rather than left to Rhai's overload resolution. What an
+    /// author meets has to be the word they must add — a signature dump is not a migration.
+    #[test]
+    fn the_pre_intent_publish_tree_says_what_to_add() {
+        let mut engine = Engine::new();
+        TasksApi::register_rhai(&mut engine);
+        let mut scope = rhai::Scope::new();
+        scope.push("tasks", TasksApi::new(limits()));
+        let error = engine
+            .run_with_scope(
+                &mut scope,
+                r#"
+                    let jar = tasks.project_jar("sources.jar");
+                    let tree = tasks.extract_java(jar, "net/example");
+                    tasks.publish_tree("old", tree, "src/main/java/net/example", "replace-root");
+                "#,
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("fifth argument"), "{error}");
+        // Named, because the whole point is that a reader does not have to go and look them up.
+        assert!(
+            error.contains("compile") && error.contains("navigation"),
+            "{error}"
         );
     }
 
