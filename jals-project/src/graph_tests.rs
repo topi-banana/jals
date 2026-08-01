@@ -1710,3 +1710,31 @@ fn an_unreadable_classpath_entry_withholds_the_coverage_claim() {
         );
     });
 }
+
+#[test]
+fn an_unreadable_classpath_entry_is_named_as_the_manifest_spelled_it() {
+    jals_exec::block_on_inline(async {
+        // Discovery relocates an entry reaching outside the declaring project to a synthesized
+        // `external-classpath-<n>/<name>`, because that is where it can put the bytes — not because
+        // anyone wrote it. A diagnostic naming that address sends the reader looking for a file the
+        // project does not have, so the entry is reported as `[build] classpath` spelled it.
+        let (root, storage) = publishing_dependency(
+            "",
+            &[
+                (
+                    "dep/jals.toml",
+                    b"[build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n\
+                      classpath = [\"../shared/broken.jar\"]\n",
+                ),
+                ("shared/broken.jar", b"not a zip archive"),
+            ],
+        );
+        let warnings = coverage_warnings(&root, &storage).await;
+
+        let [message] = warnings.as_slice() else {
+            panic!("expected exactly one warning, got {warnings:?}");
+        };
+        assert!(message.contains("`../shared/broken.jar`"), "{message}");
+        assert!(!message.contains("external-classpath"), "{message}");
+    });
+}

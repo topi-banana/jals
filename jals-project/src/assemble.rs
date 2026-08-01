@@ -336,7 +336,9 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
 
     async fn publish_classpath_entry(&mut self, node: &NodeId, entry: &CapturedClasspathEntry) {
         match entry {
-            CapturedClasspathEntry::File(file) => self.publish_classpath_file(node, file).await,
+            CapturedClasspathEntry::File { file, .. } => {
+                self.publish_classpath_file(node, file).await;
+            }
             CapturedClasspathEntry::Tree { path, members } => {
                 self.publish_classpath_tree(node, path, members).await;
             }

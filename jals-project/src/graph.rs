@@ -268,7 +268,16 @@ pub(crate) struct CapturedFile {
 
 #[derive(Debug)]
 pub(crate) enum CapturedClasspathEntry {
-    File(CapturedFile),
+    /// One captured file, beside what `[build] classpath` spelled to reach it.
+    ///
+    /// The two are not the same string, and only one of them is a location a user can act on: the
+    /// captured path is where discovery *put* the bytes, which is declaring-relative for an entry
+    /// inside the project but a synthesized `external-classpath-<n>/<name>` for one outside it.
+    /// Naming that in a diagnostic sends a reader looking for a file nobody wrote and nothing has.
+    File {
+        declared: String,
+        file: CapturedFile,
+    },
     Tree {
         path: RelativePath,
         members: Vec<CapturedFile>,
@@ -559,10 +568,10 @@ impl ResolvedNode {
                 break;
             }
             match entry {
-                CapturedClasspathEntry::File(file) => {
+                CapturedClasspathEntry::File { declared, file } => {
                     coverage
                         .add_resident(
-                            WarningOrigin::External(ExternalLocator::new(file.path.to_string())),
+                            WarningOrigin::External(ExternalLocator::new(declared.clone())),
                             &file.path,
                             &file.bytes,
                         )

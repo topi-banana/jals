@@ -445,10 +445,13 @@ impl GraphBuilder {
                     } else {
                         Self::external_file_path(index, &path)
                     };
-                    entries.push(CapturedClasspathEntry::File(CapturedFile {
-                        path: logical,
-                        bytes: file.bytes().to_vec(),
-                    }));
+                    entries.push(CapturedClasspathEntry::File {
+                        declared: entry.clone(),
+                        file: CapturedFile {
+                            path: logical,
+                            bytes: file.bytes().to_vec(),
+                        },
+                    });
                 }
                 Some(EntryRef::Directory(directory)) => {
                     let logical = if path.starts_with(declaring) {

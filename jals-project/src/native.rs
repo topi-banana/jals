@@ -887,8 +887,10 @@ impl GraphBuilder {
                             .filter(|path| !path.is_root())
                             .map_or_else(|| Self::external_classpath_file(index, &canonical), Ok);
                         match logical {
-                            Ok(path) => entries
-                                .push(CapturedClasspathEntry::File(CapturedFile { path, bytes })),
+                            Ok(path) => entries.push(CapturedClasspathEntry::File {
+                                declared: entry.clone(),
+                                file: CapturedFile { path, bytes },
+                            }),
                             Err(message) => {
                                 self.warnings.push(GraphWarning::dependency(entry, message));
                             }
