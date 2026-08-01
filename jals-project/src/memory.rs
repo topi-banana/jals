@@ -354,6 +354,20 @@ impl GraphBuilder {
             .push(GraphWarning::declared(declaring, name, message));
     }
 
+    /// Warn about a `[build] source-dirs` or `[build] classpath` entry of the node being visited.
+    ///
+    /// Attributed the same way a `[dependencies]` entry is, and for a stronger reason: `lib` is at
+    /// least a name the reader chose, where `src/main/java` is the default every project in the
+    /// captured tree writes. Never the root — its `[build]` section is lowered by `jals-classpath`,
+    /// not here — so the declaring project is always a node and always worth naming.
+    fn warn_entry(&mut self, declaring: &RelativePath, entry: &str, message: impl Into<String>) {
+        self.warnings.push(GraphWarning::declared(
+            Some(Self::node_location(declaring)),
+            entry,
+            message,
+        ));
+    }
+
     /// How a diagnostic names this node. Inside one captured tree that is the subtree it selected.
     fn node_location(root: &RelativePath) -> String {
         if root.is_root() {
@@ -373,19 +387,21 @@ impl GraphBuilder {
             let path = match Self::normalize(declaring, source) {
                 Ok(path) => path,
                 Err(message) => {
-                    self.warnings.push(GraphWarning::dependency(
+                    self.warn_entry(
+                        declaring,
                         source,
                         format!("source directory is unavailable: {message}"),
-                    ));
+                    );
                     continue;
                 }
             };
             let root = DirKey::new(path.clone());
             if let Err(error) = self.root_view.directory(&root) {
-                self.warnings.push(GraphWarning::dependency(
+                self.warn_entry(
+                    declaring,
                     source,
                     format!("source directory is unavailable: {error}"),
-                ));
+                );
                 continue;
             }
             let local = path.starts_with(declaring);
@@ -440,10 +456,11 @@ impl GraphBuilder {
             let path = match Self::normalize(declaring, entry) {
                 Ok(path) => path,
                 Err(message) => {
-                    self.warnings.push(GraphWarning::dependency(
+                    self.warn_entry(
+                        declaring,
                         entry,
                         format!("classpath entry is unavailable: {message}"),
-                    ));
+                    );
                     continue;
                 }
             };
@@ -487,10 +504,7 @@ impl GraphBuilder {
                         members,
                     });
                 }
-                None => self.warnings.push(GraphWarning::dependency(
-                    entry,
-                    "classpath entry is unavailable",
-                )),
+                None => self.warn_entry(declaring, entry, "classpath entry is unavailable"),
             }
         }
         entries
@@ -1006,6 +1020,38 @@ mod tests {
                     "dependency `a` of project `dep`: Git dependencies cannot be acquired from a \
                      portable memory graph"
                 ]
+            );
+        });
+    }
+
+    /// A `[build]` entry needs the declaring project more than a `[dependencies]` one does. `a` is
+    /// a name the reader chose; `src/main/java` is the default every project in the tree writes, so
+    /// on its own it narrows the search to nothing.
+    #[test]
+    fn a_transitive_build_entry_names_the_project_that_declared_it() {
+        jals_exec::block_on_inline(async {
+            let root = manifest("[dependencies]\ndep = { path = \"dep\" }\n");
+            let graph = MemoryProjectGraph::discover(
+                &root,
+                &view(&[(
+                    "dep/jals.toml",
+                    b"[build]\nsource-dirs = [\"src/main/java\"]\n",
+                )]),
+            )
+            .await
+            .unwrap();
+            let rendered = graph
+                .warnings()
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            assert_eq!(rendered.len(), 1, "{rendered:?}");
+            // The tail is a `ProjectView` error and is not what this pins; the subject is.
+            assert!(
+                rendered[0].starts_with(
+                    "dependency `src/main/java` of project `dep`: source directory is unavailable"
+                ),
+                "{rendered:?}"
             );
         });
     }

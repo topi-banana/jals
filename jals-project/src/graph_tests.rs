@@ -92,6 +92,53 @@ async fn storage(root: &Path, exec: &Exec) -> NativeStorage {
         .unwrap()
 }
 
+/// A `[build]` entry of a *dependency* names the project that declared it, as a `[dependencies]`
+/// entry does — and needs it more, since `src/main/java` is what every project in the graph writes
+/// and the entry alone narrows the search to nothing. The native location is a host directory, so
+/// this also pins that a reader is given a path they can open.
+#[test]
+fn a_dependency_build_entry_names_the_project_that_declared_it() {
+    jals_exec::tokio_rt::run(|exec| async move {
+        let project = tempfile::tempdir().unwrap();
+        write(
+            project.path(),
+            "dep/jals.toml",
+            "[build]\nsource-dirs = [\"src/main/java\"]\nclasspath = [\"lib\"]\n",
+        );
+        let root = manifest("[dependencies]\ndep = { path = \"dep\" }\n");
+
+        let graph = NativeProjectGraph::discover(
+            &root,
+            project.path(),
+            &exec,
+            jals_classpath::NetworkPolicy::Online,
+        )
+        .await
+        .unwrap();
+        let rendered = graph
+            .warnings()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(rendered.len(), 2, "{rendered:?}");
+        // The declaring project is the dependency's own directory, not the root's, and the tails
+        // are host I/O errors this does not pin — the subject is what these are here for.
+        for (entry, subject) in [
+            ("src/main/java", "source directory is unavailable"),
+            ("lib", "classpath entry is unavailable"),
+        ] {
+            assert!(
+                rendered.iter().any(|warning| {
+                    warning.starts_with(&format!("dependency `{entry}` of project `"))
+                        && warning.contains(&format!("dep`: {subject}"))
+                }),
+                "{rendered:?}"
+            );
+        }
+    })
+    .unwrap();
+}
+
 #[test]
 fn transitive_path_graph_is_classified_in_parent_discovery_order() {
     jals_exec::tokio_rt::run(|exec| async move {

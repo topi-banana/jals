@@ -190,22 +190,16 @@ pub struct GraphWarning {
     ///
     /// Usually a `[dependencies]` key, which is what `Display` calls it. A `[build] source-dirs` or
     /// `[build] classpath` entry also arrives here and is rendered the same way, so `dependency
-    /// `src/main/java`: source directory is unavailable` is a thing a user can be shown. Telling
-    /// the two apart is a change to what a warning *is* — a third kind of subject — not to how one
-    /// is written, so it does not belong in the rendering.
+    /// `src/main/java` of project `../lib`: source directory is unavailable` is a thing a user can
+    /// be shown. Telling the two apart is a change to what a warning *is* — a third kind of subject
+    /// — not to how one is written, so it does not belong in the rendering. Naming the project that
+    /// declared it is not that change: it is the same `node` half every other warning carries, and
+    /// `src/main/java` needs it more than `lib` does.
     pub(crate) dependency: Option<String>,
     pub(crate) message: String,
 }
 
 impl GraphWarning {
-    pub(crate) fn dependency(name: &str, message: impl Into<String>) -> Self {
-        Self {
-            node: None,
-            dependency: Some(name.to_owned()),
-            message: message.into(),
-        }
-    }
-
     pub(crate) fn node(location: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             node: Some(location.into()),
@@ -881,7 +875,7 @@ mod tests {
     #[test]
     fn warning_display_names_its_subject() {
         assert_eq!(
-            GraphWarning::dependency("lib", "source directory is unavailable").to_string(),
+            GraphWarning::declared(None, "lib", "source directory is unavailable").to_string(),
             "dependency `lib`: source directory is unavailable"
         );
         assert_eq!(

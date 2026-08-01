@@ -401,9 +401,9 @@ impl GraphBuilder {
 
         let snapshot = Self::snapshot(&acquired.root, &self.exec).await?;
         let manifest = Self::probe_manifest(&acquired, &snapshot)?;
-        // One location for this node, written twice: what the snapshot diagnostics below are
-        // attributed to has to be what the node itself records, or a reader gets two names for one
-        // dependency.
+        // One location for this node, written everywhere it is named: what the snapshot diagnostics
+        // and the `[build]` entry warnings below are attributed to has to be what the node itself
+        // records, or a reader gets two names for one dependency.
         let location = Self::node_location(&acquired);
         self.push_snapshot_warnings(Some(&location), snapshot.diagnostics);
         let view = snapshot.view;
@@ -413,8 +413,12 @@ impl GraphBuilder {
             confinement: acquired.confinement.clone(),
         };
         let (body, child_manifest) = if let Some(manifest) = manifest {
-            let authored_sources = self.capture_manifest_sources(&declaring, &manifest).await;
-            let classpath = self.capture_manifest_classpath(&declaring, &manifest).await;
+            let authored_sources = self
+                .capture_manifest_sources(&declaring, &location, &manifest)
+                .await;
+            let classpath = self
+                .capture_manifest_classpath(&declaring, &location, &manifest)
+                .await;
             (
                 NodeBody::JalsSource {
                     source: SourceNode {
@@ -471,6 +475,20 @@ impl GraphBuilder {
         let declaring = ResolvedNode::location_of(&self.nodes, parent);
         self.warnings
             .push(GraphWarning::declared(declaring, name, message));
+    }
+
+    /// Warn about a `[build] source-dirs` or `[build] classpath` entry of the node being visited.
+    ///
+    /// Attributed the same way a `[dependencies]` entry is, and for a stronger reason: `lib` is at
+    /// least a name the reader chose, where `src/main/java` is the default every project in the
+    /// graph writes. Never the root — its `[build]` section is lowered by `jals-classpath`, not
+    /// here — so the declaring project is always a node and always worth naming.
+    fn warn_entry(&mut self, location: &str, entry: &str, message: impl Into<String>) {
+        self.warnings.push(GraphWarning::declared(
+            Some(location.to_owned()),
+            entry,
+            message,
+        ));
     }
 
     /// How a diagnostic names this node. A Git dependency lives in a temporary checkout whose path
@@ -807,6 +825,7 @@ impl GraphBuilder {
     async fn capture_manifest_sources(
         &mut self,
         declaring: &DeclaringProject,
+        location: &str,
         manifest: &Manifest,
     ) -> Vec<CapturedFile> {
         let mut files = BTreeMap::new();
@@ -815,16 +834,16 @@ impl GraphBuilder {
             let canonical = match Self::canonical_directory(&physical).await {
                 Ok(path) => path,
                 Err(message) => {
-                    self.warnings.push(GraphWarning::dependency(
+                    self.warn_entry(
+                        location,
                         source,
                         format!("source directory is unavailable: {message}"),
-                    ));
+                    );
                     continue;
                 }
             };
             if let Err(message) = Self::require_confinement(declaring, &canonical) {
-                self.warnings
-                    .push(GraphWarning::dependency(source, message));
+                self.warn_entry(location, source, message);
                 continue;
             }
             if let Some(relative) = RelativePath::from_host_path(&declaring.root, &canonical) {
@@ -844,10 +863,11 @@ impl GraphBuilder {
             match Self::snapshot(&canonical, &self.exec).await {
                 Ok(snapshot) => {
                     for diagnostic in snapshot.diagnostics {
-                        self.warnings.push(GraphWarning::dependency(
+                        self.warn_entry(
+                            location,
                             source,
                             format!("source snapshot: {diagnostic:?}"),
-                        ));
+                        );
                     }
                     let prefix = RelativePath::new([Name::new(format!("external-source-{index}"))
                         .expect("generated prefix is portable")]);
@@ -860,10 +880,9 @@ impl GraphBuilder {
                         files.insert(prefix.concat(file.key().path()), file.bytes().to_vec());
                     }
                 }
-                Err(error) => self.warnings.push(GraphWarning::dependency(
-                    source,
-                    format!("source snapshot failed: {error}"),
-                )),
+                Err(error) => {
+                    self.warn_entry(location, source, format!("source snapshot failed: {error}"));
+                }
             }
         }
         files
@@ -891,6 +910,7 @@ impl GraphBuilder {
     async fn capture_manifest_classpath(
         &mut self,
         declaring: &DeclaringProject,
+        location: &str,
         manifest: &Manifest,
     ) -> Vec<CapturedClasspathEntry> {
         let mut entries = Vec::new();
@@ -899,21 +919,22 @@ impl GraphBuilder {
             let canonical = match Self::canonical_existing(&unresolved).await {
                 Ok(path) => path,
                 Err(message) => {
-                    self.warnings.push(GraphWarning::dependency(
+                    self.warn_entry(
+                        location,
                         entry,
                         format!("classpath entry is unavailable: {message}"),
-                    ));
+                    );
                     continue;
                 }
             };
             if let Err(message) = Self::require_confinement(declaring, &canonical) {
-                self.warnings.push(GraphWarning::dependency(entry, message));
+                self.warn_entry(location, entry, message);
                 continue;
             }
             let metadata = match Self::is_file(&canonical).await {
                 Ok(is_file) => is_file,
                 Err(message) => {
-                    self.warnings.push(GraphWarning::dependency(entry, message));
+                    self.warn_entry(location, entry, message);
                     continue;
                 }
             };
@@ -926,12 +947,10 @@ impl GraphBuilder {
                         match logical {
                             Ok(path) => entries
                                 .push(CapturedClasspathEntry::File(CapturedFile { path, bytes })),
-                            Err(message) => {
-                                self.warnings.push(GraphWarning::dependency(entry, message));
-                            }
+                            Err(message) => self.warn_entry(location, entry, message),
                         }
                     }
-                    Err(message) => self.warnings.push(GraphWarning::dependency(entry, message)),
+                    Err(message) => self.warn_entry(location, entry, message),
                 }
                 continue;
             }
@@ -953,19 +972,21 @@ impl GraphBuilder {
                         snapshot.diagnostics,
                     ),
                     Err(error) => {
-                        self.warnings.push(GraphWarning::dependency(
+                        self.warn_entry(
+                            location,
                             entry,
                             format!("classpath snapshot failed: {error}"),
-                        ));
+                        );
                         continue;
                     }
                 }
             };
             for diagnostic in diagnostics {
-                self.warnings.push(GraphWarning::dependency(
+                self.warn_entry(
+                    location,
                     entry,
                     format!("classpath snapshot: {diagnostic:?}"),
-                ));
+                );
             }
             let prefix_len = root.path().segments().len();
             let members = view
