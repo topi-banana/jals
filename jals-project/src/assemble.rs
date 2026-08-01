@@ -5,6 +5,7 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::fmt;
 
 use jals_classpath::{
     ClasspathEntry, DependencyLocation, DependencySpec, ExternalLocator, LibrarySource,
@@ -17,7 +18,7 @@ use jals_storage::{
 
 use crate::graph::{
     BinaryInput, CapturedClasspathEntry, CapturedFile, GraphMetadata, GraphWarning, NodeBody,
-    NodeId, PreprocessedProjectGraph,
+    NodeId, PreprocessedProjectGraph, ResolvedNode,
 };
 
 /// One verified file entry on the compile classpath.
@@ -61,12 +62,43 @@ impl CompileClasspathEntry {
 }
 
 /// Structured non-script assembly failure. Other nodes continue to assemble deterministically.
+///
+/// The fields are sealed, as [`GraphWarning`]'s are: a host reports one of these by rendering the
+/// whole thing through its [`Display`](fmt::Display). Both halves name the failing node's own side
+/// of the graph, never a file in the consumer's tree, so there is nothing here for a host to attach
+/// a diagnostic to that it could not attach to the manifest already.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectAssemblyError {
-    pub node: NodeId,
-    pub path: Option<RelativePath>,
-    pub message: String,
+    /// The failing node's [`location`](crate::graph::ResolvedNode::location), for the reason
+    /// [`GraphWarning`] holds one: a [`NodeId`] renders as a digest, and a digest names nothing a
+    /// reader can go and look at. The identity is still what `logical_path` derives artifact paths
+    /// from — it is just not what a diagnostic says.
+    node: String,
+    /// The file inside that node, addressed the way the node itself addresses it. Never the
+    /// `logical_path` an artifact is published under: that begins with the node's hex token, which
+    /// is the same digest `node` avoids and says as little in the middle of a sentence as it does
+    /// at the start of one.
+    path: Option<RelativePath>,
+    message: String,
 }
+
+/// `dependency project <node> could not assemble[ <path>]: <message>` — what a host reports.
+///
+/// One rendering for every host, for the same reason [`GraphWarning`] has one: a message names its
+/// file at most, never the node, and a host that restates the node in its own words states it
+/// differently from the next host. It reads as a whole sentence because it is also this type's
+/// [`Error`](core::error::Error) rendering, which nothing wraps.
+impl fmt::Display for ProjectAssemblyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "dependency project `{}` could not assemble", self.node)?;
+        if let Some(path) = &self.path {
+            write!(f, " `{path}`")?;
+        }
+        write!(f, ": {}", self.message)
+    }
+}
+
+impl core::error::Error for ProjectAssemblyError {}
 
 /// Mode-independent graph projection. `ProjectInputOptions` is applied only when this plan is
 /// subsequently executed by `ProjectInputs`.
@@ -134,7 +166,7 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
             if let Some(exports) = self.graph.exports.get(&node.id) {
                 for warning in &exports.warnings {
                     self.warnings
-                        .push(GraphWarning::node(node.id.clone(), warning.clone()));
+                        .push(GraphWarning::node(node.location.clone(), warning.clone()));
                 }
             }
         }
@@ -308,7 +340,7 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
             Ok(lowered) => lowered,
             Err(error) => {
                 self.errors.push(ProjectAssemblyError {
-                    node: node.id.clone(),
+                    node: node.location.clone(),
                     path: None,
                     message: format!("frontend `{}` failed: {error}", frontend.id()),
                 });
@@ -398,16 +430,20 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
                     key: key.clone(),
                 });
             }
-            let Ok(member_path) = FileKey::new(member.path.clone()) else {
+            let Ok(member_key) = FileKey::new(member.path.clone()) else {
+                let location = ResolvedNode::location_or_digest(&self.graph.nodes, node);
                 self.errors.push(ProjectAssemblyError {
-                    node: node.clone(),
-                    path: Some(member.path.clone()),
+                    node: location,
+                    // `member_path`, as the publication above reports it: both failures are about
+                    // one member of one tree, and a reader given the entry-relative path by one
+                    // and the member-relative path by the other has to work out which is which.
+                    path: Some(member_path.clone()),
                     message: "classpath tree member is not a file path".to_owned(),
                 });
                 return;
             };
             published.push(CompileClasspathTreeMember {
-                path: member_path,
+                path: member_key,
                 key,
             });
         }
@@ -447,9 +483,12 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
             .bytes(file_path.to_string().as_bytes());
         let key = CacheKey::new(namespace, fold.finish(), ContentDigest::of(bytes));
         if let Err(error) = self.cache.publish(&key, bytes).await {
+            let location = ResolvedNode::location_or_digest(&self.graph.nodes, node);
             self.errors.push(ProjectAssemblyError {
-                node: node.clone(),
-                path: Some(path),
+                node: location,
+                // The file as its own node spells it, not `path`: the reader owns the former and
+                // has never seen the latter, which is a cache address this run failed to write.
+                path: Some(file_path.clone()),
                 message: format!("artifact publication failed: {error:?}"),
             });
             return None;
@@ -474,6 +513,10 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
         struct ProjectedBinary {
             node: NodeId,
             dependency: String,
+            /// The project that declared this edge, as an identity: only the warning below names
+            /// it, and resolving a location for every edge to drop all but the failing one is work
+            /// with no reader. `None` is the root declaring its own edge, which reads as the entry
+            /// alone.
             from: Option<NodeId>,
             location: DependencyLocation,
             source_archive: bool,
@@ -509,8 +552,12 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
 
         for projected in projected {
             let Ok(name) = Name::new(&projected.dependency) else {
+                let declared_by = projected
+                    .from
+                    .as_ref()
+                    .map(|from| ResolvedNode::location_or_digest(&self.graph.nodes, from));
                 self.warnings.push(GraphWarning {
-                    node: projected.from,
+                    node: declared_by,
                     dependency: Some(projected.dependency),
                     message: "dependency name is not a portable name".to_owned(),
                 });
@@ -531,5 +578,40 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::borrow::ToOwned;
+    use alloc::string::ToString;
+
+    use jals_storage::RelativePath;
+
+    use super::ProjectAssemblyError;
+
+    /// The file is optional, the node never is: a host that reported only the message would say
+    /// which file failed for one node and nothing at all for the other. The node is named by where
+    /// it came from — a digest would say as little as no node at all.
+    #[test]
+    fn assembly_error_display_names_node_and_file() {
+        assert_eq!(
+            ProjectAssemblyError {
+                node: "../lib".to_owned(),
+                path: None,
+                message: "classpath entry is not cached".to_owned(),
+            }
+            .to_string(),
+            "dependency project `../lib` could not assemble: classpath entry is not cached"
+        );
+        assert_eq!(
+            ProjectAssemblyError {
+                node: "../lib".to_owned(),
+                path: Some(RelativePath::parse("src/Main.java").expect("a portable relative path")),
+                message: "publishing failed".to_owned(),
+            }
+            .to_string(),
+            "dependency project `../lib` could not assemble `src/Main.java`: publishing failed"
+        );
     }
 }

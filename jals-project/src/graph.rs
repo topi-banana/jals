@@ -168,28 +168,88 @@ impl GraphMetadata {
 }
 
 /// Non-fatal graph discovery or preprocessing diagnostic.
+///
+/// The attribution is not readable apart from the message: a host reports one of these by
+/// rendering the whole thing through its [`Display`](fmt::Display), which is why the fields are
+/// sealed. Several messages name no subject at all, so a host that read `message` alone dropped
+/// the half a user can act on, and the three that reassembled a subject themselves each stated it
+/// differently. The same rule holds for [`jals_classpath::Warning`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphWarning {
-    pub node: Option<NodeId>,
-    pub dependency: Option<String>,
-    pub message: String,
+    /// The attributed node's [`location`](ResolvedNode::location), never its [`NodeId`]: a digest
+    /// names nothing a reader can go and look at, which is why [`GraphError::BuildScript`] carries
+    /// one too. Two nodes may describe themselves identically — identity is the digest, and it is
+    /// deliberately not what a diagnostic shows — so two warnings can read the same.
+    ///
+    /// *Which* node it is depends on `dependency`. Alone, it is the node the warning is **about**;
+    /// beside a `dependency`, it is the project that **declared** that entry. `Display` spells the
+    /// two arms differently, so a producer setting both is saying the second.
+    pub(crate) node: Option<String>,
+    /// The manifest entry this is about, as the manifest spells it — which is not necessarily a
+    /// [`Name`](jals_storage::Name), since one warning is that it isn't.
+    ///
+    /// Usually a `[dependencies]` key, which is what `Display` calls it. A `[build] source-dirs` or
+    /// `[build] classpath` entry also arrives here and is rendered the same way, so `dependency
+    /// `src/main/java` of project `../lib`: source directory is unavailable` is a thing a user can
+    /// be shown. Telling the two apart is a change to what a warning *is* — a third kind of subject
+    /// — not to how one is written, so it does not belong in the rendering. Naming the project that
+    /// declared it is not that change: it is the same `node` half every other warning carries, and
+    /// `src/main/java` needs it more than `lib` does.
+    pub(crate) dependency: Option<String>,
+    pub(crate) message: String,
 }
 
 impl GraphWarning {
-    pub(crate) fn dependency(name: &str, message: impl Into<String>) -> Self {
+    pub(crate) fn node(location: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
-            node: None,
-            dependency: Some(name.to_owned()),
+            node: Some(location.into()),
+            dependency: None,
             message: message.into(),
         }
     }
 
-    pub(crate) fn node(node: NodeId, message: impl Into<String>) -> Self {
+    /// A manifest entry gone wrong, attributed to the project whose manifest spells it.
+    ///
+    /// `declaring` is `None` for the root, which has no node and needs none: its `jals.toml` is the
+    /// one the reader is already in, so naming it would put a host path on every line without
+    /// narrowing anything. A transitive project's entry is the case that needs it — `lib` alone
+    /// does not say which of several `jals.toml` files declares `lib`.
+    pub(crate) fn declared(
+        declaring: Option<String>,
+        name: &str,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
-            node: Some(node),
-            dependency: None,
+            node: declaring,
+            dependency: Some(name.to_owned()),
             message: message.into(),
         }
+    }
+}
+
+/// `<subject>: <message>` — the whole of what a host can say about one of these, which is why the
+/// node and the entry a warning is attributed to are not readable separately.
+///
+/// Several messages name no subject at all — a snapshot diagnostic and `source directory is
+/// unavailable` carry theirs only in the attribution — so a host that rendered the message alone
+/// would drop the half a user can act on. Every host reports these through this, exactly as one is
+/// reported for [`jals_classpath::Warning`]; the attribution a producer chose is the attribution a
+/// user sees.
+///
+/// The node and the entry are independent, so all four combinations are spelled out. A warning that
+/// names both is a declaring project's entry gone wrong, and both halves are reported: the entry
+/// alone does not say which project wrote it.
+impl fmt::Display for GraphWarning {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match (&self.dependency, &self.node) {
+            (Some(dependency), Some(node)) => {
+                write!(f, "dependency `{dependency}` of project `{node}`: ")
+            }
+            (Some(dependency), None) => write!(f, "dependency `{dependency}`: "),
+            (None, Some(node)) => write!(f, "dependency project `{node}`: "),
+            (None, None) => f.write_str("project graph: "),
+        }?;
+        f.write_str(&self.message)
     }
 }
 
@@ -313,6 +373,26 @@ impl ResolvedNode {
             NodeBody::PlainSource(_) => NodeKind::PlainSource,
             NodeBody::JalsSource { .. } => NodeKind::JalsSource,
         }
+    }
+
+    /// The location of the node `id` names, which is how a warning about an entry that project's
+    /// manifest declared is attributed. `None` is the root: discovery gives it no node.
+    ///
+    /// A scan rather than an index because it runs once per *failing* entry, and a graph with
+    /// enough nodes for the difference to show would have to fail on most of them to reach it.
+    pub(crate) fn location_of(nodes: &[Self], id: Option<&NodeId>) -> Option<String> {
+        let id = id?;
+        nodes
+            .iter()
+            .find(|node| &node.id == id)
+            .map(|node| node.location.clone())
+    }
+
+    /// [`location_of`](Self::location_of) where the caller already holds an id, so an absent node
+    /// is not the root but a node this graph does not carry — unreachable, and a digest is still a
+    /// worse diagnostic than a location rather than no diagnostic at all.
+    pub(crate) fn location_or_digest(nodes: &[Self], id: &NodeId) -> String {
+        Self::location_of(nodes, Some(id)).unwrap_or_else(|| id.to_string())
     }
 
     pub(crate) const fn source(&self) -> Option<&SourceNode> {
@@ -561,6 +641,17 @@ impl ResolvedProjectGraph {
         &self.warnings
     }
 
+    /// Every node's diagnostic [`location`](ResolvedNode::location), in discovery order. Nothing
+    /// in production reads these as a set — a diagnostic names the one node it is about — so this
+    /// exists to let the crate's own tests pin what a reader would be shown.
+    #[cfg(test)]
+    pub(crate) fn locations(&self) -> Vec<&str> {
+        self.nodes
+            .iter()
+            .map(|node| node.location.as_str())
+            .collect()
+    }
+
     /// Every direct `[dependencies] features` name that its target dependency does not declare in
     /// `[features]`.
     ///
@@ -767,5 +858,54 @@ pub struct PreprocessedProjectGraph {
 impl PreprocessedProjectGraph {
     pub(crate) fn metadata(&self) -> GraphMetadata {
         GraphMetadata::from_graph(&self.nodes, &self.edges)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::borrow::ToOwned;
+    use alloc::string::ToString;
+
+    use super::GraphWarning;
+
+    /// Every arm names its subject, and the node arms name it by where the node came from. The one
+    /// a host used to reach by reading `message` directly — neither field set, which the root
+    /// project's own snapshot diagnostics produce — is the reason this is a `Display` and not three
+    /// copies in three hosts.
+    #[test]
+    fn warning_display_names_its_subject() {
+        assert_eq!(
+            GraphWarning::declared(None, "lib", "source directory is unavailable").to_string(),
+            "dependency `lib`: source directory is unavailable"
+        );
+        assert_eq!(
+            GraphWarning::node("../shared", "build script wrote nothing").to_string(),
+            "dependency project `../shared`: build script wrote nothing"
+        );
+        assert_eq!(
+            GraphWarning {
+                node: None,
+                dependency: None,
+                message: "snapshot: unreadable".to_owned(),
+            }
+            .to_string(),
+            "project graph: snapshot: unreadable"
+        );
+    }
+
+    /// A warning that names both keeps both: the declaring project is not recoverable from the
+    /// entry, and dropping it is what every host's precedence chain used to do.
+    #[test]
+    fn warning_display_keeps_both_halves() {
+        let warning = GraphWarning {
+            node: Some("https://example.invalid/declaring.git".to_owned()),
+            dependency: Some("lib".to_owned()),
+            message: "dependency name is not a portable name".to_owned(),
+        };
+        assert_eq!(
+            warning.to_string(),
+            "dependency `lib` of project `https://example.invalid/declaring.git`: dependency name \
+             is not a portable name"
+        );
     }
 }

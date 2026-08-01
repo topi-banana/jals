@@ -92,6 +92,53 @@ async fn storage(root: &Path, exec: &Exec) -> NativeStorage {
         .unwrap()
 }
 
+/// A `[build]` entry of a *dependency* names the project that declared it, as a `[dependencies]`
+/// entry does — and needs it more, since `src/main/java` is what every project in the graph writes
+/// and the entry alone narrows the search to nothing. The native location is a host directory, so
+/// this also pins that a reader is given a path they can open.
+#[test]
+fn a_dependency_build_entry_names_the_project_that_declared_it() {
+    jals_exec::tokio_rt::run(|exec| async move {
+        let project = tempfile::tempdir().unwrap();
+        write(
+            project.path(),
+            "dep/jals.toml",
+            "[build]\nsource-dirs = [\"src/main/java\"]\nclasspath = [\"lib\"]\n",
+        );
+        let root = manifest("[dependencies]\ndep = { path = \"dep\" }\n");
+
+        let graph = NativeProjectGraph::discover(
+            &root,
+            project.path(),
+            &exec,
+            jals_classpath::NetworkPolicy::Online,
+        )
+        .await
+        .unwrap();
+        let rendered = graph
+            .warnings()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert_eq!(rendered.len(), 2, "{rendered:?}");
+        // The declaring project is the dependency's own directory, not the root's, and the tails
+        // are host I/O errors this does not pin — the subject is what these are here for.
+        for (entry, subject) in [
+            ("src/main/java", "source directory is unavailable"),
+            ("lib", "classpath entry is unavailable"),
+        ] {
+            assert!(
+                rendered.iter().any(|warning| {
+                    warning.starts_with(&format!("dependency `{entry}` of project `"))
+                        && warning.contains(&format!("dep`: {subject}"))
+                }),
+                "{rendered:?}"
+            );
+        }
+    })
+    .unwrap();
+}
+
 #[test]
 fn transitive_path_graph_is_classified_in_parent_discovery_order() {
     jals_exec::tokio_rt::run(|exec| async move {
@@ -748,6 +795,16 @@ fn git_identity_uses_head_not_checkout_path_and_local_children_stay_confined() {
                 .iter()
                 .all(|node| node.id.token().len() == 64)
         );
+        // Both nodes live in a temporary checkout, so both are named by the repository they came
+        // from — by the argument `git clone` was given, never by the identity framing beside it,
+        // which is NUL-delimited and carries a commit no reader asked to see. The two reading the
+        // same is the documented cost of naming a node by where it came from.
+        let locations = first.locations();
+        assert_eq!(locations.len(), 2, "{locations:?}");
+        for location in &locations {
+            assert!(!location.contains('\0'), "{location:?}");
+            assert!(location.ends_with("repository"), "{location:?}");
+        }
 
         let outside = project.path().join("outside");
         fs::create_dir_all(&outside).unwrap();
@@ -1005,12 +1062,31 @@ fn snapshot_diagnostics_warn_but_unreadable_manifest_is_hard() {
         )
         .await
         .unwrap();
+        // Asserted through `Display`, not `.message`: what a host shows is the whole warning, and
+        // the half these pin is the *subject*. The same byte drives two diagnostics — the root
+        // snapshot walks into `warn/`, and `warn` snapshots itself — attributed differently, and
+        // the root's is the case that carries no node at all.
+        let rendered = graph
+            .warnings()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
         assert!(
             !non_utf8_entry
-                || graph
-                    .warnings()
-                    .iter()
-                    .any(|warning| warning.message.contains("NonUtf8Entry"))
+                || rendered.iter().any(|warning| {
+                    warning.starts_with("project graph: snapshot: ")
+                        && warning.contains("NonUtf8Entry")
+                }),
+            "{rendered:?}"
+        );
+        assert!(
+            !non_utf8_entry
+                || rendered.iter().any(|warning| {
+                    warning.starts_with("dependency project `")
+                        && warning.contains("warn`: snapshot: ")
+                        && warning.contains("NonUtf8Entry")
+                }),
+            "{rendered:?}"
         );
 
         std::fs::create_dir(project.path().join("hard")).unwrap();
