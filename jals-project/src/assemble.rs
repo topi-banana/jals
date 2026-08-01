@@ -17,8 +17,8 @@ use jals_storage::{
 };
 
 use crate::graph::{
-    BinaryInput, CapturedClasspathEntry, CapturedFile, GraphMetadata, GraphWarning, NodeBody,
-    NodeId, PreprocessedProjectGraph, ResolvedNode,
+    BinaryInput, CapturedClasspathEntry, CapturedClasspathKind, CapturedFile, GraphMetadata,
+    GraphWarning, NodeBody, NodeId, PreprocessedProjectGraph, ResolvedNode,
 };
 
 /// One verified file entry on the compile classpath.
@@ -167,6 +167,15 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
                 for warning in &exports.warnings {
                     self.warnings
                         .push(GraphWarning::node(node.location.clone(), warning.clone()));
+                }
+                // One report per node, rendered at the same seam every other node diagnostic is:
+                // it stays structured through preprocessing so nothing downstream has to parse it
+                // back out of a sentence.
+                if let Some(diagnosis) = &exports.unbacked_publications {
+                    self.warnings.push(GraphWarning::node(
+                        node.location.clone(),
+                        diagnosis.to_string(),
+                    ));
                 }
             }
         }
@@ -417,9 +426,9 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
     }
 
     async fn publish_classpath_entry(&mut self, node: &NodeId, entry: &CapturedClasspathEntry) {
-        match entry {
-            CapturedClasspathEntry::File(file) => self.publish_classpath_file(node, file).await,
-            CapturedClasspathEntry::Tree { path, members } => {
+        match &entry.kind {
+            CapturedClasspathKind::File(file) => self.publish_classpath_file(node, file).await,
+            CapturedClasspathKind::Tree { path, members } => {
                 self.publish_classpath_tree(node, path, members).await;
             }
         }
