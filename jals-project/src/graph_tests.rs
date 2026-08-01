@@ -1738,3 +1738,86 @@ fn an_unreadable_classpath_entry_is_named_as_the_manifest_spelled_it() {
         assert!(!message.contains("external-classpath"), "{message}");
     });
 }
+
+/// Two publications this dependency's build script produces, neither of them backed. `extra` is
+/// appended to [`publishing_dependency`]'s script, which already publishes `api` at `net/example`.
+const PUBLISHES_A_SECOND_ROOT: &str = r#"
+    let extra = tasks.project_jar("vendor/library.jar");
+    let second = tasks.extract_java(extra, "org/vendor");
+    tasks.publish_tree("tool", second, "src/main/java/org/vendor", "replace-root");
+"#;
+
+#[test]
+fn every_unread_classpath_entry_is_withheld_in_one_report() {
+    jals_exec::block_on_inline(async {
+        // Each unread entry withholds the same claim about the same roots, so a message apiece
+        // would spell that root list once per broken jar. Two of each is the smallest shape where
+        // per-entry and per-report differ at all — one of each cannot tell them apart.
+        let library = jar(&[("org/vendor/Tool.java", b"package org.vendor; class Tool {}")]);
+        let (root, storage) = publishing_dependency(
+            PUBLISHES_A_SECOND_ROOT,
+            &[
+                (
+                    "dep/jals.toml",
+                    b"[build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n\
+                      classpath = [\"vendor/broken.jar\", \"vendor/junk.jar\"]\n",
+                ),
+                ("dep/vendor/broken.jar", b"not a zip archive"),
+                ("dep/vendor/junk.jar", b"also not a zip archive"),
+                ("dep/vendor/library.jar", &library),
+            ],
+        );
+        let warnings = coverage_warnings(&root, &storage).await;
+
+        let [message] = warnings.as_slice() else {
+            panic!("expected exactly one warning, got {warnings:?}");
+        };
+        // Both roots the claim was withheld about, and both entries it was withheld for.
+        assert!(message.contains("`api` (`net/example`)"), "{message}");
+        assert!(message.contains("`tool` (`org/vendor`)"), "{message}");
+        assert!(message.contains("`vendor/broken.jar`"), "{message}");
+        assert!(message.contains("`vendor/junk.jar`"), "{message}");
+    });
+}
+
+#[test]
+fn the_dependencies_hedge_is_stated_once_for_the_whole_report() {
+    jals_exec::block_on_inline(async {
+        // What the check could not see is one property of the project, not a fact about each root,
+        // so it is said once however many roots go unbacked — while the roots themselves stay one
+        // warning each, because each names its own owner and destination to act on.
+        let classes = jar(&[("net/example/Api.class", b"class bytes")]);
+        let library = jar(&[("org/vendor/Tool.java", b"package org.vendor; class Tool {}")]);
+        let (root, storage) = publishing_dependency(
+            PUBLISHES_A_SECOND_ROOT,
+            &[
+                (
+                    "dep/jals.toml",
+                    b"[build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n\
+                      [dependencies]\nlib = { jar = \"vendor/lib.jar\" }\n",
+                ),
+                ("dep/vendor/lib.jar", &classes),
+                ("dep/vendor/library.jar", &library),
+            ],
+        );
+        let warnings = coverage_warnings(&root, &storage).await;
+
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(
+            warnings.iter().any(|m| m.contains("publishes `api`")),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|m| m.contains("publishes `tool`")),
+            "{warnings:?}"
+        );
+        assert_eq!(
+            warnings
+                .iter()
+                .filter(|m| m.contains("disregard this"))
+                .count(),
+            1,
+            "{warnings:?}"
+        );
+    });
+}

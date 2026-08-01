@@ -606,6 +606,10 @@ impl ResolvedNode {
         // but only here, past the point where the rest of the classpath already answered the
         // question and the unread entry could not have changed it.
         if !coverage.warnings().is_empty() {
+            // One report, not one per unread entry. Every one of them withholds the same claim
+            // about the same roots, so a message each would restate that root list verbatim as
+            // many times as the classpath happened to be unreadable.
+            //
             // Withholding the claim is not the same as saying nothing: a reader still has to know
             // which roots were left unanswered, or the report names a broken jar and no reason to
             // care about it.
@@ -614,26 +618,19 @@ impl ResolvedNode {
                 .map(|(publication, prefix)| format!("`{}` (`{prefix}`)", publication.owner))
                 .collect::<Vec<_>>()
                 .join(", ");
-            return coverage
+            let unread = coverage
                 .warnings()
                 .iter()
-                .map(|warning| {
-                    format!(
-                        "cannot tell whether this project's classpath backs what its build task \
-                         publishes — {withheld}: {warning}"
-                    )
-                })
-                .collect();
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Vec::from([format!(
+                "cannot tell whether this project's classpath backs what its build task \
+                 publishes — {withheld}: {unread}"
+            )]);
         }
 
-        let unseen = if manifest.dependencies.is_empty() {
-            ""
-        } else {
-            " This project also declares `[dependencies]`, whose contribution is settled after this \
-             check and is invisible to it — disregard this if one of them already carries these \
-             types."
-        };
-        uncovered
+        let mut messages: Vec<String> = uncovered
             .iter()
             .map(|(publication, prefix)| {
                 format!(
@@ -644,11 +641,24 @@ impl ResolvedNode {
                      built as a root, which leaves the publication on disk as an ordinary source \
                      file and makes the export a matter of build state. Put the library's own jar \
                      on the classpath with `tasks.add_classpath`, or declare it as a \
-                     `[dependencies]` jar.{unseen}",
+                     `[dependencies]` jar.",
                     publication.owner, publication.destination,
                 )
             })
-            .collect()
+            .collect();
+        // Carried by the first message rather than by every one of them: the caveat is about what
+        // the check could not see, which is one property of the project and not a fact about each
+        // root. Repeating it per root is the same sentence as many times as the project publishes.
+        if !manifest.dependencies.is_empty()
+            && let Some(first) = messages.first_mut()
+        {
+            first.push_str(
+                " This project also declares `[dependencies]`, whose contribution is settled after \
+                 this check and is invisible to it — disregard this project's publication warnings \
+                 if one of them already carries the types they name.",
+            );
+        }
+        messages
     }
 
     /// The package prefix a publication destination lies at, or an error if it lies outside every
