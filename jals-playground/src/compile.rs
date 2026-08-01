@@ -1,13 +1,14 @@
 //! Compiling the in-browser workspace: frontend seam in, downloadable artifact out.
 //!
-//! The same pipeline `jals build` runs, minus the filesystem. Sources go through the frontend
-//! ([`jals_frontend::Driver`]) so the backend only ever sees what a frontend emitted, then through
-//! whichever backend [`jals_build::BackendSelection::in_process`] hands back — the in-process
-//! compiler, portable by construction, which is why a browser tab can run it at all. That entry
-//! point is also how `javac` is *declined* rather than attempted: choosing it says this host has no
-//! process to spawn, so the answer comes back as an absence carrying its reason. Class files are
-//! packaged into a jar here; a WebAssembly module is already one artifact and passes straight
-//! through.
+//! The same pipeline `jals build` runs, minus the filesystem, and reached through the same two
+//! selections it uses. Sources go through whichever frontend
+//! [`jals_frontend::FrontendSelection::for_manifest`] hands back, so the backend only ever sees what
+//! a frontend emitted, then through whichever backend
+//! [`jals_build::BackendSelection::in_process`] hands back — the in-process compiler, portable by
+//! construction, which is why a browser tab can run it at all. That second entry point is also how
+//! `javac` is *declined* rather than attempted: choosing it says this host has no process to spawn,
+//! so the answer comes back as an absence carrying its reason. Class files are packaged into a jar
+//! here; a WebAssembly module is already one artifact and passes straight through.
 //!
 //! Deliberately free of the workspace lock, Monaco, and the DOM: sources arrive as `(path, text)`
 //! and the result is bytes. That keeps the whole thing testable on the host and makes it impossible
@@ -17,7 +18,6 @@
 //! signatures come from `jals-hir`'s embedded stubs, so a downloaded jar is on the *editor's*
 //! classpath but not the compiler's — the same limitation `jals build` has today.
 
-use std::collections::BTreeSet;
 use std::fmt;
 
 use jals_build::{
@@ -25,9 +25,7 @@ use jals_build::{
 };
 use jals_classpath::JarPackage;
 use jals_config::{BackendKind, Manifest};
-use jals_frontend::{
-    DialectFlags, DialectFrontend, Driver, Frontend, FrontendKey, IrFile, VanillaFrontend,
-};
+use jals_frontend::{FrontendSelection, IrFile};
 use jals_storage::{ArtifactCache, MemoryCache, RelativePath};
 
 /// The name a project with no usable `[package] name` is packaged under.
@@ -198,41 +196,24 @@ impl Compile {
                 RelativePath::parse(path).map_err(|_| CompileFailure::InvalidPath(path.clone()))?;
             ir.push(IrFile::new(relative, text.as_bytes().to_vec().into()));
         }
-        // `Driver::lower` binary-searches this slice to attribute each emitted file to its origin, so
-        // canonical order is a precondition, not a tidiness pass.
-        FrontendKey::canonical_order(&mut ir);
-
-        // Mirrors `App::lower_sources` in `jals-cli` (the original): enabling a jals dialect feature
-        // drives the build to desugar it, without a separate `[build.frontend]` selection.
-        let feature_set = manifest.feature_set();
-        let attributes = feature_set.contains(jals_config::Feature::Attributes);
-        let dialect_flags = DialectFlags {
-            grouped_imports: feature_set.contains(jals_config::Feature::GroupedImports),
-            attributes,
-            // No command line in a browser, so `#[cfg(feature = "…")]` sees the manifest's own
-            // `default` list — the same selection the Rhai build script ran under.
-            build_features: if attributes {
-                manifest
-                    .resolve_build_features(&[], false, false)
-                    .unwrap_or_default()
-                    .features()
-                    .clone()
-            } else {
-                BTreeSet::new()
-            },
-        };
-        let use_dialect = dialect_flags.any();
-        let dialect = DialectFrontend::new(dialect_flags);
-        let frontend: &dyn Frontend = match manifest.build.frontend {
-            jals_config::FrontendKind::Vanilla {} if use_dialect => &dialect,
-            jals_config::FrontendKind::Vanilla {} => &VanillaFrontend,
-        };
+        // The `[build.frontend]` decision — and the dialect features that override it — belongs to
+        // `jals-frontend`, which is why this reads like the CLI's call rather than mirroring its
+        // body. No command line in a browser, so `#[cfg(feature = "…")]` sees the manifest's own
+        // `default` list: the same selection the Rhai build script ran under. A malformed
+        // `[features]` table degrades to the empty set here rather than failing the compile — the
+        // manifest editor is live, and the build script already ran under the same fallback.
+        let build_features = manifest
+            .resolve_build_features(&[], false, false)
+            .unwrap_or_default()
+            .into_features();
+        let frontend = FrontendSelection::for_manifest(manifest, &build_features);
 
         // A throwaway cache: lowering reads its inputs from `ir`, never from a `ProjectView`, and
         // nothing memoizes backend output yet — so publishing into the workspace's own artifacts
         // would grow it every compile for no reuse.
         let mut cache = ArtifactCache::new(MemoryCache::default());
-        let lowered = Driver::lower(frontend, &mut cache, &ir)
+        let lowered = frontend
+            .lower(&mut cache, ir)
             .await
             .map_err(|error| CompileFailure::Lower(error.to_string()))?;
 

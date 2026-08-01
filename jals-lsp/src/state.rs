@@ -697,9 +697,17 @@ mod tests {
 
     #[test]
     fn uri_configs_is_config_file_matches_only_its_file_name() {
-        let fmt = Url::parse("file:///p/jalsfmt.toml").unwrap();
-        let lint = Url::parse("file:///p/jalslint.toml").unwrap();
-        let other = Url::parse("file:///p/other.toml").unwrap();
+        // Built from a host path rather than spelled out: `is_config_file` answers through
+        // `Url::to_file_path`, and Windows rejects a `file:///p/…` URL that names no drive.
+        let root = if cfg!(windows) {
+            PathBuf::from(r"C:\p")
+        } else {
+            PathBuf::from("/p")
+        };
+        let file_uri = |name: &str| Url::from_file_path(root.join(name)).unwrap();
+        let fmt = file_uri("jalsfmt.toml");
+        let lint = file_uri("jalslint.toml");
+        let other = file_uri("other.toml");
         let non_file = Url::parse("untitled:jalsfmt.toml").unwrap();
         assert!(UriConfigs::<Config>::is_config_file(&fmt));
         assert!(!UriConfigs::<Config>::is_config_file(&lint));

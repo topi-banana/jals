@@ -1478,41 +1478,22 @@ impl App {
         sources: &[PathBuf],
         features: &ResolvedBuildFeatures,
     ) -> Result<(jals_build::StagedTree, Vec<jals_build::BackendSource>)> {
-        // Enabling a jals dialect feature (`[package] features`) drives the build to desugar it,
-        // so it compiles without a separate `[build.frontend]` selection. When no dialect feature
-        // is on, fall back to vanilla so the cache identity of ordinary projects is unchanged.
-        let feature_set = manifest.feature_set();
-        let attributes = feature_set.contains(jals_config::Feature::Attributes);
-        let dialect_flags = jals_frontend::DialectFlags {
-            grouped_imports: feature_set.contains(jals_config::Feature::GroupedImports),
-            attributes,
-            // The resolved build features feed `#[cfg(feature = "…")]` — the same set a build
-            // script queries. Kept empty when the attributes dialect is off, so the cache
-            // identity of attribute-free dialect projects stays independent of `--features`.
-            build_features: if attributes {
-                features.features().clone()
-            } else {
-                BTreeSet::new()
-            },
-        };
-        let use_dialect = dialect_flags.any();
-        let dialect = jals_frontend::DialectFrontend::new(dialect_flags);
-        let frontend: &dyn jals_frontend::Frontend = match manifest.build.frontend {
-            jals_config::FrontendKind::Vanilla {} if use_dialect => &dialect,
-            jals_config::FrontendKind::Vanilla {} => &jals_frontend::VanillaFrontend,
-        };
+        // `[build.frontend]` and the dialect features that override it are answered in
+        // `jals-frontend`, not here — the host supplies the resolved build features (the same set
+        // a build script queries) and asks once.
+        let frontend =
+            jals_frontend::FrontendSelection::for_manifest(manifest, features.features());
 
         let mut files = Vec::with_capacity(sources.len());
         for path in sources {
             let bytes = std::fs::read(path)
                 .with_context(|| format!("reading source {}", path.display()))?;
-            // Logical, project-relative identity. Sorting on this rather than on the filesystem
-            // walk order is what keeps cache keys identical across machines.
+            // Logical, project-relative identity. The seam sorts on this rather than on the
+            // filesystem walk order, which is what keeps cache keys identical across machines.
             let relative = RelativePath::from_host_path(root, path)
                 .ok_or_else(|| anyhow!("source {} is outside the project root", path.display()))?;
             files.push(jals_frontend::IrFile::new(relative, bytes.into()));
         }
-        jals_frontend::FrontendKey::canonical_order(&mut files);
 
         // Only the artifact cache is needed, so open it directly rather than taking a whole
         // project snapshot: lowering reads its inputs from `files`, never from a `ProjectView`.
@@ -1520,9 +1501,10 @@ impl App {
             root.join(NativeStorage::PROJECT_CACHE_DIR),
         ));
 
-        let lowered = jals_frontend::Driver::lower(frontend, &mut cache, &files)
+        let lowered = frontend
+            .lower(&mut cache, files)
             .await
-            .map_err(|error| anyhow!("frontend `{}` failed: {error}", frontend.caps().id))?;
+            .map_err(|error| anyhow!("frontend `{}` failed: {error}", frontend.id()))?;
 
         // Resolve the published keys to bytes once, here: the [`Backend`](jals_build::Backend)
         // contract is object-safe and `ArtifactCache` is not, so this is the host's job — and the

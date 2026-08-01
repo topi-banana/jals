@@ -1,0 +1,10 @@
+# This repository is LF-only in the working tree, on every platform.
+#
+# It is not a style preference. `java.ungram` is rejected by its own parser when a line ends in
+# CRLF, `xtask -- codegen --check` compares rendered output against a committed file byte for byte,
+# and the corpus and golden fixtures are compared the same way. A Windows checkout under the
+# default `core.autocrlf=true` breaks all three, so the working-tree ending is pinned here rather
+# than left to whatever each contributor's Git is configured to do.
+#
+# `text=auto` still lets Git detect binary content and leave it untouched.
+* text=auto eol=lf

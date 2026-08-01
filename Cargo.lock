@@ -1222,6 +1222,7 @@ dependencies = [
 name = "jals-frontend"
 version = "0.1.0"
 dependencies = [
+ "jals-config",
  "jals-exec",
  "jals-storage",
  "jals-syntax",
