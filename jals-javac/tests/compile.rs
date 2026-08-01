@@ -2885,6 +2885,37 @@ fn the_enum_shapes_that_need_another_class_file_are_reported() {
     }
 }
 
+/// A type inside an `enum` constant's body reports the enclosing type it cannot name.
+///
+/// The enclosing declaration is reached as `parent().parent()`, which for a constant's body is the
+/// `ENUM_CONSTANT` — not one of the seven forms `ast::Decl` casts. So it has no name, and the
+/// report says so instead of the lookup proceeding.
+///
+/// This pins the *narrowing*, not the wording. `Decl::name_token_of` replaced a scan that took the
+/// first `IDENT` of whatever node it was handed, which here is the constant's own name: an offset
+/// the index holds a **member** at, so `item_by_decl` answered nothing and the failure surfaced one
+/// step later as an unresolved name. Adding a variant to `ast::Decl` — `EnumConstant` has had a
+/// `name_token` since the accessors were generated — would silently restore that, and nothing else
+/// in the suite would notice.
+#[test]
+fn a_type_in_an_enum_constant_body_has_no_enclosing_name() {
+    let source = r"
+enum E {
+    A {
+        class Inner {}
+    };
+}
+";
+    let error = compile(source).expect_err("an `enum` constant is not an enclosing type");
+    assert!(
+        matches!(
+            error,
+            LowerError::Unsupported("an enclosing type with no name")
+        ),
+        "expected the enclosing-type report, got {error}"
+    );
+}
+
 /// Variable arity, end to end (JLS §15.12.2.4, §15.12.4.2).
 ///
 /// Four separate things have to hold together for this to run: the index has to give `int... values`

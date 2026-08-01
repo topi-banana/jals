@@ -1585,6 +1585,29 @@ fn the_enum_shapes_that_need_more_are_reported() {
     );
 }
 
+/// A type inside an `enum` constant's body reports that its owner has no name.
+///
+/// The JVM backend's twin (`a_type_in_an_enum_constant_body_has_no_enclosing_name`) covers the same
+/// shape through `Compile::enclosing_name`; this one reaches `Layout::owner_of` through `is_inner`,
+/// which takes `parent().parent()` of a nested class and so lands on the `ENUM_CONSTANT`. That is
+/// not one of the seven forms `ast::Decl` casts, so it has no name to key the layout on.
+///
+/// What is pinned is the narrowing. Before `Decl::name_token_of`, the scan here took the constant's
+/// own `IDENT` and looked an **item** up at a **member**'s offset; adding a variant to `ast::Decl`
+/// would put that back with nothing else in the suite disagreeing.
+#[test]
+fn a_type_in_an_enum_constant_body_has_no_owning_type() {
+    let source = "public enum E { A { class Inner {} }; }";
+    let error = compile(&[source]).expect_err("an `enum` constant is not an owning type");
+    assert!(
+        matches!(
+            error,
+            WasmError::Unsupported("a type declaration with no name")
+        ),
+        "got {error}"
+    );
+}
+
 /// A `record`: fields from the header, plus a canonical constructor and accessors written out.
 ///
 /// A component is declared once, in the header, and stands for three things — a field, an accessor, and
