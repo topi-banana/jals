@@ -281,7 +281,10 @@ impl TaskPublishIntent {
     /// Written out rather than derived from the serde representation because the two are
     /// independent surfaces: the wire name is frozen by every cache record already written under
     /// it, and the script keyword is frozen by every `build.rhai` in the wild.
-    pub fn parse(value: &str) -> Option<Self> {
+    ///
+    /// Private because the script keyword has exactly one reader — the Rhai binding below. A
+    /// consumer of a `TaskPlan` receives the parsed intent and never the word.
+    fn parse(value: &str) -> Option<Self> {
         match value {
             "compile" => Some(Self::Compile),
             "navigation" => Some(Self::Navigation),
