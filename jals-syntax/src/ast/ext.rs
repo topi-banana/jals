@@ -338,7 +338,8 @@ impl ForStmt {
     /// The walk starts at `for` rather than at `(`: `attrs:Attribute*` precede the keyword, so
     /// counting from the top would file the attribute of `#[cfg(…)] for (…)` under the
     /// initialiser, and starting at `(` would drop the whole statement when the `(` is missing
-    /// from malformed input.
+    /// from malformed input. `for` is the *only* thing that opens the walk — neither separator can
+    /// — so an attribute is outside it whatever the attribute happens to contain.
     fn sections(&self) -> impl Iterator<Item = (ForSection, SyntaxNode)> {
         let mut section = None;
         self.syntax
@@ -348,7 +349,7 @@ impl ForStmt {
                     match token.kind() {
                         FOR_KW => section = Some(ForSection::Init),
                         SEMICOLON => section = section.map(ForSection::after_semicolon),
-                        RPAREN => section = Some(ForSection::Body),
+                        RPAREN => section = section.map(|_| ForSection::Body),
                         _ => {}
                     }
                     None
@@ -431,7 +432,7 @@ impl SwitchExpr {
 
 #[cfg(test)]
 mod tests {
-    use super::AstNode;
+    use super::{AstNode, SyntaxNode};
     use crate::ast::{
         AttrArg, Attribute, CatchClause, ClassDecl, Decl, ExprStmt, FieldDecl, ForStmt, ImportDecl,
         ImportGroup, LocalVarDecl, MethodDecl, QualifiedName, Resource, Stmt, SwitchExpr, Type,
@@ -667,11 +668,11 @@ mod tests {
     }
 
     /// The source text of `node`, less the leading trivia a lossless CST attaches to it.
-    fn trimmed(node: &crate::language::SyntaxNode) -> String {
+    fn trimmed(node: &SyntaxNode) -> String {
         node.text().to_string().trim().to_owned()
     }
 
-    fn texts(nodes: impl Iterator<Item = crate::language::SyntaxNode>) -> Vec<String> {
+    fn texts(nodes: impl Iterator<Item = SyntaxNode>) -> Vec<String> {
         nodes.map(|node| trimmed(&node)).collect()
     }
 
@@ -716,11 +717,27 @@ mod tests {
         let stmt = for_stmt("for (; i < n; ) { f(); }");
         assert_eq!(texts(stmt.init()), Vec::<String>::new());
         assert_eq!(
-            stmt.condition()
-                .map(|c| c.syntax().text().to_string().trim().to_owned()),
+            stmt.condition().map(|c| trimmed(c.syntax())),
             Some("i < n".to_owned())
         );
         assert_eq!(texts(stmt.update()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn an_unclosed_for_header_degrades_where_it_broke() {
+        // `expect(RPAREN)` records a diagnostic without inserting a token, so a header with no `)`
+        // has nothing to end it and the body reads as one more update entry. That is what the two
+        // hand-rolled walks did as well; what this pins is that the sections *before* the break are
+        // still right and that nothing panics on the way — parsing is lossless and total, and
+        // sectioning what it produced has to be too.
+        let stmt = for_stmt("for (int i = 0; i < n; i++ { f(); }");
+        assert_eq!(texts(stmt.init()), ["int i = 0"]);
+        assert_eq!(
+            stmt.condition().map(|c| trimmed(c.syntax())),
+            Some("i < n".to_owned())
+        );
+        assert_eq!(texts(stmt.update()), ["i++", "{ f(); }"]);
+        assert!(stmt.body().is_none());
     }
 
     #[test]
