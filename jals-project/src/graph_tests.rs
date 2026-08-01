@@ -993,12 +993,31 @@ fn snapshot_diagnostics_warn_but_unreadable_manifest_is_hard() {
         )
         .await
         .unwrap();
+        // Asserted through `Display`, not `.message`: what a host shows is the whole warning, and
+        // the half these pin is the *subject*. The same byte drives two diagnostics — the root
+        // snapshot walks into `warn/`, and `warn` snapshots itself — attributed differently, and
+        // the root's is the case that carries no node at all.
+        let rendered = graph
+            .warnings()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
         assert!(
             !non_utf8_entry
-                || graph
-                    .warnings()
-                    .iter()
-                    .any(|warning| warning.message.contains("NonUtf8Entry"))
+                || rendered.iter().any(|warning| {
+                    warning.starts_with("project graph: snapshot: ")
+                        && warning.contains("NonUtf8Entry")
+                }),
+            "{rendered:?}"
+        );
+        assert!(
+            !non_utf8_entry
+                || rendered.iter().any(|warning| {
+                    warning.starts_with("dependency project `")
+                        && warning.contains("warn`: snapshot: ")
+                        && warning.contains("NonUtf8Entry")
+                }),
+            "{rendered:?}"
         );
 
         std::fs::create_dir(project.path().join("hard")).unwrap();
