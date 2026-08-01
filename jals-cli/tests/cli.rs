@@ -739,21 +739,32 @@ fn a_dependency_publication_reaches_javac_only_when_it_declares_compile_intent()
         "a compile publication is an ordinary source-dependency input; args: {compile_args:?}"
     );
 
-    let (navigation_args, _) = build("navigation");
+    let (navigation_args, navigation_stderr) = build("navigation");
     assert!(
         !navigation_args.iter().any(|arg| arg.ends_with("Api.java")),
         "a navigation publication is a view for the editor, never a compile input; args: \
          {navigation_args:?}"
     );
+    // Not vacuous: javac ran, it just was not handed the publication. `read_arg_lines` would have
+    // panicked on a missing capture file, and the consumer's own source is what it did compile.
+    assert!(
+        navigation_args.iter().any(|arg| arg.ends_with("Main.java")),
+        "args: {navigation_args:?}"
+    );
 
     // Nothing on the library's classpath defines `net/example` under either intent, so the
     // consumer's build reports the publication. The only end-to-end check that the diagnosis
-    // reaches a host at all, naming what the script wrote rather than where discovery put it.
-    assert!(
-        compile_stderr.contains("example-sources")
-            && compile_stderr.contains("src/main/java/net/example"),
-        "stderr: {compile_stderr}"
-    );
+    // reaches a host at all, naming what the script wrote rather than where discovery put it —
+    // under both intents, since the two are wrong in different ways and neither is silent.
+    for (intent, stderr) in [
+        ("compile", &compile_stderr),
+        ("navigation", &navigation_stderr),
+    ] {
+        assert!(
+            stderr.contains("example-sources") && stderr.contains("src/main/java/net/example"),
+            "{intent} stderr: {stderr}"
+        );
+    }
 }
 
 #[cfg(unix)]
