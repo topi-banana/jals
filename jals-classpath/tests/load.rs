@@ -1,9 +1,12 @@
 use std::io::{Cursor, Write};
 
-use jals_classpath::{ClasspathEntry, ClasspathLoad, WarningOrigin};
+use jals_classpath::{
+    ClasspathCoverage, ClasspathEntry, ClasspathLoad, ExternalLocator, WarningOrigin,
+};
 use jals_exec::{Exec, block_on_inline};
 use jals_storage::{
     CacheKey, CacheNamespace, CodeTree, ContentDigest, DirKey, Entry, FileKey, MemoryStorage,
+    RelativePath,
 };
 
 const BOX_CLASS: &[u8] = include_bytes!("fixtures/Box.class");
@@ -293,4 +296,113 @@ fn native_cached_jar_tampered_on_disk_is_a_warning() {
         "{:?}",
         load.warnings[0]
     );
+}
+
+fn prefix(value: &str) -> RelativePath {
+    RelativePath::parse(value).unwrap()
+}
+
+fn external(value: &str) -> WarningOrigin {
+    WarningOrigin::External(ExternalLocator::new(value))
+}
+
+/// One class file, three routes, two answers — and the asymmetry is the whole rule.
+///
+/// An archive member's name *is* its binary name, and a classpath directory is a package root, so
+/// both are addressed by path without parsing anything. A loose `.class` sits wherever its holder
+/// put it, so its package comes from the constant pool instead. `Box.class` declares `Box` in the
+/// default package, which is what makes the difference observable: the same bytes at the same
+/// `pkg/Box.class` path cover `pkg` by the first two routes and not by the third.
+#[test]
+fn a_package_is_read_from_the_path_in_an_archive_and_from_the_pool_in_a_loose_class() {
+    let tree = CodeTree::new([
+        Entry::File(
+            FileKey::parse("loose/pkg/Box.class").unwrap(),
+            BOX_CLASS.to_vec(),
+        ),
+        Entry::File(
+            FileKey::parse("classes/pkg/Box.class").unwrap(),
+            BOX_CLASS.to_vec(),
+        ),
+        Entry::File(
+            FileKey::parse("dep.jar").unwrap(),
+            jar(&[("pkg/Box.class", BOX_CLASS)]),
+        ),
+    ])
+    .unwrap();
+    let storage = MemoryStorage::memory(tree);
+    let view = storage.view();
+    let covers = |entry: ClasspathEntry| {
+        block_on_inline(async {
+            let mut coverage = ClasspathCoverage::seeking([prefix("pkg")]);
+            coverage.add_entry(&view, storage.artifacts(), &entry).await;
+            assert!(coverage.warnings().is_empty(), "{:?}", coverage.warnings());
+            coverage.covers(&prefix("pkg"))
+        })
+    };
+
+    assert!(covers(ClasspathEntry::ProjectFile(
+        FileKey::parse("dep.jar").unwrap()
+    )));
+    assert!(covers(ClasspathEntry::ProjectDirectory(
+        DirKey::parse("classes").unwrap()
+    )));
+    assert!(!covers(ClasspathEntry::ProjectFile(
+        FileKey::parse("loose/pkg/Box.class").unwrap()
+    )));
+}
+
+#[test]
+fn a_prefix_is_covered_by_segment_and_the_scan_completes_only_when_every_one_is() {
+    let mut coverage = ClasspathCoverage::seeking([prefix("net/example"), prefix("org/vendor")]);
+    assert!(!coverage.is_complete());
+
+    // A class in a subpackage defines something *under* the prefix, which is the question.
+    coverage.add_class(&prefix("net/example/deep/Api.class"));
+    assert!(coverage.covers(&prefix("net/example")));
+    assert!(!coverage.is_complete());
+
+    // `org/vendored` is not `org/vendor`: matching is by segment, so a shared text prefix is not a
+    // package and never answers for one.
+    coverage.add_class(&prefix("org/vendored/Tool.class"));
+    assert!(!coverage.covers(&prefix("org/vendor")));
+    assert!(!coverage.is_complete());
+
+    coverage.add_class(&prefix("org/vendor/Tool.class"));
+    assert!(coverage.is_complete());
+}
+
+#[test]
+fn a_resident_entry_is_read_by_extension_and_an_unreadable_one_only_warns() {
+    let archive = jar(&[("pkg/Box.class", BOX_CLASS)]);
+    block_on_inline(async {
+        let mut coverage = ClasspathCoverage::seeking([prefix("pkg")]);
+
+        // Not a shape this can read at all: no claim either way.
+        coverage
+            .add_resident(external("notes.txt"), &prefix("notes.txt"), b"whatever")
+            .await;
+        assert!(!coverage.covers(&prefix("pkg")));
+        assert_eq!(coverage.warnings().len(), 1);
+        assert!(
+            coverage.warnings()[0].message.contains("unrecognized"),
+            "{:?}",
+            coverage.warnings()[0]
+        );
+
+        // An archive that cannot be opened is not an archive that defines nothing.
+        coverage
+            .add_resident(external("broken.jar"), &prefix("broken.jar"), b"not a zip")
+            .await;
+        assert!(!coverage.covers(&prefix("pkg")));
+        assert_eq!(coverage.warnings().len(), 2);
+
+        coverage
+            .add_resident(external("lib.jar"), &prefix("lib.jar"), &archive)
+            .await;
+        assert!(coverage.is_complete());
+        // Answering the question does not retract what went unread on the way to it — a caller
+        // deciding what to report needs both halves.
+        assert_eq!(coverage.warnings().len(), 2);
+    });
 }
