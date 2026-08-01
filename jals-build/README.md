@@ -391,7 +391,10 @@ Two things the check will not claim, and one it says plainly:
   before preprocessing ran, and what they contribute is settled at assembly. Staying silent would
   lose the warning for every root a project publishes as soon as it gains one jar, so the report
   says what it could not see instead — for every dependency kind, since a `git`/`path` dependency's
-  sources reach a consumer's compiler too.
+  sources reach a consumer's compiler too. That is also why the report does not offer the two fixes
+  as equals: `tasks.add_classpath` is the one it reads, and a `[dependencies]` jar carries the types
+  just as well but leaves the warning exactly where it was. A publication a dependency backs is a
+  blind spot the report names, not a finding it stands behind.
 - **A `compile` publication is reported too**, and says something else: those types do reach a
   consumer, but only as source it recompiles itself, so nothing carries them for anything that does
   not build the tree.

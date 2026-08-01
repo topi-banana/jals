@@ -419,7 +419,8 @@ impl fmt::Display for PublicationDiagnosis {
         if self.dependencies_unseen {
             f.write_str(
                 " This project also declares `[dependencies]`, whose contribution is settled after \
-                 this check and is invisible to it.",
+                 this check and is invisible to it — so if one of them is what backs these types, \
+                 this warning is the check's blind spot rather than a finding.",
             )?;
         }
         if !self.unread.is_empty() {
@@ -435,9 +436,16 @@ impl fmt::Display for PublicationDiagnosis {
         }
         // Last, so the sentence a reader can act on is the one they end on however many caveats
         // came before it.
+        //
+        // The two are not offered as equals, because only one of them is one this check can see.
+        // Declaring the library as a `[dependencies]` jar does carry the types, but the jar becomes
+        // a graph node rather than an entry on this project's own classpath, so it settles the
+        // consumer's build and leaves this warning exactly where it was — offering it flatly beside
+        // `add_classpath` would send a reader after a fix and let them find the same sentence.
         f.write_str(
-            " Put the library's own jar on the classpath with `tasks.add_classpath`, or declare it \
-             as a `[dependencies]` jar.",
+            " Put the library's own jar on the classpath with `tasks.add_classpath`, which is what \
+             this check reads. Declaring it as a `[dependencies]` jar carries the types too, but \
+             this check cannot see one and will keep reporting.",
         )
     }
 }
