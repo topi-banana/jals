@@ -43,7 +43,7 @@ pub type FrontendFuture<'a> =
 /// Object-safe and `!Send`, matching the `Compiler`/`Runtime` shape already in `jals-build`. This
 /// is the seam an *implementor* fills; a host never names it, because matching a manifest selector
 /// to a frontend is [`FrontendSelection`](crate::FrontendSelection)'s job and it hands back
-/// something already driveable.
+/// something already drivable.
 pub trait Frontend {
     fn caps(&self) -> FrontendCaps;
 
