@@ -349,12 +349,14 @@ under `net/example`. …
 
 No member is ever decompressed: an archive is answered from its central directory alone, and the
 scan stops as soon as every published prefix is covered — on a game jar that is usually the first
-few of tens of thousands of entries. What reaching an entry costs depends on where its bytes live. A
-cached artifact is opened through the verified read, so it passes through SHA-256 once before its
-directory is parsed; that is the same pass the memoized execution's own re-verification already
-makes, so the added cost is a repeated digest rather than a first read. A project file is read from
-the revision, and a captured `[build] classpath` entry is already in memory. The check says nothing
-at all when an entry cannot be read — an unreadable jar is not a jar that defines nothing. A
+few of tens of thousands of entries. What reaching an entry costs depends on where its bytes live,
+so entries are folded cheapest first and an expensive one is never opened for a question the cheap
+ones already settled. A captured `[build] classpath` entry and a build script's registered classpath
+are already in memory. A cached artifact is opened through the verified read, so it passes through
+SHA-256 once before its directory is parsed; that is the same pass the memoized execution's own
+re-verification already makes, so the added cost is a repeated digest rather than a first read. The
+check says nothing at all when an entry cannot be read — an unreadable jar is not a jar that defines
+nothing. A
 dependency the project declares is out of its reach rather than late — discovery resolved it long
 before, but what it contributes is settled at assembly — so the warning names that possibility
 instead of suppressing itself, for every dependency kind: a `git`/`path` dependency's sources reach

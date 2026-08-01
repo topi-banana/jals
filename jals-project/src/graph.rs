@@ -538,29 +538,15 @@ impl ResolvedNode {
 
         let mut coverage =
             ClasspathCoverage::seeking(roots.iter().map(|(_, prefix)| prefix.clone()));
-        for key in task_classpath {
-            if coverage.is_complete() {
-                break;
-            }
-            coverage
-                .add_entry(&source.view, cache, &ClasspathEntry::Artifact(key.clone()))
-                .await;
-        }
-        // A build script's registered classpath was already read out of the view above, into
-        // `NodeExports::classpath`. Reading it a second time as a `ClasspathEntry::ProjectFile`
-        // would ask the same revision the same question and copy the answer again.
-        for file in script_classpath {
-            if coverage.is_complete() {
-                break;
-            }
-            // Every one of these came from a `FileKey` in the view, so the fallback is unreachable
-            // rather than a second way of naming the same file.
-            let origin = FileKey::new(file.path.clone()).map_or_else(
-                |_| WarningOrigin::External(ExternalLocator::new(file.path.to_string())),
-                WarningOrigin::ProjectFile,
-            );
-            coverage.add_resident(origin, &file.path, &file.bytes).await;
-        }
+        // Held bytes first, cache keys last, because the scan stops as soon as every prefix is
+        // covered and the cheap half of a classpath can settle the question the expensive half is
+        // never then opened for. What discovery captured is already in memory; a `CacheKey` costs
+        // `open_verified`'s whole SHA-256 pass, and the memoized execution just made that same pass
+        // over these same artifacts, so folding one here is a second digest rather than a first
+        // read. Nothing observable depends on the order: an entry reached only after the answer was
+        // settled could not have changed it, and one skipped for the same reason produces no
+        // warning that would have been reported anyway.
+        //
         // The manifest's own `[build] classpath` is read from what discovery captured, not from the
         // view: a native node may have taken it from a host path that is in no project revision.
         for entry in &source.classpath {
@@ -583,6 +569,29 @@ impl ResolvedNode {
                     }
                 }
             }
+        }
+        // A build script's registered classpath was already read out of the view above, into
+        // `NodeExports::classpath`. Reading it a second time as a `ClasspathEntry::ProjectFile`
+        // would ask the same revision the same question and copy the answer again.
+        for file in script_classpath {
+            if coverage.is_complete() {
+                break;
+            }
+            // Every one of these came from a `FileKey` in the view, so the fallback is unreachable
+            // rather than a second way of naming the same file.
+            let origin = FileKey::new(file.path.clone()).map_or_else(
+                |_| WarningOrigin::External(ExternalLocator::new(file.path.to_string())),
+                WarningOrigin::ProjectFile,
+            );
+            coverage.add_resident(origin, &file.path, &file.bytes).await;
+        }
+        for key in task_classpath {
+            if coverage.is_complete() {
+                break;
+            }
+            coverage
+                .add_entry(&source.view, cache, &ClasspathEntry::Artifact(key.clone()))
+                .await;
         }
 
         let uncovered: Vec<_> = roots
