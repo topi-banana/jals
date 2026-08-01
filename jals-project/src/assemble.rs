@@ -18,7 +18,7 @@ use jals_storage::{
 
 use crate::graph::{
     BinaryInput, CapturedClasspathEntry, CapturedFile, GraphMetadata, GraphWarning, NodeBody,
-    NodeId, PreprocessedProjectGraph,
+    NodeId, PreprocessedProjectGraph, ResolvedNode,
 };
 
 /// One verified file entry on the compile classpath.
@@ -431,7 +431,7 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
                 });
             }
             let Ok(member_path) = FileKey::new(member.path.clone()) else {
-                let location = self.node_location(node);
+                let location = ResolvedNode::location_or_digest(&self.graph.nodes, node);
                 self.errors.push(ProjectAssemblyError {
                     node: location,
                     path: Some(member.path.clone()),
@@ -480,7 +480,7 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
             .bytes(file_path.to_string().as_bytes());
         let key = CacheKey::new(namespace, fold.finish(), ContentDigest::of(bytes));
         if let Err(error) = self.cache.publish(&key, bytes).await {
-            let location = self.node_location(node);
+            let location = ResolvedNode::location_or_digest(&self.graph.nodes, node);
             self.errors.push(ProjectAssemblyError {
                 node: location,
                 // The file as its own node spells it, not `path`: the reader owns the former and
@@ -504,21 +504,6 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
         };
         let group = Name::new(group).expect("logical group constants are portable");
         RelativePath::new([dependencies, token, group]).concat(path)
-    }
-
-    /// A node's [`location`](crate::graph::ResolvedNode::location), which is what a diagnostic
-    /// names it by. Every id reaching here belongs to a node the graph carries, so the fallback is
-    /// unreachable; a digest is still a worse diagnostic than a location rather than no diagnostic.
-    ///
-    /// A scan rather than an index because every caller is already on a failing path — a cache
-    /// write that did not land, a member path that is not a file, an entry name that is not a
-    /// portable name. None of them runs per node or per edge.
-    fn node_location(&self, node: &NodeId) -> String {
-        self.graph
-            .nodes
-            .iter()
-            .find(|candidate| &candidate.id == node)
-            .map_or_else(|| node.to_string(), |candidate| candidate.location.clone())
     }
 
     fn project_binary_edges(&mut self) {
@@ -564,7 +549,10 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
 
         for projected in projected {
             let Ok(name) = Name::new(&projected.dependency) else {
-                let declared_by = projected.from.as_ref().map(|from| self.node_location(from));
+                let declared_by = projected
+                    .from
+                    .as_ref()
+                    .map(|from| ResolvedNode::location_or_digest(&self.graph.nodes, from));
                 self.warnings.push(GraphWarning {
                     node: declared_by,
                     dependency: Some(projected.dependency),

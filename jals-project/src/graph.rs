@@ -394,6 +394,13 @@ impl ResolvedNode {
             .map(|node| node.location.clone())
     }
 
+    /// [`location_of`](Self::location_of) where the caller already holds an id, so an absent node
+    /// is not the root but a node this graph does not carry — unreachable, and a digest is still a
+    /// worse diagnostic than a location rather than no diagnostic at all.
+    pub(crate) fn location_or_digest(nodes: &[Self], id: &NodeId) -> String {
+        Self::location_of(nodes, Some(id)).unwrap_or_else(|| id.to_string())
+    }
+
     pub(crate) const fn source(&self) -> Option<&SourceNode> {
         match &self.body {
             NodeBody::PlainSource(source) | NodeBody::JalsSource { source, .. } => Some(source),
