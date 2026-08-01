@@ -18,6 +18,9 @@
 //                   also for labeled groups like foo:(Bar (',' Bar)*))
 //   is_x:'kw'    -> pub fn is_x(&self) -> bool             (token presence)
 //   foo:'ident'  -> pub fn foo(&self) -> Option<String>    (first IDENT text)
+//                   pub fn foo_token(&self) -> Option<SyntaxToken>
+//                   (the same token; `jals-hir` is keyed on where a name starts,
+//                   so a caller resolving the declaration needs its offset)
 //
 // Accessors that don't fit these forms (or that would need two labels with
 // the same node type on one rule) are hand-written in
@@ -311,6 +314,9 @@ WhileStmt =
 DoWhileStmt =
   attrs:Attribute* 'do' body:Stmt 'while' '(' condition:Expr ')' ';'
 
+// The three header sections may all hold an `Expr`, so no label can tell them apart — and a
+// `body:Stmt` label would match the initialiser's `LocalVarDecl` first. `init`/`condition`/
+// `update`/`body` are hand-written in `jals-syntax/src/ast/ext.rs`.
 ForStmt =
   attrs:Attribute* 'for' '(' (LocalVarDecl | Expr (',' Expr)*)? ';' Expr? ';'
   (Expr (',' Expr)*)? ')' Stmt

@@ -281,10 +281,7 @@ impl Compile {
             // synthetic constructor parameter the index knows nothing about, so its constructor would
             // come out one parameter short of what a `new` passes.
 
-            let name = node
-                .children_with_tokens()
-                .filter_map(jals_syntax::SyntaxElement::into_token)
-                .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+            let name = ast::Decl::name_token_of(&node)
                 .ok_or(LowerError::Unsupported("a type declaration with no name"))?;
             let item = index
                 .item_by_decl(file, usize::from(name.text_range().start()))
@@ -719,10 +716,7 @@ impl Compile {
 
         let mut entries = Vec::with_capacity(nested.len());
         for declaration in nested {
-            let name = declaration
-                .children_with_tokens()
-                .filter_map(jals_syntax::SyntaxElement::into_token)
-                .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+            let name = ast::Decl::name_token_of(declaration)
                 .ok_or(LowerError::Unsupported("a type declaration with no name"))?;
             let item = context
                 .index
@@ -742,10 +736,7 @@ impl Compile {
                     )
                 })
                 .and_then(|outer| {
-                    let token = outer
-                        .children_with_tokens()
-                        .filter_map(jals_syntax::SyntaxElement::into_token)
-                        .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)?;
+                    let token = ast::Decl::name_token_of(&outer)?;
                     context
                         .index
                         .item_by_decl(context.file, usize::from(token.text_range().start()))
@@ -896,10 +887,7 @@ impl Compile {
             let (scanned, at) = match declaration.kind() {
                 CLASS_DECL => (
                     declaration.clone(),
-                    declaration
-                        .children_with_tokens()
-                        .filter_map(jals_syntax::SyntaxElement::into_token)
-                        .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+                    ast::Decl::name_token_of(&declaration)
                         .map(|token| usize::from(token.text_range().start())),
                 ),
                 jals_syntax::SyntaxKind::NEW_EXPR => {
@@ -1380,11 +1368,7 @@ impl Compile {
             {
                 continue;
             }
-            let Some(name) = declaration
-                .children_with_tokens()
-                .filter_map(jals_syntax::SyntaxElement::into_token)
-                .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
-            else {
+            let Some(name) = ast::Decl::name_token_of(&declaration) else {
                 continue;
             };
             let Some(item) = index.item_by_decl(file, usize::from(name.text_range().start()))
@@ -1415,17 +1399,15 @@ impl Compile {
             if member.kind() != METHOD_DECL {
                 continue;
             }
-            let Some(name) = ast::MethodDecl::cast(member.clone()).and_then(|decl| decl.name())
-            else {
+            let Some(decl) = ast::MethodDecl::cast(member.clone()) else {
                 continue;
             };
-            let Some(token) = member
-                .children_with_tokens()
-                .filter_map(jals_syntax::SyntaxElement::into_token)
-                .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
-            else {
+            // One token answers both questions: the bridge is emitted under the name's text, and the
+            // index is keyed on where that name starts.
+            let Some(token) = decl.name_token() else {
                 continue;
             };
+            let name = token.text().to_owned();
             let own = context.member_at(&token)?;
             if context.index.member(own).modifiers.is_static {
                 continue;
@@ -1529,10 +1511,7 @@ impl Compile {
                 .ok_or(LowerError::Unsupported(
                     "an inner class with no enclosing type",
                 ))?;
-        let name = declaration
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+        let name = ast::Decl::name_token_of(&declaration)
             .ok_or(LowerError::Unsupported("an enclosing type with no name"))?;
         let enclosing = index
             .item_by_decl(file, usize::from(name.text_range().start()))
@@ -1678,14 +1657,14 @@ impl Compile {
     ) -> Result<MethodInfo> {
         let decl = ast::MethodDecl::cast(node.clone())
             .ok_or(LowerError::Unsupported("a malformed method declaration"))?;
-        let name = decl.name().unwrap_or_default();
-        let member = context.member_at(
-            &jals_syntax::ast::AstNode::syntax(&decl)
-                .children_with_tokens()
-                .filter_map(jals_syntax::SyntaxElement::into_token)
-                .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
-                .ok_or_else(|| LowerError::Unresolved(name.clone()))?,
-        )?;
+        // One token again: `decl.name()` is `name_token().map(text)`, so asking for both walked the
+        // children twice and left the missing-name arm reporting `Unresolved("")` — a name that did
+        // not resolve, when what happened is that there was no name to resolve.
+        let token = decl
+            .name_token()
+            .ok_or(LowerError::Unsupported("a method declaration with no name"))?;
+        let name = token.text().to_owned();
+        let member = context.member_at(&token)?;
         // The method's own type parameters are not the class's, so the index resolved each as an
         // external name it has never heard of. Naming them here is what lets the descriptor erase them.
         let own_vars: Vec<String> = node
@@ -1912,10 +1891,8 @@ impl Compile {
         super_item: Option<ItemId>,
         members: &[SyntaxNode],
     ) -> Result<MethodInfo> {
-        let name_token = node
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+        let name_token = ast::ConstructorDecl::cast(node.clone())
+            .and_then(|decl| decl.name_token())
             .ok_or(LowerError::Unsupported("a malformed constructor"))?;
         let member = context.member_at(&name_token)?;
         let mut descriptor = Descriptor::method_descriptor(member, context.index, true)?;
@@ -2703,13 +2680,8 @@ impl Compile {
             .find(|child| child.kind() == jals_syntax::SyntaxKind::RECORD_HEADER)
             .into_iter()
             .flat_map(|header| header.children())
-            .filter(|child| child.kind() == jals_syntax::SyntaxKind::RECORD_COMPONENT)
-            .filter_map(|component| {
-                component
-                    .children_with_tokens()
-                    .filter_map(jals_syntax::SyntaxElement::into_token)
-                    .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
-            })
+            .filter_map(ast::RecordComponent::cast)
+            .filter_map(|component| component.name_token())
             .collect()
     }
 

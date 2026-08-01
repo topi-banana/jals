@@ -593,12 +593,7 @@ impl CompileWasm {
             let owner = node
                 .ancestors()
                 .find(Self::declares_a_type)
-                .and_then(|declaration| {
-                    declaration
-                        .children_with_tokens()
-                        .filter_map(jals_syntax::SyntaxElement::into_token)
-                        .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
-                })
+                .and_then(|declaration| ast::Decl::name_token_of(&declaration))
                 .and_then(|name| {
                     index.item_by_decl(input.file, usize::from(name.text_range().start()))
                 });
@@ -776,7 +771,8 @@ impl CompileWasm {
         if Self::is_anonymous(node) || Self::is_functional(node) {
             return Ok(index.item_by_decl(input.file, usize::from(node.text_range().start())));
         }
-        let name = Self::name_token(node).ok_or(WasmError::Unsupported("a class with no name"))?;
+        let name =
+            ast::Decl::name_token_of(node).ok_or(WasmError::Unsupported("a class with no name"))?;
         index
             .item_by_decl(input.file, usize::from(name.text_range().start()))
             .ok_or_else(|| WasmError::Unresolved(name.text().into()))
@@ -944,7 +940,7 @@ impl CompileWasm {
                 if !is_constructor && node.children().find_map(ast::Block::cast).is_none() {
                     continue;
                 }
-                let member_name = Self::name_token(&node)
+                let member_name = Self::member_name_token(&node, is_constructor)
                     .ok_or(WasmError::Unsupported("a member with no name"))?;
                 let member = index
                     .member_by_decl(input.file, usize::from(member_name.text_range().start()))
@@ -1009,10 +1005,17 @@ impl CompileWasm {
         Ok(())
     }
 
-    fn name_token(node: &SyntaxNode) -> Option<SyntaxToken> {
-        node.children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+    /// The name token of a class member, which is a method or a constructor here.
+    ///
+    /// Two kinds rather than one because `ConstructorDecl` is not a [`ast::Decl`] variant — a
+    /// constructor declares no type and no field, so the grammar keeps it out of that enum. Both
+    /// arms go through the node's own generated accessor.
+    fn member_name_token(node: &SyntaxNode, is_constructor: bool) -> Option<SyntaxToken> {
+        if is_constructor {
+            ast::ConstructorDecl::cast(node.clone())?.name_token()
+        } else {
+            ast::MethodDecl::cast(node.clone())?.name_token()
+        }
     }
 }
 
@@ -1231,13 +1234,11 @@ impl Layout {
             let owner = Self::owner_of(&node, input, index)?;
             let body = node.children().find(|child| child.kind() == ENUM_BODY);
             for member in body.iter().flat_map(SyntaxNode::children) {
-                if member.kind() != ENUM_CONSTANT {
+                let Some(constant) = ast::EnumConstant::cast(member.clone()) else {
                     continue;
-                }
-                let name = member
-                    .children_with_tokens()
-                    .filter_map(jals_syntax::SyntaxElement::into_token)
-                    .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+                };
+                let name = constant
+                    .name_token()
                     .ok_or(WasmError::Unsupported("an `enum` constant with no name"))?;
                 let id = index
                     .member_by_decl(input.file, usize::from(name.text_range().start()))
@@ -1260,10 +1261,7 @@ impl Layout {
 
     /// The indexed item a type declaration declares.
     fn owner_of(node: &SyntaxNode, input: &WasmInput<'_>, index: &ProjectIndex) -> Result<ItemId> {
-        let name = node
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+        let name = ast::Decl::name_token_of(node)
             .ok_or(WasmError::Unsupported("a type declaration with no name"))?;
         index
             .item_by_decl(input.file, usize::from(name.text_range().start()))
@@ -2300,18 +2298,17 @@ impl Lowering<'_> {
     /// the inner block's end and the branch back — which is exactly what makes the inner block the
     /// continue target rather than the loop.
     fn for_loop(&mut self, statement: &ast::ForStmt, insn: &mut Insn) -> Result<()> {
-        let (init, condition, update, body) = Self::for_sections(statement.syntax());
         let label = self.pending_label.take();
-        for node in &init {
-            self.for_section(node, insn)?;
+        for node in statement.init() {
+            self.for_section(&node, insn)?;
         }
         insn.block();
         let leave = insn.depth();
         insn.loop_();
         let repeat = insn.depth();
         // No condition means `for (;;)`, which never leaves by itself.
-        if let Some(condition) = &condition {
-            self.expr(condition, insn)?;
+        if let Some(condition) = statement.condition() {
+            self.expr(&condition, insn)?;
             insn.i32_eqz();
             insn.br_if(insn.depth() - leave);
         }
@@ -2324,13 +2321,13 @@ impl Lowering<'_> {
             repeat: Some(next),
             cleanups,
         });
-        if let Some(body) = &body {
-            self.stmt(body, insn)?;
+        if let Some(body) = statement.body() {
+            self.stmt(&body, insn)?;
         }
         self.loops.pop();
         insn.end();
-        for node in &update {
-            self.for_section(node, insn)?;
+        for node in statement.update() {
+            self.for_section(&node, insn)?;
         }
         insn.br(insn.depth() - repeat).end().end();
         Ok(())
@@ -2347,44 +2344,6 @@ impl Lowering<'_> {
         self.discard(&expression, insn)
     }
 
-    /// Split a `FOR_STMT` into its three header sections and its body.
-    fn for_sections(
-        node: &SyntaxNode,
-    ) -> (
-        Vec<SyntaxNode>,
-        Option<ast::Expr>,
-        Vec<SyntaxNode>,
-        Option<ast::Stmt>,
-    ) {
-        use jals_syntax::SyntaxKind::{RPAREN, SEMICOLON};
-        let (mut init, mut update) = (Vec::new(), Vec::new());
-        let (mut condition, mut body) = (None, None);
-        // 0 = initialiser, 1 = condition, 2 = update; past the `)`, the body.
-        let mut section = 0;
-        let mut in_header = true;
-        for child in node.children_with_tokens() {
-            match child {
-                jals_syntax::SyntaxElement::Token(token) => match token.kind() {
-                    SEMICOLON if in_header => section += 1,
-                    RPAREN => in_header = false,
-                    _ => {}
-                },
-                jals_syntax::SyntaxElement::Node(child) => {
-                    if !in_header {
-                        body = ast::Stmt::cast(child);
-                    } else if section == 0 {
-                        init.push(child);
-                    } else if section == 1 {
-                        condition = ast::Expr::cast(child);
-                    } else {
-                        update.push(child);
-                    }
-                }
-            }
-        }
-        (init, condition, update, body)
-    }
-
     /// `for (T v : array) body`, over an array.
     ///
     /// JLS §14.14.2 defines it as an indexed loop, and this is that loop: the array and the index live
@@ -2395,10 +2354,7 @@ impl Lowering<'_> {
             .iterable()
             .ok_or(WasmError::Unsupported("a `for`-each over nothing"))?;
         let name: SyntaxToken = statement
-            .syntax()
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+            .name_token()
             .ok_or(WasmError::Unsupported("a `for`-each with no variable"))?;
         let Some(Ty::Array(element)) = self
             .input
@@ -2673,10 +2629,7 @@ impl Lowering<'_> {
         let mut slots = Vec::with_capacity(resources.len());
         for resource in resources {
             let name = resource
-                .syntax()
-                .children_with_tokens()
-                .filter_map(jals_syntax::SyntaxElement::into_token)
-                .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+                .binding()
                 .ok_or(WasmError::Unsupported("a resource with no name"))?;
             let value = resource
                 .syntax()
@@ -2823,12 +2776,8 @@ impl Lowering<'_> {
         if types.is_empty() {
             return Err(WasmError::Unsupported("a `catch` with no type"));
         }
-        // The variable is a direct token of the clause, not wrapped in a parameter node.
         let name = clause
-            .syntax()
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+            .binding()
             .ok_or(WasmError::Unsupported("a `catch` with no variable"))?;
         let body = clause
             .syntax()

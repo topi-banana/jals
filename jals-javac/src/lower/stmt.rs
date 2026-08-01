@@ -19,7 +19,7 @@ use alloc::string::{String, ToString as _};
 use alloc::vec::Vec;
 
 use jals_hir::Ty;
-use jals_syntax::SyntaxKind::{IDENT, RPAREN, SEMICOLON};
+use jals_syntax::SyntaxKind::IDENT;
 use jals_syntax::ast::{self, AstNode as _};
 use jals_syntax::{SyntaxNode, SyntaxToken};
 
@@ -876,18 +876,16 @@ impl Stmt {
 
     /// `for (init; condition; update) body`.
     ///
-    /// The header is flat in the CST: the two `;` and the `)` are direct token children, and every
-    /// section between them is a run of siblings. The body is whatever follows the `)`.
+    /// The header is flat in the CST, so which section a child sits in is not a matter of its type;
+    /// [`ast::ForStmt`]'s accessors own that walk.
     fn for_loop(
         statement: &ast::ForStmt,
         labels: Vec<String>,
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
     ) -> Result<()> {
-        let (init, condition, update, body) = Self::for_sections(statement.syntax());
-
-        for section in &init {
-            Self::for_section(section, context, emit)?;
+        for section in statement.init() {
+            Self::for_section(&section, context, emit)?;
         }
 
         let test = emit.asm.label();
@@ -895,13 +893,14 @@ impl Stmt {
         let done = emit.asm.label();
         emit.asm.bind(test)?;
         // `for (;;)` has no condition, which means no exit but a `break`.
-        if let Some(condition) = &condition {
-            Expr::lower(condition, context, emit)?;
+        if let Some(condition) = statement.condition() {
+            Expr::lower(&condition, context, emit)?;
             emit.asm.branch(Branch::IntZero(Compare::Eq), done)?;
         }
 
         // A `continue` runs the update section (JLS §14.14.1.3), so it goes to `next` rather than to
         // `test`. Sending it to `test` skips the update and never terminates.
+        let body = statement.body();
         Self::in_scope(labels, done, Some(next), emit, |emit| {
             Self::body(body.as_ref(), context, emit)
         })?;
@@ -910,8 +909,8 @@ impl Stmt {
         // there. `for (;;) { return; }` is the ordinary shape where neither holds.
         if emit.asm.reachable() || emit.asm.is_targeted(next)? {
             emit.asm.bind(next)?;
-            for section in &update {
-                Self::for_section(section, context, emit)?;
+            for section in statement.update() {
+                Self::for_section(&section, context, emit)?;
             }
             emit.asm.branch(Branch::Always, test)?;
         }
@@ -934,43 +933,6 @@ impl Stmt {
         let expression = ast::Expr::cast(node.clone())
             .ok_or(LowerError::Unsupported("a `for` header this cannot read"))?;
         Self::discarded(&expression, context, emit)
-    }
-
-    /// Split a `for`'s header into its three sections plus the body.
-    fn for_sections(
-        node: &SyntaxNode,
-    ) -> (
-        Vec<SyntaxNode>,
-        Option<ast::Expr>,
-        Vec<SyntaxNode>,
-        Option<ast::Stmt>,
-    ) {
-        let (mut init, mut update) = (Vec::new(), Vec::new());
-        let (mut condition, mut body) = (None, None);
-        // 0 = init, 1 = condition, 2 = update; past the `)`, the body.
-        let mut section = 0;
-        let mut in_header = true;
-        for child in node.children_with_tokens() {
-            match child {
-                jals_syntax::SyntaxElement::Token(token) => match token.kind() {
-                    SEMICOLON if in_header => section += 1,
-                    RPAREN => in_header = false,
-                    _ => {}
-                },
-                jals_syntax::SyntaxElement::Node(child) => {
-                    if !in_header {
-                        body = ast::Stmt::cast(child);
-                    } else if section == 0 {
-                        init.push(child);
-                    } else if section == 1 {
-                        condition = ast::Expr::cast(child);
-                    } else {
-                        update.push(child);
-                    }
-                }
-            }
-        }
-        (init, condition, update, body)
     }
 
     /// `for (T v : array) body`, which JLS §14.14.2 defines as an indexed loop.
@@ -1013,7 +975,7 @@ impl Stmt {
 
         // The loop variable is written from the element at the top of every iteration, which is what
         // makes it a fresh binding per pass rather than one the body carries over.
-        let binding = Self::for_each_binding(statement.syntax(), context)?;
+        let binding = Self::for_each_binding(statement, context)?;
         let variable = emit.slots.declare(
             binding,
             Slots::ty_width(context.inference.type_of_def(binding)),
@@ -1094,7 +1056,7 @@ impl Stmt {
         emit.asm.invoke_interface(ITERATOR, "hasNext", "()Z")?;
         emit.asm.branch(Branch::IntZero(Compare::Eq), done)?;
 
-        let binding = Self::for_each_binding(statement.syntax(), context)?;
+        let binding = Self::for_each_binding(statement, context)?;
         let element = context.inference.type_of_def(binding).clone();
         let variable = emit.slots.declare(binding, Slots::ty_width(&element));
         emit.asm.load(cursor)?;
@@ -1117,11 +1079,12 @@ impl Stmt {
     }
 
     /// The definition a `for`-each's loop variable declares.
-    fn for_each_binding(node: &SyntaxNode, context: &Context<'_>) -> Result<jals_hir::DefId> {
-        let name: SyntaxToken = node
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .find(|token| token.kind() == IDENT)
+    fn for_each_binding(
+        statement: &ast::ForEachStmt,
+        context: &Context<'_>,
+    ) -> Result<jals_hir::DefId> {
+        let name: SyntaxToken = statement
+            .name_token()
             .ok_or(LowerError::Unsupported("a `for`-each with no variable"))?;
         context
             .resolved
