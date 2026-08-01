@@ -292,8 +292,10 @@ impl ClasspathLoad {
 /// This answers a question [`ClasspathLoad`] is too expensive to be asked: a dependency's
 /// `publish_tree` output is routed to navigation only *because* the classpath is expected to define
 /// the same types, and a compile build never loads the classpath, so nothing on that path can check
-/// the expectation. Only each archive's central directory is read — no member is decompressed — and
-/// the only class files parsed are loose `.class`, whose package cannot be read off their path.
+/// the expectation. No member is ever decompressed: an archive is answered from its central
+/// directory alone, and the only class files parsed are loose `.class`, whose package cannot be read
+/// off their path. That bounds the *parsing*, not the reading — see
+/// [`add_entry`](Self::add_entry) for what reaching an entry's bytes costs.
 ///
 /// Folded in one entry at a time because a caller assembling a classpath rarely holds it in one
 /// shape: some entries are readable from a view or a cache, and some are bytes it already captured.
@@ -331,6 +333,12 @@ impl ClasspathCoverage {
     }
 
     /// Fold in one entry readable from this project revision or verified cache.
+    ///
+    /// A project file is read from the revision. A cached artifact is reached through
+    /// [`ArtifactCache::open_verified`], which digests the whole artifact before handing out a
+    /// reader — so reading a jar's central directory here is cheap only relative to decoding its
+    /// members, never a couple of seeks. Prefer folding entries in an order that settles the answer
+    /// early, and stop on [`is_complete`](Self::is_complete).
     pub async fn add_entry<C: CacheBackend>(
         &mut self,
         view: &ProjectView,

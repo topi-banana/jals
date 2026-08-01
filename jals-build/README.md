@@ -347,10 +347,16 @@ warning: project dependency `vendored`: build task publishes `api` at
 under `net/example`. …
 ```
 
-The check reads only the central directory of each classpath archive, so it costs a couple of seeks
-per entry, and it says nothing at all when an entry cannot be read — an unreadable jar is not a jar
-that defines nothing. A `[dependencies]` jar the project declares is resolved after preprocessing
-and is invisible to it, so the warning names that possibility rather than suppressing itself.
+No member is ever decompressed: an archive is answered from its central directory alone, and the
+scan stops as soon as every published prefix is covered — on a game jar that is usually the first
+few of tens of thousands of entries. What reaching an entry costs depends on where its bytes live. A
+cached artifact is opened through the verified read, so it passes through SHA-256 once before its
+directory is parsed; that is the same pass the memoized execution's own re-verification already
+makes, so the added cost is a repeated digest rather than a first read. A project file is read from
+the revision, and a captured `[build] classpath` entry is already in memory. The check says nothing
+at all when an entry cannot be read — an unreadable jar is not a jar that defines nothing. A
+`[dependencies]` jar the project declares is resolved after preprocessing and is invisible to it, so
+the warning names that possibility rather than suppressing itself.
 
 Each dependency execution is memoized under its project identity, plan, and resolved features, and
 re-verified against the cache before it is reused, so an editor reload does not re-fetch, re-remap,
