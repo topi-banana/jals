@@ -337,9 +337,10 @@ impl GraphBuilder {
         mut acquired: AcquiredSource,
     ) -> Result<(), GraphError> {
         let checkout = acquired.checkout.take();
-        // Resolved before the inner visit consumes `parent`, and it would resolve the same after:
-        // the declaring project was pushed as a node before it began declaring anything.
-        let declared_by = ResolvedNode::location_of(&self.nodes, parent.as_ref());
+        // The id, not the location: only the cleanup failure below names the declaring project,
+        // and only a Git dependency can reach it. Resolving a location here would scan the nodes
+        // and allocate for every *path* dependency too, where nothing ever reads the result.
+        let declared_by = parent.clone();
         let result = self
             .visit_source_inner(parent, dependency, declared, acquired)
             .await;
@@ -359,11 +360,13 @@ impl GraphBuilder {
         // the whole build over a leftover temp directory leaves the user no way forward. Report it
         // and move on; the directory is under the OS temp root either way.
         if let Err(message) = cleanup {
-            self.warnings.push(GraphWarning::declared(
-                declared_by,
+            // The declaring project resolves the same now as it would have before the visit: it
+            // was pushed as a node before it began declaring anything.
+            self.warn_declared(
+                declared_by.as_ref(),
                 dependency,
                 format!("could not remove the temporary Git checkout: {message}"),
-            ));
+            );
         }
         Ok(())
     }
