@@ -825,10 +825,10 @@ mod tests {
             GraphWarning {
                 node: None,
                 dependency: None,
-                message: "project snapshot: unreadable".to_owned(),
+                message: "snapshot: unreadable".to_owned(),
             }
             .to_string(),
-            "project graph: project snapshot: unreadable"
+            "project graph: snapshot: unreadable"
         );
     }
 

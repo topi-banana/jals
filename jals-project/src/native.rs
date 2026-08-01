@@ -758,20 +758,15 @@ impl GraphBuilder {
             })
     }
 
-    /// `location` is `None` for the root project's own snapshot ([`NativeProjectGraph::discover`]),
-    /// which is why the subject is not the constant it reads like: the root is not one of its own
-    /// dependencies, and calling it one is a claim about where the user should go and look.
+    /// The message says which kind of diagnostic this is and nothing about whose it is: the
+    /// subject belongs to [`GraphWarning`]'s `Display`, and `location` — `None` for the root
+    /// project's own snapshot ([`NativeProjectGraph::discover`]) — is what it writes it from.
     fn push_snapshot_warnings(&mut self, location: Option<&str>, diagnostics: Vec<Diagnostic>) {
-        let subject = if location.is_some() {
-            "dependency snapshot"
-        } else {
-            "project snapshot"
-        };
         self.warnings
             .extend(diagnostics.into_iter().map(|diagnostic| GraphWarning {
                 node: location.map(ToOwned::to_owned),
                 dependency: None,
-                message: format!("{subject}: {diagnostic:?}"),
+                message: format!("snapshot: {diagnostic:?}"),
             }));
     }
 
