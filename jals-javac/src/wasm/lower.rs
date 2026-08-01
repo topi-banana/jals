@@ -593,12 +593,7 @@ impl CompileWasm {
             let owner = node
                 .ancestors()
                 .find(Self::declares_a_type)
-                .and_then(|declaration| {
-                    declaration
-                        .children_with_tokens()
-                        .filter_map(jals_syntax::SyntaxElement::into_token)
-                        .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
-                })
+                .and_then(|declaration| ast::Decl::name_token_of(&declaration))
                 .and_then(|name| {
                     index.item_by_decl(input.file, usize::from(name.text_range().start()))
                 });
@@ -1260,10 +1255,7 @@ impl Layout {
 
     /// The indexed item a type declaration declares.
     fn owner_of(node: &SyntaxNode, input: &WasmInput<'_>, index: &ProjectIndex) -> Result<ItemId> {
-        let name = node
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+        let name = ast::Decl::name_token_of(node)
             .ok_or(WasmError::Unsupported("a type declaration with no name"))?;
         index
             .item_by_decl(input.file, usize::from(name.text_range().start()))
@@ -2300,18 +2292,17 @@ impl Lowering<'_> {
     /// the inner block's end and the branch back — which is exactly what makes the inner block the
     /// continue target rather than the loop.
     fn for_loop(&mut self, statement: &ast::ForStmt, insn: &mut Insn) -> Result<()> {
-        let (init, condition, update, body) = Self::for_sections(statement.syntax());
         let label = self.pending_label.take();
-        for node in &init {
-            self.for_section(node, insn)?;
+        for node in statement.init() {
+            self.for_section(&node, insn)?;
         }
         insn.block();
         let leave = insn.depth();
         insn.loop_();
         let repeat = insn.depth();
         // No condition means `for (;;)`, which never leaves by itself.
-        if let Some(condition) = &condition {
-            self.expr(condition, insn)?;
+        if let Some(condition) = statement.condition() {
+            self.expr(&condition, insn)?;
             insn.i32_eqz();
             insn.br_if(insn.depth() - leave);
         }
@@ -2324,13 +2315,13 @@ impl Lowering<'_> {
             repeat: Some(next),
             cleanups,
         });
-        if let Some(body) = &body {
-            self.stmt(body, insn)?;
+        if let Some(body) = statement.body() {
+            self.stmt(&body, insn)?;
         }
         self.loops.pop();
         insn.end();
-        for node in &update {
-            self.for_section(node, insn)?;
+        for node in statement.update() {
+            self.for_section(&node, insn)?;
         }
         insn.br(insn.depth() - repeat).end().end();
         Ok(())
@@ -2345,44 +2336,6 @@ impl Lowering<'_> {
         let expression =
             ast::Expr::cast(node.clone()).ok_or(WasmError::Unsupported("this `for` header"))?;
         self.discard(&expression, insn)
-    }
-
-    /// Split a `FOR_STMT` into its three header sections and its body.
-    fn for_sections(
-        node: &SyntaxNode,
-    ) -> (
-        Vec<SyntaxNode>,
-        Option<ast::Expr>,
-        Vec<SyntaxNode>,
-        Option<ast::Stmt>,
-    ) {
-        use jals_syntax::SyntaxKind::{RPAREN, SEMICOLON};
-        let (mut init, mut update) = (Vec::new(), Vec::new());
-        let (mut condition, mut body) = (None, None);
-        // 0 = initialiser, 1 = condition, 2 = update; past the `)`, the body.
-        let mut section = 0;
-        let mut in_header = true;
-        for child in node.children_with_tokens() {
-            match child {
-                jals_syntax::SyntaxElement::Token(token) => match token.kind() {
-                    SEMICOLON if in_header => section += 1,
-                    RPAREN => in_header = false,
-                    _ => {}
-                },
-                jals_syntax::SyntaxElement::Node(child) => {
-                    if !in_header {
-                        body = ast::Stmt::cast(child);
-                    } else if section == 0 {
-                        init.push(child);
-                    } else if section == 1 {
-                        condition = ast::Expr::cast(child);
-                    } else {
-                        update.push(child);
-                    }
-                }
-            }
-        }
-        (init, condition, update, body)
     }
 
     /// `for (T v : array) body`, over an array.

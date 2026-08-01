@@ -55,12 +55,19 @@ impl AstSupport {
             .collect()
     }
 
-    /// Returns the name (`IDENT`) declared directly under `node` (e.g. the type/method name).
+    /// Returns the name (`IDENT`) token declared directly under `node` (e.g. the type/method name).
+    ///
+    /// This is the token, not its text, because a consumer that has to look the declaration up in
+    /// `jals-hir` needs its offset: the index is keyed on where the name starts
+    /// (`ProjectIndex::item_by_decl` / `member_by_decl`), and text alone cannot answer that.
+    fn name_token(node: &SyntaxNode) -> Option<SyntaxToken> {
+        Self::ident_tokens(node).next()
+    }
+
+    /// The text of [`name_token`](Self::name_token). Defined in terms of it so the pair cannot
+    /// disagree about which token is the name.
     fn name_text(node: &SyntaxNode) -> Option<String> {
-        node.children_with_tokens()
-            .filter_map(rowan::NodeOrToken::into_token)
-            .find(|t| t.kind() == IDENT)
-            .map(|t| t.text().to_owned())
+        Self::name_token(node).map(|t| t.text().to_owned())
     }
 
     /// The directly-declared name tokens (`IDENT` children) of `node`, in source order. The type of a

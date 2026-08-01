@@ -13,14 +13,14 @@ use rowan::WalkEvent;
 use rowan::ast::support;
 
 use super::{
-    AssignmentExpr, AstNode, AstSupport, AttrMeta, Attribute, BinaryExpr, CatchClause, Expr,
-    FieldAccess, FieldDecl, Literal, LocalVarDecl, Modifiers, QualifiedName, Resource, SwitchExpr,
-    Type, YieldStmt,
+    AssignmentExpr, AstNode, AstSupport, AttrMeta, Attribute, BinaryExpr, CatchClause, Decl, Expr,
+    FieldAccess, FieldDecl, ForStmt, Literal, LocalVarDecl, Modifiers, QualifiedName, Resource,
+    Stmt, SwitchExpr, Type, YieldStmt,
 };
-#[cfg(test)]
-use crate::language::SyntaxNode;
-use crate::language::SyntaxToken;
-use crate::syntax_kind::SyntaxKind::{self, DOT, EQ, IDENT, SWITCH_EXPR, SWITCH_STMT, YIELD_STMT};
+use crate::language::{SyntaxNode, SyntaxToken};
+use crate::syntax_kind::SyntaxKind::{
+    self, DOT, EQ, FOR_KW, IDENT, RPAREN, SEMICOLON, SWITCH_EXPR, SWITCH_STMT, YIELD_STMT,
+};
 #[cfg(test)]
 use crate::syntax_kind::SyntaxKind::{MODIFIERS, NON_SEALED_KW};
 
@@ -279,6 +279,119 @@ impl Resource {
     }
 }
 
+impl Decl {
+    /// The declared name token, whichever declaration form this is.
+    ///
+    /// Every `Decl` variant labels its name in the grammar, so each arm is that node's generated
+    /// `name_token`. The dispatch exists because a caller usually reaches a declaration as a plain
+    /// [`SyntaxNode`] — the seven forms are seven `SyntaxKind`s — and would otherwise re-find the
+    /// `IDENT` by hand to get the offset `jals-hir`'s index is keyed on. Going through the typed
+    /// accessors means a variant that later moves its name into a child node keeps working here.
+    pub fn name_token(&self) -> Option<SyntaxToken> {
+        match self {
+            Self::Class(decl) => decl.name_token(),
+            Self::Interface(decl) => decl.name_token(),
+            Self::Enum(decl) => decl.name_token(),
+            Self::Record(decl) => decl.name_token(),
+            Self::AnnotationType(decl) => decl.name_token(),
+            Self::Method(decl) => decl.name_token(),
+            Self::Field(decl) => decl.name_token(),
+        }
+    }
+
+    /// The declared name token of `node`, if it is a declaration at all.
+    pub fn name_token_of(node: &SyntaxNode) -> Option<SyntaxToken> {
+        Self::cast(node.clone()).and_then(|decl| decl.name_token())
+    }
+}
+
+/// Which part of a C-style `for` a direct child node belongs to.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ForSection {
+    Init,
+    Condition,
+    Update,
+    Body,
+}
+
+impl ForSection {
+    /// The section a header `;` moves into. The body's own `;` is an `EmptyStmt` node rather than a
+    /// token child, so only the two separators reach this in well-formed input; the last arm is
+    /// what keeps a stray one from re-sectioning the statement.
+    const fn after_semicolon(self) -> Self {
+        match self {
+            Self::Init => Self::Condition,
+            Self::Condition => Self::Update,
+            Self::Update | Self::Body => self,
+        }
+    }
+}
+
+impl ForStmt {
+    /// Pairs every direct child node with the section of the statement it sits in.
+    ///
+    /// A C-style `for` is flat in the CST: the two `;` and the `)` are direct token children, and
+    /// each section is the run of sibling nodes between them. Sectioning therefore cannot be done
+    /// by child type — all three header sections may hold an `Expr` — which is why the grammar
+    /// leaves them unlabeled and this walk is the one place the shape is written down.
+    ///
+    /// The walk starts at `for` rather than at `(`: `attrs:Attribute*` precede the keyword, so
+    /// counting from the top would file the attribute of `#[cfg(…)] for (…)` under the
+    /// initialiser, and starting at `(` would drop the whole statement when the `(` is missing
+    /// from malformed input.
+    fn sections(&self) -> impl Iterator<Item = (ForSection, SyntaxNode)> {
+        let mut section = None;
+        self.syntax
+            .children_with_tokens()
+            .filter_map(move |child| match child {
+                rowan::NodeOrToken::Token(token) => {
+                    match token.kind() {
+                        FOR_KW => section = Some(ForSection::Init),
+                        SEMICOLON => section = section.map(ForSection::after_semicolon),
+                        RPAREN => section = Some(ForSection::Body),
+                        _ => {}
+                    }
+                    None
+                }
+                rowan::NodeOrToken::Node(node) => section.map(|section| (section, node)),
+            })
+    }
+
+    /// The direct child nodes sitting in `want`, in source order.
+    fn nodes_in(&self, want: ForSection) -> impl Iterator<Item = SyntaxNode> {
+        self.sections()
+            .filter_map(move |(section, node)| (section == want).then_some(node))
+    }
+
+    /// The initialiser entries, in source order: either one `LocalVarDecl` (`for (int i = 0; …`) or
+    /// a comma-separated run of `Expr`s (`for (i = 0, j = n; …`). Empty for `for (;;)`.
+    ///
+    /// Kept at [`SyntaxNode`] granularity rather than narrowed to a typed enum because a local
+    /// *type* declaration is also legal here (see the parser's `for_init`), and because a caller
+    /// that cannot lower an entry must be able to report it rather than have it silently dropped.
+    pub fn init(&self) -> impl Iterator<Item = SyntaxNode> {
+        self.nodes_in(ForSection::Init)
+    }
+
+    /// The loop condition, or `None` for `for (;;)`.
+    pub fn condition(&self) -> Option<Expr> {
+        self.nodes_in(ForSection::Condition)
+            .next()
+            .and_then(Expr::cast)
+    }
+
+    /// The update entries, in source order; empty when the clause is omitted. At [`SyntaxNode`]
+    /// granularity for the same reason as [`init`](Self::init).
+    pub fn update(&self) -> impl Iterator<Item = SyntaxNode> {
+        self.nodes_in(ForSection::Update)
+    }
+
+    /// The loop body — whatever follows the `)`.
+    pub fn body(&self) -> Option<Stmt> {
+        self.nodes_in(ForSection::Body).next().and_then(Stmt::cast)
+    }
+}
+
 impl SwitchExpr {
     /// The value-producing expressions of this switch expression: each arrow rule's
     /// [`expr`](super::SwitchRule::expr) body (`case X -> expr;`), plus every `yield`'s value —
@@ -320,8 +433,8 @@ impl SwitchExpr {
 mod tests {
     use super::AstNode;
     use crate::ast::{
-        AttrArg, Attribute, CatchClause, ClassDecl, ExprStmt, FieldDecl, ImportDecl, ImportGroup,
-        LocalVarDecl, QualifiedName, Resource, SwitchExpr, Type,
+        AttrArg, Attribute, CatchClause, ClassDecl, Decl, ExprStmt, FieldDecl, ForStmt, ImportDecl,
+        ImportGroup, LocalVarDecl, MethodDecl, QualifiedName, Resource, Stmt, SwitchExpr, Type,
     };
     use crate::parser::Parse;
 
@@ -501,6 +614,123 @@ mod tests {
         assert_eq!(qn.last_segment(), None);
         assert_eq!(qn.qualifier().as_deref(), Some("a.b"));
         assert!(qn.is_wildcard());
+    }
+
+    #[test]
+    fn decl_name_token_carries_the_name_offset() {
+        const SRC: &str = "class Foo { int bar; void baz() {} }";
+        // The offset is the whole point of the token accessor: `jals-hir`'s index is keyed on
+        // where a name starts (`item_by_decl` / `member_by_decl`), so the text cannot stand in.
+        for (declared, expected) in [
+            (Decl::name_token_of(first::<ClassDecl>(SRC).syntax()), "Foo"),
+            (Decl::name_token_of(first::<FieldDecl>(SRC).syntax()), "bar"),
+            (
+                Decl::name_token_of(first::<MethodDecl>(SRC).syntax()),
+                "baz",
+            ),
+        ] {
+            let token = declared.unwrap_or_else(|| panic!("`{expected}` is a declared name"));
+            assert_eq!(token.text(), expected);
+            assert_eq!(
+                usize::from(token.text_range().start()),
+                SRC.find(expected).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn a_generated_name_and_its_token_cannot_disagree() {
+        // `AstSupport::name_text` is written in terms of `name_token`; this pins that they keep
+        // reporting the same token, since the two are generated from one label.
+        let class: ClassDecl = first("class Foo {}");
+        assert_eq!(class.name().as_deref(), Some("Foo"));
+        assert_eq!(
+            class.name_token().map(|t| t.text().to_owned()),
+            class.name()
+        );
+    }
+
+    #[test]
+    fn a_non_declaration_declares_no_name() {
+        // The old hand-rolled walk took the first `IDENT` of any node it was handed. Going through
+        // `Decl` means a node that is not one of the seven declaration forms answers `None`
+        // instead of a name that is really a reference.
+        let stmt: ExprStmt = first("class C { void m() { f(); } }");
+        assert!(Decl::name_token_of(stmt.syntax()).is_none());
+    }
+
+    /// Wraps `body` in a method so the `for` under test is the first one in the file.
+    fn for_stmt(header_and_body: &str) -> ForStmt {
+        first(&alloc::format!(
+            "class C {{ void m() {{ {header_and_body} }} }}"
+        ))
+    }
+
+    /// The source text of `node`, less the leading trivia a lossless CST attaches to it.
+    fn trimmed(node: &crate::language::SyntaxNode) -> String {
+        node.text().to_string().trim().to_owned()
+    }
+
+    fn texts(nodes: impl Iterator<Item = crate::language::SyntaxNode>) -> Vec<String> {
+        nodes.map(|node| trimmed(&node)).collect()
+    }
+
+    #[test]
+    fn for_sections_split_a_declaring_header() {
+        let stmt = for_stmt("for (int i = 0; i < n; i++) { f(); }");
+        assert_eq!(texts(stmt.init()), ["int i = 0"]);
+        assert_eq!(
+            stmt.condition().map(|c| trimmed(c.syntax())),
+            Some("i < n".to_owned())
+        );
+        assert_eq!(texts(stmt.update()), ["i++"]);
+        // The hazard the flat CST creates: `LOCAL_VAR_DECL` casts to `Stmt`, so a body accessor
+        // that selected by child type alone would return the initialiser's declaration instead.
+        let body = stmt.body().expect("the body is the statement after `)`");
+        assert!(matches!(body, Stmt::Block(_)), "body was {body:?}");
+        assert_eq!(trimmed(body.syntax()), "{ f(); }");
+    }
+
+    #[test]
+    fn for_sections_are_empty_in_an_infinite_loop() {
+        let stmt = for_stmt("for (;;) { f(); }");
+        assert_eq!(texts(stmt.init()), Vec::<String>::new());
+        assert!(stmt.condition().is_none());
+        assert_eq!(texts(stmt.update()), Vec::<String>::new());
+        assert!(stmt.body().is_some());
+    }
+
+    #[test]
+    fn for_sections_keep_every_comma_separated_entry() {
+        let stmt = for_stmt("for (i = 0, j = n; i < j; i++, j--) ;");
+        assert_eq!(texts(stmt.init()), ["i = 0", "j = n"]);
+        assert_eq!(texts(stmt.update()), ["i++", "j--"]);
+        // The body's `;` is an `EMPTY_STMT` node, not a token child, so it never reaches the
+        // sectioning walk and cannot advance a section past the header.
+        assert!(matches!(stmt.body(), Some(Stmt::Empty(_))));
+    }
+
+    #[test]
+    fn for_sections_survive_an_omitted_clause() {
+        // The condition is present but both other clauses are gone; the update must not absorb it.
+        let stmt = for_stmt("for (; i < n; ) { f(); }");
+        assert_eq!(texts(stmt.init()), Vec::<String>::new());
+        assert_eq!(
+            stmt.condition()
+                .map(|c| c.syntax().text().to_string().trim().to_owned()),
+            Some("i < n".to_owned())
+        );
+        assert_eq!(texts(stmt.update()), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_for_attribute_is_not_an_initialiser() {
+        // `attrs:Attribute*` precede the `for` keyword as direct children, so a walk that started
+        // sectioning at the top of the node would file this attribute under the initialiser and
+        // hand a consumer a node it cannot lower.
+        let stmt = for_stmt("#[cfg(feature = \"x\")] for (int i = 0; i < n; i++) { f(); }");
+        assert_eq!(stmt.attrs().count(), 1);
+        assert_eq!(texts(stmt.init()), ["int i = 0"]);
     }
 
     #[test]

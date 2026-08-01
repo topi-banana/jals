@@ -281,10 +281,7 @@ impl Compile {
             // synthetic constructor parameter the index knows nothing about, so its constructor would
             // come out one parameter short of what a `new` passes.
 
-            let name = node
-                .children_with_tokens()
-                .filter_map(jals_syntax::SyntaxElement::into_token)
-                .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+            let name = ast::Decl::name_token_of(&node)
                 .ok_or(LowerError::Unsupported("a type declaration with no name"))?;
             let item = index
                 .item_by_decl(file, usize::from(name.text_range().start()))
@@ -719,10 +716,7 @@ impl Compile {
 
         let mut entries = Vec::with_capacity(nested.len());
         for declaration in nested {
-            let name = declaration
-                .children_with_tokens()
-                .filter_map(jals_syntax::SyntaxElement::into_token)
-                .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+            let name = ast::Decl::name_token_of(declaration)
                 .ok_or(LowerError::Unsupported("a type declaration with no name"))?;
             let item = context
                 .index
@@ -742,10 +736,7 @@ impl Compile {
                     )
                 })
                 .and_then(|outer| {
-                    let token = outer
-                        .children_with_tokens()
-                        .filter_map(jals_syntax::SyntaxElement::into_token)
-                        .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)?;
+                    let token = ast::Decl::name_token_of(&outer)?;
                     context
                         .index
                         .item_by_decl(context.file, usize::from(token.text_range().start()))
@@ -1380,11 +1371,7 @@ impl Compile {
             {
                 continue;
             }
-            let Some(name) = declaration
-                .children_with_tokens()
-                .filter_map(jals_syntax::SyntaxElement::into_token)
-                .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
-            else {
+            let Some(name) = ast::Decl::name_token_of(&declaration) else {
                 continue;
             };
             let Some(item) = index.item_by_decl(file, usize::from(name.text_range().start()))
@@ -1529,10 +1516,7 @@ impl Compile {
                 .ok_or(LowerError::Unsupported(
                     "an inner class with no enclosing type",
                 ))?;
-        let name = declaration
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+        let name = ast::Decl::name_token_of(&declaration)
             .ok_or(LowerError::Unsupported("an enclosing type with no name"))?;
         let enclosing = index
             .item_by_decl(file, usize::from(name.text_range().start()))

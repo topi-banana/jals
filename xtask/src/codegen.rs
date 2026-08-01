@@ -81,7 +81,11 @@ impl Codegen {
         buf.push_str("use alloc::string::String;\n\n");
         buf.push_str("use rowan::ast::{AstChildren, AstNode, support};\n\n");
         buf.push_str("use super::AstSupport;\n");
-        buf.push_str("use crate::language::{JavaLanguage, SyntaxNode};\n");
+        if Self::names_syntax_token(&items) {
+            buf.push_str("use crate::language::{JavaLanguage, SyntaxNode, SyntaxToken};\n");
+        } else {
+            buf.push_str("use crate::language::{JavaLanguage, SyntaxNode};\n");
+        }
         // An explicit import list rather than a glob: a `use …::*` would trip
         // `clippy::enum_glob_use`. rustfmt sorts and wraps the names, so the exact
         // order emitted here does not matter.
@@ -97,6 +101,19 @@ impl Codegen {
             }
         }
         Self::reformat(&buf)
+    }
+
+    /// Whether the generated code names `SyntaxToken` at all — only a `'ident'` label's token
+    /// accessor does. The import is conditional on this because an unused one would warn inside a
+    /// do-not-edit file (see `generate`).
+    fn names_syntax_token(items: &[Item]) -> bool {
+        items.iter().any(|item| match item {
+            Item::Node(node) => node
+                .accessors
+                .iter()
+                .any(|accessor| matches!(accessor.kind, AccessorKind::NameText)),
+            Item::Enum(_) => false,
+        })
     }
 
     /// Every `SyntaxKind` variant the generated code names, deduplicated. Feeds the
@@ -258,9 +275,14 @@ impl NodeSrc {
                         buf,
                         "pub fn {label}(&self) -> bool {{ support::token(&self.syntax, {kind}).is_some() }}"
                     ),
+                    // Two accessors from one label: the text is what most callers want, and the
+                    // token is what a caller resolving the declaration through `jals-hir` needs,
+                    // because that index is keyed on where the name starts. Generating them
+                    // together is what keeps the pair from drifting apart per-node.
                     AccessorKind::NameText => writeln!(
                         buf,
-                        "pub fn {label}(&self) -> Option<String> {{ AstSupport::name_text(&self.syntax) }}"
+                        "pub fn {label}(&self) -> Option<String> {{ AstSupport::name_text(&self.syntax) }}\n\
+                         pub fn {label}_token(&self) -> Option<SyntaxToken> {{ AstSupport::name_token(&self.syntax) }}"
                     ),
                 };
             }
