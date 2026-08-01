@@ -13,7 +13,7 @@
 
 use alloc::borrow::ToOwned;
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
@@ -283,6 +283,186 @@ impl ClasspathLoad {
                 }
             }
             Err(message) => tasks.push(DecodeTask::Warn(Warning::new(origin, message))),
+        }
+    }
+}
+
+/// Which of a set of package prefixes a classpath actually defines a class under.
+///
+/// This answers a question [`ClasspathLoad`] is too expensive to be asked. A dependency's
+/// `navigation` publications are routed away from the compiler *because* the classpath is expected
+/// to define the same types, and a compile build never loads the classpath at all, so nothing on
+/// that path can check the expectation.
+///
+/// No member is ever decompressed. An archive is answered from its central directory alone, because
+/// a member's name already *is* its binary name, and a classpath directory's member path is too.
+/// The only class files parsed are loose `.class`, whose package cannot be read off their path.
+/// That bounds the *parsing*, not the reading — see [`add_cached_artifact`](Self::add_cached_artifact)
+/// for what reaching an entry's bytes costs.
+///
+/// Entries fold in one at a time because a caller assembling a classpath rarely holds it in one
+/// shape: some are bytes it already captured, and some are keys in a verified cache.
+#[derive(Debug)]
+pub struct ClasspathCoverage {
+    wanted: BTreeSet<RelativePath>,
+    covered: BTreeSet<RelativePath>,
+    warnings: Vec<Warning>,
+}
+
+/// What a classpath entry's bytes turned out to be, chosen by extension.
+enum EntryKind {
+    Class,
+    Archive,
+}
+
+impl ClasspathCoverage {
+    /// Seek `prefixes`. An empty set is already [complete](Self::is_complete), so a caller with
+    /// nothing to ask about should not build one.
+    pub fn seeking(prefixes: impl IntoIterator<Item = RelativePath>) -> Self {
+        Self {
+            wanted: prefixes.into_iter().collect(),
+            covered: BTreeSet::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    /// Whether every sought prefix is covered, at which point no further entry can change the
+    /// answer and folding one in is pure cost.
+    pub fn is_complete(&self) -> bool {
+        self.covered.len() == self.wanted.len()
+    }
+
+    /// Whether anything folded in so far defines a class under `prefix`. Always `false` for a
+    /// prefix that was never sought: this distinguishes covered from uncovered, not from unasked.
+    pub fn covers(&self, prefix: &RelativePath) -> bool {
+        self.covered.contains(prefix)
+    }
+
+    /// Entries that could not be inspected.
+    ///
+    /// An unreadable entry is not an entry that defines nothing, so a caller concluding anything
+    /// from an *uncovered* prefix has to weigh this first. Answering the question does not retract
+    /// what went unread on the way to it — the scan stopping early only means nothing was added
+    /// after the answer arrived, never that something already reported has been taken back.
+    pub fn warnings(&self) -> &[Warning] {
+        &self.warnings
+    }
+
+    /// Fold in one class already addressed by its binary name — an archive member, or a file under
+    /// a classpath directory. A no-op once the answer is settled.
+    pub fn add_class(&mut self, binary_path: &RelativePath) {
+        if self.is_complete() {
+            return;
+        }
+        for prefix in &self.wanted {
+            if !self.covered.contains(prefix) && binary_path.starts_with(prefix) {
+                self.covered.insert(prefix.clone());
+            }
+        }
+    }
+
+    /// Fold in one entry whose bytes the caller already holds — a host file a graph node captured,
+    /// or a build script's registered classpath output.
+    ///
+    /// `path` decides how the bytes are read, so it must keep the entry's extension; it is never
+    /// used as the class's package. Borrowed, not owned: only the central directory is wanted and
+    /// nothing outlives the call, so a caller with the bytes in hand pays no copy to ask.
+    pub async fn add_resident(&mut self, origin: WarningOrigin, path: &RelativePath, bytes: &[u8]) {
+        if self.is_complete() {
+            return;
+        }
+        match Self::kind(path) {
+            Some(EntryKind::Class) => match Archive::read_class(bytes).await {
+                Ok(class) => self.add_parsed_class(&class),
+                Err(message) => self.warnings.push(Warning::new(origin, message)),
+            },
+            Some(EntryKind::Archive) => {
+                self.add_archive(origin, sio::Cursor::new(bytes)).await;
+            }
+            None => self.warnings.push(Warning::new(
+                origin,
+                "unrecognized classpath file (expected `.class`, `.jar`, or `.zip`)",
+            )),
+        }
+    }
+
+    /// Fold in one archive published into the verified cache, such as a build task's JAR.
+    ///
+    /// The expensive kind, and the reason the guard above it is worth keeping at the call site
+    /// rather than only here: [`ArtifactCache::open_verified`] digests the whole artifact before it
+    /// hands out a reader, so reading a jar's central directory this way is cheap only relative to
+    /// decoding its members, never a couple of seeks. Fold entries in an order that settles the
+    /// answer early and stop on [`is_complete`](Self::is_complete).
+    pub async fn add_cached_artifact<C: CacheBackend>(
+        &mut self,
+        cache: &ArtifactCache<C>,
+        key: &CacheKey,
+    ) {
+        if self.is_complete() {
+            return;
+        }
+        let origin = WarningOrigin::Artifact(key.clone());
+        match cache.open_verified(key).await {
+            Ok(Some(reader)) => self.add_archive(origin, reader).await,
+            Ok(None) => self
+                .warnings
+                .push(Warning::new(origin, "classpath artifact is not cached")),
+            Err(error) => self.warnings.push(Warning::new(
+                origin,
+                format!("classpath artifact is invalid: {error:?}"),
+            )),
+        }
+    }
+
+    async fn add_archive<R: sio::Read + sio::Seek>(&mut self, origin: WarningOrigin, reader: R) {
+        let directory = match Archive::open(reader).await {
+            Ok((_, directory)) => directory,
+            Err(message) => {
+                self.warnings.push(Warning::new(origin, message));
+                return;
+            }
+        };
+        // An archive member's name is its binary name, so the central directory alone already
+        // spells every package this jar defines. A game jar has tens of thousands of them and the
+        // answer is usually settled by the first few, so this stops mid-directory rather than
+        // checking once per entry and walking the rest for nothing.
+        let mut yielder = jals_exec::Yielder::new();
+        for member in &directory.members {
+            if self.is_complete() {
+                return;
+            }
+            yielder.tick().await;
+            if member.is_dir
+                || !Archive::extension(&member.name)
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("class"))
+            {
+                continue;
+            }
+            if let Ok(path) = RelativePath::parse(&member.name) {
+                self.add_class(&path);
+            }
+        }
+    }
+
+    /// A loose `.class` sits wherever its holder put it, so its package comes from the constant
+    /// pool rather than from the path the file happens to have.
+    fn add_parsed_class(&mut self, class: &ClassFile) {
+        let Some(internal) = class.constant_pool.class_name(class.this_class) else {
+            return;
+        };
+        if let Ok(path) = RelativePath::parse(internal.as_ref()) {
+            self.add_class(&path);
+        }
+    }
+
+    fn kind(path: &RelativePath) -> Option<EntryKind> {
+        let extension = Archive::extension(path.name()?.as_str())?;
+        if extension.eq_ignore_ascii_case("class") {
+            Some(EntryKind::Class)
+        } else if extension.eq_ignore_ascii_case("jar") || extension.eq_ignore_ascii_case("zip") {
+            Some(EntryKind::Archive)
+        } else {
+            None
         }
     }
 }
