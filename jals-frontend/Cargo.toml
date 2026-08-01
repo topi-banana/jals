@@ -11,6 +11,11 @@ edition.workspace = true
 # Later IR levels add `jals-syntax` / `jals-hir` / `jals-classfile`, all of which are already
 # `no_std`. This crate must never depend on `jals-build`, whose compile half is `native`-gated.
 [dependencies]
+# `[build.frontend]` and `[package] features` are answered in exactly one place — `selection.rs`,
+# the only module here that reads a manifest. `jals-config` is pure `no_std + alloc` schema, so it
+# does not regress this crate's portability; the flag sets the frontends themselves take stay
+# config-free.
+jals-config.workspace = true
 jals-storage.workspace = true
 # The dialect frontend parses each file to locate grouped imports. `jals-syntax` is `no_std +
 # alloc` and wasm-safe, so it does not regress this crate's portability.

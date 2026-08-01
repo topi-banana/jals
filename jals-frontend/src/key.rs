@@ -9,7 +9,7 @@ use crate::ir::IrFile;
 use crate::level::{IrLevel, PIPELINE_API_VERSION};
 
 /// Key derivation namespace for the frontend tier.
-pub struct FrontendKey;
+pub(crate) struct FrontendKey;
 
 impl FrontendKey {
     const KIND: &'static [u8] = b"jals.frontend\0";
@@ -104,7 +104,10 @@ impl FrontendKey {
     /// platforms, so a digest folded over "all files" would otherwise be machine-dependent.
     /// Sorting by logical path — here, once, before anything is hashed — is what makes a cache
     /// entry produced on one machine valid on another.
-    pub fn canonical_order(files: &mut [IrFile]) {
+    ///
+    /// Crate-internal: [`FrontendSelection::lower`](crate::FrontendSelection::lower) takes its
+    /// input by value and calls this itself, so a caller has no order to get right.
+    pub(crate) fn canonical_order(files: &mut [IrFile]) {
         files.sort_by(|left, right| left.path.cmp(&right.path));
     }
 }

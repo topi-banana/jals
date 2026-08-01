@@ -1,18 +1,24 @@
 extern crate std;
 
 use alloc::borrow::ToOwned;
+use alloc::collections::BTreeSet;
+use alloc::format;
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::str::FromStr;
 
+use jals_config::Manifest;
 use jals_exec::block_on_inline;
-use jals_storage::{ArtifactCache, MemoryCache, RelativePath};
+use jals_storage::{ArtifactCache, CacheKey, MemoryCache, RelativePath};
 
 use crate::dialect::{DialectFlags, DialectFrontend};
 use crate::driver::Driver;
 use crate::frontend::Frontend;
 use crate::ir::{FrontendDiagnostic, Ir, IrFile, LoweredFile, LoweredTree};
 use crate::key::FrontendKey;
+use crate::selection::FrontendSelection;
 use crate::vanilla::VanillaFrontend;
 
 /// Fixture namespace for these tests.
@@ -741,4 +747,130 @@ fn attributes_off_passes_attribute_syntax_through() {
     let output = block_on_inline(frontend.run(Ir::Bytes { files: &files })).unwrap();
     assert!(!output.has_errors());
     assert_eq!(output.files[0].1, src.as_bytes());
+}
+
+// ===== Frontend selection: the one place `[build.frontend]` is answered =====
+
+/// Selection helpers.
+mod selection_helpers {
+    use super::*;
+
+    /// A manifest whose `[package] features` list is `features` (a TOML array body).
+    pub(super) fn manifest(features: &str) -> Manifest {
+        let text = format!("[package]\nname = \"demo\"\nfeatures = [{features}]\n");
+        Manifest::from_str(&text).unwrap()
+    }
+
+    pub(super) fn build_features(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    /// Lower [`Fixture::sources`] through `selection` and return the published keys.
+    ///
+    /// The keys — not the emitted bytes — are what a selection has to get right: `caps().id` and
+    /// `config_digest()` are folded into every one of them, so two selections that agree on the
+    /// output but disagree here silently invalidate a project's whole cache.
+    pub(super) fn keys(selection: &FrontendSelection) -> Vec<CacheKey> {
+        keys_of(selection, Fixture::sources())
+    }
+
+    pub(super) fn keys_of(selection: &FrontendSelection, files: Vec<IrFile>) -> Vec<CacheKey> {
+        let mut cache = ArtifactCache::new(MemoryCache::default());
+        let lowered = block_on_inline(selection.lower(&mut cache, files)).unwrap();
+        lowered
+            .tree
+            .files()
+            .iter()
+            .map(|file| file.key.clone())
+            .collect()
+    }
+}
+
+use selection_helpers::{build_features, keys, keys_of, manifest};
+
+#[test]
+fn a_manifest_with_no_dialect_feature_selects_vanilla() {
+    // Not a dialect frontend with every flag off: the two lower identically but carry different
+    // ids, and the id is folded into every key.
+    assert_eq!(
+        FrontendSelection::for_manifest(&manifest(""), &build_features(&[])).id(),
+        "vanilla"
+    );
+    assert_eq!(FrontendSelection::vanilla().id(), "vanilla");
+}
+
+#[test]
+fn a_manifest_with_no_dialect_feature_lowers_exactly_as_a_manifest_less_tree() {
+    // The legacy-node path (`vanilla()`) and the feature-less-manifest path have to be the same
+    // cache identity, or adding a `jals.toml` to a plain source tree rebuilds it from scratch.
+    assert_eq!(
+        keys(&FrontendSelection::for_manifest(
+            &manifest(""),
+            &build_features(&[])
+        )),
+        keys(&FrontendSelection::vanilla())
+    );
+}
+
+#[test]
+fn a_dialect_feature_selects_the_dialect_frontend() {
+    for features in [
+        "\"grouped-imports\"",
+        "\"attributes\"",
+        "\"attributes\", \"grouped-imports\"",
+    ] {
+        let selection = FrontendSelection::for_manifest(&manifest(features), &build_features(&[]));
+        assert_eq!(selection.id(), "jals-dialect", "for features [{features}]");
+    }
+}
+
+#[test]
+fn a_java_release_feature_is_not_a_dialect_feature() {
+    // `[package] features` also carries release presets, which close over each other. None of them
+    // is something the frontend desugars, so they must not drag a project onto the dialect.
+    let selection = FrontendSelection::for_manifest(&manifest("\"java25\""), &build_features(&[]));
+    assert_eq!(selection.id(), "vanilla");
+}
+
+#[test]
+fn build_features_are_ignored_unless_attributes_are_on() {
+    // The `if attributes` guard is part of the selection rule, not of each host's copy of it: an
+    // attribute-free project's cache identity must not move when `--features` does.
+    let with = |names: &[&str]| {
+        keys(&FrontendSelection::for_manifest(
+            &manifest("\"grouped-imports\""),
+            &build_features(names),
+        ))
+    };
+    assert_eq!(with(&["a"]), with(&["b"]));
+    assert_eq!(with(&["a"]), with(&[]));
+}
+
+#[test]
+fn build_features_change_cache_identity_once_attributes_are_on() {
+    let with = |names: &[&str]| {
+        keys(&FrontendSelection::for_manifest(
+            &manifest("\"attributes\""),
+            &build_features(names),
+        ))
+    };
+    assert_ne!(with(&["a"]), with(&["b"]));
+    assert_ne!(with(&["a"]), with(&[]));
+}
+
+#[test]
+fn lowering_imposes_canonical_order_on_its_input() {
+    // Discovery order is a filesystem walk or a build script's registration order — neither is
+    // sorted. The seam sorts, so no caller has an order to get right and a cache entry built on
+    // one machine is valid on another.
+    let selection = FrontendSelection::vanilla();
+    let ordered = Fixture::sources();
+    let mut shuffled = ordered.clone();
+    shuffled.reverse();
+
+    assert_eq!(
+        keys_of(&selection, ordered),
+        keys_of(&selection, shuffled),
+        "the published keys must not depend on discovery order"
+    );
 }

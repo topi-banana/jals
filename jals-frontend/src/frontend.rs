@@ -19,7 +19,7 @@ pub struct FrontendCaps {
     ///
     /// A string rather than an enum discriminant on purpose: adding or reordering frontends
     /// must never renumber a shipped frontend's keys and silently invalidate its cache.
-    pub id: &'static str,
+    pub(crate) id: &'static str,
     /// The lowest IR level this frontend can work from — and therefore the scope of its keys.
     pub(crate) needs: IrLevel,
     /// Source file extensions this frontend claims, without the dot.
@@ -40,8 +40,10 @@ pub type FrontendFuture<'a> =
 
 /// Lowers project sources to Java sources.
 ///
-/// Object-safe and `!Send`, matching the `Compiler`/`Runtime` shape already in `jals-build`: a
-/// host matches a manifest selector to a frontend and drives it as a `&dyn Frontend`.
+/// Object-safe and `!Send`, matching the `Compiler`/`Runtime` shape already in `jals-build`. This
+/// is the seam an *implementor* fills; a host never names it, because matching a manifest selector
+/// to a frontend is [`FrontendSelection`](crate::FrontendSelection)'s job and it hands back
+/// something already drivable.
 pub trait Frontend {
     fn caps(&self) -> FrontendCaps;
 

@@ -60,7 +60,7 @@ impl core::fmt::Display for LowerError {
 }
 
 /// Lowering namespace: runs a frontend and publishes what it emitted.
-pub struct Driver;
+pub(crate) struct Driver;
 
 impl Driver {
     /// Lower `files` with `frontend`, publishing every emitted file into `cache`.
@@ -70,8 +70,13 @@ impl Driver {
     /// cache here is also the existing layering — generation logic never knows the cache exists,
     /// and publication happens at exactly one boundary.
     ///
-    /// `files` must already be in canonical order ([`FrontendKey::canonical_order`]).
-    pub async fn lower<C: CacheBackend>(
+    /// `files` must already be in canonical order ([`FrontendKey::canonical_order`]) — which is
+    /// why this is crate-internal and
+    /// [`FrontendSelection::lower`](crate::FrontendSelection::lower) is what a caller reaches:
+    /// a precondition no signature enforces is one every call site has to remember, and there is
+    /// exactly one production call site here. (This crate's own tests call it directly, against
+    /// input they sort themselves — the internal seam that lets them exercise ordering.)
+    pub(crate) async fn lower<C: CacheBackend>(
         frontend: &dyn Frontend,
         cache: &mut ArtifactCache<C>,
         files: &[IrFile],

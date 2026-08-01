@@ -286,58 +286,31 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
         if files.is_empty() {
             return;
         }
-        jals_frontend::FrontendKey::canonical_order(&mut files);
 
         // The frontend comes from this node's own manifest — a JALS node's `[build.frontend]`, or
-        // the identity for a legacy source node with no manifest. Same rule as the CLI's root
-        // selection, applied at every depth of the graph.
-        // A node's dialect features (its own manifest's `[package] features`) drive whether its
-        // sources are desugared, so a dialect feature compiles without a separate frontend
-        // selection. Legacy source/binary nodes have no manifest, so no dialect.
-        let (kind, dialect_flags) = match &node.body {
+        // the identity for a legacy source node with no manifest. Not a rule this crate states:
+        // it asks `jals-frontend` the same question the CLI and the playground ask, at every depth
+        // of the graph. The build features are the node's own unified selection, so a dependency
+        // is lowered under its own authority, against what its consumers routed to it.
+        let empty = BTreeSet::new();
+        let frontend = match &node.body {
             NodeBody::JalsSource { manifest, .. } => {
-                let feature_set = manifest.feature_set();
-                let attributes = feature_set.contains(jals_config::Feature::Attributes);
-                (
-                    manifest.build.frontend,
-                    jals_frontend::DialectFlags {
-                        grouped_imports: feature_set.contains(jals_config::Feature::GroupedImports),
-                        attributes,
-                        // The node's own unified build-feature selection feeds its
-                        // `#[cfg(feature = "…")]` — a dependency is lowered under its own
-                        // authority, against the features its consumers routed to it. Kept
-                        // empty when the attributes dialect is off, so the cache identity of
-                        // attribute-free dialect nodes stays independent of the selection.
-                        build_features: if attributes {
-                            self.graph
-                                .features
-                                .get(&node.id)
-                                .cloned()
-                                .unwrap_or_default()
-                        } else {
-                            alloc::collections::BTreeSet::new()
-                        },
-                    },
+                jals_frontend::FrontendSelection::for_manifest(
+                    manifest,
+                    self.graph.features.get(&node.id).unwrap_or(&empty),
                 )
             }
-            NodeBody::PlainSource(_) | NodeBody::Binary(_) => (
-                jals_config::FrontendKind::Vanilla {},
-                jals_frontend::DialectFlags::default(),
-            ),
+            NodeBody::PlainSource(_) | NodeBody::Binary(_) => {
+                jals_frontend::FrontendSelection::vanilla()
+            }
         };
-        let use_dialect = dialect_flags.any();
-        let dialect = jals_frontend::DialectFrontend::new(dialect_flags);
-        let frontend: &dyn jals_frontend::Frontend = match kind {
-            jals_config::FrontendKind::Vanilla {} if use_dialect => &dialect,
-            jals_config::FrontendKind::Vanilla {} => &jals_frontend::VanillaFrontend,
-        };
-        let lowered = match jals_frontend::Driver::lower(frontend, self.cache, &files).await {
+        let lowered = match frontend.lower(self.cache, files).await {
             Ok(lowered) => lowered,
             Err(error) => {
                 self.errors.push(ProjectAssemblyError {
                     node: node.id.clone(),
                     path: None,
-                    message: format!("frontend `{}` failed: {error}", frontend.caps().id),
+                    message: format!("frontend `{}` failed: {error}", frontend.id()),
                 });
                 return;
             }
