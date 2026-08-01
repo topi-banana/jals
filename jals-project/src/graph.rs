@@ -5,6 +5,7 @@ use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::{String, ToString};
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -13,11 +14,15 @@ use jals_build::build_script::{
     prepare_build_script,
 };
 use jals_build::task::TaskPlan;
-use jals_classpath::{Fetcher, LibrarySource, NetworkPolicy};
+use jals_classpath::{
+    ClasspathCoverage, ClasspathEntry, ExternalLocator, Fetcher, LibrarySource, NetworkPolicy,
+    WarningOrigin,
+};
 use jals_config::{Dependency, Manifest, ResolvedBuildFeatures};
 use jals_exec::Exec;
 use jals_storage::{
-    ArtifactCache, CacheBackend, CacheKey, ContentDigest, DirKey, ProjectView, RelativePath,
+    ArtifactCache, CacheBackend, CacheKey, ContentDigest, DirKey, FileKey, ProjectView,
+    RelativePath,
 };
 
 use crate::task::{
@@ -385,6 +390,17 @@ impl ResolvedNode {
                 .await?;
             exports.task_classpath = execution.classpath;
             exports.library_sources = self.navigation_sources(manifest, &execution.publications)?;
+            exports.warnings.extend(
+                self.diagnose_unbacked_publications(
+                    cache,
+                    source,
+                    manifest,
+                    &output.additional_classpath,
+                    &exports.task_classpath,
+                    &execution.publications,
+                )
+                .await,
+            );
         }
         exports
             .warnings
@@ -462,6 +478,123 @@ impl ResolvedNode {
         Ok(sources)
     }
 
+    /// Warn about each published tree this node's classpath does not stand behind.
+    ///
+    /// Routing a dependency's publications away from the compiler is right for the shape it was
+    /// written for — a task that puts a JAR on the classpath *and* publishes readable sources for
+    /// the same types, where handing both to `javac` would only duplicate them. Nothing enforces
+    /// that shape, though: a publication can equally be the only carrier of a package, and there the
+    /// same rule deletes the package outright. The consumer then fails on types this project
+    /// believes it exports, several layers away from the declaration that caused it — so the
+    /// declaration says so itself, here.
+    ///
+    /// Only *this* node's classpath is inspected, because that is all a snapshot can be asked about:
+    /// its `[dependencies]` become separate graph nodes resolved long after preprocessing. Declaring
+    /// any is therefore not a reason to stay silent — that would lose the warning for every root a
+    /// project publishes as soon as it gains one jar dependency — but it is a reason to say the
+    /// check could not see them.
+    async fn diagnose_unbacked_publications<C: CacheBackend>(
+        &self,
+        cache: &ArtifactCache<C>,
+        source: &SourceNode,
+        manifest: &Manifest,
+        script_classpath: &BTreeSet<FileKey>,
+        task_classpath: &[CacheKey],
+        publications: &[BuildTaskPublication],
+    ) -> Vec<String> {
+        let mut roots = Vec::new();
+        for publication in publications {
+            // A destination outside every source root is already a hard error from
+            // `navigation_sources`, which ran first, so this cannot be reached with one.
+            let Ok(prefix) = self.package_prefix(manifest, &publication.destination) else {
+                continue;
+            };
+            roots.push((publication, prefix));
+        }
+        if roots.is_empty() {
+            return Vec::new();
+        }
+
+        let mut coverage =
+            ClasspathCoverage::seeking(roots.iter().map(|(_, prefix)| prefix.clone()));
+        let entries = task_classpath
+            .iter()
+            .map(|key| ClasspathEntry::Artifact(key.clone()))
+            .chain(
+                script_classpath
+                    .iter()
+                    .map(|key| ClasspathEntry::ProjectFile(key.clone())),
+            );
+        for entry in entries {
+            if coverage.is_complete() {
+                break;
+            }
+            coverage.add_entry(&source.view, cache, &entry).await;
+        }
+        // The manifest's own `[build] classpath` is read from what discovery captured, not from the
+        // view: a native node may have taken it from a host path that is in no project revision.
+        for entry in &source.classpath {
+            if coverage.is_complete() {
+                break;
+            }
+            match entry {
+                CapturedClasspathEntry::File(file) => {
+                    coverage
+                        .add_resident(
+                            WarningOrigin::External(ExternalLocator::new(file.path.to_string())),
+                            &file.path,
+                            Arc::from(file.bytes.as_slice()),
+                        )
+                        .await;
+                }
+                CapturedClasspathEntry::Tree { members, .. } => {
+                    for member in members {
+                        coverage.add_class(&member.path);
+                    }
+                }
+            }
+        }
+
+        let uncovered: Vec<_> = roots
+            .into_iter()
+            .filter(|(_, prefix)| !coverage.covers(prefix))
+            .collect();
+        if uncovered.is_empty() {
+            return Vec::new();
+        }
+        // An entry that could not be read is not an entry that defines nothing. Once something went
+        // unread, report *that* rather than turning an I/O failure into a claim about packages —
+        // but only here, past the point where the rest of the classpath already answered the
+        // question and the unread entry could not have changed it.
+        if !coverage.warnings().is_empty() {
+            return coverage
+                .warnings()
+                .iter()
+                .map(|warning| format!("publication coverage was not checked: {warning}"))
+                .collect();
+        }
+
+        let unseen = if manifest.dependencies.is_empty() {
+            ""
+        } else {
+            " This project also declares `[dependencies]`, which are resolved after preprocessing \
+             and are invisible here — disregard this if one of them already defines these types."
+        };
+        uncovered
+            .iter()
+            .map(|(publication, prefix)| {
+                format!(
+                    "build task publishes `{}` at `{}`, but nothing this project puts on its own \
+                     classpath defines a class under `{prefix}`. A dependency's publications are \
+                     navigation sources for a reader and never compile inputs, so a consumer \
+                     cannot compile against this root — put the library's own jar on the classpath \
+                     with `tasks.add_classpath`, or declare it as a `[dependencies]` jar.{unseen}",
+                    publication.owner, publication.destination,
+                )
+            })
+            .collect()
+    }
+
     /// The package prefix a publication destination lies at, or an error if it lies outside every
     /// declared source root — where a consumer has no way to address it.
     fn package_prefix(
@@ -505,6 +638,13 @@ pub(crate) struct NodeExports {
     pub(crate) task_classpath: Vec<CacheKey>,
     /// Navigation-only sources a build task published (`tasks.publish_tree`), addressed
     /// package-relative like every other library source. Never a compile input.
+    ///
+    /// A publication therefore means two different things by position: as the *root* it is written
+    /// into the project's source tree and compiles like an authored file, and as a *dependency* it
+    /// reaches a reader and stops there. The asymmetry is deliberate — a dependency exports types
+    /// through its classpath and publishes a view of them — and
+    /// [`diagnose_unbacked_publications`](ResolvedNode::diagnose_unbacked_publications) is what
+    /// keeps a project that meant the other thing from finding out in its consumer's `javac`.
     pub(crate) library_sources: Vec<LibrarySource>,
     pub(crate) warnings: Vec<String>,
 }

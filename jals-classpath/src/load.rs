@@ -13,7 +13,7 @@
 
 use alloc::borrow::ToOwned;
 use alloc::boxed::Box;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
@@ -285,6 +285,233 @@ impl ClasspathLoad {
             Err(message) => tasks.push(DecodeTask::Warn(Warning::new(origin, message))),
         }
     }
+}
+
+/// Which of a set of package prefixes a classpath actually defines a class under.
+///
+/// This answers a question [`ClasspathLoad`] is too expensive to be asked: a dependency's
+/// `publish_tree` output is routed to navigation only *because* the classpath is expected to define
+/// the same types, and a compile build never loads the classpath, so nothing on that path can check
+/// the expectation. Only each archive's central directory is read — no member is decompressed — and
+/// the only class files parsed are loose `.class`, whose package cannot be read off their path.
+///
+/// Folded in one entry at a time because a caller assembling a classpath rarely holds it in one
+/// shape: some entries are readable from a view or a cache, and some are bytes it already captured.
+#[derive(Debug)]
+pub struct ClasspathCoverage {
+    wanted: BTreeSet<RelativePath>,
+    covered: BTreeSet<RelativePath>,
+    warnings: Vec<Warning>,
+}
+
+impl ClasspathCoverage {
+    /// Begin looking for classes under each of `prefixes`.
+    pub fn seeking(prefixes: impl IntoIterator<Item = RelativePath>) -> Self {
+        Self {
+            wanted: prefixes.into_iter().collect(),
+            covered: BTreeSet::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    /// Every prefix is covered, so no further entry can change the answer.
+    pub fn is_complete(&self) -> bool {
+        self.covered.len() == self.wanted.len()
+    }
+
+    pub fn covers(&self, prefix: &RelativePath) -> bool {
+        self.covered.contains(prefix)
+    }
+
+    /// Entries that could not be inspected. An unreadable entry is not an entry that defines
+    /// nothing, so a caller concluding anything from an *uncovered* prefix must first find this
+    /// empty.
+    pub fn warnings(&self) -> &[Warning] {
+        &self.warnings
+    }
+
+    /// Fold in one entry readable from this project revision or verified cache.
+    pub async fn add_entry<C: CacheBackend>(
+        &mut self,
+        view: &ProjectView,
+        cache: &ArtifactCache<C>,
+        entry: &ClasspathEntry,
+    ) {
+        match entry {
+            ClasspathEntry::ProjectFile(key) => {
+                let origin = WarningOrigin::ProjectFile(key.clone());
+                match view.file(key) {
+                    Ok(file) => {
+                        let bytes: Arc<[u8]> = Arc::from(file.bytes());
+                        self.add_resident(origin, key.path(), bytes).await;
+                    }
+                    Err(error) => self.warnings.push(Warning::new(
+                        origin,
+                        format!("classpath file cannot be read: {error}"),
+                    )),
+                }
+            }
+            ClasspathEntry::ProjectDirectory(key) => {
+                if let Err(error) = view.directory(key) {
+                    self.warnings.push(Warning::new(
+                        WarningOrigin::ProjectDirectory(key.clone()),
+                        format!("classpath directory cannot be read: {error}"),
+                    ));
+                    return;
+                }
+                // A classpath directory *is* a package root, so a member's path under it already
+                // spells the binary name and no class file has to be parsed to learn it.
+                let mut yielder = jals_exec::Yielder::new();
+                for file in view
+                    .tree()
+                    .files_under(key)
+                    .filter(|file| file.key().has_extension("class"))
+                {
+                    yielder.tick().await;
+                    if let Some(member) = file.key().path().strip_prefix(key.path()) {
+                        self.add_class(&member);
+                    }
+                }
+            }
+            ClasspathEntry::Artifact(key) => {
+                let origin = WarningOrigin::Artifact(key.clone());
+                match cache.open_verified(key).await {
+                    Ok(Some(reader)) => self.add_archive(origin, reader).await,
+                    Ok(None) => self
+                        .warnings
+                        .push(Warning::new(origin, "classpath artifact is not cached")),
+                    Err(error) => self.warnings.push(Warning::new(
+                        origin,
+                        format!("classpath artifact is invalid: {error:?}"),
+                    )),
+                }
+            }
+            ClasspathEntry::ArtifactFile { path, key } => {
+                let origin = WarningOrigin::Artifact(key.clone());
+                let reader = match cache.open_verified(key).await {
+                    Ok(Some(reader)) => reader,
+                    Ok(None) => {
+                        self.warnings.push(Warning::new(
+                            origin,
+                            "classpath file artifact is not cached",
+                        ));
+                        return;
+                    }
+                    Err(error) => {
+                        self.warnings.push(Warning::new(
+                            origin,
+                            format!("classpath file artifact is invalid: {error:?}"),
+                        ));
+                        return;
+                    }
+                };
+                match Self::kind(path) {
+                    Some(EntryKind::Class) => {
+                        match Archive::read_class(Buffered::new(reader)).await {
+                            Ok(class) => self.add_parsed_class(&class),
+                            Err(message) => self.warnings.push(Warning::new(origin, message)),
+                        }
+                    }
+                    Some(EntryKind::Archive) => self.add_archive(origin, reader).await,
+                    None => self.warnings.push(Warning::new(
+                        origin,
+                        "unrecognized cached classpath file (expected `.class`, `.jar`, or `.zip`)",
+                    )),
+                }
+            }
+        }
+    }
+
+    /// Fold in one entry whose bytes the caller already holds — a host file a graph node captured,
+    /// or a build script's registered classpath output. `path` decides how the bytes are read, so it
+    /// must keep the entry's extension; it is never used as the class's package.
+    pub async fn add_resident(
+        &mut self,
+        origin: WarningOrigin,
+        path: &RelativePath,
+        bytes: Arc<[u8]>,
+    ) {
+        match Self::kind(path) {
+            Some(EntryKind::Class) => match Archive::read_class(bytes.as_ref()).await {
+                Ok(class) => self.add_parsed_class(&class),
+                Err(message) => self.warnings.push(Warning::new(origin, message)),
+            },
+            Some(EntryKind::Archive) => {
+                self.add_archive(origin, sio::Cursor::new(bytes)).await;
+            }
+            None => self.warnings.push(Warning::new(
+                origin,
+                "unrecognized classpath file (expected `.class`, `.jar`, or `.zip`)",
+            )),
+        }
+    }
+
+    /// Fold in one `.class` already addressed by its binary name — a member of a classpath tree the
+    /// caller walked itself.
+    pub fn add_class(&mut self, binary_path: &RelativePath) {
+        for prefix in &self.wanted {
+            if !self.covered.contains(prefix) && binary_path.starts_with(prefix) {
+                self.covered.insert(prefix.clone());
+            }
+        }
+    }
+
+    async fn add_archive<R: JarReader>(&mut self, origin: WarningOrigin, reader: R) {
+        let directory = match Archive::open(reader).await {
+            Ok((_, directory)) => directory,
+            Err(message) => {
+                self.warnings.push(Warning::new(origin, message));
+                return;
+            }
+        };
+        // An archive member's name is its binary name, so the central directory alone already spells
+        // every package this jar defines. A game jar has tens of thousands of them, and the answer
+        // is usually settled by the first few, so this stops mid-directory rather than per entry.
+        let mut yielder = jals_exec::Yielder::new();
+        for member in &directory.members {
+            if self.is_complete() {
+                return;
+            }
+            yielder.tick().await;
+            if member.is_dir
+                || !Archive::extension(&member.name)
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("class"))
+            {
+                continue;
+            }
+            if let Ok(path) = RelativePath::parse(&member.name) {
+                self.add_class(&path);
+            }
+        }
+    }
+
+    /// A loose `.class` sits wherever its holder put it, so its package comes from the constant pool
+    /// rather than from the path the file happens to have.
+    fn add_parsed_class(&mut self, class: &ClassFile) {
+        let Some(internal) = class.constant_pool.class_name(class.this_class) else {
+            return;
+        };
+        if let Ok(path) = RelativePath::parse(internal.as_ref()) {
+            self.add_class(&path);
+        }
+    }
+
+    fn kind(path: &RelativePath) -> Option<EntryKind> {
+        let (_, extension) = path.name()?.as_str().rsplit_once('.')?;
+        if extension.eq_ignore_ascii_case("class") {
+            Some(EntryKind::Class)
+        } else if extension.eq_ignore_ascii_case("jar") || extension.eq_ignore_ascii_case("zip") {
+            Some(EntryKind::Archive)
+        } else {
+            None
+        }
+    }
+}
+
+/// The two readable shapes of a classpath file.
+enum EntryKind {
+    Class,
+    Archive,
 }
 
 /// A nested jar stored in the nested-jar namespace.

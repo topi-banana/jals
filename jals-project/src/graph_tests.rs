@@ -1524,3 +1524,179 @@ fn a_dependency_publication_reaches_the_editor_but_not_the_compiler() {
         );
     });
 }
+
+/// A dependency whose whole task plan is local: one jar of sources published as a tree, and
+/// optionally one jar of classes on the classpath behind it. `extra` appends to the script and
+/// `files` adds or replaces project files, so each coverage test differs by a few lines.
+fn publishing_dependency(extra: &str, files: &[(&str, &[u8])]) -> (Manifest, MemoryStorage) {
+    let sources = jar(&[("net/example/Api.java", b"package net.example; class Api {}")]);
+    let script = format!(
+        r#"
+            let archive = tasks.project_jar("vendor/sources.jar");
+            let tree = tasks.extract_java(archive, "net/example");
+            tasks.publish_tree("api", tree, "src/main/java/net/example", "replace-root");
+            {extra}
+        "#
+    );
+    let mut all: Vec<(&str, &[u8])> = vec![("dep/vendor/sources.jar", &sources)];
+    all.extend_from_slice(files);
+    task_dependency(&script, &all)
+}
+
+/// Every graph warning attributed to a node, in assembly order.
+async fn coverage_warnings(root: &Manifest, storage: &MemoryStorage) -> Vec<String> {
+    let mut cache = MemoryStorage::memory(CodeTree::default());
+    let assembly = MemoryProjectGraph::discover(root, &storage.view())
+        .await
+        .unwrap()
+        .preprocess(cache.artifacts_mut(), inert!())
+        .await
+        .unwrap()
+        .assemble(cache.artifacts_mut())
+        .await;
+    assert!(assembly.errors.is_empty(), "{:?}", assembly.errors);
+    assembly
+        .warnings
+        .iter()
+        .filter(|warning| warning.node.is_some())
+        .map(|warning| warning.message.clone())
+        .collect()
+}
+
+#[test]
+fn a_dependency_publication_no_classpath_entry_backs_is_diagnosed() {
+    jals_exec::block_on_inline(async {
+        // The shape #189 is about: the publication is the *only* carrier of `net.example`, so
+        // routing it away from the compiler deletes the package rather than deduplicating it. The
+        // consumer would otherwise learn this from `javac` several layers away.
+        let (root, storage) = publishing_dependency("", &[]);
+        let warnings = coverage_warnings(&root, &storage).await;
+
+        let [message] = warnings.as_slice() else {
+            panic!("expected exactly one warning, got {warnings:?}");
+        };
+        assert!(message.contains("publishes `api`"), "{message}");
+        assert!(message.contains("`src/main/java/net/example`"), "{message}");
+        assert!(message.contains("under `net/example`"), "{message}");
+        assert!(message.contains("tasks.add_classpath"), "{message}");
+        // Nothing was declared that the check could not see, so it does not hedge.
+        assert!(!message.contains("disregard this"), "{message}");
+    });
+}
+
+#[test]
+fn a_dependency_publication_the_classpath_backs_is_silent() {
+    jals_exec::block_on_inline(async {
+        // The shape the routing was written for: the jar already defines `net.example`, so the
+        // published tree is a view of those types rather than their source.
+        let classes = jar(&[("net/example/Api.class", b"class bytes")]);
+        let (root, storage) = publishing_dependency(
+            r#"
+                let library = tasks.project_jar("vendor/lib.jar");
+                tasks.add_classpath(library);
+            "#,
+            &[("dep/vendor/lib.jar", &classes)],
+        );
+
+        assert!(coverage_warnings(&root, &storage).await.is_empty());
+    });
+}
+
+#[test]
+fn only_the_unbacked_root_of_a_multi_root_publication_is_diagnosed() {
+    jals_exec::block_on_inline(async {
+        // `examples/minecraft`'s actual shape: a decompiled game tree standing behind its own jar,
+        // next to a library's sources with nothing on the classpath behind them. Warning about the
+        // pair, or about neither, would both be wrong.
+        let classes = jar(&[("net/example/Api.class", b"class bytes")]);
+        let library = jar(&[("org/vendor/Tool.java", b"package org.vendor; class Tool {}")]);
+        let (root, storage) = publishing_dependency(
+            r#"
+                let backing = tasks.project_jar("vendor/lib.jar");
+                tasks.add_classpath(backing);
+                let extra = tasks.project_jar("vendor/library.jar");
+                let tree = tasks.extract_java(extra, "org/vendor");
+                tasks.publish_tree("tool", tree, "src/main/java/org/vendor", "replace-root");
+            "#,
+            &[
+                ("dep/vendor/lib.jar", &classes),
+                ("dep/vendor/library.jar", &library),
+            ],
+        );
+        let warnings = coverage_warnings(&root, &storage).await;
+
+        let [message] = warnings.as_slice() else {
+            panic!("expected exactly one warning, got {warnings:?}");
+        };
+        assert!(message.contains("publishes `tool`"), "{message}");
+        assert!(message.contains("under `org/vendor`"), "{message}");
+    });
+}
+
+#[test]
+fn a_publishing_dependency_with_jar_dependencies_is_still_diagnosed_but_hedges() {
+    jals_exec::block_on_inline(async {
+        // A `[dependencies]` jar is resolved as its own graph node long after preprocessing, so it
+        // could be what backs this root. Staying silent because one exists would lose the warning
+        // for *every* root the moment a project gains a single jar dependency, so the warning
+        // stands and says what it could not see.
+        let classes = jar(&[("net/example/Api.class", b"class bytes")]);
+        let (root, storage) = publishing_dependency(
+            "",
+            &[
+                (
+                    "dep/jals.toml",
+                    b"[build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n\
+                      [dependencies]\nlib = { jar = \"vendor/lib.jar\" }\n",
+                ),
+                ("dep/vendor/lib.jar", &classes),
+            ],
+        );
+        let warnings = coverage_warnings(&root, &storage).await;
+
+        let [message] = warnings.as_slice() else {
+            panic!("expected exactly one warning, got {warnings:?}");
+        };
+        assert!(message.contains("publishes `api`"), "{message}");
+        assert!(message.contains("disregard this"), "{message}");
+    });
+}
+
+#[test]
+fn an_unreadable_classpath_entry_withholds_the_coverage_claim() {
+    jals_exec::block_on_inline(async {
+        // A classpath entry that cannot be opened is not an entry that defines nothing. Reporting
+        // `net/example` as unbacked here would turn one I/O failure into a confident claim about
+        // what a jar declares.
+        //
+        // The broken jar is the *only* classpath entry on purpose. The scan stops as soon as every
+        // prefix is covered, so a covering entry ahead of this one would settle the question before
+        // the broken jar is ever opened — correctly, since it could not have changed the answer —
+        // and there would be nothing to withhold.
+        let (root, storage) = publishing_dependency(
+            "",
+            &[
+                (
+                    "dep/jals.toml",
+                    b"[build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n\
+                      classpath = [\"vendor/broken.jar\"]\n",
+                ),
+                ("dep/vendor/broken.jar", b"not a zip archive"),
+            ],
+        );
+        let warnings = coverage_warnings(&root, &storage).await;
+
+        assert!(
+            warnings
+                .iter()
+                .any(|message| message.starts_with("publication coverage was not checked:")),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings
+                .iter()
+                .all(|message| !message.contains("publishes")),
+            "{warnings:?}"
+        );
+    });
+}

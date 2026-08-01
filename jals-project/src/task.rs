@@ -46,7 +46,7 @@ pub enum BuildTaskHost {
 /// One source tree ready for transactional publication by the root host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildTaskPublication {
-    owner: String,
+    pub(crate) owner: String,
     pub(crate) destination: DirKey,
     pub(crate) tree: SourceTree,
 }

@@ -334,6 +334,24 @@ what made the whole facility unavailable there before.
   handed to the compiler: a decompiled skeleton and the classpath JAR that already defines the same
   types would collide.
 
+So a publication means one thing as the root and another as a dependency — as the root it becomes
+real files that `javac` compiles, as a dependency it reaches a reader and stops there. **A build
+script that is meant to be depended on exports its types through the classpath**, with
+`add_classpath`, and publishes a tree so those types can be read; a publication is a view of types
+defined elsewhere, never their only carrier. Publishing a root nothing on the classpath backs is
+therefore reported where it was declared:
+
+```
+warning: project dependency `vendored`: build task publishes `api` at
+`src/main/java/net/example`, but nothing this project puts on its own classpath defines a class
+under `net/example`. …
+```
+
+The check reads only the central directory of each classpath archive, so it costs a couple of seeks
+per entry, and it says nothing at all when an entry cannot be read — an unreadable jar is not a jar
+that defines nothing. A `[dependencies]` jar the project declares is resolved after preprocessing
+and is invisible to it, so the warning names that possibility rather than suppressing itself.
+
 Each dependency execution is memoized under its project identity, plan, and resolved features, and
 re-verified against the cache before it is reused, so an editor reload does not re-fetch, re-remap,
 or re-decompile a graph that has not changed.
