@@ -185,8 +185,14 @@ pub struct GraphWarning {
     /// beside a `dependency`, it is the project that **declared** that entry. `Display` spells the
     /// two arms differently, so a producer setting both is saying the second.
     pub(crate) node: Option<String>,
-    /// The `[dependencies]` entry this is about, as the manifest spells it — which is not
-    /// necessarily a [`Name`](jals_storage::Name), since one warning is that it isn't.
+    /// The manifest entry this is about, as the manifest spells it — which is not necessarily a
+    /// [`Name`](jals_storage::Name), since one warning is that it isn't.
+    ///
+    /// Usually a `[dependencies]` key, which is what `Display` calls it. A `[build] source-dirs` or
+    /// `[build] classpath` entry also arrives here and is rendered the same way, so `dependency
+    /// `src/main/java`: source directory is unavailable` is a thing a user can be shown. Telling
+    /// the two apart is a change to what a warning *is* — a third kind of subject — not to how one
+    /// is written, so it does not belong in the rendering.
     pub(crate) dependency: Option<String>,
     pub(crate) message: String,
 }
