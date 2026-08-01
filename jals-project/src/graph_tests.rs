@@ -2068,6 +2068,8 @@ fn two_publications_sharing_a_package_tree_are_covered_together() {
         let (root, storage) =
             publishing_dependency_with("navigation", extra, &[("dep/vendor/deep.jar", &deep)]);
         let diagnosis = only_diagnosis(&root, &storage).await;
+        // Terminal order, which is also the order the report lists them in: `api` is declared
+        // first, `deep` by the appended script.
         let prefixes: Vec<_> = diagnosis
             .roots
             .iter()

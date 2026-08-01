@@ -750,6 +750,9 @@ impl ResolvedNode {
         classpath: NodeClasspath<'_>,
         publications: &[BuildTaskPublication],
     ) -> Option<PublicationDiagnosis> {
+        // Terminal order, which is the order a report lists them in and the order the cache key
+        // folds them in. Both are properties of the plan, so neither depends on how a classpath
+        // happened to be walked.
         let mut roots = Vec::new();
         for publication in publications {
             // A destination outside every source root is already a hard error from
@@ -782,8 +785,18 @@ impl ResolvedNode {
             roots.retain(|root| !covered.contains(&root.prefix));
             return (!roots.is_empty()).then(|| PublicationDiagnosis {
                 roots,
-                // Only a scan that read the whole classpath is ever recorded, so a hit has nothing
-                // to qualify.
+                // Empty by construction rather than by optimism, which takes both halves of the
+                // rule. A record is written only from a scan whose `warnings()` were empty; and the
+                // key folds every entry that scan could have read — captured and registered bytes
+                // by digest, a task artifact by its key, whose content half `open_verified` checks
+                // on the way in. A hit therefore names byte-identical inputs walked in the same
+                // deterministic order, so re-scanning could only find the same nothing. The one
+                // input a key cannot pin — whether a task artifact is still *present* — was settled
+                // before this ran: `run_task_plan`'s own memo re-verifies each one and re-executes
+                // if any is gone.
+                //
+                // That also stands in for `ClasspathCoverage::warnings()` being consulted, which a
+                // hit never builds one to consult.
                 unread: Vec::new(),
                 dependencies_unseen: !manifest.dependencies.is_empty(),
             });
