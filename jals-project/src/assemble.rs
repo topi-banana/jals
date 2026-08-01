@@ -430,17 +430,20 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
                     key: key.clone(),
                 });
             }
-            let Ok(member_path) = FileKey::new(member.path.clone()) else {
+            let Ok(member_key) = FileKey::new(member.path.clone()) else {
                 let location = ResolvedNode::location_or_digest(&self.graph.nodes, node);
                 self.errors.push(ProjectAssemblyError {
                     node: location,
-                    path: Some(member.path.clone()),
+                    // `member_path`, as the publication above reports it: both failures are about
+                    // one member of one tree, and a reader given the entry-relative path by one
+                    // and the member-relative path by the other has to work out which is which.
+                    path: Some(member_path.clone()),
                     message: "classpath tree member is not a file path".to_owned(),
                 });
                 return;
             };
             published.push(CompileClasspathTreeMember {
-                path: member_path,
+                path: member_key,
                 key,
             });
         }
