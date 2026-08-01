@@ -69,10 +69,11 @@ impl CompileClasspathEntry {
 /// diagnostic to that it could not attach to the manifest already.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectAssemblyError {
-    /// Still the identity, unlike the location [`GraphWarning`] holds: `logical_path` derives
-    /// artifact paths from it, so this one is plumbed as a [`NodeId`] and its digest is what the
-    /// `Display` prints.
-    node: NodeId,
+    /// The failing node's [`location`](crate::graph::ResolvedNode::location), for the reason
+    /// [`GraphWarning`] holds one: a [`NodeId`] renders as a digest, and a digest names nothing a
+    /// reader can go and look at. The identity is still what `logical_path` derives artifact paths
+    /// from — it is just not what a diagnostic says.
+    node: String,
     path: Option<RelativePath>,
     message: String,
 }
@@ -85,7 +86,7 @@ pub struct ProjectAssemblyError {
 /// [`Error`](core::error::Error) rendering, which nothing wraps.
 impl fmt::Display for ProjectAssemblyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "dependency project {} could not assemble", self.node)?;
+        write!(f, "dependency project `{}` could not assemble", self.node)?;
         if let Some(path) = &self.path {
             write!(f, " `{path}`")?;
         }
@@ -362,7 +363,7 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
             Ok(lowered) => lowered,
             Err(error) => {
                 self.errors.push(ProjectAssemblyError {
-                    node: node.id.clone(),
+                    node: node.location.clone(),
                     path: None,
                     message: format!("frontend `{}` failed: {error}", frontend.caps().id),
                 });
@@ -453,8 +454,9 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
                 });
             }
             let Ok(member_path) = FileKey::new(member.path.clone()) else {
+                let location = self.node_location(node);
                 self.errors.push(ProjectAssemblyError {
-                    node: node.clone(),
+                    node: location,
                     path: Some(member.path.clone()),
                     message: "classpath tree member is not a file path".to_owned(),
                 });
@@ -501,8 +503,9 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
             .bytes(file_path.to_string().as_bytes());
         let key = CacheKey::new(namespace, fold.finish(), ContentDigest::of(bytes));
         if let Err(error) = self.cache.publish(&key, bytes).await {
+            let location = self.node_location(node);
             self.errors.push(ProjectAssemblyError {
-                node: node.clone(),
+                node: location,
                 path: Some(path),
                 message: format!("artifact publication failed: {error:?}"),
             });
@@ -525,14 +528,14 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
     }
 
     /// A node's [`location`](crate::graph::ResolvedNode::location), which is what a diagnostic
-    /// names it by. `None` cannot happen for a node the graph carries, and reads as one fewer
-    /// clause rather than as a digest if it ever does.
-    fn node_location(&self, node: &NodeId) -> Option<String> {
+    /// names it by. Every id reaching here belongs to a node the graph carries, so the fallback is
+    /// unreachable; a digest is still a worse diagnostic than a location rather than no diagnostic.
+    fn node_location(&self, node: &NodeId) -> String {
         self.graph
             .nodes
             .iter()
             .find(|candidate| &candidate.id == node)
-            .map(|candidate| candidate.location.clone())
+            .map_or_else(|| node.to_string(), |candidate| candidate.location.clone())
     }
 
     fn project_binary_edges(&mut self) {
@@ -568,7 +571,7 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
             projected.push(ProjectedBinary {
                 node: edge.to.clone(),
                 dependency: edge.dependency.clone(),
-                declared_by: edge.from.as_ref().and_then(|from| self.node_location(from)),
+                declared_by: edge.from.as_ref().map(|from| self.node_location(from)),
                 location,
                 source_archive,
                 recursive: edge.recursive,
@@ -605,38 +608,34 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
 #[cfg(test)]
 mod tests {
     use alloc::borrow::ToOwned;
-    use alloc::format;
     use alloc::string::ToString;
 
     use jals_storage::RelativePath;
 
     use super::ProjectAssemblyError;
-    use crate::graph::NodeId;
 
     /// The file is optional, the node never is: a host that reported only the message would say
-    /// which file failed for one node and nothing at all for the other.
+    /// which file failed for one node and nothing at all for the other. The node is named by where
+    /// it came from — a digest would say as little as no node at all.
     #[test]
     fn assembly_error_display_names_node_and_file() {
-        let node = NodeId::from_identity(b"node");
         assert_eq!(
             ProjectAssemblyError {
-                node: node.clone(),
+                node: "../lib".to_owned(),
                 path: None,
                 message: "classpath entry is not cached".to_owned(),
             }
             .to_string(),
-            format!("dependency project {node} could not assemble: classpath entry is not cached")
+            "dependency project `../lib` could not assemble: classpath entry is not cached"
         );
         assert_eq!(
             ProjectAssemblyError {
-                node: node.clone(),
+                node: "../lib".to_owned(),
                 path: Some(RelativePath::parse("src/Main.java").expect("a portable relative path")),
                 message: "publishing failed".to_owned(),
             }
             .to_string(),
-            format!(
-                "dependency project {node} could not assemble `src/Main.java`: publishing failed"
-            )
+            "dependency project `../lib` could not assemble `src/Main.java`: publishing failed"
         );
     }
 }
