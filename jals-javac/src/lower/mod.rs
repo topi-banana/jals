@@ -1657,10 +1657,13 @@ impl Compile {
     ) -> Result<MethodInfo> {
         let decl = ast::MethodDecl::cast(node.clone())
             .ok_or(LowerError::Unsupported("a malformed method declaration"))?;
-        let name = decl.name().unwrap_or_default();
+        // One token again: `decl.name()` is `name_token().map(text)`, so asking for both walked the
+        // children twice and left the missing-name arm reporting `Unresolved("")` — a name that did
+        // not resolve, when what happened is that there was no name to resolve.
         let token = decl
             .name_token()
-            .ok_or_else(|| LowerError::Unresolved(name.clone()))?;
+            .ok_or(LowerError::Unsupported("a method declaration with no name"))?;
+        let name = token.text().to_owned();
         let member = context.member_at(&token)?;
         // The method's own type parameters are not the class's, so the index resolved each as an
         // external name it has never heard of. Naming them here is what lets the descriptor erase them.
