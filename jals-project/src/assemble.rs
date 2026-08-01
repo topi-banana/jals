@@ -64,9 +64,9 @@ impl CompileClasspathEntry {
 /// Structured non-script assembly failure. Other nodes continue to assemble deterministically.
 ///
 /// The fields are sealed, as [`GraphWarning`]'s are: a host reports one of these by rendering the
-/// whole thing through its [`Display`](fmt::Display). `path` is a logical artifact path inside the
-/// failing node, not a file in the consumer's tree, so there is nothing here for a host to attach a
-/// diagnostic to that it could not attach to the manifest already.
+/// whole thing through its [`Display`](fmt::Display). Both halves name the failing node's own side
+/// of the graph, never a file in the consumer's tree, so there is nothing here for a host to attach
+/// a diagnostic to that it could not attach to the manifest already.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectAssemblyError {
     /// The failing node's [`location`](crate::graph::ResolvedNode::location), for the reason
@@ -74,6 +74,10 @@ pub struct ProjectAssemblyError {
     /// reader can go and look at. The identity is still what `logical_path` derives artifact paths
     /// from — it is just not what a diagnostic says.
     node: String,
+    /// The file inside that node, addressed the way the node itself addresses it. Never the
+    /// `logical_path` an artifact is published under: that begins with the node's hex token, which
+    /// is the same digest `node` avoids and says as little in the middle of a sentence as it does
+    /// at the start of one.
     path: Option<RelativePath>,
     message: String,
 }
@@ -506,7 +510,9 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
             let location = self.node_location(node);
             self.errors.push(ProjectAssemblyError {
                 node: location,
-                path: Some(path),
+                // The file as its own node spells it, not `path`: the reader owns the former and
+                // has never seen the latter, which is a cache address this run failed to write.
+                path: Some(file_path.clone()),
                 message: format!("artifact publication failed: {error:?}"),
             });
             return None;
