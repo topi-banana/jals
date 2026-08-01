@@ -237,7 +237,8 @@ fn build_tasks_publish_replace_remove_and_clean_an_exclusive_source_root() {
                 "example-sources",
                 sources,
                 "src/main/java/net/example",
-                "replace-root"
+                "replace-root",
+                "navigation"
             );
         "#,
     )
@@ -267,7 +268,7 @@ fn build_tasks_publish_replace_remove_and_clean_an_exclusive_source_root() {
         r#"
             let jar = tasks.project_jar("sources.jar");
             let sources = tasks.extract_java(jar, "net/example");
-            tasks.publish_tree("example-sources", sources, "src/main/java/net/example", "replace-root");
+            tasks.publish_tree("example-sources", sources, "src/main/java/net/example", "replace-root", "navigation");
         "#,
     )
     .unwrap();
@@ -306,7 +307,7 @@ fn build_dry_run_leaves_an_exclusive_publication_root_untouched() {
         r#"
             let jar = tasks.project_jar("sources.jar");
             let sources = tasks.extract_java(jar, "net/example");
-            tasks.publish_tree("example-sources", sources, "src/main/java/net/example", "replace-root");
+            tasks.publish_tree("example-sources", sources, "src/main/java/net/example", "replace-root", "navigation");
         "#,
     )
     .unwrap();
@@ -664,6 +665,106 @@ fn build_runs_rhai_and_passes_generated_inputs_to_javac() {
         std::fs::canonicalize(std::fs::read_to_string(captured_cwd).unwrap().trim()).unwrap(),
         std::fs::canonicalize(dir.path()).unwrap()
     );
+}
+
+/// The graph tests pin which channel of a `ProjectInputPlan` a publication lands in; this pins
+/// that the host then does something different with the two, which is the whole claim.
+#[cfg(unix)]
+#[test]
+fn a_dependency_publication_reaches_javac_only_when_it_declares_compile_intent() {
+    let dir = project(
+        "[package]\nname = \"consumer\"\n\
+         [dependencies]\nlibrary = { path = \"library\" }\n",
+    );
+    let library = dir.path().join("library");
+    std::fs::create_dir_all(&library).unwrap();
+    std::fs::write(
+        library.join("jals.toml"),
+        "[package]\nname = \"library\"\n\
+         [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+    )
+    .unwrap();
+    write_source_jar(
+        &library.join("sources.jar"),
+        &[(
+            "net/example/Api.java",
+            b"package net.example;\npublic class Api {}\n",
+        )],
+    );
+
+    let build = |intent: &str| {
+        std::fs::write(
+            library.join("build.rhai"),
+            format!(
+                r#"
+                    let jar = tasks.project_jar("sources.jar");
+                    let sources = tasks.extract_java(jar, "net/example");
+                    tasks.publish_tree(
+                        "example-sources",
+                        sources,
+                        "src/main/java/net/example",
+                        "replace-root",
+                        "{intent}",
+                    );
+                "#
+            ),
+        )
+        .unwrap();
+        let captured_args = dir.path().join(format!("{intent}-javac.args"));
+        let output = jals()
+            .env("JAVAC", fake_javac(dir.path()))
+            .env("JALS_CAPTURE_ARGS", &captured_args)
+            .env("JALS_CAPTURE_ENV", dir.path().join("javac.env"))
+            .env("JALS_CAPTURE_CWD", dir.path().join("javac.cwd"))
+            .args(["build", "--manifest-path"])
+            .arg(dir.path().join("jals.toml"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        (
+            read_arg_lines(&captured_args),
+            String::from_utf8(output.stderr).unwrap(),
+        )
+    };
+
+    // A dependency's source-dependency artifacts materialize under a digest-named directory, so
+    // match the file rather than a path this test would have to predict.
+    let (compile_args, compile_stderr) = build("compile");
+    assert!(
+        compile_args.iter().any(|arg| arg.ends_with("Api.java")),
+        "a compile publication is an ordinary source-dependency input; args: {compile_args:?}"
+    );
+
+    let (navigation_args, navigation_stderr) = build("navigation");
+    assert!(
+        !navigation_args.iter().any(|arg| arg.ends_with("Api.java")),
+        "a navigation publication is a view for the editor, never a compile input; args: \
+         {navigation_args:?}"
+    );
+    // Not vacuous: javac ran, it just was not handed the publication. `read_arg_lines` would have
+    // panicked on a missing capture file, and the consumer's own source is what it did compile.
+    assert!(
+        navigation_args.iter().any(|arg| arg.ends_with("Main.java")),
+        "args: {navigation_args:?}"
+    );
+
+    // Nothing on the library's classpath defines `net/example` under either intent, so the
+    // consumer's build reports the publication. The only end-to-end check that the diagnosis
+    // reaches a host at all, naming what the script wrote rather than where discovery put it —
+    // under both intents, since the two are wrong in different ways and neither is silent.
+    for (intent, stderr) in [
+        ("compile", &compile_stderr),
+        ("navigation", &navigation_stderr),
+    ] {
+        assert!(
+            stderr.contains("example-sources") && stderr.contains("src/main/java/net/example"),
+            "{intent} stderr: {stderr}"
+        );
+    }
 }
 
 #[cfg(unix)]

@@ -14,8 +14,9 @@ use jals_storage::{
 };
 
 use crate::graph::{
-    BinaryInput, CapturedClasspathEntry, CapturedFile, CycleEdge, DeclaredEdgeFeatures, GraphEdge,
-    GraphError, GraphWarning, NodeBody, NodeId, ResolvedNode, ResolvedProjectGraph, SourceNode,
+    BinaryInput, CapturedClasspathEntry, CapturedClasspathKind, CapturedFile, CycleEdge,
+    DeclaredEdgeFeatures, GraphEdge, GraphError, GraphWarning, NodeBody, NodeId, ResolvedNode,
+    ResolvedProjectGraph, SourceNode,
 };
 
 /// Portable entry point for recursive dependency discovery inside one captured [`CodeTree`].
@@ -473,10 +474,13 @@ impl GraphBuilder {
                     } else {
                         Self::external_file_path(index, &path)
                     };
-                    entries.push(CapturedClasspathEntry::File(CapturedFile {
-                        path: logical,
-                        bytes: file.bytes().to_vec(),
-                    }));
+                    entries.push(CapturedClasspathEntry {
+                        declared: entry.clone(),
+                        kind: CapturedClasspathKind::File(CapturedFile {
+                            path: logical,
+                            bytes: file.bytes().to_vec(),
+                        }),
+                    });
                 }
                 Some(EntryRef::Directory(directory)) => {
                     let logical = if path.starts_with(declaring) {
@@ -499,9 +503,12 @@ impl GraphBuilder {
                             bytes: file.bytes().to_vec(),
                         })
                         .collect();
-                    entries.push(CapturedClasspathEntry::Tree {
-                        path: logical,
-                        members,
+                    entries.push(CapturedClasspathEntry {
+                        declared: entry.clone(),
+                        kind: CapturedClasspathKind::Tree {
+                            path: logical,
+                            members,
+                        },
                     });
                 }
                 None => self.warn_entry(declaring, entry, "classpath entry is unavailable"),

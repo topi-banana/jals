@@ -40,8 +40,8 @@ pub use skeleton::{SkeletonGroup, SkeletonMode, Skeletons};
 pub use jar::JarPackage;
 #[cfg(feature = "archive")]
 pub use load::{
-    CachedJar, ClasspathEntry, ClasspathLoad, JarExtraction, SourceTree, SourceTreeExtraction,
-    SourceTreeLimits,
+    CachedJar, ClasspathCoverage, ClasspathEntry, ClasspathLoad, JarExtraction, SourceTree,
+    SourceTreeExtraction, SourceTreeLimits,
 };
 #[cfg(feature = "native")]
 pub use native::{NativeProjectPlan, ReqwestFetcher};

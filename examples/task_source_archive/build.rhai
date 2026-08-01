@@ -4,5 +4,6 @@ tasks.publish_tree(
     "example-sources",
     sources,
     "src/main/java/net/example",
-    "replace-root"
+    "replace-root",
+    "navigation"
 );

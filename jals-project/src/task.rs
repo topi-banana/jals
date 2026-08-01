@@ -12,7 +12,8 @@ use jals_build::build_script::{
     BuildScriptOutput, BuildScriptSession, prepare_build_script, publish_prepared_build_script,
 };
 use jals_build::task::{
-    TaskDigestAlgorithm, TaskFetchKind, TaskId, TaskNodeKind, TaskPlan, TaskTerminal,
+    TaskDigestAlgorithm, TaskFetchKind, TaskId, TaskNodeKind, TaskPlan, TaskPublishIntent,
+    TaskTerminal,
 };
 use jals_classpath::{
     ExpectedDigest, ExternalArtifactResolver, ExternalArtifactSpec, ExternalLocator, Fetcher,
@@ -46,9 +47,15 @@ pub enum BuildTaskHost {
 /// One source tree ready for transactional publication by the root host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildTaskPublication {
-    owner: String,
+    pub(crate) owner: String,
     pub(crate) destination: DirKey,
     pub(crate) tree: SourceTree,
+    /// What the declaring script said a consumer does with this tree.
+    ///
+    /// Carried rather than acted on here: the root host writes a publication to disk either way,
+    /// and only the graph — where the project is somebody's *dependency* — has two routings to
+    /// choose between.
+    pub(crate) intent: TaskPublishIntent,
 }
 
 /// Successfully evaluated terminal values. This type performs no project mutation itself.
@@ -234,7 +241,11 @@ struct OwnedFile {
 
 /// Wire version of a memoized snapshot execution. Bump it whenever the record's meaning changes for
 /// unchanged bytes; a mismatch is a miss, never a misread.
-const TASK_EXECUTION_VERSION: u32 = 1;
+///
+/// 2: a publication records the intent it was declared with, which decides where the consumer
+/// routes it. The plan fingerprint already folds that intent into the provenance, so a pre-intent
+/// record is unreachable by key as well — this is the belt to that's braces.
+const TASK_EXECUTION_VERSION: u32 = 2;
 
 /// A [`BuildTaskExecution`] recorded in the verified cache, addressed by what produced it.
 ///
@@ -254,6 +265,7 @@ struct TaskExecutionState {
 struct PublishedTree {
     owner: String,
     destination: String,
+    intent: TaskPublishIntent,
     files: Vec<PublishedFile>,
 }
 
@@ -434,7 +446,7 @@ impl BuildTaskExecutor {
     }
 
     /// Digest of the whole plan, which is what makes one execution's identity differ from another's.
-    fn plan_fingerprint(plan: &TaskPlan) -> Result<ContentDigest, BuildTaskRunError> {
+    pub(crate) fn plan_fingerprint(plan: &TaskPlan) -> Result<ContentDigest, BuildTaskRunError> {
         serde_json::to_vec(plan)
             .map(|bytes| ContentDigest::of(&bytes))
             .map_err(|error| {
@@ -574,6 +586,7 @@ impl BuildTaskExecutor {
                 owner: tree.owner.clone(),
                 destination: DirKey::parse(&tree.destination).ok()?,
                 tree: SourceTree { files },
+                intent: tree.intent,
             });
         }
         Some(execution)
@@ -605,6 +618,7 @@ impl BuildTaskExecutor {
                 .map(|publication| PublishedTree {
                     owner: publication.owner.clone(),
                     destination: publication.destination.to_string(),
+                    intent: publication.intent,
                     files: publication
                         .tree
                         .files
@@ -703,6 +717,7 @@ impl BuildTaskExecutor {
                     owner,
                     tree,
                     destination,
+                    intent,
                     ..
                 } => {
                     let tree = Self::source_tree(&values, *tree)
@@ -722,6 +737,7 @@ impl BuildTaskExecutor {
                         owner: owner.clone(),
                         destination,
                         tree,
+                        intent: *intent,
                     });
                 }
             }
@@ -1432,7 +1448,7 @@ mod tests {
                         tasks.bytes(1024)
                     );
                     let sources = tasks.extract_java(jar, "net/example");
-                    tasks.publish_tree("sources", sources, "src/main/java/net/example", "replace-root");
+                    tasks.publish_tree("sources", sources, "src/main/java/net/example", "replace-root", "navigation");
                 "#,
                 ContentDigest::of(b"jar").to_hex()
             );
@@ -1499,6 +1515,7 @@ mod tests {
                             key: source_key,
                         }],
                     },
+                    intent: TaskPublishIntent::Navigation,
                 }],
             };
             let roots = [DirKey::parse("src/main/java").unwrap()];

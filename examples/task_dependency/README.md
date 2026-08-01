@@ -20,16 +20,24 @@ cd consumer && jals run
 | Terminal                                 | Consumer receives                                       |
 | ---------------------------------------- | ------------------------------------------------------- |
 | `add_classpath` / `add_nested_classpath` | Compile classpath and analysis, like a `jar` dependency |
-| `publish_tree`                           | Read-only navigation sources, addressed by package      |
+| `publish_tree(…, "navigation")`          | Read-only navigation sources, addressed by package      |
+| `publish_tree(…, "compile")`             | Ordinary source-dependency inputs the consumer compiles |
 
 `publish_tree` is **virtual** here. A root project physically replaces its destination directory; a
 dependency is an immutable snapshot, so `library/src/main/java/net/example` is never written and the
-tree arrives as cache artifacts addressed `net/example/…` — the destination's source root
-(`src/main/java`) stripped off, which is how extracted `sources` jars and synthesized skeletons are
-addressed too, so one type resolves to one artifact.
+tree arrives as cache artifacts instead.
 
-Those sources are deliberately not compile inputs. The classpath JAR already defines the same types;
-handing `javac` both would be a duplicate-class error, not better coverage.
+This example declares `"navigation"`, and the addressing follows from that: the artifacts arrive as
+`net/example/…` — the destination's source root (`src/main/java`) stripped off, which is how
+extracted `sources` jars and synthesized skeletons are addressed too, so one type resolves to one
+artifact. They are deliberately not compile inputs, because the classpath JAR already defines the
+same types and handing `javac` both would be a duplicate-class error rather than better coverage.
+
+`"compile"` is the answer for the other shape, where a published tree is the only carrier of its
+package and nothing on the classpath stands behind it. jals says so when that is not what the script
+declared: a `"navigation"` root no classpath entry backs is reported against the publication, in the
+build of whoever depends on it, rather than left to surface as `package … does not exist` several
+layers away.
 
 ## Features and caching
 

@@ -673,7 +673,8 @@ mod tests {
                             "sources",
                             sources,
                             "src/main/java/net/example",
-                            "replace-root"
+                            "replace-root",
+                            "navigation"
                         );
                     "#,
                 )

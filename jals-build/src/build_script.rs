@@ -24,12 +24,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::task::{TaskPlan, TaskPlanLimits};
 
-// Both bumped for build features: the Rhai surface gained `build.feature`/`build.features` (API),
-// and `FingerprintInputsWire` gained a required `features` field (state). The API bump is the
-// load-bearing one — it reseeds the cache key (`cache_key_seed`), so a pre-feature state is never
-// fetched and decoded in the first place.
-const BUILD_SCRIPT_API_VERSION: u32 = 5;
-const BUILD_SCRIPT_STATE_VERSION: u32 = 5;
+// Both bumped for publication intent: `tasks.publish_tree` gained a required fifth argument (API),
+// and `TaskTerminal::PublishTree` gained a required `intent` field, which `BuildScriptStateWire`
+// carries verbatim (state). The API bump is the load-bearing one — it reseeds the cache key
+// (`cache_key_seed`), so a pre-intent state is never fetched and decoded in the first place.
+//
+// Bumped before that for build features: the Rhai surface gained `build.feature`/`build.features`,
+// and `FingerprintInputsWire` gained a required `features` field.
+const BUILD_SCRIPT_API_VERSION: u32 = 6;
+const BUILD_SCRIPT_STATE_VERSION: u32 = 6;
 const BUILD_ARTIFACT_ROOT: &str = "target/jals/build";
 /// Everything `jals` owns under the project: build artifacts, the verified cache, acquired
 /// dependencies. All of it is derived, so none of it is an input to a script's fingerprint.

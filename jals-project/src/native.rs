@@ -22,9 +22,9 @@ use jals_storage::{
 use crate::assemble::{CompileClasspathEntry, ProjectAssemblyError};
 use crate::assembly::{GraphResolveError, ProjectScript, RootProjection};
 use crate::graph::{
-    BinaryInput, CapturedClasspathEntry, CapturedFile, CycleEdge, DeclaredEdgeFeatures, GraphEdge,
-    GraphError, GraphMetadata, GraphPreprocess, GraphWarning, NodeBody, NodeId,
-    PreprocessedProjectGraph, ResolvedNode, ResolvedProjectGraph, SourceNode,
+    BinaryInput, CapturedClasspathEntry, CapturedClasspathKind, CapturedFile, CycleEdge,
+    DeclaredEdgeFeatures, GraphEdge, GraphError, GraphMetadata, GraphPreprocess, GraphWarning,
+    NodeBody, NodeId, PreprocessedProjectGraph, ResolvedNode, ResolvedProjectGraph, SourceNode,
 };
 
 /// Native entry point for recursive dependency graph discovery.
@@ -945,8 +945,10 @@ impl GraphBuilder {
                             .filter(|path| !path.is_root())
                             .map_or_else(|| Self::external_classpath_file(index, &canonical), Ok);
                         match logical {
-                            Ok(path) => entries
-                                .push(CapturedClasspathEntry::File(CapturedFile { path, bytes })),
+                            Ok(path) => entries.push(CapturedClasspathEntry {
+                                declared: entry.clone(),
+                                kind: CapturedClasspathKind::File(CapturedFile { path, bytes }),
+                            }),
                             Err(message) => self.warn_entry(location, entry, message),
                         }
                     }
@@ -998,7 +1000,10 @@ impl GraphBuilder {
                     bytes: file.bytes().to_vec(),
                 })
                 .collect();
-            entries.push(CapturedClasspathEntry::Tree { path, members });
+            entries.push(CapturedClasspathEntry {
+                declared: entry.clone(),
+                kind: CapturedClasspathKind::Tree { path, members },
+            });
         }
         entries
     }

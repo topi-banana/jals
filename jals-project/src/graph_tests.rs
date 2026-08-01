@@ -11,6 +11,7 @@ use std::path::Path;
 use std::process::Command;
 
 use jals_build::build_script::{BuildScriptEnvironment, BuildScriptLimits};
+use jals_build::task::TaskPublishIntent;
 use jals_classpath::{DependencyLocation, ProjectInputOptions};
 use jals_config::{Manifest, ResolvedBuildFeatures};
 use jals_exec::Exec;
@@ -1220,6 +1221,110 @@ fn task_dependency(script: &str, files: &[(&str, &[u8])]) -> (Manifest, MemorySt
     )
 }
 
+/// Discover, preprocess and project a graph whose whole task plan is local, so nothing in it can
+/// reach the network — `inert!` supplies a fetcher that panics if anything tries.
+///
+/// The cache is returned to the caller rather than owned here because a *consuming* assertion has
+/// to read the published artifacts back out of the same one.
+async fn local_assembly(
+    root: &Manifest,
+    storage: &MemoryStorage,
+    cache: &mut MemoryStorage,
+) -> crate::assemble::ProjectGraphAssembly {
+    MemoryProjectGraph::discover(root, &storage.view())
+        .await
+        .unwrap()
+        .preprocess(cache.artifacts_mut(), inert!())
+        .await
+        .unwrap()
+        .assemble(cache.artifacts_mut())
+        .await
+}
+
+/// Every node's publication coverage diagnosis, in discovery order.
+///
+/// Read off the *preprocessed* graph rather than the assembled warnings so an assertion can name
+/// the facts the check found — owner, destination, prefix, intent — instead of pinning the sentence
+/// they happen to be written into.
+async fn publication_diagnoses(
+    root: &Manifest,
+    storage: &MemoryStorage,
+) -> Vec<crate::graph::PublicationDiagnosis> {
+    let mut cache = MemoryStorage::memory(CodeTree::default());
+    publication_diagnoses_in(root, storage, &mut cache).await
+}
+
+/// The same against a caller-owned cache, so a test can preprocess twice into one.
+async fn publication_diagnoses_in(
+    root: &Manifest,
+    storage: &MemoryStorage,
+    cache: &mut MemoryStorage,
+) -> Vec<crate::graph::PublicationDiagnosis> {
+    let graph = MemoryProjectGraph::discover(root, &storage.view())
+        .await
+        .unwrap()
+        .preprocess(cache.artifacts_mut(), inert!())
+        .await
+        .unwrap();
+    graph
+        .nodes
+        .iter()
+        .filter_map(|node| graph.exports.get(&node.id))
+        .filter_map(|exports| exports.unbacked_publications.clone())
+        .collect()
+}
+
+/// The one diagnosis a graph with a single publishing dependency is expected to produce.
+async fn only_diagnosis(
+    root: &Manifest,
+    storage: &MemoryStorage,
+) -> crate::graph::PublicationDiagnosis {
+    let found = publication_diagnoses(root, storage).await;
+    let [diagnosis] = found.as_slice() else {
+        panic!("expected exactly one diagnosis, got {found:?}");
+    };
+    diagnosis.clone()
+}
+
+/// A dependency that publishes one tree of `net/example` sources with the given intent, out of a
+/// jar it holds itself so the plan needs no network.
+fn publishing_dependency(intent: &str, files: &[(&str, &[u8])]) -> (Manifest, MemoryStorage) {
+    publishing_dependency_with(intent, "", files)
+}
+
+/// The same, with `extra` appended to the script — a second publication, a classpath entry, or both.
+fn publishing_dependency_with(
+    intent: &str,
+    extra: &str,
+    files: &[(&str, &[u8])],
+) -> (Manifest, MemoryStorage) {
+    let sources = jar(&[("net/example/Api.java", b"package net.example; class Api {}")]);
+    let script = format!(
+        r#"
+            let archive = tasks.project_jar("vendor/sources.jar");
+            let tree = tasks.extract_java(archive, "net/example");
+            tasks.publish_tree("api", tree, "src/main/java/net/example", "replace-root", "{intent}");
+            {extra}
+        "#
+    );
+    let mut all: Vec<(&str, &[u8])> = vec![("dep/vendor/sources.jar", &sources)];
+    all.extend_from_slice(files);
+    task_dependency(&script, &all)
+}
+
+/// A dependency manifest whose `[build] classpath` names `entries`.
+fn manifest_with_classpath(entries: &[&str]) -> Vec<u8> {
+    let list = entries
+        .iter()
+        .map(|entry| format!("\"{entry}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "[build]\nscript = {{ type = \"rhai\", file = \"build.rhai\" }}\nclasspath = [{list}]\n"
+    )
+    .into_bytes()
+}
+
 /// Counts fetches so a test can tell a cache hit from a network round trip.
 struct CountingFetcher {
     responses: std::collections::BTreeMap<String, Vec<u8>>,
@@ -1323,7 +1428,7 @@ fn a_dependency_publication_becomes_navigation_source_and_never_touches_the_snap
                     tasks.bytes(4096)
                 );
                 let tree = tasks.extract_java(archive, "net/example");
-                tasks.publish_tree("api", tree, "src/main/java/net/example", "replace-root");
+                tasks.publish_tree("api", tree, "src/main/java/net/example", "replace-root", "navigation");
             "#,
             jals_storage::ContentDigest::of(&sources).to_hex()
         );
@@ -1396,7 +1501,7 @@ fn a_dependency_publication_outside_a_source_root_is_rejected() {
                     tasks.bytes(4096)
                 );
                 let tree = tasks.extract_java(archive, "net/example");
-                tasks.publish_tree("api", tree, "generated/net/example", "replace-root");
+                tasks.publish_tree("api", tree, "generated/net/example", "replace-root", "navigation");
             "#,
             jals_storage::ContentDigest::of(&sources).to_hex()
         );
@@ -1536,7 +1641,7 @@ fn a_dependency_publication_reaches_the_editor_but_not_the_compiler() {
                 );
                 tasks.add_classpath(archive);
                 let tree = tasks.extract_java(archive, "net/example");
-                tasks.publish_tree("api", tree, "src/main/java/net/example", "replace-root");
+                tasks.publish_tree("api", tree, "src/main/java/net/example", "replace-root", "navigation");
             "#,
             jals_storage::ContentDigest::of(&sources).to_hex()
         );
@@ -1597,6 +1702,640 @@ fn a_dependency_publication_reaches_the_editor_but_not_the_compiler() {
                 .source_dep_sources
                 .iter()
                 .all(|source| !format!("{source:?}").contains("Api.java"))
+        );
+    });
+}
+
+/// The other half of the routing. A tree its script declares as the only carrier of its package
+/// joins the dependency's own sources on the way through the dependency's own frontend, so it is
+/// addressed the way those are — project-relative, under the node token — and not the way a library
+/// source is.
+#[test]
+fn a_compile_intent_publication_is_projected_as_a_source_dependency() {
+    jals_exec::block_on_inline(async {
+        let (root, view_storage) = publishing_dependency("compile", &[]);
+        let before = view_storage.view();
+        let mut cache = MemoryStorage::memory(CodeTree::default());
+        let assembly = local_assembly(&root, &view_storage, &mut cache).await;
+        assert!(assembly.errors.is_empty(), "{:?}", assembly.errors);
+
+        // Routed, not fanned out: reaching both channels would mount one type twice in an editor.
+        assert!(
+            assembly.plan.library_source_artifacts.is_empty(),
+            "{:?}",
+            assembly.plan.library_source_artifacts
+        );
+        let published: Vec<_> = assembly
+            .plan
+            .source_dependency_artifacts
+            .iter()
+            .map(|source| source.path.to_string())
+            .filter(|path| path.ends_with("Api.java"))
+            .collect();
+        let [path] = published.as_slice() else {
+            panic!("expected exactly one published compile source, got {published:?}");
+        };
+        // The node token is the half a package address does not have, and the half two dependencies
+        // publishing one package need.
+        assert!(path.starts_with("dependencies/"), "{path}");
+        assert!(
+            path.ends_with("/sources/src/main/java/net/example/Api.java"),
+            "{path}"
+        );
+
+        // The dependency is still a snapshot, not a workspace: the intent decides where the value
+        // goes, never whether it may be written back.
+        assert_eq!(view_storage.view().revision(), before.revision());
+        assert!(
+            view_storage
+                .view()
+                .file(&FileKey::parse("dep/src/main/java/net/example/Api.java").unwrap())
+                .is_err()
+        );
+    });
+}
+
+/// The consuming half, against the mode `a_dependency_publication_reaches_the_editor_but_not_the
+/// _compiler` pins the opposite of: a declared compile input is what the compiler is handed.
+#[test]
+fn a_compile_intent_publication_reaches_the_compiler() {
+    jals_exec::block_on_inline(async {
+        let (root, view_storage) = publishing_dependency("compile", &[]);
+        let mut cache = MemoryStorage::memory(CodeTree::default());
+        let assembly = local_assembly(&root, &view_storage, &mut cache).await;
+        assert!(assembly.errors.is_empty(), "{:?}", assembly.errors);
+
+        for options in [ProjectInputOptions::Compile, ProjectInputOptions::Editor] {
+            let inputs = jals_classpath::ProjectInputs::assemble(
+                &UnreachableFetcher,
+                &mut cache,
+                &assembly.plan,
+                options,
+            )
+            .await;
+            assert!(
+                inputs
+                    .source_dep_sources
+                    .iter()
+                    .any(|source| format!("{source:?}").contains("Api.java")),
+                "{options:?}: {:?}",
+                inputs.source_dep_sources
+            );
+            // Never as a library source, in either mode — that is the channel it was routed out of.
+            assert!(
+                inputs
+                    .library_sources
+                    .iter()
+                    .all(|source| !source.path.to_string().ends_with("Api.java")),
+                "{options:?}"
+            );
+        }
+    });
+}
+
+/// Building a dependency in its own directory leaves its publications on disk, where the next
+/// consumer's discovery captures them as ordinary authored sources. Whether a consumer compiled
+/// therefore used to depend on whether somebody had ever run a build in a directory they may not
+/// even have looked at.
+///
+/// `replace-root` owns its destination, so nothing found there is authored — running the plan as a
+/// root would delete it before writing the tree — and assembly reads it the same way.
+#[test]
+fn a_publication_destination_is_owned_in_a_dependency_too() {
+    jals_exec::block_on_inline(async {
+        let (root, view_storage) = publishing_dependency(
+            "navigation",
+            &[
+                // What a previous root build of this dependency left behind: the publication's own
+                // file, plus one the tree no longer produces.
+                (
+                    "dep/src/main/java/net/example/Api.java",
+                    b"package net.example; class Api {}",
+                ),
+                (
+                    "dep/src/main/java/net/example/Removed.java",
+                    b"package net.example; class Removed {}",
+                ),
+            ],
+        );
+        let mut cache = MemoryStorage::memory(CodeTree::default());
+        let assembly = local_assembly(&root, &view_storage, &mut cache).await;
+        assert!(assembly.errors.is_empty(), "{:?}", assembly.errors);
+
+        let compiled: Vec<_> = assembly
+            .plan
+            .source_dependency_artifacts
+            .iter()
+            .map(|source| source.path.to_string())
+            .collect();
+        // Neither reaches the compiler: the publication is `navigation`, and what it left on disk
+        // is not a second opinion about that.
+        assert!(
+            compiled.iter().all(|path| !path.contains("net/example")),
+            "{compiled:?}"
+        );
+        // Scoped to the destination, not to the project: an authored file outside it is still an
+        // input.
+        assert!(
+            compiled.iter().any(|path| path.ends_with("Seed.java")),
+            "{compiled:?}"
+        );
+    });
+}
+
+/// The same ownership rule decides *which* copy a `compile` publication contributes, since both are
+/// addressed identically and only one can survive the deduplication.
+#[test]
+fn a_compile_publication_supersedes_what_a_root_build_left_at_its_destination() {
+    jals_exec::block_on_inline(async {
+        let (root, view_storage) = publishing_dependency(
+            "compile",
+            &[(
+                "dep/src/main/java/net/example/Api.java",
+                b"package net.example; class Api { int stale; }",
+            )],
+        );
+        let mut cache = MemoryStorage::memory(CodeTree::default());
+        let assembly = local_assembly(&root, &view_storage, &mut cache).await;
+        assert!(assembly.errors.is_empty(), "{:?}", assembly.errors);
+
+        let published: Vec<_> = assembly
+            .plan
+            .source_dependency_artifacts
+            .iter()
+            .filter(|source| source.path.to_string().ends_with("net/example/Api.java"))
+            .collect();
+        let [api] = published.as_slice() else {
+            panic!("expected exactly one `Api.java`, got {published:?}");
+        };
+        // The publication's bytes, not the ones sitting in the directory. Comparing the artifact is
+        // the only assertion that can tell them apart — both are addressed the same.
+        let bytes = cache.artifacts().lookup(&api.key).await.unwrap().unwrap();
+        assert_eq!(bytes, b"package net.example; class Api {}");
+    });
+}
+
+/// A destination outside every declared source root is a mistake whoever reads the tree, so the
+/// check runs for both intents. The compile routing does not *use* the package prefix, which is
+/// exactly why it would be easy to stop computing it — and then a dependency would reach the check
+/// nowhere, since only the root host validates a destination again.
+#[test]
+fn a_compile_intent_publication_outside_a_source_root_is_rejected() {
+    jals_exec::block_on_inline(async {
+        let sources = jar(&[("net/example/Api.java", b"package net.example; class Api {}")]);
+        let (root, view_storage) = task_dependency(
+            r#"
+                let archive = tasks.project_jar("vendor/sources.jar");
+                let tree = tasks.extract_java(archive, "net/example");
+                tasks.publish_tree("api", tree, "generated/net/example", "replace-root", "compile");
+            "#,
+            &[("dep/vendor/sources.jar", &sources)],
+        );
+        let mut cache = MemoryStorage::memory(CodeTree::default());
+
+        let error = MemoryProjectGraph::discover(&root, &view_storage.view())
+            .await
+            .unwrap()
+            .preprocess(cache.artifacts_mut(), inert!())
+            .await
+            .unwrap_err();
+
+        let GraphError::BuildScript {
+            location, message, ..
+        } = &error
+        else {
+            panic!("expected a build-script error, got {error:?}");
+        };
+        assert_eq!(location, "dep");
+        assert!(message.contains("source-dirs"), "{message}");
+    });
+}
+
+/// The shape #189 is about: a publication that is the only carrier of its package, routed away from
+/// the compiler because the classpath was assumed to define the same types, with nothing there that
+/// does.
+#[test]
+fn a_publication_no_classpath_entry_backs_is_diagnosed() {
+    jals_exec::block_on_inline(async {
+        let (root, storage) = publishing_dependency("navigation", &[]);
+        let diagnosis = only_diagnosis(&root, &storage).await;
+
+        let [unbacked] = diagnosis.roots.as_slice() else {
+            panic!(
+                "expected exactly one unbacked root, got {:?}",
+                diagnosis.roots
+            );
+        };
+        assert_eq!(unbacked.owner, "api");
+        assert_eq!(
+            unbacked.destination.to_string(),
+            "src/main/java/net/example"
+        );
+        assert_eq!(unbacked.prefix.to_string(), "net/example");
+        assert_eq!(unbacked.intent, TaskPublishIntent::Navigation);
+        // Nothing went unread and nothing was declared the check could not see, so it qualifies
+        // itself in neither direction.
+        assert!(diagnosis.unread.is_empty(), "{:?}", diagnosis.unread);
+        assert!(!diagnosis.dependencies_unseen);
+    });
+}
+
+/// Declaring the tree a compile input does not make the classpath carry it. The finding stands and
+/// the intent travels with it, because the two cases are wrong in different ways and a reader has
+/// to be told which one this is.
+#[test]
+fn an_unbacked_compile_publication_is_diagnosed_and_says_so_differently() {
+    jals_exec::block_on_inline(async {
+        let (navigation_root, navigation_storage) = publishing_dependency("navigation", &[]);
+        let (compile_root, compile_storage) = publishing_dependency("compile", &[]);
+        let navigation = only_diagnosis(&navigation_root, &navigation_storage).await;
+        let compile = only_diagnosis(&compile_root, &compile_storage).await;
+
+        assert_eq!(compile.roots[0].intent, TaskPublishIntent::Compile);
+        assert_eq!(navigation.roots[0].intent, TaskPublishIntent::Navigation);
+        // Same owner, same destination, same prefix — the intent is the whole difference, and it
+        // has to reach the reader.
+        assert_ne!(compile.to_string(), navigation.to_string());
+    });
+}
+
+/// The shape the routing was written for: a JAR on the classpath and a readable tree beside it.
+#[test]
+fn a_publication_the_task_classpath_backs_is_silent() {
+    jals_exec::block_on_inline(async {
+        let classes = jar(&[("net/example/Api.class", b"class bytes")]);
+        let (root, storage) = publishing_dependency_with(
+            "navigation",
+            r#"tasks.add_classpath(tasks.project_jar("vendor/lib.jar"));"#,
+            &[("dep/vendor/lib.jar", &classes)],
+        );
+
+        assert!(publication_diagnoses(&root, &storage).await.is_empty());
+    });
+}
+
+/// A `[build] classpath` jar backs a publication exactly as a task-registered one does. Discovery
+/// captured its bytes, so this is also the cheap half of the fold — the one that settles the answer
+/// before any cache key is opened.
+#[test]
+fn a_build_classpath_jar_backs_a_publication() {
+    jals_exec::block_on_inline(async {
+        let classes = jar(&[("net/example/Api.class", b"class bytes")]);
+        let (root, storage) = publishing_dependency(
+            "navigation",
+            &[
+                (
+                    "dep/jals.toml",
+                    &manifest_with_classpath(&["vendor/lib.jar"]),
+                ),
+                ("dep/vendor/lib.jar", &classes),
+            ],
+        );
+
+        assert!(publication_diagnoses(&root, &storage).await.is_empty());
+    });
+}
+
+/// A classpath *directory* is a package root, so a captured member's path already spells its binary
+/// name and no class file has to be parsed to learn it.
+#[test]
+fn a_build_classpath_directory_backs_a_publication() {
+    jals_exec::block_on_inline(async {
+        let (root, storage) = publishing_dependency(
+            "navigation",
+            &[
+                (
+                    "dep/jals.toml",
+                    &manifest_with_classpath(&["vendor/classes"]),
+                ),
+                ("dep/vendor/classes/net/example/Api.class", b"class bytes"),
+            ],
+        );
+
+        assert!(publication_diagnoses(&root, &storage).await.is_empty());
+    });
+}
+
+/// Per root, not per node: backing one published package says nothing about another.
+#[test]
+fn only_the_unbacked_root_of_a_multi_root_publication_is_diagnosed() {
+    jals_exec::block_on_inline(async {
+        let classes = jar(&[("net/example/Api.class", b"class bytes")]);
+        let library = jar(&[("org/vendor/Tool.java", b"package org.vendor; class Tool {}")]);
+        let (root, storage) = publishing_dependency_with(
+            "navigation",
+            r#"
+                tasks.add_classpath(tasks.project_jar("vendor/lib.jar"));
+                let extra = tasks.project_jar("vendor/library.jar");
+                let second = tasks.extract_java(extra, "org/vendor");
+                tasks.publish_tree("tool", second, "src/main/java/org/vendor", "replace-root",
+                                   "navigation");
+            "#,
+            &[
+                ("dep/vendor/lib.jar", &classes),
+                ("dep/vendor/library.jar", &library),
+            ],
+        );
+        let diagnosis = only_diagnosis(&root, &storage).await;
+
+        let [unbacked] = diagnosis.roots.as_slice() else {
+            panic!(
+                "expected exactly one unbacked root, got {:?}",
+                diagnosis.roots
+            );
+        };
+        assert_eq!(unbacked.owner, "tool");
+        assert_eq!(unbacked.prefix.to_string(), "org/vendor");
+    });
+}
+
+/// Two publications under one package tree are covered by one class beneath both prefixes, and
+/// uncovered together when there is none.
+#[test]
+fn two_publications_sharing_a_package_tree_are_covered_together() {
+    jals_exec::block_on_inline(async {
+        let deep = jar(&[(
+            "net/example/deep/Deep.java",
+            b"package net.example.deep; class Deep {}",
+        )]);
+        let extra = r#"
+            let nested = tasks.project_jar("vendor/deep.jar");
+            let tree = tasks.extract_java(nested, "net/example/deep");
+            tasks.publish_tree("deep", tree, "src/main/java/net/example/deep", "replace-root",
+                               "navigation");
+        "#;
+
+        let (root, storage) =
+            publishing_dependency_with("navigation", extra, &[("dep/vendor/deep.jar", &deep)]);
+        let diagnosis = only_diagnosis(&root, &storage).await;
+        // Terminal order, which is also the order the report lists them in: `api` is declared
+        // first, `deep` by the appended script.
+        let prefixes: Vec<_> = diagnosis
+            .roots
+            .iter()
+            .map(|unbacked| unbacked.prefix.to_string())
+            .collect();
+        assert_eq!(prefixes, ["net/example", "net/example/deep"]);
+
+        // One class under the deeper package is under both prefixes, so it answers for both.
+        let classes = jar(&[("net/example/deep/Deep.class", b"class bytes")]);
+        let (root, storage) = publishing_dependency_with(
+            "navigation",
+            &format!(
+                r#"{extra}
+                   tasks.add_classpath(tasks.project_jar("vendor/lib.jar"));"#
+            ),
+            &[
+                ("dep/vendor/deep.jar", &deep),
+                ("dep/vendor/lib.jar", &classes),
+            ],
+        );
+        assert!(publication_diagnoses(&root, &storage).await.is_empty());
+    });
+}
+
+/// `[dependencies]` become graph nodes long before preprocessing and contribute at assembly, so the
+/// check cannot see them. Staying silent would lose the warning for every root a project publishes
+/// as soon as it gains one jar; saying what could not be seen is the honest half.
+#[test]
+fn a_publishing_dependency_with_dependencies_still_reports_and_says_what_it_could_not_see() {
+    jals_exec::block_on_inline(async {
+        let classes = jar(&[("net/example/Api.class", b"class bytes")]);
+        let (root, storage) = publishing_dependency(
+            "navigation",
+            &[
+                (
+                    "dep/jals.toml",
+                    b"[build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n\
+                      [dependencies]\nlib = { jar = \"vendor/lib.jar\" }\n",
+                ),
+                ("dep/vendor/lib.jar", &classes),
+            ],
+        );
+        let diagnosis = only_diagnosis(&root, &storage).await;
+
+        assert_eq!(diagnosis.roots.len(), 1);
+        assert!(diagnosis.dependencies_unseen);
+    });
+}
+
+/// The caveat is a property of the project, not of each root — which is what makes it one report
+/// with two roots rather than two reports each restating it.
+#[test]
+fn the_dependencies_caveat_belongs_to_the_report_and_not_to_each_root() {
+    jals_exec::block_on_inline(async {
+        let library = jar(&[("org/vendor/Tool.java", b"package org.vendor; class Tool {}")]);
+        let (root, storage) = publishing_dependency_with(
+            "navigation",
+            r#"
+                let extra = tasks.project_jar("vendor/library.jar");
+                let second = tasks.extract_java(extra, "org/vendor");
+                tasks.publish_tree("tool", second, "src/main/java/org/vendor", "replace-root",
+                                   "navigation");
+            "#,
+            &[
+                (
+                    "dep/jals.toml",
+                    b"[build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n\
+                      [dependencies]\nlib = { jar = \"vendor/library.jar\" }\n",
+                ),
+                ("dep/vendor/library.jar", &library),
+            ],
+        );
+        let diagnosis = only_diagnosis(&root, &storage).await;
+
+        assert_eq!(diagnosis.roots.len(), 2);
+        assert!(diagnosis.dependencies_unseen);
+    });
+}
+
+/// An entry that could not be read is not an entry that defines nothing — but it is also not a
+/// reason to throw away what the rest of the classpath *did* answer. The roots stay, the unread
+/// entry rides along, and the reader gets both halves.
+#[test]
+fn an_unreadable_classpath_entry_is_reported_beside_the_roots_not_instead_of_them() {
+    jals_exec::block_on_inline(async {
+        let (root, storage) = publishing_dependency(
+            "navigation",
+            &[
+                (
+                    "dep/jals.toml",
+                    &manifest_with_classpath(&["vendor/broken.jar"]),
+                ),
+                ("dep/vendor/broken.jar", b"not a zip archive"),
+            ],
+        );
+        let diagnosis = only_diagnosis(&root, &storage).await;
+
+        assert_eq!(diagnosis.roots.len(), 1);
+        assert_eq!(diagnosis.unread.len(), 1);
+    });
+}
+
+/// Two unread entries and two roots: the smallest shape where per-entry and per-report differ.
+#[test]
+fn every_unread_classpath_entry_is_named_in_one_report() {
+    jals_exec::block_on_inline(async {
+        let library = jar(&[("org/vendor/Tool.java", b"package org.vendor; class Tool {}")]);
+        let (root, storage) = publishing_dependency_with(
+            "navigation",
+            r#"
+                let extra = tasks.project_jar("vendor/library.jar");
+                let second = tasks.extract_java(extra, "org/vendor");
+                tasks.publish_tree("tool", second, "src/main/java/org/vendor", "replace-root",
+                                   "navigation");
+            "#,
+            &[
+                (
+                    "dep/jals.toml",
+                    &manifest_with_classpath(&["vendor/broken.jar", "vendor/junk.jar"]),
+                ),
+                ("dep/vendor/broken.jar", b"not a zip archive"),
+                ("dep/vendor/junk.jar", b"also not a zip archive"),
+                ("dep/vendor/library.jar", &library),
+            ],
+        );
+        let diagnosis = only_diagnosis(&root, &storage).await;
+
+        assert_eq!(diagnosis.roots.len(), 2);
+        assert_eq!(diagnosis.unread.len(), 2);
+    });
+}
+
+/// Discovery re-homes a classpath entry pointing outside the declaring project to a synthesized
+/// `external-classpath-<n>/<name>`, which is where the bytes went and not a file anybody wrote. A
+/// diagnostic names the entry the way its manifest spells it.
+#[test]
+fn an_unreadable_classpath_entry_is_named_as_the_manifest_spelled_it() {
+    jals_exec::block_on_inline(async {
+        let (root, storage) = publishing_dependency(
+            "navigation",
+            &[
+                (
+                    "dep/jals.toml",
+                    &manifest_with_classpath(&["../shared/broken.jar"]),
+                ),
+                ("shared/broken.jar", b"not a zip archive"),
+            ],
+        );
+        let diagnosis = only_diagnosis(&root, &storage).await;
+
+        let [unread] = diagnosis.unread.as_slice() else {
+            panic!(
+                "expected exactly one unread entry, got {:?}",
+                diagnosis.unread
+            );
+        };
+        let jals_classpath::WarningOrigin::External(locator) = &unread.origin else {
+            panic!(
+                "expected the manifest's own spelling, got {:?}",
+                unread.origin
+            );
+        };
+        assert_eq!(locator.to_string(), "../shared/broken.jar");
+    });
+}
+
+/// A destination *at* a source root rather than below it has no package to be addressed by, which
+/// `package_prefix` rejects before the check is ever reached. Pinned so the coverage fold is never
+/// what a reader is shown for it.
+#[test]
+fn a_publication_at_a_source_root_is_rejected_before_the_check() {
+    jals_exec::block_on_inline(async {
+        let sources = jar(&[("net/example/Api.java", b"package net.example; class Api {}")]);
+        let (root, storage) = task_dependency(
+            r#"
+                let archive = tasks.project_jar("vendor/sources.jar");
+                let tree = tasks.extract_java(archive, "net/example");
+                tasks.publish_tree("api", tree, "src/main/java", "replace-root", "navigation");
+            "#,
+            &[("dep/vendor/sources.jar", &sources)],
+        );
+        let mut cache = MemoryStorage::memory(CodeTree::default());
+
+        let error = MemoryProjectGraph::discover(&root, &storage.view())
+            .await
+            .unwrap()
+            .preprocess(cache.artifacts_mut(), inert!())
+            .await
+            .unwrap_err();
+
+        let GraphError::BuildScript { message, .. } = &error else {
+            panic!("expected a build-script error, got {error:?}");
+        };
+        assert!(message.contains("source-dirs"), "{message}");
+    });
+}
+
+/// This is a consumer-side check, and deliberately only that. Discovery gives the root project no
+/// node — its script is the host's to run — so a library's author never meets this warning building
+/// their own repository, only whoever depends on them does.
+#[test]
+fn the_root_project_is_never_diagnosed() {
+    jals_exec::block_on_inline(async {
+        let sources = jar(&[("net/example/Api.java", b"package net.example; class Api {}")]);
+        let storage = MemoryStorage::memory(
+            CodeTree::new(
+                [
+                    (
+                        "build.rhai",
+                        r#"
+                            let archive = tasks.project_jar("vendor/sources.jar");
+                            let tree = tasks.extract_java(archive, "net/example");
+                            tasks.publish_tree("api", tree, "src/main/java/net/example",
+                                               "replace-root", "navigation");
+                        "#
+                        .as_bytes()
+                        .to_vec(),
+                    ),
+                    ("vendor/sources.jar", sources),
+                    ("src/main/java/Seed.java", b"class Seed {}".to_vec()),
+                ]
+                .into_iter()
+                .map(|(path, bytes)| Entry::File(FileKey::parse(path).unwrap(), bytes)),
+            )
+            .unwrap(),
+        );
+        // The same publication a dependency would be diagnosed for, declared by the root itself.
+        let root = manifest("[build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n");
+
+        assert!(publication_diagnoses(&root, &storage).await.is_empty());
+    });
+}
+
+/// A coverage answer is recorded so an editor reload does not re-digest the classpath to re-derive
+/// it — and the classpath is part of what the record is keyed on, so putting the missing jar there
+/// answers differently rather than serving the old answer back.
+#[test]
+fn a_recorded_coverage_answer_is_reused_and_a_classpath_edit_invalidates_it() {
+    jals_exec::block_on_inline(async {
+        let mut cache = MemoryStorage::memory(CodeTree::default());
+        let (root, unbacked) = publishing_dependency("navigation", &[]);
+
+        // Twice into one cache: the second run reads the record the first one wrote, and has to
+        // reach the same conclusion from it.
+        let first = publication_diagnoses_in(&root, &unbacked, &mut cache).await;
+        let second = publication_diagnoses_in(&root, &unbacked, &mut cache).await;
+        assert_eq!(first.len(), 1);
+        assert_eq!(first, second);
+
+        // Same node, same plan, same features — only `[build] classpath` differs, and that is
+        // enough for the recorded answer not to apply.
+        let classes = jar(&[("net/example/Api.class", b"class bytes")]);
+        let (root, backed) = publishing_dependency(
+            "navigation",
+            &[
+                (
+                    "dep/jals.toml",
+                    &manifest_with_classpath(&["vendor/lib.jar"]),
+                ),
+                ("dep/vendor/lib.jar", &classes),
+            ],
+        );
+        assert!(
+            publication_diagnoses_in(&root, &backed, &mut cache)
+                .await
+                .is_empty()
         );
     });
 }
