@@ -168,13 +168,25 @@ impl GraphMetadata {
 }
 
 /// Non-fatal graph discovery or preprocessing diagnostic.
+///
+/// The attribution is not readable apart from the message: a host reports one of these by
+/// rendering the whole thing through its [`Display`](fmt::Display), which is why the fields are
+/// sealed. Several messages name no subject at all, so a host that read `message` alone dropped
+/// the half a user can act on, and the three that reassembled a subject themselves each stated it
+/// differently. The same rule holds for [`jals_classpath::Warning`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphWarning {
     /// The attributed node's [`location`](ResolvedNode::location), never its [`NodeId`]: a digest
     /// names nothing a reader can go and look at, which is why [`GraphError::BuildScript`] carries
     /// one too. Two nodes may describe themselves identically — identity is the digest, and it is
     /// deliberately not what a diagnostic shows — so two warnings can read the same.
+    ///
+    /// *Which* node it is depends on `dependency`. Alone, it is the node the warning is **about**;
+    /// beside a `dependency`, it is the project that **declared** that entry. `Display` spells the
+    /// two arms differently, so a producer setting both is saying the second.
     pub(crate) node: Option<String>,
+    /// The `[dependencies]` entry this is about, as the manifest spells it — which is not
+    /// necessarily a [`Name`](jals_storage::Name), since one warning is that it isn't.
     pub(crate) dependency: Option<String>,
     pub(crate) message: String,
 }

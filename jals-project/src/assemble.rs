@@ -62,8 +62,16 @@ impl CompileClasspathEntry {
 }
 
 /// Structured non-script assembly failure. Other nodes continue to assemble deterministically.
+///
+/// The fields are sealed, as [`GraphWarning`]'s are: a host reports one of these by rendering the
+/// whole thing through its [`Display`](fmt::Display). `path` is a logical artifact path inside the
+/// failing node, not a file in the consumer's tree, so there is nothing here for a host to attach a
+/// diagnostic to that it could not attach to the manifest already.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectAssemblyError {
+    /// Still the identity, unlike the location [`GraphWarning`] holds: `logical_path` derives
+    /// artifact paths from it, so this one is plumbed as a [`NodeId`] and its digest is what the
+    /// `Display` prints.
     node: NodeId,
     path: Option<RelativePath>,
     message: String,
