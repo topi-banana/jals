@@ -668,7 +668,14 @@ impl Archive {
     /// Open a portable reader as a zip archive. The parsed central directory is plain data
     /// shared behind an `Arc`, so fan-out chunks clone one directory and one reader handle and
     /// only the reader position is per-clone state.
-    async fn open<R: JarReader>(mut reader: R) -> Result<(R, Arc<CentralDirectory>), String> {
+    ///
+    /// Deliberately weaker than [`JarReader`]: reading a directory needs no clone and outlives
+    /// nothing, so a caller that only asks *what* an archive contains may hand over a borrowed
+    /// cursor instead of copying the bytes into an `Arc` to satisfy `'static`. Decoding members is
+    /// what needs the stronger bound, and every caller that goes on to do it already has it.
+    async fn open<R: sio::Read + sio::Seek>(
+        mut reader: R,
+    ) -> Result<(R, Arc<CentralDirectory>), String> {
         let directory = CentralDirectory::parse(&mut reader)
             .await
             .map_err(|message| format!("failed to read archive: {message}"))?;
