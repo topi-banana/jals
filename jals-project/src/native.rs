@@ -339,7 +339,7 @@ impl GraphBuilder {
         let checkout = acquired.checkout.take();
         // Resolved before the inner visit consumes `parent`, and it would resolve the same after:
         // the declaring project was pushed as a node before it began declaring anything.
-        let declared_by = crate::graph::declaring_location(&self.nodes, parent.as_ref());
+        let declared_by = ResolvedNode::location_of(&self.nodes, parent.as_ref());
         let result = self
             .visit_source_inner(parent, dependency, declared, acquired)
             .await;
@@ -459,7 +459,7 @@ impl GraphBuilder {
     /// The entry name alone is not enough for a transitive project: `lib` says which line to look
     /// at, not which `jals.toml` it is on.
     fn warn_declared(&mut self, parent: Option<&NodeId>, name: &str, message: impl Into<String>) {
-        let declaring = crate::graph::declaring_location(&self.nodes, parent);
+        let declaring = ResolvedNode::location_of(&self.nodes, parent);
         self.warnings
             .push(GraphWarning::declared(declaring, name, message));
     }

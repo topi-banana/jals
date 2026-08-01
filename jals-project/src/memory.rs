@@ -349,7 +349,7 @@ impl GraphBuilder {
     /// The entry name alone is not enough for a transitive project: `lib` says which line to look
     /// at, not which `jals.toml` it is on.
     fn warn_declared(&mut self, parent: Option<&NodeId>, name: &str, message: impl Into<String>) {
-        let declaring = crate::graph::declaring_location(&self.nodes, parent);
+        let declaring = ResolvedNode::location_of(&self.nodes, parent);
         self.warnings
             .push(GraphWarning::declared(declaring, name, message));
     }

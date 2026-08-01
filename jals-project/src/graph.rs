@@ -233,22 +233,6 @@ impl GraphWarning {
     }
 }
 
-/// The location of the node `parent` names, which is how a warning about an entry that project's
-/// manifest declared is attributed. `None` is the root: discovery gives it no node.
-///
-/// A scan rather than an index because it runs once per *failing* entry, and a graph that had
-/// enough nodes for the difference to show would have to fail on most of them to reach it.
-pub(crate) fn declaring_location(
-    nodes: &[ResolvedNode],
-    parent: Option<&NodeId>,
-) -> Option<String> {
-    let parent = parent?;
-    nodes
-        .iter()
-        .find(|node| &node.id == parent)
-        .map(|node| node.location.clone())
-}
-
 /// `<subject>: <message>` — the whole of what a host can say about one of these, which is why the
 /// node and the entry a warning is attributed to are not readable separately.
 ///
@@ -395,6 +379,19 @@ impl ResolvedNode {
             NodeBody::PlainSource(_) => NodeKind::PlainSource,
             NodeBody::JalsSource { .. } => NodeKind::JalsSource,
         }
+    }
+
+    /// The location of the node `id` names, which is how a warning about an entry that project's
+    /// manifest declared is attributed. `None` is the root: discovery gives it no node.
+    ///
+    /// A scan rather than an index because it runs once per *failing* entry, and a graph with
+    /// enough nodes for the difference to show would have to fail on most of them to reach it.
+    pub(crate) fn location_of(nodes: &[Self], id: Option<&NodeId>) -> Option<String> {
+        let id = id?;
+        nodes
+            .iter()
+            .find(|node| &node.id == id)
+            .map(|node| node.location.clone())
     }
 
     pub(crate) const fn source(&self) -> Option<&SourceNode> {
