@@ -356,11 +356,18 @@ are already in memory. A cached artifact is opened through the verified read, so
 SHA-256 once before its directory is parsed; that is the same pass the memoized execution's own
 re-verification already makes, so the added cost is a repeated digest rather than a first read. The
 check says nothing at all when an entry cannot be read — an unreadable jar is not a jar that defines
-nothing. A
-dependency the project declares is out of its reach rather than late — discovery resolved it long
-before, but what it contributes is settled at assembly — so the warning names that possibility
-instead of suppressing itself, for every dependency kind: a `git`/`path` dependency's sources reach
-a consumer's compiler too, so they can carry the package just as a `jar` can.
+nothing. A dependency the project declares is out of its reach rather than late — discovery resolved
+it long before, but what it contributes is settled at assembly — so the warning names that
+possibility instead of suppressing itself, for every dependency kind: a `git`/`path` dependency's
+sources reach a consumer's compiler too, so they can carry the package just as a `jar` can.
+
+One thing it does *not* leave to the reader. A project built as a root of its own leaves its
+publications on disk, where they are captured as ordinary authored sources and a `path` consumer
+compiles them after all. That is visible from the same data — an authored source inside the
+publication's destination — so the warning says which of the two situations it found rather than
+carrying a standing "unless you have built it in place". It still warns when it found that one: the
+export is then a property of the dependency's build state and not of its manifest, and a `jals clean`
+there takes it back.
 
 Each dependency execution is memoized under its project identity, plan, and resolved features, and
 re-verified against the cache before it is reused, so an editor reload does not re-fetch, re-remap,

@@ -496,10 +496,15 @@ impl ResolvedNode {
     /// believes it exports, several layers away from the declaration that caused it — so the
     /// declaration says so itself, here.
     ///
-    /// One case escapes that, and the warning says so rather than overstating: a project built as a
-    /// root of its own leaves its publications on disk, where a `path` consumer picks them up as
-    /// ordinary source files. That makes the export a property of the dependency's build state
-    /// rather than of its manifest, which is worth warning about on its own terms.
+    /// One case escapes that, and it is *decided* rather than hedged: a project built as a root of
+    /// its own leaves its publications on disk, where discovery captured them as ordinary authored
+    /// sources that do reach a consumer's compiler. Whether that happened is visible from here — an
+    /// authored source under the publication's own package prefix is exactly the trace it leaves —
+    /// so the message states which of the two situations this is instead of carrying an escape
+    /// clause every reader has to evaluate against a tree they are not looking at. It still warns
+    /// either way: an export that exists only because the dependency happens to have been built in
+    /// place is a property of its build state and not of its manifest, and `jals clean` there takes
+    /// it back.
     ///
     /// Only *this* node's classpath is inspected, and its `[dependencies]` are not late but out of
     /// reach: discovery resolved them into graph nodes before any preprocessing ran, yet a
@@ -633,15 +638,31 @@ impl ResolvedNode {
         let mut messages: Vec<String> = uncovered
             .iter()
             .map(|(publication, prefix)| {
+                // Not a caveat to state unconditionally: a publication left on disk by a root build
+                // of this project was captured by discovery as an authored source, inside the very
+                // destination the publication names. Captured sources are addressed the way the
+                // destination is — relative to the declaring project, not to a source root — so
+                // this is the destination and not the package prefix. The one exception to "a
+                // consumer has nothing here" is therefore decidable, and saying which case this is
+                // beats making every reader check a tree they are not looking at.
+                let on_disk = source
+                    .authored_sources
+                    .iter()
+                    .any(|file| file.path.starts_with(publication.destination.path()));
+                let state = if on_disk {
+                    " These types do reach a consumer today, but only because this project has \
+                     itself been built as a root and left the publication on disk as ordinary \
+                     source files — `jals clean` here takes them away again, and a consumer that \
+                     never built this project directly never had them."
+                } else {
+                    ""
+                };
                 format!(
                     "build task publishes `{}` at `{}`, but nothing this project puts on its own \
                      classpath defines a class under `{prefix}`. A dependency's publications are \
                      navigation sources for a reader and never compile inputs, so a consumer has \
-                     nothing here to compile against — except where this project has itself been \
-                     built as a root, which leaves the publication on disk as an ordinary source \
-                     file and makes the export a matter of build state. Put the library's own jar \
-                     on the classpath with `tasks.add_classpath`, or declare it as a \
-                     `[dependencies]` jar.",
+                     nothing here to compile against.{state} Put the library's own jar on the \
+                     classpath with `tasks.add_classpath`, or declare it as a `[dependencies]` jar.",
                     publication.owner, publication.destination,
                 )
             })

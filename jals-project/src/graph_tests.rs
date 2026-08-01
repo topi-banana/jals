@@ -1581,6 +1581,35 @@ fn a_dependency_publication_no_classpath_entry_backs_is_diagnosed() {
         assert!(message.contains("tasks.add_classpath"), "{message}");
         // Nothing was declared that the check could not see, so it does not hedge.
         assert!(!message.contains("disregard this"), "{message}");
+        // Nor has this project been built in place, so the one case where the types reach a
+        // consumer anyway is stated as absent by not being stated at all.
+        assert!(!message.contains("jals clean"), "{message}");
+    });
+}
+
+#[test]
+fn a_publication_a_root_build_left_on_disk_is_named_as_build_state() {
+    jals_exec::block_on_inline(async {
+        // Building this project as a root once writes the publication into its own source tree,
+        // where discovery captures it as an ordinary authored source and a `path` consumer does
+        // compile it. That is the one case "a consumer has nothing here" would be wrong about —
+        // and it is not a guess: the authored source sits under the publication's package prefix.
+        // The warning stands, because `jals clean` here takes the export away again.
+        let (root, storage) = publishing_dependency(
+            "",
+            &[(
+                "dep/src/main/java/net/example/Api.java",
+                b"package net.example; class Api {}",
+            )],
+        );
+        let warnings = coverage_warnings(&root, &storage).await;
+
+        let [message] = warnings.as_slice() else {
+            panic!("expected exactly one warning, got {warnings:?}");
+        };
+        assert!(message.contains("publishes `api`"), "{message}");
+        assert!(message.contains("built as a root"), "{message}");
+        assert!(message.contains("jals clean"), "{message}");
     });
 }
 
