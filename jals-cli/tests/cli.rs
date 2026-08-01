@@ -237,7 +237,8 @@ fn build_tasks_publish_replace_remove_and_clean_an_exclusive_source_root() {
                 "example-sources",
                 sources,
                 "src/main/java/net/example",
-                "replace-root"
+                "replace-root",
+                "navigation"
             );
         "#,
     )
@@ -267,7 +268,7 @@ fn build_tasks_publish_replace_remove_and_clean_an_exclusive_source_root() {
         r#"
             let jar = tasks.project_jar("sources.jar");
             let sources = tasks.extract_java(jar, "net/example");
-            tasks.publish_tree("example-sources", sources, "src/main/java/net/example", "replace-root");
+            tasks.publish_tree("example-sources", sources, "src/main/java/net/example", "replace-root", "navigation");
         "#,
     )
     .unwrap();
@@ -306,7 +307,7 @@ fn build_dry_run_leaves_an_exclusive_publication_root_untouched() {
         r#"
             let jar = tasks.project_jar("sources.jar");
             let sources = tasks.extract_java(jar, "net/example");
-            tasks.publish_tree("example-sources", sources, "src/main/java/net/example", "replace-root");
+            tasks.publish_tree("example-sources", sources, "src/main/java/net/example", "replace-root", "navigation");
         "#,
     )
     .unwrap();

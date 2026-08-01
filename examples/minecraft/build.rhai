@@ -180,7 +180,8 @@ tasks.publish_tree(
     "minecraft-" + version,
     sources,
     "src/main/java/net/minecraft",
-    "replace-root"
+    "replace-root",
+    "navigation"
 );
 
 // The `mixin` feature adds a second, completely independent publication root: SpongePowered Mixin,
@@ -212,7 +213,8 @@ if build.feature("mixin") {
         "mixin-" + mixin_version,
         tasks.extract_java(mixin_sources, "org/spongepowered"),
         "src/main/java/org/spongepowered",
-        "replace-root"
+        "replace-root",
+        "navigation"
     );
 }
 
@@ -247,6 +249,7 @@ if build.feature("mixinextras") {
         "mixinextras-" + mixinextras_version,
         tasks.extract_java(mixinextras_sources, "com/llamalad7"),
         "src/main/java/com/llamalad7",
-        "replace-root"
+        "replace-root",
+        "navigation"
     );
 }

@@ -1432,7 +1432,7 @@ mod tests {
                         tasks.bytes(1024)
                     );
                     let sources = tasks.extract_java(jar, "net/example");
-                    tasks.publish_tree("sources", sources, "src/main/java/net/example", "replace-root");
+                    tasks.publish_tree("sources", sources, "src/main/java/net/example", "replace-root", "navigation");
                 "#,
                 ContentDigest::of(b"jar").to_hex()
             );

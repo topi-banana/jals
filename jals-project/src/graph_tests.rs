@@ -1323,7 +1323,7 @@ fn a_dependency_publication_becomes_navigation_source_and_never_touches_the_snap
                     tasks.bytes(4096)
                 );
                 let tree = tasks.extract_java(archive, "net/example");
-                tasks.publish_tree("api", tree, "src/main/java/net/example", "replace-root");
+                tasks.publish_tree("api", tree, "src/main/java/net/example", "replace-root", "navigation");
             "#,
             jals_storage::ContentDigest::of(&sources).to_hex()
         );
@@ -1396,7 +1396,7 @@ fn a_dependency_publication_outside_a_source_root_is_rejected() {
                     tasks.bytes(4096)
                 );
                 let tree = tasks.extract_java(archive, "net/example");
-                tasks.publish_tree("api", tree, "generated/net/example", "replace-root");
+                tasks.publish_tree("api", tree, "generated/net/example", "replace-root", "navigation");
             "#,
             jals_storage::ContentDigest::of(&sources).to_hex()
         );
@@ -1536,7 +1536,7 @@ fn a_dependency_publication_reaches_the_editor_but_not_the_compiler() {
                 );
                 tasks.add_classpath(archive);
                 let tree = tasks.extract_java(archive, "net/example");
-                tasks.publish_tree("api", tree, "src/main/java/net/example", "replace-root");
+                tasks.publish_tree("api", tree, "src/main/java/net/example", "replace-root", "navigation");
             "#,
             jals_storage::ContentDigest::of(&sources).to_hex()
         );

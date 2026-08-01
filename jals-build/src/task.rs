@@ -254,6 +254,42 @@ pub enum TaskPublishMode {
     ReplaceRoot,
 }
 
+/// What a published source tree is *for*, which is the whole of what a consumer does with it.
+///
+/// Deliberately not a [`TaskPublishMode`] variant: that axis is how the destination is written, and
+/// it applies identically either way — a `replace-root` publication owns its destination whoever
+/// ends up reading it. The two would multiply rather than merge.
+///
+/// The distinction only becomes visible when the project is a *dependency*. As the root a
+/// publication is written to disk and compiles like an authored file in both cases; a consumer sees
+/// either types it compiles or types it reads, and nothing in the task graph could infer which was
+/// meant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TaskPublishIntent {
+    /// The tree carries types nothing else does, so a consumer compiles it.
+    Compile,
+    /// The tree is a *view* of types the classpath already defines, so a consumer only reads it.
+    /// Handing `javac` both a decompiled tree and the JAR it came from is how a working build
+    /// acquires duplicates.
+    Navigation,
+}
+
+impl TaskPublishIntent {
+    /// The intent a build script spelled, or `None` for anything else.
+    ///
+    /// Written out rather than derived from the serde representation because the two are
+    /// independent surfaces: the wire name is frozen by every cache record already written under
+    /// it, and the script keyword is frozen by every `build.rhai` in the wild.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "compile" => Some(Self::Compile),
+            "navigation" => Some(Self::Navigation),
+            _ => None,
+        }
+    }
+}
+
 /// A side effect requested from the host after all value nodes succeed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
@@ -270,6 +306,7 @@ pub enum TaskTerminal {
         tree: TaskId,
         destination: String,
         mode: TaskPublishMode,
+        intent: TaskPublishIntent,
     },
 }
 
@@ -924,23 +961,35 @@ impl TasksApi {
         api.terminal(TaskTerminal::AddNestedClasspath { jar: jar.0.id })
     }
 
+    /// `intent` has no default on purpose. What a consumer does with a published tree is the one
+    /// thing the task graph cannot infer — a tree with a JAR behind it and a tree that is the only
+    /// carrier of its package are written identically — and a script that does not say is a script
+    /// whose author has not decided.
     fn publish_tree(
         api: &mut Self,
         owner: ImmutableString,
         tree: SourceTreeTask,
         destination: ImmutableString,
         mode: &str,
+        intent: &str,
     ) -> RhaiResult<()> {
         if mode != "replace-root" {
             return Err(Self::rhai_error(
                 "tasks.publish_tree supports only the `replace-root` mode",
             ));
         }
+        let Some(intent) = TaskPublishIntent::parse(intent) else {
+            return Err(Self::rhai_error(
+                "tasks.publish_tree needs an intent of `compile` (a consumer compiles this tree) \
+                 or `navigation` (a consumer only reads it; the classpath defines these types)",
+            ));
+        };
         api.terminal(TaskTerminal::PublishTree {
             owner: owner.into_owned(),
             tree: tree.0.id,
             destination: destination.into_owned(),
             mode: TaskPublishMode::ReplaceRoot,
+            intent,
         })
     }
 
@@ -1029,7 +1078,7 @@ mod tests {
                     let digest = tasks.sha256("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
                     let jar = tasks.fetch_jar(url, digest, tasks.bytes(1024));
                     let sources = tasks.extract_java(jar, "net/example");
-                    tasks.publish_tree("example", sources, "src/main/java/net/example", "replace-root");
+                    tasks.publish_tree("example", sources, "src/main/java/net/example", "replace-root", "navigation");
                 "#,
             )
             .unwrap();
@@ -1039,6 +1088,61 @@ mod tests {
         let decoded: TaskPlan = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(decoded, plan);
         assert_eq!(serde_json::to_vec(&decoded).unwrap(), bytes);
+    }
+
+    /// What a consumer does with a published tree is the one thing the graph cannot infer, so the
+    /// script has to say — and the two answers have to reach the plan as two different terminals,
+    /// or nothing downstream could route on them.
+    #[test]
+    fn a_publication_says_what_a_consumer_does_with_it() {
+        let mut engine = Engine::new();
+        TasksApi::register_rhai(&mut engine);
+        let api = TasksApi::new(limits());
+        let mut scope = rhai::Scope::new();
+        scope.push("tasks", api.clone());
+        engine
+            .run_with_scope(
+                &mut scope,
+                r#"
+                    let jar = tasks.project_jar("sources.jar");
+                    let tree = tasks.extract_java(jar, "net/example");
+                    tasks.publish_tree("view", tree, "src/main/java/net/example", "replace-root",
+                                       "navigation");
+                    tasks.publish_tree("carrier", tree, "src/main/java/org/vendor", "replace-root",
+                                       "compile");
+                "#,
+            )
+            .unwrap();
+        let error = engine
+            .run_with_scope(
+                &mut scope,
+                r#"
+                    let jar = tasks.project_jar("other.jar");
+                    let tree = tasks.extract_java(jar, "net/other");
+                    tasks.publish_tree("bad", tree, "src/main/java/net/other", "replace-root",
+                                       "read-only");
+                "#,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("intent"), "{error}");
+
+        drop(scope);
+        let plan = api.finish().unwrap();
+        let intents: Vec<_> = plan
+            .terminals
+            .iter()
+            .filter_map(|terminal| match terminal {
+                TaskTerminal::PublishTree { owner, intent, .. } => Some((owner.as_str(), *intent)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            intents,
+            [
+                ("view", TaskPublishIntent::Navigation),
+                ("carrier", TaskPublishIntent::Compile),
+            ]
+        );
     }
 
     /// A fetch buffers up to its declared byte count *before* the digest is checked, so an
@@ -1088,7 +1192,7 @@ mod tests {
                     if caught != 8 { throw "expected every bad declaration to be rejected"; }
                     let jar = tasks.project_jar("sources.jar");
                     let sources = tasks.extract_java(jar, "net/example");
-                    tasks.publish_tree("example", sources, "src/main/java/net/example", "replace-root");
+                    tasks.publish_tree("example", sources, "src/main/java/net/example", "replace-root", "navigation");
                 "#,
             )
             .unwrap();

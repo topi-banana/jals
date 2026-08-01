@@ -26,6 +26,7 @@ if build.feature("sources") {
         "example-sources",
         sources,
         "src/main/java/net/example",
-        "replace-root"
+        "replace-root",
+        "navigation"
     );
 }

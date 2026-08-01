@@ -3007,7 +3007,7 @@ mod tests {
                         tasks.bytes(1024)
                     );
                     let sources = tasks.extract_java(jar, "generated");
-                    tasks.publish_tree("sources", sources, "src/generated", "replace-root");
+                    tasks.publish_tree("sources", sources, "src/generated", "replace-root", "navigation");
                 "#,
             )
             .unwrap();

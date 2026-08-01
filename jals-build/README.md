@@ -291,7 +291,7 @@ asynchronously after Rhai evaluation and capability preflight succeed:
 | `decompile_java(jar, prefix)`                                                    | Compile-oriented skeleton source tree below `prefix`.                         |
 | `add_classpath(jar)`                                                             | Add a task-produced JAR to the root classpath.                                |
 | `add_nested_classpath(jar)`                                                      | Expand every nested `.jar` member onto the root classpath (library bundlers). |
-| `publish_tree(owner, tree, destination, "replace-root")`                         | Atomically replace an exclusive physical source subtree.                      |
+| `publish_tree(owner, tree, destination, "replace-root", intent)`                 | Atomically replace an exclusive physical source subtree.                      |
 
 For example:
 
@@ -302,9 +302,15 @@ tasks.publish_tree(
     "example-sources",
     sources,
     "src/main/java/net/example",
-    "replace-root"
+    "replace-root",
+    "navigation"
 );
 ```
+
+`intent` is `"compile"` or `"navigation"`, and there is no default: it says what a consumer does
+with the tree, which is the one thing the task graph cannot infer — a tree with a JAR behind it and
+a tree that is the only carrier of its package are written identically. It changes nothing for the
+root, where a publication becomes real files either way; see the dependency section below.
 
 `replace-root` is deliberately explicit and destructive: after every non-empty task result succeeds,
 the complete destination is replaced, including files manually added or edited below it. The
