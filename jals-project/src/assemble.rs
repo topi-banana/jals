@@ -536,6 +536,10 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
     /// A node's [`location`](crate::graph::ResolvedNode::location), which is what a diagnostic
     /// names it by. Every id reaching here belongs to a node the graph carries, so the fallback is
     /// unreachable; a digest is still a worse diagnostic than a location rather than no diagnostic.
+    ///
+    /// A scan rather than an index because every caller is already on a failing path — a cache
+    /// write that did not land, a member path that is not a file, an entry name that is not a
+    /// portable name. None of them runs per node or per edge.
     fn node_location(&self, node: &NodeId) -> String {
         self.graph
             .nodes
@@ -548,10 +552,11 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
         struct ProjectedBinary {
             node: NodeId,
             dependency: String,
-            /// Where the project that declared this edge came from, captured here because the
-            /// warning below names it and a `NodeId` names nothing a reader can act on. `None` is
-            /// the root declaring its own edge, which reads as the entry alone.
-            declared_by: Option<String>,
+            /// The project that declared this edge, as an identity: only the warning below names
+            /// it, and resolving a location for every edge to drop all but the failing one is work
+            /// with no reader. `None` is the root declaring its own edge, which reads as the entry
+            /// alone.
+            from: Option<NodeId>,
             location: DependencyLocation,
             source_archive: bool,
             recursive: bool,
@@ -577,7 +582,7 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
             projected.push(ProjectedBinary {
                 node: edge.to.clone(),
                 dependency: edge.dependency.clone(),
-                declared_by: edge.from.as_ref().map(|from| self.node_location(from)),
+                from: edge.from.clone(),
                 location,
                 source_archive,
                 recursive: edge.recursive,
@@ -586,8 +591,9 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
 
         for projected in projected {
             let Ok(name) = Name::new(&projected.dependency) else {
+                let declared_by = projected.from.as_ref().map(|from| self.node_location(from));
                 self.warnings.push(GraphWarning {
-                    node: projected.declared_by,
+                    node: declared_by,
                     dependency: Some(projected.dependency),
                     message: "dependency name is not a portable name".to_owned(),
                 });

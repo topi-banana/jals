@@ -392,7 +392,11 @@ impl GraphBuilder {
 
         let snapshot = Self::snapshot(&acquired.root, &self.exec).await?;
         let manifest = Self::probe_manifest(&acquired, &snapshot)?;
-        self.push_snapshot_warnings(Some(&Self::node_location(&acquired)), snapshot.diagnostics);
+        // One location for this node, written twice: what the snapshot diagnostics below are
+        // attributed to has to be what the node itself records, or a reader gets two names for one
+        // dependency.
+        let location = Self::node_location(&acquired);
+        self.push_snapshot_warnings(Some(&location), snapshot.diagnostics);
         let view = snapshot.view;
         let declaring = DeclaringProject {
             root: acquired.root.clone(),
@@ -427,7 +431,7 @@ impl GraphBuilder {
         self.seen_nodes.insert(acquired.id.clone());
         self.nodes.push(ResolvedNode {
             id: acquired.id.clone(),
-            location: Self::node_location(&acquired),
+            location,
             body,
         });
         self.states
