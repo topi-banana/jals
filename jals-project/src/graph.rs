@@ -488,6 +488,11 @@ impl ResolvedNode {
     /// believes it exports, several layers away from the declaration that caused it — so the
     /// declaration says so itself, here.
     ///
+    /// One case escapes that, and the warning says so rather than overstating: a project built as a
+    /// root of its own leaves its publications on disk, where a `path` consumer picks them up as
+    /// ordinary source files. That makes the export a property of the dependency's build state
+    /// rather than of its manifest, which is worth warning about on its own terms.
+    ///
     /// Only *this* node's classpath is inspected, and its `[dependencies]` are not late but out of
     /// reach: discovery resolved them into graph nodes before any preprocessing ran, yet a
     /// [`ResolvedNode`] holds no handle to the graph it sits in, and what a dependency finally
@@ -608,9 +613,12 @@ impl ResolvedNode {
                 format!(
                     "build task publishes `{}` at `{}`, but nothing this project puts on its own \
                      classpath defines a class under `{prefix}`. A dependency's publications are \
-                     navigation sources for a reader and never compile inputs, so a consumer \
-                     cannot compile against this root — put the library's own jar on the classpath \
-                     with `tasks.add_classpath`, or declare it as a `[dependencies]` jar.{unseen}",
+                     navigation sources for a reader and never compile inputs, so a consumer has \
+                     nothing here to compile against — except where this project has itself been \
+                     built as a root, which leaves the publication on disk as an ordinary source \
+                     file and makes the export a matter of build state. Put the library's own jar \
+                     on the classpath with `tasks.add_classpath`, or declare it as a \
+                     `[dependencies]` jar.{unseen}",
                     publication.owner, publication.destination,
                 )
             })
