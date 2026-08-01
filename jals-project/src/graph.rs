@@ -488,11 +488,19 @@ impl ResolvedNode {
     /// believes it exports, several layers away from the declaration that caused it — so the
     /// declaration says so itself, here.
     ///
-    /// Only *this* node's classpath is inspected, because that is all a snapshot can be asked about:
-    /// its `[dependencies]` become separate graph nodes resolved long after preprocessing. Declaring
-    /// any is therefore not a reason to stay silent — that would lose the warning for every root a
-    /// project publishes as soon as it gains one jar dependency — but it is a reason to say the
-    /// check could not see them.
+    /// Only *this* node's classpath is inspected, and its `[dependencies]` are not late but out of
+    /// reach: discovery resolved them into graph nodes before any preprocessing ran, yet a
+    /// [`ResolvedNode`] holds no handle to the graph it sits in, and what a dependency finally
+    /// contributes is decided at assembly, once every node has been preprocessed. Declaring one is
+    /// therefore not a reason to stay silent — that would lose the warning for every root a project
+    /// publishes as soon as it gains a single dependency — but it is a reason to say the check could
+    /// not see them.
+    ///
+    /// That hedge covers every dependency kind on purpose. A `git`/`path` dependency's sources reach
+    /// the consumer's compiler as
+    /// [`source_dependency_artifacts`](jals_classpath::ProjectInputPlan::source_dependency_artifacts),
+    /// so narrowing it to `jar` would claim these types cannot come from anywhere else, which is the
+    /// same overreach in the other direction.
     async fn diagnose_unbacked_publications<C: CacheBackend>(
         &self,
         cache: &ArtifactCache<C>,
@@ -577,8 +585,9 @@ impl ResolvedNode {
         let unseen = if manifest.dependencies.is_empty() {
             ""
         } else {
-            " This project also declares `[dependencies]`, which are resolved after preprocessing \
-             and are invisible here — disregard this if one of them already defines these types."
+            " This project also declares `[dependencies]`, whose contribution is settled after this \
+             check and is invisible to it — disregard this if one of them already carries these \
+             types."
         };
         uncovered
             .iter()

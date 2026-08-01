@@ -355,8 +355,10 @@ directory is parsed; that is the same pass the memoized execution's own re-verif
 makes, so the added cost is a repeated digest rather than a first read. A project file is read from
 the revision, and a captured `[build] classpath` entry is already in memory. The check says nothing
 at all when an entry cannot be read — an unreadable jar is not a jar that defines nothing. A
-`[dependencies]` jar the project declares is resolved after preprocessing and is invisible to it, so
-the warning names that possibility rather than suppressing itself.
+dependency the project declares is out of its reach rather than late — discovery resolved it long
+before, but what it contributes is settled at assembly — so the warning names that possibility
+instead of suppressing itself, for every dependency kind: a `git`/`path` dependency's sources reach
+a consumer's compiler too, so they can carry the package just as a `jar` can.
 
 Each dependency execution is memoized under its project identity, plan, and resolved features, and
 re-verified against the cache before it is reused, so an editor reload does not re-fetch, re-remap,
