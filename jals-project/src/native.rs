@@ -289,21 +289,21 @@ impl GraphBuilder {
                             )
                             .await
                         {
-                            self.warnings.push(GraphWarning::dependency(name, message));
+                            self.warn_declared(parent.as_ref(), name, message);
                         }
                         if let Some(sources) = &jar.sources
                             && let Err(message) = self
                                 .visit_binary(parent.clone(), declaring, name, sources, false, true)
                                 .await
                         {
-                            self.warnings.push(GraphWarning::dependency(name, message));
+                            self.warn_declared(parent.as_ref(), name, message);
                         }
                     }
                     Dependency::Path(path) => {
                         let acquired = match self.acquire_path(declaring, path).await {
                             Ok(acquired) => acquired,
                             Err(message) => {
-                                self.warnings.push(GraphWarning::dependency(name, message));
+                                self.warn_declared(parent.as_ref(), name, message);
                                 continue;
                             }
                         };
@@ -315,7 +315,7 @@ impl GraphBuilder {
                         let acquired = match self.acquire_git(declaring, name, git).await {
                             Ok(acquired) => acquired,
                             Err(message) => {
-                                self.warnings.push(GraphWarning::dependency(name, message));
+                                self.warn_declared(parent.as_ref(), name, message);
                                 continue;
                             }
                         };
@@ -337,6 +337,9 @@ impl GraphBuilder {
         mut acquired: AcquiredSource,
     ) -> Result<(), GraphError> {
         let checkout = acquired.checkout.take();
+        // Resolved before the inner visit consumes `parent`, and it would resolve the same after:
+        // the declaring project was pushed as a node before it began declaring anything.
+        let declared_by = crate::graph::declaring_location(&self.nodes, parent.as_ref());
         let result = self
             .visit_source_inner(parent, dependency, declared, acquired)
             .await;
@@ -356,7 +359,8 @@ impl GraphBuilder {
         // the whole build over a leftover temp directory leaves the user no way forward. Report it
         // and move on; the directory is under the OS temp root either way.
         if let Err(message) = cleanup {
-            self.warnings.push(GraphWarning::dependency(
+            self.warnings.push(GraphWarning::declared(
+                declared_by,
                 dependency,
                 format!("could not remove the temporary Git checkout: {message}"),
             ));
@@ -444,6 +448,16 @@ impl GraphBuilder {
             .insert(acquired.id.clone(), VisitState::Complete);
         self.order.push(index);
         Ok(())
+    }
+
+    /// Warn about a `[dependencies]` entry, attributed to the project whose manifest declares it.
+    ///
+    /// The entry name alone is not enough for a transitive project: `lib` says which line to look
+    /// at, not which `jals.toml` it is on.
+    fn warn_declared(&mut self, parent: Option<&NodeId>, name: &str, message: impl Into<String>) {
+        let declaring = crate::graph::declaring_location(&self.nodes, parent);
+        self.warnings
+            .push(GraphWarning::declared(declaring, name, message));
     }
 
     /// How a diagnostic names this node. A Git dependency lives in a temporary checkout whose path

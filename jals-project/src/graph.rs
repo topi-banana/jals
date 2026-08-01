@@ -207,6 +207,40 @@ impl GraphWarning {
             message: message.into(),
         }
     }
+
+    /// A manifest entry gone wrong, attributed to the project whose manifest spells it.
+    ///
+    /// `declaring` is `None` for the root, which has no node and needs none: its `jals.toml` is the
+    /// one the reader is already in, so naming it would put a host path on every line without
+    /// narrowing anything. A transitive project's entry is the case that needs it — `lib` alone
+    /// does not say which of several `jals.toml` files declares `lib`.
+    pub(crate) fn declared(
+        declaring: Option<String>,
+        name: &str,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            node: declaring,
+            dependency: Some(name.to_owned()),
+            message: message.into(),
+        }
+    }
+}
+
+/// The location of the node `parent` names, which is how a warning about an entry that project's
+/// manifest declared is attributed. `None` is the root: discovery gives it no node.
+///
+/// A scan rather than an index because it runs once per *failing* entry, and a graph that had
+/// enough nodes for the difference to show would have to fail on most of them to reach it.
+pub(crate) fn declaring_location(
+    nodes: &[ResolvedNode],
+    parent: Option<&NodeId>,
+) -> Option<String> {
+    let parent = parent?;
+    nodes
+        .iter()
+        .find(|node| &node.id == parent)
+        .map(|node| node.location.clone())
 }
 
 /// `<subject>: <message>` — the whole of what a host can say about one of these, which is why the
