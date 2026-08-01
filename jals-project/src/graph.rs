@@ -12,7 +12,7 @@ use jals_build::build_script::{
     BuildScriptCacheScope, BuildScriptDiagnostic, BuildScriptEnvironment, BuildScriptLimits,
     prepare_build_script,
 };
-use jals_build::task::TaskPlan;
+use jals_build::task::{TaskPlan, TaskPublishIntent};
 use jals_classpath::{Fetcher, LibrarySource, NetworkPolicy};
 use jals_config::{Dependency, Manifest, ResolvedBuildFeatures};
 use jals_exec::Exec;
@@ -464,7 +464,7 @@ impl ResolvedNode {
                 .run_task_plan(cache, &output.task_plan, &features, options, &source.view)
                 .await?;
             exports.task_classpath = execution.classpath;
-            exports.library_sources = self.navigation_sources(manifest, &execution.publications)?;
+            self.publication_exports(manifest, &execution.publications, &mut exports)?;
         }
         exports
             .warnings
@@ -519,27 +519,48 @@ impl ResolvedNode {
         .map_err(|error| self.script_error(error.to_string()))
     }
 
-    /// Published trees readdressed the way a consumer sees library sources: by package.
+    /// Published trees readdressed for the channel their declared intent routes them to.
     ///
     /// A destination is written project-relative (`src/main/java/net/minecraft`) because that is
-    /// where a *root* project would physically publish it. A consumer never sees the dependency's
-    /// directory layout, only its types, so the source root is stripped and what remains is the
-    /// package path — which is exactly how extracted `sources` jars and synthesized skeletons are
-    /// addressed, so all three agree on where a class lives.
-    fn navigation_sources(
+    /// where a *root* project would physically publish it, and the two channels want opposite
+    /// halves of that:
+    ///
+    /// - **Navigation** is addressed by package. A consumer never sees the dependency's directory
+    ///   layout, only its types, so the source root is stripped and what remains is the package
+    ///   path — exactly how extracted `sources` jars and synthesized skeletons are addressed, so
+    ///   all three agree on where a class lives and one type resolves to one artifact.
+    /// - **Compile** keeps the whole project-relative path, because it joins this node's authored
+    ///   sources on the way through its own frontend and gets a node token in front of it at
+    ///   assembly. Reusing the package address there would make two dependencies publishing the
+    ///   same package collide.
+    ///
+    /// `package_prefix` runs for both, and its result is discarded on the compile side: a
+    /// destination outside every declared source root is a mistake regardless of who reads the
+    /// tree, and skipping the call for one intent would leave that check to the root host alone.
+    fn publication_exports(
         &self,
         manifest: &Manifest,
         publications: &[BuildTaskPublication],
-    ) -> Result<Vec<LibrarySource>, GraphError> {
-        let mut sources = Vec::new();
+        exports: &mut NodeExports,
+    ) -> Result<(), GraphError> {
         for publication in publications {
             let prefix = self.package_prefix(manifest, &publication.destination)?;
-            sources.extend(publication.tree.files.iter().map(|file| LibrarySource {
-                path: prefix.concat(&file.path),
+            exports
+                .publication_roots
+                .push(publication.destination.path().clone());
+            let (channel, base) = match publication.intent {
+                TaskPublishIntent::Navigation => (&mut exports.library_sources, prefix),
+                TaskPublishIntent::Compile => (
+                    &mut exports.compile_sources,
+                    publication.destination.path().clone(),
+                ),
+            };
+            channel.extend(publication.tree.files.iter().map(|file| LibrarySource {
+                path: base.concat(&file.path),
                 key: file.key.clone(),
             }));
         }
-        Ok(sources)
+        Ok(())
     }
 
     /// The package prefix a publication destination lies at, or an error if it lies outside every
@@ -583,9 +604,26 @@ pub(crate) struct NodeExports {
     /// verified cache assembly reads from, so materializing a remapped game JAR back into memory to
     /// re-publish it under a second key would double the work and the storage for no gain.
     pub(crate) task_classpath: Vec<CacheKey>,
-    /// Navigation-only sources a build task published (`tasks.publish_tree`), addressed
-    /// package-relative like every other library source. Never a compile input.
+    /// Sources a build task published as `navigation`, addressed package-relative like every other
+    /// library source. Never a compile input.
+    ///
+    /// That routing is a *contract*, not a shortcut: a dependency exports its types through the
+    /// classpath, and a navigation publication is a view of types defined there. Handing `javac`
+    /// both a decompiled tree and the JAR it came from is how a working build acquires duplicates.
+    /// A script whose tree is the only carrier of its package says so, and lands in
+    /// [`compile_sources`](Self::compile_sources) instead.
     pub(crate) library_sources: Vec<LibrarySource>,
+    /// Sources a build task published as `compile`, addressed project-relative — they join this
+    /// node's authored sources on the way through its own frontend, and a node token separates
+    /// them from another dependency's at assembly.
+    pub(crate) compile_sources: Vec<LibrarySource>,
+    /// Every publication destination, project-relative and whatever the intent.
+    ///
+    /// A `replace-root` publication owns its destination completely, so a source captured under one
+    /// is what a previous run of this same plan left on disk — not an authored input. Assembly
+    /// drops those, which is what keeps a dependency's compile set from depending on whether
+    /// somebody once ran a build in its directory.
+    pub(crate) publication_roots: Vec<RelativePath>,
     pub(crate) warnings: Vec<String>,
 }
 

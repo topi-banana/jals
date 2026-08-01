@@ -275,6 +275,12 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
         // Navigation sources keep the package-relative path the task gave them, with no node token
         // in front: that is the address every other library source uses, and sharing it is what
         // lets one type resolve to one artifact when a jar's sources and a skeleton also offer it.
+        //
+        // A `compile` publication is deliberately absent. It went through `publish_lowered_sources`
+        // with the node's authored files and is already in `source_dependency_artifacts`; adding it
+        // here as well would mount the same type twice in an editor — once under `.jals/library`
+        // and once under `.jals/source-dependency` — and the library-source deduplication below
+        // only ever compares library sources with each other. This is a routing, not a fan-out.
         self.plan
             .library_source_artifacts
             .extend(exports.library_sources.iter().cloned());
@@ -293,9 +299,40 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
         node: &crate::graph::ResolvedNode,
         source: &crate::graph::SourceNode,
     ) {
-        // Authored and generated sources are the only place they merge; `preprocess` never sees
-        // the authored set. A build script may register a path that is also an authored file, so
-        // the union is deduplicated here — `LoweredTree` rejects a duplicate path, correctly.
+        // A `compile` publication is the one input here that arrives as a cache key rather than as
+        // bytes, because the task executor published it into this very cache and copying it back
+        // out at capture time would have bought nothing. Read before the loop below rather than
+        // inside it: the borrow of `self.graph` that reaches the authored set and the read from
+        // `self.cache` do not have to overlap, and this way neither does.
+        let publications: Vec<LibrarySource> = self
+            .graph
+            .exports
+            .get(&node.id)
+            .map(|exports| exports.compile_sources.clone())
+            .unwrap_or_default();
+        let mut published = Vec::with_capacity(publications.len());
+        for file in &publications {
+            match self.cache.lookup(&file.key).await {
+                Ok(Some(bytes)) => published.push((file.path.clone(), bytes)),
+                Ok(None) => self.errors.push(ProjectAssemblyError {
+                    node: node.location.clone(),
+                    path: Some(file.path.clone()),
+                    message: "published compile source is not cached".to_owned(),
+                }),
+                Err(error) => self.errors.push(ProjectAssemblyError {
+                    node: node.location.clone(),
+                    path: Some(file.path.clone()),
+                    message: format!("published compile source is invalid: {error:?}"),
+                }),
+            }
+        }
+
+        // Publications, then authored, then generated; `preprocess` never sees the authored set, so
+        // this is the only place all three merge. A build script may register a path that is also
+        // an authored file, so the union is deduplicated here — `LoweredTree` rejects a duplicate
+        // path, correctly. Publications go first because a `replace-root` destination belongs to
+        // the publication: anything found there is what a previous run of this same plan left
+        // behind, and the fresh tree is the one that is current.
         let generated = self
             .graph
             .exports
@@ -303,6 +340,14 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
             .map(|exports| &exports.sources);
         let mut seen = BTreeSet::new();
         let mut files = Vec::new();
+        for (path, bytes) in &published {
+            if seen.insert(path.clone()) {
+                files.push(jals_frontend::IrFile::new(
+                    path.clone(),
+                    bytes.as_slice().into(),
+                ));
+            }
+        }
         for file in source
             .authored_sources
             .iter()

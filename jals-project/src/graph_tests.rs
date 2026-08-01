@@ -1220,6 +1220,42 @@ fn task_dependency(script: &str, files: &[(&str, &[u8])]) -> (Manifest, MemorySt
     )
 }
 
+/// Discover, preprocess and project a graph whose whole task plan is local, so nothing in it can
+/// reach the network — `inert!` supplies a fetcher that panics if anything tries.
+///
+/// The cache is returned to the caller rather than owned here because a *consuming* assertion has
+/// to read the published artifacts back out of the same one.
+async fn local_assembly(
+    root: &Manifest,
+    storage: &MemoryStorage,
+    cache: &mut MemoryStorage,
+) -> crate::assemble::ProjectGraphAssembly {
+    MemoryProjectGraph::discover(root, &storage.view())
+        .await
+        .unwrap()
+        .preprocess(cache.artifacts_mut(), inert!())
+        .await
+        .unwrap()
+        .assemble(cache.artifacts_mut())
+        .await
+}
+
+/// A dependency that publishes one tree of `net/example` sources with the given intent, out of a
+/// jar it holds itself so the plan needs no network.
+fn publishing_dependency(intent: &str, files: &[(&str, &[u8])]) -> (Manifest, MemoryStorage) {
+    let sources = jar(&[("net/example/Api.java", b"package net.example; class Api {}")]);
+    let script = format!(
+        r#"
+            let archive = tasks.project_jar("vendor/sources.jar");
+            let tree = tasks.extract_java(archive, "net/example");
+            tasks.publish_tree("api", tree, "src/main/java/net/example", "replace-root", "{intent}");
+        "#
+    );
+    let mut all: Vec<(&str, &[u8])> = vec![("dep/vendor/sources.jar", &sources)];
+    all.extend_from_slice(files);
+    task_dependency(&script, &all)
+}
+
 /// Counts fetches so a test can tell a cache hit from a network round trip.
 struct CountingFetcher {
     responses: std::collections::BTreeMap<String, Vec<u8>>,
@@ -1598,5 +1634,128 @@ fn a_dependency_publication_reaches_the_editor_but_not_the_compiler() {
                 .iter()
                 .all(|source| !format!("{source:?}").contains("Api.java"))
         );
+    });
+}
+
+/// The other half of the routing. A tree its script declares as the only carrier of its package
+/// joins the dependency's own sources on the way through the dependency's own frontend, so it is
+/// addressed the way those are — project-relative, under the node token — and not the way a library
+/// source is.
+#[test]
+fn a_compile_intent_publication_is_projected_as_a_source_dependency() {
+    jals_exec::block_on_inline(async {
+        let (root, view_storage) = publishing_dependency("compile", &[]);
+        let before = view_storage.view();
+        let mut cache = MemoryStorage::memory(CodeTree::default());
+        let assembly = local_assembly(&root, &view_storage, &mut cache).await;
+        assert!(assembly.errors.is_empty(), "{:?}", assembly.errors);
+
+        // Routed, not fanned out: reaching both channels would mount one type twice in an editor.
+        assert!(
+            assembly.plan.library_source_artifacts.is_empty(),
+            "{:?}",
+            assembly.plan.library_source_artifacts
+        );
+        let published: Vec<_> = assembly
+            .plan
+            .source_dependency_artifacts
+            .iter()
+            .map(|source| source.path.to_string())
+            .filter(|path| path.ends_with("Api.java"))
+            .collect();
+        let [path] = published.as_slice() else {
+            panic!("expected exactly one published compile source, got {published:?}");
+        };
+        // The node token is the half a package address does not have, and the half two dependencies
+        // publishing one package need.
+        assert!(path.starts_with("dependencies/"), "{path}");
+        assert!(
+            path.ends_with("/sources/src/main/java/net/example/Api.java"),
+            "{path}"
+        );
+
+        // The dependency is still a snapshot, not a workspace: the intent decides where the value
+        // goes, never whether it may be written back.
+        assert_eq!(view_storage.view().revision(), before.revision());
+        assert!(
+            view_storage
+                .view()
+                .file(&FileKey::parse("dep/src/main/java/net/example/Api.java").unwrap())
+                .is_err()
+        );
+    });
+}
+
+/// The consuming half, against the mode `a_dependency_publication_reaches_the_editor_but_not_the
+/// _compiler` pins the opposite of: a declared compile input is what the compiler is handed.
+#[test]
+fn a_compile_intent_publication_reaches_the_compiler() {
+    jals_exec::block_on_inline(async {
+        let (root, view_storage) = publishing_dependency("compile", &[]);
+        let mut cache = MemoryStorage::memory(CodeTree::default());
+        let assembly = local_assembly(&root, &view_storage, &mut cache).await;
+        assert!(assembly.errors.is_empty(), "{:?}", assembly.errors);
+
+        for options in [ProjectInputOptions::Compile, ProjectInputOptions::Editor] {
+            let inputs = jals_classpath::ProjectInputs::assemble(
+                &UnreachableFetcher,
+                &mut cache,
+                &assembly.plan,
+                options,
+            )
+            .await;
+            assert!(
+                inputs
+                    .source_dep_sources
+                    .iter()
+                    .any(|source| format!("{source:?}").contains("Api.java")),
+                "{options:?}: {:?}",
+                inputs.source_dep_sources
+            );
+            // Never as a library source, in either mode — that is the channel it was routed out of.
+            assert!(
+                inputs
+                    .library_sources
+                    .iter()
+                    .all(|source| !source.path.to_string().ends_with("Api.java")),
+                "{options:?}"
+            );
+        }
+    });
+}
+
+/// A destination outside every declared source root is a mistake whoever reads the tree, so the
+/// check runs for both intents. The compile routing does not *use* the package prefix, which is
+/// exactly why it would be easy to stop computing it — and then a dependency would reach the check
+/// nowhere, since only the root host validates a destination again.
+#[test]
+fn a_compile_intent_publication_outside_a_source_root_is_rejected() {
+    jals_exec::block_on_inline(async {
+        let sources = jar(&[("net/example/Api.java", b"package net.example; class Api {}")]);
+        let (root, view_storage) = task_dependency(
+            r#"
+                let archive = tasks.project_jar("vendor/sources.jar");
+                let tree = tasks.extract_java(archive, "net/example");
+                tasks.publish_tree("api", tree, "generated/net/example", "replace-root", "compile");
+            "#,
+            &[("dep/vendor/sources.jar", &sources)],
+        );
+        let mut cache = MemoryStorage::memory(CodeTree::default());
+
+        let error = MemoryProjectGraph::discover(&root, &view_storage.view())
+            .await
+            .unwrap()
+            .preprocess(cache.artifacts_mut(), inert!())
+            .await
+            .unwrap_err();
+
+        let GraphError::BuildScript {
+            location, message, ..
+        } = &error
+        else {
+            panic!("expected a build-script error, got {error:?}");
+        };
+        assert_eq!(location, "dep");
+        assert!(message.contains("source-dirs"), "{message}");
     });
 }
