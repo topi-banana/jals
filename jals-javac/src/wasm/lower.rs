@@ -2634,10 +2634,7 @@ impl Lowering<'_> {
         let mut slots = Vec::with_capacity(resources.len());
         for resource in resources {
             let name = resource
-                .syntax()
-                .children_with_tokens()
-                .filter_map(jals_syntax::SyntaxElement::into_token)
-                .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+                .binding()
                 .ok_or(WasmError::Unsupported("a resource with no name"))?;
             let value = resource
                 .syntax()
@@ -2784,12 +2781,8 @@ impl Lowering<'_> {
         if types.is_empty() {
             return Err(WasmError::Unsupported("a `catch` with no type"));
         }
-        // The variable is a direct token of the clause, not wrapped in a parameter node.
         let name = clause
-            .syntax()
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+            .binding()
             .ok_or(WasmError::Unsupported("a `catch` with no variable"))?;
         let body = clause
             .syntax()
