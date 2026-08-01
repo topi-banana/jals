@@ -287,7 +287,10 @@ impl Decl {
     /// [`SyntaxNode`] — the seven forms are seven `SyntaxKind`s — and would otherwise re-find the
     /// `IDENT` by hand to get the offset `jals-hir`'s index is keyed on. Going through the typed
     /// accessors means a variant that later moves its name into a child node keeps working here.
-    pub fn name_token(&self) -> Option<SyntaxToken> {
+    ///
+    /// That is also why the dispatch is private: every caller arrives holding the node, so
+    /// [`name_token_of`](Self::name_token_of) is the entry and this is its body.
+    fn name_token(&self) -> Option<SyntaxToken> {
         match self {
             Self::Class(decl) => decl.name_token(),
             Self::Interface(decl) => decl.name_token(),
