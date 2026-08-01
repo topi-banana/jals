@@ -1147,7 +1147,9 @@ impl App {
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join("; ");
-            return Err(anyhow!("project dependency assembly failed: {messages}"));
+            // No outer phrase. Every message already opens with `dependency project <node> could
+            // not assemble`, and the one that used to be here restated it.
+            return Err(anyhow!("{messages}"));
         }
 
         for entry in &assembly.compile_classpath {
