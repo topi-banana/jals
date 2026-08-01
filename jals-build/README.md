@@ -291,7 +291,7 @@ asynchronously after Rhai evaluation and capability preflight succeed:
 | `decompile_java(jar, prefix)`                                                    | Compile-oriented skeleton source tree below `prefix`.                         |
 | `add_classpath(jar)`                                                             | Add a task-produced JAR to the root classpath.                                |
 | `add_nested_classpath(jar)`                                                      | Expand every nested `.jar` member onto the root classpath (library bundlers). |
-| `publish_tree(owner, tree, destination, "replace-root")`                         | Atomically replace an exclusive physical source subtree.                      |
+| `publish_tree(owner, tree, destination, "replace-root", intent)`                 | Atomically replace an exclusive physical source subtree.                      |
 
 For example:
 
@@ -302,9 +302,19 @@ tasks.publish_tree(
     "example-sources",
     sources,
     "src/main/java/net/example",
-    "replace-root"
+    "replace-root",
+    "navigation"
 );
 ```
+
+`intent` is `"compile"` or `"navigation"`, and there is no default: it says what a consumer does
+with the tree, which is the one thing the task graph cannot infer — a tree with a JAR behind it and
+a tree that is the only carrier of its package are written identically. It changes nothing for the
+root, where a publication becomes real files either way; see the dependency section below.
+
+The four-argument form every script spelled before the intent existed is still registered, and fails
+naming the argument to add. A script that omits it is one whose author has not decided, so there is
+nothing to default to — but what they meet has to be that, and not a signature dump.
 
 `replace-root` is deliberately explicit and destructive: after every non-empty task result succeeds,
 the complete destination is replaced, including files manually added or edited below it. The
@@ -327,12 +337,71 @@ what made the whole facility unavailable there before.
 
 - `add_classpath` / `add_nested_classpath` reach the consumer's compile classpath and analysis,
   exactly like a `jar` dependency's classes.
-- `publish_tree` produces **navigation-only** sources rather than files on disk. Its `destination`
-  is still validated as a strict source-root descendant, but what the consumer receives is the
-  package path below that root (`src/main/java/net/x` → `net/x/…`), addressed like an extracted
-  `sources` jar so a type resolves to one artifact however many producers offer it. These are never
-  handed to the compiler: a decompiled skeleton and the classpath JAR that already defines the same
-  types would collide.
+- `publish_tree` produces values rather than files on disk, and its `intent` decides which of two
+  things the consumer receives. Its `destination` is validated as a strict source-root descendant
+  either way — a destination with no package below it is a mistake whoever reads the tree.
+
+`"navigation"` is the **contract most publications want**: a dependency exports its types through
+the classpath, and a published tree is a *view* of types defined there. The consumer receives the
+package path below the declared source root (`src/main/java/net/x` → `net/x/…`), addressed like an
+extracted `sources` jar so a type resolves to one artifact however many producers offer it, and it
+is never handed to the compiler — a decompiled skeleton and the classpath JAR that already defines
+the same types would collide.
+
+`"compile"` is for the other shape, where the tree is the only carrier of its package. It joins the
+dependency's own sources, is lowered by the dependency's own frontend, and reaches the consumer's
+compiler as an ordinary source dependency under a node token. It is a *routing*, not a fan-out: a
+compile publication is not also a navigation source, or an editor would mount one type twice.
+
+A `replace-root` destination is owned by its publication in a dependency as well. Building a
+dependency in its own directory leaves the tree there as real files, and those are read as what they
+are — output of the same plan — rather than captured as authored sources and compiled a second time.
+So whether a consumer compiles never depends on whether anyone once ran a build in a directory they
+are not looking at.
+
+### The premise, and where it is checked
+
+Routing a `navigation` publication away from the compiler is right only because something on the
+classpath defines the same types, and nothing in the task graph enforces that. A compile build never
+loads the classpath, so it is checked where it is still attributable — against the declaration, in
+the graph's preprocessing:
+
+```
+warning: dependency project `vendored`: nothing this project puts on its own classpath defines a
+class under what its build task publishes — `api` at `src/main/java/net/example` (`navigation`,
+package `net/example`). …
+```
+
+This is a **consumer-side** check by construction: discovery gives the root project no node, so a
+library's author does not meet it building their own repository — whoever declares them as a `path`
+or `git` dependency does.
+
+No member is ever decompressed to answer it. An archive is read from its central directory alone,
+and the scan stops as soon as every published prefix is covered — on a game jar that is usually the
+first few of tens of thousands of entries. Entries fold cheapest first, so an expensive one is never
+opened for a question the cheap ones already settled: a captured `[build] classpath` entry and a
+build script's registered classpath are already in memory, while a cached artifact passes through
+`open_verified`'s whole-artifact SHA-256 before its directory is parsed. That answer is then recorded
+under its own cache namespace — keyed on the plan, the published packages, and every classpath entry
+that could have changed it — so an editor reload does not re-derive it.
+
+Two things the check will not claim, and one it says plainly:
+
+- **An entry that could not be read is not an entry that defines nothing.** Those are reported
+  beside the findings rather than instead of them — a broken jar makes a finding less certain, not
+  less actionable — and once for the whole report, since each qualifies the same claim about the
+  same roots. Only a scan that read the whole classpath is ever recorded.
+- **`[dependencies]` are out of reach rather than late.** Discovery resolved them into graph nodes
+  before preprocessing ran, and what they contribute is settled at assembly. Staying silent would
+  lose the warning for every root a project publishes as soon as it gains one jar, so the report
+  says what it could not see instead — for every dependency kind, since a `git`/`path` dependency's
+  sources reach a consumer's compiler too. That is also why the report does not offer the two fixes
+  as equals: `tasks.add_classpath` is the one it reads, and a `[dependencies]` jar carries the types
+  just as well but leaves the warning exactly where it was. A publication a dependency backs is a
+  blind spot the report names, not a finding it stands behind.
+- **A `compile` publication is reported too**, and says something else: those types do reach a
+  consumer, but only as source it recompiles itself, so nothing carries them for anything that does
+  not build the tree.
 
 Each dependency execution is memoized under its project identity, plan, and resolved features, and
 re-verified against the cache before it is reused, so an editor reload does not re-fetch, re-remap,

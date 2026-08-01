@@ -93,6 +93,14 @@ pub enum CacheNamespace {
     BuildTaskArtifact,
     BuildTaskSource,
     BuildTaskState,
+    /// Which of a dependency's published packages its own classpath defines a class under.
+    ///
+    /// Separate from [`BuildTaskState`](Self::BuildTaskState) because it answers a question with a
+    /// different input: the declaring project's `[build] classpath` and its build script's
+    /// registered classpath are part of it, and neither is part of a task execution's identity.
+    /// Folding them into that key would make editing one `[build] classpath` line re-fetch,
+    /// re-remap and re-decompile a whole task plan.
+    PublicationCoverage,
     /// One Java source file emitted by a compile frontend — the first of the two compile
     /// tiers. Keyed on what the frontend was permitted to observe, so a per-file frontend
     /// stays per-file invalidated.
@@ -125,6 +133,7 @@ impl CacheNamespace {
             Self::BuildTaskArtifact => "build-task-artifact",
             Self::BuildTaskSource => "build-task-source",
             Self::BuildTaskState => "build-task-state",
+            Self::PublicationCoverage => "publication-coverage",
             Self::FrontendOutput => "frontend-output",
             Self::BackendOutput => "backend-output",
         }
@@ -146,6 +155,7 @@ impl CacheNamespace {
             "build-task-artifact" => Self::BuildTaskArtifact,
             "build-task-source" => Self::BuildTaskSource,
             "build-task-state" => Self::BuildTaskState,
+            "publication-coverage" => Self::PublicationCoverage,
             "frontend-output" => Self::FrontendOutput,
             "backend-output" => Self::BackendOutput,
             _ => return None,

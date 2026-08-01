@@ -17,8 +17,8 @@ use jals_storage::{
 };
 
 use crate::graph::{
-    BinaryInput, CapturedClasspathEntry, CapturedFile, GraphMetadata, GraphWarning, NodeBody,
-    NodeId, PreprocessedProjectGraph, ResolvedNode,
+    BinaryInput, CapturedClasspathEntry, CapturedClasspathKind, CapturedFile, GraphMetadata,
+    GraphWarning, NodeBody, NodeId, PreprocessedProjectGraph, ResolvedNode,
 };
 
 /// One verified file entry on the compile classpath.
@@ -168,6 +168,15 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
                     self.warnings
                         .push(GraphWarning::node(node.location.clone(), warning.clone()));
                 }
+                // One report per node, rendered at the same seam every other node diagnostic is:
+                // it stays structured through preprocessing so nothing downstream has to parse it
+                // back out of a sentence.
+                if let Some(diagnosis) = &exports.unbacked_publications {
+                    self.warnings.push(GraphWarning::node(
+                        node.location.clone(),
+                        diagnosis.to_string(),
+                    ));
+                }
             }
         }
         self.project_binary_edges();
@@ -275,6 +284,12 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
         // Navigation sources keep the package-relative path the task gave them, with no node token
         // in front: that is the address every other library source uses, and sharing it is what
         // lets one type resolve to one artifact when a jar's sources and a skeleton also offer it.
+        //
+        // A `compile` publication is deliberately absent. It went through `publish_lowered_sources`
+        // with the node's authored files and is already in `source_dependency_artifacts`; adding it
+        // here as well would mount the same type twice in an editor — once under `.jals/library`
+        // and once under `.jals/source-dependency` — and the library-source deduplication below
+        // only ever compares library sources with each other. This is a routing, not a fan-out.
         self.plan
             .library_source_artifacts
             .extend(exports.library_sources.iter().cloned());
@@ -293,19 +308,64 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
         node: &crate::graph::ResolvedNode,
         source: &crate::graph::SourceNode,
     ) {
-        // Authored and generated sources are the only place they merge; `preprocess` never sees
-        // the authored set. A build script may register a path that is also an authored file, so
-        // the union is deduplicated here — `LoweredTree` rejects a duplicate path, correctly.
-        let generated = self
+        // A `compile` publication is the one input here that arrives as a cache key rather than as
+        // bytes, because the task executor published it into this very cache and copying it back
+        // out at capture time would have bought nothing. Read before the loop below rather than
+        // inside it: the borrow of `self.graph` that reaches the authored set and the read from
+        // `self.cache` do not have to overlap, and this way neither does.
+        let publications: Vec<LibrarySource> = self
             .graph
             .exports
             .get(&node.id)
-            .map(|exports| &exports.sources);
+            .map(|exports| exports.compile_sources.clone())
+            .unwrap_or_default();
+        let mut published = Vec::with_capacity(publications.len());
+        for file in &publications {
+            match self.cache.lookup(&file.key).await {
+                Ok(Some(bytes)) => published.push((file.path.clone(), bytes)),
+                Ok(None) => self.errors.push(ProjectAssemblyError {
+                    node: node.location.clone(),
+                    path: Some(file.path.clone()),
+                    message: "published compile source is not cached".to_owned(),
+                }),
+                Err(error) => self.errors.push(ProjectAssemblyError {
+                    node: node.location.clone(),
+                    path: Some(file.path.clone()),
+                    message: format!("published compile source is invalid: {error:?}"),
+                }),
+            }
+        }
+
+        // Publications, then authored, then generated; `preprocess` never sees the authored set, so
+        // this is the only place all three merge. A build script may register a path that is also
+        // an authored file, so the union is deduplicated here — `LoweredTree` rejects a duplicate
+        // path, correctly. Publications go first because a `replace-root` destination belongs to
+        // the publication: anything found there is what a previous run of this same plan left
+        // behind, and the fresh tree is the one that is current.
+        let exports = self.graph.exports.get(&node.id);
+        let roots = exports.map_or(&[][..], |exports| exports.publication_roots.as_slice());
+        let generated = exports.map(|exports| &exports.sources);
         let mut seen = BTreeSet::new();
         let mut files = Vec::new();
+        // Consumed rather than borrowed: `IrFile` needs an `Arc<[u8]>`, which is a copy whichever
+        // way the bytes arrive, but borrowing would keep every publication's `Vec` alive beside its
+        // copy until this function returns. A decompiled tree is thousands of files, so the
+        // difference is holding one whole tree twice against holding it once and a file twice.
+        for (path, bytes) in published {
+            if seen.insert(path.clone()) {
+                files.push(jals_frontend::IrFile::new(path, bytes.into()));
+            }
+        }
+        // An authored source inside a publication destination is not authored. `replace-root` owns
+        // its destination — running this plan as a root would delete the file before writing the
+        // tree — so what discovery captured there is residue of a previous build in the dependency's
+        // own directory, and compiling it would make a consumer's result depend on whether anybody
+        // ever ran one. Generated sources are not filtered: a build script registered those in this
+        // same run, so they are as current as the publication is.
         for file in source
             .authored_sources
             .iter()
+            .filter(|file| !roots.iter().any(|root| file.path.starts_with(root)))
             .chain(generated.into_iter().flatten())
         {
             if seen.insert(file.path.clone()) {
@@ -367,9 +427,9 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
     }
 
     async fn publish_classpath_entry(&mut self, node: &NodeId, entry: &CapturedClasspathEntry) {
-        match entry {
-            CapturedClasspathEntry::File(file) => self.publish_classpath_file(node, file).await,
-            CapturedClasspathEntry::Tree { path, members } => {
+        match &entry.kind {
+            CapturedClasspathKind::File(file) => self.publish_classpath_file(node, file).await,
+            CapturedClasspathKind::Tree { path, members } => {
                 self.publish_classpath_tree(node, path, members).await;
             }
         }

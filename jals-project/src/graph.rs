@@ -12,12 +12,15 @@ use jals_build::build_script::{
     BuildScriptCacheScope, BuildScriptDiagnostic, BuildScriptEnvironment, BuildScriptLimits,
     prepare_build_script,
 };
-use jals_build::task::TaskPlan;
-use jals_classpath::{Fetcher, LibrarySource, NetworkPolicy};
+use jals_build::task::{TaskPlan, TaskPublishIntent};
+use jals_classpath::{
+    ClasspathCoverage, ExternalLocator, Fetcher, LibrarySource, NetworkPolicy, WarningOrigin,
+};
 use jals_config::{Dependency, Manifest, ResolvedBuildFeatures};
 use jals_exec::Exec;
 use jals_storage::{
-    ArtifactCache, CacheBackend, CacheKey, ContentDigest, DirKey, ProjectView, RelativePath,
+    ArtifactCache, CacheBackend, CacheKey, CacheNamespace, ContentDigest, DirKey, FileKey,
+    ProjectView, ProvenanceFold, RelativePath,
 };
 
 use crate::task::{
@@ -322,8 +325,153 @@ pub(crate) struct CapturedFile {
     pub(crate) bytes: Vec<u8>,
 }
 
+/// Everything one node puts on its own classpath, in the three shapes it arrives in.
+///
+/// Kept together so the scan and the cache key it is recorded under can never see different sets:
+/// keying on a subset is how a stale answer gets served for a classpath that changed.
+#[derive(Clone, Copy)]
+struct NodeClasspath<'a> {
+    /// The manifest's own `[build] classpath`, as discovery captured it — read from the capture
+    /// rather than from the view because a native node may have taken it from a host path that is
+    /// in no project revision.
+    captured: &'a [CapturedClasspathEntry],
+    /// What the build script registered, already read out of the view into `NodeExports`.
+    registered: &'a [CapturedFile],
+    /// What a build *task* put there, as keys in the verified cache. The expensive half to read,
+    /// and free to name.
+    tasks: &'a [CacheKey],
+}
+
+/// Wire version of a recorded coverage scan. Bump it whenever the record's meaning changes for
+/// unchanged bytes; a mismatch is a miss, never a misread.
+const PUBLICATION_COVERAGE_VERSION: u32 = 1;
+
+/// One classpath scan's answer, recorded so an editor reload does not re-digest a game JAR to
+/// re-derive it.
+///
+/// Only the *covered* half is stored. The roots, their intents and the `[dependencies]` caveat are
+/// rebuilt from live data on every hit, so a record holds exactly what cost something to learn.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CoverageRecord {
+    version: u32,
+    covered: Vec<String>,
+}
+
+/// One published root nothing on the declaring project's own classpath defines a class under.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UnbackedPublication {
+    pub(crate) owner: String,
+    pub(crate) destination: DirKey,
+    pub(crate) prefix: RelativePath,
+    pub(crate) intent: TaskPublishIntent,
+}
+
+/// Everything one node's coverage check found, as **one** report.
+///
+/// One report rather than one per root, because two of the three things it says are properties of
+/// the *project* — what the check could not see, and what it could not read — and stating those
+/// once is then structural rather than a matter of appending them to whichever message happens to
+/// come first.
+///
+/// Crate-internal, and rendered into the `String` a [`NodeExports::warnings`] entry carries.
+/// [`GraphWarning`] is the one diagnostic a host sees, and it attributes this to the node at
+/// assembly; a second host-facing type would be a second thing for four hosts to learn to render.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PublicationDiagnosis {
+    pub(crate) roots: Vec<UnbackedPublication>,
+    /// Classpath entries that could not be inspected, rendered whole through
+    /// [`jals_classpath::Warning`]'s `Display` — several of its messages name no location at all,
+    /// so the message alone would drop the half a user can act on.
+    pub(crate) unread: Vec<jals_classpath::Warning>,
+    pub(crate) dependencies_unseen: bool,
+}
+
+impl fmt::Display for PublicationDiagnosis {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("nothing this project puts on its own classpath defines a class under what ")?;
+        f.write_str("its build task publishes —")?;
+        for (index, root) in self.roots.iter().enumerate() {
+            let separator = if index == 0 { " " } else { ", " };
+            let intent = match root.intent {
+                TaskPublishIntent::Compile => "compile",
+                TaskPublishIntent::Navigation => "navigation",
+            };
+            write!(
+                f,
+                "{separator}`{}` at `{}` (`{intent}`, package `{}`)",
+                root.owner, root.destination, root.prefix
+            )?;
+        }
+        f.write_str(".")?;
+        if self.mentions(TaskPublishIntent::Navigation) {
+            f.write_str(
+                " A `navigation` publication is a view of types the classpath defines, and never a \
+                 compile input, so a consumer has nothing there to compile against.",
+            )?;
+        }
+        if self.mentions(TaskPublishIntent::Compile) {
+            f.write_str(
+                " A `compile` publication does reach a consumer, but only as source it recompiles \
+                 itself: nothing carries those types for anything that does not build this tree.",
+            )?;
+        }
+        if self.dependencies_unseen {
+            f.write_str(
+                " This project also declares `[dependencies]`, whose contribution is settled after \
+                 this check and is invisible to it — so if one of them is what backs these types, \
+                 this warning is the check's blind spot rather than a finding.",
+            )?;
+        }
+        if !self.unread.is_empty() {
+            f.write_str(
+                " Part of the classpath could not be read, so this is what was reachable rather \
+                 than the whole of it:",
+            )?;
+            for (index, warning) in self.unread.iter().enumerate() {
+                let separator = if index == 0 { " " } else { "; " };
+                write!(f, "{separator}{warning}")?;
+            }
+            f.write_str(".")?;
+        }
+        // Last, so the sentence a reader can act on is the one they end on however many caveats
+        // came before it.
+        //
+        // The two are not offered as equals, because only one of them is one this check can see.
+        // Declaring the library as a `[dependencies]` jar does carry the types, but the jar becomes
+        // a graph node rather than an entry on this project's own classpath, so it settles the
+        // consumer's build and leaves this warning exactly where it was — offering it flatly beside
+        // `add_classpath` would send a reader after a fix and let them find the same sentence.
+        f.write_str(
+            " Put the library's own jar on the classpath with `tasks.add_classpath`, which is what \
+             this check reads. Declaring it as a `[dependencies]` jar carries the types too, but \
+             this check cannot see one and will keep reporting.",
+        )
+    }
+}
+
+impl PublicationDiagnosis {
+    fn mentions(&self, intent: TaskPublishIntent) -> bool {
+        self.roots.iter().any(|root| root.intent == intent)
+    }
+}
+
+/// One captured `[build] classpath` entry, beside what the manifest spelled to reach it.
 #[derive(Debug)]
-pub(crate) enum CapturedClasspathEntry {
+pub(crate) struct CapturedClasspathEntry {
+    /// The `[build] classpath` string, verbatim.
+    ///
+    /// Not the same string as where the bytes ended up, and only one of the two is a location a
+    /// user can act on: the captured path is where discovery *put* them, which is
+    /// declaring-relative for an entry inside the project but a synthesized
+    /// `external-classpath-<n>/<name>` for one outside it. Naming that in a diagnostic sends a
+    /// reader looking for a file nobody wrote and nothing has.
+    pub(crate) declared: String,
+    pub(crate) kind: CapturedClasspathKind,
+}
+
+#[derive(Debug)]
+pub(crate) enum CapturedClasspathKind {
     File(CapturedFile),
     Tree {
         path: RelativePath,
@@ -464,7 +612,20 @@ impl ResolvedNode {
                 .run_task_plan(cache, &output.task_plan, &features, options, &source.view)
                 .await?;
             exports.task_classpath = execution.classpath;
-            exports.library_sources = self.navigation_sources(manifest, &execution.publications)?;
+            self.publication_exports(manifest, &execution.publications, &mut exports)?;
+            exports.unbacked_publications = self
+                .diagnose_unbacked_publications(
+                    cache,
+                    manifest,
+                    &output.task_plan,
+                    NodeClasspath {
+                        captured: &source.classpath,
+                        registered: &exports.classpath,
+                        tasks: &exports.task_classpath,
+                    },
+                    &execution.publications,
+                )
+                .await;
         }
         exports
             .warnings
@@ -519,27 +680,338 @@ impl ResolvedNode {
         .map_err(|error| self.script_error(error.to_string()))
     }
 
-    /// Published trees readdressed the way a consumer sees library sources: by package.
+    /// Published trees readdressed for the channel their declared intent routes them to.
     ///
     /// A destination is written project-relative (`src/main/java/net/minecraft`) because that is
-    /// where a *root* project would physically publish it. A consumer never sees the dependency's
-    /// directory layout, only its types, so the source root is stripped and what remains is the
-    /// package path — which is exactly how extracted `sources` jars and synthesized skeletons are
-    /// addressed, so all three agree on where a class lives.
-    fn navigation_sources(
+    /// where a *root* project would physically publish it, and the two channels want opposite
+    /// halves of that:
+    ///
+    /// - **Navigation** is addressed by package. A consumer never sees the dependency's directory
+    ///   layout, only its types, so the source root is stripped and what remains is the package
+    ///   path — exactly how extracted `sources` jars and synthesized skeletons are addressed, so
+    ///   all three agree on where a class lives and one type resolves to one artifact.
+    /// - **Compile** keeps the whole project-relative path, because it joins this node's authored
+    ///   sources on the way through its own frontend and gets a node token in front of it at
+    ///   assembly. Reusing the package address there would make two dependencies publishing the
+    ///   same package collide.
+    ///
+    /// `package_prefix` runs for both, and its result is discarded on the compile side: a
+    /// destination outside every declared source root is a mistake regardless of who reads the
+    /// tree, and skipping the call for one intent would leave that check to the root host alone.
+    fn publication_exports(
         &self,
         manifest: &Manifest,
         publications: &[BuildTaskPublication],
-    ) -> Result<Vec<LibrarySource>, GraphError> {
-        let mut sources = Vec::new();
+        exports: &mut NodeExports,
+    ) -> Result<(), GraphError> {
         for publication in publications {
             let prefix = self.package_prefix(manifest, &publication.destination)?;
-            sources.extend(publication.tree.files.iter().map(|file| LibrarySource {
-                path: prefix.concat(&file.path),
+            exports
+                .publication_roots
+                .push(publication.destination.path().clone());
+            let (channel, base) = match publication.intent {
+                TaskPublishIntent::Navigation => (&mut exports.library_sources, prefix),
+                TaskPublishIntent::Compile => (
+                    &mut exports.compile_sources,
+                    publication.destination.path().clone(),
+                ),
+            };
+            channel.extend(publication.tree.files.iter().map(|file| LibrarySource {
+                path: base.concat(&file.path),
                 key: file.key.clone(),
             }));
         }
-        Ok(sources)
+        Ok(())
+    }
+
+    /// Warn about the published roots this node's own classpath does not stand behind.
+    ///
+    /// Routing a `navigation` publication away from the compiler is right for the shape it was
+    /// written for — a task that puts a JAR on the classpath *and* publishes readable sources for
+    /// the same types, where handing `javac` both would only duplicate them. Nothing enforces that
+    /// shape, though, so the check is here: a publication can be the only carrier of a package, and
+    /// there the same routing deletes the package outright. The consumer then fails on types this
+    /// project believes it exports, several layers away from the declaration that caused it — so
+    /// the declaration says so itself, here.
+    ///
+    /// A `compile` publication is reported too, and says something different: those types *do* reach
+    /// a consumer, but only as source, so nothing carries them for anyone who does not build this
+    /// tree.
+    ///
+    /// This is a *consumer-side* check by construction. Discovery gives the root project no node, so
+    /// a library's author never sees it building their own repository; it fires in the build of
+    /// whoever declares them as a `path` or `git` dependency.
+    ///
+    /// Only *this* node's classpath is inspected. Its `[dependencies]` are not late but out of
+    /// reach: discovery resolved them into graph nodes before any preprocessing ran, yet a
+    /// [`ResolvedNode`] holds no handle to the graph it sits in, and what a dependency finally
+    /// contributes is decided at assembly. Declaring one is therefore not a reason to stay silent —
+    /// that would lose the warning for every root a project publishes as soon as it gains a single
+    /// dependency — but it is a reason to say the check could not see them, for every dependency
+    /// kind: a `git`/`path` dependency's sources reach a consumer's compiler too, so narrowing the
+    /// caveat to `jar` would be the same overreach in the other direction.
+    async fn diagnose_unbacked_publications<C: CacheBackend>(
+        &self,
+        cache: &mut ArtifactCache<C>,
+        manifest: &Manifest,
+        plan: &TaskPlan,
+        classpath: NodeClasspath<'_>,
+        publications: &[BuildTaskPublication],
+    ) -> Option<PublicationDiagnosis> {
+        // Terminal order, which is the order a report lists them in and the order the cache key
+        // folds them in. Both are properties of the plan, so neither depends on how a classpath
+        // happened to be walked.
+        let mut roots = Vec::new();
+        for publication in publications {
+            // A destination outside every source root is already a hard error from
+            // `publication_exports`, which ran first, so this cannot be reached with one.
+            let Ok(prefix) = self.package_prefix(manifest, &publication.destination) else {
+                continue;
+            };
+            roots.push(UnbackedPublication {
+                owner: publication.owner.clone(),
+                destination: publication.destination.clone(),
+                prefix,
+                intent: publication.intent,
+            });
+        }
+        if roots.is_empty() {
+            // `ClasspathCoverage::seeking` with nothing to seek is already complete, and folding a
+            // classpath into it would be work for an answer nobody asked for.
+            return None;
+        }
+
+        // `run_task_plan` already serialized this plan to key its own record, so `None` is
+        // unreachable rather than a second policy — and if it ever happened, the answer would still
+        // be computed, just never recorded.
+        let provenance = BuildTaskExecutor::plan_fingerprint(plan)
+            .ok()
+            .map(|plan| Self::coverage_provenance(plan, &roots, classpath));
+        if let Some(provenance) = provenance
+            && let Some(covered) = Self::cached_coverage(cache, provenance).await
+        {
+            roots.retain(|root| !covered.contains(&root.prefix));
+            return (!roots.is_empty()).then(|| PublicationDiagnosis {
+                roots,
+                // Empty by construction rather than by optimism, which takes both halves of the
+                // rule. A record is written only from a scan whose `warnings()` were empty; and the
+                // key folds every entry that scan could have read — captured and registered bytes
+                // by digest, a task artifact by its key, whose content half `open_verified` checks
+                // on the way in. A hit therefore names byte-identical inputs walked in the same
+                // deterministic order, so re-scanning could only find the same nothing. The one
+                // input a key cannot pin — whether a task artifact is still *present* — was settled
+                // before this ran: `run_task_plan`'s own memo re-verifies each one and re-executes
+                // if any is gone.
+                //
+                // That also stands in for `ClasspathCoverage::warnings()` being consulted, which a
+                // hit never builds one to consult.
+                unread: Vec::new(),
+                dependencies_unseen: !manifest.dependencies.is_empty(),
+            });
+        }
+
+        let mut coverage = ClasspathCoverage::seeking(roots.iter().map(|root| root.prefix.clone()));
+        // Held bytes first, cache keys last, because the scan stops as soon as every prefix is
+        // covered and the cheap half of a classpath can settle a question the expensive half is
+        // then never opened for. What discovery captured is already in memory; a `CacheKey` costs
+        // `open_verified`'s whole SHA-256 pass. Nothing observable depends on the order: an entry
+        // reached only after the answer was settled could not have changed it, and one skipped for
+        // that reason produces no warning that would have been reported anyway.
+        //
+        // The manifest's own `[build] classpath` is read from what discovery captured, not from the
+        // view: a native node may have taken it from a host path that is in no project revision.
+        let mut yielder = jals_exec::Yielder::new();
+        for entry in classpath.captured {
+            if coverage.is_complete() {
+                break;
+            }
+            let origin = WarningOrigin::External(ExternalLocator::new(entry.declared.clone()));
+            match &entry.kind {
+                CapturedClasspathKind::File(file) => {
+                    coverage.add_resident(origin, &file.path, &file.bytes).await;
+                }
+                // A classpath directory *is* a package root, so a captured member's path already
+                // spells its binary name. A built tree holds as many of them as a jar holds
+                // members and settles just as early, so this stops mid-walk and yields on the way
+                // rather than holding the thread for a directory answered by its first entry.
+                CapturedClasspathKind::Tree { members, .. } => {
+                    for member in members {
+                        if coverage.is_complete() {
+                            break;
+                        }
+                        yielder.tick().await;
+                        coverage.add_class(&member.path);
+                    }
+                }
+            }
+        }
+        // The build script's registered classpath was already read out of the view above, into
+        // `NodeExports::classpath`. Asking the same revision the same question would copy the
+        // answer a second time.
+        for file in classpath.registered {
+            if coverage.is_complete() {
+                break;
+            }
+            // Every one of these came from a `FileKey` in the view, so the fallback is unreachable
+            // rather than a second way of naming the same file.
+            let origin = FileKey::new(file.path.clone()).map_or_else(
+                |_| WarningOrigin::External(ExternalLocator::new(file.path.to_string())),
+                WarningOrigin::ProjectFile,
+            );
+            coverage.add_resident(origin, &file.path, &file.bytes).await;
+        }
+        for key in classpath.tasks {
+            if coverage.is_complete() {
+                break;
+            }
+            coverage.add_cached_artifact(cache, key).await;
+        }
+
+        // Recorded only when the whole classpath was readable. An unreadable entry is a transient
+        // state of the host, not a property of the plan, and a recorded "could not tell" would keep
+        // answering that after the jar was fixed.
+        if coverage.warnings().is_empty()
+            && let Some(provenance) = provenance
+        {
+            let covered: Vec<_> = roots
+                .iter()
+                .filter(|root| coverage.covers(&root.prefix))
+                .map(|root| root.prefix.clone())
+                .collect();
+            Self::record_coverage(cache, provenance, &covered).await;
+        }
+
+        roots.retain(|root| !coverage.covers(&root.prefix));
+        if roots.is_empty() {
+            return None;
+        }
+        Some(PublicationDiagnosis {
+            roots,
+            // An entry that could not be read is not an entry that defines nothing. Reported beside
+            // the roots rather than instead of them: a broken jar makes the finding less certain,
+            // not less actionable, and dropping five specific findings because a sixth entry was
+            // unreadable would trade what a reader can do something about for what they cannot.
+            //
+            // Collected once for the whole report, however many entries went unread, since each of
+            // them qualifies the same claim about the same roots.
+            unread: coverage.warnings().to_vec(),
+            dependencies_unseen: !manifest.dependencies.is_empty(),
+        })
+    }
+
+    /// Identity of one coverage answer: the question, and every classpath entry that could have
+    /// changed it.
+    ///
+    /// Deliberately *not* folded into the task execution's own key. The declaring project's
+    /// `[build] classpath` and its build script's registered classpath are inputs here and are no
+    /// part of a task execution's identity; adding them there would make editing one
+    /// `[build] classpath` line re-fetch, re-remap and re-decompile a whole plan for an answer
+    /// about package names.
+    ///
+    /// Nothing is opened to compute this. Captured bytes are already in memory, and a `CacheKey`
+    /// already carries its own content digest — so the half of the classpath that costs an
+    /// `open_verified` to *read* costs nothing to *name*.
+    fn coverage_provenance(
+        plan: ContentDigest,
+        roots: &[UnbackedPublication],
+        classpath: NodeClasspath<'_>,
+    ) -> ContentDigest {
+        let mut fold = ProvenanceFold::new(b"jals.project.publication-coverage\0");
+        fold.version(PUBLICATION_COVERAGE_VERSION).digest(plan);
+        // Each section is preceded by its own length. `ProvenanceFold::bytes` frames one *item*,
+        // which is not the same as framing the run of them: without this, a prefix and a captured
+        // entry's declared spelling are the same shape, so a root list one longer than it should be
+        // folds identically to a classpath entry one shorter. Both would then read one recorded
+        // answer for two different questions.
+        fold.bytes(&(roots.len() as u64).to_be_bytes());
+        // The question, not only its inputs: a record answers about the prefixes it was asked
+        // about, and the plan digest alone would not distinguish two source-root layouts that put
+        // one destination under different packages.
+        for root in roots {
+            fold.bytes(root.prefix.to_string().as_bytes());
+        }
+        fold.bytes(&(classpath.captured.len() as u64).to_be_bytes());
+        for entry in classpath.captured {
+            fold.bytes(entry.declared.as_bytes());
+            match &entry.kind {
+                CapturedClasspathKind::File(file) => {
+                    fold.bytes(file.path.to_string().as_bytes())
+                        .digest(ContentDigest::of(&file.bytes));
+                }
+                // Only member *names* are read from a captured tree, so only they can change the
+                // answer — but a member appearing or disappearing changes the set, so every name is
+                // folded and not only how many there were.
+                CapturedClasspathKind::Tree { path, members } => {
+                    fold.bytes(path.to_string().as_bytes());
+                    fold.bytes(&(members.len() as u64).to_be_bytes());
+                    for member in members {
+                        fold.bytes(member.path.to_string().as_bytes());
+                    }
+                }
+            }
+        }
+        fold.bytes(&(classpath.registered.len() as u64).to_be_bytes());
+        for file in classpath.registered {
+            fold.bytes(file.path.to_string().as_bytes())
+                .digest(ContentDigest::of(&file.bytes));
+        }
+        // Fixed-width and self-delimiting, so the count buys nothing a `parent` does not already
+        // frame — folded anyway, because the rule "every section states its length" is one a reader
+        // can check and "every section except the last one" is one they have to reason about.
+        fold.bytes(&(classpath.tasks.len() as u64).to_be_bytes());
+        for key in classpath.tasks {
+            fold.parent(key);
+        }
+        fold.finish()
+    }
+
+    /// The prefixes a recorded scan found covered, or `None` for a miss.
+    ///
+    /// A record that cannot be read, decoded, or that was written by another version is a miss and
+    /// never an error: re-running the scan reproduces it.
+    async fn cached_coverage<C: CacheBackend>(
+        cache: &ArtifactCache<C>,
+        provenance: ContentDigest,
+    ) -> Option<BTreeSet<RelativePath>> {
+        let key = cache
+            .indexed_key(CacheNamespace::PublicationCoverage, provenance)
+            .await
+            .ok()
+            .flatten()?;
+        let bytes = cache.lookup(&key).await.ok().flatten()?;
+        let record: CoverageRecord = serde_json::from_slice(&bytes).ok()?;
+        if record.version != PUBLICATION_COVERAGE_VERSION {
+            return None;
+        }
+        record
+            .covered
+            .iter()
+            .map(|prefix| RelativePath::parse(prefix).ok())
+            .collect()
+    }
+
+    /// Record one scan's answer. A failure to write it is not a failure to answer, so it is
+    /// dropped rather than reported: the next preprocess simply scans again.
+    async fn record_coverage<C: CacheBackend>(
+        cache: &mut ArtifactCache<C>,
+        provenance: ContentDigest,
+        covered: &[RelativePath],
+    ) {
+        let record = CoverageRecord {
+            version: PUBLICATION_COVERAGE_VERSION,
+            covered: covered.iter().map(ToString::to_string).collect(),
+        };
+        let Ok(bytes) = serde_json::to_vec(&record) else {
+            return;
+        };
+        let key = CacheKey::new(
+            CacheNamespace::PublicationCoverage,
+            provenance,
+            ContentDigest::of(&bytes),
+        );
+        if cache.publish(&key, &bytes).await.is_ok() {
+            let _ = cache.record_index(&key).await;
+        }
     }
 
     /// The package prefix a publication destination lies at, or an error if it lies outside every
@@ -583,9 +1055,30 @@ pub(crate) struct NodeExports {
     /// verified cache assembly reads from, so materializing a remapped game JAR back into memory to
     /// re-publish it under a second key would double the work and the storage for no gain.
     pub(crate) task_classpath: Vec<CacheKey>,
-    /// Navigation-only sources a build task published (`tasks.publish_tree`), addressed
-    /// package-relative like every other library source. Never a compile input.
+    /// Sources a build task published as `navigation`, addressed package-relative like every other
+    /// library source. Never a compile input.
+    ///
+    /// That routing is a *contract*, not a shortcut: a dependency exports its types through the
+    /// classpath, and a navigation publication is a view of types defined there. Handing `javac`
+    /// both a decompiled tree and the JAR it came from is how a working build acquires duplicates.
+    /// A script whose tree is the only carrier of its package says so, and lands in
+    /// [`compile_sources`](Self::compile_sources) instead.
     pub(crate) library_sources: Vec<LibrarySource>,
+    /// Sources a build task published as `compile`, addressed project-relative — they join this
+    /// node's authored sources on the way through its own frontend, and a node token separates
+    /// them from another dependency's at assembly.
+    pub(crate) compile_sources: Vec<LibrarySource>,
+    /// Every publication destination, project-relative and whatever the intent.
+    ///
+    /// A `replace-root` publication owns its destination completely, so a source captured under one
+    /// is what a previous run of this same plan left on disk — not an authored input. Assembly
+    /// drops those, which is what keeps a dependency's compile set from depending on whether
+    /// somebody once ran a build in its directory.
+    pub(crate) publication_roots: Vec<RelativePath>,
+    /// What the coverage check found, kept structured up to the point a host is told about it.
+    /// Assembly renders it into a [`GraphWarning`] beside `warnings`, which is where every other
+    /// node diagnostic already goes.
+    pub(crate) unbacked_publications: Option<PublicationDiagnosis>,
     pub(crate) warnings: Vec<String>,
 }
 

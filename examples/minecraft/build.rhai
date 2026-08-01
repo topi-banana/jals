@@ -180,7 +180,8 @@ tasks.publish_tree(
     "minecraft-" + version,
     sources,
     "src/main/java/net/minecraft",
-    "replace-root"
+    "replace-root",
+    "navigation"
 );
 
 // The `mixin` feature adds a second, completely independent publication root: SpongePowered Mixin,
@@ -189,20 +190,32 @@ tasks.publish_tree(
 //
 // Unlike the game, Mixin publishes a *sources* jar, so this is `extract_java` on real `.java`
 // rather than `decompile_java` on bytecode — the same publication contract, minus the skeleton
-// rendering. The release is immutable on the SpongePowered Maven repository, so the one SHA-1 pins
-// both the URL and the fetch, exactly like the content-addressed version metadata above.
+// rendering. The release is immutable on the SpongePowered Maven repository, so each SHA-1 below
+// pins both its URL and its fetch, exactly like the content-addressed version metadata above.
 //
-// The jar is deliberately *not* put on the classpath. Mixin 0.8.7 is unshaded — its sources need
-// asm, guava, gson, commons-io, log4j2 and modlauncher, and all of `org/spongepowered/tools` is an
-// annotation processor — none of which `mixin-0.8.7.jar` carries, so adding it would define every
-// published type a second time without making the tree compile.
+// Both jars are fetched, and they carry the two halves of what this feature owes: the compiled
+// library goes on the classpath so `org.spongepowered.asm.*` *resolves*, and the sources jar is
+// published so a reader can open the real code behind those types. A publication alone would not
+// do — a dependency's published trees are navigation sources and never compile inputs, so the
+// consumer's `javac` sees only what the classpath carries.
+//
+// The published sources themselves still do not compile: Mixin 0.8.7 is unshaded, so its `asm/**`
+// runtime needs asm, guava, gson, commons-io, log4j2 and modlauncher, and all of
+// `org/spongepowered/tools` is an annotation processor. None of that is fetched here and none of it
+// is on the classpath. That is a property of the *tree*, not of the classpath entry — a consumer
+// compiling against `mixin-0.8.7.jar` never sees any of it, and javac resolves a type it is handed
+// as source and as a classpath class to the source, so nothing is defined twice either.
 if build.feature("mixin") {
     let mixin_version = "0.8.7";
+    let mixin_base = "https://repo.spongepowered.org/repository/maven-public/org/spongepowered/"
+        + "mixin/" + mixin_version + "/mixin-" + mixin_version;
+    tasks.add_classpath(tasks.fetch_jar(
+        tasks.https_url(mixin_base + ".jar"),
+        tasks.sha1("8ab114ac385e6dbdad5efafe28aba4df8120915f"),
+        tasks.bytes(2097152)
+    ));
     let mixin_sources = tasks.fetch_jar(
-        tasks.https_url(
-            "https://repo.spongepowered.org/repository/maven-public/org/spongepowered/mixin/"
-                + mixin_version + "/mixin-" + mixin_version + "-sources.jar"
-        ),
+        tasks.https_url(mixin_base + "-sources.jar"),
         tasks.sha1("b5fd91c657404b1712a612ece6c8ddf66069be0f"),
         tasks.bytes(2097152)
     );
@@ -212,7 +225,8 @@ if build.feature("mixin") {
         "mixin-" + mixin_version,
         tasks.extract_java(mixin_sources, "org/spongepowered"),
         "src/main/java/org/spongepowered",
-        "replace-root"
+        "replace-root",
+        "navigation"
     );
 }
 
@@ -227,17 +241,22 @@ if build.feature("mixin") {
 // a released version is immutable, so the one SHA-1 pins both the URL and the fetch exactly like
 // every other fetch here.
 //
-// This jar stays off the classpath for the same reasons as Mixin's: its sources compile against
-// Mixin, asm and the loader APIs that this example never resolves, and `mixinextras/ap` is an
-// annotation processor.
+// Both jars again, for the reason given above: the compiled library on the classpath is what makes
+// `com.llamalad7.mixinextras.*` resolve for a consumer, and the sources are what a reader opens.
+// The published tree does not compile here either — it is written against Mixin, asm and the loader
+// APIs this example never fetches, and `mixinextras/ap` is an annotation processor — which again
+// says nothing about the classpath entry a consumer actually compiles against.
 if build.feature("mixinextras") {
     let mixinextras_version = "0.5.4";
+    let mixinextras_base = "https://repo1.maven.org/maven2/io/github/llamalad7/mixinextras-common/"
+        + mixinextras_version + "/mixinextras-common-" + mixinextras_version;
+    tasks.add_classpath(tasks.fetch_jar(
+        tasks.https_url(mixinextras_base + ".jar"),
+        tasks.sha1("0626e00b72e3879a07e6653d8015cd3466ff5b75"),
+        tasks.bytes(1048576)
+    ));
     let mixinextras_sources = tasks.fetch_jar(
-        tasks.https_url(
-            "https://repo1.maven.org/maven2/io/github/llamalad7/mixinextras-common/"
-                + mixinextras_version + "/mixinextras-common-" + mixinextras_version
-                + "-sources.jar"
-        ),
+        tasks.https_url(mixinextras_base + "-sources.jar"),
         tasks.sha1("fd5d27cff1c8118f5a4a037e7f549b606d117caf"),
         tasks.bytes(524288)
     );
@@ -247,6 +266,7 @@ if build.feature("mixinextras") {
         "mixinextras-" + mixinextras_version,
         tasks.extract_java(mixinextras_sources, "com/llamalad7"),
         "src/main/java/com/llamalad7",
-        "replace-root"
+        "replace-root",
+        "navigation"
     );
 }
