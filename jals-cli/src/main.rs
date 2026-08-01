@@ -46,6 +46,8 @@ enum Commands {
     Build(BuildArgs),
     /// Compile and run a JALS/Java project with `java`.
     Run(RunArgs),
+    /// Lower a project's sources to plain Java with its frontend, without compiling.
+    Expand(ExpandArgs),
     /// Remove a project's `classes-dir` and reserved build-script outputs.
     Clean(CleanArgs),
     /// Scaffold a new JALS/Java project (`jals.toml`, a starter `Main.java`, and `.gitignore`).
@@ -204,6 +206,40 @@ struct RunArgs {
     features: FeatureArgs,
 }
 
+/// `jals expand`: the frontend seam on its own, for a host that compiles the project itself.
+///
+/// `build` lowers and then hands the tree to a backend; this stops after the lowering and leaves
+/// the plain Java on disk. That is the whole command — no classpath resolution, no dependency
+/// graph, no build script, no `javac` — so it needs no network and answers only from the manifest,
+/// the selected features, and the files under `[build] source-dirs`.
+///
+/// The use it exists for is a project whose *packaging* belongs to another build system (a Gradle
+/// mod build, a Maven module) while its *sources* are jals dialect: that build runs `jals expand`
+/// and compiles the emitted tree, which is exactly what a source preprocessor step does. Lowering
+/// is length-preserving, so a stack trace from the compiled output still names the authored line.
+#[derive(Args)]
+struct ExpandArgs {
+    /// Use this manifest instead of discovering `jals.toml` upward from the cwd.
+    #[arg(long, value_name = "PATH")]
+    manifest_path: Option<PathBuf>,
+
+    /// Write the lowered tree here instead of `target/jals/build/frontend`. A relative path is
+    /// resolved against the project root, like every other manifest-relative directory.
+    #[arg(long, value_name = "DIR")]
+    out_dir: Option<PathBuf>,
+
+    /// Print the tree that would be written and exit, without writing anything.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Print each emitted path.
+    #[arg(short = 'v', long)]
+    verbose: bool,
+
+    #[command(flatten)]
+    features: FeatureArgs,
+}
+
 #[derive(Args)]
 struct CleanArgs {
     /// Use this manifest instead of discovering `jals.toml` upward from the cwd.
@@ -237,6 +273,7 @@ fn main() -> ExitCode {
             Commands::Lint(args) => args.run(&exec).await,
             Commands::Build(args) => args.run(&exec).await,
             Commands::Run(args) => args.run(&exec).await,
+            Commands::Expand(args) => args.run().await,
             Commands::Clean(args) => args.run(&exec).await,
             Commands::Init(args) => args.run(&exec).await,
         }
@@ -605,6 +642,46 @@ impl BuildArgs {
             .map_err(|e| anyhow!("{e}"))?;
         App::finish_compile(&manifest, &root, &outcome)?;
         Ok(App::outcome_exit_code(outcome.code()))
+    }
+}
+
+impl ExpandArgs {
+    /// Lowers the project's authored sources with the frontend `[build.frontend]` and the dialect
+    /// features select, and writes the emitted Java tree out.
+    ///
+    /// Deliberately not `prepare_compile_inputs`: the sources a build script registers, the
+    /// dependency graph and the resolved classpath are all compile inputs, and none of them
+    /// changes what the frontend emits for a file. Skipping them is what keeps this command
+    /// offline and side-effect-free — it never runs an unreviewed `build.rhai`, and it never
+    /// publishes into a source root.
+    async fn run(&self) -> Result<ExitCode> {
+        let (manifest, root) = App::resolve_manifest(self.manifest_path.as_deref()).await?;
+        let features = self.features.resolve(&manifest)?;
+        let sources = App::discover_sources(&manifest, &root, false)?;
+        let out_dir = self.out_dir.as_ref().map_or_else(
+            || root.join(jals_build::FRONTEND_OUT_DIR),
+            |dir| root.join(dir),
+        );
+
+        let tree = App::lower_tree(&manifest, &root, &sources, &features).await?;
+        if self.verbose || self.dry_run {
+            for source in &tree {
+                println!("{}", source.path);
+            }
+        }
+        if self.dry_run {
+            return Ok(ExitCode::SUCCESS);
+        }
+        jals_build::StagedTree::write(&tree, out_dir.clone())
+            .await
+            .map_err(|error| anyhow!("writing the lowered tree failed: {error}"))?;
+        println!(
+            "expanded {} source file{} into {}",
+            tree.len(),
+            if tree.len() == 1 { "" } else { "s" },
+            out_dir.display()
+        );
+        Ok(ExitCode::SUCCESS)
     }
 }
 
@@ -1478,6 +1555,28 @@ impl App {
         sources: &[PathBuf],
         features: &ResolvedBuildFeatures,
     ) -> Result<(jals_build::StagedTree, Vec<jals_build::BackendSource>)> {
+        let tree = Self::lower_tree(manifest, root, sources, features).await?;
+        // The tree is staged for *both* backends: a process-based compiler needs the files on
+        // disk, and having them there keeps `--verbose` and post-mortem debugging identical
+        // whichever backend ran.
+        let staged = jals_build::StagedTree::write(&tree, root.join(jals_build::FRONTEND_OUT_DIR))
+            .await
+            .map_err(|error| anyhow!("staging frontend output failed: {error}"))?;
+        Ok((staged, tree))
+    }
+
+    /// The lowering itself, resolved to bytes: everything [`lower_sources`](Self::lower_sources)
+    /// does before the tree reaches disk.
+    ///
+    /// Separate because `jals expand` stops here and writes somewhere else — the lowering is the
+    /// whole of that command, and where its output goes is the caller's choice rather than the
+    /// managed staging directory a compile needs.
+    async fn lower_tree(
+        manifest: &Manifest,
+        root: &Path,
+        sources: &[PathBuf],
+        features: &ResolvedBuildFeatures,
+    ) -> Result<Vec<jals_build::BackendSource>> {
         // `[build.frontend]` and the dialect features that override it are answered in
         // `jals-frontend`, not here — the host supplies the resolved build features (the same set
         // a build script queries) and asks once.
@@ -1528,14 +1627,7 @@ impl App {
                 bytes,
             });
         }
-
-        // The tree is staged for *both* backends: a process-based compiler needs the files on
-        // disk, and having them there keeps `--verbose` and post-mortem debugging identical
-        // whichever backend ran.
-        let staged = jals_build::StagedTree::write(&tree, root.join(jals_build::FRONTEND_OUT_DIR))
-            .await
-            .map_err(|error| anyhow!("staging frontend output failed: {error}"))?;
-        Ok((staged, tree))
+        Ok(tree)
     }
 
     /// Report what a compile said and persist what it produced.

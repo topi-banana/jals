@@ -238,6 +238,7 @@ jals build --dry-run        # print the javac command without compiling
 jals run                    # compile, then run the resolved entry point
 jals run --bin server       # run a named [[bin]] entry point
 jals run -- arg1 arg2       # ...passing args to the program
+jals expand                 # lower the sources to plain Java, without compiling
 jals clean                  # remove the build output (target/classes)
 ```
 
@@ -308,6 +309,34 @@ checkout.
 Outside that portable phase, `jals-build` plans commands as data and `jals-cli` owns host source
 discovery and JDK execution (resolving `javac`/`java` via `$JAVAC`/`$JAVA`, then
 `$JAVA_HOME/bin`, then `PATH`).
+
+### Lower dialect sources for another build system
+
+`jals expand` is the frontend seam on its own: it lowers `[build] source-dirs` with the frontend
+`[build.frontend]` and `[package] features` select — desugaring grouped imports, stripping
+attributes, blanking every `#[cfg]`-false construct — and writes the plain Java out, without
+compiling anything.
+
+```sh
+jals expand                                        # → target/jals/build/frontend
+jals expand --features 1.21.8 --out-dir build/java # a release, somewhere else
+jals expand --dry-run                              # list what would be written
+```
+
+It takes the same `--features` / `--all-features` / `--no-default-features` flags as `build` and
+`run`, and `--out-dir` is resolved against the project root like every other manifest-relative
+directory. The output directory is jals-owned: a file the current lowering does not name is removed,
+exactly as it is under `target/jals/build/frontend`.
+
+This is for a project whose *packaging* belongs to another build system — a Gradle mod build, a
+Maven module — while its sources are jals dialect: that build runs `jals expand` and compiles the
+emitted tree, which is what a source preprocessor step does. Because lowering is length-preserving,
+a stack trace from the compiled output still names the authored line.
+
+Unlike `build`, it resolves no classpath, acquires no dependency, and runs no `build.rhai` — none of
+those changes what the frontend emits for a file, and leaving them out is what makes the command
+offline and side-effect-free. Sources a build script registers with `build.add_source` are therefore
+not part of what it lowers.
 
 ### Transitive project dependencies
 

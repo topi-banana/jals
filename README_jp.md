@@ -236,6 +236,7 @@ jals build                  # javac でコンパイル
 jals build --dry-run        # コンパイルせず javac コマンドを表示
 jals run                    # コンパイルしてから [run] main-class を実行
 jals run -- arg1 arg2       # ...プログラムへ引数を渡す
+jals expand                 # コンパイルせず、source を素の Java へ lower する
 jals clean                  # ビルド出力（target/classes）を削除
 ```
 
@@ -300,6 +301,34 @@ environment directive は、後続の明示的な `jals build` / `run` による
 この portable phase 以外では `jals-build` がコマンドをデータとして計画し、マニフェスト探索・source
 走査・JDK 起動を `jals-cli` が担います（`javac`/`java` は `$JAVAC`/`$JAVA`、次に
 `$JAVA_HOME/bin`、最後に `PATH` の順で解決します）。
+
+### 別のビルドシステムのために dialect source を lower する
+
+`jals expand` は frontend seam だけを単体で実行します。`[build] source-dirs` を
+`[build.frontend]` と `[package] features` が選んだ frontend で lower し——grouped import を展開し、
+attribute を除去し、`#[cfg]` が false の構文を空白化して——素の Java を書き出します。コンパイルは
+行いません。
+
+```sh
+jals expand                                        # → target/jals/build/frontend
+jals expand --features 1.21.8 --out-dir build/java # release を選び、出力先を変える
+jals expand --dry-run                              # 書き出す内容を一覧するだけ
+```
+
+`--features` / `--all-features` / `--no-default-features` は `build`・`run` と同じもので、
+`--out-dir` は他のマニフェスト相対ディレクトリと同様に project root からの相対です。出力先は jals
+が所有します——今回の lowering が挙げなかったファイルは、`target/jals/build/frontend` と同じように
+削除されます。
+
+これは、source は jals dialect でありながら *パッケージング* が別のビルドシステム——Gradle の mod
+ビルド、Maven module——に属する project のためのものです。そちらが `jals expand` を実行して出力を
+コンパイルすれば、source preprocessor の一段と同じことになります。lowering は長さを保存するので、
+コンパイル結果の stack trace は元の行をそのまま指します。
+
+`build` と違い、classpath を解決せず、依存も取得せず、`build.rhai` も実行しません。いずれも
+frontend が 1 ファイルに対して出力する内容を変えないからで、省いてあることがこのコマンドを
+オフラインかつ副作用なしにしています。したがって build script が `build.add_source` で登録する
+source は lower の対象に含まれません。
 
 ### Transitive な project dependency
 

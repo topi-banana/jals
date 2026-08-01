@@ -2116,3 +2116,154 @@ fn a_failed_in_process_compile_does_not_reach_the_run_step() {
         "the run step must not execute the previous build's class files"
     );
 }
+
+/// A project whose one source carries both branches of a `#[cfg]`, plus a `[features]` map to
+/// select between them. Deliberately not [`project`]: `expand` is about what the *frontend* emits,
+/// so the source has to have something to lower.
+fn attribute_project() -> tempfile::TempDir {
+    let dir = tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("jals.toml"),
+        "[package]\nname = \"hello\"\nfeatures = [\"attributes\"]\n\
+         [features]\ndefault = [\"old\"]\nold = []\nnew = []\n",
+    )
+    .unwrap();
+    let src = dir.path().join("src/main/java/com/example");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("Main.java"),
+        "package com.example;\n\
+         public class Main {\n\
+         \x20\x20\x20\x20#[cfg(feature = \"new\")]\n\
+         \x20\x20\x20\x20static int v() { return 2; }\n\
+         \x20\x20\x20\x20#[cfg(not(feature = \"new\"))]\n\
+         \x20\x20\x20\x20static int v() { return 1; }\n\
+         }\n",
+    )
+    .unwrap();
+    dir
+}
+
+/// `expand` lowers with the selected features and stops: the emitted file is plain Java, and the
+/// branch that lost is blanked rather than removed, so every line number is still the authored one.
+#[test]
+fn expand_lowers_the_selected_features_without_compiling() {
+    let dir = attribute_project();
+    let manifest = dir.path().join("jals.toml");
+    let out = dir.path().join("expanded");
+
+    let (stdout, stderr, code) = run_full(&[
+        "expand",
+        "--features",
+        "new",
+        "--manifest-path",
+        manifest.to_str().unwrap(),
+        "--out-dir",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains("expanded 1 source file"),
+        "stdout: {stdout}"
+    );
+
+    let lowered =
+        std::fs::read_to_string(host_join(&out, "src/main/java/com/example/Main.java")).unwrap();
+    assert!(lowered.contains("return 2;"), "{lowered}");
+    assert!(!lowered.contains("return 1;"), "{lowered}");
+    assert!(
+        !lowered.contains("#["),
+        "attributes must not survive: {lowered}"
+    );
+    let authored =
+        std::fs::read_to_string(host_join(dir.path(), "src/main/java/com/example/Main.java"))
+            .unwrap();
+    assert_eq!(
+        lowered.len(),
+        authored.len(),
+        "lowering is length-preserving"
+    );
+
+    // No compile happened: nothing was written to `classes-dir`, and no `target/jals/build`
+    // staging directory was produced either.
+    assert!(!dir.path().join("target/classes").exists());
+    assert!(!dir.path().join("target/jals/build/frontend").exists());
+}
+
+/// The selection is the manifest's `default` list when nothing is passed, exactly as for `build`.
+#[test]
+fn expand_defaults_to_the_manifests_default_features() {
+    let dir = attribute_project();
+    let out = dir.path().join("expanded");
+
+    let (_stdout, stderr, code) = run_full(&[
+        "expand",
+        "--manifest-path",
+        dir.path().join("jals.toml").to_str().unwrap(),
+        "--out-dir",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let lowered =
+        std::fs::read_to_string(host_join(&out, "src/main/java/com/example/Main.java")).unwrap();
+    assert!(lowered.contains("return 1;"), "{lowered}");
+}
+
+/// The output directory is jals-owned: a file the current lowering does not name is a leftover,
+/// and `--dry-run` writes nothing at all.
+#[test]
+fn expand_prunes_stale_output_and_writes_nothing_on_dry_run() {
+    let dir = attribute_project();
+    let manifest = dir.path().join("jals.toml");
+    let out = dir.path().join("expanded");
+    std::fs::create_dir_all(host_join(&out, "src/main/java/com/example")).unwrap();
+    let stale = host_join(&out, "src/main/java/com/example/Stale.java");
+    std::fs::write(&stale, "package com.example;\nclass Stale {}\n").unwrap();
+
+    let (stdout, stderr, code) = run_full(&[
+        "expand",
+        "--dry-run",
+        "--manifest-path",
+        manifest.to_str().unwrap(),
+        "--out-dir",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains("src/main/java/com/example/Main.java"),
+        "stdout: {stdout}"
+    );
+    assert!(stale.exists(), "--dry-run must write nothing");
+    assert!(!host_join(&out, "src/main/java/com/example/Main.java").exists());
+
+    let (_stdout, stderr, code) = run_full(&[
+        "expand",
+        "--manifest-path",
+        manifest.to_str().unwrap(),
+        "--out-dir",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(!stale.exists(), "a stale lowered file must be removed");
+    assert!(host_join(&out, "src/main/java/com/example/Main.java").exists());
+}
+
+/// An unknown feature name is rejected before anything is written, like it is for `build`.
+#[test]
+fn expand_rejects_an_undeclared_feature() {
+    let dir = attribute_project();
+    let out = dir.path().join("expanded");
+
+    let (_stdout, stderr, code) = run_full(&[
+        "expand",
+        "--features",
+        "nope",
+        "--manifest-path",
+        dir.path().join("jals.toml").to_str().unwrap(),
+        "--out-dir",
+        out.to_str().unwrap(),
+    ]);
+    assert_ne!(code, 0);
+    assert!(stderr.contains("nope"), "stderr: {stderr}");
+    assert!(!out.exists(), "nothing may be written for a rejected run");
+}

@@ -154,7 +154,11 @@ filesystem reads into portable interfaces.
   `ProjectView`, then hands the text to `jals_fmt::import` and the result to
   `jals_fmt::generate`. What it keeps of project assembly is only what a host path forces:
   `NativeScope` selection, `materialize_file`/`materialize_tree`, `to_host_path`, and promoting a
-  structured failure to `anyhow`.
+  structured failure to `anyhow`. `jals expand` is the frontend seam offered on its own, for a host
+  that compiles the lowered tree itself (a Gradle or Maven build over dialect sources): it shares
+  `build`'s lowering half (`App::lower_tree`) and stops there, running no build script, resolving no
+  classpath and acquiring no dependency — none of which changes what a frontend emits for a file,
+  which is what keeps the command offline and side-effect-free.
 - `jals-lsp`: the only URI↔native-root adapter; watched-file notifications call `refresh()`. What it
   keeps of project assembly is diagnostic shaping, overlay mounting of navigation sources, the watch
   policy, and its own root-only fallback (a second `resolve_native` call, deliberately not folded in
