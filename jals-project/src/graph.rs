@@ -575,10 +575,23 @@ impl ResolvedNode {
         // but only here, past the point where the rest of the classpath already answered the
         // question and the unread entry could not have changed it.
         if !coverage.warnings().is_empty() {
+            // Withholding the claim is not the same as saying nothing: a reader still has to know
+            // which roots were left unanswered, or the report names a broken jar and no reason to
+            // care about it.
+            let withheld = uncovered
+                .iter()
+                .map(|(publication, prefix)| format!("`{}` (`{prefix}`)", publication.owner))
+                .collect::<Vec<_>>()
+                .join(", ");
             return coverage
                 .warnings()
                 .iter()
-                .map(|warning| format!("publication coverage was not checked: {warning}"))
+                .map(|warning| {
+                    format!(
+                        "cannot tell whether this project's classpath backs what its build task \
+                         publishes — {withheld}: {warning}"
+                    )
+                })
                 .collect();
         }
 

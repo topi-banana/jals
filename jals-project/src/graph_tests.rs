@@ -1689,13 +1689,23 @@ fn an_unreadable_classpath_entry_withholds_the_coverage_claim() {
         assert!(
             warnings
                 .iter()
-                .any(|message| message.starts_with("publication coverage was not checked:")),
+                .any(|message| message
+                    .starts_with("cannot tell whether this project's classpath backs")),
             "{warnings:?}"
         );
+        // Withholding the claim still names the root it was withheld about, so the broken jar is
+        // reported with a reason to care about it.
         assert!(
             warnings
                 .iter()
-                .all(|message| !message.contains("publishes")),
+                .any(|message| message.contains("`api` (`net/example`)")),
+            "{warnings:?}"
+        );
+        // The claim itself — that the classpath defines nothing under the prefix — is never made.
+        assert!(
+            warnings
+                .iter()
+                .all(|message| !message.contains("nothing this project puts on its own classpath")),
             "{warnings:?}"
         );
     });
