@@ -5,7 +5,6 @@ use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::{String, ToString};
-use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -395,7 +394,7 @@ impl ResolvedNode {
                     cache,
                     source,
                     manifest,
-                    &output.additional_classpath,
+                    &exports.classpath,
                     &exports.task_classpath,
                     &execution.publications,
                 )
@@ -511,7 +510,7 @@ impl ResolvedNode {
         cache: &ArtifactCache<C>,
         source: &SourceNode,
         manifest: &Manifest,
-        script_classpath: &BTreeSet<FileKey>,
+        script_classpath: &[CapturedFile],
         task_classpath: &[CacheKey],
         publications: &[BuildTaskPublication],
     ) -> Vec<String> {
@@ -530,19 +529,28 @@ impl ResolvedNode {
 
         let mut coverage =
             ClasspathCoverage::seeking(roots.iter().map(|(_, prefix)| prefix.clone()));
-        let entries = task_classpath
-            .iter()
-            .map(|key| ClasspathEntry::Artifact(key.clone()))
-            .chain(
-                script_classpath
-                    .iter()
-                    .map(|key| ClasspathEntry::ProjectFile(key.clone())),
-            );
-        for entry in entries {
+        for key in task_classpath {
             if coverage.is_complete() {
                 break;
             }
-            coverage.add_entry(&source.view, cache, &entry).await;
+            coverage
+                .add_entry(&source.view, cache, &ClasspathEntry::Artifact(key.clone()))
+                .await;
+        }
+        // A build script's registered classpath was already read out of the view above, into
+        // `NodeExports::classpath`. Reading it a second time as a `ClasspathEntry::ProjectFile`
+        // would ask the same revision the same question and copy the answer again.
+        for file in script_classpath {
+            if coverage.is_complete() {
+                break;
+            }
+            // Every one of these came from a `FileKey` in the view, so the fallback is unreachable
+            // rather than a second way of naming the same file.
+            let origin = FileKey::new(file.path.clone()).map_or_else(
+                |_| WarningOrigin::External(ExternalLocator::new(file.path.to_string())),
+                WarningOrigin::ProjectFile,
+            );
+            coverage.add_resident(origin, &file.path, &file.bytes).await;
         }
         // The manifest's own `[build] classpath` is read from what discovery captured, not from the
         // view: a native node may have taken it from a host path that is in no project revision.
@@ -556,7 +564,7 @@ impl ResolvedNode {
                         .add_resident(
                             WarningOrigin::External(ExternalLocator::new(file.path.to_string())),
                             &file.path,
-                            Arc::from(file.bytes.as_slice()),
+                            &file.bytes,
                         )
                         .await;
                 }

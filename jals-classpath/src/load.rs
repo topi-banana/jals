@@ -349,10 +349,7 @@ impl ClasspathCoverage {
             ClasspathEntry::ProjectFile(key) => {
                 let origin = WarningOrigin::ProjectFile(key.clone());
                 match view.file(key) {
-                    Ok(file) => {
-                        let bytes: Arc<[u8]> = Arc::from(file.bytes());
-                        self.add_resident(origin, key.path(), bytes).await;
-                    }
+                    Ok(file) => self.add_resident(origin, key.path(), file.bytes()).await,
                     Err(error) => self.warnings.push(Warning::new(
                         origin,
                         format!("classpath file cannot be read: {error}"),
@@ -433,14 +430,12 @@ impl ClasspathCoverage {
     /// Fold in one entry whose bytes the caller already holds — a host file a graph node captured,
     /// or a build script's registered classpath output. `path` decides how the bytes are read, so it
     /// must keep the entry's extension; it is never used as the class's package.
-    pub async fn add_resident(
-        &mut self,
-        origin: WarningOrigin,
-        path: &RelativePath,
-        bytes: Arc<[u8]>,
-    ) {
+    ///
+    /// Borrowed, not owned: only the central directory is wanted, and nothing outlives the call, so
+    /// a caller with the bytes in hand pays no copy to ask.
+    pub async fn add_resident(&mut self, origin: WarningOrigin, path: &RelativePath, bytes: &[u8]) {
         match Self::kind(path) {
-            Some(EntryKind::Class) => match Archive::read_class(bytes.as_ref()).await {
+            Some(EntryKind::Class) => match Archive::read_class(bytes).await {
                 Ok(class) => self.add_parsed_class(&class),
                 Err(message) => self.warnings.push(Warning::new(origin, message)),
             },
@@ -464,7 +459,7 @@ impl ClasspathCoverage {
         }
     }
 
-    async fn add_archive<R: JarReader>(&mut self, origin: WarningOrigin, reader: R) {
+    async fn add_archive<R: sio::Read + sio::Seek>(&mut self, origin: WarningOrigin, reader: R) {
         let directory = match Archive::open(reader).await {
             Ok((_, directory)) => directory,
             Err(message) => {
@@ -903,7 +898,13 @@ impl Archive {
     /// Open a portable reader as a zip archive. The parsed central directory is plain data
     /// shared behind an `Arc`, so fan-out chunks clone one directory and one reader handle and
     /// only the reader position is per-clone state.
-    async fn open<R: JarReader>(mut reader: R) -> Result<(R, Arc<CentralDirectory>), String> {
+    ///
+    /// Deliberately weaker than [`JarReader`]: reading a directory needs no clone and outlives
+    /// nothing, so a caller that only asks what an archive contains may hand over a borrowed
+    /// cursor instead of copying the bytes into an `Arc` to satisfy `'static`.
+    async fn open<R: sio::Read + sio::Seek>(
+        mut reader: R,
+    ) -> Result<(R, Arc<CentralDirectory>), String> {
         let directory = CentralDirectory::parse(&mut reader)
             .await
             .map_err(|message| format!("failed to read archive: {message}"))?;
