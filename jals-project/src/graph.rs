@@ -918,12 +918,19 @@ impl ResolvedNode {
     ) -> ContentDigest {
         let mut fold = ProvenanceFold::new(b"jals.project.publication-coverage\0");
         fold.version(PUBLICATION_COVERAGE_VERSION).digest(plan);
+        // Each section is preceded by its own length. `ProvenanceFold::bytes` frames one *item*,
+        // which is not the same as framing the run of them: without this, a prefix and a captured
+        // entry's declared spelling are the same shape, so a root list one longer than it should be
+        // folds identically to a classpath entry one shorter. Both would then read one recorded
+        // answer for two different questions.
+        fold.bytes(&(roots.len() as u64).to_be_bytes());
         // The question, not only its inputs: a record answers about the prefixes it was asked
         // about, and the plan digest alone would not distinguish two source-root layouts that put
         // one destination under different packages.
         for root in roots {
             fold.bytes(root.prefix.to_string().as_bytes());
         }
+        fold.bytes(&(classpath.captured.len() as u64).to_be_bytes());
         for entry in classpath.captured {
             fold.bytes(entry.declared.as_bytes());
             match &entry.kind {
@@ -932,20 +939,26 @@ impl ResolvedNode {
                         .digest(ContentDigest::of(&file.bytes));
                 }
                 // Only member *names* are read from a captured tree, so only they can change the
-                // answer — but a member appearing or disappearing changes the set, so the whole
-                // list is folded rather than its length.
+                // answer — but a member appearing or disappearing changes the set, so every name is
+                // folded and not only how many there were.
                 CapturedClasspathKind::Tree { path, members } => {
                     fold.bytes(path.to_string().as_bytes());
+                    fold.bytes(&(members.len() as u64).to_be_bytes());
                     for member in members {
                         fold.bytes(member.path.to_string().as_bytes());
                     }
                 }
             }
         }
+        fold.bytes(&(classpath.registered.len() as u64).to_be_bytes());
         for file in classpath.registered {
             fold.bytes(file.path.to_string().as_bytes())
                 .digest(ContentDigest::of(&file.bytes));
         }
+        // Fixed-width and self-delimiting, so the count buys nothing a `parent` does not already
+        // frame — folded anyway, because the rule "every section states its length" is one a reader
+        // can check and "every section except the last one" is one they have to reason about.
+        fold.bytes(&(classpath.tasks.len() as u64).to_be_bytes());
         for key in classpath.tasks {
             fold.parent(key);
         }
