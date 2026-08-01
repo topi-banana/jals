@@ -1724,6 +1724,88 @@ fn a_compile_intent_publication_reaches_the_compiler() {
     });
 }
 
+/// Building a dependency in its own directory leaves its publications on disk, where the next
+/// consumer's discovery captures them as ordinary authored sources. Whether a consumer compiled
+/// therefore used to depend on whether somebody had ever run a build in a directory they may not
+/// even have looked at.
+///
+/// `replace-root` owns its destination, so nothing found there is authored — running the plan as a
+/// root would delete it before writing the tree — and assembly reads it the same way.
+#[test]
+fn a_publication_destination_is_owned_in_a_dependency_too() {
+    jals_exec::block_on_inline(async {
+        let (root, view_storage) = publishing_dependency(
+            "navigation",
+            &[
+                // What a previous root build of this dependency left behind: the publication's own
+                // file, plus one the tree no longer produces.
+                (
+                    "dep/src/main/java/net/example/Api.java",
+                    b"package net.example; class Api {}",
+                ),
+                (
+                    "dep/src/main/java/net/example/Removed.java",
+                    b"package net.example; class Removed {}",
+                ),
+            ],
+        );
+        let mut cache = MemoryStorage::memory(CodeTree::default());
+        let assembly = local_assembly(&root, &view_storage, &mut cache).await;
+        assert!(assembly.errors.is_empty(), "{:?}", assembly.errors);
+
+        let compiled: Vec<_> = assembly
+            .plan
+            .source_dependency_artifacts
+            .iter()
+            .map(|source| source.path.to_string())
+            .collect();
+        // Neither reaches the compiler: the publication is `navigation`, and what it left on disk
+        // is not a second opinion about that.
+        assert!(
+            compiled.iter().all(|path| !path.contains("net/example")),
+            "{compiled:?}"
+        );
+        // Scoped to the destination, not to the project: an authored file outside it is still an
+        // input.
+        assert!(
+            compiled.iter().any(|path| path.ends_with("Seed.java")),
+            "{compiled:?}"
+        );
+    });
+}
+
+/// The same ownership rule decides *which* copy a `compile` publication contributes, since both are
+/// addressed identically and only one can survive the deduplication.
+#[test]
+fn a_compile_publication_supersedes_what_a_root_build_left_at_its_destination() {
+    jals_exec::block_on_inline(async {
+        let (root, view_storage) = publishing_dependency(
+            "compile",
+            &[(
+                "dep/src/main/java/net/example/Api.java",
+                b"package net.example; class Api { int stale; }",
+            )],
+        );
+        let mut cache = MemoryStorage::memory(CodeTree::default());
+        let assembly = local_assembly(&root, &view_storage, &mut cache).await;
+        assert!(assembly.errors.is_empty(), "{:?}", assembly.errors);
+
+        let published: Vec<_> = assembly
+            .plan
+            .source_dependency_artifacts
+            .iter()
+            .filter(|source| source.path.to_string().ends_with("net/example/Api.java"))
+            .collect();
+        let [api] = published.as_slice() else {
+            panic!("expected exactly one `Api.java`, got {published:?}");
+        };
+        // The publication's bytes, not the ones sitting in the directory. Comparing the artifact is
+        // the only assertion that can tell them apart — both are addressed the same.
+        let bytes = cache.artifacts().lookup(&api.key).await.unwrap().unwrap();
+        assert_eq!(bytes, b"package net.example; class Api {}");
+    });
+}
+
 /// A destination outside every declared source root is a mistake whoever reads the tree, so the
 /// check runs for both intents. The compile routing does not *use* the package prefix, which is
 /// exactly why it would be easy to stop computing it — and then a dependency would reach the check

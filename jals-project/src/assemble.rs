@@ -333,11 +333,9 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
         // path, correctly. Publications go first because a `replace-root` destination belongs to
         // the publication: anything found there is what a previous run of this same plan left
         // behind, and the fresh tree is the one that is current.
-        let generated = self
-            .graph
-            .exports
-            .get(&node.id)
-            .map(|exports| &exports.sources);
+        let exports = self.graph.exports.get(&node.id);
+        let roots = exports.map_or(&[][..], |exports| exports.publication_roots.as_slice());
+        let generated = exports.map(|exports| &exports.sources);
         let mut seen = BTreeSet::new();
         let mut files = Vec::new();
         for (path, bytes) in &published {
@@ -348,9 +346,16 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
                 ));
             }
         }
+        // An authored source inside a publication destination is not authored. `replace-root` owns
+        // its destination — running this plan as a root would delete the file before writing the
+        // tree — so what discovery captured there is residue of a previous build in the dependency's
+        // own directory, and compiling it would make a consumer's result depend on whether anybody
+        // ever ran one. Generated sources are not filtered: a build script registered those in this
+        // same run, so they are as current as the publication is.
         for file in source
             .authored_sources
             .iter()
+            .filter(|file| !roots.iter().any(|root| file.path.starts_with(root)))
             .chain(generated.into_iter().flatten())
         {
             if seen.insert(file.path.clone()) {
