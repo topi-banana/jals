@@ -975,7 +975,7 @@ impl Stmt {
 
         // The loop variable is written from the element at the top of every iteration, which is what
         // makes it a fresh binding per pass rather than one the body carries over.
-        let binding = Self::for_each_binding(statement.syntax(), context)?;
+        let binding = Self::for_each_binding(statement, context)?;
         let variable = emit.slots.declare(
             binding,
             Slots::ty_width(context.inference.type_of_def(binding)),
@@ -1056,7 +1056,7 @@ impl Stmt {
         emit.asm.invoke_interface(ITERATOR, "hasNext", "()Z")?;
         emit.asm.branch(Branch::IntZero(Compare::Eq), done)?;
 
-        let binding = Self::for_each_binding(statement.syntax(), context)?;
+        let binding = Self::for_each_binding(statement, context)?;
         let element = context.inference.type_of_def(binding).clone();
         let variable = emit.slots.declare(binding, Slots::ty_width(&element));
         emit.asm.load(cursor)?;
@@ -1079,11 +1079,12 @@ impl Stmt {
     }
 
     /// The definition a `for`-each's loop variable declares.
-    fn for_each_binding(node: &SyntaxNode, context: &Context<'_>) -> Result<jals_hir::DefId> {
-        let name: SyntaxToken = node
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .find(|token| token.kind() == IDENT)
+    fn for_each_binding(
+        statement: &ast::ForEachStmt,
+        context: &Context<'_>,
+    ) -> Result<jals_hir::DefId> {
+        let name: SyntaxToken = statement
+            .name_token()
             .ok_or(LowerError::Unsupported("a `for`-each with no variable"))?;
         context
             .resolved

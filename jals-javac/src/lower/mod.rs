@@ -887,10 +887,7 @@ impl Compile {
             let (scanned, at) = match declaration.kind() {
                 CLASS_DECL => (
                     declaration.clone(),
-                    declaration
-                        .children_with_tokens()
-                        .filter_map(jals_syntax::SyntaxElement::into_token)
-                        .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+                    ast::Decl::name_token_of(&declaration)
                         .map(|token| usize::from(token.text_range().start())),
                 ),
                 jals_syntax::SyntaxKind::NEW_EXPR => {
@@ -1891,10 +1888,8 @@ impl Compile {
         super_item: Option<ItemId>,
         members: &[SyntaxNode],
     ) -> Result<MethodInfo> {
-        let name_token = node
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+        let name_token = ast::ConstructorDecl::cast(node.clone())
+            .and_then(|decl| decl.name_token())
             .ok_or(LowerError::Unsupported("a malformed constructor"))?;
         let member = context.member_at(&name_token)?;
         let mut descriptor = Descriptor::method_descriptor(member, context.index, true)?;
@@ -2682,13 +2677,8 @@ impl Compile {
             .find(|child| child.kind() == jals_syntax::SyntaxKind::RECORD_HEADER)
             .into_iter()
             .flat_map(|header| header.children())
-            .filter(|child| child.kind() == jals_syntax::SyntaxKind::RECORD_COMPONENT)
-            .filter_map(|component| {
-                component
-                    .children_with_tokens()
-                    .filter_map(jals_syntax::SyntaxElement::into_token)
-                    .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
-            })
+            .filter_map(ast::RecordComponent::cast)
+            .filter_map(|component| component.name_token())
             .collect()
     }
 

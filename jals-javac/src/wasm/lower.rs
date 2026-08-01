@@ -1234,13 +1234,11 @@ impl Layout {
             let owner = Self::owner_of(&node, input, index)?;
             let body = node.children().find(|child| child.kind() == ENUM_BODY);
             for member in body.iter().flat_map(SyntaxNode::children) {
-                if member.kind() != ENUM_CONSTANT {
+                let Some(constant) = ast::EnumConstant::cast(member.clone()) else {
                     continue;
-                }
-                let name = member
-                    .children_with_tokens()
-                    .filter_map(jals_syntax::SyntaxElement::into_token)
-                    .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+                };
+                let name = constant
+                    .name_token()
                     .ok_or(WasmError::Unsupported("an `enum` constant with no name"))?;
                 let id = index
                     .member_by_decl(input.file, usize::from(name.text_range().start()))
@@ -2356,10 +2354,7 @@ impl Lowering<'_> {
             .iterable()
             .ok_or(WasmError::Unsupported("a `for`-each over nothing"))?;
         let name: SyntaxToken = statement
-            .syntax()
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+            .name_token()
             .ok_or(WasmError::Unsupported("a `for`-each with no variable"))?;
         let Some(Ty::Array(element)) = self
             .input
