@@ -771,7 +771,8 @@ impl CompileWasm {
         if Self::is_anonymous(node) || Self::is_functional(node) {
             return Ok(index.item_by_decl(input.file, usize::from(node.text_range().start())));
         }
-        let name = Self::name_token(node).ok_or(WasmError::Unsupported("a class with no name"))?;
+        let name =
+            ast::Decl::name_token_of(node).ok_or(WasmError::Unsupported("a class with no name"))?;
         index
             .item_by_decl(input.file, usize::from(name.text_range().start()))
             .ok_or_else(|| WasmError::Unresolved(name.text().into()))
@@ -939,7 +940,7 @@ impl CompileWasm {
                 if !is_constructor && node.children().find_map(ast::Block::cast).is_none() {
                     continue;
                 }
-                let member_name = Self::name_token(&node)
+                let member_name = Self::member_name_token(&node, is_constructor)
                     .ok_or(WasmError::Unsupported("a member with no name"))?;
                 let member = index
                     .member_by_decl(input.file, usize::from(member_name.text_range().start()))
@@ -1004,10 +1005,17 @@ impl CompileWasm {
         Ok(())
     }
 
-    fn name_token(node: &SyntaxNode) -> Option<SyntaxToken> {
-        node.children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
+    /// The name token of a class member, which is a method or a constructor here.
+    ///
+    /// Two kinds rather than one because `ConstructorDecl` is not a [`ast::Decl`] variant — a
+    /// constructor declares no type and no field, so the grammar keeps it out of that enum. Both
+    /// arms go through the node's own generated accessor.
+    fn member_name_token(node: &SyntaxNode, is_constructor: bool) -> Option<SyntaxToken> {
+        if is_constructor {
+            ast::ConstructorDecl::cast(node.clone())?.name_token()
+        } else {
+            ast::MethodDecl::cast(node.clone())?.name_token()
+        }
     }
 }
 

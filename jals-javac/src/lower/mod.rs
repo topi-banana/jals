@@ -1402,17 +1402,15 @@ impl Compile {
             if member.kind() != METHOD_DECL {
                 continue;
             }
-            let Some(name) = ast::MethodDecl::cast(member.clone()).and_then(|decl| decl.name())
-            else {
+            let Some(decl) = ast::MethodDecl::cast(member.clone()) else {
                 continue;
             };
-            let Some(token) = member
-                .children_with_tokens()
-                .filter_map(jals_syntax::SyntaxElement::into_token)
-                .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
-            else {
+            // One token answers both questions: the bridge is emitted under the name's text, and the
+            // index is keyed on where that name starts.
+            let Some(token) = decl.name_token() else {
                 continue;
             };
+            let name = token.text().to_owned();
             let own = context.member_at(&token)?;
             if context.index.member(own).modifiers.is_static {
                 continue;
@@ -1663,13 +1661,10 @@ impl Compile {
         let decl = ast::MethodDecl::cast(node.clone())
             .ok_or(LowerError::Unsupported("a malformed method declaration"))?;
         let name = decl.name().unwrap_or_default();
-        let member = context.member_at(
-            &jals_syntax::ast::AstNode::syntax(&decl)
-                .children_with_tokens()
-                .filter_map(jals_syntax::SyntaxElement::into_token)
-                .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
-                .ok_or_else(|| LowerError::Unresolved(name.clone()))?,
-        )?;
+        let token = decl
+            .name_token()
+            .ok_or_else(|| LowerError::Unresolved(name.clone()))?;
+        let member = context.member_at(&token)?;
         // The method's own type parameters are not the class's, so the index resolved each as an
         // external name it has never heard of. Naming them here is what lets the descriptor erase them.
         let own_vars: Vec<String> = node
