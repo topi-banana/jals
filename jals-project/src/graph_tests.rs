@@ -748,6 +748,16 @@ fn git_identity_uses_head_not_checkout_path_and_local_children_stay_confined() {
                 .iter()
                 .all(|node| node.id.token().len() == 64)
         );
+        // Both nodes live in a temporary checkout, so both are named by the repository they came
+        // from — by the argument `git clone` was given, never by the identity framing beside it,
+        // which is NUL-delimited and carries a commit no reader asked to see. The two reading the
+        // same is the documented cost of naming a node by where it came from.
+        let locations = first.locations();
+        assert_eq!(locations.len(), 2, "{locations:?}");
+        for location in &locations {
+            assert!(!location.contains('\0'), "{location:?}");
+            assert!(location.ends_with("repository"), "{location:?}");
+        }
 
         let outside = project.path().join("outside");
         fs::create_dir_all(&outside).unwrap();

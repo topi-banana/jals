@@ -75,7 +75,13 @@ pub(crate) struct NativeGraphState {
 #[derive(Clone)]
 struct GitConfinement {
     checkout: PathBuf,
+    /// Identity framing, folded into every node id acquired inside this checkout. NUL-delimited
+    /// and nested — `git-local\0git\0<url>\0<commit>\0<relative>` is a shape this takes — so it is
+    /// a digest input, never a string to show anyone.
     stable_repository: String,
+    /// How a diagnostic names this repository: the argument `git clone` was given, which is what
+    /// the reader wrote in their manifest or a canonical host path they can open.
+    location: String,
 }
 
 #[derive(Clone)]
@@ -468,11 +474,13 @@ impl GraphBuilder {
     }
 
     /// How a diagnostic names this node. A Git dependency lives in a temporary checkout whose path
-    /// means nothing to a reader, so it is named by the repository it was cloned from instead.
+    /// means nothing to a reader, so it is named by the repository it was cloned from instead —
+    /// by that repository's [`location`](GitConfinement::location), never by the identity framing
+    /// beside it.
     fn node_location(acquired: &AcquiredSource) -> String {
         acquired.confinement.as_ref().map_or_else(
             || acquired.root.display().to_string(),
-            |confinement| confinement.stable_repository.clone(),
+            |confinement| confinement.location.clone(),
         )
     }
 
@@ -592,6 +600,10 @@ impl GraphBuilder {
             .map_err(|error| error.to_string())?;
         let (clone_argument, stable_locator) =
             self.resolve_git_locator(declaring, &dependency.git).await?;
+        // Kept out of the clone below, which moves `clone_argument` onto the blocking pool. This
+        // is the readable half of the pair: a URL as the manifest wrote it, or a canonical host
+        // path — where `stable_locator` is NUL-framed identity input.
+        let location = clone_argument.clone();
         let checkout_arg = reference.checkout_arg().map(ToOwned::to_owned);
         let selected_dir = dependency.dir.clone();
         let current_directory = declaring.root.clone();
@@ -676,6 +688,7 @@ impl GraphBuilder {
             confinement: Some(GitConfinement {
                 checkout,
                 stable_repository,
+                location,
             }),
             watch: false,
             checkout: Some(temporary),

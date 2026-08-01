@@ -647,6 +647,17 @@ impl ResolvedProjectGraph {
         &self.warnings
     }
 
+    /// Every node's diagnostic [`location`](ResolvedNode::location), in discovery order. Nothing
+    /// in production reads these as a set — a diagnostic names the one node it is about — so this
+    /// exists to let the crate's own tests pin what a reader would be shown.
+    #[cfg(test)]
+    pub(crate) fn locations(&self) -> Vec<&str> {
+        self.nodes
+            .iter()
+            .map(|node| node.location.as_str())
+            .collect()
+    }
+
     /// Every direct `[dependencies] features` name that its target dependency does not declare in
     /// `[features]`.
     ///
