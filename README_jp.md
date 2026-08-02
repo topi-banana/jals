@@ -237,6 +237,7 @@ jals build --dry-run        # コンパイルせず javac コマンドを表示
 jals run                    # コンパイルしてから [run] main-class を実行
 jals run -- arg1 arg2       # ...プログラムへ引数を渡す
 jals expand                 # コンパイルせず、source を素の Java へ lower する
+jals package                # コンパイルして出力ツリーを target/<name>.jar にまとめる
 jals clean                  # ビルド出力（target/classes）を削除
 ```
 
@@ -301,6 +302,27 @@ environment directive は、後続の明示的な `jals build` / `run` による
 この portable phase 以外では `jals-build` がコマンドをデータとして計画し、マニフェスト探索・source
 走査・JDK 起動を `jals-cli` が担います（`javac`/`java` は `$JAVAC`/`$JAVA`、次に
 `$JAVA_HOME/bin`、最後に `PATH` の順で解決します）。
+
+### jar を作る
+
+`jals build` は出力ツリーを残します。コンパイラの class ファイルに加えて、
+`[build] resource-dirs`（既定は `src/main/resources`）以下のすべてが Maven と同じ形でコピーされた
+ものです。`jals package` はそのツリーをアーカイブします。
+
+```sh
+jals package                       # → target/<package name>.jar
+jals package --out dist/app.jar    # 出力先を変える
+```
+
+`Main-Class` は解決済みの run target（`[[bin]]` / `[package] default-run` / `[run] main-class`）
+から取ります。エントリポイントを宣言していれば実行可能な jar に、していなければライブラリ jar に
+なります。アーカイブは stored-only でタイムスタンプはゼロ、ツリーもソート順に走査するので、同じ
+入力からは同じバイト列が出ます。
+
+build script は `build.add_resource(path, destination)` で resource を足せます。project ファイル
+または `output.write_text` の結果と、ツリー内で持つべきパスを渡します——version を埋め込んだ
+descriptor や、構成ごとに選ぶファイルのためのものです。script の resource は `resource-dirs` の
+後にコピーされるので、同じ destination では計算されたファイルが勝ちます。
 
 ### 別のビルドシステムのために dialect source を lower する
 

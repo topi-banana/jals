@@ -103,6 +103,7 @@ version = "0.1.0"
 [build]
 # script = { type = "rhai", file = "build.rhai" } # optional pre-javac phase
 source-dirs = ["src/main/java"]   # -sourcepath roots, also scanned for .java files
+resource-dirs = ["src/main/resources"]  # copied into classes-dir after a successful compile
 classes-dir = "target/classes"    # javac -d
 release = 21                       # javac --release N
 # source = 17                      # javac --source N  (only when release is unset)
@@ -210,6 +211,7 @@ nothing still leaves every dependency script cached.
 | ------------- | ---------------- | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | `script`      | tagged table     | —                   | optional pre-`javac` build phase; currently `{ type = "rhai", file = "build.rhai" }`                                                    |
 | `source-dirs` | array of strings | `["src/main/java"]` | `-sourcepath` (joined) **and** the roots scanned for `.java` files                                                                      |
+| `resource-dirs` | array of strings | `["src/main/resources"]` | copied into `classes-dir` after a successful compile, each file keeping its path below its root (Maven's resource step). A listed root that does not exist is empty rather than an error, so the default is harmless for a project with no resources |
 | `classes-dir` | string           | `"target/classes"`  | `javac -d` (also the dir `jals clean` removes)                                                                                          |
 | `release`     | integer          | —                   | `--release N` — sets source level, target level, and bootclasspath together; when present, `source`/`target` are ignored                |
 | `source`      | integer          | —                   | `--source N` — only when `release` is unset                                                                                             |
@@ -267,6 +269,7 @@ records a typed DAG while the first three retain the direct APIs below:
 | `build`   | `rerun_if_changed(path)`                                    | Track one project file for cache invalidation.                                                                                                                                                                                                                                                                                                                              |
 | `build`   | `rerun_if_env_changed(name)`                                | Track one supplied environment value for cache invalidation.                                                                                                                                                                                                                                                                                                                |
 | `build`   | `add_source(path)`                                          | Add a project file or returned `OutputPath` to the later source set.                                                                                                                                                                                                                                                                                                        |
+| `build`   | `add_resource(path, destination)`                           | Copy a project file or returned `OutputPath` into `classes-dir` at `destination` — for a resource the script had to compute, or one that does not sit where the archive wants it. The destination is written out rather than derived, and two sources for one destination is an error. Script resources are copied after the `[build] resource-dirs` trees, so a computed file wins. |
 | `build`   | `add_classpath(path)`                                       | Add a project file or returned `OutputPath` to the classpath.                                                                                                                                                                                                                                                                                                               |
 | `build`   | `add_javac_arg(arg)` / `add_jvm_arg(arg)`                   | Append compiler or JVM arguments in call order.                                                                                                                                                                                                                                                                                                                             |
 | `build`   | `set_compile_env(name, value)` / `set_run_env(name, value)` | Add environment entries to the compiler or runtime request.                                                                                                                                                                                                                                                                                                                 |
@@ -811,7 +814,7 @@ fed into `Invocation::build` exactly as the discovered source list is fed in tod
 | `jals check`                               | `cargo check`                | Compile for diagnostics only, no runnable output (`javac -proc:only` / throwaway `-d`), or fold in `jals fmt --check` + `jals lint`. | a "check" invocation variant                                                                    |
 | `jals test [filter]`                       | `cargo test`                 | Compile test sources and run them via the JUnit Platform launcher; filter by class/method.                                           | `[test]` section, `test-source-dirs`, a JUnit dep on the classpath, a runner invocation builder |
 | `jals doc`                                 | `cargo doc`                  | Run `javadoc` into `target/doc`; optionally open it.                                                                                 | a `javadoc` invocation builder, `[doc]` options                                                 |
-| `jals jar` / `jals package`                | `cargo package`              | Produce a runnable jar (`Main-Class` in the manifest), optionally a fat/uber jar bundling classpath deps.                            | a `jar`/archive plan, `[package]` metadata                                                      |
+| `jals package`                             | `cargo package`              | **done** for the plain jar: `jals package` archives `classes-dir` with `Main-Class` from the resolved run target. A fat/uber jar bundling classpath deps is still open.               | an archive of the output tree                                                                     |
 | `jals add <coord>` / `jals remove <coord>` | `cargo add` / `cargo remove` | Edit `[dependencies]` in `jals.toml`.                                                                                                | manifest **writing** + Maven coordinate parsing                                                 |
 | `jals tree`                                | `cargo tree`                 | Print the implemented source-project graph plus the future resolved Maven dependency tree.                                           | CLI presentation + a Maven dependency resolver (§3)                                             |
 | `jals fetch`                               | `cargo fetch`                | Download and cache dependencies without building.                                                                                    | a dependency resolver (§3)                                                                      |
@@ -840,7 +843,6 @@ Making a `features` release preset also imply a default `javac --release` is sti
 | `parameters`             | `-parameters`                            | keep formal parameter names at runtime                                     |
 | `lint` / `warnings`      | `-Xlint:all`, `-Werror`                  | typed `-Xlint` config instead of raw `javac-flags`                         |
 | `annotation-processors`  | `-processor`, `-processorpath`, `-proc:` | annotation processing                                                      |
-| `resource-dirs`          | (copy step)                              | `src/main/resources` → `classes-dir`, like Maven                           |
 | `module` / `module-path` | `--module-path`, `--module-source-path`  | JPMS (modular) builds vs. the classpath                                    |
 | `target-dir`             | `-d` parent                              | override the `target/` location (also a CLI flag, §6)                      |
 | `incremental`            | (skip unchanged)                         | recompile only stale sources — needs timestamp/hash tracking in `jals-cli` |
@@ -899,8 +901,8 @@ separate, still-unwired step).
 ## 4. Packaging
 
 | Capability                        | Cargo analogue                   | Notes                                                                 |
-| --------------------------------- | -------------------------------- | --------------------------------------------------------------------- |
-| Plain jar (`Main-Class` manifest) | `cargo build --release` artifact | a `jar` invocation/archive plan from `[package]` + `[run] main-class` |
+| --------------------------------- | -------------------------------- | --------------------------------------------------------------- |
+| Plain jar (`Main-Class` manifest) | `cargo build --release` artifact | **done**: `jals package` archives `classes-dir` — classes and the copied resources alike — with `Main-Class` from the resolved run target. Stored-only with zeroed timestamps, so the same inputs give the same bytes |
 | Fat / uber jar                    | —                                | bundle dependency jars into one runnable archive                      |
 | `jpackage` / native image         | —                                | OS installers / GraalVM native binaries                               |
 | Source & javadoc jars             | —                                | `-sources.jar` / `-javadoc.jar` for publishing                        |
@@ -936,7 +938,7 @@ without a JDK, and `wasm32`-buildable.
 
 By Java-user impact:
 
-1. **High-value `[build]` keys** — `resource-dirs`, `encoding`, `enable-preview`, `-Xlint`
+1. **High-value `[build]` keys** — `encoding`, `enable-preview`, `-Xlint`
    (cheap, immediately useful, no new infrastructure).
 2. **`jals test`** — JUnit integration; the first thing most projects need after `build`/`run`.
 3. **Maven dependency management (§3)** — coordinate/POM resolver + `jals.lock`. The highest

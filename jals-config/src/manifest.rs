@@ -961,6 +961,19 @@ pub struct Build {
     /// Source roots, relative to the manifest directory. These feed `javac`'s `-sourcepath` and
     /// are the roots scanned for `.java` files. Defaults to `["src/main/java"]`.
     pub source_dirs: Vec<String>,
+    /// Resource roots, relative to the manifest directory. Everything below one is copied into
+    /// [`classes_dir`](Build::classes_dir) after a successful compile, keeping its path below the
+    /// root — Maven's `src/main/resources` step, which is also the default.
+    ///
+    /// Unlike [`source_dirs`](Build::source_dirs), a listed directory that does not exist is
+    /// simply empty rather than an error: the default has to be harmless for the projects that
+    /// have no resources, and a project *with* resources notices a typo through the missing file
+    /// rather than through a build that refuses to start.
+    ///
+    /// A resource shares the output tree with the compiler's own output, so `classes-dir` is the
+    /// one place `jals run` puts on the classpath and `jals package` reads — a resource is
+    /// therefore in the jar for the same reason a class is, with no second list to keep in step.
+    pub resource_dirs: Vec<String>,
     /// Output directory for `.class` files (`javac -d`), relative to the manifest directory.
     /// Defaults to `"target/classes"`.
     pub classes_dir: String,
@@ -1113,6 +1126,7 @@ impl Default for Build {
             frontend: FrontendKind::Vanilla {},
             backend: BackendKind::Javac {},
             source_dirs: alloc::vec!["src/main/java".to_owned()],
+            resource_dirs: alloc::vec!["src/main/resources".to_owned()],
             classes_dir: "target/classes".to_owned(),
             release: None,
             source: None,

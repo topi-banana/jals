@@ -48,6 +48,8 @@ enum Commands {
     Run(RunArgs),
     /// Lower a project's sources to plain Java with its frontend, without compiling.
     Expand(ExpandArgs),
+    /// Compile a project and package its output tree into a `.jar`.
+    Package(PackageArgs),
     /// Remove a project's `classes-dir` and reserved build-script outputs.
     Clean(CleanArgs),
     /// Scaffold a new JALS/Java project (`jals.toml`, a starter `Main.java`, and `.gitignore`).
@@ -240,6 +242,35 @@ struct ExpandArgs {
     features: FeatureArgs,
 }
 
+/// `jals package`: `build`, then the output tree as one archive.
+///
+/// The deliverable of a Java project is usually a jar rather than a directory of class files, and
+/// building one is not a second pipeline: it is `classes-dir` — the compiler's output plus the
+/// copied `[build] resource-dirs` — written into a deterministic stored-only archive. That the
+/// resources are already there is what keeps this from needing a second list of what goes in.
+#[derive(Args)]
+struct PackageArgs {
+    /// Use this manifest instead of discovering `jals.toml` upward from the cwd.
+    #[arg(long, value_name = "PATH")]
+    manifest_path: Option<PathBuf>,
+
+    /// Write the jar here instead of `target/<package name>.jar`. A relative path is resolved
+    /// against the project root, like every other manifest-relative path.
+    #[arg(long, value_name = "PATH")]
+    out: Option<PathBuf>,
+
+    /// Print the javac command before running it.
+    #[arg(short = 'v', long)]
+    verbose: bool,
+
+    /// Resolve build-task artifacts only from the verified project cache.
+    #[arg(long)]
+    offline: bool,
+
+    #[command(flatten)]
+    features: FeatureArgs,
+}
+
 #[derive(Args)]
 struct CleanArgs {
     /// Use this manifest instead of discovering `jals.toml` upward from the cwd.
@@ -274,6 +305,7 @@ fn main() -> ExitCode {
             Commands::Build(args) => args.run(&exec).await,
             Commands::Run(args) => args.run(&exec).await,
             Commands::Expand(args) => args.run().await,
+            Commands::Package(args) => args.run(&exec).await,
             Commands::Clean(args) => args.run(&exec).await,
             Commands::Init(args) => args.run(&exec).await,
         }
@@ -640,8 +672,84 @@ impl BuildArgs {
             .compile(&request)
             .await
             .map_err(|e| anyhow!("{e}"))?;
-        App::finish_compile(&manifest, &root, &outcome)?;
+        App::finish_compile(&manifest, &root, &outcome, &inputs)?;
         Ok(App::outcome_exit_code(outcome.code()))
+    }
+}
+
+impl PackageArgs {
+    /// Compiles the project, then writes `classes-dir` — classes and copied resources alike — into
+    /// one jar.
+    ///
+    /// The compile is `jals build`'s, run through the same steps rather than beside them, so what
+    /// is packaged is exactly what a build produced. Only the archive is this command's own.
+    async fn run(&self, exec: &Exec) -> Result<ExitCode> {
+        let (mut manifest, root) = App::resolve_manifest(self.manifest_path.as_deref()).await?;
+        // A WebAssembly module is one artifact already, and not one a jar can hold: the backend
+        // writes `project.wasm` and there are no class files to archive. Refused here rather than
+        // as an empty jar later.
+        if matches!(
+            manifest.build.backend,
+            jals_config::BackendKind::JalsWasm {}
+        ) {
+            bail!(
+                "`jals package` archives the class files a compile produced, and `[build] backend` \
+                 is `jals-wasm`, which compiles the project to a single WebAssembly module \
+                 instead. That module is `{}/project.wasm`, already one artifact.",
+                manifest.build.classes_dir
+            );
+        }
+        let features = self.features.resolve(&manifest)?;
+        let (sources, tree, inputs) = App::prepare_compile_inputs(
+            &mut manifest,
+            &root,
+            exec,
+            &features,
+            self.offline,
+            jals_project::SourcePublication::Apply,
+        )
+        .await?;
+        let plan = CompilePlan::prepare(&manifest, &root, &sources, tree, &inputs, exec).await?;
+        let request = plan.request();
+        if self.verbose {
+            println!("{}", plan.backend.describe(&request));
+        }
+        let outcome = plan
+            .backend
+            .compile(&request)
+            .await
+            .map_err(|e| anyhow!("{e}"))?;
+        App::finish_compile(&manifest, &root, &outcome, &inputs)?;
+        if !outcome.success() {
+            return Ok(App::outcome_exit_code(outcome.code()));
+        }
+
+        let jar = self.jar_path(&manifest, &root);
+        let bytes = App::package_classes(&manifest, &root)?;
+        if let Some(parent) = jar.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        std::fs::write(&jar, &bytes).with_context(|| format!("writing {}", jar.display()))?;
+        println!("packaged {} ({} bytes)", jar.display(), bytes.len());
+        Ok(ExitCode::SUCCESS)
+    }
+
+    /// Where the jar goes: `--out` when given, else `target/<package name>.jar` — the same name
+    /// the playground downloads, so one project produces one artifact name whichever host built it.
+    fn jar_path(&self, manifest: &Manifest, root: &Path) -> PathBuf {
+        self.out.as_ref().map_or_else(
+            || {
+                let name = manifest
+                    .package
+                    .name
+                    .as_deref()
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or("project");
+                root.join("target").join(format!("{name}.jar"))
+            },
+            |out| root.join(out),
+        )
     }
 }
 
@@ -761,7 +869,7 @@ impl RunArgs {
             .compile(&compile_request)
             .await
             .map_err(|e| anyhow!("{e}"))?;
-        App::finish_compile(&manifest, &root, &outcome)?;
+        App::finish_compile(&manifest, &root, &outcome, &inputs)?;
         if !outcome.success() {
             return Ok(App::outcome_exit_code(outcome.code()));
         }
@@ -1017,6 +1125,10 @@ struct HostProjectInputs {
     extra_classpath: Vec<PathBuf>,
     classpath_classes: Vec<jals_classfile::ClassFile>,
     extra_sources: Vec<PathBuf>,
+    /// Root-script resources, as (destination below `classes-dir`, source file). Root-only, like
+    /// the compiler flags beside them: a dependency's own resources belong in a dependency's own
+    /// archive, not in whatever consumes it.
+    extra_resources: Vec<(String, PathBuf)>,
     feature_set: FeatureSet,
     javac_args: Vec<String>,
     jvm_args: Vec<String>,
@@ -1110,6 +1222,8 @@ impl CompilePlan {
 #[derive(Default)]
 struct HostBuildScript {
     generated_sources: Vec<PathBuf>,
+    /// `build.add_resource` pairs, as (destination below `classes-dir`, source file).
+    generated_resources: Vec<(String, PathBuf)>,
     additional_classpath: Vec<PathBuf>,
     javac_args: Vec<String>,
     jvm_args: Vec<String>,
@@ -1140,6 +1254,7 @@ impl From<HostBuildScript> for HostProjectInputs {
         Self {
             extra_classpath: script.additional_classpath,
             extra_sources: script.generated_sources,
+            extra_resources: script.generated_resources,
             javac_args: script.javac_args,
             jvm_args: script.jvm_args,
             compile_env: script.compile_env,
@@ -1473,6 +1588,13 @@ impl App {
                         .iter()
                         .map(|key| key.path().to_host_path(root))
                         .collect(),
+                    generated_resources: output
+                        .generated_resources
+                        .iter()
+                        .map(|(destination, source)| {
+                            (destination.to_string(), source.path().to_host_path(root))
+                        })
+                        .collect(),
                     additional_classpath,
                     javac_args: output.javac_args.clone(),
                     jvm_args: output.jvm_args.clone(),
@@ -1639,6 +1761,7 @@ impl App {
         manifest: &Manifest,
         root: &Path,
         outcome: &jals_build::BackendOutcome,
+        inputs: &HostProjectInputs,
     ) -> Result<()> {
         for message in &outcome.messages {
             eprintln!("error: {message}");
@@ -1658,7 +1781,121 @@ impl App {
             std::fs::write(&target, bytes)
                 .with_context(|| format!("writing {}", target.display()))?;
         }
+        Self::copy_resources(manifest, root, &inputs.extra_resources)?;
         Ok(())
+    }
+
+    /// Copy every `[build] resource-dirs` tree into `classes-dir`, keeping each file's path below
+    /// its root (Maven's resource step).
+    ///
+    /// Part of finishing a *successful* compile rather than a step of its own: the output tree is
+    /// what `jals run` puts on the classpath and what `jals package` reads, so a resource belongs
+    /// there for exactly the reason a class does. A listed root that does not exist is empty, not
+    /// an error — the default `src/main/resources` has to be harmless for a project that has none.
+    fn copy_resources(
+        manifest: &Manifest,
+        root: &Path,
+        script: &[(String, PathBuf)],
+    ) -> Result<()> {
+        let classes_dir = root.join(&manifest.build.classes_dir);
+        for resource_root in manifest.resource_roots(root) {
+            if !resource_root.is_dir() {
+                continue;
+            }
+            for source in Self::collect_files(&resource_root)? {
+                let relative = source.strip_prefix(&resource_root).map_err(|_| {
+                    anyhow!(
+                        "resource {} is outside {}",
+                        source.display(),
+                        resource_root.display()
+                    )
+                })?;
+                let target = classes_dir.join(relative);
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent)
+                        .with_context(|| format!("creating {}", parent.display()))?;
+                }
+                Self::copy_resource(&source, &target)?;
+            }
+        }
+        // The script's own resources last: a computed descriptor is the one a project means when
+        // both exist, and overwriting is what makes that so without the script also having to
+        // remove the authored file.
+        for (destination, source) in script {
+            Self::copy_resource(source, &classes_dir.join(destination))?;
+        }
+        Ok(())
+    }
+
+    /// Copy one resource into the output tree, creating the directories above it.
+    fn copy_resource(source: &Path, target: &Path) -> Result<()> {
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        std::fs::copy(source, target)
+            .with_context(|| format!("copying {} to {}", source.display(), target.display()))?;
+        Ok(())
+    }
+
+    /// Package everything under `classes-dir` into a jar's bytes.
+    ///
+    /// The tree on disk is the input, not the backend's in-memory artifacts: a process-based
+    /// compiler wrote its own output through `javac -d` and never handed any back, and the copied
+    /// resources are only there. Reading one place is also what makes the two backends produce the
+    /// same archive.
+    ///
+    /// `Main-Class` comes from the resolved run target when the manifest names one. A project that
+    /// declares no entry point gets a library jar, which is the honest output for it.
+    fn package_classes(manifest: &Manifest, root: &Path) -> Result<Vec<u8>> {
+        let classes_dir = root.join(&manifest.build.classes_dir);
+        if !classes_dir.is_dir() {
+            bail!(
+                "nothing to package: {} does not exist",
+                classes_dir.display()
+            );
+        }
+        let mut entries = Vec::new();
+        for path in Self::collect_files(&classes_dir)? {
+            let relative = RelativePath::from_host_path(&classes_dir, &path).ok_or_else(|| {
+                anyhow!("{} is not a portable project-relative path", path.display())
+            })?;
+            let bytes =
+                std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+            entries.push((relative, bytes));
+        }
+        if entries.is_empty() {
+            bail!("nothing to package: {} is empty", classes_dir.display());
+        }
+        let main_class = jals_build::RunTarget::resolve(manifest, None).ok();
+        jals_classpath::JarPackage::write(&entries, main_class).map_err(|error| anyhow!("{error}"))
+    }
+
+    /// Every file below `dir`, recursively, in sorted order.
+    ///
+    /// Sorted because the order reaches a jar's member order, and an archive that depends on a
+    /// directory walk's order is one whose bytes depend on the filesystem that produced it.
+    fn collect_files(dir: &Path) -> Result<Vec<PathBuf>> {
+        let mut files = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(current) = stack.pop() {
+            let entries = std::fs::read_dir(&current)
+                .with_context(|| format!("reading {}", current.display()))?;
+            let mut level: Vec<PathBuf> = entries
+                .map(|entry| entry.map(|entry| entry.path()))
+                .collect::<std::io::Result<_>>()
+                .with_context(|| format!("reading {}", current.display()))?;
+            level.sort();
+            for path in level {
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    files.push(path);
+                }
+            }
+        }
+        files.sort();
+        Ok(files)
     }
 
     /// The staged tree expressed as manifest `source-dirs`, relative to the project root when

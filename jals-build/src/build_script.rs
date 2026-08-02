@@ -18,21 +18,26 @@ use core::fmt;
 use jals_config::Manifest;
 use jals_storage::{
     ArtifactCache, CacheBackend, CacheKey, CacheNamespace, ContentDigest, FileKey, ProjectView,
-    ProvenanceFold, Revision,
+    ProvenanceFold, RelativePath, Revision,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::task::{TaskPlan, TaskPlanLimits};
 
-// Both bumped for publication intent: `tasks.publish_tree` gained a required fifth argument (API),
+// Both bumped for `build.add_resource`: the Rhai surface gained it (API), and
+// `BuildScriptStateWire` gained a required `generated_resources` field (state). As before, the API
+// bump is the load-bearing one — it reseeds the cache key, so a state written without the field is
+// never fetched and decoded at all.
+//
+// Bumped before that for publication intent: `tasks.publish_tree` gained a required fifth argument (API),
 // and `TaskTerminal::PublishTree` gained a required `intent` field, which `BuildScriptStateWire`
 // carries verbatim (state). The API bump is the load-bearing one — it reseeds the cache key
 // (`cache_key_seed`), so a pre-intent state is never fetched and decoded in the first place.
 //
 // Bumped before that for build features: the Rhai surface gained `build.feature`/`build.features`,
 // and `FingerprintInputsWire` gained a required `features` field.
-const BUILD_SCRIPT_API_VERSION: u32 = 6;
-const BUILD_SCRIPT_STATE_VERSION: u32 = 6;
+const BUILD_SCRIPT_API_VERSION: u32 = 7;
+const BUILD_SCRIPT_STATE_VERSION: u32 = 7;
 const BUILD_ARTIFACT_ROOT: &str = "target/jals/build";
 /// Everything `jals` owns under the project: build artifacts, the verified cache, acquired
 /// dependencies. All of it is derived, so none of it is an input to a script's fingerprint.
@@ -408,6 +413,16 @@ pub struct BuildScriptOutput {
     pub generated_files: BTreeSet<FileKey>,
     /// Generated or project source files added by the script, in key order.
     pub generated_sources: BTreeSet<FileKey>,
+    /// Resource files added by the script, as **destination below `classes-dir` -> source file**,
+    /// in destination order.
+    ///
+    /// This is how a script contributes a resource it had to compute (a version stamped into a
+    /// descriptor) or one that does not sit where it belongs in the archive (a per-configuration
+    /// file selected from several). The destination is written out rather than derived: a
+    /// generated file's own path is the script's temporary output layout and a project file's is
+    /// where the repository keeps it, and neither is where the archive wants it — so a rule
+    /// mapping one to the other would be wrong half the time.
+    pub generated_resources: BTreeMap<RelativePath, FileKey>,
     /// Additional project classpath entries, in key order.
     pub additional_classpath: BTreeSet<FileKey>,
     /// Extra `javac` arguments in script call order.
@@ -479,6 +494,7 @@ struct BuildScriptStateWire {
     outputs: Vec<OutputArtifactWire>,
     task_plan: TaskPlan,
     generated_sources: Vec<String>,
+    generated_resources: Vec<(String, String)>,
     additional_classpath: Vec<String>,
     javac_args: Vec<String>,
     jvm_args: Vec<String>,
@@ -785,6 +801,7 @@ struct PendingOutput {
     total_output_bytes: usize,
     host_directive_bytes: usize,
     generated_sources: BTreeSet<FileKey>,
+    generated_resources: BTreeMap<RelativePath, FileKey>,
     additional_classpath: BTreeSet<FileKey>,
     javac_args: Vec<String>,
     jvm_args: Vec<String>,
@@ -805,6 +822,7 @@ impl PendingOutput {
             total_output_bytes: 0,
             host_directive_bytes: 0,
             generated_sources: BTreeSet::new(),
+            generated_resources: BTreeMap::new(),
             additional_classpath: BTreeSet::new(),
             javac_args: Vec::new(),
             jvm_args: Vec::new(),
@@ -823,6 +841,7 @@ impl PendingOutput {
             revision,
             generated_files: self.generated.keys().cloned().collect(),
             generated_sources: self.generated_sources.clone(),
+            generated_resources: self.generated_resources.clone(),
             additional_classpath: self.additional_classpath.clone(),
             javac_args: self.javac_args.clone(),
             jvm_args: self.jvm_args.clone(),
@@ -1416,6 +1435,45 @@ mod api {
         add_source_path(api, path.key)
     }
 
+    fn add_resource_path(api: &BuildApi, key: FileKey, destination: &str) -> RhaiResult<()> {
+        let mut pending = api
+            .pending
+            .try_borrow_mut()
+            .map_err(|_| rhai_error("reentrant build.add_resource call"))?;
+        let destination = parse_relative(destination, "build.add_resource", &pending.limits)?;
+        let limit = pending.limits.max_array_size;
+        if let Some(existing) = pending.generated_resources.get(&destination) {
+            // Two sources for one archive member is a script defect, and silently keeping either
+            // one makes the archive depend on call order.
+            if existing != &key {
+                return Err(rhai_error(format!(
+                    "build.add_resource already added `{existing}` at `{destination}`"
+                )));
+            }
+            return Ok(());
+        }
+        check_host_collection(
+            pending.generated_resources.len(),
+            limit,
+            "build.add_resource",
+        )?;
+        pending.generated_resources.insert(destination, key);
+        Ok(())
+    }
+
+    fn build_add_resource(api: &mut BuildApi, path: &str, destination: &str) -> RhaiResult<()> {
+        let key = project_file(&api.view, path, "build.add_resource", &api.limits)?;
+        add_resource_path(api, key, destination)
+    }
+
+    fn build_add_output_resource(
+        api: &mut BuildApi,
+        path: BuildScriptOutputPath,
+        destination: &str,
+    ) -> RhaiResult<()> {
+        add_resource_path(api, path.key, destination)
+    }
+
     fn add_classpath(api: &BuildApi, key: FileKey) -> RhaiResult<()> {
         let mut pending = api
             .pending
@@ -1642,6 +1700,8 @@ mod api {
             .register_fn("env", build_env)
             .register_fn("add_source", build_add_source)
             .register_fn("add_source", build_add_output_source)
+            .register_fn("add_resource", build_add_resource)
+            .register_fn("add_resource", build_add_output_resource)
             .register_fn("add_classpath", build_add_classpath)
             .register_fn("add_classpath", build_add_output_classpath)
             .register_fn("add_javac_arg", build_add_javac_arg)
@@ -1689,6 +1749,7 @@ mod api {
         fingerprint: ContentDigest,
         outputs: Vec<(FileKey, ContentDigest)>,
         generated_sources: BTreeSet<FileKey>,
+        generated_resources: BTreeMap<RelativePath, FileKey>,
         additional_classpath: BTreeSet<FileKey>,
         javac_args: Vec<String>,
         jvm_args: Vec<String>,
@@ -1718,6 +1779,7 @@ mod api {
                 total_output_bytes,
                 host_directive_bytes: 0,
                 generated_sources: self.state.generated_sources,
+                generated_resources: self.state.generated_resources,
                 additional_classpath: self.state.additional_classpath,
                 javac_args: self.state.javac_args,
                 jvm_args: self.state.jvm_args,
@@ -1998,6 +2060,14 @@ mod api {
             outputs.push((key, digest_from_wire(&output.digest)?));
         }
         let generated_sources = parse_file_set(&wire.generated_sources)?;
+        let mut generated_resources = BTreeMap::new();
+        for (destination, source) in &wire.generated_resources {
+            let destination = RelativePath::parse(destination).ok()?;
+            let source = FileKey::parse(source).ok()?;
+            if generated_resources.insert(destination, source).is_some() {
+                return None;
+            }
+        }
         let additional_classpath = parse_file_set(&wire.additional_classpath)?;
         let rerun_files = parse_file_set(&wire.rerun_files)?;
         let rerun_env = parse_string_set(&wire.rerun_env)?;
@@ -2028,6 +2098,7 @@ mod api {
             fingerprint,
             outputs,
             generated_sources,
+            generated_resources,
             additional_classpath,
             javac_args: wire.javac_args,
             jvm_args: wire.jvm_args,
@@ -2102,6 +2173,13 @@ mod api {
             && state.outputs.iter().all(|(path, _)| path_fits(path))
             && state.generated_sources.len() <= limits.max_array_size
             && state.generated_sources.iter().all(&path_fits)
+            && state.generated_resources.len() <= limits.max_array_size
+            && state
+                .generated_resources
+                .iter()
+                .all(|(destination, source)| {
+                    destination.to_string().len() <= limits.max_path_bytes && path_fits(source)
+                })
             && state.additional_classpath.len() <= limits.max_array_size
             && state.additional_classpath.iter().all(&path_fits)
             && state.rerun_files.len() <= limits.max_array_size
@@ -2304,6 +2382,13 @@ mod api {
                 .generated_sources
                 .iter()
                 .map(ToString::to_string)
+                .collect(),
+            generated_resources: pending
+                .generated_resources
+                .iter()
+                .map(|(destination, source): (&RelativePath, &FileKey)| {
+                    (destination.to_string(), source.to_string())
+                })
                 .collect(),
             additional_classpath: pending
                 .additional_classpath

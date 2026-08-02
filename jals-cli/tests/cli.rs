@@ -2267,3 +2267,151 @@ fn expand_rejects_an_undeclared_feature() {
     assert!(stderr.contains("nope"), "stderr: {stderr}");
     assert!(!out.exists(), "nothing may be written for a rejected run");
 }
+
+/// A project whose output tree has all three kinds of member: a compiled class, a resource from
+/// `[build] resource-dirs`, and two the build script contributed. Compiled with the in-process
+/// backend so the test needs no JDK.
+fn packageable_project() -> tempfile::TempDir {
+    let dir = tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("jals.toml"),
+        "[package]\nname = \"demo\"\n\n\
+         [build]\nbackend = { type = \"jals\" }\nscript = { type = \"rhai\", file = \"build.rhai\" }\n\n\
+         [run]\nmain-class = \"com.example.Main\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("build.rhai"),
+        "let stamped = output.write_text(\"stamped.txt\", \"version=1\\n\");\n\
+         build.add_resource(stamped, \"META-INF/stamped.txt\");\n\
+         build.add_resource(\"NOTICE\", \"META-INF/NOTICE\");\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("NOTICE"), "a notice\n").unwrap();
+    let src = dir.path().join("src/main/java/com/example");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("Main.java"),
+        "package com.example;\npublic class Main { public static void main(String[] a) {} }\n",
+    )
+    .unwrap();
+    let resources = dir.path().join("src/main/resources/assets");
+    std::fs::create_dir_all(&resources).unwrap();
+    std::fs::write(resources.join("data.json"), "{}\n").unwrap();
+    dir
+}
+
+/// The jar holds the compile's output tree: classes, `resource-dirs` resources, and the script's
+/// own — each at the path it will be read from, and the manifest first with the resolved entry
+/// point.
+#[test]
+fn package_archives_classes_and_resources() {
+    let dir = packageable_project();
+
+    let (stdout, stderr, code) = run_full(&[
+        "package",
+        "--manifest-path",
+        dir.path().join("jals.toml").to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let jar = dir.path().join("target/demo.jar");
+    assert!(stdout.contains("packaged"), "stdout: {stdout}");
+    assert!(jar.is_file(), "no jar at {}", jar.display());
+
+    let file = std::fs::File::open(&jar).unwrap();
+    let mut archive = zip::ZipArchive::new(file).unwrap();
+    let names: Vec<String> = archive.file_names().map(str::to_owned).collect();
+    assert_eq!(
+        names.first().map(String::as_str),
+        Some("META-INF/MANIFEST.MF"),
+        "the manifest must be the first member: {names:?}"
+    );
+    for expected in [
+        "com/example/Main.class",
+        "assets/data.json",
+        "META-INF/stamped.txt",
+        "META-INF/NOTICE",
+    ] {
+        assert!(names.iter().any(|name| name == expected), "{names:?}");
+    }
+    let mut manifest = String::new();
+    std::io::Read::read_to_string(
+        &mut archive.by_name("META-INF/MANIFEST.MF").unwrap(),
+        &mut manifest,
+    )
+    .unwrap();
+    assert!(
+        manifest.contains("Main-Class: com.example.Main"),
+        "{manifest}"
+    );
+
+    // Same inputs, same bytes: the archive is stored-only with zeroed timestamps, and the trees it
+    // reads are walked in sorted order.
+    let first = std::fs::read(&jar).unwrap();
+    let (_stdout, stderr, code) = run_full(&[
+        "package",
+        "--manifest-path",
+        dir.path().join("jals.toml").to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(
+        first,
+        std::fs::read(&jar).unwrap(),
+        "packaging must be reproducible"
+    );
+}
+
+/// `build` copies the resources too — the output tree is what `jals run` puts on the classpath, so
+/// a resource is on it for the same reason a class is.
+#[test]
+fn build_copies_resource_dirs_into_the_output_tree() {
+    let dir = packageable_project();
+
+    let (_stdout, stderr, code) = run_full(&[
+        "build",
+        "--manifest-path",
+        dir.path().join("jals.toml").to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(dir.path().join("target/classes/assets/data.json").is_file());
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("target/classes/META-INF/stamped.txt")).unwrap(),
+        "version=1\n"
+    );
+}
+
+/// A `jals-wasm` project has one artifact already, and it is not one a jar can hold.
+#[test]
+fn package_refuses_the_wasm_backend() {
+    let dir =
+        project("[package]\nname = \"demo\"\n\n[build]\nbackend = { type = \"jals-wasm\" }\n");
+
+    let (_stdout, stderr, code) = run_full(&[
+        "package",
+        "--manifest-path",
+        dir.path().join("jals.toml").to_str().unwrap(),
+    ]);
+    assert_ne!(code, 0);
+    assert!(stderr.contains("project.wasm"), "stderr: {stderr}");
+}
+
+/// Two sources for one archive member is a script defect: keeping either one would make the
+/// archive depend on the order the calls happened to run in.
+#[test]
+fn add_resource_rejects_two_sources_for_one_destination() {
+    let dir = packageable_project();
+    std::fs::write(
+        dir.path().join("build.rhai"),
+        "build.add_resource(\"NOTICE\", \"META-INF/NOTICE\");\n\
+         build.add_resource(\"jals.toml\", \"META-INF/NOTICE\");\n",
+    )
+    .unwrap();
+
+    let (_stdout, stderr, code) = run_full(&[
+        "package",
+        "--manifest-path",
+        dir.path().join("jals.toml").to_str().unwrap(),
+    ]);
+    assert_ne!(code, 0);
+    assert!(stderr.contains("META-INF/NOTICE"), "stderr: {stderr}");
+}

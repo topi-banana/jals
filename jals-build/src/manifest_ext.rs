@@ -95,6 +95,13 @@ pub trait ManifestExt {
     /// `manifest_dir` (the manifest's own directory). These feed `javac -sourcepath` and are the
     /// roots scanned for `.java` files.
     fn source_roots(&self, manifest_dir: &Path) -> Vec<PathBuf>;
+
+    /// The absolute resource roots: each `[build] resource-dirs` entry resolved against
+    /// `manifest_dir`. Everything below one is copied into `classes-dir` after a compile.
+    ///
+    /// Resolved exactly like [`source_roots`](ManifestExt::source_roots) — the difference between
+    /// the two is what the host does with a root that is not there, not how it is spelled.
+    fn resource_roots(&self, manifest_dir: &Path) -> Vec<PathBuf>;
 }
 
 impl ManifestExt for Manifest {
@@ -138,6 +145,14 @@ impl ManifestExt for Manifest {
     fn source_roots(&self, manifest_dir: &Path) -> Vec<PathBuf> {
         self.build
             .source_dirs
+            .iter()
+            .map(|d| manifest_dir.join(d))
+            .collect()
+    }
+
+    fn resource_roots(&self, manifest_dir: &Path) -> Vec<PathBuf> {
+        self.build
+            .resource_dirs
             .iter()
             .map(|d| manifest_dir.join(d))
             .collect()

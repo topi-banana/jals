@@ -154,7 +154,11 @@ filesystem reads into portable interfaces.
   `ProjectView`, then hands the text to `jals_fmt::import` and the result to
   `jals_fmt::generate`. What it keeps of project assembly is only what a host path forces:
   `NativeScope` selection, `materialize_file`/`materialize_tree`, `to_host_path`, and promoting a
-  structured failure to `anyhow`. `jals expand` is the frontend seam offered on its own, for a host
+  structured failure to `anyhow`. It also owns the **output tree**: `[build] resource-dirs` and a
+  script's `build.add_resource(path, destination)` are copied into `classes-dir` when a compile
+  succeeds (script resources last, so a computed file wins), and `jals package` archives that one
+  tree through `jals_classpath::JarPackage` — so a resource is in the jar for the same reason a
+  class is, and there is no second list of what goes in. `jals expand` is the frontend seam on its own, for a host
   that compiles the lowered tree itself (a Gradle or Maven build over dialect sources): it shares
   `build`'s lowering half (`App::lower_tree`) and stops there, running no build script, resolving no
   classpath and acquiring no dependency — none of which changes what a frontend emits for a file,

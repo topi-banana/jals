@@ -239,6 +239,7 @@ jals run                    # compile, then run the resolved entry point
 jals run --bin server       # run a named [[bin]] entry point
 jals run -- arg1 arg2       # ...passing args to the program
 jals expand                 # lower the sources to plain Java, without compiling
+jals package                # compile, then archive the output tree as target/<name>.jar
 jals clean                  # remove the build output (target/classes)
 ```
 
@@ -309,6 +310,28 @@ checkout.
 Outside that portable phase, `jals-build` plans commands as data and `jals-cli` owns host source
 discovery and JDK execution (resolving `javac`/`java` via `$JAVAC`/`$JAVA`, then
 `$JAVA_HOME/bin`, then `PATH`).
+
+### Package a jar
+
+`jals build` leaves an output tree: the compiler's class files plus everything under
+`[build] resource-dirs` (`src/main/resources` by default), copied in the way Maven copies
+resources. `jals package` archives that tree.
+
+```sh
+jals package                       # → target/<package name>.jar
+jals package --out dist/app.jar    # somewhere else
+```
+
+`Main-Class` comes from the resolved run target — `[[bin]]` / `[package] default-run` /
+`[run] main-class` — so a project that declares an entry point gets a runnable jar and one that
+does not gets a library jar. The archive is stored-only with zeroed timestamps and both trees are
+walked in sorted order, so the same inputs produce the same bytes.
+
+A build script contributes a resource with `build.add_resource(path, destination)`, taking a
+project file or an `output.write_text` result and the path it should have in the tree — for a
+descriptor with a version stamped into it, or a file selected per configuration. Script resources
+are copied after the `resource-dirs` trees, so a computed file wins over an authored one at the
+same destination.
 
 ### Lower dialect sources for another build system
 
