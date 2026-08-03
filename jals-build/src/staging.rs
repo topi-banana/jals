@@ -66,7 +66,7 @@ impl StagedTree {
             let destination = source.path.to_host_path(&root);
             // The blocking task owns what it touches, so the bytes are copied rather than borrowed
             // — a memcpy in place of the cache read and digest pass this loop used to run.
-            crate::emit::write_file(destination.clone(), source.bytes.clone()).await?;
+            crate::emit::EmitFile::write(destination.clone(), source.bytes.clone()).await?;
             sources.push(destination);
         }
 

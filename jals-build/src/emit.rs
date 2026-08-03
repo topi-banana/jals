@@ -34,23 +34,28 @@ pub const EXPAND_JOURNAL: &str = ".jals-expand";
 /// `jals clean` that removes both together loses nothing.
 pub const RESOURCE_JOURNAL: &str = "target/jals/build/resources";
 
-/// Write one file, creating the directories above it.
-///
-/// Shared with [`StagedTree`](crate::StagedTree) so both writers skip an identical file the same
-/// way: leaving the bytes alone leaves the mtime alone, which is what keeps `javac`'s own staleness
-/// checks working across a warm rebuild.
-pub(crate) async fn write_file(target: PathBuf, bytes: Vec<u8>) -> Result<(), BackendError> {
-    on_blocking_pool(move || -> std::io::Result<()> {
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        if std::fs::read(&target).is_ok_and(|existing| existing == bytes) {
-            return Ok(());
-        }
-        std::fs::write(&target, &bytes)
-    })
-    .await
-    .map_err(|error| BackendError::Io(error.to_string()))
+/// Namespace for the single-file write both tree writers share.
+pub(crate) struct EmitFile;
+
+impl EmitFile {
+    /// Write one file, creating the directories above it.
+    ///
+    /// Shared with [`StagedTree`](crate::StagedTree) so both writers skip an identical file the
+    /// same way: leaving the bytes alone leaves the mtime alone, which is what keeps `javac`'s own
+    /// staleness checks working across a warm rebuild.
+    pub(crate) async fn write(target: PathBuf, bytes: Vec<u8>) -> Result<(), BackendError> {
+        on_blocking_pool(move || -> std::io::Result<()> {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            if std::fs::read(&target).is_ok_and(|existing| existing == bytes) {
+                return Ok(());
+            }
+            std::fs::write(&target, &bytes)
+        })
+        .await
+        .map_err(|error| BackendError::Io(error.to_string()))
+    }
 }
 
 /// The record of what one emit step wrote into a directory it does not own.
@@ -192,7 +197,7 @@ impl EmittedTree {
     pub async fn write(tree: &[BackendSource], root: PathBuf) -> Result<Self, BackendError> {
         let mut emitted = BTreeSet::new();
         for source in tree {
-            write_file(source.path.to_host_path(&root), source.bytes.clone()).await?;
+            EmitFile::write(source.path.to_host_path(&root), source.bytes.clone()).await?;
             emitted.insert(source.path.clone());
         }
         let journal = EmitJournal::new(root.clone(), root.join(EXPAND_JOURNAL));
