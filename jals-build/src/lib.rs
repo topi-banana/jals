@@ -75,7 +75,9 @@ pub use backend::{
 pub use builtin::BuiltinToolchain;
 pub use clean::CleanTargets;
 #[cfg(feature = "native")]
-pub use emit::{EXPAND_JOURNAL, EmitJournal, EmittedTree, RESOURCE_JOURNAL};
+// `EXPAND_JOURNAL` stays crate-internal: the journal `EmittedTree` keeps is its own business, and
+// the one host that writes an expansion asks for the tree, not for the bookkeeping beside it.
+pub use emit::{EmitJournal, EmittedTree, RESOURCE_JOURNAL};
 pub use init::{InitOptions, ScaffoldFile};
 pub use jals_backend::JalsBackend;
 #[cfg(feature = "native")]

@@ -177,33 +177,27 @@ impl EmitJournal {
 /// one producer — a host that compiles the lowered tree itself chooses where it goes, and that
 /// choice can be a directory holding a Gradle build, a checkout, or someone's notes.
 pub struct EmittedTree {
-    written: Vec<PathBuf>,
     removed: Vec<PathBuf>,
 }
 
 impl EmittedTree {
     /// Write `tree` under `root` and reconcile the journal beside it.
     ///
+    /// What reached disk is `tree` itself and so is not reported back: the caller already holds it,
+    /// and the only thing this step knows that the caller does not is what it *removed*.
+    ///
     /// # Errors
     /// Returns [`BackendError::Io`] when a file cannot be written, a recorded file cannot be
     /// removed, or the journal cannot be updated.
     pub async fn write(tree: &[BackendSource], root: PathBuf) -> Result<Self, BackendError> {
-        let mut written = Vec::with_capacity(tree.len());
         let mut emitted = BTreeSet::new();
         for source in tree {
-            let destination = source.path.to_host_path(&root);
-            write_file(destination.clone(), source.bytes.clone()).await?;
+            write_file(source.path.to_host_path(&root), source.bytes.clone()).await?;
             emitted.insert(source.path.clone());
-            written.push(destination);
         }
         let journal = EmitJournal::new(root.clone(), root.join(EXPAND_JOURNAL));
         let removed = journal.reconcile(&emitted).await?;
-        Ok(Self { written, removed })
-    }
-
-    /// What reached disk, in tree order.
-    pub fn written(&self) -> &[PathBuf] {
-        &self.written
+        Ok(Self { removed })
     }
 
     /// What a previous expansion into this directory left behind and this one removed.
