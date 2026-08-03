@@ -51,9 +51,14 @@ impl StagedTree {
     ///
     /// Stale entries are removed afterwards: the destination is entirely jals-owned managed build
     /// output, so a file the current tree does not name is by definition a leftover. That is what
-    /// makes this safe without the ownership journal that publishing into a *user* source root
-    /// requires — there, an unknown file might be something a person wrote, and deleting it would
-    /// destroy work. Here there is no such file.
+    /// makes this safe without the ownership journal that publishing into a directory jals does
+    /// *not* own requires — there, an unknown file might be something a person wrote, and deleting
+    /// it would destroy work. Here there is no such file.
+    ///
+    /// Which is why this takes no destination policy and [`EmittedTree`](crate::EmittedTree) is a
+    /// separate type rather than a flag on this one: the rule is a property of where the bytes go,
+    /// and a caller that could pick "no pruning" here would also be a caller that could pick
+    /// "prune" for a directory someone else owns.
     pub async fn write(tree: &[BackendSource], root: PathBuf) -> Result<Self, BackendError> {
         let mut sources = Vec::with_capacity(tree.len());
 
@@ -61,22 +66,7 @@ impl StagedTree {
             let destination = source.path.to_host_path(&root);
             // The blocking task owns what it touches, so the bytes are copied rather than borrowed
             // — a memcpy in place of the cache read and digest pass this loop used to run.
-            let bytes = source.bytes.clone();
-            let target = destination.clone();
-            on_blocking_pool(move || -> std::io::Result<()> {
-                if let Some(parent) = target.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                // Skip the write when the bytes already match, so a warm rebuild leaves mtimes
-                // alone and `javac`'s own staleness checks keep working.
-                if std::fs::read(&target).is_ok_and(|existing| existing == bytes) {
-                    return Ok(());
-                }
-                std::fs::write(&target, &bytes)
-            })
-            .await
-            .map_err(|error| BackendError::Io(error.to_string()))?;
-
+            crate::emit::write_file(destination.clone(), source.bytes.clone()).await?;
             sources.push(destination);
         }
 

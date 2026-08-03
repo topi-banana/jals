@@ -2209,22 +2209,17 @@ fn expand_defaults_to_the_manifests_default_features() {
     assert!(lowered.contains("return 1;"), "{lowered}");
 }
 
-/// The output directory is jals-owned: a file the current lowering does not name is a leftover,
-/// and `--dry-run` writes nothing at all.
+/// `--dry-run` writes nothing at all — including into a directory that does not exist yet.
 #[test]
-fn expand_prunes_stale_output_and_writes_nothing_on_dry_run() {
+fn expand_writes_nothing_on_dry_run() {
     let dir = attribute_project();
-    let manifest = dir.path().join("jals.toml");
     let out = dir.path().join("expanded");
-    std::fs::create_dir_all(host_join(&out, "src/main/java/com/example")).unwrap();
-    let stale = host_join(&out, "src/main/java/com/example/Stale.java");
-    std::fs::write(&stale, "package com.example;\nclass Stale {}\n").unwrap();
 
     let (stdout, stderr, code) = run_full(&[
         "expand",
         "--dry-run",
         "--manifest-path",
-        manifest.to_str().unwrap(),
+        dir.path().join("jals.toml").to_str().unwrap(),
         "--out-dir",
         out.to_str().unwrap(),
     ]);
@@ -2233,19 +2228,132 @@ fn expand_prunes_stale_output_and_writes_nothing_on_dry_run() {
         stdout.contains("src/main/java/com/example/Main.java"),
         "stdout: {stdout}"
     );
-    assert!(stale.exists(), "--dry-run must write nothing");
-    assert!(!host_join(&out, "src/main/java/com/example/Main.java").exists());
+    assert!(!out.exists(), "--dry-run must write nothing");
+}
+
+/// A `--out-dir` is not jals-owned, and a file jals did not write there is never touched.
+///
+/// The destination of this command is chosen by whoever runs it — a checkout, a Gradle project, a
+/// directory with notes in it — so "everything the current lowering does not name is a leftover"
+/// is false here, and acting on it would delete someone's work.
+#[test]
+fn expand_leaves_files_it_did_not_write() {
+    let dir = attribute_project();
+    let out = dir.path().join("host-build");
+    std::fs::create_dir_all(host_join(&out, "libs")).unwrap();
+    let notes = out.join("NOTES.md");
+    let jar = host_join(&out, "libs/demo.jar");
+    std::fs::write(&notes, "keep me\n").unwrap();
+    std::fs::write(&jar, b"PK\x03\x04").unwrap();
 
     let (_stdout, stderr, code) = run_full(&[
         "expand",
         "--manifest-path",
-        manifest.to_str().unwrap(),
+        dir.path().join("jals.toml").to_str().unwrap(),
         "--out-dir",
         out.to_str().unwrap(),
     ]);
     assert_eq!(code, 0, "stderr: {stderr}");
-    assert!(!stale.exists(), "a stale lowered file must be removed");
-    assert!(host_join(&out, "src/main/java/com/example/Main.java").exists());
+    assert!(host_join(&out, "src/main/java/com/example/Main.java").is_file());
+    assert_eq!(std::fs::read_to_string(&notes).unwrap(), "keep me\n");
+    assert!(jar.is_file(), "an unrelated artifact must survive");
+}
+
+/// What *is* removed is what a previous expansion into the same directory wrote and this one no
+/// longer emits — the ownership journal is the whole difference between that and the file beside
+/// it.
+#[test]
+fn expand_removes_only_what_a_previous_expansion_wrote() {
+    let dir = attribute_project();
+    let manifest = dir.path().join("jals.toml");
+    let out = dir.path().join("expanded");
+    let src = host_join(dir.path(), "src/main/java/com/example");
+    std::fs::write(
+        src.join("Extra.java"),
+        "package com.example;\nclass Extra {}\n",
+    )
+    .unwrap();
+
+    let expand = |extra: &[&str]| {
+        let mut args = vec![
+            "expand",
+            "--manifest-path",
+            manifest.to_str().unwrap(),
+            "--out-dir",
+            out.to_str().unwrap(),
+        ];
+        args.extend_from_slice(extra);
+        run_full(&args)
+    };
+
+    let (stdout, stderr, code) = expand(&[]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("expanded 2 source files"), "{stdout}");
+    let emitted = host_join(&out, "src/main/java/com/example/Extra.java");
+    assert!(emitted.is_file());
+    // The journal names what was written, and nothing else.
+    let journal = std::fs::read_to_string(out.join(".jals-expand")).unwrap();
+    assert!(
+        journal.contains("src/main/java/com/example/Extra.java"),
+        "{journal}"
+    );
+
+    // The authored source is gone, so the next expansion does not emit it — and only then is the
+    // copy in the output directory removed.
+    std::fs::remove_file(src.join("Extra.java")).unwrap();
+    let (stdout, stderr, code) = expand(&["--verbose"]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(!emitted.exists(), "the previous expansion's file must go");
+    assert!(stdout.contains("removed 1 file"), "{stdout}");
+    assert!(host_join(&out, "src/main/java/com/example/Main.java").is_file());
+}
+
+/// An emitted file keeps its whole project-relative path, so the project root is the one
+/// destination where the output lands exactly on top of the input.
+#[test]
+fn expand_refuses_an_out_dir_that_would_overwrite_the_sources() {
+    let dir = attribute_project();
+    let manifest = dir.path().join("jals.toml");
+    let authored = host_join(dir.path(), "src/main/java/com/example/Main.java");
+    let before = std::fs::read_to_string(&authored).unwrap();
+
+    for out in [".", "src/main/java", "src/main/java/com"] {
+        let (_stdout, stderr, code) = run_full(&[
+            "expand",
+            "--manifest-path",
+            manifest.to_str().unwrap(),
+            "--out-dir",
+            out,
+        ]);
+        assert_ne!(code, 0, "--out-dir {out} must be refused");
+        assert!(stderr.contains("--out-dir"), "stderr: {stderr}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(&authored).unwrap(),
+        before,
+        "the authored source must be untouched"
+    );
+}
+
+/// Without `--out-dir` the destination is managed build output, which `jals build` writes too —
+/// and there the stale rule is the managed one, so no journal is left behind.
+#[test]
+fn expand_defaults_to_the_managed_staging_directory() {
+    let dir = attribute_project();
+    let staged = host_join(dir.path(), "target/jals/build/frontend");
+
+    let (stdout, stderr, code) = run_full(&[
+        "expand",
+        "--manifest-path",
+        dir.path().join("jals.toml").to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains("target") && stdout.contains("frontend"),
+        "stdout: {stdout}"
+    );
+    assert!(host_join(&staged, "src/main/java/com/example/Main.java").is_file());
+    assert!(!staged.join(".jals-expand").exists());
 }
 
 /// An unknown feature name is rejected before anything is written, like it is for `build`.
@@ -2346,8 +2454,10 @@ fn package_archives_classes_and_resources() {
     );
 
     // Same inputs, same bytes: the archive is stored-only with zeroed timestamps, and the trees it
-    // reads are walked in sorted order.
+    // reads are walked in sorted order. Everything the first run produced is deleted first —
+    // packaging a tree that is already on disk would compare a jar against itself.
     let first = std::fs::read(&jar).unwrap();
+    std::fs::remove_dir_all(dir.path().join("target")).unwrap();
     let (_stdout, stderr, code) = run_full(&[
         "package",
         "--manifest-path",
@@ -2359,6 +2469,127 @@ fn package_archives_classes_and_resources() {
         std::fs::read(&jar).unwrap(),
         "packaging must be reproducible"
     );
+}
+
+/// A resource that is no longer produced leaves the output tree, so it cannot ship in the jar.
+///
+/// `classes-dir` outlives a build, and `jals package` reads whatever is in it. Without the
+/// ownership journal a deleted resource — or one a build script stopped computing — stays there
+/// and is archived forever after. The class files beside it are not the journal's, and stay.
+#[test]
+fn build_removes_a_resource_it_no_longer_produces() {
+    let dir = packageable_project();
+    let manifest = dir.path().join("jals.toml");
+    let build = || run_full(&["build", "--manifest-path", manifest.to_str().unwrap()]);
+
+    let (_stdout, stderr, code) = build();
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let copied = host_join(dir.path(), "target/classes/assets/data.json");
+    let scripted = host_join(dir.path(), "target/classes/META-INF/NOTICE");
+    assert!(copied.is_file() && scripted.is_file());
+
+    // One resource deleted from `resource-dirs`, one dropped by the build script.
+    std::fs::remove_file(host_join(dir.path(), "src/main/resources/assets/data.json")).unwrap();
+    std::fs::write(
+        dir.path().join("build.rhai"),
+        "let stamped = output.write_text(\"stamped.txt\", \"version=1\\n\");\n\
+         build.add_resource(stamped, \"META-INF/stamped.txt\");\n",
+    )
+    .unwrap();
+
+    let (_stdout, stderr, code) = build();
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(!copied.exists(), "a deleted resource must leave the output");
+    assert!(!scripted.exists(), "so must one the script stopped adding");
+    assert!(
+        !host_join(dir.path(), "target/classes/assets").exists(),
+        "the directory it emptied goes with it"
+    );
+    assert!(
+        host_join(dir.path(), "target/classes/META-INF/stamped.txt").is_file(),
+        "a resource still produced stays"
+    );
+    assert!(
+        host_join(dir.path(), "target/classes/com/example/Main.class").is_file(),
+        "class files are the compiler's, and never the journal's to remove"
+    );
+}
+
+/// `classes-dir` holds the compiler's output, and a resource may not overwrite a class file there:
+/// the jar would carry bytecode no compile produced.
+#[test]
+fn build_refuses_a_resource_that_would_overwrite_a_class() {
+    let dir = packageable_project();
+    let planted = host_join(dir.path(), "src/main/resources/com/example");
+    std::fs::create_dir_all(&planted).unwrap();
+    std::fs::write(planted.join("Main.class"), b"\xca\xfe\xba\xbe").unwrap();
+
+    let (_stdout, stderr, code) = run_full(&[
+        "build",
+        "--manifest-path",
+        dir.path().join("jals.toml").to_str().unwrap(),
+    ]);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("com/example/Main.class"),
+        "stderr: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read(host_join(
+            dir.path(),
+            "target/classes/com/example/Main.class"
+        ))
+        .unwrap()
+        .get(..4),
+        Some(b"\xca\xfe\xba\xbe".as_slice()),
+        "the class file must still be the compiler's"
+    );
+}
+
+/// Several `[[bin]]` and no `default-run` is a question about the jar's entry point, not a library
+/// jar. `--bin` answers it.
+#[test]
+fn package_reports_an_ambiguous_entry_point() {
+    let dir = tempdir().unwrap();
+    let manifest = dir.path().join("jals.toml");
+    std::fs::write(
+        &manifest,
+        format!(
+            "{}\n[build]\nbackend = {{ type = \"jals\" }}\n",
+            two_bin_manifest("")
+        ),
+    )
+    .unwrap();
+    let src = dir.path().join("src/main/java/com/example");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("Main.java"),
+        "package com.example;\npublic class Main {}\n",
+    )
+    .unwrap();
+
+    let (_stdout, stderr, code) =
+        run_full(&["package", "--manifest-path", manifest.to_str().unwrap()]);
+    assert_ne!(code, 0, "an unlaunchable jar must not be written silently");
+    assert!(stderr.contains("--bin"), "stderr: {stderr}");
+
+    let (_stdout, stderr, code) = run_full(&[
+        "package",
+        "--bin",
+        "two",
+        "--manifest-path",
+        manifest.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let file = std::fs::File::open(dir.path().join("target/hello.jar")).unwrap();
+    let mut archive = zip::ZipArchive::new(file).unwrap();
+    let mut text = String::new();
+    std::io::Read::read_to_string(
+        &mut archive.by_name("META-INF/MANIFEST.MF").unwrap(),
+        &mut text,
+    )
+    .unwrap();
+    assert!(text.contains("Main-Class: com.example.Two"), "{text}");
 }
 
 /// `build` copies the resources too — the output tree is what `jals run` puts on the classpath, so
@@ -2377,6 +2608,35 @@ fn build_copies_resource_dirs_into_the_output_tree() {
     assert_eq!(
         std::fs::read_to_string(dir.path().join("target/classes/META-INF/stamped.txt")).unwrap(),
         "version=1\n"
+    );
+}
+
+/// A build script's resources survive a rebuild that changes nothing.
+///
+/// The registrations are carried in the memoized script state, so a second build with the same
+/// inputs answers from the encode/decode round trip rather than from the values the first run
+/// produced in memory. Deleting the output tree in between is what makes that observable: a
+/// resource lost anywhere along that path simply never comes back.
+#[test]
+fn build_copies_script_resources_from_the_cached_script_state() {
+    let dir = packageable_project();
+    let manifest = dir.path().join("jals.toml");
+    let build = || run_full(&["build", "--manifest-path", manifest.to_str().unwrap()]);
+
+    let (_stdout, stderr, code) = build();
+    assert_eq!(code, 0, "stderr: {stderr}");
+    std::fs::remove_dir_all(dir.path().join("target/classes")).unwrap();
+
+    let (_stdout, stderr, code) = build();
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert_eq!(
+        std::fs::read_to_string(host_join(dir.path(), "target/classes/META-INF/stamped.txt"))
+            .unwrap(),
+        "version=1\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(host_join(dir.path(), "target/classes/META-INF/NOTICE")).unwrap(),
+        "a notice\n"
     );
 }
 

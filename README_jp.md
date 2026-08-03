@@ -338,9 +338,15 @@ jals expand --dry-run                              # 書き出す内容を一覧
 ```
 
 `--features` / `--all-features` / `--no-default-features` は `build`・`run` と同じもので、
-`--out-dir` は他のマニフェスト相対ディレクトリと同様に project root からの相対です。出力先は jals
-が所有します——今回の lowering が挙げなかったファイルは、`target/jals/build/frontend` と同じように
-削除されます。
+`--out-dir` は他のマニフェスト相対ディレクトリと同様に project root からの相対です。
+
+既定の出力先は jals が所有する build output なので、今回の lowering が挙げなかったファイルは
+leftover として削除されます。`--out-dir` はそうではありません——checkout かもしれず、Gradle の
+project かもしれず、誰かのメモが置いてあるかもしれないので、**同じディレクトリへの前回の `jals
+expand` が書いたもの以外は一切削除しません**。その記録が出力の隣に置かれる `.jals-expand` journal
+で、journal が無ければ何も削除しません。唯一その場で拒否される出力先は project root と
+`[build] source-dirs` 配下です——出力ファイルは project 相対パスをそのまま保つので、そこへ expand
+すると lowering 結果を元の source に上書きしてしまいます。
 
 これは、source は jals dialect でありながら *パッケージング* が別のビルドシステム——Gradle の mod
 ビルド、Maven module——に属する project のためのものです。そちらが `jals expand` を実行して出力を
@@ -349,8 +355,9 @@ jals expand --dry-run                              # 書き出す内容を一覧
 
 `build` と違い、classpath を解決せず、依存も取得せず、`build.rhai` も実行しません。いずれも
 frontend が 1 ファイルに対して出力する内容を変えないからで、省いてあることがこのコマンドを
-オフラインかつ副作用なしにしています。したがって build script が `build.add_source` で登録する
-source は lower の対象に含まれません。
+オフラインにしています。したがって build script が `build.add_source` で登録する source は lower の
+対象に含まれません。ただし副作用が無いわけではありません——build と同じく、lowering は
+`target/jals/cache` の artifact cache に publish します。
 
 ### Transitive な project dependency
 

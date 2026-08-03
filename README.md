@@ -348,8 +348,15 @@ jals expand --dry-run                              # list what would be written
 
 It takes the same `--features` / `--all-features` / `--no-default-features` flags as `build` and
 `run`, and `--out-dir` is resolved against the project root like every other manifest-relative
-directory. The output directory is jals-owned: a file the current lowering does not name is removed,
-exactly as it is under `target/jals/build/frontend`.
+directory.
+
+The default destination is managed build output, where a file the current lowering does not name is
+a leftover and is removed. An `--out-dir` is not: it may be a checkout, a Gradle project, a
+directory with someone's notes in it, so **nothing there is deleted except what a previous `jals
+expand` into the same directory wrote**. That record is the `.jals-expand` journal beside the
+output; with no journal, nothing is removed at all. The one destination that is refused outright is
+the project root or a `[build] source-dirs` root — an emitted file keeps its whole project-relative
+path, so expanding there would write the lowering over the sources it came from.
 
 This is for a project whose *packaging* belongs to another build system — a Gradle mod build, a
 Maven module — while its sources are jals dialect: that build runs `jals expand` and compiles the
@@ -358,8 +365,9 @@ a stack trace from the compiled output still names the authored line.
 
 Unlike `build`, it resolves no classpath, acquires no dependency, and runs no `build.rhai` — none of
 those changes what the frontend emits for a file, and leaving them out is what makes the command
-offline and side-effect-free. Sources a build script registers with `build.add_source` are therefore
-not part of what it lowers.
+offline. Sources a build script registers with `build.add_source` are therefore not part of what it
+lowers. It is not effect-free: like a build, lowering publishes into the project's artifact cache
+under `target/jals/cache`.
 
 ### Transitive project dependencies
 

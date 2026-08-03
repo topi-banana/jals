@@ -211,7 +211,7 @@ nothing still leaves every dependency script cached.
 | ------------- | ---------------- | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | `script`      | tagged table     | —                   | optional pre-`javac` build phase; currently `{ type = "rhai", file = "build.rhai" }`                                                    |
 | `source-dirs` | array of strings | `["src/main/java"]` | `-sourcepath` (joined) **and** the roots scanned for `.java` files                                                                      |
-| `resource-dirs` | array of strings | `["src/main/resources"]` | copied into `classes-dir` after a successful compile, each file keeping its path below its root (Maven's resource step). A listed root that does not exist is empty rather than an error, so the default is harmless for a project with no resources |
+| `resource-dirs` | array of strings | `["src/main/resources"]` | copied into `classes-dir` after a successful compile, each file keeping its path below its root (Maven's resource step). A listed root that does not exist is empty rather than an error, so the default is harmless for a project with no resources. A copy a later build no longer makes is removed, through an ownership journal that names only what the copy step itself wrote — the class files beside it are the compiler's and are never touched, and a resource whose destination spells a `.class` is refused |
 | `classes-dir` | string           | `"target/classes"`  | `javac -d` (also the dir `jals clean` removes)                                                                                          |
 | `release`     | integer          | —                   | `--release N` — sets source level, target level, and bootclasspath together; when present, `source`/`target` are ignored                |
 | `source`      | integer          | —                   | `--source N` — only when `release` is unset                                                                                             |
@@ -901,7 +901,7 @@ separate, still-unwired step).
 ## 4. Packaging
 
 | Capability                        | Cargo analogue                   | Notes                                                                 |
-| --------------------------------- | -------------------------------- | --------------------------------------------------------------- |
+| --------------------------------- | -------------------------------- | --------------------------------------------------------------------- |
 | Plain jar (`Main-Class` manifest) | `cargo build --release` artifact | **done**: `jals package` archives `classes-dir` — classes and the copied resources alike — with `Main-Class` from the resolved run target. Stored-only with zeroed timestamps, so the same inputs give the same bytes |
 | Fat / uber jar                    | —                                | bundle dependency jars into one runnable archive                      |
 | `jpackage` / native image         | —                                | OS installers / GraalVM native binaries                               |

@@ -44,6 +44,8 @@ pub mod build_script;
 #[cfg(feature = "native")]
 mod builtin;
 mod clean;
+#[cfg(feature = "native")]
+mod emit;
 mod init;
 #[cfg(feature = "native")]
 mod invocation;
@@ -72,6 +74,8 @@ pub use backend::{
 #[cfg(feature = "native")]
 pub use builtin::BuiltinToolchain;
 pub use clean::CleanTargets;
+#[cfg(feature = "native")]
+pub use emit::{EXPAND_JOURNAL, EmitJournal, EmittedTree, RESOURCE_JOURNAL};
 pub use init::{InitOptions, ScaffoldFile};
 pub use jals_backend::JalsBackend;
 #[cfg(feature = "native")]

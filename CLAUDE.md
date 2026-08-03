@@ -158,11 +158,20 @@ filesystem reads into portable interfaces.
   script's `build.add_resource(path, destination)` are copied into `classes-dir` when a compile
   succeeds (script resources last, so a computed file wins), and `jals package` archives that one
   tree through `jals_classpath::JarPackage` — so a resource is in the jar for the same reason a
-  class is, and there is no second list of what goes in. `jals expand` is the frontend seam on its own, for a host
-  that compiles the lowered tree itself (a Gradle or Maven build over dialect sources): it shares
-  `build`'s lowering half (`App::lower_tree`) and stops there, running no build script, resolving no
-  classpath and acquiring no dependency — none of which changes what a frontend emits for a file,
-  which is what keeps the command offline and side-effect-free.
+  class is, and there is no second list of what goes in. `jals expand` is the frontend seam on its
+  own, for a host that compiles the lowered tree itself (a Gradle or Maven build over dialect
+  sources): it shares `build`'s lowering half (`App::lower_tree`) and stops there, running no build
+  script, resolving no classpath and acquiring no dependency — none of which changes what a frontend
+  emits for a file, which is what keeps the command offline (not effect-free: lowering publishes
+  into the artifact cache, exactly as a build's does).
+  Where output goes decides how staleness is handled, and the two rules are **types rather than a
+  flag**: `StagedTree` prunes, and may, because managed build output holds nothing else;
+  `EmittedTree` and the `EmitJournal` beneath it delete only what a previous run of the same step
+  recorded, which is what an `--out-dir` someone chose and a `classes-dir` shared with the compiler
+  both require. A caller that could ask either type for the other rule is the mistake this shape
+  removes. A destination is refused outright only where no journal could help — expanding onto the
+  project root or a `source-dirs` root writes the lowering over its own input — and a resource whose
+  destination spells a `.class` is refused for the same reason: that path is the compiler's.
 - `jals-lsp`: the only URI↔native-root adapter; watched-file notifications call `refresh()`. What it
   keeps of project assembly is diagnostic shaping, overlay mounting of navigation sources, the watch
   policy, and its own root-only fallback (a second `resolve_native` call, deliberately not folded in

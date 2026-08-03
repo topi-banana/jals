@@ -226,7 +226,9 @@ struct ExpandArgs {
     manifest_path: Option<PathBuf>,
 
     /// Write the lowered tree here instead of `target/jals/build/frontend`. A relative path is
-    /// resolved against the project root, like every other manifest-relative directory.
+    /// resolved against the project root, like every other manifest-relative directory. Nothing in
+    /// this directory is deleted except what a previous `jals expand` into it wrote, recorded in
+    /// the `.jals-expand` journal beside the output.
     #[arg(long, value_name = "DIR")]
     out_dir: Option<PathBuf>,
 
@@ -234,7 +236,7 @@ struct ExpandArgs {
     #[arg(long)]
     dry_run: bool,
 
-    /// Print each emitted path.
+    /// Print each emitted path, and each one a previous expansion left behind.
     #[arg(short = 'v', long)]
     verbose: bool,
 
@@ -258,6 +260,11 @@ struct PackageArgs {
     /// against the project root, like every other manifest-relative path.
     #[arg(long, value_name = "PATH")]
     out: Option<PathBuf>,
+
+    /// Which `[[bin]]` supplies the jar's `Main-Class`. Needed only when several are declared and
+    /// `[package] default-run` names none.
+    #[arg(long, value_name = "NAME")]
+    bin: Option<String>,
 
     /// Print the javac command before running it.
     #[arg(short = 'v', long)]
@@ -672,7 +679,7 @@ impl BuildArgs {
             .compile(&request)
             .await
             .map_err(|e| anyhow!("{e}"))?;
-        App::finish_compile(&manifest, &root, &outcome, &inputs)?;
+        App::finish_compile(&manifest, &root, &outcome, &inputs).await?;
         Ok(App::outcome_exit_code(outcome.code()))
     }
 }
@@ -719,13 +726,13 @@ impl PackageArgs {
             .compile(&request)
             .await
             .map_err(|e| anyhow!("{e}"))?;
-        App::finish_compile(&manifest, &root, &outcome, &inputs)?;
+        App::finish_compile(&manifest, &root, &outcome, &inputs).await?;
         if !outcome.success() {
             return Ok(App::outcome_exit_code(outcome.code()));
         }
 
         let jar = self.jar_path(&manifest, &root);
-        let bytes = App::package_classes(&manifest, &root)?;
+        let bytes = App::package_classes(&manifest, &root, self.bin.as_deref())?;
         if let Some(parent) = jar.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
@@ -760,16 +767,18 @@ impl ExpandArgs {
     /// Deliberately not `prepare_compile_inputs`: the sources a build script registers, the
     /// dependency graph and the resolved classpath are all compile inputs, and none of them
     /// changes what the frontend emits for a file. Skipping them is what keeps this command
-    /// offline and side-effect-free — it never runs an unreviewed `build.rhai`, and it never
-    /// publishes into a source root.
+    /// offline — it never runs an unreviewed `build.rhai`, it acquires no dependency, and it never
+    /// publishes into a source root. It is not *effect*-free: lowering publishes into the project's
+    /// artifact cache under `target/jals/cache`, exactly as a build's does.
     async fn run(&self) -> Result<ExitCode> {
         let (manifest, root) = App::resolve_manifest(self.manifest_path.as_deref()).await?;
         let features = self.features.resolve(&manifest)?;
         let sources = App::discover_sources(&manifest, &root, false)?;
-        let out_dir = self.out_dir.as_ref().map_or_else(
-            || root.join(jals_build::FRONTEND_OUT_DIR),
-            |dir| root.join(dir),
-        );
+        let out_dir = self
+            .out_dir
+            .as_ref()
+            .map(|dir| Self::check_out_dir(&manifest, &root, &root.join(dir)))
+            .transpose()?;
 
         let tree = App::lower_tree(&manifest, &root, &sources, &features).await?;
         if self.verbose || self.dry_run {
@@ -780,16 +789,82 @@ impl ExpandArgs {
         if self.dry_run {
             return Ok(ExitCode::SUCCESS);
         }
-        jals_build::StagedTree::write(&tree, out_dir.clone())
-            .await
-            .map_err(|error| anyhow!("writing the lowered tree failed: {error}"))?;
+        // Two destinations, two stale rules, and the destination is what picks: the default is
+        // managed build output, where a file the tree does not name is a leftover by definition and
+        // `StagedTree` deletes it; a `--out-dir` is someone else's directory, where only an
+        // ownership journal can say what a previous expansion put there. Pruning the second would
+        // delete whatever else lives beside the output — a `.git`, a Gradle `build/libs`, notes.
+        let (destination, removed) = match out_dir {
+            None => {
+                let destination = root.join(jals_build::FRONTEND_OUT_DIR);
+                jals_build::StagedTree::write(&tree, destination.clone())
+                    .await
+                    .map_err(|error| anyhow!("writing the lowered tree failed: {error}"))?;
+                (destination, 0)
+            }
+            Some(destination) => {
+                let emitted = jals_build::EmittedTree::write(&tree, destination.clone())
+                    .await
+                    .map_err(|error| anyhow!("writing the lowered tree failed: {error}"))?;
+                if self.verbose {
+                    for path in emitted.removed() {
+                        println!("removed {}", path.display());
+                    }
+                }
+                (destination, emitted.removed().len())
+            }
+        };
         println!(
             "expanded {} source file{} into {}",
             tree.len(),
             if tree.len() == 1 { "" } else { "s" },
-            out_dir.display()
+            destination.display()
         );
+        if removed != 0 {
+            println!(
+                "removed {removed} file{} a previous expansion left there",
+                if removed == 1 { "" } else { "s" }
+            );
+        }
         Ok(ExitCode::SUCCESS)
+    }
+
+    /// Reject a `--out-dir` that would write over the project instead of beside it.
+    ///
+    /// An emitted file keeps its whole project-relative path below the destination, so a
+    /// destination that *is* the project root puts every lowered file exactly on top of the source
+    /// it came from — `--out-dir .` overwrites the authored tree with its own lowering, which for
+    /// the blanking dialect is a silent, irreversible loss of every inactive branch. A destination
+    /// inside a `[build] source-dirs` root is the other half of the same rule: generated sources
+    /// under a source root are picked up by the next lowering as if a person had written them.
+    ///
+    /// Everything else is allowed and made safe by the ownership journal instead — this is the one
+    /// class of destination no journal can rescue, because the collision is with files jals never
+    /// wrote.
+    fn check_out_dir(manifest: &Manifest, root: &Path, out_dir: &Path) -> Result<PathBuf> {
+        let out_dir = App::lexical_path(out_dir);
+        let root = App::lexical_path(root);
+        if root.starts_with(&out_dir) {
+            bail!(
+                "--out-dir {} is the project root{}; a lowered file keeps its project-relative \
+                 path, so expanding here would write over the authored sources. Pick a directory \
+                 beside the project, or omit --out-dir for {}.",
+                out_dir.display(),
+                if root == out_dir { "" } else { " or above it" },
+                jals_build::FRONTEND_OUT_DIR
+            );
+        }
+        for source_root in manifest.source_roots(&root) {
+            if out_dir.starts_with(App::lexical_path(&source_root)) {
+                bail!(
+                    "--out-dir {} is inside the source root {}; generated sources there are read \
+                     back as authored ones by the next lowering.",
+                    out_dir.display(),
+                    source_root.display()
+                );
+            }
+        }
+        Ok(out_dir)
     }
 }
 
@@ -869,7 +944,7 @@ impl RunArgs {
             .compile(&compile_request)
             .await
             .map_err(|e| anyhow!("{e}"))?;
-        App::finish_compile(&manifest, &root, &outcome, &inputs)?;
+        App::finish_compile(&manifest, &root, &outcome, &inputs).await?;
         if !outcome.success() {
             return Ok(App::outcome_exit_code(outcome.code()));
         }
@@ -1653,8 +1728,8 @@ impl App {
         let sources = Self::collect_java_files(&existing_roots)?;
         if sources.is_empty() && !has_generated_sources {
             return Err(anyhow!(
-                "no .java files found under {:?}",
-                manifest.build.source_dirs
+                "no .java files found under {}",
+                manifest.build.source_dirs.join(", ")
             ));
         }
         Ok(sources)
@@ -1757,7 +1832,7 @@ impl App {
     /// Artifacts are only written on success, and only an in-process backend has any: a process-based
     /// one already wrote its own output through `javac -d`, so the loop is a no-op for it and the two
     /// backends need no branch here.
-    fn finish_compile(
+    async fn finish_compile(
         manifest: &Manifest,
         root: &Path,
         outcome: &jals_build::BackendOutcome,
@@ -1781,7 +1856,7 @@ impl App {
             std::fs::write(&target, bytes)
                 .with_context(|| format!("writing {}", target.display()))?;
         }
-        Self::copy_resources(manifest, root, &inputs.extra_resources)?;
+        Self::copy_resources(manifest, root, &inputs.extra_resources).await?;
         Ok(())
     }
 
@@ -1792,12 +1867,20 @@ impl App {
     /// what `jals run` puts on the classpath and what `jals package` reads, so a resource belongs
     /// there for exactly the reason a class does. A listed root that does not exist is empty, not
     /// an error — the default `src/main/resources` has to be harmless for a project that has none.
-    fn copy_resources(
+    ///
+    /// What a previous build copied and this one does not is removed, through the ownership journal
+    /// under the managed build root. Without it a resource stays in `classes-dir` after it is
+    /// deleted, renamed, or dropped by a build script that no longer computes it — and `jals
+    /// package` reads that directory, so the stale copy ships in the jar. The journal is what keeps
+    /// the removal to resources: a class file beside one was never recorded, so it is never a
+    /// candidate.
+    async fn copy_resources(
         manifest: &Manifest,
         root: &Path,
         script: &[(String, PathBuf)],
     ) -> Result<()> {
         let classes_dir = root.join(&manifest.build.classes_dir);
+        let mut copied = std::collections::BTreeSet::new();
         for resource_root in manifest.resource_roots(root) {
             if !resource_root.is_dir() {
                 continue;
@@ -1810,32 +1893,63 @@ impl App {
                         resource_root.display()
                     )
                 })?;
-                let target = classes_dir.join(relative);
-                if let Some(parent) = target.parent() {
-                    std::fs::create_dir_all(parent)
-                        .with_context(|| format!("creating {}", parent.display()))?;
-                }
-                Self::copy_resource(&source, &target)?;
+                copied.insert(Self::copy_resource(
+                    &source,
+                    &classes_dir.join(relative),
+                    &classes_dir,
+                )?);
             }
         }
         // The script's own resources last: a computed descriptor is the one a project means when
         // both exist, and overwriting is what makes that so without the script also having to
         // remove the authored file.
         for (destination, source) in script {
-            Self::copy_resource(source, &classes_dir.join(destination))?;
+            copied.insert(Self::copy_resource(
+                source,
+                &classes_dir.join(destination),
+                &classes_dir,
+            )?);
         }
+        jals_build::EmitJournal::new(classes_dir, root.join(jals_build::RESOURCE_JOURNAL))
+            .reconcile(&copied)
+            .await
+            .map_err(|error| anyhow!("reconciling copied resources failed: {error}"))?;
         Ok(())
     }
 
-    /// Copy one resource into the output tree, creating the directories above it.
-    fn copy_resource(source: &Path, target: &Path) -> Result<()> {
+    /// Copy one resource into the output tree, creating the directories above it, and return where
+    /// it landed relative to that tree.
+    ///
+    /// A destination that spells a class file is refused rather than copied. `classes-dir` holds
+    /// the compiler's output, and a `.class` there is the compiler's by convention on every host
+    /// that reads one — a resource overwriting one produces a jar whose bytecode is not what the
+    /// compile produced, reported by nothing until the class fails to load.
+    fn copy_resource(source: &Path, target: &Path, classes_dir: &Path) -> Result<RelativePath> {
+        let relative = RelativePath::from_host_path(classes_dir, target).ok_or_else(|| {
+            anyhow!(
+                "resource destination {} is not a portable path below {}",
+                target.display(),
+                classes_dir.display()
+            )
+        })?;
+        if target
+            .extension()
+            .is_some_and(|extension| extension == "class")
+        {
+            bail!(
+                "resource {} would be copied to {}, and a `.class` in the output tree belongs to \
+                 the compiler. Rename the resource or give it another destination.",
+                source.display(),
+                relative
+            );
+        }
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
         std::fs::copy(source, target)
             .with_context(|| format!("copying {} to {}", source.display(), target.display()))?;
-        Ok(())
+        Ok(relative)
     }
 
     /// Package everything under `classes-dir` into a jar's bytes.
@@ -1846,8 +1960,11 @@ impl App {
     /// same archive.
     ///
     /// `Main-Class` comes from the resolved run target when the manifest names one. A project that
-    /// declares no entry point gets a library jar, which is the honest output for it.
-    fn package_classes(manifest: &Manifest, root: &Path) -> Result<Vec<u8>> {
+    /// declares no entry point gets a library jar, which is the honest output for it — but that is
+    /// the *only* reason a jar is written without one. A manifest that declares several `[[bin]]`
+    /// and chooses none is a question, not a library, so it is reported instead of silently
+    /// producing an unlaunchable jar; `--bin` answers it.
+    fn package_classes(manifest: &Manifest, root: &Path, bin: Option<&str>) -> Result<Vec<u8>> {
         let classes_dir = root.join(&manifest.build.classes_dir);
         if !classes_dir.is_dir() {
             bail!(
@@ -1867,8 +1984,37 @@ impl App {
         if entries.is_empty() {
             bail!("nothing to package: {} is empty", classes_dir.display());
         }
-        let main_class = jals_build::RunTarget::resolve(manifest, None).ok();
+        let main_class = match jals_build::RunTarget::resolve(manifest, bin) {
+            Ok(main_class) => Some(main_class),
+            // The one absence that is an answer rather than a question.
+            Err(jals_build::ResolveTargetError::NoTarget) => None,
+            Err(error) => bail!("cannot set the jar's `Main-Class`: {error}"),
+        };
         jals_classpath::JarPackage::write(&entries, main_class).map_err(|error| anyhow!("{error}"))
+    }
+
+    /// A path with its `.` and `..` components resolved textually.
+    ///
+    /// Deliberately not `canonicalize`: the question these comparisons ask is whether one path the
+    /// user typed denotes the same place as another, and `canonicalize` requires both to exist —
+    /// an `--out-dir` normally does not yet. Symlinks are therefore not resolved, which is the
+    /// weaker guarantee: a link *into* the project passes a check a canonicalized path would fail.
+    /// It is the containment checks that are conservative here, not the writing, which is journal-
+    /// bounded regardless.
+    fn lexical_path(path: &Path) -> PathBuf {
+        let mut lexical = PathBuf::new();
+        for component in path.components() {
+            match component {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    if !lexical.pop() {
+                        lexical.push(component.as_os_str());
+                    }
+                }
+                other => lexical.push(other.as_os_str()),
+            }
+        }
+        lexical
     }
 
     /// Every file below `dir`, recursively, in sorted order.
@@ -1881,16 +2027,26 @@ impl App {
         while let Some(current) = stack.pop() {
             let entries = std::fs::read_dir(&current)
                 .with_context(|| format!("reading {}", current.display()))?;
-            let mut level: Vec<PathBuf> = entries
-                .map(|entry| entry.map(|entry| entry.path()))
+            let mut level: Vec<(PathBuf, std::fs::FileType)> = entries
+                .map(|entry| entry.and_then(|entry| Ok((entry.path(), entry.file_type()?))))
                 .collect::<std::io::Result<_>>()
                 .with_context(|| format!("reading {}", current.display()))?;
-            level.sort();
-            for path in level {
-                if path.is_dir() {
+            level.sort_by(|left, right| left.0.cmp(&right.0));
+            for (path, kind) in level {
+                // `read_dir` file types do not follow symlinks, unlike `Path::is_dir` — and this
+                // walk must not follow one into a directory: the result is a jar member, so a
+                // symlinked directory would silently archive a tree from outside the project, or
+                // never terminate if it points back above itself. A symlink to a *file* is
+                // followed, which is how a linked `LICENSE` still gets packaged.
+                if kind.is_dir() {
                     stack.push(path);
-                } else {
+                } else if kind.is_file() || path.is_file() {
                     files.push(path);
+                } else {
+                    eprintln!(
+                        "warning: skipping {}: a symbolic link to a directory is not followed",
+                        path.display()
+                    );
                 }
             }
         }
