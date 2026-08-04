@@ -2335,6 +2335,45 @@ fn expand_refuses_an_out_dir_that_would_overwrite_the_sources() {
     );
 }
 
+/// The same two refusals, reached through a symlink rather than by spelling the destination out.
+///
+/// A lexical comparison passes both: neither link name is the project root or under a source root
+/// as *written*. What each one does when followed is what the refusals are about, and they differ —
+/// a link to the project root puts every lowered file exactly on its own source, while a link to
+/// the source root puts the tree at a nested path inside it, which the next lowering reads back as
+/// authored. Only the first destroys anything, and nothing records it: the journal names what jals
+/// wrote, never what it overwrote.
+#[cfg(unix)]
+#[test]
+fn expand_refuses_an_out_dir_that_reaches_the_project_through_a_symlink() {
+    for (link, target) in [("here", "."), ("gen", "src/main/java")] {
+        let dir = attribute_project();
+        let manifest = dir.path().join("jals.toml");
+        let authored = host_join(dir.path(), "src/main/java/com/example/Main.java");
+        let before = std::fs::read_to_string(&authored).unwrap();
+        std::os::unix::fs::symlink(host_join(dir.path(), target), dir.path().join(link)).unwrap();
+
+        let (_stdout, stderr, code) = run_full(&[
+            "expand",
+            "--manifest-path",
+            manifest.to_str().unwrap(),
+            "--out-dir",
+            link,
+        ]);
+        assert_ne!(code, 0, "--out-dir {link} -> {target} must be refused");
+        assert!(stderr.contains("--out-dir"), "stderr: {stderr}");
+        assert_eq!(
+            std::fs::read_to_string(&authored).unwrap(),
+            before,
+            "the authored source must be untouched"
+        );
+        assert!(
+            !host_join(dir.path(), "src/main/java/src").exists(),
+            "nothing may be emitted below the source root"
+        );
+    }
+}
+
 /// Without `--out-dir` the destination is managed build output, which `jals build` writes too —
 /// and there the stale rule is the managed one, so no journal is left behind.
 #[test]

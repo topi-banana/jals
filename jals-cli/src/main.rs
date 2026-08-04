@@ -841,21 +841,33 @@ impl ExpandArgs {
     /// Everything else is allowed and made safe by the ownership journal instead — this is the one
     /// class of destination no journal can rescue, because the collision is with files jals never
     /// wrote.
+    ///
+    /// Both sides of every comparison go through [`resolved_path`](App::resolved_path) rather than
+    /// being matched as typed. A lexical check answers where a path is *spelled*, and what has to
+    /// be refused is where it *lands*: `--out-dir gen`, with `gen` a symlink to `src/main/java`,
+    /// spells a destination under no source root and denotes one under it. The destination that
+    /// comes back is still the lexical path — resolving is for deciding, not for writing.
     fn check_out_dir(manifest: &Manifest, root: &Path, out_dir: &Path) -> Result<PathBuf> {
         let out_dir = App::lexical_path(out_dir);
         let root = App::lexical_path(root);
-        if root.starts_with(&out_dir) {
+        let resolved_out_dir = App::resolved_path(&out_dir);
+        let resolved_root = App::resolved_path(&root);
+        if resolved_root.starts_with(&resolved_out_dir) {
             bail!(
                 "--out-dir {} is the project root{}; a lowered file keeps its project-relative \
                  path, so expanding here would write over the authored sources. Pick a directory \
                  beside the project, or omit --out-dir for {}.",
                 out_dir.display(),
-                if root == out_dir { "" } else { " or above it" },
+                if resolved_root == resolved_out_dir {
+                    ""
+                } else {
+                    " or above it"
+                },
                 jals_build::FRONTEND_OUT_DIR
             );
         }
         for source_root in manifest.source_roots(&root) {
-            if out_dir.starts_with(App::lexical_path(&source_root)) {
+            if resolved_out_dir.starts_with(App::resolved_path(&source_root)) {
                 bail!(
                     "--out-dir {} is inside the source root {}; generated sources there are read \
                      back as authored ones by the next lowering.",
@@ -1995,12 +2007,10 @@ impl App {
 
     /// A path with its `.` and `..` components resolved textually.
     ///
-    /// Deliberately not `canonicalize`: the question these comparisons ask is whether one path the
-    /// user typed denotes the same place as another, and `canonicalize` requires both to exist —
-    /// an `--out-dir` normally does not yet. Symlinks are therefore not resolved, which is the
-    /// weaker guarantee: a link *into* the project passes a check a canonicalized path would fail.
-    /// It is the containment checks that are conservative here, not the writing, which is journal-
-    /// bounded regardless.
+    /// Textual on purpose, and only half of a comparison: `canonicalize` needs the path to exist
+    /// and an `--out-dir` usually does not yet, so this normalizes what the user typed and
+    /// [`resolved_path`](Self::resolved_path) supplies the filesystem half. This is also the form
+    /// that gets written to and printed, because it is the one the user will recognise.
     fn lexical_path(path: &Path) -> PathBuf {
         let mut lexical = PathBuf::new();
         for component in path.components() {
@@ -2015,6 +2025,38 @@ impl App {
             }
         }
         lexical
+    }
+
+    /// [`lexical_path`](Self::lexical_path) with the longest existing prefix resolved through the
+    /// filesystem and the not-yet-existing tail put back on.
+    ///
+    /// A containment check that must not be circumvented cannot be lexical alone, and the one in
+    /// [`check_out_dir`](ExpandArgs::check_out_dir) is exactly that: a symlink pointing into a
+    /// source root spells a destination outside every one of them. The ownership journal is no
+    /// backstop there — it bounds what a later run *deletes*, and this would be the first run
+    /// *overwriting*, which for the blanking dialect loses every inactive branch with nothing to
+    /// restore it from.
+    ///
+    /// Canonicalizing the destination itself is not available (the run is usually what creates
+    /// it), so its nearest existing ancestor is canonicalized instead — which is where a symlink
+    /// has to be, since a path component cannot be a link to somewhere without existing.
+    fn resolved_path(path: &Path) -> PathBuf {
+        let lexical = Self::lexical_path(path);
+        let mut tail = Vec::new();
+        let mut current = lexical.as_path();
+        loop {
+            if let Ok(mut resolved) = current.canonicalize() {
+                resolved.extend(tail.iter().rev());
+                return resolved;
+            }
+            // No existing ancestor at all: nothing to resolve against, so the lexical form is the
+            // best answer available. A comparison against it is the pre-existing behaviour.
+            let (Some(parent), Some(name)) = (current.parent(), current.file_name()) else {
+                return lexical;
+            };
+            tail.push(name.to_os_string());
+            current = parent;
+        }
     }
 
     /// Every file below `dir`, recursively, in sorted order.
