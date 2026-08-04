@@ -158,12 +158,17 @@ filesystem reads into portable interfaces.
   script's `build.add_resource(path, destination)` are copied into `classes-dir` when a compile
   succeeds (script resources last, so a computed file wins), and `jals package` archives that one
   tree through `jals_classpath::JarPackage` — so a resource is in the jar for the same reason a
-  class is, and there is no second list of what goes in. `jals expand` is the frontend seam on its
-  own, for a host that compiles the lowered tree itself (a Gradle or Maven build over dialect
-  sources): it shares `build`'s lowering half (`App::lower_tree`) and stops there, running no build
-  script, resolving no classpath and acquiring no dependency — none of which changes what a frontend
-  emits for a file, which is what keeps the command offline (not effect-free: lowering publishes
-  into the artifact cache, exactly as a build's does).
+  class is, and *this host* keeps no second list of what goes in. That last part is a property of
+  `jals-cli` and not of jals: `jals-playground` archives the backend's own artifacts, so its jar is
+  classes only and a project with `resource-dirs` gets different contents depending on which host
+  built it. `JarPackage` is what the two genuinely share; the rule for what goes in lives here, and
+  a third host needing one is the point to lift it into `jals-build` rather than write it a third
+  time. `jals expand` is the frontend seam on its own, for a host that compiles the lowered tree
+  itself (a Gradle or Maven build over dialect sources): it shares `build`'s lowering half
+  (`App::lower_tree`) and stops there, running no build script, resolving no classpath and
+  acquiring no dependency — none of which changes what a frontend emits for a file, which is what
+  keeps the command offline (not effect-free: lowering publishes into the artifact cache, exactly
+  as a build's does).
   Where output goes decides how staleness is handled, and the two rules are **types rather than a
   flag**: `StagedTree` prunes, and may, because managed build output holds nothing else;
   `EmittedTree` and the `EmitJournal` beneath it delete only what a previous run of the same step
