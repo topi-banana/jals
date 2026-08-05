@@ -276,3 +276,64 @@ classpath = ["../sibling-classes", "{absolute_class}"]
     assert_eq!(inputs.classpath_classes.len(), 2);
     assert_eq!(inputs.source_dep_sources.len(), 2);
 }
+
+#[test]
+fn the_snapshot_captures_every_mapping_alternative_and_every_resource() {
+    // Both halves are silent when they are missing: a mapping file outside the snapshot makes the
+    // captured tree depend on `--features`, and a resource dir outside it produces a jar with no
+    // resources in it. Neither reports anything, so the scopes are what has to be pinned.
+    let project = tempfile::tempdir().unwrap();
+    let root = project.path();
+    fs::create_dir_all(root.join("maps")).unwrap();
+    fs::create_dir_all(root.join("src/main/resources/nested")).unwrap();
+    fs::write(root.join("maps/a.txt"), b"pkg.A -> a:\n").unwrap();
+    fs::write(root.join("maps/b.txt"), b"pkg.A -> b:\n").unwrap();
+    fs::write(root.join("src/main/resources/mixins.json"), b"{}").unwrap();
+    fs::write(root.join("src/main/resources/nested/data.bin"), b"\x00\x01").unwrap();
+
+    let manifest = manifest(
+        r#"
+[features]
+"1.20.1" = []
+"1.19.4" = []
+
+[build]
+remap = { with = "mojmap" }
+
+[[mappings.mojmap]]
+file = "maps/a.txt"
+required-features = ["1.20.1"]
+
+[[mappings.mojmap]]
+file = "maps/b.txt"
+required-features = ["1.19.4"]
+"#,
+    );
+
+    let captured = jals_exec::tokio_rt::run(|exec| async move {
+        let scopes = NativeProjectPlan::snapshot_scopes(&manifest, root);
+        let storage = NativeStorage::for_project_scoped(root, scopes, exec)
+            .await
+            .unwrap();
+        let view = storage.view();
+        view.tree()
+            .files_under(&DirKey::ROOT)
+            .map(|file| file.key().path().to_string())
+            .collect::<Vec<_>>()
+    })
+    .expect("test runtime bootstraps");
+
+    for expected in [
+        // Every alternative, not just the one some selection activates.
+        "maps/a.txt",
+        "maps/b.txt",
+        // Every file below a resource root, whatever its extension.
+        "src/main/resources/mixins.json",
+        "src/main/resources/nested/data.bin",
+    ] {
+        assert!(
+            captured.iter().any(|path| path == expected),
+            "`{expected}` is missing from the captured tree: {captured:?}"
+        );
+    }
+}

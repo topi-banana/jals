@@ -118,7 +118,11 @@ pub struct Manifest {
     /// declared but whose [`required-features`](MappingSource::required_features) are not satisfied
     /// is **not** an error — the remap is simply skipped, which is the only way to say "this release
     /// ships no mappings".
-    pub mappings: BTreeMap<String, MappingSource>,
+    ///
+    /// Each value is a [`MappingEntry`]: one source, or a list of feature-selected alternatives of
+    /// which at most one is ever active. The plural form is what lets one reference cover a project
+    /// that targets many releases, each with its own mapping text.
+    pub mappings: BTreeMap<String, MappingEntry>,
     /// Toolchain selection (`[toolchain]`): which `javac` compiles the project and which `java` runs
     /// it, chosen independently (see [`Toolchain`] and its [`Compiler`](crate::Compiler) /
     /// [`Runtime`](crate::Runtime) enums). Defaults to the system tools when omitted, so an existing
@@ -403,7 +407,152 @@ impl fmt::Display for DependencyError {
 
 impl Error for DependencyError {}
 
-/// A single `[mappings]` entry: where one named mapping set comes from, in one of two forms.
+/// One `[mappings]` entry: a single source, or feature-selected alternatives of the same name.
+///
+/// `[mappings.mojmap]` writes the singular form and `[[mappings.mojmap]]` the plural one. They are
+/// the same thing to every reader — [`alternatives`](MappingEntry::alternatives) hands back a slice
+/// either way — because the plural form exists to answer one question the singular cannot: a project
+/// that builds against many releases needs a different mapping text per release, and `remap = "…"`
+/// names one key.
+///
+/// The alternatives are gated, not merged. At most one may be active under any selection, so the
+/// entry still denotes exactly one mapping set once the features are known; which one is the only
+/// thing the list adds. [`Manifest::validate`] rejects every table where that could fail, by
+/// refusing any pair whose `required-features` are comparable by inclusion.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum MappingEntry {
+    /// `[mappings.<name>]` — one source, active whenever its own `required-features` are met.
+    One(MappingSource),
+    /// `[[mappings.<name>]]` — alternatives in declaration order.
+    Many(Vec<MappingSource>),
+}
+
+impl MappingEntry {
+    /// Every alternative, in declaration order.
+    ///
+    /// The singular form is a one-element slice rather than a separate arm at each call site: a
+    /// reader that wants "all the sources this name could resolve to" — validation, and the native
+    /// snapshot scopes, which must capture every alternative's file so the captured tree does not
+    /// vary with `--features` — asks once and never learns which spelling was used.
+    pub fn alternatives(&self) -> &[MappingSource] {
+        match self {
+            Self::One(source) => core::slice::from_ref(source),
+            Self::Many(sources) => sources,
+        }
+    }
+
+    /// The one alternative `enabled` activates, or `None` when none does.
+    ///
+    /// `None` is not a mistake: an entry whose alternatives all name an unselected release is how a
+    /// manifest says "this selection ships no mappings".
+    ///
+    /// # Errors
+    /// [`AmbiguousMapping`] when more than one alternative is active. Unreachable for a validated
+    /// manifest, and still an error rather than a tiebreak, because *which* mapping set rewrote a
+    /// jar is not a question a silent first-wins rule should be allowed to answer.
+    pub fn active(
+        &self,
+        name: &str,
+        enabled: &BTreeSet<String>,
+    ) -> Result<Option<&MappingSource>, AmbiguousMapping> {
+        let mut active = self
+            .alternatives()
+            .iter()
+            .enumerate()
+            .filter(|(_, source)| source.is_active(enabled));
+        let Some((first, source)) = active.next() else {
+            return Ok(None);
+        };
+        match active.next() {
+            // Positions are reported 1-based, as a reader counts `[[mappings.<name>]]` blocks.
+            Some((second, _)) => Err(AmbiguousMapping {
+                name: name.to_owned(),
+                first: first + 1,
+                second: second + 1,
+            }),
+            None => Ok(Some(source)),
+        }
+    }
+
+    /// Apply the per-alternative checks and the cross-alternative exclusivity rule. `name` labels
+    /// errors.
+    ///
+    /// # Errors
+    /// The first [`MappingError`] found.
+    fn validate(&self, name: &str) -> Result<(), MappingError> {
+        let alternatives = self.alternatives();
+        if alternatives.is_empty() {
+            return Err(MappingError::NoAlternatives {
+                name: name.to_owned(),
+            });
+        }
+        for source in alternatives {
+            source.validate(name)?;
+        }
+        // Exclusivity, decided statically: if one alternative's `required-features` are a subset of
+        // another's, every selection that activates the superset activates the subset too. That is
+        // exactly the provable half of "at most one active" — it subsumes two identical lists and
+        // two empty ones — and it is checked here rather than left to the resolving call sites so a
+        // manifest that could ever be ambiguous is rejected before any selection exists.
+        let gates: Vec<BTreeSet<&str>> = alternatives
+            .iter()
+            .map(|source| {
+                source
+                    .required_features()
+                    .iter()
+                    .map(String::as_str)
+                    .collect()
+            })
+            .collect();
+        for (i, left) in gates.iter().enumerate() {
+            for (j, right) in gates.iter().enumerate().skip(i + 1) {
+                if left.is_subset(right) || right.is_subset(left) {
+                    return Err(MappingError::AmbiguousAlternatives {
+                        name: name.to_owned(),
+                        first: i + 1,
+                        second: j + 1,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// More than one alternative of one `[mappings]` entry is active under a feature selection.
+///
+/// Carries the 1-based declaration positions rather than the sources themselves: the positions are
+/// what a reader edits, and two alternatives may well name the same URL while differing only in
+/// their gate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AmbiguousMapping {
+    /// The `[mappings]` key.
+    pub name: String,
+    /// The 1-based position of the first alternative found active.
+    pub first: usize,
+    /// The 1-based position of the second.
+    pub second: usize,
+}
+
+impl fmt::Display for AmbiguousMapping {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            name,
+            first,
+            second,
+        } = self;
+        write!(
+            f,
+            "mapping `{name}` has two active alternatives (#{first} and #{second}): at most one \
+             may be active under one feature selection"
+        )
+    }
+}
+
+impl Error for AmbiguousMapping {}
+
+/// A single `[mappings]` alternative: where one mapping set comes from, in one of two forms.
 ///
 /// Classified by serde at parse time exactly like [`Dependency`] — `#[serde(untagged)]` with each
 /// variant denying unknown fields, so `{ file, url }` matches nothing and a field misplaced onto the
@@ -542,6 +691,22 @@ pub enum MappingError {
         /// The offending entry, as written.
         feature: String,
     },
+    /// `mappings.<name> = []` — an entry with no alternative can never resolve to anything, so a
+    /// `remap` naming it would silently do nothing forever.
+    NoAlternatives {
+        /// The mapping's name.
+        name: String,
+    },
+    /// Two alternatives whose `required-features` are comparable by inclusion, so some selection
+    /// activates both. See [`MappingEntry::validate`].
+    AmbiguousAlternatives {
+        /// The mapping's name.
+        name: String,
+        /// The 1-based position of the first alternative.
+        first: usize,
+        /// The 1-based position of the second.
+        second: usize,
+    },
 }
 
 impl fmt::Display for MappingError {
@@ -574,6 +739,20 @@ impl fmt::Display for MappingError {
                 "mapping `{name}` lists `{feature}` in `required-features`, which names build \
                  features of this project (not `default`, and not a `<dependency>/<feature>` \
                  reference)"
+            ),
+            Self::NoAlternatives { name } => write!(
+                f,
+                "mapping `{name}` declares no alternative, so nothing could ever remap with it"
+            ),
+            Self::AmbiguousAlternatives {
+                name,
+                first,
+                second,
+            } => write!(
+                f,
+                "mapping `{name}` alternatives #{first} and #{second} have `required-features` that \
+                 are comparable by inclusion, so a selection could activate both: at most one \
+                 alternative may be active"
             ),
         }
     }
@@ -1363,6 +1542,19 @@ pub struct Build {
     /// Output directory for `.class` files (`javac -d`), relative to the manifest directory.
     /// Defaults to `"target/classes"`.
     pub classes_dir: String,
+    /// Directories whose files are packaged into the jar [`remap`](Build::remap) writes, relative
+    /// to the manifest directory. Defaults to `["src/main/resources"]`.
+    ///
+    /// Authored project files, unlike [`classes-dir`](Build::classes_dir), which is compiler
+    /// output — which is why they are read from the immutable project snapshot rather than walked
+    /// off a host filesystem. A directory that does not exist is skipped in silence: the default
+    /// lands on every project, and a project with no resources is not a project with a mistake.
+    ///
+    /// These reach the **jar only**. `jals run` executes `classes-dir` and does not see them; a
+    /// program that must read a resource at run time wants the directory on
+    /// [`classpath`](Build::classpath) as well. They also do not reach the browser playground,
+    /// which refuses a declared `remap` outright.
+    pub resource_dirs: Vec<String>,
     /// `javac --release N`. When set it determines source level, target level, and bootclasspath
     /// together, and `source`/`target` are ignored.
     pub release: Option<u32>,
@@ -1557,6 +1749,7 @@ impl Default for Build {
             backend: BackendKind::Javac {},
             source_dirs: alloc::vec!["src/main/java".to_owned()],
             classes_dir: "target/classes".to_owned(),
+            resource_dirs: alloc::vec!["src/main/resources".to_owned()],
             release: None,
             source: None,
             target: None,
@@ -1850,6 +2043,28 @@ impl Manifest {
                 dir: self.build.classes_dir.clone(),
             });
         }
+        // `resource-dirs`, unlike `classes-dir`, is always a portable project path: its files are
+        // read from the immutable snapshot, which addresses nothing outside the project. The root
+        // is rejected for a reason of its own — it would package `target/` into the jar.
+        for dir in &self.build.resource_dirs {
+            let key = DirKey::parse(dir)
+                .map_err(|_| ValidationError::InvalidResourceDir { dir: dir.clone() })?;
+            if key.path().is_root() {
+                return Err(ValidationError::InvalidResourceDir { dir: dir.clone() });
+            }
+            // A resource dir inside `classes-dir` would package the compiler's own output as
+            // resources, and would then be swept by `jals clean` as if it were output.
+            if classes_dir
+                .as_ref()
+                .is_some_and(|classes| key.path().starts_with(classes.path()))
+            {
+                return Err(ValidationError::ResourceDirInClassesDir {
+                    dir: dir.clone(),
+                    classes_dir: self.build.classes_dir.clone(),
+                });
+            }
+        }
+
         if let Some(BuildScript::Rhai { file }) = &self.build.script {
             let script = FileKey::parse(file)
                 .map_err(|_| ValidationError::InvalidBuildScriptFile { file: file.clone() })?;
@@ -2328,6 +2543,19 @@ pub enum ValidationError {
         /// The invalid compiler output directory.
         dir: String,
     },
+    /// A `[build] resource-dirs` entry is not a non-root portable project directory path.
+    InvalidResourceDir {
+        /// The invalid resource directory.
+        dir: String,
+    },
+    /// A `[build] resource-dirs` entry is inside `[build] classes-dir`, so it would package the
+    /// compiler's own output as resources.
+    ResourceDirInClassesDir {
+        /// The offending resource directory.
+        dir: String,
+        /// The `classes-dir` it sits inside.
+        classes_dir: String,
+    },
     /// A `[build] script.file` is not a non-root portable project file path.
     InvalidBuildScriptFile {
         /// The invalid script file value.
@@ -2482,6 +2710,16 @@ impl fmt::Display for ValidationError {
             Self::InvalidClassesDir { dir } => write!(
                 f,
                 "invalid `[build] classes-dir` `{dir}`: expected a non-root portable project directory path"
+            ),
+            Self::InvalidResourceDir { dir } => write!(
+                f,
+                "invalid `[build] resource-dirs` entry `{dir}`: expected a non-root portable \
+                 project directory path"
+            ),
+            Self::ResourceDirInClassesDir { dir, classes_dir } => write!(
+                f,
+                "invalid `[build] resource-dirs` entry `{dir}`: resources must be outside `[build] \
+                 classes-dir` `{classes_dir}`, which the compiler writes and `jals clean` removes"
             ),
             Self::InvalidBuildScriptFile { file } => write!(
                 f,
@@ -4189,13 +4427,15 @@ mod tests {
         .parse()
         .unwrap();
 
-        let local = &manifest.mappings["local"];
+        let [local] = manifest.mappings["local"].alternatives() else {
+            panic!("the singular spelling holds exactly one alternative");
+        };
         assert!(matches!(local, MappingSource::File(_)));
         // Both forms default the format, so an entry that says nothing still names one grammar.
         assert_eq!(local.format(), MappingFormatKind::Proguard {});
         assert!(local.required_features().is_empty());
 
-        let MappingSource::Url(mojmap) = &manifest.mappings["mojmap"] else {
+        let [MappingSource::Url(mojmap)] = manifest.mappings["mojmap"].alternatives() else {
             panic!("the `url` form should classify as `Url`");
         };
         assert_eq!(
@@ -4302,8 +4542,198 @@ mod tests {
         .unwrap();
 
         let mapping = &manifest.mappings["mojmap"];
-        assert!(!mapping.is_active(&BTreeSet::new()));
-        assert!(mapping.is_active(&BTreeSet::from(["obfuscated".to_owned()])));
+        assert_eq!(mapping.active("mojmap", &BTreeSet::new()), Ok(None));
+        assert!(
+            mapping
+                .active("mojmap", &BTreeSet::from(["obfuscated".to_owned()]))
+                .expect("one alternative cannot be ambiguous")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn both_mapping_spellings_parse() {
+        // The gate on the nested-untagged shape: a TOML array of tables has to reach `Many` and a
+        // plain table `One`, with the inner `MappingSource` classification unchanged in both.
+        let manifest: Manifest = r#"
+            [features]
+            "1.20.1" = []
+            "1.19.4" = []
+
+            [mappings.local]
+            file = "mappings/server.txt"
+
+            [[mappings.mojmap]]
+            required-features = ["1.20.1"]
+            url = "https://piston-data.example/a.txt"
+            sha1 = "aa"
+            max-bytes = 16
+
+            [[mappings.mojmap]]
+            required-features = ["1.19.4"]
+            file = "mappings/b.txt"
+            "#
+        .parse()
+        .unwrap();
+
+        assert!(matches!(manifest.mappings["local"], MappingEntry::One(_)));
+        let MappingEntry::Many(alternatives) = &manifest.mappings["mojmap"] else {
+            panic!("an array of tables should classify as `Many`");
+        };
+        assert_eq!(alternatives.len(), 2);
+        assert!(matches!(alternatives[0], MappingSource::Url(_)));
+        assert!(matches!(alternatives[1], MappingSource::File(_)));
+        // Both spellings read the same way.
+        assert_eq!(manifest.mappings["local"].alternatives().len(), 1);
+        assert_eq!(manifest.mappings["mojmap"].alternatives().len(), 2);
+    }
+
+    #[test]
+    fn at_most_one_alternative_is_active() {
+        let manifest: Manifest = r#"
+            [features]
+            a = []
+            b = []
+
+            [[mappings.m]]
+            required-features = ["a"]
+            file = "maps/a.txt"
+
+            [[mappings.m]]
+            required-features = ["b"]
+            file = "maps/b.txt"
+            "#
+        .parse()
+        .unwrap();
+
+        let entry = &manifest.mappings["m"];
+        let selected = |names: &[&str]| {
+            entry
+                .active("m", &names.iter().map(|name| (*name).to_owned()).collect())
+                .map(|source| {
+                    source.map(|source| match source {
+                        MappingSource::File(file) => file.file.clone(),
+                        MappingSource::Url(_) => panic!("both alternatives are the file form"),
+                    })
+                })
+        };
+        assert_eq!(selected(&["a"]), Ok(Some("maps/a.txt".to_owned())));
+        assert_eq!(selected(&["b"]), Ok(Some("maps/b.txt".to_owned())));
+        // No version selected is "this selection ships no mappings", not a mistake.
+        assert_eq!(selected(&[]), Ok(None));
+        // Validation rejects a table that could reach this, so it takes both gates at once to get
+        // here — which is exactly why `active` reports rather than picks.
+        assert_eq!(
+            selected(&["a", "b"]),
+            Err(AmbiguousMapping {
+                name: "m".to_owned(),
+                first: 1,
+                second: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn alternatives_with_comparable_required_features_are_rejected() {
+        // Every pair a selection could activate together: identical lists, two unconditional
+        // entries, and one list contained in the other.
+        for gates in [
+            (
+                r#"required-features = ["a"]"#,
+                r#"required-features = ["a"]"#,
+            ),
+            ("", ""),
+            (
+                r#"required-features = ["a"]"#,
+                r#"required-features = ["a", "b"]"#,
+            ),
+        ] {
+            let source = alloc::format!(
+                "[features]\na = []\nb = []\n\
+                 [[mappings.m]]\nfile = \"maps/a.txt\"\n{}\n\
+                 [[mappings.m]]\nfile = \"maps/b.txt\"\n{}\n",
+                gates.0,
+                gates.1
+            );
+            let manifest: Manifest = toml::from_str(&source).unwrap();
+            assert_eq!(
+                manifest.validate(),
+                Err(ValidationError::Mapping(
+                    MappingError::AmbiguousAlternatives {
+                        name: "m".to_owned(),
+                        first: 1,
+                        second: 2,
+                    }
+                )),
+                "comparable gates should be rejected: {gates:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn disjoint_alternatives_are_accepted() {
+        let manifest: Manifest = r#"
+            [features]
+            a = []
+            b = []
+            c = []
+
+            [[mappings.m]]
+            required-features = ["a"]
+            file = "maps/a.txt"
+
+            [[mappings.m]]
+            required-features = ["b"]
+            file = "maps/b.txt"
+
+            [[mappings.m]]
+            required-features = ["c"]
+            file = "maps/c.txt"
+            "#
+        .parse()
+        .unwrap();
+        assert_eq!(manifest.mappings["m"].alternatives().len(), 3);
+    }
+
+    #[test]
+    fn a_resource_dir_must_be_a_non_root_project_directory_outside_classes_dir() {
+        // The default lands on every project, so it is the one shape that has to keep validating.
+        assert_eq!(
+            Build::default().resource_dirs,
+            alloc::vec!["src/main/resources".to_owned()]
+        );
+        Manifest::default().validate().unwrap();
+
+        // The root would package `target/` into the jar.
+        let rooted: Manifest = toml::from_str("[build]\nresource-dirs = [\"\"]\n").unwrap();
+        assert_eq!(
+            rooted.validate(),
+            Err(ValidationError::InvalidResourceDir { dir: String::new() })
+        );
+
+        // Inside `classes-dir` would package the compiler's own output as resources, and would
+        // then be swept by `jals clean` as if it were output.
+        let nested: Manifest =
+            toml::from_str("[build]\nclasses-dir = \"out\"\nresource-dirs = [\"out/resources\"]\n")
+                .unwrap();
+        assert_eq!(
+            nested.validate(),
+            Err(ValidationError::ResourceDirInClassesDir {
+                dir: "out/resources".to_owned(),
+                classes_dir: "out".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn an_empty_alternative_list_is_rejected() {
+        let manifest: Manifest = toml::from_str("[mappings]\nm = []\n").unwrap();
+        assert_eq!(
+            manifest.validate(),
+            Err(ValidationError::Mapping(MappingError::NoAlternatives {
+                name: "m".to_owned()
+            }))
+        );
     }
 
     #[test]

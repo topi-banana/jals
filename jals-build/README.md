@@ -104,6 +104,7 @@ version = "0.1.0"
 # script = { type = "rhai", file = "build.rhai" } # optional pre-javac phase
 source-dirs = ["src/main/java"]   # -sourcepath roots, also scanned for .java files
 classes-dir = "target/classes"    # javac -d
+# resource-dirs = ["src/main/resources"]  # packaged into the jar `[build] remap` writes
 release = 21                       # javac --release N
 # source = 17                      # javac --source N  (only when release is unset)
 # target = 17                      # javac --target N  (only when release is unset)
@@ -211,6 +212,7 @@ nothing still leaves every dependency script cached.
 | `script`      | tagged table     | —                   | optional pre-`javac` build phase; currently `{ type = "rhai", file = "build.rhai" }`                                                    |
 | `source-dirs` | array of strings | `["src/main/java"]` | `-sourcepath` (joined) **and** the roots scanned for `.java` files                                                                      |
 | `classes-dir` | string           | `"target/classes"`  | `javac -d` (also the dir `jals clean` removes)                                                                                          |
+| `resource-dirs` | array of strings | `["src/main/resources"]` | files packaged into the jar `[build] remap` writes. Authored project files, read from the snapshot; a missing directory is skipped. They reach the **jar only** — `jals run` executes `classes-dir` and never sees them. Must be non-root project directories outside `classes-dir` |
 | `release`     | integer          | —                   | `--release N` — sets source level, target level, and bootclasspath together; when present, `source`/`target` are ignored                |
 | `source`      | integer          | —                   | `--source N` — only when `release` is unset                                                                                             |
 | `target`      | integer          | —                   | `--target N` — only when `release` is unset                                                                                             |
@@ -518,7 +520,10 @@ See [`examples/rhai_build_script`](../examples/rhai_build_script) for a runnable
 [`examples/task_source_archive`](../examples/task_source_archive) demonstrates exclusive source-JAR
 publication. [`examples/minecraft`](../examples/minecraft)
 fetches, remaps, and decompiles a Minecraft release — selected from 43 mutually exclusive version
-`[features]` — through the task DAG.
+`[features]` — through the task DAG, and
+[`examples/minecraft_mod`](../examples/minecraft_mod) consumes it: a Mixin mod whose `[build] remap`
+reobfuscates the compiled classes with whichever of 39 `[[mappings.mojmap]]` alternatives the
+selection activates.
 
 ### `[run]`
 

@@ -13,11 +13,11 @@ use core::fmt;
 use jals_classpath::{
     Fetcher, JarPackage, JarRemap, MappingResolver, MappingSpec, RemapDirection, RemapRequest,
 };
-use jals_config::{BackendKind, Manifest, ResolvedBuildFeatures};
+use jals_config::{AmbiguousMapping, BackendKind, Manifest, ResolvedBuildFeatures};
 use jals_exec::Exec;
 use jals_storage::{
-    CacheBackend, CacheKey, CacheNamespace, ContentDigest, ProjectStorage, ProvenanceFold,
-    RelativePath, SourceBackend,
+    CacheBackend, CacheKey, CacheNamespace, ContentDigest, DirKey, ProjectStorage, ProjectView,
+    ProvenanceFold, RelativePath, SourceBackend,
 };
 
 /// Whether this project asks for a post-compile remap, and whether its backend can supply one.
@@ -27,15 +27,18 @@ use jals_storage::{
 /// `[build] remap` itself, so the decision table lives in one place.
 #[derive(Debug)]
 pub enum RemapSelection {
-    /// Nothing to do: the manifest declares no `[build] remap`, or the mapping set it names is
-    /// inactive under this selection.
+    /// Nothing to do: the manifest declares no `[build] remap`.
     ///
-    /// The two collapse deliberately. An unmet `required-features` is how a manifest says "this
-    /// selection ships no mappings", and a host that had to tell the two apart would be deciding
-    /// something the manifest already decided.
+    /// Only that. An unmet `required-features` is [`Requested`](Self::Requested) with no mapping,
+    /// because the difference is observable in the output: a declared step writes its jar whether
+    /// or not a mapping applies. "This selection ships no mappings" says *do not rewrite the
+    /// names*, not *produce nothing* — a release that ships deobfuscated needs the same
+    /// distributable as one that does not.
     NotRequested,
-    /// Reobfuscate the compiled classes and write the jar.
+    /// Package the compiled classes, reobfuscating first when a mapping set is active.
     Requested(RemapPlan),
+    /// Declared, but more than one alternative of the `[mappings]` entry it names is active.
+    Ambiguous(AmbiguousMapping),
     /// Declared, but this backend does not produce class files to remap.
     Unsupported {
         /// The backend's `[build] backend` tag.
@@ -62,10 +65,15 @@ impl fmt::Display for RemapAbsence {
     }
 }
 
-/// A resolved `[build] remap`: which mapping set, and where the jar goes.
+/// A resolved `[build] remap`: which mapping set (if any is active), and where the jar goes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemapPlan {
-    mapping: MappingSpec,
+    /// The mapping set, or `None` when no alternative of the named entry is active under this
+    /// selection — the jar is packaged and its names are left alone.
+    mapping: Option<MappingSpec>,
+    /// The `[build] resource-dirs` whose files are packaged alongside the classes, lowered. A
+    /// directory that does not exist in the snapshot is skipped when the jar is written.
+    resources: Vec<DirKey>,
     /// The output jar, as the project-relative path `[build] remap` resolved to.
     pub jar: String,
 }
@@ -89,32 +97,51 @@ impl RemapSelection {
                 };
             }
         }
-        let Some(source) = manifest.mappings.get(&remap.with) else {
-            // `Manifest::validate` rejects an undeclared reference, so reaching this is a manifest
-            // that was never validated. Nothing to remap with is nothing to do.
-            return Self::NotRequested;
-        };
-        if !source.is_active(features.features()) {
-            return Self::NotRequested;
-        }
         let mut warnings = Vec::new();
-        let Some(mapping) = MappingSpec::lower(manifest, &remap.with, &mut warnings) else {
-            return Self::NotRequested;
+        // `Manifest::validate` rejects an undeclared reference and every provably ambiguous table,
+        // so an unvalidated manifest is the only way past either. A missing or malformed entry
+        // still packages: the step was declared, and refusing to write the jar because the *names*
+        // could not be resolved would withhold the deliverable over the optional half of it.
+        let mapping = match MappingSpec::lower_active(
+            manifest,
+            &remap.with,
+            features.features(),
+            &mut warnings,
+        ) {
+            Ok(mapping) => mapping,
+            Err(ambiguous) => return Self::Ambiguous(ambiguous),
         };
+        // A `resource-dirs` entry `Manifest::validate` accepted always parses; one that does not is
+        // a manifest that reached here unvalidated, and dropping it is the same answer the missing
+        // directory below gets.
+        let resources = manifest
+            .build
+            .resource_dirs
+            .iter()
+            .filter_map(|dir| DirKey::parse(dir).ok())
+            .collect();
         Self::Requested(RemapPlan {
             mapping,
+            resources,
             jar: remap.jar_path(&manifest.package),
         })
     }
 }
 
 impl RemapPlan {
-    /// Reobfuscate `classes` and return the jar's bytes.
+    /// Package `classes` and return the jar's bytes, reobfuscating first when a mapping is active.
     ///
-    /// `hierarchy` is the resolved compile classpath. It is not optional in practice: the classes
-    /// being remapped extend types that live there, and an inherited member whose declaring type is
-    /// missing from the index keeps its original name in an otherwise remapped archive — a silent
-    /// wrong answer rather than a failure.
+    /// `hierarchy` closes the class hierarchy of what is being remapped, and is read only when one
+    /// is: the classes being remapped extend types that live there, and an inherited member whose
+    /// declaring type is missing from the index keeps its original name in an otherwise remapped
+    /// archive — a silent wrong answer rather than a failure.
+    ///
+    /// Today a host supplies the archives resolved from `[dependencies]`, which is **not** the whole
+    /// compile classpath: a jar a dependency's build script put there with `tasks.add_classpath`,
+    /// and a `[build] classpath` entry that is a project file rather than a cached artifact, are
+    /// both absent. A mixin-style class that names its target only through an annotation `Class`
+    /// value is unaffected — the class table alone renames that — but a member inherited from such
+    /// a jar is exactly the silent case above.
     ///
     /// # Errors
     /// A message naming what could not be resolved, packaged, or remapped.
@@ -133,16 +160,31 @@ impl RemapPlan {
         C: CacheBackend,
     {
         let view = storage.view();
-        let mappings =
-            MappingResolver::text(fetcher, &view, storage.artifacts_mut(), &self.mapping)
-                .await
-                .map_err(|warning| warning.to_string())?;
 
         // The remapper works on cached archives, so the compiled classes are packaged first. That
         // is not a detour: the jar is the deliverable, and packaging before rather than after means
         // the `Main-Class` in its manifest is rewritten by the same pass that rewrites every other
         // reference to the entry point.
-        let staged = JarPackage::write(classes, main_class)?;
+        //
+        // Resources ride along in the same archive. They are authored project files, so they come
+        // out of the snapshot rather than off a host filesystem, which is what keeps this whole
+        // step portable — and a remap leaves every non-class member untouched, so they survive it
+        // byte for byte.
+        let mut entries = classes.to_vec();
+        entries.extend(self.resource_entries(&view));
+        let staged = JarPackage::write(&entries, main_class)?;
+
+        // No active mapping is the whole answer: the packaged jar already carries the names the
+        // target runtime loads, and its manifest's `Main-Class` is correspondingly left alone
+        // because nothing was obfuscated.
+        let Some(mapping) = &self.mapping else {
+            return Ok(staged);
+        };
+
+        let mappings = MappingResolver::text(fetcher, &view, storage.artifacts_mut(), mapping)
+            .await
+            .map_err(|warning| warning.to_string())?;
+
         let key = Self::stage_key(&staged);
         storage
             .artifacts_mut()
@@ -156,7 +198,7 @@ impl RemapPlan {
             &key,
             &RemapRequest {
                 mappings: &mappings,
-                format: self.mapping.format,
+                format: mapping.format,
                 direction: RemapDirection::Reobfuscate,
                 hierarchy,
             },
@@ -168,6 +210,38 @@ impl RemapPlan {
             .await
             .map_err(|error| format!("reading the remapped jar failed: {error:?}"))?
             .ok_or_else(|| "the remapped jar is not cached".to_owned())
+    }
+
+    /// Every `[build] resource-dirs` file in `view`, addressed by its path below the directory it
+    /// was declared under — exactly as a class is addressed below `classes-dir`.
+    ///
+    /// Sorted by that path, per directory, because the jar's member order is part of its bytes.
+    fn resource_entries(&self, view: &ProjectView) -> Vec<(RelativePath, Vec<u8>)> {
+        let mut entries = Vec::new();
+        for dir in &self.resources {
+            // A declared directory that is not there is not a mistake: `[build] resource-dirs`
+            // defaults onto every project, and most projects have no resources.
+            if view.directory(dir).is_err() {
+                continue;
+            }
+            let mut found: Vec<_> = view
+                .tree()
+                .files_under(dir)
+                .filter_map(|file| {
+                    let path = RelativePath::new(
+                        file.key()
+                            .path()
+                            .segments()
+                            .skip(dir.path().segments().len())
+                            .cloned(),
+                    );
+                    (!path.is_root()).then(|| (path, file.bytes().to_vec()))
+                })
+                .collect();
+            found.sort_by_key(|(path, _)| path.to_string());
+            entries.extend(found);
+        }
+        entries
     }
 
     /// The cache key the staged (pre-remap) jar is published under.
@@ -238,21 +312,75 @@ mod tests {
     }
 
     #[test]
-    fn an_unmet_required_feature_is_a_skip_rather_than_a_failure() {
-        // The same rule `dependencies.*.remap` follows: "this selection ships no mappings" is an
-        // outcome the manifest states, not a mistake a host reports.
+    fn an_inactive_mapping_still_packages_a_jar() {
+        // "This selection ships no mappings" is an outcome the manifest states, not a mistake a
+        // host reports — and it says *do not rewrite the names*, not *produce nothing*. A release
+        // that ships deobfuscated needs the same distributable as one that does not.
         let source = "[features]\nobfuscated = []\n\
                       [build]\nremap = { with = \"mojmap\" }\n\
                       [mappings.mojmap]\nfile = \"maps/server.txt\"\n\
                       required-features = [\"obfuscated\"]\n";
-        assert!(matches!(
-            selection(source, &[]),
-            RemapSelection::NotRequested
-        ));
-        assert!(matches!(
-            selection(source, &["obfuscated"]),
-            RemapSelection::Requested(_)
-        ));
+        let RemapSelection::Requested(plan) = selection(source, &[]) else {
+            panic!("a declared step is requested whether or not a mapping applies");
+        };
+        assert!(plan.mapping.is_none());
+        let RemapSelection::Requested(plan) = selection(source, &["obfuscated"]) else {
+            panic!("declared and active");
+        };
+        assert!(plan.mapping.is_some());
+    }
+
+    #[test]
+    fn alternatives_select_by_feature() {
+        let source = "[features]\na = []\nb = []\n\
+                      [build]\nremap = { with = \"mojmap\" }\n\
+                      [[mappings.mojmap]]\nfile = \"maps/a.txt\"\nrequired-features = [\"a\"]\n\
+                      [[mappings.mojmap]]\nfile = \"maps/b.txt\"\nrequired-features = [\"b\"]\n";
+        let lowered = |selected: &[&str]| {
+            let RemapSelection::Requested(plan) = selection(source, selected) else {
+                panic!("a declared step is always requested");
+            };
+            plan.mapping
+        };
+        let first = lowered(&["a"]).expect("`a` activates the first alternative");
+        let second = lowered(&["b"]).expect("`b` activates the second");
+        assert_ne!(first, second);
+        assert!(lowered(&[]).is_none());
+    }
+
+    #[test]
+    fn resource_dirs_are_lowered_into_the_plan() {
+        let RemapSelection::Requested(plan) = selection(DECLARED, &[]) else {
+            panic!("declared and active");
+        };
+        // The default, lowered — the plan carries the directories rather than the host re-reading
+        // `[build] resource-dirs` when it packages.
+        assert_eq!(
+            plan.resources,
+            alloc::vec![DirKey::parse("src/main/resources").expect("constant is portable")]
+        );
+
+        let none = "[build]\nremap = { with = \"m\" }\nresource-dirs = []\n\
+                    [mappings.m]\nfile = \"maps/server.txt\"\n";
+        let RemapSelection::Requested(plan) = selection(none, &[]) else {
+            panic!("declared and active");
+        };
+        assert!(plan.resources.is_empty());
+    }
+
+    #[test]
+    fn an_ambiguous_selection_is_reported() {
+        // `Manifest::validate` rejects a table where this is provable, so it takes an unvalidated
+        // manifest to get here — and the host is told rather than handed whichever came first.
+        let source = "[features]\na = []\nb = []\n\
+                      [build]\nremap = { with = \"mojmap\" }\n\
+                      [[mappings.mojmap]]\nfile = \"maps/a.txt\"\nrequired-features = [\"a\"]\n\
+                      [[mappings.mojmap]]\nfile = \"maps/b.txt\"\nrequired-features = [\"b\"]\n";
+        let RemapSelection::Ambiguous(ambiguous) = selection(source, &["a", "b"]) else {
+            panic!("two active alternatives are ambiguous");
+        };
+        assert_eq!(ambiguous.name, "mojmap");
+        assert_eq!((ambiguous.first, ambiguous.second), (1, 2));
     }
 
     #[test]

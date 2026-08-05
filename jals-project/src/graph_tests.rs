@@ -2477,3 +2477,113 @@ fn an_inactive_required_feature_leaves_the_jar_unremapped() {
         assert!(assembly.warnings.is_empty(), "{:?}", assembly.warnings);
     });
 }
+
+/// A root whose one jar dependency names a `[mappings]` entry with two alternatives.
+///
+/// The gate is the *declaring* project's selection, and the root has no node to read one from —
+/// which is what `root_features` exists for, and what makes this the case worth pinning.
+fn alternatives_project(
+    root_features: &[&str],
+) -> (Manifest, MemoryStorage, ResolvedBuildFeatures) {
+    let root: Manifest = "[features]\n\"1.20.1\" = []\n\"1.19.4\" = []\n\
+         [[mappings.a]]\nfile = \"maps/a.txt\"\nrequired-features = [\"1.20.1\"]\n\
+         [[mappings.a]]\nfile = \"maps/b.txt\"\nrequired-features = [\"1.19.4\"]\n\
+         [dependencies]\none = { jar = \"vendor/lib.jar\", remap = \"a\" }\n"
+        .parse()
+        .expect("manifest is valid");
+    let storage = MemoryStorage::memory(
+        CodeTree::new([
+            Entry::File(
+                FileKey::parse("vendor/lib.jar").expect("portable key"),
+                jar(&[("pkg/A.class", b"a")]),
+            ),
+            Entry::File(
+                FileKey::parse("maps/a.txt").expect("portable key"),
+                b"pkg.A -> a:\n".to_vec(),
+            ),
+            Entry::File(
+                FileKey::parse("maps/b.txt").expect("portable key"),
+                b"pkg.A -> b:\n".to_vec(),
+            ),
+        ])
+        .expect("tree is valid"),
+    );
+    let selected: Vec<String> = root_features
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect();
+    let features = root
+        .resolve_build_features(&selected, false, false)
+        .expect("selection is declared");
+    (root, storage, features)
+}
+
+#[test]
+fn alternatives_select_the_one_the_root_selection_activates() {
+    jals_exec::block_on_inline(async {
+        for selection in [&["1.20.1"][..], &["1.19.4"][..]] {
+            let (root, view_storage, features) = alternatives_project(selection);
+            let mut cache = MemoryStorage::memory(CodeTree::default());
+            let assembly = MemoryProjectGraph::discover(&root, &view_storage.view())
+                .await
+                .unwrap()
+                .preprocess(
+                    cache.artifacts_mut(),
+                    inert!(
+                        &BuildScriptEnvironment::new(),
+                        &features,
+                        &BuildScriptLimits::default()
+                    ),
+                )
+                .await
+                .unwrap()
+                .assemble(cache.artifacts_mut())
+                .await;
+
+            let [dependency] = &assembly.plan.dependencies[..] else {
+                panic!("one node: {:?}", assembly.plan.dependencies);
+            };
+            assert!(dependency.remap.is_some(), "{selection:?}: {dependency:?}");
+            assert!(assembly.warnings.is_empty(), "{:?}", assembly.warnings);
+        }
+    });
+}
+
+#[test]
+fn an_ambiguous_edge_remap_warns_and_leaves_the_jar_unremapped() {
+    jals_exec::block_on_inline(async {
+        // `Manifest::validate` rejects a table where this is provable, so getting here takes both
+        // gates at once. The jar is left alone rather than remapped by whichever came first: two
+        // sets of names is the disagreement the dedup above refuses for the same reason.
+        let (root, view_storage, features) = alternatives_project(&["1.20.1", "1.19.4"]);
+        let mut cache = MemoryStorage::memory(CodeTree::default());
+        let assembly = MemoryProjectGraph::discover(&root, &view_storage.view())
+            .await
+            .unwrap()
+            .preprocess(
+                cache.artifacts_mut(),
+                inert!(
+                    &BuildScriptEnvironment::new(),
+                    &features,
+                    &BuildScriptLimits::default()
+                ),
+            )
+            .await
+            .unwrap()
+            .assemble(cache.artifacts_mut())
+            .await;
+
+        let [dependency] = &assembly.plan.dependencies[..] else {
+            panic!("one node: {:?}", assembly.plan.dependencies);
+        };
+        assert!(dependency.remap.is_none(), "{dependency:?}");
+        assert!(
+            assembly
+                .warnings
+                .iter()
+                .any(|warning| warning.to_string().contains("two active alternatives")),
+            "{:?}",
+            assembly.warnings
+        );
+    });
+}
