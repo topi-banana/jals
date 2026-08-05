@@ -5,7 +5,7 @@ use alloc::format;
 use alloc::vec::Vec;
 
 use alloc::borrow::ToOwned;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 
 use jals_classfile::ClassFile;
 use jals_config::{Dependency, FeatureSet, Manifest, ResolvedBuildFeatures};
@@ -100,12 +100,15 @@ impl ProjectInputPlan {
         }
     }
 
-    /// The mapping set a `remap` reference resolves to under `features`, or `None` when the entry
-    /// is inactive.
+    /// The mapping set a `remap` reference resolves to under `features`, or `None` when no
+    /// alternative of the entry is active.
     ///
     /// The gate and the lowering are deliberately separate calls: `jals-project` applies the same
     /// gate with a *graph node's* features rather than these, and duplicating the lowering there is
     /// what would let the two drift.
+    ///
+    /// An ambiguous entry drops the jar, exactly as an unresolvable mapping does below: an archive
+    /// nobody can say which names it answers to is not a degraded version of what was asked for.
     fn active_remap(
         manifest: &Manifest,
         features: &ResolvedBuildFeatures,
@@ -113,14 +116,16 @@ impl ProjectInputPlan {
         warnings: &mut Vec<Warning>,
     ) -> Option<MappingSpec> {
         let reference = reference?;
-        if !manifest
-            .mappings
-            .get(reference)?
-            .is_active(features.features())
-        {
-            return None;
+        match MappingSpec::lower_active(manifest, reference, features.features(), warnings) {
+            Ok(spec) => spec,
+            Err(ambiguous) => {
+                warnings.push(Warning::new(
+                    WarningOrigin::External(ExternalLocator::new(reference)),
+                    ambiguous.to_string(),
+                ));
+                None
+            }
         }
-        MappingSpec::lower(manifest, reference, warnings)
     }
 }
 

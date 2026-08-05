@@ -75,6 +75,11 @@ pub enum CompileFailure {
     /// against embedded stubs rather than a classpath, which is where the class hierarchy a
     /// reobfuscation needs would come from. Handing back an unremapped jar under the name the
     /// manifest asked for would be indistinguishable from success.
+    ///
+    /// The refusal covers a declared step whose mapping set no selection activates, too. Elsewhere
+    /// that case packages a jar and rewrites nothing, but what blocks this host is the storage and
+    /// the fetcher rather than the mapping — and `[build] remap`'s `jar` is a project path, which
+    /// is not a name a browser download has.
     RemapUnsupported,
 }
 

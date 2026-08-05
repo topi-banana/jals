@@ -609,11 +609,29 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
                 Some(from) => self.graph.features.get(from),
                 None => Some(&self.graph.root_features),
             };
-            let remap = edge.remap.as_ref().and_then(|remap| {
-                remap
-                    .active(declaring_features.unwrap_or(&EMPTY_FEATURES))
-                    .cloned()
-            });
+            let active = edge
+                .remap
+                .as_ref()
+                .map(|remap| remap.active(declaring_features.unwrap_or(&EMPTY_FEATURES)));
+            let remap = match active {
+                None | Some(Ok(None)) => None,
+                Some(Ok(Some(spec))) => Some(spec.clone()),
+                Some(Err(message)) => {
+                    // Ambiguity leaves the jar unremapped rather than picking an alternative, for
+                    // the reason the disagreement below is reported: an archive nobody can say
+                    // which names it answers to is not a usable classpath entry.
+                    let declared_by = edge
+                        .from
+                        .as_ref()
+                        .map(|from| ResolvedNode::location_or_digest(&self.graph.nodes, from));
+                    self.warnings.push(GraphWarning {
+                        node: declared_by,
+                        dependency: Some(edge.dependency.clone()),
+                        message,
+                    });
+                    None
+                }
+            };
             if let Some(index) = indices.get(&edge.to).copied() {
                 projected[index].recursive |= edge.recursive;
                 // `recursive` unions because two edges asking for nested expansion want the same

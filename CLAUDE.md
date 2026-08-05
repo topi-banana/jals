@@ -163,7 +163,11 @@ filesystem reads into portable interfaces.
   classes only and a project with `resource-dirs` gets different contents depending on which host
   built it. `JarPackage` is what the two genuinely share; the rule for what goes in lives here, and
   a third host needing one is the point to lift it into `jals-build` rather than write it a third
-  time. `jals expand` is the frontend seam on its own, for a host that compiles the lowered tree
+  time. `[build] remap`'s jar is a *third* reading of the same `resource-dirs`, and deliberately not
+  this one: it packages from the immutable project snapshot, because remapping runs where no host
+  filesystem is in reach. The two routes never read each other's output, which is also why a
+  script's `build.add_resource` reaches `jals package`'s jar and not the remapped one — a computed
+  file exists on the host, and the snapshot is what a dependency's build would have to agree on. `jals expand` is the frontend seam on its own, for a host that compiles the lowered tree
   itself (a Gradle or Maven build over dialect sources): it shares `build`'s lowering half
   (`App::lower_tree`) and stops there, running no build script, resolving no classpath and
   acquiring no dependency — none of which changes what a frontend emits for a file, which is what

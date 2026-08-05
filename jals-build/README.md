@@ -105,6 +105,7 @@ version = "0.1.0"
 source-dirs = ["src/main/java"]   # -sourcepath roots, also scanned for .java files
 resource-dirs = ["src/main/resources"]  # copied into classes-dir after a successful compile
 classes-dir = "target/classes"    # javac -d
+# resource-dirs = ["src/main/resources"]  # packaged into the jar `[build] remap` writes
 release = 21                       # javac --release N
 # source = 17                      # javac --source N  (only when release is unset)
 # target = 17                      # javac --target N  (only when release is unset)
@@ -207,17 +208,17 @@ nothing still leaves every dependency script cached.
 
 ### `[build]`
 
-| Key           | Type             | Default             | Maps to                                                                                                                                 |
-| ------------- | ---------------- | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `script`      | tagged table     | —                   | optional pre-`javac` build phase; currently `{ type = "rhai", file = "build.rhai" }`                                                    |
-| `source-dirs` | array of strings | `["src/main/java"]` | `-sourcepath` (joined) **and** the roots scanned for `.java` files                                                                      |
-| `resource-dirs` | array of strings | `["src/main/resources"]` | copied into `classes-dir` after a successful compile, each file keeping its path below its root (Maven's resource step). A listed root that does not exist is empty rather than an error, so the default is harmless for a project with no resources. A copy a later build no longer makes is removed, through an ownership journal that names only what the copy step itself wrote — the class files beside it are the compiler's and are never touched, and a resource whose destination spells a `.class` is refused |
-| `classes-dir` | string           | `"target/classes"`  | `javac -d` (also the dir `jals clean` removes)                                                                                          |
-| `release`     | integer          | —                   | `--release N` — sets source level, target level, and bootclasspath together; when present, `source`/`target` are ignored                |
-| `source`      | integer          | —                   | `--source N` — only when `release` is unset                                                                                             |
-| `target`      | integer          | —                   | `--target N` — only when `release` is unset                                                                                             |
-| `classpath`   | array of strings | `[]`                | `-classpath` (joined with the platform separator); omitted entirely when empty                                                          |
-| `javac-flags` | array of strings | `[]`                | appended **verbatim** after the generated flags, before the source files — an escape hatch for anything the manifest does not model yet |
+| Key             | Type             | Default                  | Maps to                                                                                                                                                         |
+| --------------- | ---------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `script`        | tagged table     | —                        | optional pre-`javac` build phase; currently `{ type = "rhai", file = "build.rhai" }`                                                                            |
+| `source-dirs`   | array of strings | `["src/main/java"]`      | `-sourcepath` (joined) **and** the roots scanned for `.java` files                                                                                              |
+| `classes-dir`   | string           | `"target/classes"`       | `javac -d` (also the dir `jals clean` removes)                                                                                                                  |
+| `resource-dirs` | array of strings | `["src/main/resources"]` | copied into `classes-dir` after a successful compile, each file keeping its path below its root (Maven's resource step), and packaged from the snapshot into the jar `[build] remap` writes. Non-root dirs outside `classes-dir`; a missing one is skipped. A copy a later build no longer makes is removed through an ownership journal naming only what the copy step wrote — the class files beside it are the compiler's and are never touched, and a resource whose destination spells a `.class` is refused |
+| `release`       | integer          | —                        | `--release N` — sets source level, target level, and bootclasspath together; when present, `source`/`target` are ignored                                        |
+| `source`        | integer          | —                        | `--source N` — only when `release` is unset                                                                                                                     |
+| `target`        | integer          | —                        | `--target N` — only when `release` is unset                                                                                                                     |
+| `classpath`     | array of strings | `[]`                     | `-classpath` (joined with the platform separator); omitted entirely when empty                                                                                  |
+| `javac-flags`   | array of strings | `[]`                     | appended **verbatim** after the generated flags, before the source files — an escape hatch for anything the manifest does not model yet                         |
 
 ### Rhai build scripts
 
@@ -521,7 +522,10 @@ See [`examples/rhai_build_script`](../examples/rhai_build_script) for a runnable
 [`examples/task_source_archive`](../examples/task_source_archive) demonstrates exclusive source-JAR
 publication. [`examples/minecraft`](../examples/minecraft)
 fetches, remaps, and decompiles a Minecraft release — selected from 43 mutually exclusive version
-`[features]` — through the task DAG.
+`[features]` — through the task DAG, and
+[`examples/minecraft_mod`](../examples/minecraft_mod) consumes it: a Mixin mod whose `[build] remap`
+reobfuscates the compiled classes with whichever of 39 `[[mappings.mojmap]]` alternatives the
+selection activates.
 
 ### `[run]`
 

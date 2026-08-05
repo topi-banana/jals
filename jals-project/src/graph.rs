@@ -17,7 +17,7 @@ use jals_classpath::{
     ClasspathCoverage, ExternalLocator, Fetcher, LibrarySource, MappingSpec, NetworkPolicy,
     WarningOrigin,
 };
-use jals_config::{Dependency, Manifest, ResolvedBuildFeatures};
+use jals_config::{AmbiguousMapping, Dependency, Manifest, ResolvedBuildFeatures};
 use jals_exec::Exec;
 use jals_storage::{
     ArtifactCache, CacheBackend, CacheKey, CacheNamespace, ContentDigest, DirKey, FileKey,
@@ -102,10 +102,22 @@ pub struct GraphEdge {
 /// Both halves are private to this module: the pair is only ever read together, and
 /// [`active`](EdgeRemap::active) is that reading. An assembler reaching past it for `spec` would be
 /// taking the lowering without the gate, which is the one combination this type exists to refuse.
+///
+/// *Every* alternative of the referenced entry is lowered, not just the one that will turn out to
+/// apply, because the selection that decides which is not known here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EdgeRemap {
+    /// The entry's alternatives, lowered in declaration order, each with its own gate.
+    alternatives: Vec<EdgeAlternative>,
+    /// The `[mappings]` key, for the ambiguity message.
+    reference: String,
+}
+
+/// One lowered alternative and the gate that selects it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EdgeAlternative {
     spec: MappingSpec,
-    /// The entry's `required-features`, verbatim. Conjunctive: every one must be enabled.
+    /// The alternative's `required-features`, verbatim. Conjunctive: every one must be enabled.
     required_features: BTreeSet<String>,
 }
 
@@ -120,33 +132,63 @@ impl EdgeRemap {
         let Some(reference) = dependency.remap() else {
             return Ok(None);
         };
-        let Some(source) = manifest.mappings.get(reference) else {
+        let Some(entry) = manifest.mappings.get(reference) else {
             return Err(format!("`remap` names no `[mappings]` entry `{reference}`"));
         };
-        let required_features = source.required_features().iter().cloned().collect();
-        let mut warnings = Vec::new();
-        let Some(spec) = MappingSpec::lower(manifest, reference, &mut warnings) else {
-            // Rendered whole rather than by `message`: several of these name their subject only in
-            // the origin, so the message alone would drop the one part a user can act on.
-            return Err(warnings.first().map_or_else(
-                || format!("mapping `{reference}` is malformed"),
-                ToString::to_string,
-            ));
-        };
+        let mut alternatives = Vec::with_capacity(entry.alternatives().len());
+        for source in entry.alternatives() {
+            let mut warnings = Vec::new();
+            let Some(spec) = MappingSpec::lower(reference, source, &mut warnings) else {
+                // Rendered whole rather than by `message`: several of these name their subject only
+                // in the origin, so the message alone would drop the one part a user can act on.
+                return Err(warnings.first().map_or_else(
+                    || format!("mapping `{reference}` is malformed"),
+                    ToString::to_string,
+                ));
+            };
+            alternatives.push(EdgeAlternative {
+                spec,
+                required_features: source.required_features().iter().cloned().collect(),
+            });
+        }
         Ok(Some(Self {
-            spec,
-            required_features,
+            alternatives,
+            reference: reference.to_owned(),
         }))
     }
 
-    /// The spec, when `features` satisfies the entry's gate.
+    /// The spec, when `features` satisfies exactly one alternative's gate.
     ///
     /// An unmet gate is not a diagnostic: it is how a manifest says "this selection ships no
     /// mappings", which is the whole reason the key exists.
-    pub(crate) fn active(&self, features: &BTreeSet<String>) -> Option<&MappingSpec> {
-        self.required_features
-            .is_subset(features)
-            .then_some(&self.spec)
+    ///
+    /// # Errors
+    /// A message when more than one alternative is active. `Manifest::validate` rejects every table
+    /// where that is provable, so reaching this means an unvalidated manifest — and the jar is left
+    /// unremapped rather than remapped by whichever alternative came first.
+    pub(crate) fn active(
+        &self,
+        features: &BTreeSet<String>,
+    ) -> Result<Option<&MappingSpec>, String> {
+        let mut active = self
+            .alternatives
+            .iter()
+            .enumerate()
+            .filter(|(_, alternative)| alternative.required_features.is_subset(features));
+        let Some((first, alternative)) = active.next() else {
+            return Ok(None);
+        };
+        match active.next() {
+            // The same sentence `MappingEntry::active` reports, rendered from the same type: this
+            // gate is a second *evaluation* of the manifest's rule, not a second statement of it.
+            Some((second, _)) => Err(AmbiguousMapping {
+                name: self.reference.clone(),
+                first: first + 1,
+                second: second + 1,
+            }
+            .to_string()),
+            None => Ok(Some(&alternative.spec)),
+        }
     }
 }
 
