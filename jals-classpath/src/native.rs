@@ -320,6 +320,14 @@ impl NativeProjectPlan {
                 scopes.push(NativeScope::extension(path, "java"));
             }
         }
+        // `[build] resource-dirs`, retaining *every* file: a resource is whatever the author put
+        // there. Without this scope the directories are outside the captured tree, and the jar
+        // `[build] remap` writes would silently come out with no resources in it at all.
+        for resource in &manifest.build.resource_dirs {
+            if let Some(path) = Self::project_relative(project_root, resource) {
+                scopes.push(NativeScope::all(path));
+            }
+        }
         for classpath in &manifest.build.classpath {
             if let Some(path) = Self::project_relative(project_root, classpath) {
                 let host = path.to_host_path(project_root);
@@ -330,15 +338,18 @@ impl NativeProjectPlan {
                 });
             }
         }
-        // Every `[mappings] file`, whether or not a `remap` currently names it. Scoping the
-        // snapshot to what is *referenced* would make the captured tree depend on the feature
-        // selection, and the same project would then read differently under two `--features` runs
-        // for a reason nothing in the manifest states.
-        for source in manifest.mappings.values() {
-            if let jals_config::MappingSource::File(file) = source
-                && let Some(path) = Self::project_relative(project_root, &file.file)
-            {
-                scopes.push(NativeScope::all(path));
+        // Every `[mappings] file`, whether or not a `remap` currently names it — and every
+        // *alternative* of every entry, for the same reason. Scoping the snapshot to what is
+        // *referenced*, or to the alternative one selection happens to activate, would make the
+        // captured tree depend on the feature selection, and the same project would then read
+        // differently under two `--features` runs for a reason nothing in the manifest states.
+        for entry in manifest.mappings.values() {
+            for source in entry.alternatives() {
+                if let jals_config::MappingSource::File(file) = source
+                    && let Some(path) = Self::project_relative(project_root, &file.file)
+                {
+                    scopes.push(NativeScope::all(path));
+                }
             }
         }
         for dependency in manifest.dependencies.values() {

@@ -1,0 +1,328 @@
+[package]
+name = "hellomod"
+version = "0.1.0"
+
+# Every axis of the SDK, forwarded. A name declared here is a *local* build feature — which is what
+# lets the `[[mappings.mojmap]]` alternatives below gate on it — whose list routes the same name into
+# the dependency. Nothing here is queryable in this project: a `<dependency>/<feature>` entry is
+# routing only.
+#
+# There is deliberately no `default`. `[dependencies] minecraft` leaves `default-features` at its
+# `true`, so the SDK resolves its own `default = ["server", "mixin", "mixinextras"]` and its build
+# script falls back to its own newest release. `jals build` with no flags therefore builds against
+# 26.2 — which ships deobfuscated — and packages a jar with no reobfuscation pass at all.
+#
+# The version features are mutually exclusive, and this project does not re-enforce that: the
+# forwarded selection reaches the SDK's own build script, whose `build.error` rejects a second
+# version before any download. Restating the rule here would be a second copy of a 43-row table.
+[features]
+server = ["minecraft/server"]
+client = ["minecraft/client"]
+mixin = ["minecraft/mixin"]
+mixinextras = ["minecraft/mixinextras"]
+"26.2" = ["minecraft/26.2"]
+"26.1.2" = ["minecraft/26.1.2"]
+"26.1.1" = ["minecraft/26.1.1"]
+"26.1" = ["minecraft/26.1"]
+"1.21.11" = ["minecraft/1.21.11"]
+"1.21.10" = ["minecraft/1.21.10"]
+"1.21.9" = ["minecraft/1.21.9"]
+"1.21.8" = ["minecraft/1.21.8"]
+"1.21.7" = ["minecraft/1.21.7"]
+"1.21.6" = ["minecraft/1.21.6"]
+"1.21.5" = ["minecraft/1.21.5"]
+"1.21.4" = ["minecraft/1.21.4"]
+"1.21.3" = ["minecraft/1.21.3"]
+"1.21.2" = ["minecraft/1.21.2"]
+"1.21.1" = ["minecraft/1.21.1"]
+"1.21" = ["minecraft/1.21"]
+"1.20.6" = ["minecraft/1.20.6"]
+"1.20.5" = ["minecraft/1.20.5"]
+"1.20.4" = ["minecraft/1.20.4"]
+"1.20.3" = ["minecraft/1.20.3"]
+"1.20.2" = ["minecraft/1.20.2"]
+"1.20.1" = ["minecraft/1.20.1"]
+"1.20" = ["minecraft/1.20"]
+"1.19.4" = ["minecraft/1.19.4"]
+"1.19.3" = ["minecraft/1.19.3"]
+"1.19.2" = ["minecraft/1.19.2"]
+"1.19.1" = ["minecraft/1.19.1"]
+"1.19" = ["minecraft/1.19"]
+"1.18.2" = ["minecraft/1.18.2"]
+"1.18.1" = ["minecraft/1.18.1"]
+"1.18" = ["minecraft/1.18"]
+"1.17.1" = ["minecraft/1.17.1"]
+"1.17" = ["minecraft/1.17"]
+"1.16.5" = ["minecraft/1.16.5"]
+"1.16.4" = ["minecraft/1.16.4"]
+"1.16.3" = ["minecraft/1.16.3"]
+"1.16.2" = ["minecraft/1.16.2"]
+"1.16.1" = ["minecraft/1.16.1"]
+"1.16" = ["minecraft/1.16"]
+"1.15.2" = ["minecraft/1.15.2"]
+"1.15.1" = ["minecraft/1.15.1"]
+"1.15" = ["minecraft/1.15"]
+"1.14.4" = ["minecraft/1.14.4"]
+
+# The SDK. Its build script puts the resolved game jar, `mixin-0.8.7.jar` and
+# `mixinextras-common-0.5.4.jar` on this project's compile classpath, and publishes the matching
+# sources as navigation trees an editor can open. Compiling against the jars and reading the trees
+# is the whole arrangement; a published tree is never a compile input.
+[dependencies]
+minecraft = { path = "../minecraft" }
+
+[build]
+# The default value, written out because it is one of the two things this example demonstrates:
+# `mixins.hellomod.json` has to be *in* the jar or Mixin has nothing to read.
+resource-dirs = ["src/main/resources"]
+# Reobfuscate the compiled classes and package them. `with` names one key; the key holds 39
+# alternatives, one per release that ships obfuscated. At most one is ever active, because each
+# names exactly one version feature and the 39 sets are pairwise incomparable — `jals` rejects a
+# table where that could fail. The four 26.x releases name no alternative at all, so there the step
+# packages the jar and rewrites nothing, which is exactly right: they ship deobfuscated.
+remap = { with = "mojmap" }
+
+# One mapping set per obfuscated release, gated on that release's feature. Each URL is
+# content-addressed by the same SHA-1 it is checked against, so one digest pins both the address and
+# the bytes — the same property the SDK's version-metadata fetch relies on. `max-bytes` is the
+# published size rounded up to the next MiB; the digest is what guarantees the content, so pinning
+# the exact byte count would only break if Mojang ever re-served identical text with different
+# framing.
+#
+# To refresh: for each catalog entry in `../minecraft/build.rhai` whose `obfuscated?` flag is true,
+# fetch `https://piston-meta.mojang.com/v1/packages/<metadata sha1>/<version>.json` and project
+# `downloads.server_mappings.{url, sha1, size}`.
+
+[[mappings.mojmap]]
+required-features = ["1.21.11"]
+url = "https://piston-data.mojang.com/v1/objects/5621e9253f05fd57872bbe7f8ddf5f9a7d525955/server.txt"
+sha1 = "5621e9253f05fd57872bbe7f8ddf5f9a7d525955"
+max-bytes = 9437184
+
+[[mappings.mojmap]]
+required-features = ["1.21.10"]
+url = "https://piston-data.mojang.com/v1/objects/c5440743411a6fd7490fa18a4b6c5d8edf36d88b/server.txt"
+sha1 = "c5440743411a6fd7490fa18a4b6c5d8edf36d88b"
+max-bytes = 9437184
+
+[[mappings.mojmap]]
+required-features = ["1.21.9"]
+url = "https://piston-data.mojang.com/v1/objects/587e016fe8a876cbc1cc98d73f9d0d79bfb32b2c/server.txt"
+sha1 = "587e016fe8a876cbc1cc98d73f9d0d79bfb32b2c"
+max-bytes = 9437184
+
+[[mappings.mojmap]]
+required-features = ["1.21.8"]
+url = "https://piston-data.mojang.com/v1/objects/eb1e1eb47cb740012fc82eacc394859463684132/server.txt"
+sha1 = "eb1e1eb47cb740012fc82eacc394859463684132"
+max-bytes = 8388608
+
+[[mappings.mojmap]]
+required-features = ["1.21.7"]
+url = "https://piston-data.mojang.com/v1/objects/eb1e1eb47cb740012fc82eacc394859463684132/server.txt"
+sha1 = "eb1e1eb47cb740012fc82eacc394859463684132"
+max-bytes = 8388608
+
+[[mappings.mojmap]]
+required-features = ["1.21.6"]
+url = "https://piston-data.mojang.com/v1/objects/94d453080a58875d3acc1a9a249809767c91ed40/server.txt"
+sha1 = "94d453080a58875d3acc1a9a249809767c91ed40"
+max-bytes = 8388608
+
+[[mappings.mojmap]]
+required-features = ["1.21.5"]
+url = "https://piston-data.mojang.com/v1/objects/f4812c1d66d0098a94616b19c21829e591d0af3a/server.txt"
+sha1 = "f4812c1d66d0098a94616b19c21829e591d0af3a"
+max-bytes = 8388608
+
+[[mappings.mojmap]]
+required-features = ["1.21.4"]
+url = "https://piston-data.mojang.com/v1/objects/0b1e60cc509cfb0172573ae56b436c29febbc187/server.txt"
+sha1 = "0b1e60cc509cfb0172573ae56b436c29febbc187"
+max-bytes = 8388608
+
+[[mappings.mojmap]]
+required-features = ["1.21.3"]
+url = "https://piston-data.mojang.com/v1/objects/c70e10f72ea65bb97e156143fd97c852dc958325/server.txt"
+sha1 = "c70e10f72ea65bb97e156143fd97c852dc958325"
+max-bytes = 8388608
+
+[[mappings.mojmap]]
+required-features = ["1.21.2"]
+url = "https://piston-data.mojang.com/v1/objects/ce1d4ab050af87c41fc3d51050ef6862385da784/server.txt"
+sha1 = "ce1d4ab050af87c41fc3d51050ef6862385da784"
+max-bytes = 8388608
+
+[[mappings.mojmap]]
+required-features = ["1.21.1"]
+url = "https://piston-data.mojang.com/v1/objects/03f8985492bda0afc0898465341eb0acef35f570/server.txt"
+sha1 = "03f8985492bda0afc0898465341eb0acef35f570"
+max-bytes = 8388608
+
+[[mappings.mojmap]]
+required-features = ["1.21"]
+url = "https://piston-data.mojang.com/v1/objects/31c77994d96f05ba25a870ada70f47f315330437/server.txt"
+sha1 = "31c77994d96f05ba25a870ada70f47f315330437"
+max-bytes = 8388608
+
+[[mappings.mojmap]]
+required-features = ["1.20.6"]
+url = "https://piston-data.mojang.com/v1/objects/9e96100f573a46ef44caab3e716d5eb974594bb7/server.txt"
+sha1 = "9e96100f573a46ef44caab3e716d5eb974594bb7"
+max-bytes = 7340032
+
+[[mappings.mojmap]]
+required-features = ["1.20.5"]
+url = "https://piston-data.mojang.com/v1/objects/14be97974a77b09eb8bca88ed9268445f0fde3e7/server.txt"
+sha1 = "14be97974a77b09eb8bca88ed9268445f0fde3e7"
+max-bytes = 7340032
+
+[[mappings.mojmap]]
+required-features = ["1.20.4"]
+url = "https://piston-data.mojang.com/v1/objects/c1cafe916dd8b58ed1fe0564fc8f786885224e62/server.txt"
+sha1 = "c1cafe916dd8b58ed1fe0564fc8f786885224e62"
+max-bytes = 7340032
+
+[[mappings.mojmap]]
+required-features = ["1.20.3"]
+url = "https://piston-data.mojang.com/v1/objects/c1cafe916dd8b58ed1fe0564fc8f786885224e62/server.txt"
+sha1 = "c1cafe916dd8b58ed1fe0564fc8f786885224e62"
+max-bytes = 7340032
+
+[[mappings.mojmap]]
+required-features = ["1.20.2"]
+url = "https://piston-data.mojang.com/v1/objects/dced504a9b5df367ddd3477adac084cea8024ba4/server.txt"
+sha1 = "dced504a9b5df367ddd3477adac084cea8024ba4"
+max-bytes = 7340032
+
+[[mappings.mojmap]]
+required-features = ["1.20.1"]
+url = "https://piston-data.mojang.com/v1/objects/0b4dba049482496c507b2387a73a913230ebbd76/server.txt"
+sha1 = "0b4dba049482496c507b2387a73a913230ebbd76"
+max-bytes = 6291456
+
+[[mappings.mojmap]]
+required-features = ["1.20"]
+url = "https://piston-data.mojang.com/v1/objects/15e61168fd24c7950b22cd3b9e771a7ce4035b41/server.txt"
+sha1 = "15e61168fd24c7950b22cd3b9e771a7ce4035b41"
+max-bytes = 6291456
+
+[[mappings.mojmap]]
+required-features = ["1.19.4"]
+url = "https://piston-data.mojang.com/v1/objects/73c8bb982e420b33aad9632b482608c5c33e2d13/server.txt"
+sha1 = "73c8bb982e420b33aad9632b482608c5c33e2d13"
+max-bytes = 6291456
+
+[[mappings.mojmap]]
+required-features = ["1.19.3"]
+url = "https://piston-data.mojang.com/v1/objects/bc44f6dd84cd2f3ad8c0caad850eaca9e82067e3/server.txt"
+sha1 = "bc44f6dd84cd2f3ad8c0caad850eaca9e82067e3"
+max-bytes = 6291456
+
+[[mappings.mojmap]]
+required-features = ["1.19.2"]
+url = "https://piston-data.mojang.com/v1/objects/ed5e6e8334ad67f5af0150beed0f3d156d74bd57/server.txt"
+sha1 = "ed5e6e8334ad67f5af0150beed0f3d156d74bd57"
+max-bytes = 6291456
+
+[[mappings.mojmap]]
+required-features = ["1.19.1"]
+url = "https://piston-data.mojang.com/v1/objects/3565648cdd47ae15738fb804a95a659137d7cfd3/server.txt"
+sha1 = "3565648cdd47ae15738fb804a95a659137d7cfd3"
+max-bytes = 6291456
+
+[[mappings.mojmap]]
+required-features = ["1.19"]
+url = "https://piston-data.mojang.com/v1/objects/1c1cea17d5cd63d68356df2ef31e724dd09f8c26/server.txt"
+sha1 = "1c1cea17d5cd63d68356df2ef31e724dd09f8c26"
+max-bytes = 6291456
+
+[[mappings.mojmap]]
+required-features = ["1.18.2"]
+url = "https://piston-data.mojang.com/v1/objects/e562f588fea155d96291267465dc3323bfe1551b/server.txt"
+sha1 = "e562f588fea155d96291267465dc3323bfe1551b"
+max-bytes = 5242880
+
+[[mappings.mojmap]]
+required-features = ["1.18.1"]
+url = "https://piston-data.mojang.com/v1/objects/9717df2acd926bd4a9a7b2ce5f981bb7e4f7f04a/server.txt"
+sha1 = "9717df2acd926bd4a9a7b2ce5f981bb7e4f7f04a"
+max-bytes = 5242880
+
+[[mappings.mojmap]]
+required-features = ["1.18"]
+url = "https://piston-data.mojang.com/v1/objects/a8fe854e35a69df7289d3f03fc0821f6363f2238/server.txt"
+sha1 = "a8fe854e35a69df7289d3f03fc0821f6363f2238"
+max-bytes = 5242880
+
+[[mappings.mojmap]]
+required-features = ["1.17.1"]
+url = "https://piston-data.mojang.com/v1/objects/f6cae1c5c1255f68ba4834b16a0da6a09621fe13/server.txt"
+sha1 = "f6cae1c5c1255f68ba4834b16a0da6a09621fe13"
+max-bytes = 5242880
+
+[[mappings.mojmap]]
+required-features = ["1.17"]
+url = "https://piston-data.mojang.com/v1/objects/84d80036e14bc5c7894a4fad9dd9f367d3000334/server.txt"
+sha1 = "84d80036e14bc5c7894a4fad9dd9f367d3000334"
+max-bytes = 5242880
+
+[[mappings.mojmap]]
+required-features = ["1.16.5"]
+url = "https://piston-data.mojang.com/v1/objects/41285beda6d251d190f2bf33beadd4fee187df7a/server.txt"
+sha1 = "41285beda6d251d190f2bf33beadd4fee187df7a"
+max-bytes = 5242880
+
+[[mappings.mojmap]]
+required-features = ["1.16.4"]
+url = "https://piston-data.mojang.com/v1/objects/d9ae0e8e28475254855430ff051daaa0dd041a08/server.txt"
+sha1 = "d9ae0e8e28475254855430ff051daaa0dd041a08"
+max-bytes = 5242880
+
+[[mappings.mojmap]]
+required-features = ["1.16.3"]
+url = "https://piston-data.mojang.com/v1/objects/e75ff1e729aec4a3ec6a94fe1ddd2f5a87a2fd00/server.txt"
+sha1 = "e75ff1e729aec4a3ec6a94fe1ddd2f5a87a2fd00"
+max-bytes = 5242880
+
+[[mappings.mojmap]]
+required-features = ["1.16.2"]
+url = "https://piston-data.mojang.com/v1/objects/40337a76c8486473e5990f7bb44b13bc08b69e7a/server.txt"
+sha1 = "40337a76c8486473e5990f7bb44b13bc08b69e7a"
+max-bytes = 5242880
+
+[[mappings.mojmap]]
+required-features = ["1.16.1"]
+url = "https://piston-data.mojang.com/v1/objects/11120c39da4df293c4bd020896391fb9ddd6c2ba/server.txt"
+sha1 = "11120c39da4df293c4bd020896391fb9ddd6c2ba"
+max-bytes = 5242880
+
+[[mappings.mojmap]]
+required-features = ["1.16"]
+url = "https://piston-data.mojang.com/v1/objects/11120c39da4df293c4bd020896391fb9ddd6c2ba/server.txt"
+sha1 = "11120c39da4df293c4bd020896391fb9ddd6c2ba"
+max-bytes = 5242880
+
+[[mappings.mojmap]]
+required-features = ["1.15.2"]
+url = "https://piston-data.mojang.com/v1/objects/8ccf85df7a3a1f1119352b21e9a2f6894f6c3f3a/server.txt"
+sha1 = "8ccf85df7a3a1f1119352b21e9a2f6894f6c3f3a"
+max-bytes = 4194304
+
+[[mappings.mojmap]]
+required-features = ["1.15.1"]
+url = "https://piston-data.mojang.com/v1/objects/3a818e8d2f85b4a1ca6a35bac57be84e81d907a7/server.txt"
+sha1 = "3a818e8d2f85b4a1ca6a35bac57be84e81d907a7"
+max-bytes = 4194304
+
+[[mappings.mojmap]]
+required-features = ["1.15"]
+url = "https://piston-data.mojang.com/v1/objects/25ff0e2b1104b8f06fe55b7675dd11b05c72f5f4/server.txt"
+sha1 = "25ff0e2b1104b8f06fe55b7675dd11b05c72f5f4"
+max-bytes = 4194304
+
+[[mappings.mojmap]]
+required-features = ["1.14.4"]
+url = "https://piston-data.mojang.com/v1/objects/c604a623b416a88a844979a6c55862c8a97510a9/server.txt"
+sha1 = "c604a623b416a88a844979a6c55862c8a97510a9"
+max-bytes = 4194304

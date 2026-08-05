@@ -340,6 +340,35 @@ The first consumer build pays the same download-and-decompile cost documented ab
 for the two library jars; after that the whole task execution is memoized under the resolved feature
 set, so rebuilds and editor reloads reuse it.
 
+## Writing a mod against this
+
+[`examples/minecraft_mod`](../minecraft_mod) is that consumer: a Mixin mod built from this project's
+three classpath jars, reobfuscated by `[build] remap` into the names vanilla actually loads, for all
+43 releases. Read it for the whole shape; what belongs *here* is the one fact about the game that
+decides how such a mod is written.
+
+**Not every class is obfuscated.** Mojang keeps a few names, and the entry points are exactly where
+they do it — which is the opposite of where a "hello world at startup" mod would first reach:
+
+| type                                            | 1.14.4 – 1.15.2 | 1.16 – 1.21.11               | 26.x |
+| ----------------------------------------------- | --------------- | ---------------------------- | ---- |
+| `net.minecraft.server.MinecraftServer`          | itself          | itself                       | —    |
+| `net.minecraft.server.Main`                     | **absent**      | itself                       | —    |
+| `net.minecraft.server.dedicated.DedicatedServer`| `uk` / `wd`     | `zg` (1.16.5) … `ary` (1.21.11) | —    |
+
+(Verified against all 39 published `server_mappings`. The 26.x column is empty because those
+releases ship deobfuscated and declare no mappings at all — see the catalog's `obfuscated?` flag.)
+
+So `MinecraftServer` and `Main` map to themselves: a mixin aimed at either round-trips through
+`remap_jar` unchanged, which is fine for the mod and proves nothing about the remap. `Main` is also
+not in the mappings before 1.16, so it is not even a target that spans the range. `DedicatedServer`
+is obfuscated in every mapped release, which makes it the one entry point where a mod compiled
+against these sources genuinely needs reobfuscating before vanilla will load it.
+
+The same table is why the mod example touches no *member*: jals rewrites annotation `Class` values
+and never annotation strings, and generates no refmap, so `@Mixin(DedicatedServer.class)` is
+rewritten while `@Shadow` or `@At(target = "…")` would silently bind to the wrong name.
+
 ## Legal note
 
 Generated Minecraft sources and the original jars/mappings are Mojang's copyrighted material.

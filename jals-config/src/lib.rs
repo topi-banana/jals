@@ -31,10 +31,10 @@ pub use lint::Severity;
 pub use loader::{ConfigError, DiscoverableConfig};
 pub use manifest::MANAGED_REMAP_ROOT;
 pub use manifest::{
-    BackendKind, Bin, Build, BuildFeatureError, BuildRemap, BuildScript, Dependency,
-    DependencyError, Feature, FeatureRefError, FeatureSet, FileMappings, FrontendKind,
+    AmbiguousMapping, BackendKind, Bin, Build, BuildFeatureError, BuildRemap, BuildScript,
+    Dependency, DependencyError, Feature, FeatureRefError, FeatureSet, FileMappings, FrontendKind,
     GitDependency, GitRef, JarDependency, Manifest, ManifestParseError, MappingDigest,
-    MappingError, MappingFormatKind, MappingSource, Package, PathDependency, RemapSite,
-    ResolvedBuildFeatures, Run, UrlMappings, ValidationError,
+    MappingEntry, MappingError, MappingFormatKind, MappingSource, Package, PathDependency,
+    RemapSite, ResolvedBuildFeatures, Run, UrlMappings, ValidationError,
 };
 pub use toolchain::{Compiler, Distribution, Runtime, ToolSpec, Toolchain};

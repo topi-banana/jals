@@ -604,7 +604,7 @@ impl BuildArgs {
             .await
             .map_err(|e| anyhow!("{e}"))?;
         App::finish_compile(&manifest, &root, &outcome)?;
-        App::finish_remap(&manifest, &root, exec, &features, &outcome, &inputs).await?;
+        App::finish_package(&manifest, &root, exec, &features, &outcome, &inputs).await?;
         Ok(App::outcome_exit_code(outcome.code()))
     }
 }
@@ -1580,12 +1580,14 @@ impl App {
         Ok(())
     }
 
-    /// Run the post-compile `[build] remap`, when the manifest asks for one.
+    /// Run the post-compile packaging `[build] remap` names, when the manifest asks for one.
     ///
-    /// This host never matches on `[build] remap` itself: it asks
+    /// Packaging, not only remapping: a declared step writes its jar whether or not a mapping set
+    /// is active, so a release that ships deobfuscated produces the same distributable as one that
+    /// does not. This host never matches on `[build] remap` itself: it asks
     /// [`RemapSelection`](jals_project::RemapSelection) once and does what comes back. What is left
     /// here is only what a host path forces — collecting the class bytes, and writing the jar.
-    async fn finish_remap(
+    async fn finish_package(
         manifest: &Manifest,
         root: &Path,
         exec: &Exec,
@@ -1598,6 +1600,9 @@ impl App {
         }
         let plan = match jals_project::RemapSelection::for_manifest(manifest, features) {
             jals_project::RemapSelection::NotRequested => return Ok(()),
+            jals_project::RemapSelection::Ambiguous(ambiguous) => {
+                bail!("`[build] remap` cannot be resolved: {ambiguous}");
+            }
             jals_project::RemapSelection::Unsupported { backend, reason } => {
                 bail!(
                     "`[build] remap` is declared, but `[build] backend` selects `{backend}`: {reason}"
@@ -1614,7 +1619,7 @@ impl App {
             Self::read_classes_dir(&root.join(&manifest.build.classes_dir))?
         };
         if classes.is_empty() {
-            bail!("`[build] remap` found no class files to remap");
+            bail!("`[build] remap` found no class files to package");
         }
 
         let scopes = jals_classpath::NativeProjectPlan::snapshot_scopes(manifest, root);

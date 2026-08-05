@@ -1,6 +1,7 @@
 //! Deterministic dependency resolution into the project artifact cache.
 
 use alloc::borrow::ToOwned;
+use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -13,7 +14,7 @@ use jals_storage::{
 use sha1::{Digest as _, Sha1};
 
 use crate::{Fetcher, MappingFormat, Warning, WarningOrigin};
-use jals_config::{Manifest, MappingDigest, MappingFormatKind, MappingSource};
+use jals_config::{AmbiguousMapping, Manifest, MappingDigest, MappingFormatKind, MappingSource};
 
 /// A non-project locator used by a host fetch adapter.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -112,21 +113,20 @@ pub struct MappingSpec {
 }
 
 impl MappingSpec {
-    /// Lower one `[mappings]` entry of `manifest` to a spec, by the key a `remap` references.
+    /// Lower one alternative of the `[mappings]` entry `reference` to a spec.
     ///
-    /// Says nothing about whether the entry is *active*: `required-features` is evaluated against a
-    /// feature selection, and which selection that is depends on the caller — the declaring
-    /// project's own for a direct lowering, a graph node's for an edge. Keeping the gate out of here
-    /// is what lets both callers share one lowering instead of growing a second.
+    /// Says nothing about whether the alternative is *active*: `required-features` is evaluated
+    /// against a feature selection, and which selection that is depends on the caller — the
+    /// declaring project's own for a direct lowering, a graph node's for an edge. Keeping the gate
+    /// out of here is what lets both callers share one lowering instead of growing a second, and it
+    /// is why an edge can lower every alternative up front and pick between them later.
     ///
-    /// `None` when the key is undeclared (a manifest that reached this layer unvalidated) or its
-    /// value is malformed; a malformed value is diagnosed into `warnings` first.
+    /// `None` when the value is malformed, diagnosed into `warnings` first.
     pub fn lower(
-        manifest: &Manifest,
         reference: &str,
+        source: &MappingSource,
         warnings: &mut Vec<Warning>,
     ) -> Option<Self> {
-        let source = manifest.mappings.get(reference)?;
         // Every rejection here points at the value that was written rather than at the key, since
         // the key is what the reader already knows.
         let mut reject = |locator: &str, message: String| {
@@ -188,6 +188,33 @@ impl MappingSpec {
             location,
             format,
         })
+    }
+
+    /// Lower the alternative of `manifest`'s `[mappings]` entry `reference` that `enabled` activates.
+    ///
+    /// The single spelling of gate-then-lower, so the two callers that hold a resolved selection —
+    /// the classpath plan's `[dependencies] remap` and the post-compile `[build] remap` — cannot
+    /// answer "which alternative" differently.
+    ///
+    /// `Ok(None)` when the key is undeclared (a manifest that reached this layer unvalidated), when
+    /// no alternative is active, or when the active one is malformed.
+    ///
+    /// # Errors
+    /// [`AmbiguousMapping`] when more than one alternative is active — unreachable for a validated
+    /// manifest, and passed through rather than resolved here because the two callers report it
+    /// differently.
+    pub fn lower_active(
+        manifest: &Manifest,
+        reference: &str,
+        enabled: &BTreeSet<String>,
+        warnings: &mut Vec<Warning>,
+    ) -> Result<Option<Self>, AmbiguousMapping> {
+        let Some(entry) = manifest.mappings.get(reference) else {
+            return Ok(None);
+        };
+        Ok(entry
+            .active(reference, enabled)?
+            .and_then(|source| Self::lower(reference, source, warnings)))
     }
 }
 

@@ -46,6 +46,10 @@ impl CleanTargets {
             keys.push(build_root);
         }
         if manifest.build.remap.is_some() {
+            // Declared, not *active*: a `[build] remap` whose mapping set no selection activates
+            // still packages its jar into this root, so the question here is whether the step
+            // exists and never which mapping it resolved to.
+            //
             // The managed remap root, and only it — never the directory an author redirected the
             // jar into. `jals clean` removes a key recursively, so taking the parent of an
             // arbitrary `jar` path would delete whatever else the author keeps beside it. A

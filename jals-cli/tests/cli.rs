@@ -2116,3 +2116,104 @@ fn a_failed_in_process_compile_does_not_reach_the_run_step() {
         "the run step must not execute the previous build's class files"
     );
 }
+
+/// Every member name of a stored jar, in archive order.
+fn jar_members(path: &Path) -> Vec<String> {
+    let file = std::fs::File::open(path).unwrap();
+    let mut archive = zip::ZipArchive::new(file).unwrap();
+    (0..archive.len())
+        .map(|index| archive.by_index(index).unwrap().name().to_owned())
+        .collect()
+}
+
+/// A project whose `[build] remap` names a mapping gated on a feature nothing selects, plus one
+/// resource. The in-process backend keeps this off the host's JDK.
+fn packaging_project() -> tempfile::TempDir {
+    let dir = project(
+        "[package]\nname = \"packaged\"\nversion = \"0.1.0\"\n\
+         [features]\nobfuscated = []\n\
+         [build]\nbackend = { type = \"jals\" }\nremap = { with = \"mojmap\" }\n\
+         [mappings.mojmap]\nfile = \"maps/server.txt\"\nrequired-features = [\"obfuscated\"]\n",
+    );
+    std::fs::create_dir_all(dir.path().join("maps")).unwrap();
+    std::fs::write(
+        dir.path().join("maps/server.txt"),
+        "com.example.Main -> a:\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(dir.path().join("src/main/resources")).unwrap();
+    std::fs::write(dir.path().join("src/main/resources/mixins.json"), "{}").unwrap();
+    dir
+}
+
+#[test]
+fn a_declared_remap_with_no_active_mapping_still_writes_a_jar() {
+    // "This selection ships no mappings" says *do not rewrite the names*, not *produce nothing*: a
+    // release that ships deobfuscated needs the same distributable as one that does not.
+    let dir = packaging_project();
+    let (stdout, stderr, code) = run_full(&[
+        "build",
+        "--manifest-path",
+        dir.path().join("jals.toml").to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+
+    let jar = dir.path().join("target/jals/remap/packaged-0.1.0.jar");
+    let members = jar_members(&jar);
+    assert_eq!(
+        members.first().map(String::as_str),
+        Some("META-INF/MANIFEST.MF")
+    );
+    assert!(
+        members.iter().any(|name| name == "com/example/Main.class"),
+        "the class keeps its own name when nothing remapped it: {members:?}"
+    );
+    assert!(
+        !members.iter().any(|name| name == "a.class"),
+        "the inactive mapping must not have been applied: {members:?}"
+    );
+}
+
+#[test]
+fn an_active_mapping_reobfuscates_the_packaged_jar() {
+    // The other half of the same manifest: selecting the gate turns the very same step into a
+    // reobfuscation, and the member is addressed by its new name.
+    let dir = packaging_project();
+    let (stdout, stderr, code) = run_full(&[
+        "build",
+        "--manifest-path",
+        dir.path().join("jals.toml").to_str().unwrap(),
+        "--features",
+        "obfuscated",
+    ]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+
+    let members = jar_members(&dir.path().join("target/jals/remap/packaged-0.1.0.jar"));
+    assert!(
+        members.iter().any(|name| name == "a.class"),
+        "`com.example.Main -> a` should have renamed the member: {members:?}"
+    );
+}
+
+#[test]
+fn resources_are_packaged_into_the_jar() {
+    // Resources are authored project files, so they come out of the snapshot — and a remap leaves
+    // every non-class member alone, so the same file survives both branches byte for byte.
+    let dir = packaging_project();
+    let manifest = dir.path().join("jals.toml");
+    let manifest = manifest.to_str().unwrap();
+    for extra in [&[][..], &["--features", "obfuscated"][..]] {
+        let mut args = vec!["build", "--manifest-path", manifest];
+        args.extend_from_slice(extra);
+        let (stdout, stderr, code) = run_full(&args);
+        assert_eq!(code, 0, "{stdout}{stderr}");
+
+        let members = jar_members(&dir.path().join("target/jals/remap/packaged-0.1.0.jar"));
+        assert!(
+            members.iter().any(|name| name == "mixins.json"),
+            "{extra:?}: the resource is addressed below its declared root: {members:?}"
+        );
+    }
+    // `classes-dir` is the compiler's, and resources are not compiler output.
+    assert!(!dir.path().join("target/classes/mixins.json").exists());
+}
