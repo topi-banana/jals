@@ -12,7 +12,8 @@ use jals_storage::{
 };
 use sha1::{Digest as _, Sha1};
 
-use crate::{Fetcher, Warning, WarningOrigin};
+use crate::{Fetcher, MappingFormat, Warning, WarningOrigin};
+use jals_config::{Manifest, MappingDigest, MappingFormatKind, MappingSource};
 
 /// A non-project locator used by a host fetch adapter.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -72,11 +73,128 @@ pub enum DependencyLocation {
     },
 }
 
+/// Where a mapping text's bytes originate.
+///
+/// Deliberately not a [`DependencyLocation`]: that type's external arm pins a SHA-256 because a
+/// dependency jar has no other digest to offer, while a published mapping set is as likely to be
+/// pinned by SHA-1 (which is what Mojang's version metadata carries). Sharing the type would have
+/// meant either widening it for a consumer that is not a dependency, or refusing the digest half the
+/// real inputs come with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MappingLocation {
+    /// A mapping text in the immutable project revision.
+    Project(FileKey),
+    /// A mapping text fetched and verified against `expected`.
+    External {
+        locator: ExternalLocator,
+        expected: ExpectedDigest,
+        max_bytes: usize,
+    },
+}
+
+/// One already-classified mapping set, resolved from the manifest that declared it.
+///
+/// Carries the *resolution*, not the `[mappings]` key: a name is only meaningful inside the manifest
+/// that wrote it, and a dependency's table is a different namespace from its consumer's. Resolving
+/// at lowering time is what keeps that question from reaching anything downstream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MappingSpec {
+    /// The `[mappings]` key, for diagnostics only.
+    pub name: Name,
+    pub location: MappingLocation,
+    pub format: MappingFormat,
+}
+
+impl MappingSpec {
+    /// Lower one `[mappings]` entry of `manifest` to a spec, by the key a `remap` references.
+    ///
+    /// Says nothing about whether the entry is *active*: `required-features` is evaluated against a
+    /// feature selection, and which selection that is depends on the caller — the declaring
+    /// project's own for a direct lowering, a graph node's for an edge. Keeping the gate out of here
+    /// is what lets both callers share one lowering instead of growing a second.
+    ///
+    /// `None` when the key is undeclared (a manifest that reached this layer unvalidated) or its
+    /// value is malformed; a malformed value is diagnosed into `warnings` first.
+    pub fn lower(
+        manifest: &Manifest,
+        reference: &str,
+        warnings: &mut Vec<Warning>,
+    ) -> Option<Self> {
+        let source = manifest.mappings.get(reference)?;
+        // Every rejection here points at the value that was written rather than at the key, since
+        // the key is what the reader already knows.
+        let mut reject = |locator: &str, message: String| {
+            warnings.push(Warning::new(
+                WarningOrigin::External(ExternalLocator::new(locator)),
+                message,
+            ));
+        };
+        let name = match Name::new(reference) {
+            Ok(name) => name,
+            Err(error) => {
+                reject(
+                    reference,
+                    format!("mapping name is not a portable name: {error:?}"),
+                );
+                return None;
+            }
+        };
+        let format = match source.format() {
+            MappingFormatKind::Proguard {} => MappingFormat::Proguard,
+        };
+        let location = match source {
+            MappingSource::File(file) => match FileKey::parse(&file.file) {
+                Ok(key) => MappingLocation::Project(key),
+                Err(error) => {
+                    reject(
+                        &file.file,
+                        format!("mapping `{name}` has an invalid `file`: {error:?}"),
+                    );
+                    return None;
+                }
+            },
+            MappingSource::Url(url) => {
+                let expected = match url.digest(reference) {
+                    Ok(MappingDigest::Sha1(hex)) => ExpectedDigest::from_hex("sha1", &hex),
+                    Ok(MappingDigest::Sha256(hex)) => ExpectedDigest::from_hex("sha256", &hex),
+                    Err(error) => {
+                        reject(&url.url, error.to_string());
+                        return None;
+                    }
+                };
+                let Some(expected) = expected else {
+                    reject(&url.url, format!("mapping `{name}` has a malformed digest"));
+                    return None;
+                };
+                MappingLocation::External {
+                    locator: ExternalLocator::new(&url.url),
+                    expected,
+                    // The manifest's cap is a `u64` so it can name a size the way a fetch does; the
+                    // resolver's is a `usize` because it bounds an allocation. On a 32-bit host a
+                    // cap above `usize::MAX` is unsatisfiable anyway, so saturating is the same
+                    // answer the fetch would give.
+                    max_bytes: usize::try_from(url.max_bytes).unwrap_or(usize::MAX),
+                }
+            }
+        };
+        Some(Self {
+            name,
+            location,
+            format,
+        })
+    }
+}
+
 /// One already-classified dependency request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DependencySpec {
     pub name: Name,
     pub location: DependencyLocation,
+    /// The mapping set that deobfuscates this jar before anything reads it, when one was declared.
+    ///
+    /// Applied after resolution and before nested expansion, so the classpath, the analysis index,
+    /// and the skeletons an editor synthesizes all see one set of names.
+    pub remap: Option<MappingSpec>,
     /// Whether nested jars should be expanded by the archive adapter.
     pub recursive: bool,
 }
@@ -101,6 +219,94 @@ pub struct ResolvedDependencies {
 enum Classified {
     Done(Result<CacheKey, Warning>),
     NeedsFetch { locator: usize },
+}
+
+/// Stateless mapping-text resolver.
+pub struct MappingResolver;
+
+impl MappingResolver {
+    /// Read one mapping set's text, fetching and verifying it when it is external.
+    ///
+    /// The fetch capability is the `Fetcher`, exactly as it is for [`DependencyResolver`] beside it:
+    /// a host with no network hands over one that refuses, rather than this layer carrying a policy
+    /// its neighbour does not.
+    ///
+    /// # Errors
+    /// A [`Warning`] attributed to the mapping's own location — a missing project file, a failed or
+    /// oversized fetch, a digest mismatch, or bytes that are not UTF-8. Every one of them is a
+    /// reason the *jar* cannot be produced, so a caller drops that input rather than using it under
+    /// the names it was trying to replace.
+    pub async fn text<F: Fetcher, C: CacheBackend>(
+        fetcher: &F,
+        view: &ProjectView,
+        cache: &mut ArtifactCache<C>,
+        spec: &MappingSpec,
+    ) -> Result<String, Warning> {
+        let bytes = match &spec.location {
+            MappingLocation::Project(key) => view
+                .file(key)
+                .map(|file| file.bytes().to_vec())
+                .map_err(|error| {
+                    Warning::new(
+                        WarningOrigin::ProjectFile(key.clone()),
+                        format!("mapping `{}` cannot be read: {error}", spec.name),
+                    )
+                })?,
+            MappingLocation::External {
+                locator,
+                expected,
+                max_bytes,
+            } => {
+                let key = ExternalArtifactResolver::resolve(
+                    fetcher,
+                    cache,
+                    &ExternalArtifactSpec {
+                        locator: locator.clone(),
+                        expected: *expected,
+                        max_bytes: *max_bytes,
+                        namespace: CacheNamespace::Mappings,
+                    },
+                    NetworkPolicy::Online,
+                )
+                .await
+                .map_err(|error| {
+                    Warning::new(
+                        WarningOrigin::External(locator.clone()),
+                        format!("mapping `{}` could not be resolved: {error}", spec.name),
+                    )
+                })?;
+                cache
+                    .lookup_bounded(&key, *max_bytes)
+                    .await
+                    .map_err(|error| {
+                        Warning::new(
+                            WarningOrigin::Artifact(key.clone()),
+                            format!("mapping `{}` cache read failed: {error:?}", spec.name),
+                        )
+                    })?
+                    .ok_or_else(|| {
+                        Warning::new(
+                            WarningOrigin::Artifact(key.clone()),
+                            format!("mapping `{}` is not cached", spec.name),
+                        )
+                    })?
+            }
+        };
+        String::from_utf8(bytes).map_err(|error| {
+            Warning::new(
+                Self::origin(spec),
+                format!("mapping `{}` is not UTF-8: {error}", spec.name),
+            )
+        })
+    }
+
+    /// What a diagnostic about this mapping set points at.
+    fn origin(spec: &MappingSpec) -> WarningOrigin {
+        match &spec.location {
+            MappingLocation::Project(key) => WarningOrigin::ProjectFile(key.clone()),
+            MappingLocation::External { locator, .. } => WarningOrigin::External(locator.clone()),
+        }
+    }
 }
 
 /// Stateless dependency resolver. Persistence belongs to [`ArtifactCache`].

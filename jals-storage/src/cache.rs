@@ -101,6 +101,12 @@ pub enum CacheNamespace {
     /// Folding them into that key would make editing one `[build] classpath` line re-fetch,
     /// re-remap and re-decompile a whole task plan.
     PublicationCoverage,
+    /// One mapping text a `remap` key names, fetched and verified before anything parses it.
+    ///
+    /// Its own namespace rather than [`DependencyJar`](Self::DependencyJar) because it is not a
+    /// classpath input at all: nothing loads a class from it, and an eviction policy that treated
+    /// the two alike would be reasoning about the wrong kind of artifact.
+    Mappings,
     /// One Java source file emitted by a compile frontend — the first of the two compile
     /// tiers. Keyed on what the frontend was permitted to observe, so a per-file frontend
     /// stays per-file invalidated.
@@ -134,6 +140,7 @@ impl CacheNamespace {
             Self::BuildTaskSource => "build-task-source",
             Self::BuildTaskState => "build-task-state",
             Self::PublicationCoverage => "publication-coverage",
+            Self::Mappings => "mappings",
             Self::FrontendOutput => "frontend-output",
             Self::BackendOutput => "backend-output",
         }
@@ -156,6 +163,7 @@ impl CacheNamespace {
             "build-task-source" => Self::BuildTaskSource,
             "build-task-state" => Self::BuildTaskState,
             "publication-coverage" => Self::PublicationCoverage,
+            "mappings" => Self::Mappings,
             "frontend-output" => Self::FrontendOutput,
             "backend-output" => Self::BackendOutput,
             _ => return None,

@@ -8,7 +8,7 @@ use alloc::borrow::ToOwned;
 use alloc::string::String;
 
 use jals_classfile::ClassFile;
-use jals_config::{Dependency, FeatureSet, Manifest};
+use jals_config::{Dependency, FeatureSet, Manifest, ResolvedBuildFeatures};
 use jals_storage::{
     CacheBackend, CacheKey, DirKey, EntryRef, FileKey, Name, ProjectStorage, ProjectView,
     RelativePath, SourceBackend,
@@ -16,7 +16,8 @@ use jals_storage::{
 
 use crate::{
     ClasspathEntry, ClasspathLoad, DependencyLocation, DependencyResolver, DependencySpec,
-    ExternalLocator, Fetcher, JarExtraction, LibrarySource, SkeletonGroup, Warning, WarningOrigin,
+    ExternalLocator, Fetcher, JarExtraction, JarRemap, LibrarySource, MappingResolver, MappingSpec,
+    RemapDirection, RemapRequest, SkeletonGroup, Warning, WarningOrigin,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,10 +64,11 @@ impl ProjectInputPlan {
     pub(crate) fn add_jar_dependencies(
         &mut self,
         manifest: &Manifest,
+        features: &ResolvedBuildFeatures,
         mut classify: impl FnMut(&str) -> DependencyLocation,
         warnings: &mut Vec<Warning>,
     ) {
-        for (raw_name, dependency) in &manifest.dependencies {
+        for (raw_name, dependency) in manifest.active_dependencies(features) {
             let Dependency::Jar(jar) = dependency else {
                 continue;
             };
@@ -83,16 +85,42 @@ impl ProjectInputPlan {
             self.dependencies.push(DependencySpec {
                 name: name.clone(),
                 location: classify(&jar.jar),
+                remap: Self::active_remap(manifest, features, jar.remap.as_deref(), warnings),
                 recursive: jar.recursive.unwrap_or(false),
             });
             if let Some(sources) = &jar.sources {
                 self.source_archives.push(DependencySpec {
                     name,
                     location: classify(sources),
+                    // A sources jar is never remapped; the manifest rejects declaring both.
+                    remap: None,
                     recursive: false,
                 });
             }
         }
+    }
+
+    /// The mapping set a `remap` reference resolves to under `features`, or `None` when the entry
+    /// is inactive.
+    ///
+    /// The gate and the lowering are deliberately separate calls: `jals-project` applies the same
+    /// gate with a *graph node's* features rather than these, and duplicating the lowering there is
+    /// what would let the two drift.
+    fn active_remap(
+        manifest: &Manifest,
+        features: &ResolvedBuildFeatures,
+        reference: Option<&str>,
+        warnings: &mut Vec<Warning>,
+    ) -> Option<MappingSpec> {
+        let reference = reference?;
+        if !manifest
+            .mappings
+            .get(reference)?
+            .is_active(features.features())
+        {
+            return None;
+        }
+        MappingSpec::lower(manifest, reference, warnings)
     }
 }
 
@@ -145,7 +173,57 @@ impl ProjectInputs {
         )
         .await;
         let mut warnings = resolved.warnings;
-        let resolved_jars = resolved.jars;
+
+        // Deobfuscate every jar whose entry declared a `remap`, before anything reads one. Doing it
+        // here rather than at each consumer is what makes the classpath, the analysis index, and the
+        // skeletons an editor synthesizes agree on one set of names — and it happens before the
+        // nested expansion below, so a fat jar's bundled members are unpacked from the remapped
+        // archive rather than the original.
+        //
+        // A mapping that cannot be resolved drops its jar instead of admitting it unremapped. The
+        // unremapped archive is not a degraded version of what was asked for: every type in it
+        // answers to a name nothing else in the build uses, so the `cannot find symbol` a missing
+        // entry produces points at the real problem and obfuscated names would not.
+        let mut resolved_jars = Vec::with_capacity(resolved.jars.len());
+        for mut jar in resolved.jars {
+            let Some(spec) = plan
+                .dependencies
+                .iter()
+                .find(|spec| spec.name == jar.name)
+                .and_then(|spec| spec.remap.as_ref())
+            else {
+                resolved_jars.push(jar);
+                continue;
+            };
+            let text =
+                match MappingResolver::text(fetcher, &view, storage.artifacts_mut(), spec).await {
+                    Ok(text) => text,
+                    Err(warning) => {
+                        warnings.push(warning);
+                        continue;
+                    }
+                };
+            let request = RemapRequest {
+                mappings: &text,
+                format: spec.format,
+                direction: RemapDirection::Deobfuscate,
+                // A dependency jar closes over its own hierarchy: it is the artifact the mapping
+                // set was published for. Reobfuscating compiled output is the case that needs the
+                // classpath, and that is a different caller.
+                hierarchy: &[],
+            };
+            match JarRemap::remap(&exec, storage.artifacts_mut(), &jar.key, &request).await {
+                Ok(key) => {
+                    jar.key = key;
+                    resolved_jars.push(jar);
+                }
+                Err(error) => warnings.push(Warning::new(
+                    WarningOrigin::Artifact(jar.key.clone()),
+                    format!("dependency `{}` could not be remapped: {error}", jar.name),
+                )),
+            }
+        }
+
         // Keep top-level dependencies in request order; recursive members are additions appended in
         // the same second-pass order.
         let mut dependency_jars: Vec<_> = resolved_jars.iter().map(|jar| jar.key.clone()).collect();

@@ -2339,3 +2339,141 @@ fn a_recorded_coverage_answer_is_reused_and_a_classpath_edit_invalidates_it() {
         );
     });
 }
+
+/// Two `[dependencies]` entries reaching one jar, declared with and without a matching `remap`.
+///
+/// Both name the same local jar, so discovery gives them one node — the dedup that keeps a diamond
+/// from putting one library on the classpath twice.
+fn shared_jar_project(first_remap: &str, second_remap: &str) -> (Manifest, MemoryStorage) {
+    let manifest = format!(
+        "[mappings.a]\nfile = \"maps/a.txt\"\n\
+         [mappings.b]\nfile = \"maps/b.txt\"\n\
+         [dependencies]\n\
+         one = {{ jar = \"vendor/lib.jar\", {first_remap} }}\n\
+         two = {{ jar = \"vendor/lib.jar\", {second_remap} }}\n"
+    );
+    let storage = MemoryStorage::memory(
+        CodeTree::new([
+            Entry::File(
+                FileKey::parse("vendor/lib.jar").expect("portable key"),
+                jar(&[("pkg/A.class", b"a")]),
+            ),
+            Entry::File(
+                FileKey::parse("maps/a.txt").expect("portable key"),
+                b"pkg.A -> a:\n".to_vec(),
+            ),
+            Entry::File(
+                FileKey::parse("maps/b.txt").expect("portable key"),
+                b"pkg.A -> b:\n".to_vec(),
+            ),
+        ])
+        .expect("tree is valid"),
+    );
+    (manifest.parse().expect("manifest is valid"), storage)
+}
+
+#[test]
+fn two_entries_reaching_one_jar_must_agree_about_remap() {
+    jals_exec::block_on_inline(async {
+        // Disagreement has no resolution: no archive is both, and `recursive`'s union has no
+        // analogue for a mapping value. Splitting the node instead would put `pkg.A` on the
+        // classpath under two names, which is exactly what the dedup prevents.
+        let (root, view_storage) = shared_jar_project("remap = \"a\"", "remap = \"b\"");
+        let mut cache = MemoryStorage::memory(CodeTree::default());
+        let assembly = MemoryProjectGraph::discover(&root, &view_storage.view())
+            .await
+            .unwrap()
+            .preprocess(cache.artifacts_mut(), inert!())
+            .await
+            .unwrap()
+            .assemble(cache.artifacts_mut())
+            .await;
+
+        assert_eq!(
+            assembly.plan.dependencies.len(),
+            1,
+            "the node stays deduplicated: {:?}",
+            assembly.plan.dependencies
+        );
+        assert!(
+            assembly
+                .warnings
+                .iter()
+                .any(|warning| warning.to_string().contains("different `remap`")),
+            "{:?}",
+            assembly.warnings
+        );
+    });
+}
+
+#[test]
+fn agreeing_entries_carry_one_remap_and_report_nothing() {
+    jals_exec::block_on_inline(async {
+        let (root, view_storage) = shared_jar_project("remap = \"a\"", "remap = \"a\"");
+        let mut cache = MemoryStorage::memory(CodeTree::default());
+        let assembly = MemoryProjectGraph::discover(&root, &view_storage.view())
+            .await
+            .unwrap()
+            .preprocess(cache.artifacts_mut(), inert!())
+            .await
+            .unwrap()
+            .assemble(cache.artifacts_mut())
+            .await;
+
+        let [dependency] = &assembly.plan.dependencies[..] else {
+            panic!("one node: {:?}", assembly.plan.dependencies);
+        };
+        // The point of the whole edge-carrying change: a root `[dependencies] remap` reaches the
+        // spec the classpath is assembled from, rather than being dropped between the two.
+        assert!(dependency.remap.is_some(), "{dependency:?}");
+        assert!(
+            !assembly
+                .warnings
+                .iter()
+                .any(|warning| warning.to_string().contains("different `remap`")),
+            "{:?}",
+            assembly.warnings
+        );
+    });
+}
+
+#[test]
+fn an_inactive_required_feature_leaves_the_jar_unremapped() {
+    jals_exec::block_on_inline(async {
+        // "This selection ships no mappings" has to be expressible, and it is a resolution outcome
+        // rather than a mistake — so no warning, and the jar stays on the classpath.
+        let root: Manifest = "[features]\nobfuscated = []\n\
+             [mappings.a]\nfile = \"maps/a.txt\"\nrequired-features = [\"obfuscated\"]\n\
+             [dependencies]\none = { jar = \"vendor/lib.jar\", remap = \"a\" }\n"
+            .parse()
+            .expect("manifest is valid");
+        let view_storage = MemoryStorage::memory(
+            CodeTree::new([
+                Entry::File(
+                    FileKey::parse("vendor/lib.jar").expect("portable key"),
+                    jar(&[("pkg/A.class", b"a")]),
+                ),
+                Entry::File(
+                    FileKey::parse("maps/a.txt").expect("portable key"),
+                    b"pkg.A -> a:\n".to_vec(),
+                ),
+            ])
+            .expect("tree is valid"),
+        );
+        let mut cache = MemoryStorage::memory(CodeTree::default());
+        let assembly = MemoryProjectGraph::discover(&root, &view_storage.view())
+            .await
+            .unwrap()
+            .preprocess(cache.artifacts_mut(), inert!())
+            .await
+            .unwrap()
+            .assemble(cache.artifacts_mut())
+            .await;
+
+        let [dependency] = &assembly.plan.dependencies[..] else {
+            panic!("one node: {:?}", assembly.plan.dependencies);
+        };
+        assert!(dependency.remap.is_none(), "{dependency:?}");
+        assert!(assembly.warnings.is_empty(), "{:?}", assembly.warnings);
+    });
+}

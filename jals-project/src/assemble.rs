@@ -9,7 +9,7 @@ use core::fmt;
 
 use jals_classpath::{
     ClasspathEntry, DependencyLocation, DependencySpec, ExternalLocator, LibrarySource,
-    ProjectInputPlan,
+    MappingSpec, ProjectInputPlan,
 };
 use jals_storage::{
     ArtifactCache, CacheBackend, CacheKey, CacheNamespace, ContentDigest, FileKey, Name,
@@ -570,6 +570,11 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
     }
 
     fn project_binary_edges(&mut self) {
+        /// Stands in for a node whose features preprocessing did not record — a node that failed to
+        /// preprocess. An empty set gates every `required-features` entry off, which for a failed
+        /// node is the conservative answer: no remap rather than one chosen from nothing.
+        static EMPTY_FEATURES: BTreeSet<String> = BTreeSet::new();
+
         struct ProjectedBinary {
             node: NodeId,
             dependency: String,
@@ -581,6 +586,8 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
             location: DependencyLocation,
             source_archive: bool,
             recursive: bool,
+            /// The mapping set every edge reaching this node agreed on, already gated.
+            remap: Option<MappingSpec>,
         }
 
         let mut projected = Vec::<ProjectedBinary>::new();
@@ -595,8 +602,39 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
             } else {
                 continue;
             };
+            // The gate is the *declaring* project's selection: `required-features` is a
+            // precondition the manifest that wrote the `remap` states about its own features, and
+            // the root has no node of its own to read them from.
+            let declaring_features = match &edge.from {
+                Some(from) => self.graph.features.get(from),
+                None => Some(&self.graph.root_features),
+            };
+            let remap = edge.remap.as_ref().and_then(|remap| {
+                remap
+                    .active(declaring_features.unwrap_or(&EMPTY_FEATURES))
+                    .cloned()
+            });
             if let Some(index) = indices.get(&edge.to).copied() {
                 projected[index].recursive |= edge.recursive;
+                // `recursive` unions because two edges asking for nested expansion want the same
+                // thing more or less thoroughly. Two edges naming *different* mapping sets do not:
+                // no archive satisfies both, and picking either hands one declaring project a
+                // classpath it never asked for. Splitting the node instead would put the same types
+                // on the classpath twice under two sets of names — the failure the dedup exists to
+                // prevent — so the dedup stays and the disagreement is reported against the entry.
+                if projected[index].remap != remap {
+                    let declared_by = edge
+                        .from
+                        .as_ref()
+                        .map(|from| ResolvedNode::location_or_digest(&self.graph.nodes, from));
+                    self.warnings.push(GraphWarning {
+                        node: declared_by,
+                        dependency: Some(edge.dependency.clone()),
+                        message: "reaches a jar another entry also declares, but names a \
+                                  different `remap`; the first declaration is used"
+                            .to_owned(),
+                    });
+                }
                 continue;
             }
             indices.insert(edge.to.clone(), projected.len());
@@ -607,6 +645,7 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
                 location,
                 source_archive,
                 recursive: edge.recursive,
+                remap,
             });
         }
 
@@ -626,6 +665,7 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
             let dependency = DependencySpec {
                 name,
                 location: projected.location,
+                remap: projected.remap,
                 recursive: projected.recursive,
             };
             if projected.source_archive {

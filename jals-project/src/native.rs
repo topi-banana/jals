@@ -23,8 +23,9 @@ use crate::assemble::{CompileClasspathEntry, ProjectAssemblyError};
 use crate::assembly::{GraphResolveError, ProjectScript, RootProjection};
 use crate::graph::{
     BinaryInput, CapturedClasspathEntry, CapturedClasspathKind, CapturedFile, CycleEdge,
-    DeclaredEdgeFeatures, GraphEdge, GraphError, GraphMetadata, GraphPreprocess, GraphWarning,
-    NodeBody, NodeId, PreprocessedProjectGraph, ResolvedNode, ResolvedProjectGraph, SourceNode,
+    DeclaredBinaryEdge, DeclaredEdgeFeatures, EdgeRemap, GraphEdge, GraphError, GraphMetadata,
+    GraphPreprocess, GraphWarning, NodeBody, NodeId, PreprocessedProjectGraph, ResolvedNode,
+    ResolvedProjectGraph, SourceNode,
 };
 
 /// Native entry point for recursive dependency graph discovery.
@@ -226,6 +227,9 @@ impl ProjectScript {
         let graph_assembly = graph.assemble(storage.artifacts_mut()).await;
         let (inputs, source_roots) = NativeProjectPlan::assemble_native(
             &Self::root_only(root_manifest),
+            // `root_only` cleared `[dependencies]`, so nothing this call lowers reads a feature.
+            // The graph resolved the real selection per node before this point.
+            &jals_config::ResolvedBuildFeatures::default(),
             root_directory,
             storage,
             mode,
@@ -284,14 +288,20 @@ impl GraphBuilder {
             for (name, dependency) in &manifest.dependencies {
                 match dependency {
                     Dependency::Jar(jar) => {
+                        let remap = match EdgeRemap::of(manifest, dependency) {
+                            Ok(remap) => remap,
+                            Err(message) => {
+                                self.warn_declared(parent.as_ref(), name, message);
+                                None
+                            }
+                        };
                         if let Err(message) = self
                             .visit_binary(
                                 parent.clone(),
                                 declaring,
                                 name,
                                 &jar.jar,
-                                jar.recursive.unwrap_or(false),
-                                false,
+                                DeclaredBinaryEdge::classes(jar.recursive.unwrap_or(false), remap),
                             )
                             .await
                         {
@@ -299,7 +309,13 @@ impl GraphBuilder {
                         }
                         if let Some(sources) = &jar.sources
                             && let Err(message) = self
-                                .visit_binary(parent.clone(), declaring, name, sources, false, true)
+                                .visit_binary(
+                                    parent.clone(),
+                                    declaring,
+                                    name,
+                                    sources,
+                                    DeclaredBinaryEdge::sources(),
+                                )
                                 .await
                         {
                             self.warn_declared(parent.as_ref(), name, message);
@@ -391,6 +407,8 @@ impl GraphBuilder {
             recursive: false,
             features: declared.features,
             default_features: declared.default_features,
+            // Only a `jar` entry can carry one, and this is the source-form edge.
+            remap: None,
         };
         self.edges.push(incoming.clone());
         match self.states.get(&acquired.id) {
@@ -508,9 +526,13 @@ impl GraphBuilder {
         declaring: &DeclaringProject,
         dependency: &str,
         locator: &str,
-        recursive: bool,
-        source_archive: bool,
+        declared: DeclaredBinaryEdge,
     ) -> Result<(), String> {
+        let DeclaredBinaryEdge {
+            recursive,
+            source_archive,
+            remap,
+        } = declared;
         let role = if source_archive { "source" } else { "binary" };
         let (id, input) = if locator.starts_with("http://") || locator.starts_with("https://") {
             let input = if source_archive {
@@ -553,6 +575,7 @@ impl GraphBuilder {
             recursive,
             features: binary.features,
             default_features: binary.default_features,
+            remap,
         });
         if !self.seen_nodes.insert(id.clone()) {
             return Ok(());

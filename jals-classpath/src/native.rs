@@ -13,7 +13,9 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use jals_config::{Dependency, GitDependency, GitRef, Manifest, PathDependency};
+use jals_config::{
+    Dependency, GitDependency, GitRef, Manifest, PathDependency, ResolvedBuildFeatures,
+};
 use jals_exec::tokio_rt::on_blocking_pool;
 use jals_storage::{
     CacheKey, CacheNamespace, ContentDigest, DirKey, EntryRef, FileKey, MemoryCache, Name,
@@ -187,11 +189,12 @@ impl NativeProjectPlan {
     /// own execution context. Returns the resolved inputs plus the manifest's source roots.
     pub async fn assemble_native(
         manifest: &Manifest,
+        features: &ResolvedBuildFeatures,
         project_root: &Path,
         storage: &mut NativeStorage,
         options: ProjectInputOptions,
     ) -> (ProjectInputs, Vec<DirKey>) {
-        let mut native = Self::from_manifest(manifest, project_root, &storage.view());
+        let mut native = Self::from_manifest(manifest, features, project_root, &storage.view());
         native.materialize_external_sources(storage, options).await;
         native
             .materialize_external_classpath(storage, options)
@@ -209,7 +212,12 @@ impl NativeProjectPlan {
         (inputs, native.source_roots)
     }
 
-    pub fn from_manifest(manifest: &Manifest, project_root: &Path, view: &ProjectView) -> Self {
+    pub fn from_manifest(
+        manifest: &Manifest,
+        features: &ResolvedBuildFeatures,
+        project_root: &Path,
+        view: &ProjectView,
+    ) -> Self {
         let mut result = Self {
             plan: ProjectInputPlan {
                 feature_set: manifest.feature_set(),
@@ -266,6 +274,7 @@ impl NativeProjectPlan {
 
         result.plan.add_jar_dependencies(
             manifest,
+            features,
             |locator| Self::classify(project_root, locator),
             &mut result.warnings,
         );
@@ -319,6 +328,17 @@ impl NativeProjectPlan {
                 } else {
                     NativeScope::all(path)
                 });
+            }
+        }
+        // Every `[mappings] file`, whether or not a `remap` currently names it. Scoping the
+        // snapshot to what is *referenced* would make the captured tree depend on the feature
+        // selection, and the same project would then read differently under two `--features` runs
+        // for a reason nothing in the manifest states.
+        for source in manifest.mappings.values() {
+            if let jals_config::MappingSource::File(file) = source
+                && let Some(path) = Self::project_relative(project_root, &file.file)
+            {
+                scopes.push(NativeScope::all(path));
             }
         }
         for dependency in manifest.dependencies.values() {

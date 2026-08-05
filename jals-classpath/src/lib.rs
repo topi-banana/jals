@@ -31,8 +31,8 @@ mod zip;
 pub use io::Fetcher;
 pub use resolve::{
     DependencyLocation, DependencyResolver, DependencySpec, ExpectedDigest,
-    ExternalArtifactResolver, ExternalArtifactSpec, ExternalLocator, NetworkPolicy,
-    ResolvedDependencies, ResolvedJar,
+    ExternalArtifactResolver, ExternalArtifactSpec, ExternalLocator, MappingLocation,
+    MappingResolver, MappingSpec, NetworkPolicy, ResolvedDependencies, ResolvedJar,
 };
 pub use skeleton::{SkeletonGroup, SkeletonMode, Skeletons};
 
@@ -50,12 +50,55 @@ pub use project::{
     MemoryProjectPlan, ProjectInputOptions, ProjectInputPlan, ProjectInputs, SourceFile,
 };
 #[cfg(feature = "archive")]
-pub use remap::{JarMerge, JarRemap, NestedJar};
+pub use remap::{JarMerge, JarRemap, NestedJar, RemapRequest};
 
 use alloc::string::String;
 use core::fmt;
 
 use jals_storage::{CacheKey, DirKey, FileKey, RelativePath};
+
+/// Which way a mapping file is applied.
+///
+/// The pair of namespaces is fixed by the file; this says which of them the jar being remapped is
+/// written in. There is deliberately no default: a jar in the wrong namespace remaps to nothing at
+/// all and produces a *plausible* archive, so the direction is something a caller states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RemapDirection {
+    /// Obfuscated → official: a shipped library becomes the names a project is written against.
+    Deobfuscate,
+    /// Official → obfuscated: a project's own output becomes the names its runtime loads.
+    Reobfuscate,
+}
+
+impl RemapDirection {
+    /// The direction's cache identity. A stable string rather than the enum discriminant, for the
+    /// reason every other tag in the workspace is one.
+    pub const fn tag_name(self) -> &'static str {
+        match self {
+            Self::Deobfuscate => "deobfuscate",
+            Self::Reobfuscate => "reobfuscate",
+        }
+    }
+}
+
+/// Which grammar a mapping text is written in.
+///
+/// One variant today. It exists as an enum so that adding tiny/tsrg/enigma is a new arm here and in
+/// [`Mappings::parse`], rather than a second entry point every caller has to learn about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MappingFormat {
+    /// The ProGuard-style text Mojang publishes per Minecraft release.
+    Proguard,
+}
+
+impl MappingFormat {
+    /// The format's cache identity.
+    pub const fn tag_name(self) -> &'static str {
+        match self {
+            Self::Proguard => "proguard",
+        }
+    }
+}
 
 /// A navigation source stored as a verified cache artifact: an extracted `sources`-jar member, a
 /// published Git checkout file, or a synthesized skeleton.

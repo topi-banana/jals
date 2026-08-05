@@ -20,6 +20,7 @@ mod graph_tests;
 mod memory;
 #[cfg(feature = "native")]
 mod native;
+mod remap;
 mod task;
 
 pub use assemble::{
@@ -35,6 +36,7 @@ pub use assembly::{GraphResolveError, MemoryProjectAssembly, ProjectAssembly, Pr
 pub use graph::{CycleEdge, GraphError, GraphPreprocess, GraphWarning, NodeId};
 #[cfg(feature = "native")]
 pub use native::NativeProjectAssembly;
+pub use remap::{CompiledClasses, RemapAbsence, RemapPlan, RemapSelection};
 // `ProjectGraphAssembly`, `ResolvedProjectGraph`, `PreprocessedProjectGraph`, `MemoryProjectGraph`,
 // and `NativeProjectGraph` are deliberately *not* re-exported. They are the steps `ProjectAssembly`
 // sequences and the intermediate values that only exist between them; a host hands over policy and

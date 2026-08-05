@@ -67,6 +67,15 @@ pub enum CompileFailure {
     Package(String),
     /// There is nothing to compile.
     NoSources,
+    /// The manifest declares `[build] remap`, which this host cannot run.
+    ///
+    /// A refusal rather than a jar built without it. This host releases its workspace lock before
+    /// compiling — deliberately, because a compile is the longest thing it does — so the storage a
+    /// remap resolves its mapping set through is not held here, and its in-process backend compiles
+    /// against embedded stubs rather than a classpath, which is where the class hierarchy a
+    /// reobfuscation needs would come from. Handing back an unremapped jar under the name the
+    /// manifest asked for would be indistinguishable from success.
+    RemapUnsupported,
 }
 
 impl fmt::Display for CompileFailure {
@@ -74,6 +83,11 @@ impl fmt::Display for CompileFailure {
         match self {
             // The absence is the selection's own wording; the rest points at the two backends that
             // *do* run here, since the manifest is one edit away.
+            Self::RemapUnsupported => f.write_str(
+                "`[build] remap` is declared, but the browser build cannot reobfuscate: it holds \
+                 no project storage while compiling and compiles against embedded stubs rather \
+                 than a classpath",
+            ),
             Self::BackendUnavailable { id, reason } => write!(
                 f,
                 "{id} needs a host process, and {reason}.\n\
@@ -118,6 +132,11 @@ impl Compile {
                     return Err(CompileFailure::BackendUnavailable { id, reason });
                 }
             };
+        // Asked before any work, like the backend above: a refusal the manifest already implies
+        // should not arrive after the slowest step in the host has run.
+        if manifest.build.remap.is_some() {
+            return Err(CompileFailure::RemapUnsupported);
+        }
         if files.is_empty() {
             return Err(CompileFailure::NoSources);
         }
