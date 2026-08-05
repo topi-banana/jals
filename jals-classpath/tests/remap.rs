@@ -3,7 +3,10 @@
 use std::io::{Cursor, Write};
 
 use jals_classfile::ClassFile;
-use jals_classpath::{JarMerge, JarRemap, SourceTreeExtraction, SourceTreeLimits};
+use jals_classpath::{
+    JarMerge, JarRemap, MappingFormat, RemapDirection, RemapRequest, SourceTreeExtraction,
+    SourceTreeLimits,
+};
 use jals_exec::{Exec, block_on_inline};
 use jals_storage::io::Cursor as SioCursor;
 use jals_storage::{
@@ -30,6 +33,16 @@ fn write_jar(entries: &[(&str, &[u8])]) -> Vec<u8> {
     cursor.into_inner()
 }
 
+/// A deobfuscating request with no extra hierarchy — what a self-contained library jar needs.
+const fn deobfuscate(mappings: &str) -> RemapRequest<'_> {
+    RemapRequest {
+        mappings,
+        format: MappingFormat::Proguard,
+        direction: RemapDirection::Deobfuscate,
+        hierarchy: &[],
+    }
+}
+
 async fn publish(cache: &mut ArtifactCache<MemoryCache>, tag: &[u8], bytes: &[u8]) -> CacheKey {
     let key = CacheKey::new(
         CacheNamespace::BuildTaskArtifact,
@@ -53,7 +66,7 @@ Renamed -> Box:
         let exec = Exec::inline();
         let mut cache = ArtifactCache::new(MemoryCache::default());
         let jar = publish(&mut cache, b"fixture", &jar_bytes).await;
-        let remapped = JarRemap::remap(&exec, &mut cache, &jar, mappings)
+        let remapped = JarRemap::remap(&exec, &mut cache, &jar, &deobfuscate(mappings))
             .await
             .expect("remap succeeds");
         let bytes = cache
@@ -152,6 +165,149 @@ fn decompile_strips_prefix_and_drops_field_final() {
             parsed.errors().is_empty(),
             "syntax errors: {:?}",
             parsed.errors()
+        );
+    });
+}
+
+fn hierarchy_class(name: &str) -> Vec<u8> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/hierarchy-evolution/v1/evolution")
+        .join(format!("{name}.class"));
+    std::fs::read(&path).unwrap_or_else(|error| panic!("reading {}: {error}", path.display()))
+}
+
+/// Whether `haystack` contains `needle` as a raw byte run — how a `Utf8` constant is stored.
+fn contains_bytes(haystack: &[u8], needle: &str) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle.as_bytes())
+}
+
+fn member_bytes(jar: &[u8], name: &str) -> Vec<u8> {
+    let mut archive =
+        zip::ZipArchive::new(Cursor::new(jar.to_vec())).expect("remapped jar is a zip");
+    let mut member = archive.by_name(name).expect("member is present");
+    let mut bytes = Vec::new();
+    std::io::copy(&mut member, &mut bytes).unwrap();
+    bytes
+}
+
+#[test]
+fn an_inherited_member_needs_the_jar_that_declares_it() {
+    block_on_inline(async {
+        // `HierarchyEvolution` calls `HierarchyLeft.rootValue`, but `rootValue` is declared on
+        // `HierarchyRoot` — `HierarchyLeft` only extends it. Resolving that rename means walking
+        // from the reference's owner up to the declaration, and the types on that path live in a
+        // different archive.
+        //
+        // This is the failure mode the `hierarchy` field exists for, and it is a *silent* one: the
+        // remap succeeds either way and produces a jar whose call site still says `rootValue` while
+        // every declaration around it says the new name.
+        let mappings = "\
+evolution.RenamedRoot -> evolution.HierarchyRoot:
+    int renamedRootValue(int) -> rootValue
+";
+        let subject = write_jar(&[(
+            "evolution/HierarchyEvolution.class",
+            &hierarchy_class("HierarchyEvolution"),
+        )]);
+        let supertypes = write_jar(&[
+            (
+                "evolution/HierarchyLeft.class",
+                &hierarchy_class("HierarchyLeft"),
+            ),
+            (
+                "evolution/HierarchyRoot.class",
+                &hierarchy_class("HierarchyRoot"),
+            ),
+        ]);
+
+        let exec = Exec::inline();
+        let mut cache = ArtifactCache::new(MemoryCache::default());
+        let jar = publish(&mut cache, b"subject", &subject).await;
+        let supers = publish(&mut cache, b"supertypes", &supertypes).await;
+
+        let alone = JarRemap::remap(&exec, &mut cache, &jar, &deobfuscate(mappings))
+            .await
+            .expect("remap succeeds");
+        let alone = member_bytes(
+            &cache.lookup(&alone).await.unwrap().unwrap(),
+            "evolution/HierarchyEvolution.class",
+        );
+        assert!(
+            !contains_bytes(&alone, "renamedRootValue"),
+            "without the declaring jar the walk cannot reach `HierarchyRoot`"
+        );
+
+        let supers = [supers];
+        let with_supers = JarRemap::remap(
+            &exec,
+            &mut cache,
+            &jar,
+            &RemapRequest {
+                hierarchy: &supers,
+                ..deobfuscate(mappings)
+            },
+        )
+        .await
+        .expect("remap succeeds");
+        let with_supers = member_bytes(
+            &cache.lookup(&with_supers).await.unwrap().unwrap(),
+            "evolution/HierarchyEvolution.class",
+        );
+        assert!(
+            contains_bytes(&with_supers, "renamedRootValue"),
+            "the inherited member resolves once its declaring type is in the index"
+        );
+    });
+}
+
+#[test]
+fn reobfuscating_a_remapped_jar_restores_its_original_names() {
+    block_on_inline(async {
+        // What makes a `[build] remap` trustworthy: the jar a runtime loads carries the names it
+        // expects. Checked as a round trip because that is the property, and because a one-way
+        // assertion passes just as well when both directions are wrong the same way.
+        let mappings = "\
+Renamed -> Box:
+    java.lang.Object value -> value
+    java.lang.Object get() -> get
+    void set(java.lang.Object) -> set
+";
+        let exec = Exec::inline();
+        let mut cache = ArtifactCache::new(MemoryCache::default());
+        let jar = publish(
+            &mut cache,
+            b"fixture",
+            &write_jar(&[("Box.class", box_class())]),
+        )
+        .await;
+
+        let deobf = JarRemap::remap(&exec, &mut cache, &jar, &deobfuscate(mappings))
+            .await
+            .expect("deobfuscate succeeds");
+        let reobf = JarRemap::remap(
+            &exec,
+            &mut cache,
+            &deobf,
+            &RemapRequest {
+                direction: RemapDirection::Reobfuscate,
+                ..deobfuscate(mappings)
+            },
+        )
+        .await
+        .expect("reobfuscate succeeds");
+
+        let bytes = cache.lookup(&reobf).await.unwrap().unwrap();
+        let cf = ClassFile::read(SioCursor::new(member_bytes(&bytes, "Box.class").as_slice()))
+            .await
+            .expect("parse the reobfuscated class");
+        assert_eq!(
+            cf.constant_pool
+                .class_name(cf.this_class)
+                .expect("this_class")
+                .into_owned(),
+            "Box"
         );
     });
 }

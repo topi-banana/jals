@@ -14,7 +14,8 @@ use jals_build::build_script::{
 };
 use jals_build::task::{TaskPlan, TaskPublishIntent};
 use jals_classpath::{
-    ClasspathCoverage, ExternalLocator, Fetcher, LibrarySource, NetworkPolicy, WarningOrigin,
+    ClasspathCoverage, ExternalLocator, Fetcher, LibrarySource, MappingSpec, NetworkPolicy,
+    WarningOrigin,
 };
 use jals_config::{Dependency, Manifest, ResolvedBuildFeatures};
 use jals_exec::Exec;
@@ -85,6 +86,103 @@ pub struct GraphEdge {
     /// (`default-features`, `true` unless the entry says otherwise; always `true` for a binary
     /// node, which receives no features at all).
     pub(crate) default_features: bool,
+    /// The mapping set this entry's `remap` names, still ungated. `None` when the entry declares
+    /// none, or when the name it declares is not a `[mappings]` entry the declaring manifest has.
+    pub(crate) remap: Option<EdgeRemap>,
+}
+
+/// A `remap` reference resolved against the declaring manifest, with its gate still to apply.
+///
+/// The two halves travel together because the gate is evaluated somewhere the lowering cannot be:
+/// `required-features` is answered by the *declaring project's* resolved selection, which discovery
+/// has not computed when it builds this edge and preprocessing settles afterwards. Lowering early
+/// and gating late is what lets one lowering serve both, instead of a second one growing in the
+/// graph.
+///
+/// Both halves are private to this module: the pair is only ever read together, and
+/// [`active`](EdgeRemap::active) is that reading. An assembler reaching past it for `spec` would be
+/// taking the lowering without the gate, which is the one combination this type exists to refuse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EdgeRemap {
+    spec: MappingSpec,
+    /// The entry's `required-features`, verbatim. Conjunctive: every one must be enabled.
+    required_features: BTreeSet<String>,
+}
+
+impl EdgeRemap {
+    /// Read one `[dependencies]` entry's `remap` against the manifest that declared it.
+    ///
+    /// # Errors
+    /// A message naming why the referenced entry could not be lowered, for the builder to attribute
+    /// to the declaring project through its own `warn_declared`. `Ok(None)` is an entry with no
+    /// `remap` at all.
+    pub(crate) fn of(manifest: &Manifest, dependency: &Dependency) -> Result<Option<Self>, String> {
+        let Some(reference) = dependency.remap() else {
+            return Ok(None);
+        };
+        let Some(source) = manifest.mappings.get(reference) else {
+            return Err(format!("`remap` names no `[mappings]` entry `{reference}`"));
+        };
+        let required_features = source.required_features().iter().cloned().collect();
+        let mut warnings = Vec::new();
+        let Some(spec) = MappingSpec::lower(manifest, reference, &mut warnings) else {
+            // Rendered whole rather than by `message`: several of these name their subject only in
+            // the origin, so the message alone would drop the one part a user can act on.
+            return Err(warnings.first().map_or_else(
+                || format!("mapping `{reference}` is malformed"),
+                ToString::to_string,
+            ));
+        };
+        Ok(Some(Self {
+            spec,
+            required_features,
+        }))
+    }
+
+    /// The spec, when `features` satisfies the entry's gate.
+    ///
+    /// An unmet gate is not a diagnostic: it is how a manifest says "this selection ships no
+    /// mappings", which is the whole reason the key exists.
+    pub(crate) fn active(&self, features: &BTreeSet<String>) -> Option<&MappingSpec> {
+        self.required_features
+            .is_subset(features)
+            .then_some(&self.spec)
+    }
+}
+
+/// What one `jar` `[dependencies]` entry declares about the edge itself, kept together for the
+/// reason [`DeclaredEdgeFeatures`] is: a builder threading these one by one is a builder that can
+/// carry three of them across a boundary and forget the fourth.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DeclaredBinaryEdge {
+    /// Whether the entry requests recursive nested-jar extraction.
+    pub(crate) recursive: bool,
+    /// Whether this edge is the entry's companion `sources` archive rather than its classes. One
+    /// entry emits both under one dependency name.
+    pub(crate) source_archive: bool,
+    /// The entry's `remap`, still ungated. Always `None` on the `sources` edge: the manifest rejects
+    /// declaring both keys on one entry.
+    pub(crate) remap: Option<EdgeRemap>,
+}
+
+impl DeclaredBinaryEdge {
+    /// The classes edge of a `jar` entry.
+    pub(crate) const fn classes(recursive: bool, remap: Option<EdgeRemap>) -> Self {
+        Self {
+            recursive,
+            source_archive: false,
+            remap,
+        }
+    }
+
+    /// The companion `sources` edge of a `jar` entry: never recursive, never remapped.
+    pub(crate) const fn sources() -> Self {
+        Self {
+            recursive: false,
+            source_archive: true,
+            remap: None,
+        }
+    }
 }
 
 /// What one `[dependencies]` entry declares about its target's build features, kept together so a
@@ -1327,6 +1425,7 @@ impl ResolvedProjectGraph {
             warnings: self.warnings,
             exports,
             features: features_by_node,
+            root_features: options.root_features.features().clone(),
             #[cfg(feature = "native")]
             native: self.native,
         })
@@ -1344,6 +1443,12 @@ pub struct PreprocessedProjectGraph {
     /// [`resolve_node_features`](ResolvedProjectGraph::resolve_node_features)), kept so assembly
     /// can hand a node's own features to its dialect frontend (`#[cfg(feature = "…")]`).
     pub(crate) features: BTreeMap<NodeId, BTreeSet<String>>,
+    /// The root project's own resolved selection.
+    ///
+    /// Kept beside the per-node map because the root has no node — discovery gives it none — and an
+    /// edge the root declared still has to be gated against *something*. Without this, a root
+    /// `[dependencies] remap` would be evaluated against an empty set and silently never apply.
+    pub(crate) root_features: BTreeSet<String>,
     #[cfg(feature = "native")]
     pub(crate) native: crate::native::NativeGraphState,
 }

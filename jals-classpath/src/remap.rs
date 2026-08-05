@@ -34,6 +34,7 @@ use jals_storage::{
 use crate::load::{Archive, SourceTreeLimits};
 use crate::mappings::Mappings;
 use crate::zip::{StoredZip, WriteMember};
+use crate::{MappingFormat, RemapDirection};
 
 /// Hardcoded size budget for a remapped / merged jar input. Matches the task-side
 /// `ExtractJava` total (1 GiB) so a Minecraft client/server jar always fits with headroom.
@@ -183,16 +184,39 @@ impl NestedJar {
 pub struct JarRemap;
 
 impl JarRemap {
-    /// Remap every `.class` member of `jar` per Mojang-format `mappings` text, publishing the
-    /// resulting jar under `BuildTaskArtifact`. Provenance includes the source jar key and the
-    /// mapping-bytes digest so re-runs are content-addressed.
+    /// Remap every `.class` member of `jar` per `request`, publishing the resulting jar under
+    /// `BuildTaskArtifact`.
+    ///
+    /// Provenance covers the source jar key, the mapping *digest* (not its text — the rule keys on
+    /// mapping identity), the direction, the format, and every hierarchy jar, so re-runs are
+    /// content-addressed and two directions of one file never collide.
+    ///
+    /// The whole thing is memoized through the cache's advisory locator index: the work here is
+    /// proportional to the size of a game jar, and the callers that are not the task graph — a
+    /// `[dependencies]` entry resolved on every editor reload — have no plan-level memo above them.
+    /// A stale index entry costs a miss, never wrong bytes, because the artifact still comes back
+    /// through a verified read.
     pub async fn remap<C: CacheBackend>(
         exec: &Exec,
         cache: &mut ArtifactCache<C>,
         jar: &CacheKey,
-        mappings_text: &str,
+        request: &RemapRequest<'_>,
     ) -> Result<CacheKey, String> {
-        let mappings = Mappings::parse(mappings_text)
+        let provenance = request.provenance(jar);
+        if let Some(key) = cache
+            .indexed_key(CacheNamespace::BuildTaskArtifact, provenance)
+            .await
+            .map_err(|error| format!("remap index lookup failed: {error:?}"))?
+            && cache
+                .open_verified(&key)
+                .await
+                .map_err(|error| format!("remapped jar is invalid: {error:?}"))?
+                .is_some()
+        {
+            return Ok(key);
+        }
+
+        let mappings = Mappings::parse(request.mappings, request.format, request.direction)
             .map_err(|error| format!("mappings parse failed: {error}"))?;
         let mappings = Arc::new(mappings);
 
@@ -203,7 +227,7 @@ impl JarRemap {
             .ok_or_else(|| "remap jar is not cached".to_owned())?;
         let members = Archive::decode_all_bounded(exec, reader, JAR_LIMITS).await?;
 
-        // Pass 1: parse every class file and build the obfuscated class hierarchy.
+        // Pass 1: parse every class file and build the source-namespace class hierarchy.
         let mut parsed: Vec<(usize, ClassFile)> = Vec::new();
         let mut index = ClassIndex::default();
         for (position, (name, outcome)) in members.iter().enumerate() {
@@ -216,34 +240,10 @@ impl JarRemap {
             let cf = ClassFile::read(bytes.as_slice())
                 .await
                 .map_err(|error| format!("failed to parse archive member `{name}`: {error}"))?;
-            let this = cf
-                .constant_pool
-                .class_name(cf.this_class)
-                .ok_or_else(|| format!("class `{name}` has no this_class name"))?
-                .into_owned();
-            let super_name = if cf.super_class == 0 {
-                None
-            } else {
-                Some(
-                    cf.constant_pool
-                        .class_name(cf.super_class)
-                        .ok_or_else(|| format!("class `{name}` has no super_class name"))?
-                        .into_owned(),
-                )
-            };
-            let interfaces = cf
-                .interfaces
-                .iter()
-                .map(|&i| {
-                    cf.constant_pool
-                        .class_name(i)
-                        .map(alloc::borrow::Cow::into_owned)
-                        .ok_or_else(|| format!("class `{name}` has a broken interfaces entry"))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            index.insert(this, super_name, interfaces);
+            Self::index_class(&mut index, name, &cf)?;
             parsed.push((position, cf));
         }
+        Self::index_hierarchy(exec, cache, request.hierarchy, &mut index).await?;
         let index = Arc::new(index);
 
         // Pass 2: remap each class (CPU-bound; fan-out keeps input order).
@@ -309,20 +309,122 @@ impl JarRemap {
         }
         let jar_bytes = StoredZip::write(&out_members)?;
 
-        // The mappings fold as their digest, not their text: the rule keys on mapping identity.
-        let mut fold = ProvenanceFold::new(b"remap-jar\0");
-        fold.parent(jar)
-            .digest(ContentDigest::of(mappings_text.as_bytes()));
         let key = CacheKey::new(
             CacheNamespace::BuildTaskArtifact,
-            fold.finish(),
+            provenance,
             ContentDigest::of(&jar_bytes),
         );
         cache
             .publish(&key, &jar_bytes)
             .await
             .map_err(|error| format!("remapped jar publish failed: {error:?}"))?;
+        cache
+            .record_index(&key)
+            .await
+            .map_err(|error| format!("remapped jar index failed: {error:?}"))?;
         Ok(key)
+    }
+
+    /// Add every class of `hierarchy` to `index` without remapping any of them.
+    ///
+    /// The jar being remapped rarely closes its own hierarchy. Reobfuscating a mod is the clear
+    /// case — its classes extend types that live in the game jar — but a library split across
+    /// archives has the same shape. Without these, an inherited member is looked up against a
+    /// supertype nobody declared, misses, and keeps its source name in an otherwise remapped jar: a
+    /// silent wrong answer rather than a failure.
+    async fn index_hierarchy<C: CacheBackend>(
+        exec: &Exec,
+        cache: &ArtifactCache<C>,
+        hierarchy: &[CacheKey],
+        index: &mut ClassIndex,
+    ) -> Result<(), String> {
+        for extra in hierarchy {
+            let reader = cache
+                .open_verified(extra)
+                .await
+                .map_err(|error| format!("hierarchy jar is invalid: {error:?}"))?
+                .ok_or_else(|| "hierarchy jar is not cached".to_owned())?;
+            for (name, outcome) in Archive::decode_all_bounded(exec, reader, JAR_LIMITS).await? {
+                if !helpers::has_extension(&name, "class") {
+                    continue;
+                }
+                let bytes = outcome.map_err(|error| {
+                    format!("failed to read hierarchy member `{name}`: {error}")
+                })?;
+                let cf = ClassFile::read(bytes.as_slice()).await.map_err(|error| {
+                    format!("failed to parse hierarchy member `{name}`: {error}")
+                })?;
+                Self::index_class(index, &name, &cf)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Record one class's `this` / `super` / `interfaces` edges into the hierarchy index.
+    fn index_class(index: &mut ClassIndex, name: &str, cf: &ClassFile) -> Result<(), String> {
+        let this = cf
+            .constant_pool
+            .class_name(cf.this_class)
+            .ok_or_else(|| format!("class `{name}` has no this_class name"))?
+            .into_owned();
+        let super_name = if cf.super_class == 0 {
+            None
+        } else {
+            Some(
+                cf.constant_pool
+                    .class_name(cf.super_class)
+                    .ok_or_else(|| format!("class `{name}` has no super_class name"))?
+                    .into_owned(),
+            )
+        };
+        let interfaces = cf
+            .interfaces
+            .iter()
+            .map(|&i| {
+                cf.constant_pool
+                    .class_name(i)
+                    .map(alloc::borrow::Cow::into_owned)
+                    .ok_or_else(|| format!("class `{name}` has a broken interfaces entry"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        index.insert(this, super_name, interfaces);
+        Ok(())
+    }
+}
+
+/// What one [`JarRemap::remap`] applies: the mapping text, how to read it, which way to apply it,
+/// and the archives that close the hierarchy it needs.
+#[derive(Debug, Clone, Copy)]
+pub struct RemapRequest<'a> {
+    /// The mapping text, already fetched and verified by whoever produced it.
+    pub mappings: &'a str,
+    /// Which grammar `mappings` is written in.
+    pub format: MappingFormat,
+    /// Which namespace the jar being remapped is written in.
+    pub direction: RemapDirection,
+    /// Cached jars read for their class hierarchy only — never remapped, never in the output.
+    ///
+    /// A `[dependencies]` deobfuscation usually needs none (a game jar closes over itself); a
+    /// `[build] remap` needs the resolved compile classpath, because that is where the supertypes of
+    /// the classes being reobfuscated live.
+    pub hierarchy: &'a [CacheKey],
+}
+
+impl RemapRequest<'_> {
+    /// The provenance of the artifact this request produces from `jar`.
+    ///
+    /// Every input that changes the output is folded, and the mapping text folds as its digest
+    /// rather than its bytes so identity — not position in some file — is what the key rests on.
+    fn provenance(&self, jar: &CacheKey) -> ContentDigest {
+        let mut fold = ProvenanceFold::new(b"remap-jar\0");
+        fold.parent(jar)
+            .digest(ContentDigest::of(self.mappings.as_bytes()))
+            .bytes(self.format.tag_name().as_bytes())
+            .bytes(self.direction.tag_name().as_bytes());
+        for extra in self.hierarchy {
+            fold.parent(extra);
+        }
+        fold.finish()
     }
 }
 
