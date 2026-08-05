@@ -463,8 +463,9 @@ pub struct UrlMappings {
 /// The grammar a [`MappingSource`]'s text is written in, selected by its `type` field.
 ///
 /// Tagged from the start for the reason [`BackendKind`] is: adding tiny/tsrg/enigma later is a new
-/// variant rather than a schema change, and the tag string — not the enum discriminant — is what
-/// folds into a remapped artifact's cache identity.
+/// variant rather than a schema change. Unlike that enum this one carries no `tag_name`, because
+/// nothing here is a cache key — the artifact a format identifies is remapped in `jals-classpath`,
+/// against its own `MappingFormat`, and the stable string the provenance fold reads is that one's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum MappingFormatKind {
@@ -480,16 +481,6 @@ pub enum MappingFormatKind {
 impl Default for MappingFormatKind {
     fn default() -> Self {
         Self::Proguard {}
-    }
-}
-
-impl MappingFormatKind {
-    /// The value of the format's serialized `type` tag, and its cache identity. A stable string
-    /// rather than the enum discriminant, so adding a format never renumbers a shipped one's keys.
-    pub const fn tag_name(self) -> &'static str {
-        match self {
-            Self::Proguard {} => "proguard",
-        }
     }
 }
 
@@ -921,8 +912,9 @@ impl ResolvedBuildFeatures {
     /// Whether an `optional` `[dependencies]` entry was activated by this resolution.
     ///
     /// Only meaningful for an optional entry; a required one is present whatever this says, which
-    /// is why [`Manifest::active_dependencies`] rather than this is what a consumer iterates.
-    pub fn activates(&self, dependency: &str) -> bool {
+    /// is why [`Manifest::active_dependencies`] rather than this is what a consumer iterates — and
+    /// why this is not exposed. Asking it directly is re-deriving presence from half the rule.
+    fn activates(&self, dependency: &str) -> bool {
         self.activated.contains(dependency)
     }
 }
@@ -1728,11 +1720,16 @@ impl Dependency {
 
     /// Whether this entry is present only when a build feature activates it (Cargo's `optional`).
     ///
-    /// An optional entry that nothing activates contributes nothing at all — no classpath entry, no
-    /// graph node, no build script run — which is how a manifest expresses a dependency that exists
-    /// under one selection and not another. A non-optional entry is always present, so the whole
-    /// question is settled here rather than at each of the two discovery adapters.
-    pub fn is_optional(&self) -> bool {
+    /// How a manifest expresses a dependency that exists under one selection and not another. A
+    /// non-optional entry is always present, so the whole question is settled here rather than
+    /// wherever presence is asked about.
+    ///
+    /// Not exposed, because [`Manifest::active_dependencies`] is the answer a consumer wants: this
+    /// half is only meaningful beside a resolution that says what was activated, and pairing the
+    /// two at each call site is what would let them drift. Project-graph discovery does not consult
+    /// either yet — an unactivated entry is still discovered as a node — because a dependency's own
+    /// selection is settled by preprocessing, after the edges that carry it exist.
+    fn is_optional(&self) -> bool {
         match self {
             Self::Jar(jar) => jar.optional.unwrap_or(false),
             Self::Git(git) => git.optional.unwrap_or(false),
@@ -4195,7 +4192,7 @@ mod tests {
         let local = &manifest.mappings["local"];
         assert!(matches!(local, MappingSource::File(_)));
         // Both forms default the format, so an entry that says nothing still names one grammar.
-        assert_eq!(local.format().tag_name(), "proguard");
+        assert_eq!(local.format(), MappingFormatKind::Proguard {});
         assert!(local.required_features().is_empty());
 
         let MappingSource::Url(mojmap) = &manifest.mappings["mojmap"] else {

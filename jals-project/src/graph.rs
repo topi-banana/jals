@@ -98,11 +98,15 @@ pub struct GraphEdge {
 /// has not computed when it builds this edge and preprocessing settles afterwards. Lowering early
 /// and gating late is what lets one lowering serve both, instead of a second one growing in the
 /// graph.
+///
+/// Both halves are private to this module: the pair is only ever read together, and
+/// [`active`](EdgeRemap::active) is that reading. An assembler reaching past it for `spec` would be
+/// taking the lowering without the gate, which is the one combination this type exists to refuse.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EdgeRemap {
-    pub(crate) spec: MappingSpec,
+    spec: MappingSpec,
     /// The entry's `required-features`, verbatim. Conjunctive: every one must be enabled.
-    pub(crate) required_features: BTreeSet<String>,
+    required_features: BTreeSet<String>,
 }
 
 impl EdgeRemap {

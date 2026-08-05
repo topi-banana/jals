@@ -97,11 +97,17 @@ pub enum MappingLocation {
 /// Carries the *resolution*, not the `[mappings]` key: a name is only meaningful inside the manifest
 /// that wrote it, and a dependency's table is a different namespace from its consumer's. Resolving
 /// at lowering time is what keeps that question from reaching anything downstream.
+///
+/// A caller outside this module holds one and hands it back — to [`MappingResolver::text`], or to a
+/// remap request through `format`. The other two fields are how *this* module resolves it, so they
+/// stay in it: anything that read `location` would be deciding where the bytes come from, which is
+/// the decision this type exists to have already made.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MappingSpec {
     /// The `[mappings]` key, for diagnostics only.
-    pub name: Name,
-    pub location: MappingLocation,
+    name: Name,
+    location: MappingLocation,
+    /// Which grammar the text is written in, read by whoever builds the remap request.
     pub format: MappingFormat,
 }
 

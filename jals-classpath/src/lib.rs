@@ -73,7 +73,13 @@ pub enum RemapDirection {
 impl RemapDirection {
     /// The direction's cache identity. A stable string rather than the enum discriminant, for the
     /// reason every other tag in the workspace is one.
-    pub const fn tag_name(self) -> &'static str {
+    ///
+    /// Private to the crate root, so the remapper below reaches it and nothing outside can key a
+    /// cache on the tag independently. It carries `archive`'s gate because the fold that reads it is
+    /// the remapper, which only exists there — an ungated declaration would have no caller in the
+    /// portable configuration.
+    #[cfg(feature = "archive")]
+    const fn tag_name(self) -> &'static str {
         match self {
             Self::Deobfuscate => "deobfuscate",
             Self::Reobfuscate => "reobfuscate",
@@ -92,8 +98,10 @@ pub enum MappingFormat {
 }
 
 impl MappingFormat {
-    /// The format's cache identity.
-    pub const fn tag_name(self) -> &'static str {
+    /// The format's cache identity. Scoped and gated like `RemapDirection::tag_name` above, and for
+    /// the same reason: the remapper's provenance fold is its only reader.
+    #[cfg(feature = "archive")]
+    const fn tag_name(self) -> &'static str {
         match self {
             Self::Proguard => "proguard",
         }
