@@ -207,17 +207,17 @@ nothing still leaves every dependency script cached.
 
 ### `[build]`
 
-| Key           | Type             | Default             | Maps to                                                                                                                                 |
-| ------------- | ---------------- | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `script`      | tagged table     | —                   | optional pre-`javac` build phase; currently `{ type = "rhai", file = "build.rhai" }`                                                    |
-| `source-dirs` | array of strings | `["src/main/java"]` | `-sourcepath` (joined) **and** the roots scanned for `.java` files                                                                      |
-| `classes-dir` | string           | `"target/classes"`  | `javac -d` (also the dir `jals clean` removes)                                                                                          |
-| `resource-dirs` | array of strings | `["src/main/resources"]` | files packaged into the jar `[build] remap` writes. Authored project files, read from the snapshot; a missing directory is skipped. They reach the **jar only** — `jals run` executes `classes-dir` and never sees them. Must be non-root project directories outside `classes-dir` |
-| `release`     | integer          | —                   | `--release N` — sets source level, target level, and bootclasspath together; when present, `source`/`target` are ignored                |
-| `source`      | integer          | —                   | `--source N` — only when `release` is unset                                                                                             |
-| `target`      | integer          | —                   | `--target N` — only when `release` is unset                                                                                             |
-| `classpath`   | array of strings | `[]`                | `-classpath` (joined with the platform separator); omitted entirely when empty                                                          |
-| `javac-flags` | array of strings | `[]`                | appended **verbatim** after the generated flags, before the source files — an escape hatch for anything the manifest does not model yet |
+| Key             | Type             | Default                  | Maps to                                                                                                                                                         |
+| --------------- | ---------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `script`        | tagged table     | —                        | optional pre-`javac` build phase; currently `{ type = "rhai", file = "build.rhai" }`                                                                            |
+| `source-dirs`   | array of strings | `["src/main/java"]`      | `-sourcepath` (joined) **and** the roots scanned for `.java` files                                                                                              |
+| `classes-dir`   | string           | `"target/classes"`       | `javac -d` (also the dir `jals clean` removes)                                                                                                                  |
+| `resource-dirs` | array of strings | `["src/main/resources"]` | files packaged into the jar `[build] remap` writes — the **jar only**, never `jals run`'s classpath; non-root dirs outside `classes-dir`, a missing one skipped |
+| `release`       | integer          | —                        | `--release N` — sets source level, target level, and bootclasspath together; when present, `source`/`target` are ignored                                        |
+| `source`        | integer          | —                        | `--source N` — only when `release` is unset                                                                                                                     |
+| `target`        | integer          | —                        | `--target N` — only when `release` is unset                                                                                                                     |
+| `classpath`     | array of strings | `[]`                     | `-classpath` (joined with the platform separator); omitted entirely when empty                                                                                  |
+| `javac-flags`   | array of strings | `[]`                     | appended **verbatim** after the generated flags, before the source files — an escape hatch for anything the manifest does not model yet                         |
 
 ### Rhai build scripts
 
@@ -837,18 +837,18 @@ Making a `features` release preset also imply a default `javac --release` is sti
 
 ### `[build]` additions
 
-| Key                      | Maps to                                  | Notes                                                                      |
-| ------------------------ | ---------------------------------------- | -------------------------------------------------------------------------- |
-| `encoding`               | `javac -encoding`                        | source encoding; default `UTF-8`                                           |
-| `enable-preview`         | `--enable-preview` (with `--release`)    | preview-language features (also needed at `java` run time)                 |
-| `debug` / `debug-info`   | `-g` / `-g:none`                         | debug-symbol level                                                         |
-| `parameters`             | `-parameters`                            | keep formal parameter names at runtime                                     |
-| `lint` / `warnings`      | `-Xlint:all`, `-Werror`                  | typed `-Xlint` config instead of raw `javac-flags`                         |
-| `annotation-processors`  | `-processor`, `-processorpath`, `-proc:` | annotation processing                                                      |
-| `resource-dirs`          | (copy step)                              | `src/main/resources` → `classes-dir`, like Maven                           |
-| `module` / `module-path` | `--module-path`, `--module-source-path`  | JPMS (modular) builds vs. the classpath                                    |
-| `target-dir`             | `-d` parent                              | override the `target/` location (also a CLI flag, §6)                      |
-| `incremental`            | (skip unchanged)                         | recompile only stale sources — needs timestamp/hash tracking in `jals-cli` |
+| Key                            | Maps to                                  | Notes                                                                                                |
+| ------------------------------ | ---------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `encoding`                     | `javac -encoding`                        | source encoding; default `UTF-8`                                                                     |
+| `enable-preview`               | `--enable-preview` (with `--release`)    | preview-language features (also needed at `java` run time)                                           |
+| `debug` / `debug-info`         | `-g` / `-g:none`                         | debug-symbol level                                                                                   |
+| `parameters`                   | `-parameters`                            | keep formal parameter names at runtime                                                               |
+| `lint` / `warnings`            | `-Xlint:all`, `-Werror`                  | typed `-Xlint` config instead of raw `javac-flags`                                                   |
+| `annotation-processors`        | `-processor`, `-processorpath`, `-proc:` | annotation processing                                                                                |
+| resources on the run classpath | (copy step)                              | `resource-dirs` reaches the jar only; copying into `classes-dir` like Maven is what `jals run` needs |
+| `module` / `module-path`       | `--module-path`, `--module-source-path`  | JPMS (modular) builds vs. the classpath                                                              |
+| `target-dir`                   | `-d` parent                              | override the `target/` location (also a CLI flag, §6)                                                |
+| `incremental`                  | (skip unchanged)                         | recompile only stale sources — needs timestamp/hash tracking in `jals-cli`                           |
 
 ### `[run]` additions (Cargo `[profile]`/run)
 
@@ -941,7 +941,7 @@ without a JDK, and `wasm32`-buildable.
 
 By Java-user impact:
 
-1. **High-value `[build]` keys** — `resource-dirs`, `encoding`, `enable-preview`, `-Xlint`
+1. **High-value `[build]` keys** — `encoding`, `enable-preview`, `-Xlint`
    (cheap, immediately useful, no new infrastructure).
 2. **`jals test`** — JUnit integration; the first thing most projects need after `build`/`run`.
 3. **Maven dependency management (§3)** — coordinate/POM resolver + `jals.lock`. The highest

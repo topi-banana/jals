@@ -1,4 +1,4 @@
-# A Minecraft mixin mod, reobfuscated for every release from 1.14.4 to 26.2
+# A Minecraft mixin mod, built for every release from 1.14.4 to 26.2
 
 One mixin, one resource, one jar. It prints `Hello, world` as the dedicated server object finishes
 construction, and it builds against any of the 43 releases
