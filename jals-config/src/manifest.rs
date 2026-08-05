@@ -782,9 +782,10 @@ impl MappingSource {
 
     /// Whether `enabled` satisfies this entry's [`required_features`](MappingSource::required_features).
     ///
-    /// The single spelling of "is this mapping set active?", so the lowering that builds the task
-    /// plan and any host that reports what it skipped cannot answer it differently.
-    pub fn is_active(&self, enabled: &BTreeSet<String>) -> bool {
+    /// One alternative's gate and nothing more. Private because [`MappingEntry::active`] is its only
+    /// reader, and what a caller outside wants is that: the gate together with the at-most-one check
+    /// it is evaluated under, never the conjunction on its own.
+    fn is_active(&self, enabled: &BTreeSet<String>) -> bool {
         self.required_features()
             .iter()
             .all(|feature| enabled.contains(feature))
