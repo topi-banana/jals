@@ -25,6 +25,14 @@ use crate::toolchain::Toolchain;
 
 const MANAGED_BUILD_ROOT: &str = "target/jals/build";
 
+/// Where a `[build] remap` writes its jar when the entry names no path.
+///
+/// Under `target/jals` like every other managed output, and deliberately *not* under
+/// [`MANAGED_BUILD_ROOT`]: that tree carries the build script's ownership ledger and its stale-output
+/// sweep, neither of which knows anything about a remapped jar. `jals clean` removes this root
+/// explicitly instead.
+pub const MANAGED_REMAP_ROOT: &str = "target/jals/remap";
+
 /// The reserved `[features]` key whose list is the build-feature set enabled when the command
 /// line selects none (Cargo's `default` feature). A resolution directive, never itself a queryable
 /// feature — [`Manifest::resolve_build_features`] expands it and drops the name from the result.
@@ -41,6 +49,13 @@ const DEFAULT_BUILD_FEATURE: &str = "default";
 /// Reserved in a feature *name*: a `[features]` key carrying it would be unreachable, since every
 /// list entry containing it is read as a cross-package reference instead (see [`FeatureRef`]).
 const FEATURE_SEPARATOR: char = '/';
+
+/// The prefix of the optional-dependency activation form (Cargo's `dep:serde`).
+///
+/// A `[features]` list entry naming a dependency rather than a feature. Writing it anywhere in the
+/// table also *suppresses* the implicit feature that dependency would otherwise declare, which is
+/// what lets a project activate a dependency from a feature of a different name.
+const DEPENDENCY_ACTIVATION_PREFIX: &str = "dep:";
 
 /// A parsed `jals.toml` project manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
@@ -89,6 +104,21 @@ pub struct Manifest {
     /// source into the editor index; this crate only models and validates the specs, staying pure
     /// (`jals-build`'s `ManifestExt` classifies them into host-facing path sources).
     pub dependencies: BTreeMap<String, Dependency>,
+    /// Named mapping sets (`[mappings]`), keyed by the name a `remap` key references.
+    ///
+    /// A sibling of `[dependencies]` rather than a form of one: a mapping set never reaches a
+    /// classpath, carries no build features, and is not a node of the project graph. Keeping it in
+    /// its own table is also what makes `remap = "…"` unambiguous — there is exactly one namespace a
+    /// reference can resolve in.
+    ///
+    /// Two sites read a name from here, and both are written in *this* manifest:
+    /// [`JarDependency::remap`] (deobfuscate an input jar before it reaches the classpath) and
+    /// [`Build::remap`] (reobfuscate the compiled output into a distributable jar). A reference to a
+    /// key this table does not declare is a [`ValidationError::UnknownMapping`]; a key that is
+    /// declared but whose [`required-features`](MappingSource::required_features) are not satisfied
+    /// is **not** an error — the remap is simply skipped, which is the only way to say "this release
+    /// ships no mappings".
+    pub mappings: BTreeMap<String, MappingSource>,
     /// Toolchain selection (`[toolchain]`): which `javac` compiles the project and which `java` runs
     /// it, chosen independently (see [`Toolchain`] and its [`Compiler`](crate::Compiler) /
     /// [`Runtime`](crate::Runtime) enums). Defaults to the system tools when omitted, so an existing
@@ -157,6 +187,20 @@ pub struct JarDependency {
     /// bundled libraries are loaded for both compilation and analysis; the default (`None`/`false`) reads
     /// only the jar's own top-level `.class` files. A bundled-jar-less jar is unaffected.
     pub recursive: Option<bool>,
+    /// The `[mappings]` key whose mapping set **deobfuscates** this jar before anything reads it: the
+    /// classpath, the analysis index, and the skeletons an editor synthesizes all see the renamed
+    /// classes.
+    ///
+    /// Only on the `jar` form. A `git`/`path` dependency contributes `.java`, and renaming
+    /// identifiers in source is a different operation from rewriting a constant pool — writing the key
+    /// there is a parse error like any misplaced field.
+    ///
+    /// Never combined with [`sources`](JarDependency::sources); see
+    /// [`DependencyError::RemapWithSources`] for why.
+    pub remap: Option<String>,
+    /// Whether this entry is only present when a build feature activates it (Cargo's `optional`).
+    /// See [`Dependency::is_optional`].
+    optional: Option<bool>,
 }
 
 /// The `git` form of a [`Dependency`]: a repository to clone for its `.java` source.
@@ -186,6 +230,9 @@ pub struct GitDependency {
     /// `default-features`). See [`Dependency::default_features`], which reads the `None` default.
     #[serde(default)]
     default_features: Option<bool>,
+    /// Whether this entry is only present when a build feature activates it (Cargo's `optional`).
+    /// See [`Dependency::is_optional`].
+    optional: Option<bool>,
 }
 
 /// The `path` form of a [`Dependency`]: a local directory tree of `.java` source.
@@ -206,6 +253,9 @@ pub struct PathDependency {
     /// `default-features`). See [`Dependency::default_features`], which reads the `None` default.
     #[serde(default)]
     default_features: Option<bool>,
+    /// Whether this entry is only present when a build feature activates it (Cargo's `optional`).
+    /// See [`Dependency::is_optional`].
+    optional: Option<bool>,
 }
 
 /// Which commit of a git dependency to check out: the default branch, or a named branch / tag / commit.
@@ -296,6 +346,17 @@ pub enum DependencyError {
         /// The offending entry, as written.
         feature: String,
     },
+    /// A `jar` entry carries both `remap` and `sources`.
+    ///
+    /// One `jar` entry contributes two inputs under one name, and only the binary half can be
+    /// remapped: renaming identifiers in `.java` is a different operation from rewriting a constant
+    /// pool. Accepting both would resolve a type to real names through the classpath and to
+    /// obfuscated ones on go-to-definition — a split no diagnostic downstream can attribute back
+    /// here.
+    RemapWithSources {
+        /// The dependency's name.
+        name: String,
+    },
 }
 
 impl fmt::Display for DependencyError {
@@ -330,11 +391,304 @@ impl fmt::Display for DependencyError {
                 "dependency `{name}` lists `{feature}` in `features`, which names features of \
                  `{name}` itself (write a `<dependency>/<feature>` reference in `[features]`)"
             ),
+            Self::RemapWithSources { name } => write!(
+                f,
+                "dependency `{name}` sets both `remap` and `sources`, but only the classes are \
+                 remapped: go-to-definition would land on obfuscated names for types the classpath \
+                 now spells out (drop one)"
+            ),
         }
     }
 }
 
 impl Error for DependencyError {}
+
+/// A single `[mappings]` entry: where one named mapping set comes from, in one of two forms.
+///
+/// Classified by serde at parse time exactly like [`Dependency`] — `#[serde(untagged)]` with each
+/// variant denying unknown fields, so `{ file, url }` matches nothing and a field misplaced onto the
+/// wrong form is a TOML parse error rather than a late diagnostic.
+///
+/// - **`file`** — a mapping text checked into the project, read from the immutable project snapshot.
+/// - **`url`** — a mapping text fetched over HTTPS. Like every other fetch in jals it carries a
+///   mandatory expected digest and byte cap, so the bytes are authenticated before they are parsed.
+///
+/// Both forms carry [`format`](MappingSource::format) (which grammar the text is written in) and
+/// [`required-features`](MappingSource::required_features) (when this entry is active at all).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum MappingSource {
+    /// A mapping text stored in the project.
+    File(FileMappings),
+    /// A mapping text fetched over HTTPS, pinned by digest and byte cap.
+    Url(UrlMappings),
+}
+
+/// The `file` form of a [`MappingSource`]: mapping text checked into the project.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct FileMappings {
+    /// The mapping text, as a non-root portable project file path.
+    pub file: String,
+    /// Which mapping grammar the text is written in.
+    #[serde(default)]
+    format: MappingFormatKind,
+    /// The build features that must all be enabled for this entry to be active.
+    #[serde(default)]
+    required_features: Vec<String>,
+}
+
+/// The `url` form of a [`MappingSource`]: mapping text fetched over HTTPS.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct UrlMappings {
+    /// An `https://` URL. Plain `http` is rejected: a mapping set decides what every call site in a
+    /// remapped jar resolves to, and the fetch layer accepts nothing else either.
+    pub url: String,
+    /// The expected SHA-1 of the fetched bytes (mutually exclusive with `sha256`).
+    sha1: Option<String>,
+    /// The expected SHA-256 of the fetched bytes (mutually exclusive with `sha1`).
+    sha256: Option<String>,
+    /// The byte cap for the fetch. Required, like every other fetch jals performs — an unbounded
+    /// download is not something a manifest should be able to ask for by omission.
+    pub max_bytes: u64,
+    /// Which mapping grammar the text is written in.
+    #[serde(default)]
+    format: MappingFormatKind,
+    /// The build features that must all be enabled for this entry to be active.
+    #[serde(default)]
+    required_features: Vec<String>,
+}
+
+/// The grammar a [`MappingSource`]'s text is written in, selected by its `type` field.
+///
+/// Tagged from the start for the reason [`BackendKind`] is: adding tiny/tsrg/enigma later is a new
+/// variant rather than a schema change. Unlike that enum this one carries no `tag_name`, because
+/// nothing here is a cache key — the artifact a format identifies is remapped in `jals-classpath`,
+/// against its own `MappingFormat`, and the stable string the provenance fold reads is that one's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum MappingFormatKind {
+    /// The ProGuard-style text Mojang publishes per Minecraft release (`official -> obfuscated`,
+    /// dotted names, indented member lines).
+    ///
+    /// A struct variant (`{}`) rather than a unit one for the same reason [`FrontendKind::Vanilla`]
+    /// is: serde honors `deny_unknown_fields` for a struct variant of an internally-tagged enum and
+    /// silently ignores it for a unit one.
+    Proguard {},
+}
+
+impl Default for MappingFormatKind {
+    fn default() -> Self {
+        Self::Proguard {}
+    }
+}
+
+/// The expected digest of a fetched mapping text: exactly one algorithm, already classified.
+///
+/// The [`UrlMappings`] analogue of [`GitRef`] — the pure classification of two mutually exclusive
+/// optional fields, so no caller re-derives "how many are set?" from the raw options.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum MappingDigest {
+    /// A hex SHA-1 (`sha1 = "…"`).
+    Sha1(String),
+    /// A hex SHA-256 (`sha256 = "…"`).
+    Sha256(String),
+}
+
+/// A `[mappings]` entry whose value could not be classified.
+///
+/// The value-level checks serde cannot express, in the same two-layer shape as [`DependencyError`]:
+/// the *structural* errors — both forms at once, neither form, a field on the wrong form — are
+/// rejected earlier as a TOML parse error when [`MappingSource`]'s untagged variants fail to match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MappingError {
+    /// A field expected to carry a value (`file` / `url` / a digest) is present but empty.
+    Empty {
+        /// The mapping's name.
+        name: String,
+        /// Which field was empty (e.g. `"file"`, `"url"`).
+        field: &'static str,
+    },
+    /// A `url` is not an `https://` URL.
+    NotHttps {
+        /// The mapping's name.
+        name: String,
+        /// The offending value.
+        value: String,
+    },
+    /// A `file` is not a non-root portable project file path.
+    InvalidFile {
+        /// The mapping's name.
+        name: String,
+        /// The offending value.
+        value: String,
+    },
+    /// Neither `sha1` nor `sha256` was given, or both were. A fetch is authenticated by exactly one.
+    Digest {
+        /// The mapping's name.
+        name: String,
+    },
+    /// `max-bytes` is zero, which can never admit a mapping text.
+    EmptyByteCap {
+        /// The mapping's name.
+        name: String,
+    },
+    /// A `required-features` name is empty, is the reserved `default`, or carries the cross-package
+    /// `/` (which names features of another package and cannot gate this entry).
+    RequiredFeature {
+        /// The mapping's name.
+        name: String,
+        /// The offending entry, as written.
+        feature: String,
+    },
+}
+
+impl fmt::Display for MappingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty { name, field } => {
+                write!(f, "mapping `{name}` has an empty `{field}`")
+            }
+            Self::NotHttps { name, value } => write!(
+                f,
+                "mapping `{name}` has a `url` of `{value}`, but a fetched mapping set must be \
+                 `https://` (use `file` for one stored in the project)"
+            ),
+            Self::InvalidFile { name, value } => write!(
+                f,
+                "mapping `{name}` has a `file` of `{value}`: expected a non-root portable project \
+                 file path"
+            ),
+            Self::Digest { name } => write!(
+                f,
+                "mapping `{name}` needs exactly one of `sha1` or `sha256`: a fetched mapping set \
+                 decides what every call site in a remapped jar resolves to, so it is never taken \
+                 unauthenticated"
+            ),
+            Self::EmptyByteCap { name } => {
+                write!(f, "mapping `{name}` has a `max-bytes` of 0")
+            }
+            Self::RequiredFeature { name, feature } => write!(
+                f,
+                "mapping `{name}` lists `{feature}` in `required-features`, which names build \
+                 features of this project (not `default`, and not a `<dependency>/<feature>` \
+                 reference)"
+            ),
+        }
+    }
+}
+
+impl Error for MappingError {}
+
+impl MappingSource {
+    /// Which grammar this entry's text is written in.
+    pub const fn format(&self) -> MappingFormatKind {
+        match self {
+            Self::File(file) => file.format,
+            Self::Url(url) => url.format,
+        }
+    }
+
+    /// The build features that must **all** be enabled for this entry to be active.
+    ///
+    /// Conjunctive rather than additive on purpose: this is a precondition on one entry, not a
+    /// feature list that unions with anything. An empty list means always active.
+    pub fn required_features(&self) -> &[String] {
+        match self {
+            Self::File(file) => &file.required_features,
+            Self::Url(url) => &url.required_features,
+        }
+    }
+
+    /// Whether `enabled` satisfies this entry's [`required_features`](MappingSource::required_features).
+    ///
+    /// The single spelling of "is this mapping set active?", so the lowering that builds the task
+    /// plan and any host that reports what it skipped cannot answer it differently.
+    pub fn is_active(&self, enabled: &BTreeSet<String>) -> bool {
+        self.required_features()
+            .iter()
+            .all(|feature| enabled.contains(feature))
+    }
+
+    /// Apply the value-level checks serde cannot express. `name` labels errors.
+    ///
+    /// # Errors
+    /// The first [`MappingError`] found.
+    fn validate(&self, name: &str) -> Result<(), MappingError> {
+        match self {
+            Self::File(file) => {
+                if file.file.is_empty() {
+                    return Err(MappingError::Empty {
+                        name: name.to_owned(),
+                        field: "file",
+                    });
+                }
+                FileKey::parse(&file.file).map_err(|_| MappingError::InvalidFile {
+                    name: name.to_owned(),
+                    value: file.file.clone(),
+                })?;
+            }
+            Self::Url(url) => {
+                if url.url.is_empty() {
+                    return Err(MappingError::Empty {
+                        name: name.to_owned(),
+                        field: "url",
+                    });
+                }
+                if !url.url.starts_with("https://") {
+                    return Err(MappingError::NotHttps {
+                        name: name.to_owned(),
+                        value: url.url.clone(),
+                    });
+                }
+                url.digest(name)?;
+                if url.max_bytes == 0 {
+                    return Err(MappingError::EmptyByteCap {
+                        name: name.to_owned(),
+                    });
+                }
+            }
+        }
+        for feature in self.required_features() {
+            if feature.is_empty()
+                || feature == DEFAULT_BUILD_FEATURE
+                || feature.contains(FEATURE_SEPARATOR)
+            {
+                return Err(MappingError::RequiredFeature {
+                    name: name.to_owned(),
+                    feature: feature.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
+impl UrlMappings {
+    /// Classify the expected digest from exactly one of `sha1` / `sha256`.
+    ///
+    /// # Errors
+    /// [`MappingError::Digest`] when neither or both are set, [`MappingError::Empty`] when the one
+    /// set is empty.
+    pub fn digest(&self, name: &str) -> Result<MappingDigest, MappingError> {
+        let non_empty = |value: &str, field| {
+            (!value.is_empty())
+                .then(|| value.to_owned())
+                .ok_or_else(|| MappingError::Empty {
+                    name: name.to_owned(),
+                    field,
+                })
+        };
+        match (self.sha1.as_deref(), self.sha256.as_deref()) {
+            (Some(sha1), None) => Ok(MappingDigest::Sha1(non_empty(sha1, "sha1")?)),
+            (None, Some(sha256)) => Ok(MappingDigest::Sha256(non_empty(sha256, "sha256")?)),
+            _ => Err(MappingError::Digest {
+                name: name.to_owned(),
+            }),
+        }
+    }
+}
 
 /// One entry of a build-feature list, classified: a feature of the package that wrote the list, or
 /// Cargo's cross-package `<dependency>/<feature>` form (`serde/std`).
@@ -355,6 +709,11 @@ pub enum FeatureRef<'a> {
         /// The feature to enable there.
         feature: &'a str,
     },
+    /// `dep:<dependency>`: activate that optional `[dependencies]` entry.
+    ///
+    /// Not a feature of anything — it turns an entry on rather than enabling a name — so it is
+    /// absent from the resolved queryable set exactly as the cross-package form is.
+    Activation(&'a str),
 }
 
 impl<'a> FeatureRef<'a> {
@@ -365,11 +724,21 @@ impl<'a> FeatureRef<'a> {
     /// at all here — a dependency node receives opaque names it may not declare.
     ///
     /// # Errors
-    /// [`FeatureRefError`] for an empty entry or side, a second `/`, or `dep/default` — the
-    /// reserved directive is never enableable by name (see [`DEFAULT_BUILD_FEATURE`]).
+    /// [`FeatureRefError`] for an empty entry or side, a second `/`, `dep/default` — the reserved
+    /// directive is never enableable by name (see [`DEFAULT_BUILD_FEATURE`]) — or a `dep:` entry
+    /// carrying a `/`, which would name a feature of an entry it is only meant to switch on.
     fn parse(entry: &'a str) -> Result<Self, FeatureRefError> {
         if entry.is_empty() {
             return Err(FeatureRefError::Empty);
+        }
+        if let Some(dependency) = entry.strip_prefix(DEPENDENCY_ACTIVATION_PREFIX) {
+            if dependency.is_empty() {
+                return Err(FeatureRefError::Empty);
+            }
+            if dependency.contains(FEATURE_SEPARATOR) {
+                return Err(FeatureRefError::ActivationWithFeature);
+            }
+            return Ok(Self::Activation(dependency));
         }
         let Some((dependency, feature)) = entry.split_once(FEATURE_SEPARATOR) else {
             return Ok(Self::Local(entry));
@@ -401,12 +770,17 @@ pub enum FeatureRefError {
     /// The dependency-side feature is the reserved `default`, which is a resolution directive
     /// rather than an enableable feature; use `default-features` to control it.
     ReservedFeature,
+    /// A `dep:` entry carries a `/`. Activating an entry and enabling a feature in it are two
+    /// directives, written as two list entries (`dep:render` and `render/vulkan`).
+    ActivationWithFeature,
 }
 
 impl fmt::Display for FeatureRefError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Empty => f.write_str("expected `<feature>` or `<dependency>/<feature>`"),
+            Self::Empty => {
+                f.write_str("expected `<feature>`, `<dependency>/<feature>`, or `dep:<dependency>`")
+            }
             Self::NestedSeparator => {
                 f.write_str("expected at most one `/` (`<dependency>/<feature>`)")
             }
@@ -414,6 +788,10 @@ impl fmt::Display for FeatureRefError {
                 f,
                 "`{DEFAULT_BUILD_FEATURE}` is a resolution directive, never an enableable feature \
                  (use `default-features` on the `[dependencies]` entry)"
+            ),
+            Self::ActivationWithFeature => f.write_str(
+                "`dep:<dependency>` activates an entry and names no feature of it (write \
+                 `<dependency>/<feature>` as a second entry to enable one)",
             ),
         }
     }
@@ -451,6 +829,12 @@ pub enum BuildFeatureError {
         /// Why the shape was rejected.
         reason: FeatureRefError,
     },
+    /// `--features dep:x` was selected. Activating a dependency is a `[features]` directive: the
+    /// manifest decides which feature carries an entry, and the command line selects features.
+    ActivationSelected {
+        /// The whole selection entry, as written.
+        name: String,
+    },
 }
 
 impl fmt::Display for BuildFeatureError {
@@ -468,6 +852,11 @@ impl fmt::Display for BuildFeatureError {
             Self::InvalidSelected { name, reason } => {
                 write!(f, "`--features {name}` is malformed: {reason}")
             }
+            Self::ActivationSelected { name } => write!(
+                f,
+                "`--features {name}` activates a dependency, which only a `[features]` list can do \
+                 (select the feature whose list carries it)"
+            ),
         }
     }
 }
@@ -493,6 +882,7 @@ impl Error for BuildFeatureError {
 pub struct ResolvedBuildFeatures {
     features: BTreeSet<String>,
     dependencies: BTreeMap<String, BTreeSet<String>>,
+    activated: BTreeSet<String>,
 }
 
 impl ResolvedBuildFeatures {
@@ -517,6 +907,15 @@ impl ResolvedBuildFeatures {
         self.dependencies
             .iter()
             .map(|(name, features)| (name.as_str(), features))
+    }
+
+    /// Whether an `optional` `[dependencies]` entry was activated by this resolution.
+    ///
+    /// Only meaningful for an optional entry; a required one is present whatever this says, which
+    /// is why [`Manifest::active_dependencies`] rather than this is what a consumer iterates — and
+    /// why this is not exposed. Asking it directly is re-deriving presence from half the rule.
+    fn activates(&self, dependency: &str) -> bool {
+        self.activated.contains(dependency)
     }
 }
 
@@ -989,6 +1388,50 @@ pub struct Build {
     /// Extra raw flags appended verbatim after the generated `javac` arguments (before the source
     /// files). An escape hatch for anything the manifest does not model yet.
     pub javac_flags: Vec<String>,
+    /// Optional post-compile step: **reobfuscate** the compiled classes and package them as a
+    /// distributable jar.
+    ///
+    /// The output side of the pipeline `[build] frontend` and `[build] backend` describe. It does not
+    /// touch [`classes-dir`](Build::classes_dir), deliberately: `jals run` keeps executing the
+    /// deobfuscated classes it compiled, while the jar this produces carries the names the target
+    /// runtime actually loads.
+    pub remap: Option<BuildRemap>,
+}
+
+/// The `[build] remap` step: which mapping set reobfuscates the compiled output, and where the jar
+/// goes.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case")]
+pub struct BuildRemap {
+    /// The `[mappings]` key to apply, in reverse — the compiled classes are written in the mapping's
+    /// *official* namespace and the jar is written in its *obfuscated* one.
+    ///
+    /// A key that is declared but whose `required-features` are unmet produces no jar rather than an
+    /// error, matching what an unmet `dependencies.*.remap` does.
+    pub with: String,
+    /// Where to write the jar, as a non-root portable project file path. Defaults to
+    /// `target/jals/remap/<package name>-<package version>.jar`; see [`BuildRemap::jar_path`].
+    pub jar: Option<String>,
+}
+
+impl BuildRemap {
+    /// The jar path this step writes, resolving the default from `[package]` when `jar` is unset.
+    ///
+    /// The default lives here rather than at the two hosts that materialize it, so `jals clean` and
+    /// the build agree on which file the step owns without either re-deriving the name.
+    pub fn jar_path(&self, package: &Package) -> String {
+        if let Some(jar) = &self.jar {
+            return jar.clone();
+        }
+        let stem = match (package.name.as_deref(), package.version.as_deref()) {
+            (Some(name), Some(version)) => alloc::format!("{name}-{version}"),
+            (Some(name), None) => name.to_owned(),
+            // A project with no `[package] name` still has a jar to write; naming it after the step
+            // rather than refusing keeps `[package]` informational, which is all it has ever been.
+            (None, _) => "remapped".to_owned(),
+        };
+        alloc::format!("{MANAGED_REMAP_ROOT}/{stem}.jar")
+    }
 }
 
 /// A project build script selected by its `type` field.
@@ -1133,6 +1576,7 @@ impl Default for Build {
             target: None,
             classpath: Vec::new(),
             javac_flags: Vec::new(),
+            remap: None,
         }
     }
 }
@@ -1191,6 +1635,11 @@ impl Dependency {
                 Self::validate_jar_location(&jar.jar, name, "jar")?;
                 if let Some(sources) = &jar.sources {
                     Self::validate_jar_location(sources, name, "sources")?;
+                    if jar.remap.is_some() {
+                        return Err(DependencyError::RemapWithSources {
+                            name: name.to_owned(),
+                        });
+                    }
                 }
                 Ok(())
             }
@@ -1267,6 +1716,38 @@ impl Dependency {
             Self::Jar(_) => true,
             Self::Git(git) => git.default_features.unwrap_or(true),
             Self::Path(path) => path.default_features.unwrap_or(true),
+        }
+    }
+
+    /// The `[mappings]` key that deobfuscates this entry's classes, when it declares one.
+    ///
+    /// Only a `jar` can: the other two forms contribute `.java`, where a rename is a different
+    /// operation entirely, and writing the key on them is a parse error. Exhaustive for the reason
+    /// [`accepts_features`](Dependency::accepts_features) is — a future form answers here rather than
+    /// inheriting whichever answer the callers assumed.
+    pub fn remap(&self) -> Option<&str> {
+        match self {
+            Self::Jar(jar) => jar.remap.as_deref(),
+            Self::Git(_) | Self::Path(_) => None,
+        }
+    }
+
+    /// Whether this entry is present only when a build feature activates it (Cargo's `optional`).
+    ///
+    /// How a manifest expresses a dependency that exists under one selection and not another. A
+    /// non-optional entry is always present, so the whole question is settled here rather than
+    /// wherever presence is asked about.
+    ///
+    /// Not exposed, because [`Manifest::active_dependencies`] is the answer a consumer wants: this
+    /// half is only meaningful beside a resolution that says what was activated, and pairing the
+    /// two at each call site is what would let them drift. Project-graph discovery does not consult
+    /// either yet — an unactivated entry is still discovered as a node — because a dependency's own
+    /// selection is settled by preprocessing, after the edges that carry it exist.
+    fn is_optional(&self) -> bool {
+        match self {
+            Self::Jar(jar) => jar.optional.unwrap_or(false),
+            Self::Git(git) => git.optional.unwrap_or(false),
+            Self::Path(path) => path.optional.unwrap_or(false),
         }
     }
 
@@ -1404,6 +1885,38 @@ impl Manifest {
             }
         }
 
+        // `[mappings]`: the value-level half, exactly as for `[dependencies]` above — serde already
+        // rejected an entry that is neither form or both.
+        for (name, mappings) in &self.mappings {
+            mappings.validate(name).map_err(ValidationError::Mapping)?;
+        }
+
+        // `[build] remap`: the referenced mapping must exist, and the jar it writes must be a
+        // portable project file outside every directory that owns its contents. `classes-dir` is
+        // handed to the compiler and scanned for output; `target/jals/build` carries the build
+        // script's ownership ledger and its stale-output sweep. A jar in either is claimed by
+        // something that does not know it is there.
+        if let Some(remap) = &self.build.remap {
+            self.require_mapping(RemapSite::Build, &remap.with)?;
+            let jar = remap.jar_path(&self.package);
+            let key = FileKey::parse(&jar)
+                .map_err(|_| ValidationError::InvalidRemapOutput { jar: jar.clone() })?;
+            if classes_dir
+                .as_ref()
+                .is_some_and(|dir| key.path().starts_with(dir.path()))
+            {
+                return Err(ValidationError::RemapOutputInClassesDir {
+                    jar,
+                    classes_dir: self.build.classes_dir.clone(),
+                });
+            }
+            let managed_root = DirKey::parse(MANAGED_BUILD_ROOT)
+                .map_err(|_| ValidationError::InvalidRemapOutput { jar: jar.clone() })?;
+            if key.path().starts_with(managed_root.path()) {
+                return Err(ValidationError::RemapOutputInManagedRoot { jar });
+            }
+        }
+
         let mut seen: Vec<&str> = Vec::with_capacity(self.bin.len());
         for bin in &self.bin {
             if bin.name.is_empty() {
@@ -1440,6 +1953,9 @@ impl Manifest {
         // warnings handled later by the host's resolver.
         for (name, dep) in &self.dependencies {
             dep.validate(name).map_err(ValidationError::Dependency)?;
+            if let Some(mapping) = dep.remap() {
+                self.require_mapping(RemapSite::Dependency(name.clone()), mapping)?;
+            }
         }
 
         // `[features]`: every local name a `default`/`enables` list references must itself be a
@@ -1456,12 +1972,72 @@ impl Manifest {
                     feature: feature.clone(),
                 });
             }
+            // Both this key and an unsuppressed implicit feature would answer to the name, and
+            // whether enabling it also activates the entry has no defensible answer. Writing
+            // `dep:<name>` somewhere settles it by removing the implicit one.
+            if self.implicit_dependency_feature(feature) {
+                return Err(ValidationError::ShadowedDependencyFeature {
+                    feature: feature.clone(),
+                });
+            }
             for entry in enables {
                 self.validate_feature_entry(feature, entry)?;
             }
         }
 
         Ok(())
+    }
+
+    /// Check that a `remap` reference names a declared `[mappings]` key.
+    ///
+    /// Only *declared*, never *active*: an entry whose `required-features` are unmet is the
+    /// documented way to say "nothing to remap here", so gating it is a resolution outcome and not a
+    /// manifest error. A name no entry declares is always a mistake, whatever the selection.
+    fn require_mapping(&self, site: RemapSite, mapping: &str) -> Result<(), ValidationError> {
+        if self.mappings.contains_key(mapping) {
+            return Ok(());
+        }
+        Err(ValidationError::UnknownMapping {
+            site,
+            mapping: mapping.to_owned(),
+            declared: self.mappings.keys().cloned().collect(),
+        })
+    }
+
+    /// The `[dependencies]` entries present under `features`, in name order: every required entry,
+    /// plus each `optional` one the resolution activated.
+    ///
+    /// The single spelling of "is this entry present?", so the two discovery adapters, the classpath
+    /// lowering, and anything that reports what a selection dropped cannot answer it differently.
+    /// Iterating `manifest.dependencies` directly is what this replaces.
+    pub fn active_dependencies<'a>(
+        &'a self,
+        features: &'a ResolvedBuildFeatures,
+    ) -> impl Iterator<Item = (&'a String, &'a Dependency)> {
+        self.dependencies
+            .iter()
+            .filter(move |(name, dep)| !dep.is_optional() || features.activates(name))
+    }
+
+    /// Whether some `[features]` list writes `dep:<dependency>`, which suppresses that entry's
+    /// implicit feature (Cargo's rule).
+    ///
+    /// The suppression is what lets a project activate a dependency from a feature of a different
+    /// name — `gpu = ["dep:vulkan"]` — without also exporting `vulkan` as a feature nobody meant to
+    /// publish.
+    fn activated_explicitly(&self, dependency: &str) -> bool {
+        self.features.values().flatten().any(|entry| {
+            matches!(FeatureRef::parse(entry), Ok(FeatureRef::Activation(name)) if name == dependency)
+        })
+    }
+
+    /// Whether `name` is the implicit feature of an optional dependency: the entry is optional and
+    /// no `dep:` mentions it.
+    fn implicit_dependency_feature(&self, name: &str) -> bool {
+        self.dependencies
+            .get(name)
+            .is_some_and(Dependency::is_optional)
+            && !self.activated_explicitly(name)
     }
 
     /// Check one `[features]` list entry of the declared feature `feature` against what this
@@ -1476,7 +2052,9 @@ impl Manifest {
             })?;
         match reference {
             FeatureRef::Local(name) => {
-                if self.features.contains_key(name) {
+                // An optional dependency's implicit feature is as declared as a `[features]` key —
+                // it is simply written in the other table.
+                if self.features.contains_key(name) || self.implicit_dependency_feature(name) {
                     Ok(())
                 } else {
                     Err(ValidationError::UndeclaredBuildFeature {
@@ -1485,6 +2063,22 @@ impl Manifest {
                     })
                 }
             }
+            // Activating something that is always present has no meaning, and reading it as a
+            // no-op would hide the real mistake: either the `optional` was forgotten, or the entry
+            // is not the one meant.
+            FeatureRef::Activation(dependency) => match self.dependencies.get(dependency) {
+                Some(dep) if dep.is_optional() => Ok(()),
+                Some(_) => Err(ValidationError::ActivatesRequiredDependency {
+                    feature: feature.to_owned(),
+                    entry: entry.to_owned(),
+                    dependency: dependency.to_owned(),
+                }),
+                None => Err(ValidationError::UndeclaredFeatureDependency {
+                    feature: feature.to_owned(),
+                    entry: entry.to_owned(),
+                    dependency: dependency.to_owned(),
+                }),
+            },
             // Routing to something with no build script is always a mistake, and the graph relies
             // on it: a `jar` name reaching the router would be ambiguous, since a jar with a
             // companion `sources` archive contributes two edges under one name.
@@ -1547,23 +2141,35 @@ impl Manifest {
             // A malformed entry cannot route anywhere, and `validate` has already rejected every
             // shape a manifest can write, so treat the leftovers as opaque local names rather than
             // inventing a failure mode a dependency's arriving set would have to handle.
-            if let Ok(FeatureRef::Dependency {
-                dependency,
-                feature,
-            }) = FeatureRef::parse(&entry)
-            {
-                resolved
-                    .dependencies
-                    .entry(dependency.to_owned())
-                    .or_default()
-                    .insert(feature.to_owned());
-                continue;
+            match FeatureRef::parse(&entry) {
+                Ok(FeatureRef::Dependency {
+                    dependency,
+                    feature,
+                }) => {
+                    resolved
+                        .dependencies
+                        .entry(dependency.to_owned())
+                        .or_default()
+                        .insert(feature.to_owned());
+                    continue;
+                }
+                Ok(FeatureRef::Activation(dependency)) => {
+                    resolved.activated.insert(dependency.to_owned());
+                    continue;
+                }
+                _ => {}
             }
             if resolved.features.contains(&entry) {
                 continue;
             }
             if let Some(enables) = declared.get(&entry) {
                 pending.extend(enables.iter().cloned());
+            }
+            // An optional dependency with no `dep:` anywhere declares a feature of its own name that
+            // activates it. Resolved here rather than by rewriting `[features]` beforehand, so the
+            // table a manifest wrote stays the table `validate` reported against.
+            if self.implicit_dependency_feature(&entry) {
+                resolved.activated.insert(entry.clone());
             }
             resolved.features.insert(entry);
         }
@@ -1602,9 +2208,17 @@ impl Manifest {
         for name in selected {
             match FeatureRef::parse(name) {
                 Ok(FeatureRef::Local(local)) => {
-                    if !self.features.contains_key(local) {
+                    if !self.features.contains_key(local)
+                        && !self.implicit_dependency_feature(local)
+                    {
                         return Err(BuildFeatureError::UnknownSelected { name: name.clone() });
                     }
+                }
+                // `dep:` is a `[features]` directive, not a selection. Accepting it on the command
+                // line would let a build turn on a dependency the manifest never wired to any
+                // feature, which is the coupling `dep:` exists to make explicit.
+                Ok(FeatureRef::Activation(_)) => {
+                    return Err(BuildFeatureError::ActivationSelected { name: name.clone() });
                 }
                 Ok(FeatureRef::Dependency { dependency, .. }) => {
                     if !self
@@ -1809,6 +2423,71 @@ pub enum ValidationError {
         /// The `jar` dependency name.
         dependency: String,
     },
+    /// A `dep:<dependency>` entry names a `[dependencies]` entry that is not `optional`, so there is
+    /// nothing to activate.
+    ActivatesRequiredDependency {
+        /// The declared feature (or `default`) whose list carries the entry.
+        feature: String,
+        /// The offending entry, as written.
+        entry: String,
+        /// The always-present dependency name.
+        dependency: String,
+    },
+    /// A `[features]` key has the same name as an optional dependency that no `dep:` mentions, so
+    /// the key and that entry's implicit feature would both claim the name.
+    ShadowedDependencyFeature {
+        /// The colliding name.
+        feature: String,
+    },
+    /// A `[mappings]` entry could not be classified. Wraps the classification [`MappingError`] so
+    /// the two layers share one message, exactly as [`Dependency`](ValidationError::Dependency) does.
+    Mapping(MappingError),
+    /// A `remap` key references a `[mappings]` entry this manifest does not declare.
+    UnknownMapping {
+        /// Where the reference was written.
+        site: RemapSite,
+        /// The undeclared `[mappings]` key.
+        mapping: String,
+        /// The declared keys, for an actionable message.
+        declared: Vec<String>,
+    },
+    /// A `[build] remap` jar is not a non-root portable project file path.
+    InvalidRemapOutput {
+        /// The invalid jar path, after the `[package]`-derived default was applied.
+        jar: String,
+    },
+    /// A `[build] remap` jar is inside `target/jals/build`, whose ownership ledger and stale-output
+    /// sweep know nothing about it.
+    RemapOutputInManagedRoot {
+        /// The unsafe jar path.
+        jar: String,
+    },
+    /// A `[build] remap` jar is inside `classes-dir`, which the compiler writes and `jals clean`
+    /// removes.
+    RemapOutputInClassesDir {
+        /// The unsafe jar path.
+        jar: String,
+        /// The compiler output directory containing it.
+        classes_dir: String,
+    },
+}
+
+/// Where a `remap` reference was written, for [`ValidationError::UnknownMapping`]'s message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemapSite {
+    /// A `[dependencies]` entry's `remap`, named by its dependency key.
+    Dependency(String),
+    /// `[build] remap`'s `with`.
+    Build,
+}
+
+impl fmt::Display for RemapSite {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Dependency(name) => write!(f, "dependency `{name}`"),
+            Self::Build => f.write_str("`[build] remap`"),
+        }
+    }
 }
 
 impl fmt::Display for ValidationError {
@@ -1874,6 +2553,46 @@ impl fmt::Display for ValidationError {
                 "`[features] {feature}` enables `{entry}`, but `{dependency}` is a `jar` \
                  dependency, which runs no build script that could read a feature"
             ),
+            Self::ActivatesRequiredDependency {
+                feature,
+                entry,
+                dependency,
+            } => write!(
+                f,
+                "`[features] {feature}` enables `{entry}`, but `{dependency}` is not `optional`, \
+                 so it is present whatever the selection"
+            ),
+            Self::ShadowedDependencyFeature { feature } => write!(
+                f,
+                "`[features]` declares `{feature}`, which is also the implicit feature of the \
+                 optional dependency `{feature}` (write `dep:{feature}` in the list that should \
+                 activate it, which suppresses the implicit one)"
+            ),
+            Self::Mapping(err) => write!(f, "{err}"),
+            Self::UnknownMapping {
+                site,
+                mapping,
+                declared,
+            } => write!(
+                f,
+                "{site} remaps with `{mapping}`, which is not a declared `[mappings]` entry \
+                 (declared: {})",
+                declared.join(", ")
+            ),
+            Self::InvalidRemapOutput { jar } => write!(
+                f,
+                "invalid `[build] remap` jar `{jar}`: expected a non-root portable file path"
+            ),
+            Self::RemapOutputInManagedRoot { jar } => write!(
+                f,
+                "invalid `[build] remap` jar `{jar}`: it must be outside `target/jals/build`, whose \
+                 stale-output sweep would claim it"
+            ),
+            Self::RemapOutputInClassesDir { jar, classes_dir } => write!(
+                f,
+                "invalid `[build] remap` jar `{jar}`: it must be outside `[build] classes-dir` \
+                 `{classes_dir}`, which the compiler writes and `jals clean` removes"
+            ),
         }
     }
 }
@@ -1882,6 +2601,7 @@ impl Error for ValidationError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Dependency(err) => Some(err),
+            Self::Mapping(err) => Some(err),
             Self::InvalidFeatureRef { reason, .. } => Some(reason),
             _ => None,
         }
@@ -2825,6 +3545,8 @@ mod tests {
             jar: jar.to_owned(),
             sources: None,
             recursive: None,
+            remap: None,
+            optional: None,
         })
     }
 
@@ -2900,6 +3622,8 @@ mod tests {
                 jar: "libs/lib.jar".to_owned(),
                 sources: Some("libs/lib-sources.jar".to_owned()),
                 recursive: None,
+                remap: None,
+                optional: None,
             }))
         );
     }
@@ -2912,6 +3636,8 @@ mod tests {
                 jar: "libs/lib.jar".to_owned(),
                 sources: Some("ftp://example.com/lib-sources.jar".to_owned()),
                 recursive: None,
+                remap: None,
+                optional: None,
             }),
         );
         assert_eq!(
@@ -2946,6 +3672,7 @@ mod tests {
                 dir: Some("core/src/main/java".to_owned()),
                 features: vec!["hello".to_owned()],
                 default_features: None,
+                optional: None,
             }))
         );
         assert_eq!(
@@ -2955,6 +3682,7 @@ mod tests {
                 dir: None,
                 features: Vec::new(),
                 default_features: None,
+                optional: None,
             }))
         );
     }
@@ -2969,6 +3697,7 @@ mod tests {
             dir: None,
             features: Vec::new(),
             default_features: None,
+            optional: None,
         };
         assert_eq!(make(None, None, None).git_ref("r"), Ok(GitRef::Default));
         assert_eq!(
@@ -3100,6 +3829,8 @@ mod tests {
                 jar: "libs/fat.jar".to_owned(),
                 sources: None,
                 recursive: Some(true),
+                remap: None,
+                optional: None,
             }))
         );
     }
@@ -3114,6 +3845,8 @@ mod tests {
                         jar: "libs/fat.jar".to_owned(),
                         sources: None,
                         recursive: Some(true),
+                        remap: None,
+                        optional: None,
                     }),
                 ),
                 // A plain jar (no flag) and an explicit `recursive = false` are both excluded.
@@ -3124,6 +3857,8 @@ mod tests {
                         jar: "libs/off.jar".to_owned(),
                         sources: None,
                         recursive: Some(false),
+                        remap: None,
+                        optional: None,
                     }),
                 ),
                 // `git`/`path` forms never carry the flag.
@@ -3134,6 +3869,7 @@ mod tests {
                         dir: None,
                         features: Vec::new(),
                         default_features: None,
+                        optional: None,
                     }),
                 ),
             ]),
@@ -3160,6 +3896,7 @@ mod tests {
                 dir: None,
                 features: Vec::new(),
                 default_features: None,
+                optional: None,
             }),
         );
         assert_eq!(
@@ -3314,5 +4051,348 @@ mod tests {
 
         let bad_toml = "not = = toml".parse::<Manifest>();
         assert!(matches!(bad_toml, Err(ManifestParseError::Parse { .. })));
+    }
+
+    #[test]
+    fn an_optional_dependency_declares_an_implicit_feature() {
+        let manifest: Manifest = r#"
+            [features]
+            default = []
+
+            [dependencies]
+            render = { path = "../render", optional = true }
+            core = { path = "../core" }
+            "#
+        .parse()
+        .unwrap();
+
+        // Nothing selected: the required entry is present and the optional one is not.
+        let none = manifest.resolve_build_features(&[], false, false).unwrap();
+        assert_eq!(
+            manifest
+                .active_dependencies(&none)
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["core"]
+        );
+
+        // The implicit feature is a real, queryable feature — not just a switch.
+        let selected = manifest
+            .resolve_build_features(&["render".to_owned()], false, false)
+            .unwrap();
+        assert!(selected.features().contains("render"));
+        assert!(selected.activates("render"));
+        assert_eq!(
+            manifest
+                .active_dependencies(&selected)
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            ["core", "render"]
+        );
+    }
+
+    #[test]
+    fn a_dep_entry_suppresses_the_implicit_feature() {
+        // Naming the entry with `dep:` is what lets a feature of a *different* name carry it, and
+        // it is also what stops the dependency's own name from becoming a published feature.
+        let manifest: Manifest = r#"
+            [features]
+            gpu = ["dep:render"]
+
+            [dependencies]
+            render = { path = "../render", optional = true }
+            "#
+        .parse()
+        .unwrap();
+
+        let by_name = manifest.resolve_build_features(&["render".to_owned()], false, false);
+        assert!(
+            matches!(by_name, Err(BuildFeatureError::UnknownSelected { .. })),
+            "the implicit feature must be gone: {by_name:?}"
+        );
+
+        let gpu = manifest
+            .resolve_build_features(&["gpu".to_owned()], false, false)
+            .unwrap();
+        assert!(gpu.activates("render"));
+        // The directive routes; it is never itself queryable, exactly like `<dep>/<feature>`.
+        assert_eq!(gpu.features(), &BTreeSet::from(["gpu".to_owned()]));
+    }
+
+    #[test]
+    fn activation_rejects_what_it_cannot_switch_on() {
+        let required: Manifest = toml::from_str(
+            "[features]\nf = [\"dep:c\"]\n[dependencies]\nc = { path = \"../c\" }\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            required.validate(),
+            Err(ValidationError::ActivatesRequiredDependency { .. })
+        ));
+
+        let undeclared: Manifest = toml::from_str("[features]\nf = [\"dep:nope\"]\n").unwrap();
+        assert!(matches!(
+            undeclared.validate(),
+            Err(ValidationError::UndeclaredFeatureDependency { .. })
+        ));
+
+        // Activating an entry and enabling a feature in it are two directives.
+        let both: Manifest = toml::from_str(
+            "[features]\nf = [\"dep:r/vulkan\"]\n[dependencies]\nr = { path = \"../r\", optional = true }\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            both.validate(),
+            Err(ValidationError::InvalidFeatureRef {
+                reason: FeatureRefError::ActivationWithFeature,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn a_features_key_may_not_shadow_an_implicit_dependency_feature() {
+        let shadowed: Manifest = toml::from_str(
+            "[features]\nrender = []\n[dependencies]\nrender = { path = \"../r\", optional = true }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            shadowed.validate(),
+            Err(ValidationError::ShadowedDependencyFeature {
+                feature: "render".to_owned()
+            })
+        );
+
+        // Writing `dep:` anywhere removes the implicit feature, so the key is unambiguous again.
+        let disambiguated: Manifest = toml::from_str(
+            "[features]\nrender = [\"dep:render\"]\n[dependencies]\nrender = { path = \"../r\", optional = true }\n",
+        )
+        .unwrap();
+        disambiguated.validate().unwrap();
+        let resolved = disambiguated
+            .resolve_build_features(&["render".to_owned()], false, false)
+            .unwrap();
+        assert!(resolved.activates("render"));
+    }
+
+    #[test]
+    fn dep_activation_is_not_a_command_line_selection() {
+        // The manifest decides which feature carries an entry; the command line selects features.
+        let manifest: Manifest =
+            toml::from_str("[dependencies]\nr = { path = \"../r\", optional = true }\n").unwrap();
+        assert_eq!(
+            manifest.resolve_build_features(&["dep:r".to_owned()], false, false),
+            Err(BuildFeatureError::ActivationSelected {
+                name: "dep:r".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn parses_both_mapping_forms() {
+        let manifest: Manifest = r#"
+            [mappings.local]
+            file = "mappings/server.txt"
+
+            [mappings.mojmap]
+            url = "https://piston-data.example/server.txt"
+            sha1 = "aa5b7"
+            max-bytes = 16777216
+            required-features = ["obfuscated"]
+            "#
+        .parse()
+        .unwrap();
+
+        let local = &manifest.mappings["local"];
+        assert!(matches!(local, MappingSource::File(_)));
+        // Both forms default the format, so an entry that says nothing still names one grammar.
+        assert_eq!(local.format(), MappingFormatKind::Proguard {});
+        assert!(local.required_features().is_empty());
+
+        let MappingSource::Url(mojmap) = &manifest.mappings["mojmap"] else {
+            panic!("the `url` form should classify as `Url`");
+        };
+        assert_eq!(
+            mojmap.digest("mojmap"),
+            Ok(MappingDigest::Sha1("aa5b7".to_owned()))
+        );
+        assert_eq!(mojmap.max_bytes, 16_777_216);
+    }
+
+    #[test]
+    fn mapping_forms_are_mutually_exclusive_at_parse() {
+        // Same shape as `[dependencies]`: the untagged variants plus `deny_unknown_fields` are what
+        // make "both forms", "neither form", and "field on the wrong form" parse errors rather than
+        // late diagnostics.
+        for entry in [
+            r#"m = { file = "a.txt", url = "https://e/a.txt", sha1 = "x", max-bytes = 1 }"#,
+            "m = {}",
+            r#"m = { file = "a.txt", sha1 = "x" }"#,
+            r#"m = { url = "https://e/a.txt", sha1 = "x", max-bytes = 1, bogus = 1 }"#,
+        ] {
+            let mut source = String::from("[mappings]\n");
+            source.push_str(entry);
+            let parsed: Result<Manifest, _> = toml::from_str(&source);
+            assert!(parsed.is_err(), "`{entry}` should not parse");
+        }
+    }
+
+    #[test]
+    fn a_fetched_mapping_needs_https_and_exactly_one_digest() {
+        let http: Manifest = toml::from_str(
+            "[mappings]\nm = { url = \"http://e/a.txt\", sha1 = \"x\", max-bytes = 1 }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            http.validate(),
+            Err(ValidationError::Mapping(MappingError::NotHttps {
+                name: "m".to_owned(),
+                value: "http://e/a.txt".to_owned(),
+            }))
+        );
+
+        // Neither digest and both digests fail the same way: the fetch is authenticated by exactly
+        // one, so "which one" is never a question the executor has to answer.
+        for digests in ["", "sha1 = \"x\", sha256 = \"y\", "] {
+            let mut source = String::from("[mappings]\nm = { url = \"https://e/a.txt\", ");
+            source.push_str(digests);
+            source.push_str("max-bytes = 1 }\n");
+            let manifest: Manifest = toml::from_str(&source).unwrap();
+            assert_eq!(
+                manifest.validate(),
+                Err(ValidationError::Mapping(MappingError::Digest {
+                    name: "m".to_owned()
+                })),
+                "`{digests}` should not authenticate a fetch"
+            );
+        }
+    }
+
+    #[test]
+    fn a_remap_must_name_a_declared_mapping() {
+        let dependency: Manifest =
+            toml::from_str("[dependencies]\nj = { jar = \"libs/x.jar\", remap = \"nope\" }\n")
+                .unwrap();
+        assert_eq!(
+            dependency.validate(),
+            Err(ValidationError::UnknownMapping {
+                site: RemapSite::Dependency("j".to_owned()),
+                mapping: "nope".to_owned(),
+                declared: Vec::new(),
+            })
+        );
+
+        let build: Manifest = toml::from_str(
+            "[build]\nremap = { with = \"nope\" }\n[mappings]\nm = { file = \"a\" }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            build.validate(),
+            Err(ValidationError::UnknownMapping {
+                site: RemapSite::Build,
+                mapping: "nope".to_owned(),
+                declared: alloc::vec!["m".to_owned()],
+            })
+        );
+    }
+
+    #[test]
+    fn a_declared_but_inactive_mapping_is_not_an_error() {
+        // The whole point of `required-features`: "this release ships no mappings" has to be
+        // expressible, and it is a resolution outcome rather than a manifest mistake. Validation
+        // knows nothing about the selection, so it can only check that the name is declared.
+        let manifest: Manifest = r#"
+            [features]
+            obfuscated = []
+
+            [dependencies]
+            game = { jar = "libs/game.jar", remap = "mojmap" }
+
+            [mappings.mojmap]
+            file = "mappings/server.txt"
+            required-features = ["obfuscated"]
+            "#
+        .parse()
+        .unwrap();
+
+        let mapping = &manifest.mappings["mojmap"];
+        assert!(!mapping.is_active(&BTreeSet::new()));
+        assert!(mapping.is_active(&BTreeSet::from(["obfuscated".to_owned()])));
+    }
+
+    #[test]
+    fn remap_only_exists_on_the_jar_form() {
+        for entry in [
+            r#"d = { path = "../s", remap = "m" }"#,
+            r#"d = { git = "https://e/r.git", remap = "m" }"#,
+        ] {
+            let mut source = String::from("[dependencies]\n");
+            source.push_str(entry);
+            let parsed: Result<Manifest, _> = toml::from_str(&source);
+            assert!(
+                parsed.is_err(),
+                "`remap` on a source dependency should not parse: `{entry}`"
+            );
+        }
+    }
+
+    #[test]
+    fn remap_and_sources_cannot_both_be_declared() {
+        let manifest: Manifest = toml::from_str(
+            "[dependencies]\nj = { jar = \"a.jar\", sources = \"a-sources.jar\", remap = \"m\" }\n\
+             [mappings]\nm = { file = \"a\" }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            manifest.validate(),
+            Err(ValidationError::Dependency(
+                DependencyError::RemapWithSources {
+                    name: "j".to_owned()
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn the_remap_jar_defaults_to_the_package_name_and_is_kept_out_of_owned_roots() {
+        let remap = BuildRemap {
+            with: "m".to_owned(),
+            jar: None,
+        };
+        assert_eq!(
+            remap.jar_path(&Package {
+                name: Some("mymod".to_owned()),
+                version: Some("0.1.0".to_owned()),
+                ..Default::default()
+            }),
+            "target/jals/remap/mymod-0.1.0.jar"
+        );
+        // `[package]` has always been informational; a project without it still gets a jar.
+        assert_eq!(
+            remap.jar_path(&Package::default()),
+            "target/jals/remap/remapped.jar"
+        );
+
+        // Both rejections are about *ownership*: something else already claims everything under
+        // those two roots and would remove or re-read this jar without knowing what it is.
+        let in_classes: Manifest = toml::from_str(
+            "[build]\nremap = { with = \"m\", jar = \"target/classes/out.jar\" }\n\
+             [mappings]\nm = { file = \"a\" }\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            in_classes.validate(),
+            Err(ValidationError::RemapOutputInClassesDir { .. })
+        ));
+
+        let in_managed: Manifest = toml::from_str(
+            "[build]\nremap = { with = \"m\", jar = \"target/jals/build/out.jar\" }\n\
+             [mappings]\nm = { file = \"a\" }\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            in_managed.validate(),
+            Err(ValidationError::RemapOutputInManagedRoot { .. })
+        ));
     }
 }

@@ -8,6 +8,15 @@ use jals_classpath::{Fetcher, NativeProjectPlan, ProjectInputOptions, ProjectInp
 use jals_config::Manifest;
 use jals_storage::{CacheNamespace, NativeStorage};
 
+/// The build features a test project resolves with nothing selected — its own `[features] default`
+/// closure. Every one of these fixtures declares no features, so this is the empty set; it exists so
+/// the call sites read as "the default selection" rather than as a magic empty value.
+fn features(manifest: &jals_config::Manifest) -> jals_config::ResolvedBuildFeatures {
+    manifest
+        .resolve_build_features(&[], false, false)
+        .expect("fixtures declare no features")
+}
+
 struct NoFetch;
 
 impl Fetcher for NoFetch {
@@ -75,7 +84,12 @@ fixture = {{ git = "{locator}" }}
         )
         .await
         .unwrap();
-        let mut plan = NativeProjectPlan::from_manifest(&manifest, project.path(), &storage.view());
+        let mut plan = NativeProjectPlan::from_manifest(
+            &manifest,
+            &features(&manifest),
+            project.path(),
+            &storage.view(),
+        );
         plan.materialize_git_sources(project.path(), &mut storage, ProjectInputOptions::Compile)
             .await;
         assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
@@ -148,8 +162,12 @@ fixture = {{ git = "{locator}", rev = "{rev}" }}
         .await
         .unwrap();
 
-        let mut first =
-            NativeProjectPlan::from_manifest(&manifest, project.path(), &storage.view());
+        let mut first = NativeProjectPlan::from_manifest(
+            &manifest,
+            &features(&manifest),
+            project.path(),
+            &storage.view(),
+        );
         first
             .materialize_git_sources(project.path(), &mut storage, ProjectInputOptions::Compile)
             .await;
@@ -159,8 +177,12 @@ fixture = {{ git = "{locator}", rev = "{rev}" }}
         // The repository is gone; only the published cache can satisfy the second assembly.
         drop(repository);
 
-        let mut second =
-            NativeProjectPlan::from_manifest(&manifest, project.path(), &storage.view());
+        let mut second = NativeProjectPlan::from_manifest(
+            &manifest,
+            &features(&manifest),
+            project.path(),
+            &storage.view(),
+        );
         second
             .materialize_git_sources(project.path(), &mut storage, ProjectInputOptions::Compile)
             .await;

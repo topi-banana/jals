@@ -11,6 +11,15 @@ use jals_classpath::{
 use jals_config::Manifest;
 use jals_storage::{CacheNamespace, DirKey, NativeStorage};
 
+/// The build features a test project resolves with nothing selected — its own `[features] default`
+/// closure. Every one of these fixtures declares no features, so this is the empty set; it exists so
+/// the call sites read as "the default selection" rather than as a magic empty value.
+fn features(manifest: &jals_config::Manifest) -> jals_config::ResolvedBuildFeatures {
+    manifest
+        .resolve_build_features(&[], false, false)
+        .expect("fixtures declare no features")
+}
+
 struct NoFetch;
 
 impl Fetcher for NoFetch {
@@ -45,7 +54,12 @@ classpath = ["./libs/dep.jar"]
         )
         .await
         .unwrap();
-        NativeProjectPlan::from_manifest(&manifest, project.path(), &storage.view())
+        NativeProjectPlan::from_manifest(
+            &manifest,
+            &features(&manifest),
+            project.path(),
+            &storage.view(),
+        )
     })
     .expect("test runtime bootstraps");
     assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
@@ -81,7 +95,12 @@ fn in_project_path_dependency_auto_detects_conventional_source_root() {
         )
         .await
         .unwrap();
-        NativeProjectPlan::from_manifest(&manifest, project.path(), &storage.view())
+        NativeProjectPlan::from_manifest(
+            &manifest,
+            &features(&manifest),
+            project.path(),
+            &storage.view(),
+        )
     })
     .expect("test runtime bootstraps");
     assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
@@ -108,7 +127,12 @@ fn sibling_path_dependency_is_scanned_and_published() {
         let mut storage = NativeStorage::native(&project, project.join("target/jals/cache"), exec)
             .await
             .unwrap();
-        let mut plan = NativeProjectPlan::from_manifest(&manifest, &project, &storage.view());
+        let mut plan = NativeProjectPlan::from_manifest(
+            &manifest,
+            &features(&manifest),
+            &project,
+            &storage.view(),
+        );
         assert!(plan.plan.source_dependency_roots.is_empty());
         plan.materialize_path_sources(&project, &mut storage, ProjectInputOptions::Compile)
             .await;
@@ -154,7 +178,12 @@ fn missing_path_dependency_is_a_warning_not_a_panic() {
         )
         .await
         .unwrap();
-        let mut plan = NativeProjectPlan::from_manifest(&manifest, project.path(), &storage.view());
+        let mut plan = NativeProjectPlan::from_manifest(
+            &manifest,
+            &features(&manifest),
+            project.path(),
+            &storage.view(),
+        );
         plan.materialize_path_sources(project.path(), &mut storage, ProjectInputOptions::Compile)
             .await;
         assert_eq!(plan.warnings.len(), 1);
@@ -183,7 +212,12 @@ trailing = { path = "../sibling", dir = "src/" }
         let mut storage = NativeStorage::native(&project, project.join("target/jals/cache"), exec)
             .await
             .unwrap();
-        let mut plan = NativeProjectPlan::from_manifest(&manifest, &project, &storage.view());
+        let mut plan = NativeProjectPlan::from_manifest(
+            &manifest,
+            &features(&manifest),
+            &project,
+            &storage.view(),
+        );
         plan.materialize_path_sources(&project, &mut storage, ProjectInputOptions::Compile)
             .await;
 
@@ -228,6 +262,7 @@ classpath = ["../sibling-classes", "{absolute_class}"]
             .unwrap();
         NativeProjectPlan::assemble_native(
             &manifest,
+            &features(&manifest),
             &project,
             &mut storage,
             ProjectInputOptions::Editor,

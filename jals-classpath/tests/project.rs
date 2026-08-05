@@ -38,6 +38,7 @@ fn setup() -> (MemoryStorage, ProjectInputPlan) {
             name: Name::new("box").unwrap(),
             location: DependencyLocation::Project(FileKey::parse("lib/box.jar").unwrap()),
             recursive: false,
+            remap: None,
         }],
         feature_set: FeatureSet::resolve(&[Feature::Java25]),
         ..ProjectInputPlan::default()

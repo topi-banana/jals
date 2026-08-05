@@ -82,6 +82,33 @@ pub enum TaskFetchKind {
     Text,
 }
 
+/// The grammar a [`TaskNodeKind::RemapJar`]'s mapping text is written in.
+///
+/// The plan's own spelling of `jals_classpath::MappingFormat`: this crate is the portable IR and
+/// does not depend on the implementation, and the wire name here is frozen by written cache records
+/// while that enum's is frozen by nothing. Keeping them separate is the same split
+/// [`TaskPublishIntent`] makes between its serde tag and its script keyword.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TaskMappingFormat {
+    /// The ProGuard-style text Mojang publishes per Minecraft release.
+    Proguard,
+}
+
+/// Which way a [`TaskNodeKind::RemapJar`] applies its mapping file.
+///
+/// One file describes a pair of namespaces; this says which of them the jar being remapped is
+/// written in. It is part of the node rather than inferred because a jar in the wrong namespace
+/// remaps to nothing and still produces a plausible archive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TaskRemapDirection {
+    /// Obfuscated → official: a shipped library becomes the names a project is written against.
+    Deobfuscate,
+    /// Official → obfuscated: compiled output becomes the names its runtime loads.
+    Reobfuscate,
+}
+
 /// One value-producing node in a task plan.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
@@ -90,6 +117,15 @@ pub enum TaskNodeKind {
         value: String,
     },
     ProjectJar {
+        path: String,
+    },
+    /// UTF-8 text read from the immutable project snapshot.
+    ///
+    /// The counterpart of `ProjectJar` for the one other kind of bytes a plan consumes. Without it
+    /// a mapping file checked into the repository cannot be used at all — the only producer of
+    /// [`TaskValueKind::Text`] was an HTTPS fetch, which is the wrong shape for something already
+    /// under version control.
+    ProjectText {
         path: String,
     },
     Digest {
@@ -139,6 +175,14 @@ pub enum TaskNodeKind {
     RemapJar {
         jar: TaskId,
         mappings: TaskId,
+        format: TaskMappingFormat,
+        direction: TaskRemapDirection,
+        /// Jars read for their class hierarchy only — never remapped, never in the output.
+        ///
+        /// A jar whose supertypes live elsewhere cannot be remapped correctly from itself alone:
+        /// an inherited member resolves against a supertype nobody declared, misses, and keeps its
+        /// source name in an otherwise remapped archive.
+        hierarchy: Vec<TaskId>,
     },
     MergeJars {
         base: TaskId,
@@ -165,7 +209,8 @@ impl TaskNodeKind {
             Self::Fetch {
                 kind: TaskFetchKind::Text,
                 ..
-            } => TaskValueKind::Text,
+            }
+            | Self::ProjectText { .. } => TaskValueKind::Text,
             Self::Fetch {
                 kind: TaskFetchKind::Jar,
                 ..
@@ -182,6 +227,7 @@ impl TaskNodeKind {
         match self {
             Self::HttpsUrl { .. }
             | Self::ProjectJar { .. }
+            | Self::ProjectText { .. }
             | Self::Digest { .. }
             | Self::ByteCount { .. } => Vec::new(),
             Self::Fetch {
@@ -203,8 +249,15 @@ impl TaskNodeKind {
                 vec![(*jar, TaskValueKind::Jar)]
             }
             Self::NestedJar { jar, .. } => vec![(*jar, TaskValueKind::Jar)],
-            Self::RemapJar { jar, mappings } => {
-                vec![(*jar, TaskValueKind::Jar), (*mappings, TaskValueKind::Text)]
+            Self::RemapJar {
+                jar,
+                mappings,
+                hierarchy,
+                ..
+            } => {
+                let mut inputs = vec![(*jar, TaskValueKind::Jar), (*mappings, TaskValueKind::Text)];
+                inputs.extend(hierarchy.iter().map(|id| (*id, TaskValueKind::Jar)));
+                inputs
             }
             Self::MergeJars { base, overlay } => {
                 vec![(*base, TaskValueKind::Jar), (*overlay, TaskValueKind::Jar)]
@@ -221,6 +274,7 @@ impl TaskNodeKind {
         match self {
             Self::HttpsUrl { value }
             | Self::ProjectJar { path: value }
+            | Self::ProjectText { path: value }
             | Self::Digest { value, .. } => value.len(),
             Self::ByteCount { .. }
             | Self::Fetch { .. }
@@ -464,7 +518,7 @@ impl TaskPlan {
                     return Err(TaskPlanError::InvalidHttpsUrl);
                 }
             }
-            TaskNodeKind::ProjectJar { path } => {
+            TaskNodeKind::ProjectJar { path } | TaskNodeKind::ProjectText { path } => {
                 Self::validate_path(path, limits, false)?;
             }
             TaskNodeKind::Digest { algorithm, value } => {
@@ -928,10 +982,19 @@ impl TasksApi {
         .map(JarTask)
     }
 
+    /// `tasks.remap_jar(jar, mappings)` — deobfuscate a jar that closes over its own hierarchy.
+    ///
+    /// The script surface keeps the two arguments it has always had, and the node's other three
+    /// fields take the values that spelling has always meant. A script fetching a game jar and its
+    /// mappings is asking for exactly this; the manifest's `remap` keys are where the other
+    /// direction and an extra hierarchy are said.
     fn remap_jar(api: &mut Self, jar: JarTask, mappings: TextTask) -> RhaiResult<JarTask> {
         api.push(TaskNodeKind::RemapJar {
             jar: jar.0.id,
             mappings: mappings.0.id,
+            format: TaskMappingFormat::Proguard,
+            direction: TaskRemapDirection::Deobfuscate,
+            hierarchy: Vec::new(),
         })
         .map(JarTask)
     }

@@ -15,8 +15,8 @@ use jals_storage::{
 
 use crate::graph::{
     BinaryInput, CapturedClasspathEntry, CapturedClasspathKind, CapturedFile, CycleEdge,
-    DeclaredEdgeFeatures, GraphEdge, GraphError, GraphWarning, NodeBody, NodeId, ResolvedNode,
-    ResolvedProjectGraph, SourceNode,
+    DeclaredBinaryEdge, DeclaredEdgeFeatures, EdgeRemap, GraphEdge, GraphError, GraphWarning,
+    NodeBody, NodeId, ResolvedNode, ResolvedProjectGraph, SourceNode,
 };
 
 /// Portable entry point for recursive dependency discovery inside one captured [`CodeTree`].
@@ -103,13 +103,19 @@ impl GraphBuilder {
             for (name, dependency) in &manifest.dependencies {
                 match dependency {
                     Dependency::Jar(jar) => {
+                        let remap = match EdgeRemap::of(manifest, dependency) {
+                            Ok(remap) => remap,
+                            Err(message) => {
+                                self.warn_declared(parent.as_ref(), name, message);
+                                None
+                            }
+                        };
                         if let Err(message) = self.visit_binary(
                             parent.clone(),
                             declaring,
                             name,
                             &jar.jar,
-                            jar.recursive.unwrap_or(false),
-                            false,
+                            DeclaredBinaryEdge::classes(jar.recursive.unwrap_or(false), remap),
                         ) {
                             self.warn_declared(parent.as_ref(), name, message);
                         }
@@ -119,8 +125,7 @@ impl GraphBuilder {
                                 declaring,
                                 name,
                                 sources,
-                                false,
-                                true,
+                                DeclaredBinaryEdge::sources(),
                             )
                         {
                             self.warn_declared(parent.as_ref(), name, message);
@@ -163,6 +168,8 @@ impl GraphBuilder {
             recursive: false,
             features: declared.features,
             default_features: declared.default_features,
+            // Only a `jar` entry can carry one, and this is the source-form edge.
+            remap: None,
         };
         self.edges.push(incoming.clone());
         match self.states.get(&acquired.id) {
@@ -228,9 +235,13 @@ impl GraphBuilder {
         declaring: &RelativePath,
         dependency: &str,
         locator: &str,
-        recursive: bool,
-        source_archive: bool,
+        declared: DeclaredBinaryEdge,
     ) -> Result<(), String> {
+        let DeclaredBinaryEdge {
+            recursive,
+            source_archive,
+            remap,
+        } = declared;
         let role = if source_archive { "source" } else { "binary" };
         let (id, input) = if locator.starts_with("http://") || locator.starts_with("https://") {
             let id = NodeId::from_identity(format!("memory-{role}-external\0{locator}").as_bytes());
@@ -273,6 +284,7 @@ impl GraphBuilder {
             recursive,
             features: binary.features,
             default_features: binary.default_features,
+            remap,
         });
         if !self.seen_nodes.insert(id.clone()) {
             return Ok(());

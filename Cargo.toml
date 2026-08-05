@@ -97,7 +97,7 @@ rhai = { version = "=1.25.1", default-features = false, features = [
   "no_time",
   "no_custom_syntax",
 ] }
-rowan = { version = "0.16.1" }
+rowan = { version = "0.17.0" }
 serde = { version = "1.0.219", default-features = false, features = [
   "derive",
   "alloc",

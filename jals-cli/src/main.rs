@@ -680,6 +680,7 @@ impl BuildArgs {
             .await
             .map_err(|e| anyhow!("{e}"))?;
         App::finish_compile(&manifest, &root, &outcome, &inputs).await?;
+        App::finish_remap(&manifest, &root, exec, &features, &outcome, &inputs).await?;
         Ok(App::outcome_exit_code(outcome.code()))
     }
 }
@@ -1210,6 +1211,12 @@ struct App;
 #[derive(Default)]
 struct HostProjectInputs {
     extra_classpath: Vec<PathBuf>,
+    /// The resolved dependency jars, as verified cache artifacts.
+    ///
+    /// Kept beside `extra_classpath` rather than derived from it: a post-compile remap needs the
+    /// compile classpath as a *class hierarchy*, and re-reading those paths off disk to publish
+    /// them again would be the same bytes acquired a second way.
+    dependency_jars: Vec<jals_storage::CacheKey>,
     classpath_classes: Vec<jals_classfile::ClassFile>,
     extra_sources: Vec<PathBuf>,
     /// Root-script resources, as (destination below `classes-dir`, source file). Root-only, like
@@ -1430,6 +1437,10 @@ impl App {
             // not assemble`, and the one that used to be here restated it.
             return Err(anyhow!("{messages}"));
         }
+
+        result
+            .dependency_jars
+            .clone_from(&assembly.inputs.dependency_jars);
 
         for entry in &assembly.compile_classpath {
             let path = match entry {
@@ -2094,6 +2105,114 @@ impl App {
         }
         files.sort();
         Ok(files)
+    }
+
+    /// Run the post-compile `[build] remap`, when the manifest asks for one.
+    ///
+    /// This host never matches on `[build] remap` itself: it asks
+    /// [`RemapSelection`](jals_project::RemapSelection) once and does what comes back. What is left
+    /// here is only what a host path forces — collecting the class bytes, and writing the jar.
+    async fn finish_remap(
+        manifest: &Manifest,
+        root: &Path,
+        exec: &Exec,
+        features: &ResolvedBuildFeatures,
+        outcome: &jals_build::BackendOutcome,
+        inputs: &HostProjectInputs,
+    ) -> Result<()> {
+        if !outcome.success() {
+            return Ok(());
+        }
+        let plan = match jals_project::RemapSelection::for_manifest(manifest, features) {
+            jals_project::RemapSelection::NotRequested => return Ok(()),
+            jals_project::RemapSelection::Unsupported { backend, reason } => {
+                bail!(
+                    "`[build] remap` is declared, but `[build] backend` selects `{backend}`: {reason}"
+                );
+            }
+            jals_project::RemapSelection::Requested(plan) => plan,
+        };
+
+        // Where the class bytes are is the one part of this a host has to answer: an in-process
+        // backend returns them, and `javac` wrote its own through `-d` and hands back nothing.
+        let classes = if jals_project::CompiledClasses::are_in_memory(&outcome.artifacts) {
+            outcome.artifacts.clone()
+        } else {
+            Self::read_classes_dir(&root.join(&manifest.build.classes_dir))?
+        };
+        if classes.is_empty() {
+            bail!("`[build] remap` found no class files to remap");
+        }
+
+        let scopes = jals_classpath::NativeProjectPlan::snapshot_scopes(manifest, root);
+        let mut storage = NativeStorage::for_project_scoped(root, scopes, exec.clone())
+            .await
+            .context("opening project storage")?;
+        let main_class = jals_build::RunTarget::resolve(manifest, None).ok();
+        let bytes = plan
+            .run(
+                exec,
+                &jals_classpath::ReqwestFetcher::for_project(root.to_path_buf()),
+                &mut storage,
+                &classes,
+                &inputs.dependency_jars,
+                main_class,
+            )
+            .await
+            .map_err(|error| anyhow!("`[build] remap` failed: {error}"))?;
+
+        let target = root.join(&plan.jar);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        std::fs::write(&target, &bytes).with_context(|| format!("writing {}", target.display()))?;
+        Ok(())
+    }
+
+    /// Every `.class` file below `dir`, addressed relative to it.
+    ///
+    /// Reading the compiler's own output back is what a process-based backend forces: it wrote the
+    /// files and reported nothing, so a step that consumes what it produced has to go and look.
+    fn read_classes_dir(dir: &Path) -> Result<Vec<(jals_storage::RelativePath, Vec<u8>)>> {
+        let mut pending = vec![dir.to_path_buf()];
+        let mut classes = Vec::new();
+        while let Some(current) = pending.pop() {
+            let entries = match std::fs::read_dir(&current) {
+                Ok(entries) => entries,
+                // A project that has never compiled has no directory, which is not a failure of
+                // this step — the caller reports the empty result as the missing input it is.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(anyhow!("reading {}: {error}", current.display()));
+                }
+            };
+            for entry in entries {
+                let entry = entry.with_context(|| format!("reading {}", current.display()))?;
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|ext| ext != "class") {
+                    continue;
+                }
+                let relative = path.strip_prefix(dir).unwrap_or(&path);
+                let Some(text) = relative.to_str() else {
+                    bail!("class file `{}` is not a portable path", path.display());
+                };
+                let key = jals_storage::RelativePath::parse(&text.replace('\\', "/"))
+                    .map_err(|error| anyhow!("class file `{text}` is not portable: {error:?}"))?;
+                classes.push((
+                    key,
+                    std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?,
+                ));
+            }
+        }
+        // Deterministic output: the jar's member order is part of its bytes, and a directory walk
+        // is not ordered by anything a filesystem promises.
+        classes.sort_by_key(|(path, _)| path.to_string());
+        Ok(classes)
     }
 
     /// The staged tree expressed as manifest `source-dirs`, relative to the project root when

@@ -12,8 +12,8 @@ use jals_build::build_script::{
     BuildScriptOutput, BuildScriptSession, prepare_build_script, publish_prepared_build_script,
 };
 use jals_build::task::{
-    TaskDigestAlgorithm, TaskFetchKind, TaskId, TaskNodeKind, TaskPlan, TaskPublishIntent,
-    TaskTerminal,
+    TaskDigestAlgorithm, TaskFetchKind, TaskId, TaskMappingFormat, TaskNodeKind, TaskPlan,
+    TaskPublishIntent, TaskRemapDirection, TaskTerminal,
 };
 use jals_classpath::{
     ExpectedDigest, ExternalArtifactResolver, ExternalArtifactSpec, ExternalLocator, Fetcher,
@@ -1039,6 +1039,20 @@ impl BuildTaskExecutor {
                     .map_err(|error| format!("project JAR cache publish failed: {error:?}"))?;
                 Ok(TaskValue::Jar(artifact))
             }
+            TaskNodeKind::ProjectText { path } => {
+                let key = FileKey::parse(path)
+                    .map_err(|error| format!("invalid project text path: {error:?}"))?;
+                let bytes = view
+                    .file(&key)
+                    .map_err(|error| format!("project text `{key}` cannot be read: {error}"))?
+                    .bytes();
+                // Unlike a jar, text is a *value* the plan carries rather than an artifact it
+                // names, so it is decoded here and never published: a mapping file's identity
+                // reaches the cache through the digest folded into whatever consumes it.
+                let text = core::str::from_utf8(bytes)
+                    .map_err(|error| format!("project text `{key}` is not UTF-8: {error}"))?;
+                Ok(TaskValue::Text(text.to_owned()))
+            }
             TaskNodeKind::Digest { algorithm, value } => {
                 let digest = ExpectedDigest::from_hex(Self::algorithm(*algorithm), value)
                     .ok_or_else(|| "invalid canonical digest".to_owned())?;
@@ -1175,12 +1189,32 @@ impl BuildTaskExecutor {
                     .await
                     .map(TaskValue::Jar)
             }
-            TaskNodeKind::RemapJar { jar, mappings } => {
+            TaskNodeKind::RemapJar {
+                jar,
+                mappings,
+                format,
+                direction,
+                hierarchy,
+            } => {
                 let jar = Self::jar(values, *jar)?.clone();
+                let hierarchy = hierarchy
+                    .iter()
+                    .map(|id| Self::jar(values, *id).cloned())
+                    .collect::<Result<Vec<_>, _>>()?;
                 let mappings = Self::text(values, *mappings)?;
-                jals_classpath::JarRemap::remap(exec, cache, &jar, mappings)
-                    .await
-                    .map(TaskValue::Jar)
+                jals_classpath::JarRemap::remap(
+                    exec,
+                    cache,
+                    &jar,
+                    &jals_classpath::RemapRequest {
+                        mappings,
+                        format: Self::mapping_format(*format),
+                        direction: Self::remap_direction(*direction),
+                        hierarchy: &hierarchy,
+                    },
+                )
+                .await
+                .map(TaskValue::Jar)
             }
             TaskNodeKind::MergeJars { base, overlay } => {
                 let base = Self::jar(values, *base)?.clone();
@@ -1285,6 +1319,24 @@ impl BuildTaskExecutor {
         match Self::value(values, id)? {
             TaskValue::Jar(value) => Ok(value),
             _ => Err("task input is not a JAR".to_owned()),
+        }
+    }
+
+    /// Lower the plan's spelling of a mapping grammar to the implementation's.
+    ///
+    /// Two enums rather than one because they are frozen by different things: the plan's tag is
+    /// written into cache records, the implementation's is not. This is the one place they meet.
+    const fn mapping_format(format: TaskMappingFormat) -> jals_classpath::MappingFormat {
+        match format {
+            TaskMappingFormat::Proguard => jals_classpath::MappingFormat::Proguard,
+        }
+    }
+
+    /// Lower the plan's spelling of a remap direction to the implementation's.
+    const fn remap_direction(direction: TaskRemapDirection) -> jals_classpath::RemapDirection {
+        match direction {
+            TaskRemapDirection::Deobfuscate => jals_classpath::RemapDirection::Deobfuscate,
+            TaskRemapDirection::Reobfuscate => jals_classpath::RemapDirection::Reobfuscate,
         }
     }
 

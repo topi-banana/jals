@@ -10,6 +10,12 @@
 //!
 //! The parser is strict: a malformed line fails the whole file, because silently dropping rename
 //! information would produce an inconsistent jar.
+//!
+//! One file describes one *pair* of namespaces, so it serves both directions: deobfuscating a
+//! library into the names a project is written against, and reobfuscating that project's own output
+//! back into the names its runtime loads. [`RemapDirection`] chooses which way the indices are built,
+//! and everything downstream — the hierarchy walk, the descriptor rewrite, the member lookup — is
+//! written against "source" and "target" rather than against either namespace by name.
 
 use alloc::borrow::ToOwned;
 use alloc::collections::BTreeMap;
@@ -17,37 +23,57 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-/// A parsed mapping file, indexed for deobfuscation (obfuscated → official lookups).
+use crate::{MappingFormat, RemapDirection};
+
+/// A parsed mapping file, indexed in one [`RemapDirection`] (source → target lookups).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Mappings {
-    /// Official internal name → obfuscated internal name.
-    official_to_obf: BTreeMap<String, String>,
-    /// Obfuscated internal name → official internal name.
-    obf_to_official: BTreeMap<String, String>,
-    /// Official internal owner name → its declared members, keyed for obfuscated lookup.
+    /// Source internal name → target internal name.
+    classes: BTreeMap<String, String>,
+    /// **Target** internal owner name → its declared members, keyed by source identity.
+    ///
+    /// Keyed by the target owner because a caller remaps the owner class first and then asks about
+    /// its members; that is the order the constant pool forces, since a member ref names its owner
+    /// through a `Class` entry that has already been rewritten.
     members: BTreeMap<String, ClassMembers>,
 }
 
-/// The renamed members of one class, keyed by their obfuscated identities.
+/// The renamed members of one class, keyed by their source identities.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ClassMembers {
-    /// `(obfuscated name, obfuscated descriptor)` → official name.
+    /// `(source name, source descriptor)` → target name.
     methods: BTreeMap<(String, String), String>,
-    /// `(obfuscated name, obfuscated descriptor)` → official name.
+    /// `(source name, source descriptor)` → target name.
     fields: BTreeMap<(String, String), String>,
-    /// Obfuscated name → official name, only while exactly one method carries the obfuscated name.
+    /// Source name → target name, only while exactly one method carries the source name.
     methods_by_name: BTreeMap<String, Option<String>>,
-    /// Obfuscated name → official name, only while exactly one field carries the obfuscated name.
+    /// Source name → target name, only while exactly one field carries the source name.
     fields_by_name: BTreeMap<String, Option<String>>,
 }
 
 impl Mappings {
-    /// Parse a Mojang mapping file. Comments (`#`) and blank lines are skipped; anything else that
-    /// does not match the grammar is an error naming the 1-based line.
-    pub(crate) fn parse(text: &str) -> Result<Self, String> {
+    /// Parse a mapping file for one direction. Comments (`#`) and blank lines are skipped; anything
+    /// else that does not match the grammar is an error naming the 1-based line.
+    pub(crate) fn parse(
+        text: &str,
+        format: MappingFormat,
+        direction: RemapDirection,
+    ) -> Result<Self, String> {
+        match format {
+            MappingFormat::Proguard => Self::parse_proguard(text, direction),
+        }
+    }
+
+    fn parse_proguard(text: &str, direction: RemapDirection) -> Result<Self, String> {
         // Pass 1: the whole class map. A member's descriptor translation can reference a class
         // declared anywhere in the file, so members only parse after every class is known.
+        //
+        // Both directions of the class map are built regardless of `direction`: the reverse one is
+        // an integrity check (two official classes may not share an obfuscated name) even when it is
+        // not the one kept, and the forward one is what descriptor translation reads.
         let mut lines = Vec::new();
+        let mut official_to_obf: BTreeMap<String, String> = BTreeMap::new();
+        let mut obf_to_official: BTreeMap<String, String> = BTreeMap::new();
         let mut mappings = Self::default();
         for (number, raw) in text.lines().enumerate() {
             let number = number + 1;
@@ -65,8 +91,7 @@ impl Mappings {
             })?;
             let official = Self::internalize(official);
             let obf = Self::internalize(obf);
-            if mappings
-                .official_to_obf
+            if official_to_obf
                 .insert(official.clone(), obf.clone())
                 .is_some()
             {
@@ -74,8 +99,7 @@ impl Mappings {
                     "mapping line {number} redefines class `{official}`"
                 ));
             }
-            if mappings
-                .obf_to_official
+            if obf_to_official
                 .insert(obf.clone(), official.clone())
                 .is_some()
             {
@@ -85,6 +109,10 @@ impl Mappings {
             }
             lines.push((number, line, false));
         }
+        mappings.classes = match direction {
+            RemapDirection::Deobfuscate => obf_to_official,
+            RemapDirection::Reobfuscate => official_to_obf.clone(),
+        };
 
         // Pass 2: member lines attach to the class line that most recently preceded them.
         let mut owner: Option<String> = None;
@@ -99,14 +127,41 @@ impl Mappings {
                 .clone()
                 .ok_or_else(|| format!("mapping line {number} is a member before any class"))?;
             let (left, obf_name) = Self::split_arrow(line, number)?;
-            let class_map = &mappings.official_to_obf;
-            let members = mappings.members.entry(official_owner).or_default();
-            if left.contains('(') {
-                let (name, desc) = Self::method_entry(class_map, left, number)?;
-                members.insert_method(obf_name.to_owned(), desc, name);
+            let is_method = left.contains('(');
+            // The declared name plus its descriptor, with class names translated through
+            // `class_map`. An empty map leaves them in the official namespace.
+            let entry = |class_map: &BTreeMap<String, String>| {
+                if is_method {
+                    Self::method_entry(class_map, left, number)
+                } else {
+                    Self::field_entry(class_map, left, number)
+                }
+            };
+            let (official_name, obf_desc) = entry(&official_to_obf)?;
+            // The member's identity in each namespace. Deobfuscating keys by the obfuscated pair
+            // under the official owner; reobfuscating keys by the official pair under the
+            // obfuscated one. Both are derived from the same line, so neither direction can index a
+            // member the other would have missed.
+            let (owner_key, source_name, source_desc, target_name) = match direction {
+                RemapDirection::Deobfuscate => {
+                    (official_owner, obf_name.to_owned(), obf_desc, official_name)
+                }
+                RemapDirection::Reobfuscate => {
+                    // The official descriptor is the same signature read without translating class
+                    // names, so it comes from the same parser with an empty class map.
+                    let (_, official_desc) = entry(&BTreeMap::new())?;
+                    let obf_owner = official_to_obf
+                        .get(&official_owner)
+                        .cloned()
+                        .ok_or_else(|| format!("mapping line {number} has an unmapped owner"))?;
+                    (obf_owner, official_name, official_desc, obf_name.to_owned())
+                }
+            };
+            let members = mappings.members.entry(owner_key).or_default();
+            if is_method {
+                members.insert_method(source_name, source_desc, target_name);
             } else {
-                let (name, desc) = Self::field_entry(class_map, left, number)?;
-                members.insert_field(obf_name.to_owned(), desc, name);
+                members.insert_field(source_name, source_desc, target_name);
             }
         }
         Ok(mappings)
@@ -247,90 +302,94 @@ impl Mappings {
         Ok(out)
     }
 
-    /// The official internal name for an obfuscated internal name, when the class map covers it.
-    pub(crate) fn remap_class(&self, obf_internal: &str) -> Option<&str> {
-        self.obf_to_official.get(obf_internal).map(String::as_str)
+    /// The target internal name for a source internal name, when the class map covers it.
+    pub(crate) fn remap_class(&self, source_internal: &str) -> Option<&str> {
+        self.classes.get(source_internal).map(String::as_str)
     }
 
-    /// The official name of a method declared by `owner_official` (internal form), looked up by
-    /// its obfuscated name and descriptor.
+    /// The target name of a method declared by `owner_target` (internal form), looked up by its
+    /// source name and descriptor.
     pub(crate) fn remap_method(
         &self,
-        owner_official: &str,
-        obf_name: &str,
-        obf_desc: &str,
+        owner_target: &str,
+        source_name: &str,
+        source_desc: &str,
     ) -> Option<&str> {
         self.members
-            .get(owner_official)?
+            .get(owner_target)?
             .methods
-            .get(&(obf_name.to_owned(), obf_desc.to_owned()))
+            .get(&(source_name.to_owned(), source_desc.to_owned()))
             .map(String::as_str)
     }
 
-    /// The official name of a field declared by `owner_official` (internal form), looked up by
-    /// its obfuscated name and descriptor.
+    /// The target name of a field declared by `owner_target` (internal form), looked up by its
+    /// source name and descriptor.
     pub(crate) fn remap_field(
         &self,
-        owner_official: &str,
-        obf_name: &str,
-        obf_desc: &str,
+        owner_target: &str,
+        source_name: &str,
+        source_desc: &str,
     ) -> Option<&str> {
         self.members
-            .get(owner_official)?
+            .get(owner_target)?
             .fields
-            .get(&(obf_name.to_owned(), obf_desc.to_owned()))
+            .get(&(source_name.to_owned(), source_desc.to_owned()))
             .map(String::as_str)
     }
 
-    /// The official name of a method when it is the only method carrying `obf_name` in the owner
+    /// The target name of a method when it is the only method carrying `source_name` in the owner
     /// (used for annotation elements, which carry no descriptor).
     pub(crate) fn remap_method_by_name(
         &self,
-        owner_official: &str,
-        obf_name: &str,
+        owner_target: &str,
+        source_name: &str,
     ) -> Option<&str> {
         self.members
-            .get(owner_official)?
+            .get(owner_target)?
             .methods_by_name
-            .get(obf_name)?
+            .get(source_name)?
             .as_deref()
     }
 
-    /// The official name of a field when it is the only field carrying `obf_name` in the owner
+    /// The target name of a field when it is the only field carrying `source_name` in the owner
     /// (used for enum constants in annotations, which carry no descriptor).
-    pub(crate) fn remap_field_by_name(&self, owner_official: &str, obf_name: &str) -> Option<&str> {
+    pub(crate) fn remap_field_by_name(
+        &self,
+        owner_target: &str,
+        source_name: &str,
+    ) -> Option<&str> {
         self.members
-            .get(owner_official)?
+            .get(owner_target)?
             .fields_by_name
-            .get(obf_name)?
+            .get(source_name)?
             .as_deref()
     }
 }
 
 impl ClassMembers {
-    fn insert_method(&mut self, obf_name: String, obf_desc: String, official: String) {
+    fn insert_method(&mut self, source_name: String, source_desc: String, target: String) {
         self.methods
-            .insert((obf_name.clone(), obf_desc), official.clone());
-        Self::insert_by_name(&mut self.methods_by_name, obf_name, official);
+            .insert((source_name.clone(), source_desc), target.clone());
+        Self::insert_by_name(&mut self.methods_by_name, source_name, target);
     }
 
-    fn insert_field(&mut self, obf_name: String, obf_desc: String, official: String) {
+    fn insert_field(&mut self, source_name: String, source_desc: String, target: String) {
         self.fields
-            .insert((obf_name.clone(), obf_desc), official.clone());
-        Self::insert_by_name(&mut self.fields_by_name, obf_name, official);
+            .insert((source_name.clone(), source_desc), target.clone());
+        Self::insert_by_name(&mut self.fields_by_name, source_name, target);
     }
 
-    /// Keep `obf -> official` only while unambiguous: a second distinct official name for the same
-    /// obfuscated name poisons the entry (`None`), so name-only lookups miss instead of guessing.
-    fn insert_by_name(map: &mut BTreeMap<String, Option<String>>, obf: String, official: String) {
-        match map.get_mut(&obf) {
+    /// Keep `source -> target` only while unambiguous: a second distinct target name for the same
+    /// source name poisons the entry (`None`), so name-only lookups miss instead of guessing.
+    fn insert_by_name(map: &mut BTreeMap<String, Option<String>>, source: String, target: String) {
+        match map.get_mut(&source) {
             Some(slot) => {
-                if slot.as_ref() != Some(&official) {
+                if slot.as_ref() != Some(&target) {
                     *slot = None;
                 }
             }
             None => {
-                map.insert(obf, Some(official));
+                map.insert(source, Some(target));
             }
         }
     }
@@ -340,9 +399,7 @@ impl ClassMembers {
 mod tests {
     use super::*;
 
-    #[test]
-    fn parses_classes_fields_and_methods() {
-        let text = "\
+    const SAMPLE: &str = "\
 # comment
 com.example.Outer -> a:
     int count -> a
@@ -351,7 +408,15 @@ com.example.Outer -> a:
 com.example.Outer$Inner -> a$a:
     java.lang.String name -> a
 ";
-        let map = Mappings::parse(text).expect("parses");
+
+    fn deobfuscating(text: &str) -> Mappings {
+        Mappings::parse(text, MappingFormat::Proguard, RemapDirection::Deobfuscate).expect("parses")
+    }
+
+    #[test]
+    fn parses_classes_fields_and_methods() {
+        let text = SAMPLE;
+        let map = deobfuscating(text);
         assert_eq!(map.remap_class("a"), Some("com/example/Outer"));
         assert_eq!(map.remap_class("a$a"), Some("com/example/Outer$Inner"));
         assert_eq!(
@@ -375,6 +440,73 @@ com.example.Outer$Inner -> a$a:
 
     #[test]
     fn rejects_member_before_class() {
-        assert!(Mappings::parse("    int x -> a\n").is_err());
+        assert!(
+            Mappings::parse(
+                "    int x -> a\n",
+                MappingFormat::Proguard,
+                RemapDirection::Deobfuscate
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn reobfuscating_indexes_the_same_file_the_other_way() {
+        // One file, two tables. What each direction has to get right is not just the class map but
+        // *which* namespace the member key is written in: reobfuscating looks a member up by the
+        // official name and the official descriptor, under the obfuscated owner.
+        let map = Mappings::parse(SAMPLE, MappingFormat::Proguard, RemapDirection::Reobfuscate)
+            .expect("parses");
+
+        assert_eq!(map.remap_class("com/example/Outer"), Some("a"));
+        assert_eq!(map.remap_class("com/example/Outer$Inner"), Some("a$a"));
+        assert_eq!(map.remap_field("a", "count", "I"), Some("a"));
+        assert_eq!(map.remap_method("a", "size", "()I"), Some("b"));
+        // The descriptor is the *official* one here — the same signature the deobfuscating table
+        // keys as `(La;)La;`.
+        assert_eq!(
+            map.remap_method("a", "nest", "(Lcom/example/Outer;)Lcom/example/Outer;"),
+            Some("c")
+        );
+        assert_eq!(map.remap_field_by_name("a$a", "name"), Some("a"));
+    }
+
+    #[test]
+    fn the_two_directions_are_inverses_on_every_entry() {
+        // The property that makes a build's reobfuscation trustworthy: whatever deobfuscation
+        // renamed, reobfuscation renames back. Checked over the whole table rather than a sample,
+        // so an entry only one direction indexes cannot hide.
+        let out = deobfuscating(SAMPLE);
+        let back = Mappings::parse(SAMPLE, MappingFormat::Proguard, RemapDirection::Reobfuscate)
+            .expect("parses");
+
+        for (source, target) in &out.classes {
+            assert_eq!(
+                back.remap_class(target),
+                Some(source.as_str()),
+                "class `{source}` does not round-trip"
+            );
+        }
+        for (owner_target, members) in &out.members {
+            let owner_source = out
+                .classes
+                .iter()
+                .find_map(|(s, t)| (t == owner_target).then_some(s.as_str()))
+                .expect("every owner is a mapped class");
+            for ((source_name, _), target_name) in &members.methods {
+                assert!(
+                    back.remap_method_by_name(owner_source, target_name)
+                        .is_some_and(|back_name| back_name == source_name),
+                    "method `{owner_target}.{source_name}` does not round-trip"
+                );
+            }
+            for ((source_name, _), target_name) in &members.fields {
+                assert!(
+                    back.remap_field_by_name(owner_source, target_name)
+                        .is_some_and(|back_name| back_name == source_name),
+                    "field `{owner_target}.{source_name}` does not round-trip"
+                );
+            }
+        }
     }
 }

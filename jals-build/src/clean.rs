@@ -18,9 +18,16 @@ impl CleanTargets {
     /// Resolve the build-output directories that `jals clean` should remove for `manifest`, as
     /// root-relative keys the caller resolves against the project root.
     ///
-    /// This is the compiler output directory (`classes-dir`) and the dedicated `target/jals/build`
-    /// script-artifact root. Returning a `Vec` leaves room for future artifacts (a packaged jar, a
+    /// This is the compiler output directory (`classes-dir`), the dedicated `target/jals/build`
+    /// script-artifact root, and — when `[build] remap` declares one — the directory holding the
+    /// jar that step writes. Returning a `Vec` leaves room for future artifacts (a packaged jar, a
     /// dependency cache) without changing the signature.
+    ///
+    /// A declared remap contributes `target/jals/remap` — the root its jar defaults into — because
+    /// nothing else claims it: the jar sits outside both roots above by construction
+    /// ([`Manifest::validate`] rejects one inside either), so a clean that skipped it would leave
+    /// the previous build's distributable behind. An author who redirected the jar elsewhere keeps
+    /// that location: removing a directory they chose would take whatever else they keep in it.
     /// The result may include paths that do not exist; the caller skips those rather than treating a
     /// never-built project as an error.
     ///
@@ -37,6 +44,17 @@ impl CleanTargets {
         let build_root = DirKey::parse("target/jals/build")?;
         if !keys.contains(&build_root) {
             keys.push(build_root);
+        }
+        if manifest.build.remap.is_some() {
+            // The managed remap root, and only it — never the directory an author redirected the
+            // jar into. `jals clean` removes a key recursively, so taking the parent of an
+            // arbitrary `jar` path would delete whatever else the author keeps beside it. A
+            // redirected jar is theirs to place and theirs to remove; what jals owns is the root it
+            // chose itself, which holds nothing else by construction.
+            let remap_root = DirKey::parse(jals_config::MANAGED_REMAP_ROOT)?;
+            if !keys.contains(&remap_root) {
+                keys.push(remap_root);
+            }
         }
         Ok(keys)
     }
@@ -117,5 +135,39 @@ mod tests {
                 .iter()
                 .all(|target| !script.path().starts_with(target.path()))
         );
+    }
+
+    #[test]
+    fn a_declared_remap_contributes_its_managed_root() {
+        let mut m = Manifest::default();
+        assert!(
+            !CleanTargets::keys(&m)
+                .unwrap()
+                .contains(&DirKey::parse(jals_config::MANAGED_REMAP_ROOT).unwrap())
+        );
+
+        m.build.remap = Some(jals_config::BuildRemap {
+            with: "mojmap".to_owned(),
+            jar: None,
+        });
+        assert!(
+            CleanTargets::keys(&m)
+                .unwrap()
+                .contains(&DirKey::parse(jals_config::MANAGED_REMAP_ROOT).unwrap())
+        );
+    }
+
+    #[test]
+    fn a_redirected_remap_jar_leaves_its_directory_alone() {
+        // `jals clean` removes a key recursively. Taking the parent of a path the author chose
+        // would delete whatever else they keep beside the jar, which is not jals' to remove.
+        let mut m = Manifest::default();
+        m.build.remap = Some(jals_config::BuildRemap {
+            with: "mojmap".to_owned(),
+            jar: Some("dist/mod.jar".to_owned()),
+        });
+        let keys = CleanTargets::keys(&m).unwrap();
+        assert!(!keys.contains(&DirKey::parse("dist").unwrap()), "{keys:?}");
+        assert!(keys.contains(&DirKey::parse(jals_config::MANAGED_REMAP_ROOT).unwrap()));
     }
 }

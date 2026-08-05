@@ -136,6 +136,7 @@ fn project_dependency_is_read_from_the_captured_revision() {
             name: Name::new("dep").unwrap(),
             location: DependencyLocation::Project(FileKey::parse("lib/dep.jar").unwrap()),
             recursive: false,
+            remap: None,
         };
         let resolved = DependencyResolver::resolve(
             &fetcher,
@@ -180,6 +181,7 @@ fn artifact_dependency_is_verified_without_fetching_or_republishing() {
                 name: Name::new("cached").unwrap(),
                 location: DependencyLocation::Artifact(key.clone()),
                 recursive: false,
+                remap: None,
             }],
         )
         .await;
@@ -205,6 +207,7 @@ fn expected_digest_enables_verified_external_cache_hits() {
                 expected: Some(ContentDigest::of(b"remote jar")),
             },
             recursive: false,
+            remap: None,
         };
         let first = DependencyResolver::resolve(
             &fetcher,
@@ -253,6 +256,7 @@ fn digest_less_external_dependency_resolves_from_cache_offline() {
                 expected: None,
             },
             recursive: false,
+            remap: None,
         };
         let first = DependencyResolver::resolve(
             &fetcher,
@@ -301,6 +305,7 @@ fn digest_mismatch_is_a_warning_and_is_not_published() {
                 expected: Some(ContentDigest::of(b"expected")),
             },
             recursive: false,
+            remap: None,
         };
         let resolved = DependencyResolver::resolve(
             &fetcher,
@@ -332,6 +337,7 @@ fn duplicate_locators_fetch_once_and_resolve_in_spec_order() {
                 expected: None,
             },
             recursive: false,
+            remap: None,
         };
         let resolved = DependencyResolver::resolve(
             &fetcher,
