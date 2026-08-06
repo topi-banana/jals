@@ -28,11 +28,11 @@ mod remap;
 #[cfg(feature = "archive")]
 mod zip;
 
-pub use io::Fetcher;
+pub use io::{Fetcher, NetworkPolicy};
 pub use resolve::{
     DependencyLocation, DependencyResolver, DependencySpec, ExpectedDigest,
     ExternalArtifactResolver, ExternalArtifactSpec, ExternalLocator, MappingLocation,
-    MappingResolver, MappingSpec, NetworkPolicy, ResolvedDependencies, ResolvedJar,
+    MappingResolver, MappingSpec, ResolvedDependencies, ResolvedJar,
 };
 pub use skeleton::{SkeletonGroup, SkeletonMode, Skeletons};
 

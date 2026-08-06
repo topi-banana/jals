@@ -989,7 +989,7 @@ impl App {
         mut storage: MemoryStorage,
         script: ProjectScript,
     ) -> Result<ClasspathResolution, String> {
-        let fetcher = BrowserFetcher::new(proxy);
+        let fetcher = BrowserFetcher::new(proxy, jals_classpath::NetworkPolicy::Online);
         // The script's `add_classpath` entries are lowered by exactly the rule that lowers the
         // manifest's own, and land after them — the group order a browser build has always had.
         script.augment_classpath(&mut manifest);
@@ -1012,7 +1012,6 @@ impl App {
                     environment: &BuildScriptEnvironment::new(),
                     root_features: &features,
                     limits: &BuildScriptLimits::default(),
-                    network: jals_classpath::NetworkPolicy::Online,
                 },
                 ProjectInputOptions::Editor,
             )

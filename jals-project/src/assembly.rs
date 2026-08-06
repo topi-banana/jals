@@ -127,8 +127,10 @@ impl ProjectScript {
     /// The graph phase over one captured in-memory tree: discover, preprocess, project, and resolve
     /// the root's and the graph's inputs against `storage`.
     ///
-    /// `preprocess.network` governs the whole phase, discovery included — a host cannot ask the graph
-    /// to be discovered online and preprocessed offline.
+    /// `preprocess.fetcher`'s [`NetworkPolicy`](jals_classpath::NetworkPolicy) governs the whole
+    /// phase, discovery and input resolution included — a host cannot ask the graph to be
+    /// discovered online and resolved offline, because there is one capability and every step is
+    /// handed the same one.
     pub async fn resolve_memory<F, S, C>(
         &self,
         manifest: &Manifest,
@@ -350,7 +352,6 @@ mod tests {
     use alloc::vec;
 
     use jals_build::build_script::{BuildScriptEnvironment, BuildScriptLimits};
-    use jals_classpath::NetworkPolicy;
     use jals_config::ResolvedBuildFeatures;
     use jals_exec::block_on_inline;
     use jals_storage::{
@@ -363,7 +364,12 @@ mod tests {
     struct UnreachableFetcher;
 
     impl Fetcher for UnreachableFetcher {
-        async fn fetch(&self, locator: &str) -> Result<Vec<u8>, String> {
+        // `Online`: the panic is the assertion — `Offline` would refuse first and pass blind.
+        fn network(&self) -> jals_classpath::NetworkPolicy {
+            jals_classpath::NetworkPolicy::Online
+        }
+
+        async fn fetch_admitted(&self, locator: &str) -> Result<Vec<u8>, String> {
             panic!("this assembly must not fetch, but asked for `{locator}`")
         }
     }
@@ -378,7 +384,6 @@ mod tests {
                 environment: &BuildScriptEnvironment::new(),
                 root_features: &ResolvedBuildFeatures::default(),
                 limits: &BuildScriptLimits::default(),
-                network: NetworkPolicy::Offline,
             }
         };
     }
@@ -836,7 +841,6 @@ mod tests {
                     manifest: &manifest,
                     environment: &BuildScriptEnvironment::new(),
                     limits: &BuildScriptLimits::default(),
-                    network: NetworkPolicy::Offline,
                     host: crate::BuildTaskHost::NoTerminals,
                     blocked_files: &[],
                     publications: crate::SourcePublication::Apply,

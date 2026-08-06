@@ -24,42 +24,39 @@ use jals_storage::{
 };
 
 use crate::{
-    ClasspathEntry, DependencyLocation, ExternalLocator, Fetcher, LibrarySource,
+    ClasspathEntry, DependencyLocation, ExternalLocator, Fetcher, LibrarySource, NetworkPolicy,
     ProjectInputOptions, ProjectInputPlan, ProjectInputs, Warning, WarningOrigin,
 };
 
 /// A fetcher backed by `reqwest`'s async client.
 pub struct ReqwestFetcher {
     client: reqwest::Client,
-    project_root: Option<PathBuf>,
+    project_root: PathBuf,
+    network: NetworkPolicy,
 }
 
 impl ReqwestFetcher {
-    fn new() -> Self {
-        Self {
-            client: reqwest::Client::new(),
-            project_root: None,
-        }
-    }
-
     /// Build the host fetch adapter for one project. Relative and `file://` locators are read by
-    /// this adapter; HTTP remains the only network capability.
-    pub fn for_project(project_root: PathBuf) -> Self {
+    /// this adapter; HTTP remains the only network capability, and `network` is whether that
+    /// capability may be used.
+    ///
+    /// There is deliberately no `Default`: it could answer neither question, and one that guessed
+    /// the policy is exactly how a host ends up fetching under `--offline`.
+    pub fn for_project(project_root: PathBuf, network: NetworkPolicy) -> Self {
         Self {
             client: reqwest::Client::new(),
-            project_root: Some(project_root),
+            project_root,
+            network,
         }
-    }
-}
-
-impl Default for ReqwestFetcher {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
 impl Fetcher for ReqwestFetcher {
-    async fn fetch(&self, locator: &str) -> Result<Vec<u8>, String> {
+    fn network(&self) -> NetworkPolicy {
+        self.network
+    }
+
+    async fn fetch_admitted(&self, locator: &str) -> Result<Vec<u8>, String> {
         if let Some(path) = locator.strip_prefix("file://") {
             let path = path.to_owned();
             return on_blocking_pool(move || {
@@ -68,11 +65,7 @@ impl Fetcher for ReqwestFetcher {
             .await;
         }
         if !ExternalLocator::is_url(locator) {
-            let path = self
-                .project_root
-                .as_deref()
-                .unwrap_or_else(|| Path::new("."))
-                .join(locator);
+            let path = self.project_root.join(locator);
             return on_blocking_pool(move || {
                 fs::read(&path).map_err(|error| format!("reading {}: {error}", path.display()))
             })
@@ -93,16 +86,16 @@ impl Fetcher for ReqwestFetcher {
             .map_err(|error| format!("reading response: {error}"))
     }
 
-    async fn fetch_bounded(&self, locator: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
+    async fn fetch_bounded_admitted(
+        &self,
+        locator: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, String> {
         if let Some(path) = locator.strip_prefix("file://") {
             return Self::read_file_bounded(PathBuf::from(path), max_bytes).await;
         }
         if !ExternalLocator::is_url(locator) {
-            let path = self
-                .project_root
-                .as_deref()
-                .unwrap_or_else(|| Path::new("."))
-                .join(locator);
+            let path = self.project_root.join(locator);
             return Self::read_file_bounded(path, max_bytes).await;
         }
         let mut response = self
@@ -187,11 +180,16 @@ impl NativeProjectPlan {
     /// materialize Git sources, fetch and resolve dependencies over async HTTP, and merge the
     /// lowering warnings into the result's. Fan-out and blocking host work run on the storage's
     /// own execution context. Returns the resolved inputs plus the manifest's source roots.
-    pub async fn assemble_native(
+    ///
+    /// `fetcher` is the caller's, never one built here: it carries the [`NetworkPolicy`] the host
+    /// chose, and constructing a replacement is how this function used to fetch under `--offline`.
+    /// The parameter sits where the portable sibling `MemoryProjectPlan::assemble` puts it.
+    pub async fn assemble_native<F: Fetcher>(
         manifest: &Manifest,
         features: &ResolvedBuildFeatures,
         project_root: &Path,
         storage: &mut NativeStorage,
+        fetcher: &F,
         options: ProjectInputOptions,
     ) -> (ProjectInputs, Vec<DirKey>) {
         let mut native = Self::from_manifest(manifest, features, project_root, &storage.view());
@@ -205,8 +203,7 @@ impl NativeProjectPlan {
         native
             .materialize_path_sources(project_root, storage, options)
             .await;
-        let fetcher = ReqwestFetcher::for_project(project_root.to_path_buf());
-        let mut inputs = ProjectInputs::assemble(&fetcher, storage, &native.plan, options).await;
+        let mut inputs = ProjectInputs::assemble(fetcher, storage, &native.plan, options).await;
         native.warnings.append(&mut inputs.warnings);
         inputs.warnings = native.warnings;
         (inputs, native.source_roots)
