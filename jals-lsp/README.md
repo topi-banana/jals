@@ -62,7 +62,9 @@ default. When the client supports file watching, edits to either file take effec
 server restart.
 
 Rhai `build.warning`/`build.error` messages and compilation/runtime failures are published on the
-configured script URI as `jals-build` diagnostics as well as logged to stderr. Compilation/runtime
+configured script URI as `jals-build` diagnostics as well as logged to stderr. A published
+diagnostic carries its severity in the protocol field and its message bare; the stderr line has no
+such field, so there the diagnostic renders itself severity and all. Compilation/runtime
 failures use Rhai's exact source position; script-reported messages use a first-line fallback range.
 A clean rerun or script removal clears the previous publication.
 Typed root build tasks are executed during workspace assembly. Exclusive physical source-tree

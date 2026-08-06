@@ -9,8 +9,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use jals_build::build_script::{
-    BuildScriptCacheScope, BuildScriptDiagnostic, BuildScriptEnvironment, BuildScriptLimits,
-    prepare_build_script,
+    BuildScriptCacheScope, BuildScriptEnvironment, BuildScriptLimits, prepare_build_script,
 };
 use jals_build::task::{TaskPlan, TaskPublishIntent};
 use jals_classpath::{
@@ -767,17 +766,17 @@ impl ResolvedNode {
                 )
                 .await;
         }
-        exports
-            .warnings
-            .extend(
-                output
-                    .diagnostics
-                    .iter()
-                    .filter_map(|diagnostic| match diagnostic {
-                        BuildScriptDiagnostic::Warning(message) => Some(message.clone()),
-                        BuildScriptDiagnostic::Error(_) => None,
-                    }),
-            );
+        // `BuildScriptOutput::diagnostics` is warnings-only by construction, so this promotes the
+        // whole collection rather than filtering it: a filter here would erase an error instead of
+        // surfacing it if that ever stopped holding. The message and not the whole diagnostic,
+        // because each becomes a `GraphWarning` — a type that is already a warning and supplies
+        // its own attribution, so rendering would spell "warning" twice.
+        exports.warnings.extend(
+            output
+                .diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.message().to_owned()),
+        );
         if let Err(message) = prepared.persist(cache).await {
             exports.warnings.push(format!(
                 "could not persist prepared build-script artifacts: {message}"

@@ -177,21 +177,18 @@ script, whose `build.error` rejects a second version before any download:
 
 ```
 $ cargo run -p jals-cli -- build --manifest-path examples/minecraft_mod/jals.toml --features 1.20.1,1.19.4
-error: resolving the project dependency graph: dependency build script
-`…/examples/minecraft` failed: build script reported 1 error diagnostic(s)
+error: resolving the project dependency graph: dependency build script `…/examples/minecraft`
+failed: build script reported: error: select at most one Minecraft version feature, got `1.20.1`
+and `1.19.4`
 ```
 
 `--all-features` fails identically, for the same reason, and always will. A second copy of that
 43-row rule in this manifest would be a second thing to keep in sync.
 
-Note what that message does *not* say: a build script's own diagnostic text is printed when the
-script belongs to the root project, but a **dependency's** is currently reported only by count, so
-the actual sentence — `select at most one Minecraft version feature, got '1.20.1' and '1.19.4'` — is
-not shown. Build the SDK directly to read it:
-
-```sh
-cargo run -p jals-cli -- build --manifest-path examples/minecraft/jals.toml --features 1.20.1,1.19.4
-```
+The sentence is the SDK's own, reported where it was hit: the attribution names which dependency
+failed and the body is that dependency's diagnostic, so there is nothing to go and reproduce
+elsewhere. This is the one diagnostic you could not read for yourself — the script ran against a
+snapshot this project does not own.
 
 ## JDK requirement
 
