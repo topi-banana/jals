@@ -46,10 +46,14 @@ impl ExternalLocator {
     /// cache's locator index instead of refetching. Local `file://` and plain-path locators are
     /// deliberately read fresh so edits to a local jar are always picked up.
     ///
-    /// This is also the network gate's discriminator ([`NetworkPolicy::admits`]), which is why it
-    /// is public and why it is *not* [`is_url`](Self::is_url): that one also matches `file://`, and
-    /// refusing a `file://` or plain-path locator offline would break a dependency that never
-    /// wanted the network. The two predicates differ by exactly that scheme; do not merge them.
+    /// It is also what [`NetworkPolicy`](crate::NetworkPolicy) asks when it decides whether to
+    /// admit a locator, and it is deliberately *not* the crate-private `is_url`: that one also
+    /// matches `file://`, and refusing a `file://` or plain-path locator offline would break a
+    /// dependency that never wanted the network. The two predicates differ by exactly that scheme;
+    /// do not merge them.
+    ///
+    /// Public because `jals-project` classifies a declared locator with the same rule while it
+    /// builds the graph — the gate itself is this crate's own and stays here.
     pub fn is_remote(value: &str) -> bool {
         ["http://", "https://"]
             .iter()

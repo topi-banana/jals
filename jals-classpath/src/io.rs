@@ -10,7 +10,7 @@ use crate::ExternalLocator;
 /// Whether a fetch capability may reach the network.
 ///
 /// Part of the capability rather than a value beside it. A host that must not fetch hands over a
-/// [`Fetcher`] that says so, and every fetch this crate performs goes through [`Fetch`], which
+/// [`Fetcher`] that says so, and every fetch this crate performs goes through `Fetch`, which
 /// asks. Holding the capability while being unaware of the policy is what the previous
 /// arrangement allowed, and it is what let `jals lint` and the language server pass `Offline` to
 /// some layers while handing a freshly built online fetcher to others.
@@ -41,7 +41,11 @@ impl NetworkPolicy {
     /// project root to exactly such an external locator — and refusing those offline would break a
     /// build that never wanted the network at all. That is why the discriminator is
     /// [`ExternalLocator::is_remote`] and never `is_url`, which also matches `file://`.
-    pub fn admits(self, locator: &ExternalLocator) -> bool {
+    ///
+    /// `pub(crate)`: the gate belongs to this crate. A host chooses the policy and answers
+    /// [`Fetcher::network`] with it; deciding what that policy admits is not its business, and a
+    /// second caller of this would be a second gate.
+    pub(crate) fn admits(self, locator: &ExternalLocator) -> bool {
         match self {
             Self::Online => true,
             Self::Offline => !ExternalLocator::is_remote(locator.as_str()),
@@ -55,7 +59,8 @@ impl NetworkPolicy {
 /// [`jals_storage::ProjectView`]; only genuinely external content (normally HTTP) is fetched.
 ///
 /// An implementor answers [`network`](Self::network) and supplies the two `_admitted` methods. It
-/// never sees a locator its own policy refused: [`Fetch`] is the only caller, and it asks first.
+/// never sees a locator its own policy refused: this crate's own `Fetch` is the only caller, and
+/// it asks first.
 #[allow(async_fn_in_trait)]
 pub trait Fetcher {
     /// Whether this capability may reach the network.
@@ -66,8 +71,8 @@ pub trait Fetcher {
 
     /// Fetch `locator`, returning a diagnostic-ready error message on failure.
     ///
-    /// **Precondition:** the network gate has already admitted `locator`. Reach it through
-    /// [`Fetch::bytes`], never directly.
+    /// **Precondition:** the network gate has already admitted `locator`. This crate reaches it
+    /// through `Fetch::bytes` and nothing else may call it directly.
     async fn fetch_admitted(&self, locator: &str) -> Result<Vec<u8>, String>;
 
     /// Fetch at most `max_bytes`, rejecting an oversized result. Carries the same precondition as
