@@ -2106,6 +2106,26 @@ impl AssembledWorkspace {
             eprintln!("jals-lsp: {warning}");
         }
 
+        // The server is unconditionally offline, so a dependency it could not resolve is not a
+        // broken manifest — it is one this machine has never built. Say that once, with the remedy,
+        // rather than leaving a bare refusal that reads like a failure to debug. The advice lives
+        // here and not in `jals-classpath`, which knows neither which host it is under nor that
+        // `jals build` is something a browser could not run anyway.
+        let uncached_dependencies = inputs.warnings.iter().any(|w| {
+            w.message
+                .contains(jals_classpath::NetworkPolicy::OFFLINE_REFUSAL)
+        });
+        if uncached_dependencies {
+            let advice = "some dependencies are not in the verified cache; \
+                          run `jals build` to fetch them (the language server never does)";
+            eprintln!("jals-lsp: {advice}");
+            project_diagnostics.push(Self::project_diagnostic(
+                DiagnosticSeverity::INFORMATION,
+                "dependency-cache",
+                advice.to_owned(),
+            ));
+        }
+
         // Navigation sources are cache artifacts, not host paths. Mount them as overlay files in
         // the same aggregate so the editor reads them from this exact revision, and materialize
         // each one out of the cache so its definition targets are real, openable files.
