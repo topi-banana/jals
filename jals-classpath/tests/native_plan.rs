@@ -139,8 +139,7 @@ fn sibling_path_dependency_is_scanned_and_published() {
             &storage.view(),
         );
         assert!(plan.plan.source_dependency_roots.is_empty());
-        plan.materialize_path_sources(&project, &mut storage, ProjectInputOptions::Compile)
-            .await;
+        plan.materialize_path_sources(&project, &mut storage).await;
         assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
 
         let inputs = ProjectInputs::assemble(
@@ -189,7 +188,7 @@ fn missing_path_dependency_is_a_warning_not_a_panic() {
             project.path(),
             &storage.view(),
         );
-        plan.materialize_path_sources(project.path(), &mut storage, ProjectInputOptions::Compile)
+        plan.materialize_path_sources(project.path(), &mut storage)
             .await;
         assert_eq!(plan.warnings.len(), 1);
         assert!(plan.plan.source_dependency_artifacts.is_empty());
@@ -223,8 +222,7 @@ trailing = { path = "../sibling", dir = "src/" }
             &project,
             &storage.view(),
         );
-        plan.materialize_path_sources(&project, &mut storage, ProjectInputOptions::Compile)
-            .await;
+        plan.materialize_path_sources(&project, &mut storage).await;
 
         assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
         assert_eq!(plan.plan.source_dependency_artifacts.len(), 3);

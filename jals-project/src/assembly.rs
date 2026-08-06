@@ -471,14 +471,21 @@ mod tests {
         });
     }
 
+    /// A dependency's sources are a **typing authority**, so every inputs policy reads them.
+    ///
+    /// `Analysis` used to come back empty here, which is why `jals lint` could not resolve a
+    /// `path` dependency's types. Withholding a typing authority does not make an analysis pass
+    /// cheaper — it makes every reference into that dependency an unresolved name. What the policy
+    /// still decides is the *navigation* half (`-sources.jar` extraction and skeleton synthesis),
+    /// which [`task_classpath_classes_get_navigation_sources`] covers.
     #[test]
-    fn the_inputs_policy_decides_whether_dependency_sources_are_visible() {
+    fn every_inputs_policy_reads_a_dependency_source() {
         block_on_inline(async {
             let manifest = root_manifest();
-            for (options, expected) in [
-                (ProjectInputOptions::Editor, vec!["artifact"]),
-                (ProjectInputOptions::Compile, vec!["artifact"]),
-                (ProjectInputOptions::Analysis, Vec::new()),
+            for options in [
+                ProjectInputOptions::Editor,
+                ProjectInputOptions::Compile,
+                ProjectInputOptions::Analysis,
             ] {
                 let mut storage = project();
                 let assembly = ProjectScript::skipped()
@@ -492,8 +499,8 @@ mod tests {
                 );
                 assert_eq!(
                     source_kinds(&assembly, "Child.java"),
-                    expected,
-                    "{options:?} decides whether a dependency's sources reach the caller"
+                    vec!["artifact"],
+                    "{options:?}: a dependency's sources define types the consumer names"
                 );
             }
         });
