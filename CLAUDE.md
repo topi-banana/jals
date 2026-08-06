@@ -148,6 +148,16 @@ filesystem reads into portable interfaces.
   crate-internal `javac` invocation layer *beneath* that seam, which `JavacBackend` drives once
   `StagedTree` has materialized the tree; `[toolchain] compiler` still chooses which tool runs, and
   `[toolchain] runtime` is selected independently for `jals run`'s run step.
+  A `BuildScriptDiagnostic`'s fields are sealed and it renders as `<severity>: <message>` through its
+  own `Display`; `BuildScriptError::ReportedErrors` renders every diagnostic it carries, in emission
+  order. A `build.warning` and a `build.error` read identically once the severity is dropped, so a
+  host that prints `message()` into a plain string either restates a severity it re-derived or shows
+  a warning as an error — which is why the rendering lives here. `message()` is for a destination
+  that already has a severity channel: an LSP `DiagnosticSeverity`, a Monaco marker, the `warning:`
+  lead of a CLI line, a `GraphWarning`. Filling one of those from a *documented invariant* is not a
+  re-derivation — `BuildScriptOutput::diagnostics` is warnings-only because a run that produced an
+  error diverts the whole collection into `ReportedErrors` before an output exists, so promoting it
+  needs no severity test, and writing one there erases an error rather than surfacing it.
 - `jals-cli`: the host boundary from clap `PathBuf` values to `NativeStorage` and typed keys. It
   also owns native-formatter-config **detection** (`migrate.rs`): portable crates cannot look at a
   filesystem, so the host decides which config file is there and reads its bytes through a

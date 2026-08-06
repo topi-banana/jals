@@ -292,9 +292,12 @@ impl BuildScriptDiagnosticUpdate {
     }
 
     fn push_reported(&mut self, diagnostic: &BuildScriptDiagnostic) {
-        let severity = match diagnostic {
-            BuildScriptDiagnostic::Warning(_) => DiagnosticSeverity::WARNING,
-            BuildScriptDiagnostic::Error(_) => DiagnosticSeverity::ERROR,
+        // The message stays bare: LSP carries severity in its own field, so rendering the whole
+        // diagnostic here would spell it twice — once for the protocol and once inside the text.
+        let severity = if diagnostic.is_error() {
+            DiagnosticSeverity::ERROR
+        } else {
+            DiagnosticSeverity::WARNING
         };
         let diagnostic = self.diagnostic(severity, diagnostic.message().to_owned(), None);
         self.diagnostics.push(diagnostic);
@@ -2190,14 +2193,10 @@ impl AssembledWorkspace {
         update: &mut BuildScriptDiagnosticUpdate,
         diagnostic: &BuildScriptDiagnostic,
     ) {
-        let severity = match diagnostic {
-            BuildScriptDiagnostic::Warning(_) => "warning",
-            BuildScriptDiagnostic::Error(_) => "error",
-        };
+        // stderr is a plain string with no severity channel, so the diagnostic renders itself.
         eprintln!(
-            "jals-lsp: build script {severity} for {}: {}",
-            root.display(),
-            diagnostic.message()
+            "jals-lsp: build script for {}: {diagnostic}",
+            root.display()
         );
         update.push_reported(diagnostic);
     }
@@ -2748,8 +2747,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let script = FileKey::parse("build.rhai").unwrap();
         let mut reported = BuildScriptDiagnosticUpdate::new(Some(script.clone()));
-        reported.push_reported(&BuildScriptDiagnostic::Warning("generated fallback".into()));
-        reported.push_reported(&BuildScriptDiagnostic::Error("generation failed".into()));
+        reported.push_reported(&BuildScriptDiagnostic::warning("generated fallback"));
+        reported.push_reported(&BuildScriptDiagnostic::error("generation failed"));
 
         let publications =
             Actor::build_script_diagnostic_publications(root.path(), None, &reported);
@@ -2763,6 +2762,8 @@ mod tests {
             publications[0].diagnostics[1].severity,
             Some(DiagnosticSeverity::ERROR)
         );
+        // Both messages stay bare: the protocol carries the severity in its own field.
+        assert_eq!(publications[0].diagnostics[0].message, "generated fallback");
         assert_eq!(publications[0].diagnostics[1].message, "generation failed");
         assert_eq!(
             publications[0].diagnostics[0].range,

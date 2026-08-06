@@ -379,26 +379,82 @@ impl FromIterator<(String, String)> for BuildScriptEnvironment {
     }
 }
 
-/// One script-reported diagnostic.
+/// How severe one script-reported diagnostic is.
+///
+/// Deliberately crate-private. Every consumer of a [`BuildScriptDiagnostic`] either needs the
+/// whole rendering ([`fmt::Display`]) or a two-way answer ([`BuildScriptDiagnostic::is_error`]);
+/// none needs to name a severity. Publishing this enum together with its `Display` would hand
+/// every host the two halves of `format!("{severity}: {message}")`, which is the rendering that
+/// belongs here. When a third severity arrives, `is_error` stops answering the question at the
+/// sites that matter and the compiler says so — that is when this becomes public.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BuildScriptSeverity {
+    Warning,
+    Error,
+}
+
+impl fmt::Display for BuildScriptSeverity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Warning => "warning",
+            Self::Error => "error",
+        })
+    }
+}
+
+/// One script-reported diagnostic: a severity and the message the script passed.
+///
+/// The fields are sealed so the severity cannot be recovered by matching. A consumer either
+/// renders the whole diagnostic or asks [`is_error`](Self::is_error); it never spells the severity
+/// itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BuildScriptDiagnostic {
-    /// A non-fatal warning.
-    Warning(String),
-    /// A fatal diagnostic. Any such diagnostic prevents publication.
-    Error(String),
+pub struct BuildScriptDiagnostic {
+    severity: BuildScriptSeverity,
+    message: String,
 }
 
 impl BuildScriptDiagnostic {
-    /// Diagnostic message without its severity.
-    pub fn message(&self) -> &str {
-        match self {
-            Self::Warning(message) | Self::Error(message) => message,
+    /// A non-fatal diagnostic.
+    pub fn warning(message: impl Into<String>) -> Self {
+        Self {
+            severity: BuildScriptSeverity::Warning,
+            message: message.into(),
         }
+    }
+
+    /// A fatal diagnostic. Any such diagnostic prevents publication.
+    pub fn error(message: impl Into<String>) -> Self {
+        Self {
+            severity: BuildScriptSeverity::Error,
+            message: message.into(),
+        }
+    }
+
+    /// Diagnostic message without its severity.
+    ///
+    /// For a destination that carries severity in a channel of its own — an LSP
+    /// `DiagnosticSeverity`, a Monaco marker, the `warning:` lead of a CLI line. A destination
+    /// that is a plain string renders the whole diagnostic through [`fmt::Display`] instead.
+    pub fn message(&self) -> &str {
+        &self.message
     }
 
     /// Whether this diagnostic prevents publication.
     pub const fn is_error(&self) -> bool {
-        matches!(self, Self::Error(_))
+        matches!(self.severity, BuildScriptSeverity::Error)
+    }
+}
+
+/// `<severity>: <message>` — what a host prints.
+///
+/// This rendering lives here rather than in each host for the reason `jals_classpath::Warning`'s
+/// does: a message alone is not the diagnostic. A script's
+/// `build.warning` and its `build.error` read identically once the severity is dropped, so a host
+/// that prints [`message`](Self::message) into a plain string either restates a severity it
+/// re-derived or silently presents a warning as an error.
+impl fmt::Display for BuildScriptDiagnostic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.severity, self.message)
     }
 }
 
@@ -425,8 +481,13 @@ pub struct BuildScriptOutput {
     pub rerun_files: BTreeSet<FileKey>,
     /// Environment names that invalidate this result, in lexical order.
     rerun_env: BTreeSet<String>,
-    /// Script warnings and any non-fatal cache-persistence warning. Successful results never
-    /// contain an error diagnostic.
+    /// Script warnings and any non-fatal cache-persistence warning.
+    ///
+    /// Successful results never contain an error diagnostic: a run that produced one diverts the
+    /// whole collection into [`BuildScriptError::ReportedErrors`] before an output exists. That is
+    /// a structural guarantee rather than a filter, so a host promoting these into a warning
+    /// channel of its own needs no severity test — and a host that writes one is describing a
+    /// state that cannot arise while erasing the one that would.
     pub diagnostics: Vec<BuildScriptDiagnostic>,
     /// Script metadata, in lexical key order.
     metadata: BTreeMap<String, String>,
@@ -697,6 +758,10 @@ pub enum BuildScriptError {
         message: String,
     },
     /// The script called `build.error`; no generated files were published.
+    ///
+    /// Carries *every* diagnostic the run produced, in the order the script emitted them — a
+    /// warning reported before the fatal one is context for it, not noise, and there is no other
+    /// carrier for it once publication is refused. Non-empty by construction.
     ReportedErrors(Vec<BuildScriptDiagnostic>),
 }
 
@@ -749,11 +814,18 @@ impl fmt::Display for BuildScriptError {
             } => {
                 write!(f, "build script `{script}` failed: {message}")
             }
-            Self::ReportedErrors(diagnostics) => write!(
-                f,
-                "build script reported {} error diagnostic(s)",
-                diagnostics.iter().filter(|item| item.is_error()).count()
-            ),
+            // Every diagnostic, each through its own rendering. A count told a host nothing it
+            // could act on and left it to reach past this into the vector for the bodies.
+            Self::ReportedErrors(diagnostics) => {
+                f.write_str("build script reported: ")?;
+                for (index, diagnostic) in diagnostics.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str("; ")?;
+                    }
+                    write!(f, "{diagnostic}")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -960,11 +1032,11 @@ mod api {
         BUILD_ARTIFACT_ROOT, BUILD_SCRIPT_API_VERSION, BUILD_SCRIPT_STATE_VERSION, BuildApi,
         BuildScriptCacheScope, BuildScriptDiagnostic, BuildScriptEnvironment, BuildScriptError,
         BuildScriptLimits, BuildScriptLimitsWire, BuildScriptOutput, BuildScriptOutputPath,
-        BuildScriptPosition, BuildScriptSession, BuildScriptStateWire, CacheIdentity,
-        DiagnosticLevelWire, DiagnosticWire, EnvironmentFingerprintWire, FileFingerprintWire,
-        FingerprintFilesModeWire, FingerprintInputsWire, MANAGED_ROOT, MANIFEST_FILE, OutputApi,
-        OutputArtifactWire, PendingOutput, PreparedBuildScript, PreparedCacheState, ProjectApi,
-        RHAI_OUTPUT_ROOT,
+        BuildScriptPosition, BuildScriptSession, BuildScriptSeverity, BuildScriptStateWire,
+        CacheIdentity, DiagnosticLevelWire, DiagnosticWire, EnvironmentFingerprintWire,
+        FileFingerprintWire, FingerprintFilesModeWire, FingerprintInputsWire, MANAGED_ROOT,
+        MANIFEST_FILE, OutputApi, OutputArtifactWire, PendingOutput, PreparedBuildScript,
+        PreparedCacheState, ProjectApi, RHAI_OUTPUT_ROOT,
     };
     use crate::task::{TaskPlan, TasksApi};
 
@@ -1564,7 +1636,7 @@ mod api {
     fn build_warning(api: &mut BuildApi, message: ImmutableString) -> RhaiResult<()> {
         push_diagnostic(
             api,
-            BuildScriptDiagnostic::Warning(message.into_owned()),
+            BuildScriptDiagnostic::warning(message.into_owned()),
             "build.warning",
         )
     }
@@ -1572,7 +1644,7 @@ mod api {
     fn build_error(api: &mut BuildApi, message: ImmutableString) -> RhaiResult<()> {
         push_diagnostic(
             api,
-            BuildScriptDiagnostic::Error(message.into_owned()),
+            BuildScriptDiagnostic::error(message.into_owned()),
             "build.error",
         )
     }
@@ -2022,8 +2094,12 @@ mod api {
             .into_iter()
             .map(|diagnostic| match diagnostic.level {
                 DiagnosticLevelWire::Warning => {
-                    Some(BuildScriptDiagnostic::Warning(diagnostic.message))
+                    Some(BuildScriptDiagnostic::warning(diagnostic.message))
                 }
+                // One error collapses the whole `Option`, so a state holding one is undecodable
+                // and reads as a cache miss. That is how "a successful result never contains an
+                // error diagnostic" is enforced at rest — deliberately, and not testable from
+                // outside, because a run that produced an error never reaches a state write.
                 DiagnosticLevelWire::Error => None,
             })
             .collect::<Option<Vec<_>>>()?;
@@ -2326,15 +2402,12 @@ mod api {
             diagnostics: pending
                 .diagnostics
                 .iter()
-                .map(|diagnostic| match diagnostic {
-                    BuildScriptDiagnostic::Warning(message) => DiagnosticWire {
-                        level: DiagnosticLevelWire::Warning,
-                        message: message.clone(),
+                .map(|diagnostic| DiagnosticWire {
+                    level: match diagnostic.severity {
+                        BuildScriptSeverity::Warning => DiagnosticLevelWire::Warning,
+                        BuildScriptSeverity::Error => DiagnosticLevelWire::Error,
                     },
-                    BuildScriptDiagnostic::Error(message) => DiagnosticWire {
-                        level: DiagnosticLevelWire::Error,
-                        message: message.clone(),
-                    },
+                    message: diagnostic.message.clone(),
                 })
                 .collect(),
             metadata: pending.metadata.clone(),
@@ -2646,7 +2719,7 @@ mod api {
             // cross-session ownership/fingerprinting is degraded by this warning.
             output
                 .diagnostics
-                .push(BuildScriptDiagnostic::Warning(format!(
+                .push(BuildScriptDiagnostic::warning(format!(
                     "could not persist build-script cache: {message}"
                 )));
         }
@@ -3267,7 +3340,7 @@ mod tests {
             assert_eq!(output.run_env.get("MODE").unwrap(), "test");
             assert_eq!(
                 output.diagnostics,
-                [BuildScriptDiagnostic::Warning("generated fallback".into())]
+                [BuildScriptDiagnostic::warning("generated fallback")]
             );
             assert_eq!(output.metadata.get("schema").unwrap(), "v1");
         });
@@ -3618,6 +3691,71 @@ mod tests {
             assert_eq!(
                 output.additional_classpath,
                 BTreeSet::from([FileKey::parse("lib/kept.jar").unwrap()])
+            );
+        });
+    }
+
+    #[test]
+    fn a_diagnostic_renders_its_own_severity() {
+        assert_eq!(
+            BuildScriptDiagnostic::warning("cache is stale").to_string(),
+            "warning: cache is stale"
+        );
+        assert_eq!(
+            BuildScriptDiagnostic::error("stop").to_string(),
+            "error: stop"
+        );
+    }
+
+    #[test]
+    fn reported_errors_render_every_diagnostic_in_emission_order() {
+        block_on_inline(async {
+            let mut storage = storage(
+                r#"build.warning("check your features"); build.error("stop");"#,
+                [],
+            );
+            let error = run(
+                &mut storage,
+                &BuildScriptEnvironment::new(),
+                &BuildScriptLimits::default(),
+                &mut BuildScriptSession::new(),
+            )
+            .await
+            .expect_err("the script reported an error");
+
+            // The warning is carried, labelled, and kept ahead of the error it preceded: it is the
+            // context for the failure and `ReportedErrors` is its only carrier once publication is
+            // refused.
+            assert_eq!(
+                error.to_string(),
+                "build script reported: warning: check your features; error: stop"
+            );
+        });
+    }
+
+    #[test]
+    fn a_cached_warning_round_trips_through_the_state_with_its_severity() {
+        block_on_inline(async {
+            let mut storage = storage(r#"build.warning("kept");"#, []);
+            let environment = BuildScriptEnvironment::new();
+            let limits = BuildScriptLimits::default();
+            let mut session = BuildScriptSession::new();
+            let first = run(&mut storage, &environment, &limits, &mut session)
+                .await
+                .unwrap();
+            assert_eq!(
+                first.diagnostics,
+                [BuildScriptDiagnostic::warning("kept")],
+                "the first run reports the script's own warning"
+            );
+
+            let reused = run(&mut storage, &environment, &limits, &mut session)
+                .await
+                .unwrap();
+            assert_eq!(
+                reused.diagnostics,
+                [BuildScriptDiagnostic::warning("kept")],
+                "and the cached state decodes back to the same severity"
             );
         });
     }
