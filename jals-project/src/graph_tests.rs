@@ -381,17 +381,21 @@ fn relative_child_jar_and_classpath_become_verified_artifacts() {
             assembly.plan.dependencies[0].location,
             DependencyLocation::Artifact(_)
         ));
+        // Both sit in `../lib`, outside the `child` project that declares them, so both are
+        // addressed by a synthesized name rather than by a path `child` does not have. The jar's
+        // is qualified by its role: two out-of-project jars can share a basename, and the bare
+        // form this used to take made them one file.
         assert!(
             assembly
                 .compile_classpath
                 .iter()
-                .any(|entry| classpath_contains(entry, "Api.class"))
+                .any(|entry| classpath_contains(entry, "external-classpath-0/Api.class"))
         );
         assert!(
             assembly
                 .compile_classpath
                 .iter()
-                .any(|entry| classpath_contains(entry, "dep.jar"))
+                .any(|entry| classpath_contains(entry, "external-binary/dep.jar"))
         );
     })
     .unwrap();

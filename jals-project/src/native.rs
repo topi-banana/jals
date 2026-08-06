@@ -1,31 +1,36 @@
-//! Native recursive path/Git acquisition and root-project input projection.
+//! Native path/Git acquisition and root-project input projection.
+//!
+//! The walk is [`crate::walk`]'s; this is the half a host owns. Acquiring means canonicalizing a
+//! path or cloning a repository, and *opening* means snapshotting what was acquired into a
+//! [`ProjectView`] — after which the walk reads exactly as it does over a captured tree.
 
 use std::fs;
 use std::path::{Component, Path, PathBuf, Prefix};
 use std::process::Command;
 
-use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use jals_classpath::{
-    ExternalLocator, Fetcher, NativeProjectPlan, NetworkPolicy, ProjectInputOptions, ProjectInputs,
+    Fetcher, NativeProjectPlan, NetworkPolicy, ProjectInputOptions, ProjectInputs,
 };
-use jals_config::{Dependency, GitDependency, Manifest, PathDependency};
-use jals_exec::{Exec, LocalBoxFuture};
+use jals_config::{GitDependency, Manifest, PathDependency};
+use jals_exec::Exec;
 use jals_storage::{
-    Diagnostic, DirKey, EntryRef, FileKey, MemoryCache, Name, NativeSource, NativeStorage,
-    ProjectStorage, ProjectView, RelativePath,
+    Diagnostic, DirKey, FileKey, MemoryCache, Name, NativeSource, NativeStorage, ProjectStorage,
+    ProjectView, RelativePath,
 };
 
 use crate::assemble::{CompileClasspathEntry, ProjectAssemblyError};
 use crate::assembly::{GraphResolveError, ProjectScript, RootProjection};
 use crate::graph::{
-    BinaryInput, CapturedClasspathEntry, CapturedClasspathKind, CapturedFile, CycleEdge,
-    DeclaredBinaryEdge, DeclaredEdgeFeatures, EdgeRemap, GraphEdge, GraphError, GraphMetadata,
-    GraphPreprocess, GraphWarning, NodeBody, NodeId, PreprocessedProjectGraph, ResolvedNode,
-    ResolvedProjectGraph, SourceNode,
+    GraphError, GraphMetadata, GraphPreprocess, GraphWarning, NodeId, PreprocessedProjectGraph,
+    ResolvedProjectGraph,
+};
+use crate::walk::{
+    Acquired, DeclaredEntry, DeclaredFile, DeclaredTree, GraphHost, GraphWalk, Opened, Placement,
 };
 
 /// Native entry point for recursive dependency graph discovery.
@@ -92,40 +97,25 @@ struct DeclaringProject {
     confinement: Option<GitConfinement>,
 }
 
-struct AcquiredSource {
-    id: NodeId,
-    root: PathBuf,
-    confinement: Option<GitConfinement>,
-    watch: bool,
-    checkout: Option<tempfile::TempDir>,
-}
-
 struct CapturedSnapshot {
     view: ProjectView,
     diagnostics: Vec<Diagnostic>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum VisitState {
-    Visiting,
-    Complete,
+/// A dependency source located on this host but not yet snapshotted.
+struct NativeSite {
+    root: PathBuf,
+    confinement: Option<GitConfinement>,
+    /// Whether a host watching this project should watch this dependency too. A path dependency
+    /// outside a Git checkout is editable in place; a temporary clone is not.
+    watch: bool,
 }
 
-struct StackEntry {
-    id: NodeId,
-    incoming: GraphEdge,
-}
-
-struct GraphBuilder {
+/// The host half of discovery: what it takes to reach a path or a repository, and what it collected
+/// on the way.
+struct NativeHost {
     exec: Exec,
     network: NetworkPolicy,
-    nodes: Vec<ResolvedNode>,
-    seen_nodes: BTreeSet<NodeId>,
-    states: BTreeMap<NodeId, VisitState>,
-    edges: Vec<GraphEdge>,
-    stack: Vec<StackEntry>,
-    order: Vec<usize>,
-    warnings: Vec<GraphWarning>,
     watch_paths: BTreeSet<PathBuf>,
 }
 
@@ -143,25 +133,36 @@ impl NativeProjectGraph {
             .map_err(|error| GraphError::InvalidRootManifest {
                 message: error.to_string(),
             })?;
-        let root = GraphBuilder::canonical_project_root(root_directory).await?;
-        let snapshot = GraphBuilder::snapshot(&root, exec).await?;
+        let root = NativeHost::canonical_project_root(root_directory).await?;
+        let snapshot = NativeHost::snapshot(&root, exec).await?;
+        // The root project is no node, so its own snapshot diagnostics are attributed to nothing.
+        // Seeded ahead of the walk so they read before anything it finds.
+        let warnings = NativeHost::snapshot_notes("snapshot", &snapshot.diagnostics)
+            .into_iter()
+            .map(|message| GraphWarning {
+                node: None,
+                dependency: None,
+                message,
+            })
+            .collect();
         let declaring = DeclaringProject {
             root,
             view: snapshot.view,
             confinement: None,
         };
-        let mut builder = GraphBuilder::new(exec.clone(), network);
-        builder.push_snapshot_warnings(None, snapshot.diagnostics);
-        builder
-            .visit_dependencies(None, &declaring, root_manifest)
-            .await?;
+        let mut host = NativeHost {
+            exec: exec.clone(),
+            network,
+            watch_paths: BTreeSet::new(),
+        };
+        let output = GraphWalk::run(&mut host, &declaring, root_manifest, warnings).await?;
         Ok(ResolvedProjectGraph {
-            nodes: builder.nodes,
-            edges: builder.edges,
-            order: builder.order,
-            warnings: builder.warnings,
+            nodes: output.nodes,
+            edges: output.edges,
+            order: output.order,
+            warnings: output.warnings,
             native: NativeGraphState {
-                watch_paths: builder.watch_paths.into_iter().collect(),
+                watch_paths: host.watch_paths.into_iter().collect(),
             },
         })
     }
@@ -270,477 +271,59 @@ impl ProjectScript {
     }
 }
 
-impl GraphBuilder {
-    const fn new(exec: Exec, network: NetworkPolicy) -> Self {
-        Self {
-            exec,
-            network,
-            nodes: Vec::new(),
-            seen_nodes: BTreeSet::new(),
-            states: BTreeMap::new(),
-            edges: Vec::new(),
-            stack: Vec::new(),
-            order: Vec::new(),
-            warnings: Vec::new(),
-            watch_paths: BTreeSet::new(),
-        }
-    }
-
-    fn visit_dependencies<'a>(
-        &'a mut self,
-        parent: Option<NodeId>,
-        declaring: &'a DeclaringProject,
-        manifest: &'a Manifest,
-    ) -> LocalBoxFuture<'a, Result<(), GraphError>> {
-        Box::pin(async move {
-            for (name, dependency) in &manifest.dependencies {
-                match dependency {
-                    Dependency::Jar(jar) => {
-                        let remap = match EdgeRemap::of(manifest, dependency) {
-                            Ok(remap) => remap,
-                            Err(message) => {
-                                self.warn_declared(parent.as_ref(), name, message);
-                                None
-                            }
-                        };
-                        if let Err(message) = self
-                            .visit_binary(
-                                parent.clone(),
-                                declaring,
-                                name,
-                                &jar.jar,
-                                DeclaredBinaryEdge::classes(jar.recursive.unwrap_or(false), remap),
-                            )
-                            .await
-                        {
-                            self.warn_declared(parent.as_ref(), name, message);
-                        }
-                        if let Some(sources) = &jar.sources
-                            && let Err(message) = self
-                                .visit_binary(
-                                    parent.clone(),
-                                    declaring,
-                                    name,
-                                    sources,
-                                    DeclaredBinaryEdge::sources(),
-                                )
-                                .await
-                        {
-                            self.warn_declared(parent.as_ref(), name, message);
-                        }
-                    }
-                    Dependency::Path(path) => {
-                        let acquired = match self.acquire_path(declaring, path).await {
-                            Ok(acquired) => acquired,
-                            Err(message) => {
-                                self.warn_declared(parent.as_ref(), name, message);
-                                continue;
-                            }
-                        };
-                        let declared = DeclaredEdgeFeatures::of(dependency);
-                        self.visit_source(parent.clone(), name, declared, acquired)
-                            .await?;
-                    }
-                    Dependency::Git(git) => {
-                        let acquired = match self.acquire_git(declaring, name, git).await {
-                            Ok(acquired) => acquired,
-                            Err(message) => {
-                                self.warn_declared(parent.as_ref(), name, message);
-                                continue;
-                            }
-                        };
-                        let declared = DeclaredEdgeFeatures::of(dependency);
-                        self.visit_source(parent.clone(), name, declared, acquired)
-                            .await?;
-                    }
-                }
-            }
-            Ok(())
-        })
-    }
-
-    async fn visit_source(
-        &mut self,
-        parent: Option<NodeId>,
-        dependency: &str,
-        declared: DeclaredEdgeFeatures,
-        mut acquired: AcquiredSource,
-    ) -> Result<(), GraphError> {
-        let checkout = acquired.checkout.take();
-        // The id, not the location: only the cleanup failure below names the declaring project,
-        // and only a Git dependency can reach it. Resolving a location here would scan the nodes
-        // and allocate for every *path* dependency too, where nothing ever reads the result.
-        let declared_by = parent.clone();
-        let result = self
-            .visit_source_inner(parent, dependency, declared, acquired)
-            .await;
-        let cleanup = if let Some(checkout) = checkout {
-            jals_exec::tokio_rt::on_blocking_pool(move || {
-                checkout
-                    .close()
-                    .map_err(|error| format!("removing temporary Git checkout: {error}"))
-            })
-            .await
-        } else {
-            Ok(())
-        };
-        result?;
-        // Removing the scratch checkout is housekeeping, not part of resolving the graph. On
-        // Windows an antivirus or indexer holding a handle makes this fail routinely, and failing
-        // the whole build over a leftover temp directory leaves the user no way forward. Report it
-        // and move on; the directory is under the OS temp root either way.
-        if let Err(message) = cleanup {
-            // The declaring project resolves the same now as it would have before the visit: it
-            // was pushed as a node before it began declaring anything.
-            self.warn_declared(
-                declared_by.as_ref(),
-                dependency,
-                format!("could not remove the temporary Git checkout: {message}"),
-            );
-        }
-        Ok(())
-    }
-
-    async fn visit_source_inner(
-        &mut self,
-        parent: Option<NodeId>,
-        dependency: &str,
-        declared: DeclaredEdgeFeatures,
-        acquired: AcquiredSource,
-    ) -> Result<(), GraphError> {
-        let incoming = GraphEdge {
-            from: parent,
-            dependency: dependency.to_owned(),
-            to: acquired.id.clone(),
-            recursive: false,
-            features: declared.features,
-            default_features: declared.default_features,
-            // Only a `jar` entry can carry one, and this is the source-form edge.
-            remap: None,
-        };
-        self.edges.push(incoming.clone());
-        match self.states.get(&acquired.id) {
-            Some(VisitState::Complete) => return Ok(()),
-            Some(VisitState::Visiting) => return Err(self.cycle(&incoming)),
-            None => {}
-        }
-
-        let snapshot = Self::snapshot(&acquired.root, &self.exec).await?;
-        let manifest = Self::probe_manifest(&acquired, &snapshot)?;
-        // One location for this node, written everywhere it is named: what the snapshot diagnostics
-        // and the `[build]` entry warnings below are attributed to has to be what the node itself
-        // records, or a reader gets two names for one dependency.
-        let location = Self::node_location(&acquired);
-        self.push_snapshot_warnings(Some(&location), snapshot.diagnostics);
-        let view = snapshot.view;
-        let declaring = DeclaringProject {
-            root: acquired.root.clone(),
-            view: view.clone(),
-            confinement: acquired.confinement.clone(),
-        };
-        let (body, child_manifest) = if let Some(manifest) = manifest {
-            let authored_sources = self
-                .capture_manifest_sources(&declaring, &location, &manifest)
-                .await;
-            let classpath = self
-                .capture_manifest_classpath(&declaring, &location, &manifest)
-                .await;
-            (
-                NodeBody::JalsSource {
-                    source: SourceNode {
-                        view,
-                        authored_sources,
-                        classpath,
-                    },
-                    manifest: Box::new(manifest.clone()),
-                },
-                Some(manifest),
-            )
-        } else {
-            (
-                NodeBody::PlainSource(SourceNode {
-                    authored_sources: Self::capture_plain_sources(&view),
-                    view,
-                    classpath: Vec::new(),
-                }),
-                None,
-            )
-        };
-        let index = self.nodes.len();
-        self.seen_nodes.insert(acquired.id.clone());
-        self.nodes.push(ResolvedNode {
-            id: acquired.id.clone(),
-            location,
-            body,
-        });
-        self.states
-            .insert(acquired.id.clone(), VisitState::Visiting);
-        self.stack.push(StackEntry {
-            id: acquired.id.clone(),
-            incoming,
-        });
-        if acquired.watch {
-            self.watch_paths.insert(acquired.root.clone());
-        }
-        if let Some(manifest) = child_manifest.as_ref() {
-            self.visit_dependencies(Some(acquired.id.clone()), &declaring, manifest)
-                .await?;
-        }
-        self.stack.pop();
-        self.states
-            .insert(acquired.id.clone(), VisitState::Complete);
-        self.order.push(index);
-        Ok(())
-    }
-
-    /// Warn about a `[dependencies]` entry, attributed to the project whose manifest declares it.
-    ///
-    /// The entry name alone is not enough for a transitive project: `lib` says which line to look
-    /// at, not which `jals.toml` it is on.
-    fn warn_declared(&mut self, parent: Option<&NodeId>, name: &str, message: impl Into<String>) {
-        let declaring = ResolvedNode::location_of(&self.nodes, parent);
-        self.warnings
-            .push(GraphWarning::declared(declaring, name, message));
-    }
-
-    /// Warn about a `[build] source-dirs` or `[build] classpath` entry of the node being visited.
-    ///
-    /// Attributed the same way a `[dependencies]` entry is, and for a stronger reason: `lib` is at
-    /// least a name the reader chose, where `src/main/java` is the default every project in the
-    /// graph writes. Never the root — its `[build]` section is lowered by `jals-classpath`, not
-    /// here — so the declaring project is always a node and always worth naming.
-    fn warn_entry(&mut self, location: &str, entry: &str, message: impl Into<String>) {
-        self.warnings.push(GraphWarning::declared(
-            Some(location.to_owned()),
-            entry,
-            message,
-        ));
-    }
-
-    /// How a diagnostic names this node. A Git dependency lives in a temporary checkout whose path
+impl NativeHost {
+    /// How a diagnostic names a node. A Git dependency lives in a temporary checkout whose path
     /// means nothing to a reader, so it is named by the repository it was cloned from instead —
     /// by that repository's [`location`](GitConfinement::location), never by the identity framing
     /// beside it.
-    fn node_location(acquired: &AcquiredSource) -> String {
-        acquired.confinement.as_ref().map_or_else(
-            || acquired.root.display().to_string(),
+    fn node_location(root: &Path, confinement: Option<&GitConfinement>) -> String {
+        confinement.map_or_else(
+            || root.display().to_string(),
             |confinement| confinement.location.clone(),
         )
     }
 
-    async fn visit_binary(
-        &mut self,
-        parent: Option<NodeId>,
-        declaring: &DeclaringProject,
-        dependency: &str,
-        locator: &str,
-        declared: DeclaredBinaryEdge,
-    ) -> Result<(), String> {
-        let DeclaredBinaryEdge {
-            recursive,
-            source_archive,
-            remap,
-        } = declared;
-        let role = if source_archive { "source" } else { "binary" };
-        let (id, input) = if ExternalLocator::is_remote(locator) {
-            let input = if source_archive {
-                BinaryInput::ExternalSource {
-                    locator: locator.to_owned(),
-                }
-            } else {
-                BinaryInput::External {
-                    locator: locator.to_owned(),
-                }
-            };
-            (
-                NodeId::from_identity(format!("{role}-external\0{locator}").as_bytes()),
-                input,
-            )
-        } else {
-            let raw = locator.strip_prefix("file://").unwrap_or(locator);
-            let unresolved = Self::resolve_path(&declaring.root, raw);
-            let canonical = Self::canonical_file(&unresolved).await?;
-            Self::require_confinement(declaring, &canonical)?;
-            let identity = Self::stable_local_identity(declaring, &canonical, role)?;
-            let bytes = Self::read_declared_file(declaring, &canonical).await?;
-            let logical = Self::logical_file_path(declaring, &canonical)?;
-            let captured = CapturedFile {
-                path: logical,
-                bytes,
-            };
-            let input = if source_archive {
-                BinaryInput::CapturedSource(captured)
-            } else {
-                BinaryInput::Captured(captured)
-            };
-            (NodeId::from_identity(identity.as_bytes()), input)
-        };
-        let binary = DeclaredEdgeFeatures::binary();
-        self.edges.push(GraphEdge {
-            from: parent,
-            dependency: dependency.to_owned(),
-            to: id.clone(),
-            recursive,
-            features: binary.features,
-            default_features: binary.default_features,
-            remap,
-        });
-        if !self.seen_nodes.insert(id.clone()) {
-            return Ok(());
-        }
-        let index = self.nodes.len();
-        self.nodes.push(ResolvedNode {
-            id,
-            location: locator.to_owned(),
-            body: NodeBody::Binary(input),
-        });
-        self.order.push(index);
-        Ok(())
+    /// One declared file's own name, portable enough to address it by.
+    fn host_file_name(canonical: &Path) -> Result<Name, String> {
+        let name = canonical
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| "dependency file name is not portable UTF-8".to_owned())?;
+        Name::new(name).map_err(|error| format!("dependency file name is not portable: {error:?}"))
     }
 
-    async fn acquire_path(
-        &self,
-        declaring: &DeclaringProject,
-        dependency: &PathDependency,
-    ) -> Result<AcquiredSource, String> {
-        let base = Self::resolve_path(&declaring.root, &dependency.path);
-        let selected = dependency
-            .dir
-            .as_deref()
-            .map_or_else(|| base.clone(), |dir| base.join(dir));
-        let root = Self::canonical_directory(&selected).await?;
-        Self::require_confinement(declaring, &root)?;
-        let (identity, confinement, watch) = if let Some(confinement) = &declaring.confinement {
-            let relative = Self::stable_relative(&confinement.checkout, &root)?;
-            (
-                format!("path-in-git\0{}\0{relative}", confinement.stable_repository),
-                Some(confinement.clone()),
-                false,
-            )
-        } else {
-            let rendered = Self::stable_path(&root)?;
-            (format!("path\0{rendered}"), None, true)
-        };
-        Ok(AcquiredSource {
-            id: NodeId::from_identity(identity.as_bytes()),
-            root,
-            confinement,
-            watch,
-            checkout: None,
-        })
+    /// Where a canonical host path sits relative to the project that declared it.
+    fn placement(declaring: &DeclaringProject, canonical: &Path) -> Placement {
+        RelativePath::from_host_path(&declaring.root, canonical)
+            .filter(|relative| !relative.is_root())
+            .map_or(Placement::External, Placement::Local)
     }
 
-    async fn acquire_git(
-        &self,
-        declaring: &DeclaringProject,
-        dependency_name: &str,
-        dependency: &GitDependency,
-    ) -> Result<AcquiredSource, String> {
-        // Cloning is a network operation, and it is not gated anywhere downstream. `--offline`
-        // has to stop it here, and the language server runs offline unconditionally — opening a
-        // folder in an editor must not reach out to a remote the user never asked about.
-        if self.network == NetworkPolicy::Offline {
-            return Err(format!(
-                "git dependency `{dependency_name}` cannot be acquired offline"
-            ));
-        }
-        let reference = dependency
-            .git_ref(dependency_name)
-            .map_err(|error| error.to_string())?;
-        let (clone_argument, stable_locator) =
-            self.resolve_git_locator(declaring, &dependency.git).await?;
-        // Kept out of the clone below, which moves `clone_argument` onto the blocking pool. This
-        // is the readable half of the pair: a URL as the manifest wrote it, or a canonical host
-        // path — where `stable_locator` is NUL-framed identity input.
-        let location = clone_argument.clone();
-        let checkout_arg = reference.checkout_arg().map(ToOwned::to_owned);
-        let selected_dir = dependency.dir.clone();
-        let current_directory = declaring.root.clone();
-        let (temporary, checkout, selected, commit) =
-            jals_exec::tokio_rt::on_blocking_pool(move || {
-                let temporary = tempfile::tempdir()
-                    .map_err(|error| format!("creating temporary Git checkout: {error}"))?;
-                let checkout = temporary.path().join("checkout");
-                let clone = NativeProjectGraph::git_command()
-                    .current_dir(&current_directory)
-                    .arg("clone")
-                    .arg("--quiet")
-                    // `--` ends option parsing: without it a URL or path that happens to look
-                    // like a flag would be read as one.
-                    .arg("--")
-                    .arg(&clone_argument)
-                    .arg(&checkout)
-                    .output()
-                    .map_err(|error| format!("running git clone: {error}"))?;
-                if !clone.status.success() {
-                    return Err(format!(
-                        "git clone failed: {}",
-                        String::from_utf8_lossy(&clone.stderr).trim()
-                    ));
-                }
-                if let Some(target) = checkout_arg {
-                    let output = NativeProjectGraph::git_command()
-                        .arg("-C")
-                        .arg(&checkout)
-                        .arg("checkout")
-                        .arg("--quiet")
-                        .arg(target)
-                        // No pathspecs follow, so a ref sharing a name with a file is still
-                        // resolved as a ref.
-                        .arg("--")
-                        .output()
-                        .map_err(|error| format!("running git checkout: {error}"))?;
-                    if !output.status.success() {
-                        return Err(format!(
-                            "git checkout failed: {}",
-                            String::from_utf8_lossy(&output.stderr).trim()
-                        ));
-                    }
-                }
-                let head = NativeProjectGraph::git_command()
-                    .arg("-C")
-                    .arg(&checkout)
-                    .arg("rev-parse")
-                    .arg("HEAD")
-                    .output()
-                    .map_err(|error| format!("reading Git HEAD: {error}"))?;
-                if !head.status.success() {
-                    return Err("could not resolve checked-out Git HEAD".to_owned());
-                }
-                let commit = String::from_utf8(head.stdout)
-                    .map_err(|_| "Git HEAD is not UTF-8".to_owned())?
-                    .trim()
-                    .to_owned();
-                let checkout = Self::canonicalize(&checkout)
-                    .map_err(|error| format!("canonicalizing Git checkout: {error}"))?;
-                let selected = selected_dir
-                    .as_deref()
-                    .map_or_else(|| checkout.clone(), |dir| checkout.join(dir));
-                let selected = Self::canonicalize(&selected)
-                    .map_err(|error| format!("selecting Git dependency root: {error}"))?;
-                if !selected.is_dir() || !selected.starts_with(&checkout) {
-                    return Err("selected Git dependency root leaves the checkout".to_owned());
-                }
-                let selected = Self::stable_relative(&checkout, &selected)?;
-                Ok((temporary, checkout, selected, commit))
-            })
-            .await?;
-        let identity = format!("git\0{stable_locator}\0{commit}\0{selected}");
-        let stable_repository = format!("git\0{stable_locator}\0{commit}");
-        Ok(AcquiredSource {
-            id: NodeId::from_identity(identity.as_bytes()),
-            root: if selected.is_empty() {
-                checkout.clone()
-            } else {
-                Self::resolve_path(&checkout, &selected)
-            },
-            confinement: Some(GitConfinement {
-                checkout,
-                stable_repository,
-                location,
-            }),
-            watch: false,
-            checkout: Some(temporary),
+    /// Why a `jals.toml` the snapshot did not produce could not be read, if that is what happened.
+    ///
+    /// A permission failure is not missing data, and the two are indistinguishable from the view
+    /// alone — the entry is simply absent either way. The snapshot's own diagnostics are what tell
+    /// them apart, so they are scanned here, once, while they are still in hand.
+    fn manifest_unreadable(root: &Path, diagnostics: &[Diagnostic]) -> Option<String> {
+        let path = root.join("jals.toml");
+        diagnostics.iter().find_map(|diagnostic| match diagnostic {
+            Diagnostic::UnreadableEntry(message)
+                if message
+                    .strip_prefix(path.to_string_lossy().as_ref())
+                    .is_some_and(|suffix| suffix.starts_with(':')) =>
+            {
+                Some(message.clone())
+            }
+            Diagnostic::SymlinkEscapesRoot(logical) | Diagnostic::SymlinkCycle(logical)
+                if logical == "jals.toml" =>
+            {
+                Some(format!("`jals.toml` is unreadable: {diagnostic:?}"))
+            }
+            Diagnostic::ExternalChangeShadowed(_)
+            | Diagnostic::NonUtf8Entry(_)
+            | Diagnostic::SymlinkEscapesRoot(_)
+            | Diagnostic::SymlinkCycle(_)
+            | Diagnostic::UnreadableEntry(_) => None,
         })
     }
 
@@ -777,307 +360,6 @@ impl GraphBuilder {
             format!("file\0{canonical_path}")
         };
         Ok((canonical_path, stable))
-    }
-
-    fn probe_manifest(
-        acquired: &AcquiredSource,
-        snapshot: &CapturedSnapshot,
-    ) -> Result<Option<Manifest>, GraphError> {
-        let key = FileKey::parse("jals.toml").expect("constant is a portable file key");
-        let file = match snapshot.view.tree().lookup_file(&key) {
-            Some(EntryRef::File(file)) => file,
-            Some(EntryRef::Directory(_)) => {
-                return Err(GraphError::Acquisition {
-                    operation: format!("reading dependency manifest for {}", acquired.id),
-                    message: "`jals.toml` is not a file".to_owned(),
-                });
-            }
-            None => {
-                let path = acquired.root.join("jals.toml");
-                if let Some(message) =
-                    snapshot
-                        .diagnostics
-                        .iter()
-                        .find_map(|diagnostic| match diagnostic {
-                            Diagnostic::UnreadableEntry(message)
-                                if message
-                                    .strip_prefix(path.to_string_lossy().as_ref())
-                                    .is_some_and(|suffix| suffix.starts_with(':')) =>
-                            {
-                                Some(message.clone())
-                            }
-                            Diagnostic::SymlinkEscapesRoot(logical)
-                            | Diagnostic::SymlinkCycle(logical)
-                                if logical == "jals.toml" =>
-                            {
-                                Some(format!("`jals.toml` is unreadable: {diagnostic:?}"))
-                            }
-                            Diagnostic::ExternalChangeShadowed(_)
-                            | Diagnostic::NonUtf8Entry(_)
-                            | Diagnostic::SymlinkEscapesRoot(_)
-                            | Diagnostic::SymlinkCycle(_)
-                            | Diagnostic::UnreadableEntry(_) => None,
-                        })
-                {
-                    return Err(GraphError::Acquisition {
-                        operation: format!("reading dependency manifest for {}", acquired.id),
-                        message,
-                    });
-                }
-                return Ok(None);
-            }
-        };
-        let text = file.text().map_err(|error| GraphError::MalformedManifest {
-            node: acquired.id.clone(),
-            location: format!("dependencies/{}/jals.toml", acquired.id.token()),
-            message: error.to_string(),
-        })?;
-        text.parse::<Manifest>()
-            .map(Some)
-            .map_err(|error| GraphError::MalformedManifest {
-                node: acquired.id.clone(),
-                location: format!("dependencies/{}/jals.toml", acquired.id.token()),
-                message: error.to_string(),
-            })
-    }
-
-    /// The message says which kind of diagnostic this is and nothing about whose it is: the
-    /// subject belongs to [`GraphWarning`]'s `Display`, and `location` — `None` for the root
-    /// project's own snapshot ([`NativeProjectGraph::discover`]) — is what it writes it from.
-    fn push_snapshot_warnings(&mut self, location: Option<&str>, diagnostics: Vec<Diagnostic>) {
-        self.warnings
-            .extend(diagnostics.into_iter().map(|diagnostic| GraphWarning {
-                node: location.map(ToOwned::to_owned),
-                dependency: None,
-                message: format!("snapshot: {diagnostic:?}"),
-            }));
-    }
-
-    async fn capture_manifest_sources(
-        &mut self,
-        declaring: &DeclaringProject,
-        location: &str,
-        manifest: &Manifest,
-    ) -> Vec<CapturedFile> {
-        let mut files = BTreeMap::new();
-        for (index, source) in manifest.build.source_dirs.iter().enumerate() {
-            let physical = Self::resolve_path(&declaring.root, source);
-            let canonical = match Self::canonical_directory(&physical).await {
-                Ok(path) => path,
-                Err(message) => {
-                    self.warn_entry(
-                        location,
-                        source,
-                        format!("source directory is unavailable: {message}"),
-                    );
-                    continue;
-                }
-            };
-            if let Err(message) = Self::require_confinement(declaring, &canonical) {
-                self.warn_entry(location, source, message);
-                continue;
-            }
-            if let Some(relative) = RelativePath::from_host_path(&declaring.root, &canonical) {
-                let root = DirKey::new(relative);
-                if declaring.view.directory(&root).is_ok() {
-                    for file in declaring
-                        .view
-                        .tree()
-                        .files_under(&root)
-                        .filter(|file| file.key().has_extension("java"))
-                    {
-                        files.insert(file.key().path().clone(), file.bytes().to_vec());
-                    }
-                    continue;
-                }
-            }
-            match Self::snapshot(&canonical, &self.exec).await {
-                Ok(snapshot) => {
-                    for diagnostic in snapshot.diagnostics {
-                        self.warn_entry(
-                            location,
-                            source,
-                            format!("source snapshot: {diagnostic:?}"),
-                        );
-                    }
-                    let prefix = RelativePath::new([Name::new(format!("external-source-{index}"))
-                        .expect("generated prefix is portable")]);
-                    for file in snapshot
-                        .view
-                        .tree()
-                        .files_under(&DirKey::ROOT)
-                        .filter(|file| file.key().has_extension("java"))
-                    {
-                        files.insert(prefix.concat(file.key().path()), file.bytes().to_vec());
-                    }
-                }
-                Err(error) => {
-                    self.warn_entry(location, source, format!("source snapshot failed: {error}"));
-                }
-            }
-        }
-        files
-            .into_iter()
-            .map(|(path, bytes)| CapturedFile { path, bytes })
-            .collect()
-    }
-
-    fn capture_plain_sources(view: &ProjectView) -> Vec<CapturedFile> {
-        let root = ["src/main/java", "src"]
-            .into_iter()
-            .filter_map(|path| DirKey::parse(path).ok())
-            .find(|path| view.directory(path).is_ok())
-            .unwrap_or(DirKey::ROOT);
-        view.tree()
-            .files_under(&root)
-            .filter(|file| file.key().has_extension("java"))
-            .map(|file| CapturedFile {
-                path: file.key().path().clone(),
-                bytes: file.bytes().to_vec(),
-            })
-            .collect()
-    }
-
-    async fn capture_manifest_classpath(
-        &mut self,
-        declaring: &DeclaringProject,
-        location: &str,
-        manifest: &Manifest,
-    ) -> Vec<CapturedClasspathEntry> {
-        let mut entries = Vec::new();
-        for (index, entry) in manifest.build.classpath.iter().enumerate() {
-            let unresolved = Self::resolve_path(&declaring.root, entry);
-            let canonical = match Self::canonical_existing(&unresolved).await {
-                Ok(path) => path,
-                Err(message) => {
-                    self.warn_entry(
-                        location,
-                        entry,
-                        format!("classpath entry is unavailable: {message}"),
-                    );
-                    continue;
-                }
-            };
-            if let Err(message) = Self::require_confinement(declaring, &canonical) {
-                self.warn_entry(location, entry, message);
-                continue;
-            }
-            let metadata = match Self::is_file(&canonical).await {
-                Ok(is_file) => is_file,
-                Err(message) => {
-                    self.warn_entry(location, entry, message);
-                    continue;
-                }
-            };
-            if metadata {
-                match Self::read_declared_file(declaring, &canonical).await {
-                    Ok(bytes) => {
-                        let logical = RelativePath::from_host_path(&declaring.root, &canonical)
-                            .filter(|path| !path.is_root())
-                            .map_or_else(|| Self::external_classpath_file(index, &canonical), Ok);
-                        match logical {
-                            Ok(path) => entries.push(CapturedClasspathEntry {
-                                declared: entry.clone(),
-                                kind: CapturedClasspathKind::File(CapturedFile { path, bytes }),
-                            }),
-                            Err(message) => self.warn_entry(location, entry, message),
-                        }
-                    }
-                    Err(message) => self.warn_entry(location, entry, message),
-                }
-                continue;
-            }
-            let relative = RelativePath::from_host_path(&declaring.root, &canonical);
-            let (view, path, root, diagnostics) = if let Some(relative) = relative {
-                (
-                    declaring.view.clone(),
-                    relative.clone(),
-                    DirKey::new(relative),
-                    Vec::new(),
-                )
-            } else {
-                match Self::snapshot(&canonical, &self.exec).await {
-                    Ok(snapshot) => (
-                        snapshot.view,
-                        RelativePath::new([Name::new(format!("external-classpath-{index}"))
-                            .expect("generated prefix is portable")]),
-                        DirKey::ROOT,
-                        snapshot.diagnostics,
-                    ),
-                    Err(error) => {
-                        self.warn_entry(
-                            location,
-                            entry,
-                            format!("classpath snapshot failed: {error}"),
-                        );
-                        continue;
-                    }
-                }
-            };
-            for diagnostic in diagnostics {
-                self.warn_entry(
-                    location,
-                    entry,
-                    format!("classpath snapshot: {diagnostic:?}"),
-                );
-            }
-            let prefix_len = root.path().segments().len();
-            let members = view
-                .tree()
-                .files_under(&root)
-                .filter(|file| file.key().has_extension("class"))
-                .map(|file| CapturedFile {
-                    path: RelativePath::new(file.key().path().segments().skip(prefix_len).cloned()),
-                    bytes: file.bytes().to_vec(),
-                })
-                .collect();
-            entries.push(CapturedClasspathEntry {
-                declared: entry.clone(),
-                kind: CapturedClasspathKind::Tree { path, members },
-            });
-        }
-        entries
-    }
-
-    fn external_classpath_file(index: usize, canonical: &Path) -> Result<RelativePath, String> {
-        let name = canonical
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| "dependency file name is not portable UTF-8".to_owned())?;
-        Ok(RelativePath::new([
-            Name::new(format!("external-classpath-{index}")).expect("generated prefix is portable"),
-            Name::new(name)
-                .map_err(|error| format!("dependency file name is not portable: {error:?}"))?,
-        ]))
-    }
-
-    fn cycle(&self, closing: &GraphEdge) -> GraphError {
-        let position = self
-            .stack
-            .iter()
-            .position(|entry| entry.id == closing.to)
-            .expect("visiting node is on the DFS stack");
-        let mut chain: Vec<_> = self.stack[position + 1..]
-            .iter()
-            .map(|entry| CycleEdge {
-                from: entry
-                    .incoming
-                    .from
-                    .clone()
-                    .expect("cycle edges are between dependency nodes"),
-                dependency: entry.incoming.dependency.clone(),
-                to: entry.id.clone(),
-            })
-            .collect();
-        chain.push(CycleEdge {
-            from: closing
-                .from
-                .clone()
-                .expect("cycle closing edge has a dependency parent"),
-            dependency: closing.dependency.clone(),
-            to: closing.to.clone(),
-        });
-        GraphError::Cycle { chain }
     }
 
     fn require_confinement(declaring: &DeclaringProject, selected: &Path) -> Result<(), String> {
@@ -1123,24 +405,6 @@ impl GraphBuilder {
         .await
     }
 
-    fn logical_file_path(
-        declaring: &DeclaringProject,
-        canonical: &Path,
-    ) -> Result<RelativePath, String> {
-        if let Some(relative) = RelativePath::from_host_path(&declaring.root, canonical)
-            && !relative.is_root()
-        {
-            return Ok(relative);
-        }
-        let name = canonical
-            .file_name()
-            .and_then(|name| name.to_str())
-            .ok_or_else(|| "dependency file name is not portable UTF-8".to_owned())?;
-        Ok(RelativePath::new([Name::new(name).map_err(|error| {
-            format!("dependency file name is not portable: {error:?}")
-        })?]))
-    }
-
     async fn snapshot(root: &Path, exec: &Exec) -> Result<CapturedSnapshot, GraphError> {
         let root = root.to_path_buf();
         let source = jals_exec::tokio_rt::on_blocking_pool(move || {
@@ -1167,6 +431,40 @@ impl GraphBuilder {
         Ok(CapturedSnapshot {
             view: storage.view(),
             diagnostics: storage.diagnostics().to_vec(),
+        })
+    }
+
+    /// What the host has to say about a tree it captured, attributed to whatever is being captured.
+    ///
+    /// `label` names the capture rather than the diagnostic, because the reader is told what was
+    /// being read at the time: a dependency's own tree, or the `[build]` entry that named one.
+    fn snapshot_notes(label: &str, diagnostics: &[Diagnostic]) -> Vec<String> {
+        diagnostics
+            .iter()
+            .map(|diagnostic| format!("{label}: {diagnostic:?}"))
+            .collect()
+    }
+
+    /// A declared directory nothing already holds a view of, captured on its own.
+    ///
+    /// The caller decides *whether* a declared directory is external, because the two `[build]`
+    /// entries do not agree on how to tell — `source-dirs` requires the snapshot to have kept it,
+    /// where a `classpath` directory is taken at its host path. Once outside, they are the same
+    /// capture, and `label` is the one word both a remark and a failure are spelled with.
+    async fn external_tree(
+        &self,
+        canonical: &Path,
+        label: &str,
+        notes: &mut Vec<String>,
+    ) -> Result<DeclaredTree, String> {
+        let snapshot = Self::snapshot(canonical, &self.exec)
+            .await
+            .map_err(|error| format!("{label} failed: {error}"))?;
+        notes.extend(Self::snapshot_notes(label, &snapshot.diagnostics));
+        Ok(DeclaredTree {
+            view: snapshot.view,
+            root: DirKey::ROOT,
+            placement: Placement::External,
         })
     }
 
@@ -1281,6 +579,294 @@ impl GraphBuilder {
     }
 }
 
+impl GraphHost for NativeHost {
+    type Site = NativeSite;
+    type Project = DeclaringProject;
+    /// A Git dependency is cloned into a scratch directory that must outlive its whole subtree.
+    type Guard = Option<tempfile::TempDir>;
+
+    const SCOPE: &'static str = "native";
+
+    /// A dependency's manifest is addressed by the node's own token: a temporary checkout's path is
+    /// no help, and two dependencies can sit at the same relative place under different roots.
+    fn manifest_location(&self, id: &NodeId, _acquired: &Acquired<Self>) -> String {
+        format!("dependencies/{}/jals.toml", id.token())
+    }
+
+    async fn acquire_path(
+        &mut self,
+        declaring: &Self::Project,
+        dependency: &PathDependency,
+    ) -> Result<Acquired<Self>, String> {
+        let base = Self::resolve_path(&declaring.root, &dependency.path);
+        let selected = dependency
+            .dir
+            .as_deref()
+            .map_or_else(|| base.clone(), |dir| base.join(dir));
+        let root = Self::canonical_directory(&selected).await?;
+        Self::require_confinement(declaring, &root)?;
+        let (identity, confinement, watch) = if let Some(confinement) = &declaring.confinement {
+            let relative = Self::stable_relative(&confinement.checkout, &root)?;
+            (
+                format!("path-in-git\0{}\0{relative}", confinement.stable_repository),
+                Some(confinement.clone()),
+                false,
+            )
+        } else {
+            let rendered = Self::stable_path(&root)?;
+            (format!("path\0{rendered}"), None, true)
+        };
+        Ok(Acquired {
+            identity,
+            location: Self::node_location(&root, confinement.as_ref()),
+            site: NativeSite {
+                root,
+                confinement,
+                watch,
+            },
+            guard: None,
+        })
+    }
+
+    async fn acquire_git(
+        &mut self,
+        declaring: &Self::Project,
+        dependency_name: &str,
+        dependency: &GitDependency,
+    ) -> Result<Acquired<Self>, String> {
+        // Cloning is a network operation, and it is not gated anywhere downstream. `--offline`
+        // has to stop it here, and the language server runs offline unconditionally — opening a
+        // folder in an editor must not reach out to a remote the user never asked about.
+        if self.network == NetworkPolicy::Offline {
+            return Err(format!(
+                "git dependency `{dependency_name}` cannot be acquired offline"
+            ));
+        }
+        let reference = dependency
+            .git_ref(dependency_name)
+            .map_err(|error| error.to_string())?;
+        let (clone_argument, stable_locator) =
+            self.resolve_git_locator(declaring, &dependency.git).await?;
+        // Kept out of the clone below, which moves `clone_argument` onto the blocking pool. This
+        // is the readable half of the pair: a URL as the manifest wrote it, or a canonical host
+        // path — where `stable_locator` is NUL-framed identity input.
+        let location = clone_argument.clone();
+        let checkout_arg = reference.checkout_arg().map(ToOwned::to_owned);
+        let selected_dir = dependency.dir.clone();
+        let current_directory = declaring.root.clone();
+        let (temporary, checkout, selected, commit) =
+            jals_exec::tokio_rt::on_blocking_pool(move || {
+                let temporary = tempfile::tempdir()
+                    .map_err(|error| format!("creating temporary Git checkout: {error}"))?;
+                let checkout = temporary.path().join("checkout");
+                let clone = NativeProjectGraph::git_command()
+                    .current_dir(&current_directory)
+                    .arg("clone")
+                    .arg("--quiet")
+                    // `--` ends option parsing: without it a URL or path that happens to look
+                    // like a flag would be read as one.
+                    .arg("--")
+                    .arg(&clone_argument)
+                    .arg(&checkout)
+                    .output()
+                    .map_err(|error| format!("running git clone: {error}"))?;
+                if !clone.status.success() {
+                    return Err(format!(
+                        "git clone failed: {}",
+                        String::from_utf8_lossy(&clone.stderr).trim()
+                    ));
+                }
+                if let Some(target) = checkout_arg {
+                    let output = NativeProjectGraph::git_command()
+                        .arg("-C")
+                        .arg(&checkout)
+                        .arg("checkout")
+                        .arg("--quiet")
+                        .arg(target)
+                        // No pathspecs follow, so a ref sharing a name with a file is still
+                        // resolved as a ref.
+                        .arg("--")
+                        .output()
+                        .map_err(|error| format!("running git checkout: {error}"))?;
+                    if !output.status.success() {
+                        return Err(format!(
+                            "git checkout failed: {}",
+                            String::from_utf8_lossy(&output.stderr).trim()
+                        ));
+                    }
+                }
+                let head = NativeProjectGraph::git_command()
+                    .arg("-C")
+                    .arg(&checkout)
+                    .arg("rev-parse")
+                    .arg("HEAD")
+                    .output()
+                    .map_err(|error| format!("reading Git HEAD: {error}"))?;
+                if !head.status.success() {
+                    return Err("could not resolve checked-out Git HEAD".to_owned());
+                }
+                let commit = String::from_utf8(head.stdout)
+                    .map_err(|_| "Git HEAD is not UTF-8".to_owned())?
+                    .trim()
+                    .to_owned();
+                let checkout = Self::canonicalize(&checkout)
+                    .map_err(|error| format!("canonicalizing Git checkout: {error}"))?;
+                let selected = selected_dir
+                    .as_deref()
+                    .map_or_else(|| checkout.clone(), |dir| checkout.join(dir));
+                let selected = Self::canonicalize(&selected)
+                    .map_err(|error| format!("selecting Git dependency root: {error}"))?;
+                if !selected.is_dir() || !selected.starts_with(&checkout) {
+                    return Err("selected Git dependency root leaves the checkout".to_owned());
+                }
+                let selected = Self::stable_relative(&checkout, &selected)?;
+                Ok((temporary, checkout, selected, commit))
+            })
+            .await?;
+        let identity = format!("git\0{stable_locator}\0{commit}\0{selected}");
+        let stable_repository = format!("git\0{stable_locator}\0{commit}");
+        let root = if selected.is_empty() {
+            checkout.clone()
+        } else {
+            Self::resolve_path(&checkout, &selected)
+        };
+        Ok(Acquired {
+            identity,
+            // The repository as the manifest spelled it. A temporary checkout path names nothing
+            // a reader could open.
+            location: location.clone(),
+            site: NativeSite {
+                root,
+                confinement: Some(GitConfinement {
+                    checkout,
+                    stable_repository,
+                    location,
+                }),
+                // Never: the clone is scratch, and it is removed as soon as the subtree is walked.
+                watch: false,
+            },
+            guard: Some(temporary),
+        })
+    }
+
+    async fn open(&mut self, acquired: &Acquired<Self>) -> Result<Opened<Self>, GraphError> {
+        let snapshot = Self::snapshot(&acquired.site.root, &self.exec).await?;
+        let manifest_unreadable =
+            Self::manifest_unreadable(&acquired.site.root, &snapshot.diagnostics);
+        let notes = Self::snapshot_notes("snapshot", &snapshot.diagnostics);
+        Ok(Opened {
+            project: DeclaringProject {
+                root: acquired.site.root.clone(),
+                view: snapshot.view.clone(),
+                confinement: acquired.site.confinement.clone(),
+            },
+            view: snapshot.view,
+            notes,
+            manifest_unreadable,
+        })
+    }
+
+    fn admitted(&mut self, acquired: &Acquired<Self>) {
+        if acquired.site.watch {
+            self.watch_paths.insert(acquired.site.root.clone());
+        }
+    }
+
+    /// Removing the scratch checkout is housekeeping, not part of resolving the graph. On Windows
+    /// an antivirus or indexer holding a handle makes this fail routinely, and failing the whole
+    /// build over a leftover temp directory leaves the user no way forward. Report it and move on;
+    /// the directory is under the OS temp root either way.
+    async fn release(&mut self, guard: Self::Guard) -> Result<(), String> {
+        let Some(checkout) = guard else {
+            return Ok(());
+        };
+        jals_exec::tokio_rt::on_blocking_pool(move || {
+            checkout
+                .close()
+                .map_err(|error| format!("removing temporary Git checkout: {error}"))
+        })
+        .await
+        .map_err(|message| format!("could not remove the temporary Git checkout: {message}"))
+    }
+
+    async fn resolve_declared_file(
+        &mut self,
+        declaring: &Self::Project,
+        raw: &str,
+        role: &str,
+    ) -> Result<DeclaredFile, String> {
+        let unresolved = Self::resolve_path(&declaring.root, raw);
+        let canonical = Self::canonical_file(&unresolved).await?;
+        Self::require_confinement(declaring, &canonical)?;
+        let identity = Self::stable_local_identity(declaring, &canonical, role)?;
+        Ok(DeclaredFile {
+            bytes: Self::read_declared_file(declaring, &canonical).await?,
+            name: Self::host_file_name(&canonical)?,
+            identity,
+            placement: Self::placement(declaring, &canonical),
+        })
+    }
+
+    async fn resolve_source_dir(
+        &mut self,
+        declaring: &Self::Project,
+        raw: &str,
+        notes: &mut Vec<String>,
+    ) -> Result<DeclaredTree, String> {
+        let physical = Self::resolve_path(&declaring.root, raw);
+        let canonical = Self::canonical_directory(&physical)
+            .await
+            .map_err(|message| format!("source directory is unavailable: {message}"))?;
+        Self::require_confinement(declaring, &canonical)?;
+        // Inside the project the snapshot already holds it, so no second scan of the same bytes.
+        if let Some(relative) = RelativePath::from_host_path(&declaring.root, &canonical) {
+            let root = DirKey::new(relative.clone());
+            if declaring.view.directory(&root).is_ok() {
+                return Ok(DeclaredTree {
+                    view: declaring.view.clone(),
+                    root,
+                    placement: Placement::Local(relative),
+                });
+            }
+        }
+        self.external_tree(&canonical, "source snapshot", notes)
+            .await
+    }
+
+    async fn resolve_classpath_entry(
+        &mut self,
+        declaring: &Self::Project,
+        raw: &str,
+        notes: &mut Vec<String>,
+    ) -> Result<DeclaredEntry, String> {
+        let unresolved = Self::resolve_path(&declaring.root, raw);
+        let canonical = Self::canonical_existing(&unresolved)
+            .await
+            .map_err(|message| format!("classpath entry is unavailable: {message}"))?;
+        Self::require_confinement(declaring, &canonical)?;
+        if Self::is_file(&canonical).await? {
+            return Ok(DeclaredEntry::File(DeclaredFile {
+                bytes: Self::read_declared_file(declaring, &canonical).await?,
+                name: Self::host_file_name(&canonical)?,
+                // A `[build] classpath` entry becomes no node, so it needs no identity.
+                identity: String::new(),
+                placement: Self::placement(declaring, &canonical),
+            }));
+        }
+        if let Some(relative) = RelativePath::from_host_path(&declaring.root, &canonical) {
+            return Ok(DeclaredEntry::Tree(DeclaredTree {
+                view: declaring.view.clone(),
+                root: DirKey::new(relative.clone()),
+                placement: Placement::Local(relative),
+            }));
+        }
+        let tree = self
+            .external_tree(&canonical, "classpath snapshot", notes)
+            .await?;
+        Ok(DeclaredEntry::Tree(tree))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use jals_build::build_script::{BuildScriptEnvironment, BuildScriptLimits};
@@ -1288,6 +874,7 @@ mod tests {
     use jals_storage::{CodeTree, MemoryStorage};
 
     use super::*;
+    use crate::graph::{BinaryInput, NodeBody, ResolvedNode, SourceNode};
 
     /// A fetch capability for graphs that declare no task plan. Reaching it is the failure.
     struct UnreachableFetcher;

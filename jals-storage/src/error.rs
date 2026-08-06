@@ -25,7 +25,33 @@ pub enum PathError {
     FileIsRoot,
     /// A directory key that must name a real subdirectory resolved to the project root itself.
     DirectoryIsRoot,
+    /// A `..` segment climbed above the project root. Only
+    /// [`RelativePath::resolve`](crate::RelativePath::resolve) folds `..`, so only it raises this.
+    Escape,
     InvalidName(NameError),
+}
+
+/// Rendered for a reader, because a declared `[build]` entry or dependency path is something they
+/// wrote and can go and fix. Two crates used to spell these sentences themselves — the one place
+/// they disagreed was whether escaping the root left "the project root" or "the root project tree",
+/// which named the same rule twice.
+impl fmt::Display for PathError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Absolute => f.write_str("path must be relative to the project root"),
+            Self::Drive => f.write_str("path must not name a drive"),
+            Self::Unc => f.write_str("path must not be a UNC path"),
+            Self::FileIsRoot => f.write_str("path names the project root, not a file"),
+            Self::DirectoryIsRoot => f.write_str("path names the project root, not a subdirectory"),
+            Self::Escape => f.write_str("path leaves the project root"),
+            // The one segment error worth its own sentence: a Windows-style path reaches here as a
+            // separator inside a segment, and "invalid segment: Separator" would not say so.
+            Self::InvalidName(NameError::Separator) => {
+                f.write_str("path must use portable `/` separators")
+            }
+            Self::InvalidName(error) => write!(f, "path contains an invalid segment: {error:?}"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

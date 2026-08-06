@@ -1,53 +1,41 @@
 //! Portable recursive project-graph discovery over one immutable in-memory tree.
+//!
+//! The walk itself is [`crate::walk`]'s; this is the half that differs. An in-memory project has
+//! one address space, so acquiring a dependency means selecting a subtree of the tree already in
+//! hand: nothing is copied, nothing can fail to be read afterwards, and a Git remote is simply out
+//! of reach.
 
 use alloc::borrow::ToOwned;
-use alloc::boxed::Box;
-use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use jals_config::{Dependency, Manifest, PathDependency};
-use jals_exec::LocalBoxFuture;
+use jals_config::{GitDependency, Manifest, PathDependency};
 use jals_storage::{
     CodeTree, DirKey, Entry, EntryRef, FileKey, MemoryStorage, Name, ProjectView, RelativePath,
 };
 
-use crate::graph::{
-    BinaryInput, CapturedClasspathEntry, CapturedClasspathKind, CapturedFile, CycleEdge,
-    DeclaredBinaryEdge, DeclaredEdgeFeatures, EdgeRemap, GraphEdge, GraphError, GraphWarning,
-    NodeBody, NodeId, ResolvedNode, ResolvedProjectGraph, SourceNode,
+use crate::graph::{GraphError, NodeId, ResolvedProjectGraph};
+use crate::walk::{
+    Acquired, DeclaredEntry, DeclaredFile, DeclaredTree, GraphHost, GraphWalk, Opened, Placement,
 };
 
 /// Portable entry point for recursive dependency discovery inside one captured [`CodeTree`].
 pub struct MemoryProjectGraph;
 
-struct AcquiredSource {
-    id: NodeId,
+/// The tree every declaration in this graph is addressed against.
+///
+/// One field, because that is the whole of what a portable host needs to acquire anything: there is
+/// no second address space to reach into.
+struct MemoryHost {
+    root_view: ProjectView,
+}
+
+/// A selected subtree, already cut. Selecting one is the acquisition; there is nothing left to
+/// open, which is why [`MemoryHost::open`] cannot fail.
+struct Selected {
     root: RelativePath,
     view: ProjectView,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum VisitState {
-    Visiting,
-    Complete,
-}
-
-struct StackEntry {
-    id: NodeId,
-    incoming: GraphEdge,
-}
-
-struct GraphBuilder {
-    root_view: ProjectView,
-    nodes: Vec<ResolvedNode>,
-    seen_nodes: BTreeSet<NodeId>,
-    states: BTreeMap<NodeId, VisitState>,
-    edges: Vec<GraphEdge>,
-    stack: Vec<StackEntry>,
-    order: Vec<usize>,
-    warnings: Vec<GraphWarning>,
 }
 
 impl MemoryProjectGraph {
@@ -64,324 +52,47 @@ impl MemoryProjectGraph {
             .map_err(|error| GraphError::InvalidRootManifest {
                 message: error.to_string(),
             })?;
-        let mut builder = GraphBuilder::new(root_view.clone());
-        builder
-            .visit_dependencies(None, &RelativePath::ROOT, root_manifest)
-            .await?;
+        let mut host = MemoryHost {
+            root_view: root_view.clone(),
+        };
+        let output =
+            GraphWalk::run(&mut host, &RelativePath::ROOT, root_manifest, Vec::new()).await?;
         Ok(ResolvedProjectGraph {
-            nodes: builder.nodes,
-            edges: builder.edges,
-            order: builder.order,
-            warnings: builder.warnings,
+            nodes: output.nodes,
+            edges: output.edges,
+            order: output.order,
+            warnings: output.warnings,
             #[cfg(feature = "native")]
             native: crate::native::NativeGraphState::default(),
         })
     }
 }
 
-impl GraphBuilder {
-    const fn new(root_view: ProjectView) -> Self {
-        Self {
-            root_view,
-            nodes: Vec::new(),
-            seen_nodes: BTreeSet::new(),
-            states: BTreeMap::new(),
-            edges: Vec::new(),
-            stack: Vec::new(),
-            order: Vec::new(),
-            warnings: Vec::new(),
-        }
-    }
-
-    fn visit_dependencies<'a>(
-        &'a mut self,
-        parent: Option<NodeId>,
-        declaring: &'a RelativePath,
-        manifest: &'a Manifest,
-    ) -> LocalBoxFuture<'a, Result<(), GraphError>> {
-        Box::pin(async move {
-            for (name, dependency) in &manifest.dependencies {
-                match dependency {
-                    Dependency::Jar(jar) => {
-                        let remap = match EdgeRemap::of(manifest, dependency) {
-                            Ok(remap) => remap,
-                            Err(message) => {
-                                self.warn_declared(parent.as_ref(), name, message);
-                                None
-                            }
-                        };
-                        if let Err(message) = self.visit_binary(
-                            parent.clone(),
-                            declaring,
-                            name,
-                            &jar.jar,
-                            DeclaredBinaryEdge::classes(jar.recursive.unwrap_or(false), remap),
-                        ) {
-                            self.warn_declared(parent.as_ref(), name, message);
-                        }
-                        if let Some(sources) = &jar.sources
-                            && let Err(message) = self.visit_binary(
-                                parent.clone(),
-                                declaring,
-                                name,
-                                sources,
-                                DeclaredBinaryEdge::sources(),
-                            )
-                        {
-                            self.warn_declared(parent.as_ref(), name, message);
-                        }
-                    }
-                    Dependency::Path(path) => {
-                        let acquired = match self.acquire_path(declaring, path) {
-                            Ok(acquired) => acquired,
-                            Err(message) => {
-                                self.warn_declared(parent.as_ref(), name, message);
-                                continue;
-                            }
-                        };
-                        let declared = DeclaredEdgeFeatures::of(dependency);
-                        self.visit_source(parent.clone(), name, declared, acquired)
-                            .await?;
-                    }
-                    Dependency::Git(_) => self.warn_declared(
-                        parent.as_ref(),
-                        name,
-                        "Git dependencies cannot be acquired from a portable memory graph",
-                    ),
-                }
-            }
-            Ok(())
-        })
-    }
-
-    async fn visit_source(
-        &mut self,
-        parent: Option<NodeId>,
-        dependency: &str,
-        declared: DeclaredEdgeFeatures,
-        acquired: AcquiredSource,
-    ) -> Result<(), GraphError> {
-        let incoming = GraphEdge {
-            from: parent,
-            dependency: dependency.to_owned(),
-            to: acquired.id.clone(),
-            recursive: false,
-            features: declared.features,
-            default_features: declared.default_features,
-            // Only a `jar` entry can carry one, and this is the source-form edge.
-            remap: None,
-        };
-        self.edges.push(incoming.clone());
-        match self.states.get(&acquired.id) {
-            Some(VisitState::Complete) => return Ok(()),
-            Some(VisitState::Visiting) => return Err(self.cycle(&incoming)),
-            None => {}
-        }
-
-        let manifest = Self::probe_manifest(&acquired)?;
-        let declaring = acquired.root;
-        let (body, child_manifest) = if let Some(manifest) = manifest {
-            let authored_sources = self.capture_manifest_sources(&declaring, &manifest);
-            let classpath = self.capture_manifest_classpath(&declaring, &manifest);
-            (
-                NodeBody::JalsSource {
-                    source: SourceNode {
-                        view: acquired.view,
-                        authored_sources,
-                        classpath,
-                    },
-                    manifest: Box::new(manifest.clone()),
-                },
-                Some(manifest),
-            )
-        } else {
-            let authored_sources = Self::capture_plain_sources(&acquired.view);
-            (
-                NodeBody::PlainSource(SourceNode {
-                    view: acquired.view,
-                    authored_sources,
-                    classpath: Vec::new(),
-                }),
-                None,
-            )
-        };
-        let index = self.nodes.len();
-        self.seen_nodes.insert(acquired.id.clone());
-        self.nodes.push(ResolvedNode {
-            id: acquired.id.clone(),
-            location: Self::node_location(&declaring),
-            body,
-        });
-        self.states
-            .insert(acquired.id.clone(), VisitState::Visiting);
-        self.stack.push(StackEntry {
-            id: acquired.id.clone(),
-            incoming,
-        });
-        if let Some(manifest) = child_manifest.as_ref() {
-            self.visit_dependencies(Some(acquired.id.clone()), &declaring, manifest)
-                .await?;
-        }
-        self.stack.pop();
-        self.states
-            .insert(acquired.id.clone(), VisitState::Complete);
-        self.order.push(index);
-        Ok(())
-    }
-
-    fn visit_binary(
-        &mut self,
-        parent: Option<NodeId>,
-        declaring: &RelativePath,
-        dependency: &str,
-        locator: &str,
-        declared: DeclaredBinaryEdge,
-    ) -> Result<(), String> {
-        let DeclaredBinaryEdge {
-            recursive,
-            source_archive,
-            remap,
-        } = declared;
-        let role = if source_archive { "source" } else { "binary" };
-        let (id, input) = if locator.starts_with("http://") || locator.starts_with("https://") {
-            let id = NodeId::from_identity(format!("memory-{role}-external\0{locator}").as_bytes());
-            let input = if source_archive {
-                BinaryInput::ExternalSource {
-                    locator: locator.to_owned(),
-                }
-            } else {
-                BinaryInput::External {
-                    locator: locator.to_owned(),
-                }
-            };
-            (id, input)
-        } else {
-            let raw = locator.strip_prefix("file://").unwrap_or(locator);
-            let path = Self::normalize(declaring, raw)?;
-            let key = FileKey::new(path.clone())
-                .map_err(|error| format!("dependency file path is invalid: {error:?}"))?;
-            let file = self
-                .root_view
-                .file(&key)
-                .map_err(|error| format!("dependency file `{path}` is unavailable: {error}"))?;
-            let identity = format!("memory-{role}\0{path}");
-            let captured = CapturedFile {
-                path: Self::rebase_file_path(declaring, &path, role)?,
-                bytes: file.bytes().to_vec(),
-            };
-            let input = if source_archive {
-                BinaryInput::CapturedSource(captured)
-            } else {
-                BinaryInput::Captured(captured)
-            };
-            (NodeId::from_identity(identity.as_bytes()), input)
-        };
-        let binary = DeclaredEdgeFeatures::binary();
-        self.edges.push(GraphEdge {
-            from: parent,
-            dependency: dependency.to_owned(),
-            to: id.clone(),
-            recursive,
-            features: binary.features,
-            default_features: binary.default_features,
-            remap,
-        });
-        if !self.seen_nodes.insert(id.clone()) {
-            return Ok(());
-        }
-        let index = self.nodes.len();
-        self.nodes.push(ResolvedNode {
-            id,
-            location: locator.to_owned(),
-            body: NodeBody::Binary(input),
-        });
-        self.order.push(index);
-        Ok(())
-    }
-
-    fn acquire_path(
-        &self,
-        declaring: &RelativePath,
-        dependency: &PathDependency,
-    ) -> Result<AcquiredSource, String> {
-        let base = Self::normalize(declaring, &dependency.path)?;
-        let selected = if let Some(dir) = dependency.dir.as_deref() {
-            Self::normalize(&base, dir)?
-        } else {
-            base
-        };
-        let selected_dir = DirKey::new(selected.clone());
-        self.root_view.directory(&selected_dir).map_err(|error| {
-            format!("selected dependency root `{selected}` is unavailable: {error}")
-        })?;
-        let view = Self::subtree(&self.root_view, &selected)?;
-        let identity = format!("memory-path\0{selected}");
-        Ok(AcquiredSource {
-            id: NodeId::from_identity(identity.as_bytes()),
-            root: selected,
-            view,
-        })
-    }
-
-    fn probe_manifest(acquired: &AcquiredSource) -> Result<Option<Manifest>, GraphError> {
-        let key = FileKey::parse("jals.toml").expect("constant is a portable file key");
-        let file = match acquired.view.tree().lookup_file(&key) {
-            Some(EntryRef::File(file)) => file,
-            Some(EntryRef::Directory(_)) => {
-                return Err(GraphError::Acquisition {
-                    operation: format!("reading dependency manifest for {}", acquired.id),
-                    message: "`jals.toml` is not a file".to_owned(),
-                });
-            }
-            None => return Ok(None),
-        };
-        let text = file.text().map_err(|error| GraphError::MalformedManifest {
-            node: acquired.id.clone(),
-            location: Self::manifest_location(&acquired.root),
-            message: error.to_string(),
-        })?;
-        text.parse::<Manifest>()
-            .map(Some)
-            .map_err(|error| GraphError::MalformedManifest {
-                node: acquired.id.clone(),
-                location: Self::manifest_location(&acquired.root),
-                message: error.to_string(),
-            })
-    }
-
-    fn manifest_location(root: &RelativePath) -> String {
-        if root.is_root() {
-            "jals.toml".to_owned()
-        } else {
-            format!("{root}/jals.toml")
-        }
-    }
-
-    /// Warn about a `[dependencies]` entry, attributed to the project whose manifest declares it.
+impl MemoryHost {
+    /// One declared path, resolved against the project that wrote it.
     ///
-    /// The entry name alone is not enough for a transitive project: `lib` says which line to look
-    /// at, not which `jals.toml` it is on.
-    fn warn_declared(&mut self, parent: Option<&NodeId>, name: &str, message: impl Into<String>) {
-        let declaring = ResolvedNode::location_of(&self.nodes, parent);
-        self.warnings
-            .push(GraphWarning::declared(declaring, name, message));
+    /// The fold is [`RelativePath::resolve`]'s, shared with `jals-classpath`'s `[build]` lowering.
+    /// What is the graph's own is the base: a dependency spells `../lib` for a sibling, so `..` has
+    /// to climb above the declaring project — just never above the captured tree.
+    fn normalize(base: &RelativePath, raw: &str) -> Result<RelativePath, String> {
+        RelativePath::resolve(base, raw).map_err(|error| error.to_string())
     }
 
-    /// Warn about a `[build] source-dirs` or `[build] classpath` entry of the node being visited.
-    ///
-    /// Attributed the same way a `[dependencies]` entry is, and for a stronger reason: `lib` is at
-    /// least a name the reader chose, where `src/main/java` is the default every project in the
-    /// captured tree writes. Never the root — its `[build]` section is lowered by `jals-classpath`,
-    /// not here — so the declaring project is always a node and always worth naming.
-    fn warn_entry(&mut self, declaring: &RelativePath, entry: &str, message: impl Into<String>) {
-        self.warnings.push(GraphWarning::declared(
-            Some(Self::node_location(declaring)),
-            entry,
-            message,
-        ));
+    /// A file key's own last segment, which is the name a synthesized `external-*` path uses.
+    fn file_name(key: &FileKey) -> Name {
+        key.path()
+            .name()
+            .cloned()
+            .expect("a file key always has a last segment")
     }
 
-    /// How a diagnostic names this node. Inside one captured tree that is the subtree it selected.
+    /// Where a declared path sits relative to the project that declared it.
+    fn placement(declaring: &RelativePath, path: &RelativePath) -> Placement {
+        path.strip_prefix(declaring)
+            .map_or(Placement::External, Placement::Local)
+    }
+
+    /// How a diagnostic names a node. Inside one captured tree that is the subtree it selected.
     fn node_location(root: &RelativePath) -> String {
         if root.is_root() {
             ".".to_owned()
@@ -390,179 +101,7 @@ impl GraphBuilder {
         }
     }
 
-    fn capture_manifest_sources(
-        &mut self,
-        declaring: &RelativePath,
-        manifest: &Manifest,
-    ) -> Vec<CapturedFile> {
-        let mut files = BTreeMap::new();
-        for (index, source) in manifest.build.source_dirs.iter().enumerate() {
-            let path = match Self::normalize(declaring, source) {
-                Ok(path) => path,
-                Err(message) => {
-                    self.warn_entry(
-                        declaring,
-                        source,
-                        format!("source directory is unavailable: {message}"),
-                    );
-                    continue;
-                }
-            };
-            let root = DirKey::new(path.clone());
-            if let Err(error) = self.root_view.directory(&root) {
-                self.warn_entry(
-                    declaring,
-                    source,
-                    format!("source directory is unavailable: {error}"),
-                );
-                continue;
-            }
-            let local = path.starts_with(declaring);
-            let prefix = if local {
-                path.strip_prefix(declaring)
-                    .expect("a path tested with starts_with has the prefix")
-            } else {
-                RelativePath::new([Name::new(format!("external-source-{index}"))
-                    .expect("generated prefix is portable")])
-            };
-            let prefix_len = path.segments().len();
-            for file in self
-                .root_view
-                .tree()
-                .files_under(&root)
-                .filter(|file| file.key().has_extension("java"))
-            {
-                let member =
-                    RelativePath::new(file.key().path().segments().skip(prefix_len).cloned());
-                files.insert(prefix.concat(&member), file.bytes().to_vec());
-            }
-        }
-        files
-            .into_iter()
-            .map(|(path, bytes)| CapturedFile { path, bytes })
-            .collect()
-    }
-
-    fn capture_plain_sources(view: &ProjectView) -> Vec<CapturedFile> {
-        let root = ["src/main/java", "src"]
-            .into_iter()
-            .filter_map(|path| DirKey::parse(path).ok())
-            .find(|path| view.directory(path).is_ok())
-            .unwrap_or(DirKey::ROOT);
-        view.tree()
-            .files_under(&root)
-            .filter(|file| file.key().has_extension("java"))
-            .map(|file| CapturedFile {
-                path: file.key().path().clone(),
-                bytes: file.bytes().to_vec(),
-            })
-            .collect()
-    }
-
-    fn capture_manifest_classpath(
-        &mut self,
-        declaring: &RelativePath,
-        manifest: &Manifest,
-    ) -> Vec<CapturedClasspathEntry> {
-        let mut entries = Vec::new();
-        for (index, entry) in manifest.build.classpath.iter().enumerate() {
-            let path = match Self::normalize(declaring, entry) {
-                Ok(path) => path,
-                Err(message) => {
-                    self.warn_entry(
-                        declaring,
-                        entry,
-                        format!("classpath entry is unavailable: {message}"),
-                    );
-                    continue;
-                }
-            };
-            let found = self.root_view.tree().lookup_dir(&DirKey::new(path.clone()));
-            match found {
-                Some(EntryRef::File(file)) => {
-                    let logical = if path.starts_with(declaring) {
-                        path.strip_prefix(declaring)
-                            .expect("a path tested with starts_with has the prefix")
-                    } else {
-                        Self::external_file_path(index, &path)
-                    };
-                    entries.push(CapturedClasspathEntry {
-                        declared: entry.clone(),
-                        kind: CapturedClasspathKind::File(CapturedFile {
-                            path: logical,
-                            bytes: file.bytes().to_vec(),
-                        }),
-                    });
-                }
-                Some(EntryRef::Directory(directory)) => {
-                    let logical = if path.starts_with(declaring) {
-                        path.strip_prefix(declaring)
-                            .expect("a path tested with starts_with has the prefix")
-                    } else {
-                        RelativePath::new([Name::new(format!("external-classpath-{index}"))
-                            .expect("generated prefix is portable")])
-                    };
-                    let prefix_len = path.segments().len();
-                    let members = self
-                        .root_view
-                        .tree()
-                        .files_under(directory)
-                        .filter(|file| file.key().has_extension("class"))
-                        .map(|file| CapturedFile {
-                            path: RelativePath::new(
-                                file.key().path().segments().skip(prefix_len).cloned(),
-                            ),
-                            bytes: file.bytes().to_vec(),
-                        })
-                        .collect();
-                    entries.push(CapturedClasspathEntry {
-                        declared: entry.clone(),
-                        kind: CapturedClasspathKind::Tree {
-                            path: logical,
-                            members,
-                        },
-                    });
-                }
-                None => self.warn_entry(declaring, entry, "classpath entry is unavailable"),
-            }
-        }
-        entries
-    }
-
-    fn rebase_file_path(
-        root: &RelativePath,
-        path: &RelativePath,
-        role: &str,
-    ) -> Result<RelativePath, String> {
-        if let Some(relative) = path.strip_prefix(root)
-            && !relative.is_root()
-        {
-            return Ok(relative);
-        }
-        let name = path
-            .segments()
-            .last()
-            .cloned()
-            .ok_or_else(|| "dependency file path is the project root".to_owned())?;
-        Ok(RelativePath::new([
-            Name::new(format!("external-{role}")).expect("generated dependency prefix is portable"),
-            name,
-        ]))
-    }
-
-    fn external_file_path(index: usize, path: &RelativePath) -> RelativePath {
-        let name = path
-            .segments()
-            .last()
-            .cloned()
-            .expect("a file path is not root");
-        RelativePath::new([
-            Name::new(format!("external-classpath-{index}"))
-                .expect("generated classpath prefix is portable"),
-            name,
-        ])
-    }
-
+    /// The selected subtree as a view of its own, so a dependency's keys stay project-relative.
     fn subtree(root: &ProjectView, selected: &RelativePath) -> Result<ProjectView, String> {
         let prefix_len = selected.segments().len();
         let selected = DirKey::new(selected.clone());
@@ -577,67 +116,153 @@ impl GraphBuilder {
             .map_err(|error| format!("capturing selected dependency subtree failed: {error:?}"))?;
         Ok(MemoryStorage::memory(tree).view())
     }
+}
 
-    fn normalize(base: &RelativePath, raw: &str) -> Result<RelativePath, String> {
-        if raw.starts_with('/')
-            || raw.starts_with('\\')
-            || (raw.as_bytes().get(1) == Some(&b':') && raw.as_bytes()[0].is_ascii_alphabetic())
-        {
-            return Err("path must be relative to the declaring project".to_owned());
+impl GraphHost for MemoryHost {
+    type Site = Selected;
+    type Project = RelativePath;
+    /// Selecting a subtree copies nothing that has to be cleaned up.
+    type Guard = ();
+
+    const SCOPE: &'static str = "memory";
+
+    fn manifest_location(&self, _id: &NodeId, acquired: &Acquired<Self>) -> String {
+        let root = &acquired.site.root;
+        if root.is_root() {
+            "jals.toml".to_owned()
+        } else {
+            format!("{root}/jals.toml")
         }
-        if raw.contains('\\') {
-            return Err("path must use portable `/` separators".to_owned());
-        }
-        let mut segments: Vec<Name> = base.segments().cloned().collect();
-        for part in raw.split('/') {
-            match part {
-                "." | "" => {}
-                ".." => {
-                    if segments.pop().is_none() {
-                        return Err("path leaves the root project tree".to_owned());
-                    }
-                }
-                part => segments.push(
-                    Name::new(part)
-                        .map_err(|error| format!("path contains an invalid segment: {error:?}"))?,
-                ),
-            }
-        }
-        Ok(RelativePath::new(segments))
     }
 
-    fn cycle(&self, closing: &GraphEdge) -> GraphError {
-        let position = self
-            .stack
-            .iter()
-            .position(|entry| entry.id == closing.to)
-            .expect("visiting node is on the DFS stack");
-        let mut chain: Vec<_> = self.stack[position + 1..]
-            .iter()
-            .map(|entry| CycleEdge {
-                from: entry
-                    .incoming
-                    .from
-                    .clone()
-                    .expect("cycle edges are between dependency nodes"),
-                dependency: entry.incoming.dependency.clone(),
-                to: entry.id.clone(),
-            })
-            .collect();
-        chain.push(CycleEdge {
-            from: closing
-                .from
-                .clone()
-                .expect("cycle closing edge has a dependency parent"),
-            dependency: closing.dependency.clone(),
-            to: closing.to.clone(),
-        });
-        GraphError::Cycle { chain }
+    async fn acquire_path(
+        &mut self,
+        project: &Self::Project,
+        dependency: &PathDependency,
+    ) -> Result<Acquired<Self>, String> {
+        let base = Self::normalize(project, &dependency.path)?;
+        let selected = match dependency.dir.as_deref() {
+            Some(dir) => Self::normalize(&base, dir)?,
+            None => base,
+        };
+        self.root_view
+            .directory(&DirKey::new(selected.clone()))
+            .map_err(|error| {
+                format!("selected dependency root `{selected}` is unavailable: {error}")
+            })?;
+        let view = Self::subtree(&self.root_view, &selected)?;
+        Ok(Acquired {
+            identity: format!("path\0{selected}"),
+            location: Self::node_location(&selected),
+            site: Selected {
+                root: selected,
+                view,
+            },
+            guard: (),
+        })
+    }
+
+    async fn acquire_git(
+        &mut self,
+        _project: &Self::Project,
+        _name: &str,
+        _dependency: &GitDependency,
+    ) -> Result<Acquired<Self>, String> {
+        Err("Git dependencies cannot be acquired from a portable memory graph".to_owned())
+    }
+
+    async fn open(&mut self, acquired: &Acquired<Self>) -> Result<Opened<Self>, GraphError> {
+        Ok(Opened {
+            view: acquired.site.view.clone(),
+            project: acquired.site.root.clone(),
+            notes: Vec::new(),
+            // Every file in the captured tree is already read. A `jals.toml` that is not here is
+            // one the project does not have.
+            manifest_unreadable: None,
+        })
+    }
+
+    fn admitted(&mut self, _acquired: &Acquired<Self>) {}
+
+    async fn release(&mut self, (): Self::Guard) -> Result<(), String> {
+        Ok(())
+    }
+
+    async fn resolve_declared_file(
+        &mut self,
+        project: &Self::Project,
+        raw: &str,
+        _role: &str,
+    ) -> Result<DeclaredFile, String> {
+        let path = Self::normalize(project, raw)?;
+        let key = FileKey::new(path.clone())
+            .map_err(|error| format!("dependency file path is invalid: {error:?}"))?;
+        let file = self
+            .root_view
+            .file(&key)
+            .map_err(|error| format!("dependency file `{path}` is unavailable: {error}"))?;
+        Ok(DeclaredFile {
+            bytes: file.bytes().to_vec(),
+            name: Self::file_name(&key),
+            identity: format!("file\0{path}"),
+            placement: Self::placement(project, &path),
+        })
+    }
+
+    async fn resolve_source_dir(
+        &mut self,
+        project: &Self::Project,
+        raw: &str,
+        _notes: &mut Vec<String>,
+    ) -> Result<DeclaredTree, String> {
+        let path = Self::normalize(project, raw)
+            .map_err(|message| format!("source directory is unavailable: {message}"))?;
+        let root = DirKey::new(path.clone());
+        self.root_view
+            .directory(&root)
+            .map_err(|error| format!("source directory is unavailable: {error}"))?;
+        Ok(DeclaredTree {
+            view: self.root_view.clone(),
+            root,
+            placement: Self::placement(project, &path),
+        })
+    }
+
+    async fn resolve_classpath_entry(
+        &mut self,
+        project: &Self::Project,
+        raw: &str,
+        _notes: &mut Vec<String>,
+    ) -> Result<DeclaredEntry, String> {
+        let path = Self::normalize(project, raw)
+            .map_err(|message| format!("classpath entry is unavailable: {message}"))?;
+        let placement = Self::placement(project, &path);
+        // A file and a directory can share neither a path nor a key, so one probe answers both.
+        match self.root_view.tree().lookup_dir(&DirKey::new(path.clone())) {
+            Some(EntryRef::File(file)) => {
+                let key = FileKey::new(path)
+                    .map_err(|error| format!("classpath entry is unavailable: {error:?}"))?;
+                Ok(DeclaredEntry::File(DeclaredFile {
+                    bytes: file.bytes().to_vec(),
+                    name: Self::file_name(&key),
+                    identity: String::new(),
+                    placement,
+                }))
+            }
+            Some(EntryRef::Directory(_)) => Ok(DeclaredEntry::Tree(DeclaredTree {
+                view: self.root_view.clone(),
+                root: DirKey::new(path),
+                placement,
+            })),
+            None => Err("classpath entry is unavailable".to_owned()),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use alloc::collections::BTreeSet;
+
     use jals_build::build_script::{BuildScriptEnvironment, BuildScriptLimits};
     use jals_config::ResolvedBuildFeatures;
     use jals_storage::{CodeTree, Entry, FileKey, MemoryStorage};
