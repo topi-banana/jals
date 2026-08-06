@@ -1792,7 +1792,7 @@ fn lint_renders_cfg_disabled_regions_as_advice_without_failing() {
 }
 
 #[test]
-fn lint_does_not_call_an_uncached_dependencys_types_unresolved() {
+fn lint_does_not_call_an_uncached_dependency_type_unresolved() {
     // `jals lint` never fetches, so a dependency this machine has not built is a jar the classpath
     // does not have. Reporting unresolved names could have made that one warning into one error per
     // reference; it does not, because an imported name is not one the resolver calls unknown. What
