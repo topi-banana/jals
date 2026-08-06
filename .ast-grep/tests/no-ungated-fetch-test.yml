@@ -1,0 +1,43 @@
+id: no-ungated-fetch
+
+valid:
+    # Defining the methods is how an implementor supplies the capability. Only calls are rejected.
+    - |
+        impl Fetcher for BrowserFetcher {
+            async fn fetch_admitted(&self, url: &str) -> Result<Vec<u8>, String> {
+                self.get(url).await
+            }
+        }
+
+    - |
+        impl Fetcher for ReqwestFetcher {
+            async fn fetch_bounded_admitted(
+                &self,
+                locator: &str,
+                max_bytes: usize,
+            ) -> Result<Vec<u8>, String> {
+                Self::read_file_bounded(PathBuf::from(locator), max_bytes).await
+            }
+        }
+
+    - |
+        trait Fetcher {
+            async fn fetch_admitted(&self, locator: &str) -> Result<Vec<u8>, String>;
+        }
+
+    # The sanctioned path: `Fetch` applies the policy and then calls.
+    - |
+        let bytes = Fetch::bytes(fetcher, &spec.locator).await?;
+
+    - |
+        let bytes = Fetch::bounded(fetcher, &spec.locator, spec.max_bytes).await?;
+
+invalid:
+    - |
+        let bytes = fetcher.fetch_admitted(locator.as_str()).await?;
+
+    - |
+        let bytes = self.fetch_bounded_admitted(locator, max_bytes).await?;
+
+    - |
+        let jars = join_ordered(locators.iter().map(|l| fetcher.fetch_admitted(l.as_str()))).await;
