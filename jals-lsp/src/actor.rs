@@ -1855,7 +1855,18 @@ impl AssembledWorkspace {
             features: &features,
             limits: &limits,
         };
-        let fetcher = jals_classpath::ReqwestFetcher::for_project(root.to_path_buf());
+        // Analysis consumes what the user's own build already fetched and verified into the cache;
+        // it does not fetch. Opening a folder runs whatever `build.rhai` it contains, and nobody
+        // reviews a repository before opening it in an editor — reaching the network on that signal
+        // alone would let an unread script pull (and send) whatever it likes the moment a project is
+        // opened. `jals build` populates the cache, and the server picks it up from there.
+        //
+        // Stated here because the policy is part of the capability: every phase handed this fetcher
+        // inherits the refusal, which is what the separate `network` field beside it could not do.
+        let fetcher = jals_classpath::ReqwestFetcher::for_project(
+            root.to_path_buf(),
+            jals_classpath::NetworkPolicy::Offline,
+        );
         let script = match ProjectAssembly::script(
             &exec,
             &fetcher,
@@ -1865,13 +1876,6 @@ impl AssembledWorkspace {
                 manifest,
                 environment: &environment,
                 limits: &limits,
-                // Analysis consumes what the user's own build already fetched and verified into
-                // the cache; it does not fetch. Opening a folder runs whatever `build.rhai` it
-                // contains, and nobody reviews a repository before opening it in an editor —
-                // reaching the network on that signal alone would let an unread script pull (and
-                // send) whatever it likes the moment a project is opened. `jals build` populates
-                // the cache, and the server picks it up from there.
-                network: jals_classpath::NetworkPolicy::Offline,
                 host: BuildTaskHost::Project,
                 blocked_files,
 
@@ -2038,11 +2042,16 @@ impl AssembledWorkspace {
                 storage,
                 jals_project::GraphPreprocess {
                     exec: &exec,
-                    fetcher: &jals_classpath::ReqwestFetcher::for_project(root.to_path_buf()),
+                    // Offline, and now that the policy rides the capability, that holds for the
+                    // input resolution this phase ends in as well — not just for discovery and the
+                    // dependency task plans, which is as far as the old `network` field reached.
+                    fetcher: &jals_classpath::ReqwestFetcher::for_project(
+                        root.to_path_buf(),
+                        jals_classpath::NetworkPolicy::Offline,
+                    ),
                     environment: scripts.environment,
                     root_features: scripts.features,
                     limits: scripts.limits,
-                    network: jals_classpath::NetworkPolicy::Offline,
                 },
                 jals_classpath::ProjectInputOptions::Editor,
             )
@@ -2095,6 +2104,26 @@ impl AssembledWorkspace {
             // on either — and the classpath ones name a `[build]` entry or a cached artifact the
             // message itself does not repeat.
             eprintln!("jals-lsp: {warning}");
+        }
+
+        // The server is unconditionally offline, so a dependency it could not resolve is not a
+        // broken manifest — it is one this machine has never built. Say that once, with the remedy,
+        // rather than leaving a bare refusal that reads like a failure to debug. The advice lives
+        // here and not in `jals-classpath`, which knows neither which host it is under nor that
+        // `jals build` is something a browser could not run anyway.
+        let uncached_dependencies = inputs.warnings.iter().any(|w| {
+            w.message
+                .contains(jals_classpath::NetworkPolicy::OFFLINE_REFUSAL)
+        });
+        if uncached_dependencies {
+            let advice = "some dependencies are not in the verified cache; \
+                          run `jals build` to fetch them (the language server never does)";
+            eprintln!("jals-lsp: {advice}");
+            project_diagnostics.push(Self::project_diagnostic(
+                DiagnosticSeverity::INFORMATION,
+                "dependency-cache",
+                advice.to_owned(),
+            ));
         }
 
         // Navigation sources are cache artifacts, not host paths. Mount them as overlay files in

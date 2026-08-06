@@ -647,12 +647,18 @@ impl BuildArgs {
         // Assemble the root script outputs and complete transitive dependency graph. Structural graph
         // and dependency-script failures abort before javac; lower-level classpath misses remain
         // warnings so the resolver can report all deterministic diagnostics.
+        // One fetch capability for the whole command. It carries `--offline`, so every phase that
+        // can fetch is handed the same answer instead of being told it separately.
+        let fetcher = jals_classpath::ReqwestFetcher::for_project(
+            root.clone(),
+            jals_classpath::NetworkPolicy::when_offline(self.offline),
+        );
         let (sources, tree, inputs) = App::prepare_compile_inputs(
             &mut manifest,
             &root,
             exec,
             &features,
-            self.offline,
+            &fetcher,
             if self.dry_run {
                 jals_project::SourcePublication::Skip
             } else {
@@ -678,7 +684,10 @@ impl BuildArgs {
             .await
             .map_err(|e| anyhow!("{e}"))?;
         App::finish_compile(&manifest, &root, &outcome, &inputs).await?;
-        App::finish_package(&manifest, &root, exec, &features, &outcome, &inputs).await?;
+        App::finish_package(
+            &manifest, &root, exec, &features, &fetcher, &outcome, &inputs,
+        )
+        .await?;
         Ok(App::outcome_exit_code(outcome.code()))
     }
 }
@@ -706,12 +715,18 @@ impl PackageArgs {
             );
         }
         let features = self.features.resolve(&manifest)?;
+        // One fetch capability for the whole command, carrying `--offline`, exactly as `jals build`
+        // does: packaging compiles first, so every phase that can fetch gets the same answer.
+        let fetcher = jals_classpath::ReqwestFetcher::for_project(
+            root.clone(),
+            jals_classpath::NetworkPolicy::when_offline(self.offline),
+        );
         let (sources, tree, inputs) = App::prepare_compile_inputs(
             &mut manifest,
             &root,
             exec,
             &features,
-            self.offline,
+            &fetcher,
             jals_project::SourcePublication::Apply,
         )
         .await?;
@@ -910,12 +925,17 @@ impl RunArgs {
         };
         // Assemble the compile inputs once. Transitive sources compile into `classes-dir`, while every
         // verified graph classpath artifact is shared by the javac and java requests.
+        // One fetch capability for the whole command; see `BuildArgs::run`.
+        let fetcher = jals_classpath::ReqwestFetcher::for_project(
+            root.clone(),
+            jals_classpath::NetworkPolicy::when_offline(self.offline),
+        );
         let (sources, tree, inputs) = App::prepare_compile_inputs(
             &mut manifest,
             &root,
             exec,
             &features,
-            self.offline,
+            &fetcher,
             if self.dry_run {
                 jals_project::SourcePublication::Skip
             } else {
@@ -1155,8 +1175,12 @@ impl ProjectLintContext {
                 environment: &environment,
                 features: &features,
             },
-            // Lint analyses what is already here; it does not acquire dependencies.
-            jals_classpath::NetworkPolicy::Offline,
+            // Lint analyses what is already here; it does not acquire dependencies. The refusal is
+            // the capability's, so it holds for every phase this hands the fetcher to.
+            &jals_classpath::ReqwestFetcher::for_project(
+                root.to_path_buf(),
+                jals_classpath::NetworkPolicy::Offline,
+            ),
         )
         .await
         {
@@ -1377,7 +1401,7 @@ impl App {
         exec: &Exec,
         script: RootScript,
         scripts: &RootScriptInputs<'_>,
-        network: jals_classpath::NetworkPolicy,
+        fetcher: &jals_classpath::ReqwestFetcher,
     ) -> Result<HostProjectInputs> {
         let mut result = HostProjectInputs::from(script.host);
         let scopes = jals_classpath::NativeProjectPlan::snapshot_scopes(manifest, root);
@@ -1392,13 +1416,13 @@ impl App {
                 &mut storage,
                 jals_project::GraphPreprocess {
                     exec,
-                    // A dependency's build tasks fetch under the same policy as the root's, from
-                    // the same project cache — `--offline` means offline for the whole graph.
-                    fetcher: &jals_classpath::ReqwestFetcher::for_project(root.to_path_buf()),
+                    // The caller's capability, which is the root's: a dependency's build tasks and
+                    // its jars resolve under the same policy, from the same project cache —
+                    // `--offline` means offline for the whole graph.
+                    fetcher,
                     environment: scripts.environment,
                     root_features: scripts.features,
                     limits: &BuildScriptLimits::default(),
-                    network,
                 },
                 options,
             )
@@ -1499,7 +1523,7 @@ impl App {
         root: &Path,
         exec: &Exec,
         features: &ResolvedBuildFeatures,
-        offline: bool,
+        fetcher: &jals_classpath::ReqwestFetcher,
         publications: jals_project::SourcePublication,
     ) -> Result<(
         jals_build::StagedTree,
@@ -1508,7 +1532,7 @@ impl App {
     )> {
         let environment = Self::build_script_environment(manifest, features);
         let script =
-            Self::run_build_script(manifest, root, exec, &environment, offline, publications)
+            Self::run_build_script(manifest, root, exec, &environment, fetcher, publications)
                 .await?;
         let sources =
             Self::discover_sources(manifest, root, !script.host.generated_sources.is_empty())?;
@@ -1527,11 +1551,7 @@ impl App {
                 environment: &environment,
                 features,
             },
-            if offline {
-                jals_classpath::NetworkPolicy::Offline
-            } else {
-                jals_classpath::NetworkPolicy::Online
-            },
+            fetcher,
         )
         .await?;
         inputs.deduplicate(manifest, root, &sources);
@@ -1599,7 +1619,7 @@ impl App {
         root: &Path,
         exec: &Exec,
         environment: &BuildScriptEnvironment,
-        offline: bool,
+        fetcher: &jals_classpath::ReqwestFetcher,
         publications: jals_project::SourcePublication,
     ) -> Result<RootScript> {
         let mut storage = NativeStorage::for_project_scoped(
@@ -1610,22 +1630,15 @@ impl App {
         .await
         .context("opening project storage for the build script")?;
         let mut session = BuildScriptSession::new();
-        let fetcher = jals_classpath::ReqwestFetcher::for_project(root.to_path_buf());
-        let network = if offline {
-            jals_classpath::NetworkPolicy::Offline
-        } else {
-            jals_classpath::NetworkPolicy::Online
-        };
         let assembled = jals_project::ProjectAssembly::script(
             exec,
-            &fetcher,
+            fetcher,
             &mut storage,
             &mut session,
             jals_project::RootBuildScriptOptions {
                 manifest,
                 environment,
                 limits: &BuildScriptLimits::default(),
-                network,
                 host: jals_project::BuildTaskHost::Project,
                 blocked_files: &[],
                 publications,
@@ -2102,6 +2115,7 @@ impl App {
         root: &Path,
         exec: &Exec,
         features: &ResolvedBuildFeatures,
+        fetcher: &jals_classpath::ReqwestFetcher,
         outcome: &jals_build::BackendOutcome,
         inputs: &HostProjectInputs,
     ) -> Result<()> {
@@ -2140,7 +2154,9 @@ impl App {
         let bytes = plan
             .run(
                 exec,
-                &jals_classpath::ReqwestFetcher::for_project(root.to_path_buf()),
+                // The command's own capability: under `--offline` a `url` mapping that is not
+                // already in the verified cache now fails here rather than being fetched.
+                fetcher,
                 &mut storage,
                 &classes,
                 &inputs.dependency_jars,

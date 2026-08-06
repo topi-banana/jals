@@ -81,6 +81,17 @@ filesystem reads into portable interfaces.
   an entry reaching outside it is a warning, not a host path. A `Warning` carries its subject in
   `origin`, not in `message` — several messages name no location at all — so a host reports one by
   rendering the whole `Warning` through its `Display`, never `warning.message` alone.
+  `NetworkPolicy` is part of the `Fetcher`, not a value travelling beside it: a host that must not
+  fetch constructs one that refuses, and every step it is handed inherits the refusal. That is why
+  `ReqwestFetcher::for_project` takes the policy and has no `Default`, and why nothing downstream
+  re-derives it — a phase that built its own fetcher is how `--offline`, `jals lint`, and the
+  language server all used to issue live HTTP GETs for uncached dependency jars. Implementors
+  supply `fetch_admitted`/`fetch_bounded_admitted`, whose precondition is that the gate already
+  admitted the locator; `io.rs`'s `Fetch` is the only caller, and `no-ungated-fetch.yml` keeps it
+  that way because a trait method cannot be `pub(crate)`. The gate refuses **network** locators
+  only (`ExternalLocator::is_remote`, never `is_url`): the same seam carries `file://` and the host
+  paths `NativeProjectPlan::classify` lowers an out-of-project `jar = "../lib/x.jar"` to, and
+  refusing those offline breaks a build that never wanted the network.
 - `jals-project`: transitive path/Git/JAR project-graph discovery, stable node identity,
   dependency-first preprocessing, and artifact-only projection into `jals-classpath`. The portable
   memory graph operates on one captured `CodeTree`; only the `native` adapter may acquire host path

@@ -1122,6 +1122,33 @@ fn offline_does_not_clone_git_dependencies() {
     );
 }
 
+/// The sibling of the git case: `--offline` reached graph discovery and the build script, but not
+/// the input resolution that follows, so an uncached `[dependencies]` jar was still downloaded.
+///
+/// The assertion is on the gate's own wording rather than merely on "it warned". `example.invalid`
+/// never resolves, so this command warned and succeeded before the fix too — from a DNS failure.
+/// Only a distinguishable message separates "refused" from "tried and failed".
+#[test]
+fn offline_does_not_fetch_remote_jar_dependencies() {
+    let dir = project(
+        "[package]\nname = \"offline-jar\"\n\
+         [dependencies]\nlib = { jar = \"https://example.invalid/lib.jar\" }\n",
+    );
+
+    let output = jals()
+        .args(["build", "--offline", "--dry-run", "--manifest-path"])
+        .arg(dir.path().join("jals.toml"))
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("not fetched while offline"),
+        "stderr: {stderr}"
+    );
+}
+
 /// `Manifest::discover_path` returns a bare `jals.toml` when the manifest is in the current
 /// directory, and `Path::new("jals.toml").parent()` is `Some("")` rather than `None`. The empty
 /// root then failed to canonicalize, so the classpath and feature set were silently dropped and

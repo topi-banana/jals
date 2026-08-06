@@ -17,7 +17,7 @@ use jals_build::task::{
 };
 use jals_classpath::{
     ExpectedDigest, ExternalArtifactResolver, ExternalArtifactSpec, ExternalLocator, Fetcher,
-    LibrarySource, NetworkPolicy, SourceTree, SourceTreeExtraction, SourceTreeLimits,
+    LibrarySource, SourceTree, SourceTreeExtraction, SourceTreeLimits,
 };
 use jals_config::Manifest;
 use jals_exec::Exec;
@@ -109,9 +109,11 @@ pub(crate) struct RootBuildScriptOutput {
 }
 
 /// Runtime policy for one task-plan execution.
+///
+/// Whether a fetch may reach the network is not here: it is carried by the `Fetcher` the execution
+/// is handed, so the two cannot be paired wrongly.
 #[derive(Debug, Clone, Copy)]
 pub struct TaskRuntime {
-    pub(crate) network: NetworkPolicy,
     /// Ceiling on any single fetch, including a size projected out of fetched JSON with
     /// `tasks.json_u64`. A fetch buffers up to this many bytes before its digest is checked.
     pub(crate) max_fetch_bytes: u64,
@@ -138,7 +140,6 @@ pub struct RootBuildScriptOptions<'a> {
     pub manifest: &'a Manifest,
     pub environment: &'a BuildScriptEnvironment,
     pub limits: &'a BuildScriptLimits,
-    pub network: NetworkPolicy,
     pub host: BuildTaskHost,
     pub blocked_files: &'a [FileKey],
     /// Whether exclusive source-tree publications may touch the project. See
@@ -146,10 +147,12 @@ pub struct RootBuildScriptOptions<'a> {
     pub publications: SourcePublication,
 }
 
-/// Identity of one memoized snapshot task execution.
+/// Identity of one memoized snapshot task execution, plus the runtime it executes under.
 ///
-/// The three fields are exactly what can change its result, so they are what its cache record is
-/// keyed on. They travel together because keying on a subset silently serves a stale execution.
+/// `identity` and `features` are what the cache record is keyed on, together with the plan
+/// fingerprint — see [`snapshot_provenance`](BuildTaskExecutor::snapshot_provenance), which folds
+/// exactly those and nothing else. `runtime` is deliberately *not* part of that key: it carries
+/// ceilings on how an execution runs, not inputs that change what it produces.
 #[derive(Debug, Clone, Copy)]
 pub struct SnapshotTaskOptions<'a> {
     /// Stable identity of the project the plan belongs to — a graph node's digest.
@@ -395,7 +398,6 @@ impl BuildTaskExecutor {
             storage.artifacts_mut(),
             &plan,
             TaskRuntime {
-                network: options.network,
                 max_fetch_bytes: options.limits.max_fetch_bytes,
             },
             options.host,
@@ -1077,8 +1079,7 @@ impl BuildTaskExecutor {
                     max_bytes,
                     namespace: CacheNamespace::BuildTaskArtifact,
                 };
-                let key = ExternalArtifactResolver::resolve(fetcher, cache, &spec, runtime.network)
-                    .await?;
+                let key = ExternalArtifactResolver::resolve(fetcher, cache, &spec).await?;
                 match kind {
                     TaskFetchKind::Jar => Ok(TaskValue::Jar(key)),
                     TaskFetchKind::Json => {
@@ -1374,10 +1375,34 @@ mod tests {
     struct MockFetcher {
         responses: StdBTreeMap<String, Vec<u8>>,
         calls: AtomicUsize,
+        network: jals_classpath::NetworkPolicy,
+    }
+
+    impl MockFetcher {
+        fn online(responses: StdBTreeMap<String, Vec<u8>>) -> Self {
+            Self {
+                responses,
+                calls: AtomicUsize::new(0),
+                network: jals_classpath::NetworkPolicy::Online,
+            }
+        }
+
+        /// A capability that refuses the network, with nothing to serve if it did not.
+        fn offline() -> Self {
+            Self {
+                responses: StdBTreeMap::new(),
+                calls: AtomicUsize::new(0),
+                network: jals_classpath::NetworkPolicy::Offline,
+            }
+        }
     }
 
     impl Fetcher for MockFetcher {
-        async fn fetch(&self, locator: &str) -> Result<Vec<u8>, String> {
+        fn network(&self) -> jals_classpath::NetworkPolicy {
+            self.network
+        }
+
+        async fn fetch_admitted(&self, locator: &str) -> Result<Vec<u8>, String> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             self.responses
                 .get(locator)
@@ -1431,8 +1456,8 @@ mod tests {
                 ContentDigest::of(metadata.as_bytes()).to_hex()
             );
             let mut storage = storage(&script);
-            let online = MockFetcher {
-                responses: [
+            let online = MockFetcher::online(
+                [
                     (
                         "https://example.invalid/version.json".to_owned(),
                         metadata.into_bytes(),
@@ -1441,8 +1466,7 @@ mod tests {
                 ]
                 .into_iter()
                 .collect(),
-                calls: AtomicUsize::new(0),
-            };
+            );
             let first = BuildTaskExecutor::execute_root(
                 &Exec::inline(),
                 &online,
@@ -1452,7 +1476,6 @@ mod tests {
                     manifest: &manifest(),
                     environment: &BuildScriptEnvironment::new(),
                     limits: &BuildScriptLimits::default(),
-                    network: NetworkPolicy::Online,
                     host: BuildTaskHost::Project,
                     blocked_files: &[],
                     publications: SourcePublication::Apply,
@@ -1463,10 +1486,9 @@ mod tests {
             assert_eq!(online.calls.load(Ordering::Relaxed), 2);
             assert_eq!(first.task_classpath.len(), 1);
 
-            let offline = MockFetcher {
-                responses: StdBTreeMap::new(),
-                calls: AtomicUsize::new(0),
-            };
+            // The policy now rides the capability instead of `RootBuildScriptOptions.network`,
+            // which is the shape production uses.
+            let offline = MockFetcher::offline();
             let second = BuildTaskExecutor::execute_root(
                 &Exec::inline(),
                 &offline,
@@ -1476,7 +1498,6 @@ mod tests {
                     manifest: &manifest(),
                     environment: &BuildScriptEnvironment::new(),
                     limits: &BuildScriptLimits::default(),
-                    network: NetworkPolicy::Offline,
                     host: BuildTaskHost::Project,
                     blocked_files: &[],
                     publications: SourcePublication::Apply,
@@ -1505,10 +1526,7 @@ mod tests {
                 ContentDigest::of(b"jar").to_hex()
             );
             let mut storage = storage(&script);
-            let fetcher = MockFetcher {
-                responses: StdBTreeMap::new(),
-                calls: AtomicUsize::new(0),
-            };
+            let fetcher = MockFetcher::online(StdBTreeMap::new());
             let error = BuildTaskExecutor::execute_root(
                 &Exec::inline(),
                 &fetcher,
@@ -1518,7 +1536,6 @@ mod tests {
                     manifest: &manifest(),
                     environment: &BuildScriptEnvironment::new(),
                     limits: &BuildScriptLimits::default(),
-                    network: NetworkPolicy::Online,
                     host: BuildTaskHost::ArtifactsOnly,
                     blocked_files: &[],
                     publications: SourcePublication::Apply,

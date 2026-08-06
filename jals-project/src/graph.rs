@@ -13,8 +13,7 @@ use jals_build::build_script::{
 };
 use jals_build::task::{TaskPlan, TaskPublishIntent};
 use jals_classpath::{
-    ClasspathCoverage, ExternalLocator, Fetcher, LibrarySource, MappingSpec, NetworkPolicy,
-    WarningOrigin,
+    ClasspathCoverage, ExternalLocator, Fetcher, LibrarySource, MappingSpec, WarningOrigin,
 };
 use jals_config::{AmbiguousMapping, Dependency, Manifest, ResolvedBuildFeatures};
 use jals_exec::Exec;
@@ -810,7 +809,6 @@ impl ResolvedNode {
                 identity: self.id.digest(),
                 features,
                 runtime: TaskRuntime {
-                    network: options.network,
                     max_fetch_bytes: options.limits.max_fetch_bytes,
                 },
             },
@@ -1235,17 +1233,17 @@ pub struct ResolvedProjectGraph {
 
 /// Everything [`ResolvedProjectGraph::preprocess`] needs beyond the cache it writes to.
 ///
-/// A dependency's build script may declare a task plan, and running one needs a fetch capability,
-/// an execution context, and a network policy — which is why they travel with the script inputs
-/// rather than being reachable from the graph itself. A host that cannot fetch still passes its own
-/// `Fetcher`; `network` is what actually decides whether one is used.
+/// A dependency's build script may declare a task plan, and running one needs a fetch capability
+/// and an execution context — which is why they travel with the script inputs rather than being
+/// reachable from the graph itself. A host that must not fetch hands over a `Fetcher` that says so:
+/// the network policy is part of that capability, not a field beside it, so there is no way to
+/// hold one here and be unaware of the other.
 pub struct GraphPreprocess<'a, F: Fetcher> {
     pub exec: &'a Exec,
     pub fetcher: &'a F,
     pub environment: &'a BuildScriptEnvironment,
     pub root_features: &'a ResolvedBuildFeatures,
     pub limits: &'a BuildScriptLimits,
-    pub network: NetworkPolicy,
 }
 
 /// A direct `[dependencies] features` name that its target's `[features]` table does not declare.

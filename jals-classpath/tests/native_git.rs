@@ -20,7 +20,12 @@ fn features(manifest: &jals_config::Manifest) -> jals_config::ResolvedBuildFeatu
 struct NoFetch;
 
 impl Fetcher for NoFetch {
-    async fn fetch(&self, _: &str) -> Result<Vec<u8>, String> {
+    // `Online`: the panic is the assertion — `Offline` would refuse first and pass blind.
+    fn network(&self) -> jals_classpath::NetworkPolicy {
+        jals_classpath::NetworkPolicy::Online
+    }
+
+    async fn fetch_admitted(&self, _: &str) -> Result<Vec<u8>, String> {
         panic!("unexpected fetch")
     }
 }

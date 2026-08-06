@@ -11,19 +11,25 @@
 //! proxy — [`BrowserFetcher`] prepends an optional proxy base to every URL for exactly that.
 
 use gloo_net::http::Request;
-use jals_classpath::Fetcher;
+use jals_classpath::{Fetcher, NetworkPolicy};
 
 /// Downloads dependency jars with the browser's `fetch`, optionally through a CORS proxy.
 pub struct BrowserFetcher {
     /// A CORS-proxy base prepended to each URL (e.g. `https://corsproxy.io/?`); empty for a direct
     /// fetch (the default), which only reaches CORS-permissive hosts.
     proxy: String,
+    network: NetworkPolicy,
 }
 
 impl BrowserFetcher {
-    /// A fetcher that prepends `proxy` (empty for a direct fetch) to each requested URL.
-    pub fn new(proxy: String) -> Self {
-        BrowserFetcher { proxy }
+    /// A fetcher that prepends `proxy` (empty for a direct fetch) to each requested URL, under
+    /// `network`.
+    ///
+    /// The browser has no cache to fall back on and no second way to reach a host, so the
+    /// playground builds these `Online`. The parameter exists because the policy belongs to the
+    /// capability, not because this host varies it.
+    pub fn new(proxy: String, network: NetworkPolicy) -> Self {
+        BrowserFetcher { proxy, network }
     }
 }
 
@@ -39,7 +45,11 @@ impl BrowserFetcher {
 }
 
 impl Fetcher for BrowserFetcher {
-    async fn fetch(&self, url: &str) -> Result<Vec<u8>, String> {
+    fn network(&self) -> NetworkPolicy {
+        self.network
+    }
+
+    async fn fetch_admitted(&self, url: &str) -> Result<Vec<u8>, String> {
         let target = self.target(url);
         let response = Request::get(&target)
             .send()
@@ -51,7 +61,7 @@ impl Fetcher for BrowserFetcher {
         response.binary().await.map_err(|e| e.to_string())
     }
 
-    async fn fetch_bounded(&self, url: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
+    async fn fetch_bounded_admitted(&self, url: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
         let target = self.target(url);
         let response = Request::get(&target)
             .send()

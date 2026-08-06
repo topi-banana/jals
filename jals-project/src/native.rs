@@ -10,7 +10,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use jals_classpath::{
-    Fetcher, NativeProjectPlan, NetworkPolicy, ProjectInputOptions, ProjectInputs, ReqwestFetcher,
+    ExternalLocator, Fetcher, NativeProjectPlan, NetworkPolicy, ProjectInputOptions, ProjectInputs,
 };
 use jals_config::{Dependency, GitDependency, Manifest, PathDependency};
 use jals_exec::{Exec, LocalBoxFuture};
@@ -171,8 +171,10 @@ impl ProjectScript {
     /// The graph phase over a native project root: discover, preprocess, project, and resolve the
     /// root's and the graph's inputs against `storage`.
     ///
-    /// `preprocess.network` governs the whole phase, discovery included — a host cannot ask the graph
-    /// to be discovered online and preprocessed offline. `preprocess.exec` likewise drives both.
+    /// `preprocess.fetcher`'s [`NetworkPolicy`] governs the whole phase, discovery and input
+    /// resolution included — a host cannot ask the graph to be discovered online and resolved
+    /// offline, because there is one capability and every step is handed the same one.
+    /// `preprocess.exec` likewise drives all of it.
     pub async fn resolve_native<F: Fetcher>(
         &self,
         manifest: &Manifest,
@@ -181,8 +183,13 @@ impl ProjectScript {
         preprocess: GraphPreprocess<'_, F>,
         options: ProjectInputOptions,
     ) -> Result<NativeProjectAssembly, GraphResolveError> {
+        // `preprocess` is consumed by the phase it names, but the graph plan needs the same fetch
+        // capability again when it resolves. The field is a shared reference, so copy it out first
+        // — exactly as `resolve_memory` does. Rebuilding one here instead is what used to fetch
+        // under `--offline`.
+        let fetcher = preprocess.fetcher;
         let graph =
-            NativeProjectGraph::discover(manifest, root, preprocess.exec, preprocess.network)
+            NativeProjectGraph::discover(manifest, root, preprocess.exec, fetcher.network())
                 .await
                 .map_err(GraphResolveError::unreported)?;
         let discovered = graph.warnings.clone();
@@ -191,7 +198,7 @@ impl ProjectScript {
             .await
             .map_err(|error| GraphResolveError::reporting(error, discovered))?;
         Ok(self
-            .project_native(&graph, manifest, root, storage, options)
+            .project_native(&graph, manifest, root, storage, fetcher, options)
             .await)
     }
 
@@ -216,12 +223,13 @@ impl ProjectScript {
     /// preprocessed graph under more than one [`ProjectInputOptions`] without rediscovering it.
     /// A host has no such need and reaches it through
     /// [`resolve_native`](Self::resolve_native), which owns the order of the phases before it.
-    pub(crate) async fn project_native(
+    pub(crate) async fn project_native<F: Fetcher>(
         &self,
         graph: &PreprocessedProjectGraph,
         root_manifest: &Manifest,
         root_directory: &Path,
         storage: &mut NativeStorage,
+        fetcher: &F,
         mode: ProjectInputOptions,
     ) -> NativeProjectAssembly {
         let graph_assembly = graph.assemble(storage.artifacts_mut()).await;
@@ -232,10 +240,10 @@ impl ProjectScript {
             &jals_config::ResolvedBuildFeatures::default(),
             root_directory,
             storage,
+            fetcher,
             mode,
         )
         .await;
-        let fetcher = ReqwestFetcher::for_project(root_directory.to_path_buf());
         let projected = self
             .project(
                 graph,
@@ -244,7 +252,7 @@ impl ProjectScript {
                     inputs,
                     source_roots,
                 },
-                &fetcher,
+                fetcher,
                 storage,
                 mode,
             )
@@ -534,7 +542,7 @@ impl GraphBuilder {
             remap,
         } = declared;
         let role = if source_archive { "source" } else { "binary" };
-        let (id, input) = if locator.starts_with("http://") || locator.starts_with("https://") {
+        let (id, input) = if ExternalLocator::is_remote(locator) {
             let input = if source_archive {
                 BinaryInput::ExternalSource {
                     locator: locator.to_owned(),
@@ -1285,7 +1293,12 @@ mod tests {
     struct UnreachableFetcher;
 
     impl jals_classpath::Fetcher for UnreachableFetcher {
-        async fn fetch(&self, locator: &str) -> Result<Vec<u8>, String> {
+        // `Online`: the panic is the assertion — `Offline` would refuse first and pass blind.
+        fn network(&self) -> jals_classpath::NetworkPolicy {
+            jals_classpath::NetworkPolicy::Online
+        }
+
+        async fn fetch_admitted(&self, locator: &str) -> Result<Vec<u8>, String> {
             panic!("this graph must not fetch, but asked for `{locator}`")
         }
     }
@@ -1340,7 +1353,6 @@ mod tests {
                     environment: &BuildScriptEnvironment::new(),
                     root_features: &ResolvedBuildFeatures::default(),
                     limits: &BuildScriptLimits::default(),
-                    network: NetworkPolicy::Offline,
                 },
             )
             .await
@@ -1398,7 +1410,6 @@ mod tests {
                                 .with_features(BTreeSet::from(["root-only".to_owned()])),
                             root_features: &ResolvedBuildFeatures::default(),
                             limits: &BuildScriptLimits::default(),
-                            network: NetworkPolicy::Offline,
                         },
                     )
                     .await
