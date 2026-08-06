@@ -114,6 +114,42 @@ impl RelativePath {
             .map(Self)
     }
 
+    /// `raw`, as one project writes it against `base`, resolved into a portable path.
+    ///
+    /// [`parse`](Self::parse) rejects the `.` and `..` segments a declared entry is allowed to
+    /// spell; this folds them. `..` may climb above `base` — a sibling project is exactly what
+    /// `../lib` names — but never above the tree root, where there is nothing left to address.
+    ///
+    /// The one place that fold lives, for the reason [`strip_prefix`](Self::strip_prefix) is the
+    /// one place rebasing lives: two subsystems resolved declared paths themselves — a `[build]`
+    /// entry in `jals-classpath`, a dependency path in `jals-project`'s graph discovery — and the
+    /// only thing they had ever disagreed about was which sentence to refuse with.
+    pub fn resolve(base: &Self, raw: &str) -> core::result::Result<Self, PathError> {
+        if raw.starts_with("//") || raw.starts_with("\\\\") {
+            return Err(PathError::Unc);
+        }
+        if raw.starts_with('/') || raw.starts_with('\\') {
+            return Err(PathError::Absolute);
+        }
+        if raw.as_bytes().get(1) == Some(&b':') && raw.as_bytes()[0].is_ascii_alphabetic() {
+            return Err(PathError::Drive);
+        }
+        let mut segments = base.0.clone();
+        for part in raw.split('/') {
+            match part {
+                // An empty part is a doubled or trailing `/`, which names the same directory.
+                "." | "" => {}
+                ".." => {
+                    if segments.pop().is_none() {
+                        return Err(PathError::Escape);
+                    }
+                }
+                part => segments.push(Name::new(part).map_err(PathError::InvalidName)?),
+            }
+        }
+        Ok(Self(segments))
+    }
+
     pub const fn is_root(&self) -> bool {
         self.0.is_empty()
     }
@@ -377,5 +413,64 @@ mod tests {
         }
         assert_eq!(RelativePath::parse("").unwrap(), RelativePath::ROOT);
         assert!(FileKey::parse("").is_err());
+    }
+
+    #[test]
+    fn resolve_folds_dots_and_climbs_only_to_the_root() {
+        let base = RelativePath::parse("dep/inner").unwrap();
+        for (raw, expected) in [
+            ("src", "dep/inner/src"),
+            ("./src/./a", "dep/inner/src/a"),
+            ("a//b", "dep/inner/a/b"),
+            // A sibling project is exactly what `../lib` names, so `..` climbs above `base`.
+            ("../lib", "dep/lib"),
+            ("../../other", "other"),
+            ("../..", ""),
+        ] {
+            let resolved = RelativePath::resolve(&base, raw).unwrap_or_else(|error| {
+                panic!("{raw:?} against {base}: {error}");
+            });
+            assert_eq!(resolved.to_string(), expected, "resolving {raw:?}");
+        }
+        // But never above the tree root, where there is nothing left to address.
+        assert_eq!(
+            RelativePath::resolve(&base, "../../../out"),
+            Err(PathError::Escape)
+        );
+        assert_eq!(
+            RelativePath::resolve(&RelativePath::ROOT, ".."),
+            Err(PathError::Escape)
+        );
+    }
+
+    #[test]
+    fn resolve_refuses_host_spellings_with_a_readable_reason() {
+        for (raw, expected) in [
+            ("/abs", PathError::Absolute),
+            ("\\abs", PathError::Absolute),
+            ("//share/x", PathError::Unc),
+            ("\\\\share\\x", PathError::Unc),
+            ("C:/x", PathError::Drive),
+            ("a\\b", PathError::InvalidName(NameError::Separator)),
+        ] {
+            assert_eq!(
+                RelativePath::resolve(&RelativePath::ROOT, raw),
+                Err(expected),
+                "resolving {raw:?}"
+            );
+        }
+        // The sentences two crates used to spell themselves, now spelled once.
+        assert_eq!(
+            PathError::Escape.to_string(),
+            "path leaves the project root"
+        );
+        assert_eq!(
+            PathError::InvalidName(NameError::Separator).to_string(),
+            "path must use portable `/` separators"
+        );
+        assert_eq!(
+            PathError::InvalidName(NameError::WindowsReservedCharacter).to_string(),
+            "path contains an invalid segment: WindowsReservedCharacter"
+        );
     }
 }

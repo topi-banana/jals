@@ -438,37 +438,14 @@ impl MemoryProjectPlan {
         result
     }
 
-    /// Normalize one portable project-relative path, accepting `.` while rejecting root escape.
+    /// One `[build]` entry, resolved against the project root.
     ///
-    /// [`RelativePath::parse`] rejects the `.` and `..` segments a `[build]` entry is allowed to
-    /// spell, so this resolves them itself. There is no host path to fall back on, which is why a
-    /// path leaving the project root is an error rather than an external entry.
+    /// The fold itself is [`RelativePath::resolve`]'s — it is shared with `jals-project`'s graph
+    /// discovery, which resolves the same spellings against a *dependency's* root. What is this
+    /// crate's own is the base: an in-memory project has one address space and no host path to
+    /// fall back on, so a path leaving the root is an error here rather than an external entry.
     fn project_relative(raw: &str) -> Result<RelativePath, String> {
-        if raw.starts_with('/')
-            || raw.starts_with('\\')
-            || (raw.as_bytes().get(1) == Some(&b':') && raw.as_bytes()[0].is_ascii_alphabetic())
-        {
-            return Err("path must be relative to the project root".to_owned());
-        }
-        if raw.contains('\\') {
-            return Err("path must use portable `/` separators".to_owned());
-        }
-        let mut segments = Vec::new();
-        for part in raw.split('/') {
-            match part {
-                "." | "" => {}
-                ".." => {
-                    if segments.pop().is_none() {
-                        return Err("path leaves the project root".to_owned());
-                    }
-                }
-                part => segments.push(
-                    Name::new(part)
-                        .map_err(|error| format!("path contains an invalid segment: {error:?}"))?,
-                ),
-            }
-        }
-        Ok(RelativePath::new(segments))
+        RelativePath::resolve(&RelativePath::ROOT, raw).map_err(|error| error.to_string())
     }
 
     fn warn_path(&mut self, path: &str, message: String) {

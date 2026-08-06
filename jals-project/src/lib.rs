@@ -22,6 +22,7 @@ mod memory;
 mod native;
 mod remap;
 mod task;
+mod walk;
 
 pub use assemble::{
     CompileClasspathEntry, CompileClasspathFile, CompileClasspathTree, CompileClasspathTreeMember,
