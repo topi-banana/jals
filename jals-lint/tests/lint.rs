@@ -5,11 +5,11 @@ use jals_config::lint::Config;
 use jals_config::{Feature, FeatureSet, Severity};
 use jals_lint::LintOutput;
 
-/// Render the diagnostics (then parser errors) of a default-config lint run as one line each:
+/// Render the diagnostics of a default-config lint run as one line each:
 /// `rule:start..end: message`.
 fn render(out: &LintOutput) -> String {
     let mut s = String::new();
-    for d in out.diagnostics.iter().chain(&out.parse_errors) {
+    for d in &out.diagnostics {
         writeln!(
             s,
             "{}:{}..{}: {}",

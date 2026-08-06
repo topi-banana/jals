@@ -66,7 +66,7 @@ proptest! {
     #[test]
     fn ranges_in_bounds(src in javaish()) {
         let out = jals_exec::block_on_inline(LintOutput::lint_source(&src, &Config::default()));
-        for d in out.diagnostics.iter().chain(&out.parse_errors) {
+        for d in &out.diagnostics {
             prop_assert!(d.range.start <= d.range.end);
             prop_assert!(d.range.end <= src.len());
         }

@@ -36,6 +36,11 @@ jals-build = { workspace = true, features = ["native", "rhai"] }
 jals-classfile.workspace = true
 jals-classpath.workspace = true
 jals-config.workspace = true
+# The canonical, protocol-neutral diagnostics assembly (`FileDiagnostics`). `jals lint` goes
+# through it exactly as the language server and the playground do, so the three hosts cannot
+# disagree about ordering, suppression, or which passes run. Adds no crate to the build graph —
+# `jals-lsp` already depends on it — and pulls no feature: `jals-editor` is `no_std` and featureless.
+jals-editor.workspace = true
 jals-exec = { workspace = true, features = ["tokio"] }
 # `std` for the XML-backed config importers (Eclipse exported profile, IntelliJ code-style
 # scheme): `jals fmt` / `jals init` detect a native formatter config on the host and migrate it,
@@ -45,7 +50,6 @@ jals-fmt = { workspace = true, features = ["std"] }
 jals-frontend.workspace = true
 jals-storage = { workspace = true, features = ["std"] }
 jals-hir.workspace = true
-jals-lint.workspace = true
 jals-lsp.workspace = true
 jals-project = { workspace = true, features = ["native"] }
 jals-syntax.workspace = true

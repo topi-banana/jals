@@ -88,7 +88,7 @@ impl Migration {
     /// `Ok(None)` is A.1 row 8 — nothing to migrate. The caller keeps `Config::default()` and writes
     /// nothing.
     pub(crate) async fn detect(start: &Path, walk: Walk, exec: &Exec) -> Result<Option<Self>> {
-        let start = crate::App::canonical_dir(start);
+        let start = crate::App::canonical_path(start);
 
         // Row 1. Checked against *every* ancestor, not just the ones the walk below visits: an
         // authored `jalsfmt.toml` anywhere above is the config that will actually be used
@@ -447,7 +447,7 @@ org.eclipse.jdt.core.compiler.source=21
     #[test]
     fn the_walk_stops_at_a_project_marker() {
         let dir = tempfile::tempdir().expect("a temp dir");
-        let root = crate::App::canonical_dir(dir.path());
+        let root = crate::App::canonical_path(dir.path());
         std::fs::write(root.join("jals.toml"), "[package]\nname = \"x\"\n").expect("write");
         let nested = root.join("src/main/java");
         std::fs::create_dir_all(&nested).expect("mkdir");
@@ -475,7 +475,7 @@ org.eclipse.jdt.core.compiler.source=21
         // Without this, `jals fmt /tmp/scratch/A.java` could pick up `/tmp/.editorconfig` — and
         // then write a `jalsfmt.toml` outside anything the user considers their project.
         let dir = tempfile::tempdir().expect("a temp dir");
-        let nested = crate::App::canonical_dir(dir.path()).join("scratch");
+        let nested = crate::App::canonical_path(dir.path()).join("scratch");
         std::fs::create_dir_all(&nested).expect("mkdir");
 
         assert_eq!(
