@@ -159,14 +159,10 @@ impl BuildFailure {
         let position = error
             .position()
             .map(|position| (position.line(), position.column()));
-        let message = match error {
-            BuildScriptError::ReportedErrors(diagnostics) => diagnostics
-                .iter()
-                .map(BuildScriptDiagnostic::message)
-                .collect::<Vec<_>>()
-                .join("; "),
-            error => error.to_string(),
-        };
+        // One plain string with no severity channel of its own, so every variant renders itself —
+        // including `ReportedErrors`, whose warnings used to arrive here unlabelled and be shown
+        // as part of the error.
+        let message = error.to_string();
         Self {
             message,
             script_path,
@@ -962,13 +958,14 @@ impl App {
         };
         let mut status = format!("generated {} file(s)", output.generated_files.len());
         if !output.diagnostics.is_empty() {
+            // Each renders its own severity, so the count does not have to name one.
             status.push_str(&format!(
-                "; {} warning(s): {}",
+                "; {} diagnostic(s): {}",
                 output.diagnostics.len(),
                 output
                     .diagnostics
                     .iter()
-                    .map(BuildScriptDiagnostic::message)
+                    .map(ToString::to_string)
                     .collect::<Vec<_>>()
                     .join("; ")
             ));
@@ -1769,6 +1766,48 @@ mod tests {
                 let failure = BuildFailure::from_error(error);
                 assert_eq!(failure.marker_range(script, fallback), expected);
             }
+        });
+    }
+
+    #[test]
+    fn reported_diagnostics_keep_their_severity_in_the_failure_message() {
+        block_on_inline(async {
+            let manifest_text = ConfigKind::Manifest.seed();
+            let manifest: Manifest = manifest_text.parse().expect("seed manifest is valid");
+            let mut workspace = Workspace::new().await;
+            let error = workspace
+                .run_build_script(
+                    &manifest,
+                    manifest_text,
+                    "build.warning(\"check the version features\");\nbuild.error(\"select at most one\");\n",
+                )
+                .await
+                .expect_err("script should fail");
+
+            // The whole thing is painted as one error marker, so a warning that arrived unlabelled
+            // used to read as part of the error.
+            assert_eq!(
+                BuildFailure::from_error(error).message,
+                "build script reported: warning: check the version features; error: select at most one"
+            );
+        });
+    }
+
+    #[test]
+    fn build_status_reports_a_diagnostic_through_its_own_rendering() {
+        block_on_inline(async {
+            let manifest_text = ConfigKind::Manifest.seed();
+            let manifest: Manifest = manifest_text.parse().expect("seed manifest is valid");
+            let mut workspace = Workspace::new().await;
+            let output = workspace
+                .run_build_script(&manifest, manifest_text, "build.warning(\"kept\");\n")
+                .await
+                .expect("a warning does not fail the script");
+
+            assert_eq!(
+                App::build_status(output.as_ref()),
+                "generated 0 file(s); 1 diagnostic(s): warning: kept"
+            );
         });
     }
 

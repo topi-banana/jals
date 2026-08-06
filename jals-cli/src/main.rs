@@ -14,9 +14,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
-use jals_build::build_script::{
-    BuildScriptDiagnostic, BuildScriptEnvironment, BuildScriptLimits, BuildScriptSession,
-};
+use jals_build::build_script::{BuildScriptEnvironment, BuildScriptLimits, BuildScriptSession};
 use jals_build::{ManifestExt, Runtime};
 use jals_config::fmt::Config;
 use jals_config::lint::Config as LintConfig;
@@ -1633,23 +1631,7 @@ impl App {
                 publications,
             },
         )
-        .await
-        .map_err(|error| match error {
-            jals_project::RootBuildScriptError::BuildScript(
-                jals_build::build_script::BuildScriptError::ReportedErrors(diagnostics),
-            ) => anyhow!(
-                "build script reported errors: {}",
-                diagnostics
-                    .iter()
-                    .filter_map(|diagnostic| match diagnostic {
-                        BuildScriptDiagnostic::Error(message) => Some(message.as_str()),
-                        BuildScriptDiagnostic::Warning(_) => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            ),
-            other => anyhow!(other),
-        })?;
+        .await?;
         let mut task_classpath = Vec::new();
         for (index, key) in assembled.task_classpath().iter().enumerate() {
             let logical = RelativePath::parse(&format!("build-task/{index}.jar"))
@@ -1669,10 +1651,11 @@ impl App {
         let host = assembled
             .output()
             .map_or_else(HostBuildScript::default, |output| {
+                // The `warning:` lead is this CLI's severity channel, and these are warnings by
+                // construction — not a severity re-derived from the diagnostic, which is why the
+                // message alone is what belongs after it.
                 for diagnostic in &output.diagnostics {
-                    if let BuildScriptDiagnostic::Warning(message) = diagnostic {
-                        eprintln!("warning: build script: {message}");
-                    }
+                    eprintln!("warning: build script: {}", diagnostic.message());
                 }
                 let mut additional_classpath: Vec<_> = output
                     .additional_classpath

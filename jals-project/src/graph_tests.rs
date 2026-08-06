@@ -1539,6 +1539,55 @@ fn a_dependency_publication_outside_a_source_root_is_rejected() {
 }
 
 #[test]
+fn a_dependency_build_script_error_reaches_the_consumer_with_its_message() {
+    jals_exec::block_on_inline(async {
+        // A dependency's `build.error` is the one diagnostic a consumer cannot go and read for
+        // itself: the script ran against a snapshot it does not own. Reporting it by count told a
+        // reader only that something failed, which is why this asserts the sentence and not the
+        // shape.
+        let (root, view_storage) = task_dependency(
+            r#"build.warning("check the version features"); build.error("select at most one");"#,
+            &[],
+        );
+        let mut cache = MemoryStorage::memory(CodeTree::default());
+
+        let error = MemoryProjectGraph::discover(&root, &view_storage.view())
+            .await
+            .unwrap()
+            .preprocess(
+                cache.artifacts_mut(),
+                GraphPreprocess {
+                    exec: &Exec::inline(),
+                    fetcher: &UnreachableFetcher,
+                    environment: &BuildScriptEnvironment::new(),
+                    root_features: &ResolvedBuildFeatures::default(),
+                    limits: &BuildScriptLimits::default(),
+                    network: jals_classpath::NetworkPolicy::Offline,
+                },
+            )
+            .await
+            .unwrap_err();
+
+        let GraphError::BuildScript {
+            location, message, ..
+        } = &error
+        else {
+            panic!("expected a build-script error, got {error:?}");
+        };
+        assert_eq!(location, "dep");
+        assert_eq!(
+            message,
+            "build script reported: warning: check the version features; error: select at most one"
+        );
+        assert_eq!(
+            error.to_string(),
+            "dependency build script `dep` failed: build script reported: \
+             warning: check the version features; error: select at most one"
+        );
+    });
+}
+
+#[test]
 fn a_dependency_task_execution_is_memoized_across_preprocessing() {
     jals_exec::block_on_inline(async {
         // `project_jar` reads the dependency's own snapshot, so removing that file between runs

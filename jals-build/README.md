@@ -445,10 +445,14 @@ process-only flag/environment directives because they spawn no JDK tools.
 Root-script `javac` arguments follow manifest `javac-flags` and remain before source paths. Root JVM
 arguments precede `-cp`. Manifest classpath entries come first; root-script and resolved dependency
 entries are stably deduplicated while preserving their first-occurrence order. Added sources compile
-with ordinary project and source-dependency sources. Warnings are surfaced by each host.
-`build.error`, a Rhai compile/evaluation error, a bad path, or a limit violation publishes no partial
-generated output. Metadata is available in `BuildScriptOutput` for host integrations and is not
-otherwise interpreted by `javac` or `java`.
+with ordinary project and source-dependency sources. A diagnostic renders itself as
+`<severity>: <message>`, and a host that writes it into a plain string renders the whole thing
+rather than spelling the severity again; `message()` alone is for a destination that already carries
+severity in a field of its own. `build.error`, a Rhai compile/evaluation error, a bad path, or a
+limit violation publishes no partial generated output — and the resulting error reports every
+diagnostic the run emitted, in order, so a warning that preceded the fatal one stays with it.
+Metadata is available in `BuildScriptOutput` for host integrations and is not otherwise interpreted
+by `javac` or `java`.
 
 Manifest-backed source dependencies use the lower-level immutable preparation API instead. The
 project graph invokes every unique binary, legacy-source, and JALS-source node unconditionally in

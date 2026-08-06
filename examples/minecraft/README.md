@@ -55,7 +55,7 @@ because `[features]` resolution is additive and cannot express exclusivity:
 
 ```
 $ jals build --features 1.20.1,1.19.4
-error: build script reported errors: select at most one Minecraft version feature, got `1.20.1` and `1.19.4`
+error: build script reported: error: select at most one Minecraft version feature, got `1.20.1` and `1.19.4`
 ```
 
 `--all-features` therefore always fails here — it selects all 43 releases at once.

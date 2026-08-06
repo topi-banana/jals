@@ -602,6 +602,37 @@ fn cfg_attribute_selects_code_and_preserves_lines_through_real_javac() {
     );
 }
 
+#[test]
+fn a_root_build_script_error_reports_every_diagnostic_it_emitted() {
+    let dir = project(
+        "[package]\nname = \"reported\"\n\
+         [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+    );
+    std::fs::write(
+        dir.path().join("build.rhai"),
+        "build.warning(\"check the version features\");\nbuild.error(\"select at most one\");\n",
+    )
+    .unwrap();
+
+    // No toolchain is involved: the script runs while the compile inputs are being prepared, well
+    // before a backend is chosen, so this needs no `javac` real or fake.
+    let output = jals()
+        .args(["build", "--manifest-path"])
+        .arg(dir.path().join("jals.toml"))
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains(
+            "error: build script reported: \
+             warning: check the version features; error: select at most one"
+        ),
+        "the warning emitted before the fatal diagnostic is context for it; stderr: {stderr}"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn build_runs_rhai_and_passes_generated_inputs_to_javac() {
@@ -619,6 +650,7 @@ fn build_runs_rhai_and_passes_generated_inputs_to_javac() {
             build.add_source(source);
             build.add_javac_arg("-Agenerated=true");
             build.set_compile_env("JALS_SCRIPT_ENV", "from-rhai");
+            build.warning("generated BuildInfo.java");
         "#,
     )
     .unwrap();
@@ -636,10 +668,13 @@ fn build_runs_rhai_and_passes_generated_inputs_to_javac() {
         .output()
         .unwrap();
 
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(output.status.success(), "stderr: {stderr}");
+    // On the success path the diagnostics are warnings by construction, so the `warning:` lead is
+    // the CLI's own severity channel and the diagnostic contributes only its message.
     assert!(
-        output.status.success(),
-        "stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
+        stderr.contains("warning: build script: generated BuildInfo.java"),
+        "stderr: {stderr}"
     );
     let generated = dir
         .path()
@@ -976,15 +1011,27 @@ fn graph_failures_prevent_javac() {
     )
     .unwrap();
 
-    for (fixture, expected) in [
-        (&malformed, "malformed dependency manifest"),
-        (&cycle, "dependency cycle"),
-        (&script, "dependency build script"),
-    ] {
+    // Two substrings for the script fixture rather than one sentence: the attribution names the
+    // dependency and the body is the dependency's own diagnostic, and only the second used to be
+    // missing. Splitting them also keeps the host path out of the assertion.
+    let cases: [(&tempfile::TempDir, &[&str]); 3] = [
+        (&malformed, &["malformed dependency manifest"]),
+        (&cycle, &["dependency cycle"]),
+        (
+            &script,
+            &[
+                "dependency build script",
+                "build script reported: error: dependency script failed",
+            ],
+        ),
+    ];
+    for (fixture, expected) in cases {
         let output = build_with_fake_javac(fixture.path());
         assert_eq!(output.status.code(), Some(1));
         let stderr = String::from_utf8(output.stderr).unwrap();
-        assert!(stderr.contains(expected), "stderr: {stderr}");
+        for want in expected {
+            assert!(stderr.contains(want), "want {want:?}; stderr: {stderr}");
+        }
         assert!(!fixture.path().join("failed-javac.args").exists());
     }
 }
