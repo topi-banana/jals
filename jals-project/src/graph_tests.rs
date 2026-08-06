@@ -26,7 +26,12 @@ use crate::{CompileClasspathEntry, GraphError, GraphPreprocess, ProjectScript};
 struct UnreachableFetcher;
 
 impl jals_classpath::Fetcher for UnreachableFetcher {
-    async fn fetch(&self, locator: &str) -> Result<Vec<u8>, String> {
+    // `Online`: the panic is the assertion — `Offline` would refuse first and pass blind.
+    fn network(&self) -> jals_classpath::NetworkPolicy {
+        jals_classpath::NetworkPolicy::Online
+    }
+
+    async fn fetch_admitted(&self, locator: &str) -> Result<Vec<u8>, String> {
         panic!("this graph must not fetch, but asked for `{locator}`")
     }
 }
@@ -50,7 +55,6 @@ macro_rules! inert {
             environment: $environment,
             root_features: $features,
             limits: $limits,
-            network: jals_classpath::NetworkPolicy::Offline,
         }
     };
 }
@@ -566,6 +570,13 @@ fn native_compile_classpath_keeps_mixed_local_and_remote_order() {
                 &root,
                 project.path(),
                 &mut root_storage,
+                // This one really does fetch — two of its three jars are remote. Passing the
+                // capability in is the point: the projection used to build its own `ReqwestFetcher`
+                // and reach the network no matter what the caller's policy was.
+                &jals_classpath::ReqwestFetcher::for_project(
+                    project.path().to_path_buf(),
+                    jals_classpath::NetworkPolicy::Online,
+                ),
                 ProjectInputOptions::Compile,
             )
             .await;
@@ -887,6 +898,7 @@ fn native_projection_returns_watch_paths_and_applies_mode_downstream() {
                 &root,
                 project.path(),
                 &mut root_storage,
+                &UnreachableFetcher,
                 ProjectInputOptions::Analysis,
             )
             .await;
@@ -903,6 +915,7 @@ fn native_projection_returns_watch_paths_and_applies_mode_downstream() {
                 &root,
                 project.path(),
                 &mut root_storage,
+                &UnreachableFetcher,
                 ProjectInputOptions::Editor,
             )
             .await;
@@ -1348,7 +1361,13 @@ impl CountingFetcher {
 }
 
 impl jals_classpath::Fetcher for CountingFetcher {
-    async fn fetch(&self, locator: &str) -> Result<Vec<u8>, String> {
+    // `Online`: this double records what was asked for, so a refusal here would
+    // hide the very call the test counts.
+    fn network(&self) -> jals_classpath::NetworkPolicy {
+        jals_classpath::NetworkPolicy::Online
+    }
+
+    async fn fetch_admitted(&self, locator: &str) -> Result<Vec<u8>, String> {
         self.calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.responses
@@ -1388,7 +1407,6 @@ fn a_dependency_build_task_puts_its_jar_on_the_consumer_classpath() {
                     environment: &BuildScriptEnvironment::new(),
                     root_features: &ResolvedBuildFeatures::default(),
                     limits: &BuildScriptLimits::default(),
-                    network: jals_classpath::NetworkPolicy::Online,
                 },
             )
             .await
@@ -1448,7 +1466,6 @@ fn a_dependency_publication_becomes_navigation_source_and_never_touches_the_snap
                     environment: &BuildScriptEnvironment::new(),
                     root_features: &ResolvedBuildFeatures::default(),
                     limits: &BuildScriptLimits::default(),
-                    network: jals_classpath::NetworkPolicy::Online,
                 },
             )
             .await
@@ -1520,7 +1537,6 @@ fn a_dependency_publication_outside_a_source_root_is_rejected() {
                     environment: &BuildScriptEnvironment::new(),
                     root_features: &ResolvedBuildFeatures::default(),
                     limits: &BuildScriptLimits::default(),
-                    network: jals_classpath::NetworkPolicy::Online,
                 },
             )
             .await
@@ -1562,7 +1578,6 @@ fn a_dependency_build_script_error_reaches_the_consumer_with_its_message() {
                     environment: &BuildScriptEnvironment::new(),
                     root_features: &ResolvedBuildFeatures::default(),
                     limits: &BuildScriptLimits::default(),
-                    network: jals_classpath::NetworkPolicy::Offline,
                 },
             )
             .await
@@ -1709,7 +1724,6 @@ fn a_dependency_publication_reaches_the_editor_but_not_the_compiler() {
                     environment: &BuildScriptEnvironment::new(),
                     root_features: &ResolvedBuildFeatures::default(),
                     limits: &BuildScriptLimits::default(),
-                    network: jals_classpath::NetworkPolicy::Online,
                 },
             )
             .await
@@ -2635,4 +2649,76 @@ fn an_ambiguous_edge_remap_warns_and_leaves_the_jar_unremapped() {
             assembly.warnings
         );
     });
+}
+
+/// A capability that refuses the network, and panics if anything gets past the refusal.
+///
+/// Distinct from [`UnreachableFetcher`], which is `Online`: that one asserts a graph never *asks*,
+/// this one asserts the policy answers before an ask can reach an adapter.
+struct RefusingFetcher;
+
+impl jals_classpath::Fetcher for RefusingFetcher {
+    fn network(&self) -> jals_classpath::NetworkPolicy {
+        jals_classpath::NetworkPolicy::Offline
+    }
+
+    async fn fetch_admitted(&self, locator: &str) -> Result<Vec<u8>, String> {
+        panic!("the gate must refuse before this runs, but `{locator}` reached it")
+    }
+}
+
+/// The end-to-end regression for the leak this seam closed.
+///
+/// `project_native` used to discard the caller's capability and build its own `ReqwestFetcher`, so
+/// an uncached remote jar was fetched no matter what the host asked for — under
+/// `jals build --offline`, under `jals lint`, and the moment the language server opened a folder.
+/// Nothing downstream of `resolve_native` may reach the network when the capability refuses.
+///
+/// Driven through `resolve_native` rather than `project_native` because the discarded fetcher was
+/// only observable across the whole phase: it is the hand-over between the steps that lost it.
+#[test]
+fn an_offline_graph_does_not_fetch_a_remote_jar_dependency() {
+    jals_exec::tokio_rt::run(|exec| async move {
+        let project = tempfile::tempdir().unwrap();
+        write(project.path(), "src/main/java/Root.java", "class Root {}\n");
+        let root =
+            manifest("[dependencies]\nlib = { jar = \"https://example.invalid/lib.jar\" }\n");
+        let mut root_storage = storage(project.path(), &exec).await;
+        let assembly = ProjectScript::skipped()
+            .resolve_native(
+                &root,
+                project.path(),
+                &mut root_storage,
+                GraphPreprocess {
+                    exec: &exec,
+                    fetcher: &RefusingFetcher,
+                    environment: &BuildScriptEnvironment::new(),
+                    root_features: &ResolvedBuildFeatures::default(),
+                    limits: &BuildScriptLimits::default(),
+                },
+                ProjectInputOptions::Compile,
+            )
+            .await
+            .expect("an unreachable dependency is a warning, not a phase failure");
+
+        assert!(assembly.errors.is_empty(), "{:?}", assembly.errors);
+        assert!(
+            assembly.compile_classpath.is_empty(),
+            "the jar must not be on the classpath: {:?}",
+            assembly.compile_classpath
+        );
+        let rendered: Vec<_> = assembly
+            .inputs
+            .warnings
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert!(
+            rendered
+                .iter()
+                .any(|warning| warning.contains("not fetched while offline")),
+            "{rendered:?}"
+        );
+    })
+    .unwrap();
 }

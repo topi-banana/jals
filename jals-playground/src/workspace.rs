@@ -260,14 +260,13 @@ impl Workspace {
                     // Build-task fetches go through the same CORS proxy as dependency
                     // resolution; without it every `tasks.fetch_*` to a non-permissive host
                     // (Maven Central among them) fails, with nothing pointing at the proxy field.
-                    &BrowserFetcher::new(proxy.to_owned()),
+                    &BrowserFetcher::new(proxy.to_owned(), jals_classpath::NetworkPolicy::Online),
                     storage,
                     &mut self.build_script_session,
                     RootBuildScriptOptions {
                         manifest,
                         environment: &environment,
                         limits: &BuildScriptLimits::default(),
-                        network: jals_classpath::NetworkPolicy::Online,
                         host: BuildTaskHost::NoTerminals,
                         blocked_files: &[],
                         publications: jals_project::SourcePublication::Apply,

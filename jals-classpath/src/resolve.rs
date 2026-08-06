@@ -13,6 +13,7 @@ use jals_storage::{
 };
 use sha1::{Digest as _, Sha1};
 
+use crate::io::Fetch;
 use crate::{Fetcher, MappingFormat, Warning, WarningOrigin};
 use jals_config::{AmbiguousMapping, Manifest, MappingDigest, MappingFormatKind, MappingSource};
 
@@ -25,7 +26,7 @@ impl ExternalLocator {
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
-    fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 
@@ -44,7 +45,16 @@ impl ExternalLocator {
     /// Whether `value` is fetched over the network — the locators worth recovering from the
     /// cache's locator index instead of refetching. Local `file://` and plain-path locators are
     /// deliberately read fresh so edits to a local jar are always picked up.
-    fn is_remote(value: &str) -> bool {
+    ///
+    /// It is also what [`NetworkPolicy`](crate::NetworkPolicy) asks when it decides whether to
+    /// admit a locator, and it is deliberately *not* the crate-private `is_url`: that one also
+    /// matches `file://`, and refusing a `file://` or plain-path locator offline would break a
+    /// dependency that never wanted the network. The two predicates differ by exactly that scheme;
+    /// do not merge them.
+    ///
+    /// Public because `jals-project` classifies a declared locator with the same rule while it
+    /// builds the graph — the gate itself is this crate's own and stays here.
+    pub fn is_remote(value: &str) -> bool {
         ["http://", "https://"]
             .iter()
             .any(|scheme| value.starts_with(scheme))
@@ -262,7 +272,9 @@ impl MappingResolver {
     ///
     /// The fetch capability is the `Fetcher`, exactly as it is for [`DependencyResolver`] beside it:
     /// a host with no network hands over one that refuses, rather than this layer carrying a policy
-    /// its neighbour does not.
+    /// its neighbour does not. The refusal is applied by `Fetch`, which every fetch in this crate
+    /// goes through — this function used to pass `NetworkPolicy::Online` here, which was the one
+    /// place the sentence above was untrue.
     ///
     /// # Errors
     /// A [`Warning`] attributed to the mapping's own location — a missing project file, a failed or
@@ -299,7 +311,6 @@ impl MappingResolver {
                         max_bytes: *max_bytes,
                         namespace: CacheNamespace::Mappings,
                     },
-                    NetworkPolicy::Online,
                 )
                 .await
                 .map_err(|error| {
@@ -344,13 +355,6 @@ impl MappingResolver {
 
 /// Stateless dependency resolver. Persistence belongs to [`ArtifactCache`].
 pub struct DependencyResolver;
-
-/// Whether an external-artifact resolution may use the fetch capability.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NetworkPolicy {
-    Online,
-    Offline,
-}
 
 /// Expected digest supplied by an external artifact's metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -426,7 +430,6 @@ impl ExternalArtifactResolver {
         fetcher: &F,
         cache: &mut ArtifactCache<C>,
         spec: &ExternalArtifactSpec,
-        network: NetworkPolicy,
     ) -> Result<CacheKey, String> {
         if spec.max_bytes == 0 {
             return Err("external artifact has a zero byte limit".to_owned());
@@ -448,15 +451,18 @@ impl ExternalArtifactResolver {
         {
             return Ok(key);
         }
-        if network == NetworkPolicy::Offline {
+        // Not redundant with the gate inside `Fetch`: this is the *message*. Only here is it known
+        // that the verified cache was already tried and missed, and this string reaches
+        // `BuildTaskRunError::Node`, which renders it with no origin beside it — so it names its
+        // own locator. Both ask `NetworkPolicy::admits`, so they cannot disagree about which
+        // locators are refused, only about how the refusal reads.
+        if !fetcher.network().admits(&spec.locator) {
             return Err(format!(
                 "external artifact `{}` is not available in the verified cache while offline",
                 spec.locator.as_str()
             ));
         }
-        let bytes = fetcher
-            .fetch_bounded(spec.locator.as_str(), spec.max_bytes)
-            .await?;
+        let bytes = Fetch::bounded(fetcher, &spec.locator, spec.max_bytes).await?;
         if !spec.expected.matches(&bytes) {
             return Err(format!(
                 "external artifact `{}` digest mismatch",
@@ -528,7 +534,7 @@ impl DependencyResolver {
         let fetched = jals_exec::join_ordered(
             locators
                 .iter()
-                .map(|locator| fetcher.fetch(locator.as_str())),
+                .map(|locator| Fetch::bytes(fetcher, locator)),
         )
         .await;
 

@@ -1,0 +1,25 @@
+id: no-ungated-fetch
+language: Rust
+severity: error
+message: A Fetcher's `_admitted` methods must be reached through `Fetch`, which applies the network policy.
+note: |
+  `Fetcher::fetch_admitted` and `fetch_bounded_admitted` carry a precondition: the capability's own
+  `NetworkPolicy` has already admitted the locator. `jals_classpath::io::Fetch` is what applies it,
+  and it is the only sanctioned caller. Calling one directly is how `jals lint`, the language
+  server, and `jals build --offline` used to fetch anyway.
+
+  Trait methods cannot be `pub(crate)`, so this rule is what keeps the gate structural rather than
+  advisory. An implementor *defining* these methods is fine — only call expressions are rejected.
+
+rule:
+  kind: field_identifier
+  regex: '^(fetch_admitted|fetch_bounded_admitted)$'
+  inside:
+    kind: field_expression
+    inside:
+      kind: call_expression
+
+ignores:
+  - '**/target/**'
+  # The gate itself, plus the default `fetch_bounded_admitted` body that delegates to its sibling.
+  - 'jals-classpath/src/io.rs'

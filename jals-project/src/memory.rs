@@ -649,7 +649,12 @@ mod tests {
     struct UnreachableFetcher;
 
     impl jals_classpath::Fetcher for UnreachableFetcher {
-        async fn fetch(&self, locator: &str) -> Result<Vec<u8>, String> {
+        // `Online`: the panic is the assertion — `Offline` would refuse first and pass blind.
+        fn network(&self) -> jals_classpath::NetworkPolicy {
+            jals_classpath::NetworkPolicy::Online
+        }
+
+        async fn fetch_admitted(&self, locator: &str) -> Result<Vec<u8>, String> {
             panic!("this graph must not fetch, but asked for `{locator}`")
         }
     }
@@ -674,7 +679,6 @@ mod tests {
                 environment: $environment,
                 root_features: $features,
                 limits: $limits,
-                network: jals_classpath::NetworkPolicy::Offline,
             }
         };
     }
