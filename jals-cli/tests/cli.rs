@@ -1,6 +1,7 @@
 //! Integration tests driving the built `jals` binary.
 
-#[cfg(unix)]
+// Ungated since `lint_reads_stdin` writes to the child's stdin on every platform. The gate this
+// import used to carry was for the `#[cfg(unix)]` build-script tests, which were its only readers.
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
