@@ -1256,33 +1256,36 @@ impl App {
                 // Discovery had already found something worth saying about this project before a
                 // later phase failed, and it is usually the half that explains the other: the
                 // dependency preprocessing could not resolve is often the one discovery warned was
-                // unavailable. Print them in the same shape a successful run would, then fail.
-                for warning in &failure.warnings {
-                    eprintln!("warning: {warning}");
-                }
-                failure.error
-            })
-            .context("resolving the project dependency graph")?;
+                // unavailable. The assembly orders and grades both; this prints what it produced.
+                //
+                // The script phase is `Skipped` here whichever command is running: whoever ran a
+                // script reports it (`run_build_script`), and `jals lint` runs none at all.
+                Reporter::report_project(
+                    &jals_project::ProjectDiagnostics::assemble(
+                        jals_project::ScriptOutcome::Skipped,
+                        jals_project::GraphOutcome::Failed(&failure),
+                        None,
+                    ),
+                    None,
+                );
+                // No `.context()` on top: it would restate this sentence, and the detail is in the
+                // diagnostics just reported rather than in the error chain.
+                anyhow!("the project dependency graph could not be resolved")
+            })?;
 
-        // Every warning below is rendered whole, not by its message: several of these name their
-        // subject only in the attribution, so printing the message alone drops the entry the user
-        // has to go and fix.
-        for warning in &assembly.warnings {
-            eprintln!("warning: {warning}");
-        }
-        for warning in &assembly.inputs.warnings {
-            eprintln!("warning: {warning}");
-        }
-        if !assembly.errors.is_empty() {
-            let messages = assembly
-                .errors
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("; ");
-            // No outer phrase. Every message already opens with `dependency project <node> could
-            // not assemble`, and the one that used to be here restated it.
-            return Err(anyhow!("{messages}"));
+        let reported = jals_project::ProjectDiagnostics::assemble(
+            jals_project::ScriptOutcome::Skipped,
+            jals_project::GraphOutcome::Resolved(assembly.report()),
+            None,
+        );
+        Reporter::report_project(&reported, None);
+        if reported
+            .iter()
+            .any(|diagnostic| diagnostic.severity == jals_project::ProjectDiagnosticSeverity::Error)
+        {
+            // No outer phrase and no restated detail: every failure has just been reported in full,
+            // and repeating one here would print it twice under two different leads.
+            return Err(anyhow!("the project could not be assembled"));
         }
 
         result
@@ -1455,7 +1458,38 @@ impl App {
         .await
         .context("opening project storage for the build script")?;
         let mut session = BuildScriptSession::new();
-        let assembled = jals_project::ProjectAssembly::script(
+        // The configured script's key and text, so a failure that carries a Rhai position can be
+        // pointed at the offending line rather than reported without a location.
+        let script_key = manifest
+            .build
+            .script
+            .as_ref()
+            .and_then(|script| match script {
+                jals_config::BuildScript::Rhai { file } => FileKey::parse(file).ok(),
+            });
+        let script_text = script_key
+            .as_ref()
+            .and_then(|key| storage.view().file_text(key).ok().map(ToOwned::to_owned));
+        let script_label = script_key
+            .as_ref()
+            .map(|key| key.path().to_host_path(root).display().to_string());
+        let script_file = script_key.as_ref().map(|key| jals_project::ScriptFile {
+            key,
+            text: script_text.as_deref(),
+        });
+        let report = |outcome: jals_project::ScriptOutcome<'_>| {
+            Reporter::report_project(
+                &jals_project::ProjectDiagnostics::assemble(
+                    outcome,
+                    jals_project::GraphOutcome::NotReached,
+                    script_file,
+                ),
+                // `zip` already gates on both halves: a configured script whose text would not read
+                // reports its diagnostics without a source to point at, like an unconfigured one.
+                script_label.as_deref().zip(script_text.as_deref()),
+            );
+        };
+        let assembled = match jals_project::ProjectAssembly::script(
             exec,
             fetcher,
             &mut storage,
@@ -1469,7 +1503,23 @@ impl App {
                 publications,
             },
         )
-        .await?;
+        .await
+        {
+            Ok(assembled) => assembled,
+            Err(error) => {
+                report(jals_project::ScriptOutcome::Failed(&error));
+                // Reported in full above, with a span when the script gave one. Restating the error
+                // here would print it a second time under a different lead.
+                return Err(anyhow!("the build script failed"));
+            }
+        };
+        report(
+            assembled
+                .output()
+                .map_or(jals_project::ScriptOutcome::Skipped, |output| {
+                    jals_project::ScriptOutcome::Ran(output)
+                }),
+        );
         let mut task_classpath = Vec::new();
         for (index, key) in assembled.task_classpath().iter().enumerate() {
             let logical = RelativePath::parse(&format!("build-task/{index}.jar"))
@@ -1489,12 +1539,6 @@ impl App {
         let host = assembled
             .output()
             .map_or_else(HostBuildScript::default, |output| {
-                // The `warning:` lead is this CLI's severity channel, and these are warnings by
-                // construction — not a severity re-derived from the diagnostic, which is why the
-                // message alone is what belongs after it.
-                for diagnostic in &output.diagnostics {
-                    eprintln!("warning: build script: {}", diagnostic.message());
-                }
                 let mut additional_classpath: Vec<_> = output
                     .additional_classpath
                     .iter()

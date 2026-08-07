@@ -28,6 +28,20 @@ impl NetworkPolicy {
     /// owner, so the wording and the thing that matches it cannot drift apart.
     pub const OFFLINE_REFUSAL: &'static str = "not fetched while offline";
 
+    /// Whether `message` reports a refusal by [`Offline`](Self::Offline).
+    ///
+    /// The other half of [`OFFLINE_REFUSAL`](Self::OFFLINE_REFUSAL)'s promise: naming the sentence
+    /// only prevents drift if what recognizes it lives beside it, and a caller writing the
+    /// substring test itself is the copy that constant exists to avoid.
+    ///
+    /// A producer wraps the refusal in its own sentence, so this is a substring test rather than an
+    /// equality one. It takes the text rather than a [`Warning`] because a caller scanning a
+    /// project's diagnostics has more than one kind of message in front of it, and a refusal reads
+    /// the same in all of them.
+    pub fn refused_offline(message: &str) -> bool {
+        message.contains(Self::OFFLINE_REFUSAL)
+    }
+
     /// The policy a host's `--offline`-style flag selects. Named so the conversion is spelled once
     /// rather than as an `if` at each construction site.
     pub const fn when_offline(offline: bool) -> Self {

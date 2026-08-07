@@ -14,6 +14,7 @@ extern crate alloc;
 
 mod assemble;
 mod assembly;
+mod diagnostics;
 mod graph;
 #[cfg(all(test, feature = "native"))]
 mod graph_tests;
@@ -29,6 +30,13 @@ pub use assemble::{
     ProjectAssemblyError,
 };
 pub use assembly::{GraphResolveError, MemoryProjectAssembly, ProjectAssembly, ProjectScript};
+// The canonical, protocol-neutral diagnostics assembly for one project — the project-scoped
+// counterpart of `jals_editor::FileDiagnostics`. A host maps a `ProjectDiagnostic` to its
+// protocol's shape and sequences nothing.
+pub use diagnostics::{
+    GraphOutcome, ProjectAnchor, ProjectDiagnostic, ProjectDiagnosticCode,
+    ProjectDiagnosticSeverity, ProjectDiagnostics, ProjectReport, ScriptFile, ScriptOutcome,
+};
 // `CycleEdge` and `NodeId` are here because a public error names them — `GraphError::Cycle` carries
 // the chain and `GraphError::InvalidDependency` the declaring node. A host reads neither: they
 // render through their `Display`, which is the whole of what they say. `GraphWarning` and

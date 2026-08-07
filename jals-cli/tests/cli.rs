@@ -625,13 +625,48 @@ fn a_root_build_script_error_reports_every_diagnostic_it_emitted() {
 
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8(output.stderr).unwrap();
+    // Two diagnostics, each under its own severity and in the order the script emitted them. They
+    // used to be flattened into one `error:` line, which read the warning as part of the failure.
     assert!(
-        stderr.contains(
-            "error: build script reported: \
-             warning: check the version features; error: select at most one"
-        ),
+        stderr.contains("warning[build-script]: check the version features"),
         "the warning emitted before the fatal diagnostic is context for it; stderr: {stderr}"
     );
+    assert!(
+        stderr.contains("error[build-script]: select at most one"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.find("warning[build-script]") < stderr.find("error[build-script]"),
+        "emission order is preserved; stderr: {stderr}"
+    );
+}
+
+/// The CLI used to report a broken `build.rhai` with no location at all: it held the Rhai position
+/// and never resolved it against the script's text. It now points at the offending line.
+#[test]
+fn a_failing_build_script_is_reported_at_the_line_it_failed_on() {
+    let dir = project(
+        "[package]\nname = \"positioned\"\n\
+         [build]\nscript = { type = \"rhai\", file = \"build.rhai\" }\n",
+    );
+    std::fs::write(
+        dir.path().join("build.rhai"),
+        "let valid = 1;\nlet broken = ;\n",
+    )
+    .unwrap();
+
+    let output = jals()
+        .args(["build", "--manifest-path"])
+        .arg(dir.path().join("jals.toml"))
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    // An `ariadne` report: the script's path, the failing line number, and the source line itself.
+    assert!(stderr.contains("build.rhai:2:"), "stderr: {stderr}");
+    assert!(stderr.contains("let broken = ;"), "stderr: {stderr}");
+    assert!(stderr.contains("build-script"), "stderr: {stderr}");
 }
 
 #[cfg(unix)]
@@ -674,7 +709,7 @@ fn build_runs_rhai_and_passes_generated_inputs_to_javac() {
     // On the success path the diagnostics are warnings by construction, so the `warning:` lead is
     // the CLI's own severity channel and the diagnostic contributes only its message.
     assert!(
-        stderr.contains("warning: build script: generated BuildInfo.java"),
+        stderr.contains("warning[build-script]: generated BuildInfo.java"),
         "stderr: {stderr}"
     );
     let generated = dir

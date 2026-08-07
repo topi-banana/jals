@@ -82,6 +82,25 @@ pub struct ProjectAssemblyError {
     message: String,
 }
 
+impl ProjectAssemblyError {
+    /// One failure, attributed to `node` and optionally to a file inside it.
+    ///
+    /// `pub(crate)` because the fields are sealed and a struct literal is only reachable from this
+    /// module: the diagnostics assembly's tests are a sibling, and one constructor is a smaller
+    /// surface than widening three fields for them.
+    pub(crate) fn new(
+        node: impl Into<String>,
+        path: Option<RelativePath>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            node: node.into(),
+            path,
+            message: message.into(),
+        }
+    }
+}
+
 /// `dependency project <node> could not assemble[ <path>]: <message>` — what a host reports.
 ///
 /// One rendering for every host, for the same reason [`GraphWarning`] has one: a message names its
@@ -323,16 +342,16 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
         for file in &publications {
             match self.cache.lookup(&file.key).await {
                 Ok(Some(bytes)) => published.push((file.path.clone(), bytes)),
-                Ok(None) => self.errors.push(ProjectAssemblyError {
-                    node: node.location.clone(),
-                    path: Some(file.path.clone()),
-                    message: "published compile source is not cached".to_owned(),
-                }),
-                Err(error) => self.errors.push(ProjectAssemblyError {
-                    node: node.location.clone(),
-                    path: Some(file.path.clone()),
-                    message: format!("published compile source is invalid: {error:?}"),
-                }),
+                Ok(None) => self.errors.push(ProjectAssemblyError::new(
+                    node.location.clone(),
+                    Some(file.path.clone()),
+                    "published compile source is not cached",
+                )),
+                Err(error) => self.errors.push(ProjectAssemblyError::new(
+                    node.location.clone(),
+                    Some(file.path.clone()),
+                    format!("published compile source is invalid: {error:?}"),
+                )),
             }
         }
 
@@ -399,11 +418,11 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
         let lowered = match frontend.lower(self.cache, files).await {
             Ok(lowered) => lowered,
             Err(error) => {
-                self.errors.push(ProjectAssemblyError {
-                    node: node.location.clone(),
-                    path: None,
-                    message: format!("frontend `{}` failed: {error}", frontend.id()),
-                });
+                self.errors.push(ProjectAssemblyError::new(
+                    node.location.clone(),
+                    None,
+                    format!("frontend `{}` failed: {error}", frontend.id()),
+                ));
                 return;
             }
         };
@@ -492,14 +511,14 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
             }
             let Ok(member_key) = FileKey::new(member.path.clone()) else {
                 let location = ResolvedNode::location_or_digest(&self.graph.nodes, node);
-                self.errors.push(ProjectAssemblyError {
-                    node: location,
+                self.errors.push(ProjectAssemblyError::new(
+                    location,
                     // `member_path`, as the publication above reports it: both failures are about
                     // one member of one tree, and a reader given the entry-relative path by one
                     // and the member-relative path by the other has to work out which is which.
-                    path: Some(member_path.clone()),
-                    message: "classpath tree member is not a file path".to_owned(),
-                });
+                    Some(member_path.clone()),
+                    "classpath tree member is not a file path",
+                ));
                 return;
             };
             published.push(CompileClasspathTreeMember {
@@ -544,13 +563,13 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
         let key = CacheKey::new(namespace, fold.finish(), ContentDigest::of(bytes));
         if let Err(error) = self.cache.publish(&key, bytes).await {
             let location = ResolvedNode::location_or_digest(&self.graph.nodes, node);
-            self.errors.push(ProjectAssemblyError {
-                node: location,
+            self.errors.push(ProjectAssemblyError::new(
+                location,
                 // The file as its own node spells it, not `path`: the reader owns the former and
                 // has never seen the latter, which is a cache address this run failed to write.
-                path: Some(file_path.clone()),
-                message: format!("artifact publication failed: {error:?}"),
-            });
+                Some(file_path.clone()),
+                format!("artifact publication failed: {error:?}"),
+            ));
             return None;
         }
         Some((path, key))
@@ -701,7 +720,6 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
 
 #[cfg(test)]
 mod tests {
-    use alloc::borrow::ToOwned;
     use alloc::string::ToString;
 
     use jals_storage::RelativePath;
@@ -714,20 +732,15 @@ mod tests {
     #[test]
     fn assembly_error_display_names_node_and_file() {
         assert_eq!(
-            ProjectAssemblyError {
-                node: "../lib".to_owned(),
-                path: None,
-                message: "classpath entry is not cached".to_owned(),
-            }
-            .to_string(),
+            ProjectAssemblyError::new("../lib", None, "classpath entry is not cached").to_string(),
             "dependency project `../lib` could not assemble: classpath entry is not cached"
         );
         assert_eq!(
-            ProjectAssemblyError {
-                node: "../lib".to_owned(),
-                path: Some(RelativePath::parse("src/Main.java").expect("a portable relative path")),
-                message: "publishing failed".to_owned(),
-            }
+            ProjectAssemblyError::new(
+                "../lib",
+                Some(RelativePath::parse("src/Main.java").expect("a portable relative path")),
+                "publishing failed",
+            )
             .to_string(),
             "dependency project `../lib` could not assemble `src/Main.java`: publishing failed"
         );

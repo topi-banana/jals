@@ -27,15 +27,15 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use futures::lock::Mutex;
-use jals_build::build_script::{
-    BuildScriptDiagnostic, BuildScriptEnvironment, BuildScriptError, BuildScriptLimits,
-    BuildScriptOutput,
-};
+use jals_build::build_script::{BuildScriptEnvironment, BuildScriptLimits, BuildScriptOutput};
 use jals_classpath::{LibrarySource, ProjectInputOptions, SourceFile};
 use jals_config::fmt::Config;
 use jals_config::{FeatureSet, Manifest, ManifestParseError};
 use jals_hir::{LoweredClasspath, ProjectIndex};
-use jals_project::ProjectScript;
+use jals_project::{
+    GraphOutcome, ProjectAnchor, ProjectDiagnostic, ProjectDiagnosticSeverity, ProjectDiagnostics,
+    ProjectScript, ScriptFile, ScriptOutcome,
+};
 use jals_storage::{ArtifactCache, DirKey, FileKey, MemoryCache, MemoryStorage};
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::spawn_local;
@@ -51,7 +51,7 @@ use crate::{monaco, providers};
 
 /// One of the editable project files shown in the sidebar's `Config` section.
 /// They are never analysed or indexed as Java and use plaintext Monaco models.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum ConfigKind {
     /// `jals.toml` — the project manifest; its `[dependencies]` drive classpath resolution.
     Manifest,
@@ -65,6 +65,17 @@ impl ConfigKind {
     /// Every config kind, in sidebar order — the single source for [`ConfigKind::from_path`] and the
     /// file-tree's `Config` section.
     const ALL: [ConfigKind; 3] = [ConfigKind::Manifest, ConfigKind::Fmt, ConfigKind::Script];
+
+    /// Whether a project diagnostic anchored at `anchor` belongs on this config's model.
+    ///
+    /// The manifest is where the procedure's dependency half lands, and the script where its own
+    /// half does. `jalsfmt.toml` is not part of project assembly, so nothing anchors to it.
+    const fn holds(self, anchor: &ProjectAnchor) -> bool {
+        matches!(
+            (self, anchor),
+            (Self::Manifest, ProjectAnchor::Manifest) | (Self::Script, ProjectAnchor::Script(_))
+        )
+    }
 
     /// This config's pseudo-path — its Monaco model key and file-tree selection key.
     const fn path(self) -> &'static str {
@@ -146,75 +157,6 @@ struct ConfigParseError {
     message: String,
 }
 
-/// A build failure retained in UI state with its optional Rhai source location.
-struct BuildFailure {
-    message: String,
-    script_path: Option<String>,
-    position: Option<(u32, u32)>,
-}
-
-impl BuildFailure {
-    fn from_error(error: BuildScriptError) -> Self {
-        let script_path = error.script_path().map(ToString::to_string);
-        let position = error
-            .position()
-            .map(|position| (position.line(), position.column()));
-        // One plain string with no severity channel of its own, so every variant renders itself —
-        // including `ReportedErrors`, whose warnings used to arrive here unlabelled and be shown
-        // as part of the error.
-        let message = error.to_string();
-        Self {
-            message,
-            script_path,
-            position,
-        }
-    }
-
-    fn marker_range(&self, source: &str, fallback: MonacoRange) -> MonacoRange {
-        let Some((line, column)) = self.script_path.as_ref().and(self.position) else {
-            return fallback;
-        };
-        let Some(line_index) = line
-            .checked_sub(1)
-            .and_then(|line| usize::try_from(line).ok())
-        else {
-            return fallback;
-        };
-        let Some(character_index) = column
-            .checked_sub(1)
-            .and_then(|column| usize::try_from(column).ok())
-        else {
-            return fallback;
-        };
-        let mut line_start = 0;
-        let mut selected = None;
-        for (index, line_text) in source.split_inclusive('\n').enumerate() {
-            if index == line_index {
-                selected = Some(line_text.strip_suffix('\n').unwrap_or(line_text));
-                break;
-            }
-            line_start += line_text.len();
-        }
-        let Some(line_text) = selected else {
-            return fallback;
-        };
-        let relative = line_text
-            .char_indices()
-            .map(|(offset, _)| offset)
-            .nth(character_index)
-            .or_else(|| (character_index == line_text.chars().count()).then_some(line_text.len()));
-        let Some(start) = relative.map(|offset| line_start + offset) else {
-            return fallback;
-        };
-        let end = if start < line_start + line_text.len() {
-            start + source[start..].chars().next().map_or(0, char::len_utf8)
-        } else {
-            start
-        };
-        MonacoRange::of(&jals_editor::LineIndex::new(source), source, &(start..end))
-    }
-}
-
 #[derive(Clone, PartialEq, Eq)]
 struct BuildInputs {
     manifest: String,
@@ -239,6 +181,9 @@ pub struct ClasspathResolution {
     /// line), what `#[cfg(feature = "…")]` evaluates against when `attributes` is on.
     build_features: BTreeSet<String>,
     status: String,
+    /// What the graph phase reported, to paint onto the manifest model. The script phase's own
+    /// diagnostics arrive separately, with the build that produced them.
+    diagnostics: Vec<ProjectDiagnostic>,
     artifacts: ArtifactCache<MemoryCache>,
     sources: DependencySourceTexts,
 }
@@ -382,14 +327,14 @@ pub enum Msg {
         active_path: String,
         active_source: String,
         status: String,
-        diagnostics: Vec<BuildScriptDiagnostic>,
+        diagnostics: Vec<ProjectDiagnostic>,
     },
     /// Rhai compilation/evaluation failed without publishing partial generated output.
     BuildFailed {
         generation: u64,
-        error: String,
-        script_path: Option<String>,
-        position: Option<(u32, u32)>,
+        /// The status-line summary. The detail is in `diagnostics`, each with its own severity.
+        message: String,
+        diagnostics: Vec<ProjectDiagnostic>,
     },
     /// Compile the workspace with the backend `jals.toml`'s `[build] backend` selects.
     Compile,
@@ -463,10 +408,13 @@ pub struct App {
     compile_generation: Rc<Cell<u64>>,
     /// Whether Monaco has been created; generated model/marker writes wait for this point.
     editor_ready: bool,
-    /// Diagnostics reported by the most recent successful script execution.
-    build_diagnostics: Vec<BuildScriptDiagnostic>,
-    /// Compilation/runtime failure from the most recent script execution.
-    build_error: Option<BuildFailure>,
+    /// Everything the most recent project assembly reported, ordered and graded once by
+    /// [`ProjectDiagnostics`]. Painted onto the config model each one is anchored to.
+    project_diagnostics: Vec<ProjectDiagnostic>,
+    /// The last parse error for each config editor, retained because a config model's markers are
+    /// the *union* of its parse error and the project diagnostics anchored to it — and the two
+    /// arrive at different times (a parse error per keystroke, project diagnostics per build).
+    config_errors: RefCell<BTreeMap<ConfigKind, ConfigParseError>>,
     /// Inputs sent through the automatic build pipeline, reset by an invalid manifest edit.
     build_inputs: BuildInputTracker,
     /// The CORS proxy for jar downloads (typed in the header); empty by default.
@@ -540,8 +488,8 @@ impl App {
             build_generation: Rc::new(Cell::new(0)),
             compile_generation: Rc::new(Cell::new(0)),
             editor_ready: false,
-            build_diagnostics: Vec::new(),
-            build_error: None,
+            project_diagnostics: Vec::new(),
+            config_errors: RefCell::new(BTreeMap::new()),
             build_inputs: BuildInputTracker::default(),
             proxy: String::new(),
         }
@@ -708,73 +656,91 @@ impl App {
         }
     }
 
-    /// Paint the config editor's parse diagnostics on the current model: a single error marker
-    /// derived from `error` (spanning its byte range, or the first line when the error carries no
-    /// span), or no markers when `error` is `None` (a clean parse). Reuses the Java marker path.
-    fn set_config_diagnostic(&self, text: &str, error: Option<ConfigParseError>) {
-        /// The byte length of `text`'s first line (up to the first `\n`, or the whole string) — the
-        /// fallback marker range for a config error that carries no span.
-        fn first_line_len(text: &str) -> usize {
-            text.find('\n').unwrap_or(text.len())
-        }
-        let marker = error.as_ref().map(|ConfigParseError { span, message }| {
-            let range = span.clone().unwrap_or_else(|| 0..first_line_len(text));
-            // Built only when there is an error to place — a clean parse (the common keystroke) skips
-            // the whole-buffer scan.
-            let index = jals_editor::LineIndex::new(text);
-            let MonacoRange {
-                start_line,
-                start_col,
-                end_line,
-                end_col,
-            } = MonacoRange::of(&index, text, &range);
-            monaco::Marker {
-                start_line,
-                start_col,
-                end_line,
-                end_col,
-                message: message.as_str(),
-                severity: jals_editor::DiagnosticSeverity::Error,
-            }
-        });
-        // `Option<Marker>` is an iterator of zero or one marker; either paints the error or clears.
-        monaco::Marker::set_diagnostics(marker);
+    /// Record `error` as `kind`'s current parse state and repaint that model.
+    ///
+    /// The error is *retained* rather than painted and forgotten: a config model's markers are the
+    /// union of its parse error and the project diagnostics anchored to it, and the two arrive at
+    /// different times — a parse error on every keystroke, project diagnostics once a build
+    /// finishes. Whichever changed, the union needs both.
+    fn set_config_diagnostic(&self, kind: ConfigKind, error: Option<ConfigParseError>) {
+        match error {
+            Some(error) => self.config_errors.borrow_mut().insert(kind, error),
+            None => self.config_errors.borrow_mut().remove(&kind),
+        };
+        self.repaint_config_model(kind);
     }
 
-    /// Paint Rhai failures at their structured source position on the fixed script editor model,
-    /// regardless of the configured storage path. Diagnostics without a position and successful
-    /// build warnings use the first line.
-    fn set_build_diagnostics(&self) {
-        let first_line = 0..self.build_src.find('\n').unwrap_or(self.build_src.len());
-        let index = jals_editor::LineIndex::new(&self.build_src);
-        let fallback_range = MonacoRange::of(&index, &self.build_src, &first_line);
-        let mut markers = Vec::new();
-        for diagnostic in &self.build_diagnostics {
-            markers.push(monaco::Marker {
-                start_line: fallback_range.start_line,
-                start_col: fallback_range.start_col,
-                end_line: fallback_range.end_line,
-                end_col: fallback_range.end_col,
-                message: diagnostic.message(),
-                severity: if diagnostic.is_error() {
-                    jals_editor::DiagnosticSeverity::Error
-                } else {
-                    jals_editor::DiagnosticSeverity::Warning
+    /// Repaint every config model. Called when the project diagnostics change, since one assembly
+    /// can move markers on the manifest and the script at once.
+    fn repaint_config_markers(&self) {
+        for kind in ConfigKind::ALL {
+            self.repaint_config_model(kind);
+        }
+    }
+
+    /// Replace `kind`'s markers with the union of its parse error and the project diagnostics
+    /// anchored to it.
+    ///
+    /// Addressed by path rather than painted on the *current* model: two owners writing the current
+    /// model is how a script diagnostic and a config parse error used to erase each other whenever
+    /// `build.rhai` happened to be the open editor.
+    fn repaint_config_model(&self, kind: ConfigKind) {
+        /// The first line — where a diagnostic with no span goes, there being nothing narrower in
+        /// this file to point at.
+        fn first_line(text: &str) -> Range<usize> {
+            0..text.find('\n').unwrap_or(text.len())
+        }
+
+        let text = self.config_src(kind);
+        // Gathered first because a `Marker` borrows its message and these come from two places.
+        let mut entries: Vec<(Range<usize>, jals_editor::DiagnosticSeverity, &str)> = Vec::new();
+        let errors = self.config_errors.borrow();
+        if let Some(ConfigParseError { span, message }) = errors.get(&kind) {
+            entries.push((
+                span.clone().unwrap_or_else(|| first_line(text)),
+                jals_editor::DiagnosticSeverity::Error,
+                message.as_str(),
+            ));
+        }
+        for diagnostic in &self.project_diagnostics {
+            if !kind.holds(&diagnostic.anchor) {
+                continue;
+            }
+            entries.push((
+                diagnostic.span.clone().unwrap_or_else(|| first_line(text)),
+                match diagnostic.severity {
+                    ProjectDiagnosticSeverity::Error => jals_editor::DiagnosticSeverity::Error,
+                    ProjectDiagnosticSeverity::Warning => jals_editor::DiagnosticSeverity::Warning,
+                    // Monaco's own Info is 2, but a marker's severity is typed on the editor's
+                    // three-arm vocabulary. `Hint` renders faintly, which is why the offline
+                    // advisory also stays in the status line.
+                    ProjectDiagnosticSeverity::Info => jals_editor::DiagnosticSeverity::Hint,
                 },
-            });
+                diagnostic.message.as_str(),
+            ));
         }
-        if let Some(failure) = &self.build_error {
-            let range = failure.marker_range(&self.build_src, fallback_range);
-            markers.push(monaco::Marker {
-                start_line: range.start_line,
-                start_col: range.start_col,
-                end_line: range.end_line,
-                end_col: range.end_col,
-                message: &failure.message,
-                severity: jals_editor::DiagnosticSeverity::Error,
-            });
-        }
-        monaco::Marker::set_diagnostics_for(BUILD_SCRIPT_PATH, markers);
+        // Published even when empty: an empty marker set is what clears a previous run's.
+        let index = jals_editor::LineIndex::new(text);
+        let markers: Vec<_> = entries
+            .iter()
+            .map(|(range, severity, message)| {
+                let MonacoRange {
+                    start_line,
+                    start_col,
+                    end_line,
+                    end_col,
+                } = MonacoRange::of(&index, text, range);
+                monaco::Marker {
+                    start_line,
+                    start_col,
+                    end_line,
+                    end_col,
+                    message,
+                    severity: *severity,
+                }
+            })
+            .collect();
+        monaco::Marker::set_diagnostics_for(kind.path(), markers);
     }
 
     /// Parse `jalsfmt.toml` text into the shared formatter [`Config`] and repaint the config editor's
@@ -788,7 +754,7 @@ impl App {
             }
             Err(err) => Some(err),
         };
-        self.set_config_diagnostic(text, error);
+        self.set_config_diagnostic(ConfigKind::Fmt, error);
     }
 
     /// Parse + validate `jals.toml` and start the Rhai/classpath pipeline. Invalid edits cancel
@@ -800,11 +766,11 @@ impl App {
                 self.build_inputs.invalidate();
                 self.advance_build();
                 self.deps_status = Some(format!("manifest error: {}", err.message));
-                self.set_config_diagnostic(text, Some(err));
+                self.set_config_diagnostic(ConfigKind::Manifest, Some(err));
                 return true;
             }
         };
-        self.set_config_diagnostic(text, None);
+        self.set_config_diagnostic(ConfigKind::Manifest, None);
         self.start_build(ctx, manifest)
     }
 
@@ -849,10 +815,9 @@ impl App {
         }
         let token = self.advance_build();
         self.deps_status = Some("running bounded Rhai build script...".to_string());
-        self.build_diagnostics.clear();
-        self.build_error = None;
+        self.project_diagnostics.clear();
         if self.editor_ready {
-            self.set_build_diagnostics();
+            self.repaint_config_markers();
         }
         let manifest_text = self.manifest_src.clone();
         let script_text = self.build_src.clone();
@@ -870,9 +835,13 @@ impl App {
                 {
                     Ok(script) => {
                         let status = Self::build_status(script.output());
-                        let diagnostics = script
-                            .output()
-                            .map_or_else(Vec::new, |output| output.diagnostics.clone());
+                        let diagnostics = Self::script_diagnostics(
+                            script
+                                .output()
+                                .map_or(ScriptOutcome::Skipped, ScriptOutcome::Ran),
+                            &manifest,
+                            &script_text,
+                        );
                         let entries = Self::tree_entries(&ws);
                         let files = ws.file_texts();
                         let active_path = ws.active().to_string();
@@ -891,7 +860,14 @@ impl App {
                             storage,
                         ))
                     }
-                    Err(error) => Err(BuildFailure::from_error(error)),
+                    Err(error) => Err((
+                        error.to_string(),
+                        Self::script_diagnostics(
+                            ScriptOutcome::Failed(&error),
+                            &manifest,
+                            &script_text,
+                        ),
+                    )),
                 }
             };
 
@@ -910,16 +886,11 @@ impl App {
                 storage,
             ) = match build_result {
                 Ok(result) => result,
-                Err(BuildFailure {
-                    message: error,
-                    script_path,
-                    position,
-                }) => {
+                Err((message, diagnostics)) => {
                     link.send_message(Msg::BuildFailed {
                         generation: token.captured,
-                        error,
-                        script_path,
-                        position,
+                        message,
+                        diagnostics,
                     });
                     return;
                 }
@@ -949,6 +920,32 @@ impl App {
             }
         });
         true
+    }
+
+    /// The script phase's diagnostics, assembled from whichever outcome it had.
+    ///
+    /// The script's key comes from the manifest and its text from the live editor buffer, so a
+    /// failure carrying a Rhai position resolves to a byte span the marker path can point at.
+    fn script_diagnostics(
+        outcome: ScriptOutcome<'_>,
+        manifest: &Manifest,
+        script_text: &str,
+    ) -> Vec<ProjectDiagnostic> {
+        let key = manifest
+            .build
+            .script
+            .as_ref()
+            .and_then(|script| match script {
+                jals_config::BuildScript::Rhai { file } => FileKey::parse(file).ok(),
+            });
+        ProjectDiagnostics::assemble(
+            outcome,
+            GraphOutcome::NotReached,
+            key.as_ref().map(|key| ScriptFile {
+                key,
+                text: Some(script_text),
+            }),
+        )
     }
 
     /// Human-readable result of a successful script phase.
@@ -1016,23 +1013,26 @@ impl App {
                 ProjectInputOptions::Editor,
             )
             .await
-            // The status line is this host's only channel, so a failed phase's warnings have to
-            // ride along in the message or they are gone — there is no second place to print them.
+            // A failed phase's warnings ride along in the message: this returns `Err(String)` for
+            // the status line, and the assembly is what puts them in front of the error they
+            // explain.
             .map_err(|failure| {
-                let mut message = failure.error.to_string();
-                for warning in &failure.warnings {
-                    message.push_str("; ");
-                    message.push_str(&warning.to_string());
-                }
-                message
+                Self::status_line(&ProjectDiagnostics::assemble(
+                    ScriptOutcome::Skipped,
+                    GraphOutcome::Failed(&failure),
+                    None,
+                ))
             })?;
-        if !assembly.errors.is_empty() {
-            return Err(assembly
-                .errors
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("; "));
+        let diagnostics = ProjectDiagnostics::assemble(
+            ScriptOutcome::Skipped,
+            GraphOutcome::Resolved(assembly.report()),
+            None,
+        );
+        if diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == ProjectDiagnosticSeverity::Error)
+        {
+            return Err(Self::status_line(&diagnostics));
         }
         let inputs = assembly.inputs;
         let classpath = ProjectIndex::lower_classpath(&inputs.classpath_classes).await;
@@ -1042,25 +1042,33 @@ impl App {
             inputs.classpath_classes.len(),
             inputs.dependency_jars.len()
         );
-        // Rendered whole: the status line is this host's only channel, and a warning that does not
-        // name the dependency or the `[build]` entry it came from is not actionable in a browser.
-        let mut warnings: Vec<_> = assembly.warnings.iter().map(ToString::to_string).collect();
-        warnings.extend(inputs.warnings.iter().map(ToString::to_string));
-        if !warnings.is_empty() {
-            status.push_str(&format!(
-                " — {} warning(s): {}",
-                warnings.len(),
-                warnings.join("; ")
-            ));
+        // The markers carry the detail; the status line carries the summary, because a `Hint`
+        // marker (the offline advisory) renders faintly enough to miss.
+        if !diagnostics.is_empty() {
+            status.push_str(" — ");
+            status.push_str(&Self::status_line(&diagnostics));
         }
         Ok(ClasspathResolution {
             classpath,
             feature_set: inputs.feature_set,
             build_features: features.features().clone(),
             status,
+            diagnostics,
             artifacts: storage.into_artifacts(),
             sources,
         })
+    }
+
+    /// One line naming each diagnostic with its severity.
+    ///
+    /// The browser's only always-visible channel. Every producer renders whole, so a warning that
+    /// names its dependency only in the attribution still says which one it is about.
+    fn status_line(diagnostics: &[ProjectDiagnostic]) -> String {
+        diagnostics
+            .iter()
+            .map(|diagnostic| format!("{}: {}", diagnostic.severity.lead(), diagnostic.message))
+            .collect::<Vec<_>>()
+            .join("; ")
     }
 
     async fn dependency_source_texts(
@@ -1219,9 +1227,9 @@ impl Component for App {
                     monaco::switch_model(&path, &src);
                     // Selecting never executes a script or starts dependency resolution.
                     if kind == ConfigKind::Script {
-                        self.set_build_diagnostics();
+                        self.repaint_config_markers();
                     } else {
-                        self.set_config_diagnostic(&src, kind.parse_error(&src));
+                        self.set_config_diagnostic(kind, kind.parse_error(&src));
                     }
                 } else {
                     let Some(workspace) = self.workspace() else {
@@ -1341,7 +1349,7 @@ impl Component for App {
                     return false;
                 };
                 self.editor_ready = true;
-                self.set_build_diagnostics();
+                self.repaint_config_markers();
                 // Register the language-feature providers, backed by the shared workspace.
                 providers::Providers::install(Rc::clone(&workspace));
                 let link = ctx.link().clone();
@@ -1427,8 +1435,7 @@ impl Component for App {
                 self.active_path = active_path.clone();
                 self.active_source = active_source.clone();
                 self.deps_status = Some(status);
-                self.build_diagnostics = diagnostics;
-                self.build_error = None;
+                self.project_diagnostics = diagnostics;
                 if self.editor_ready {
                     if self.active_config.is_none() {
                         if active_changed {
@@ -1438,28 +1445,22 @@ impl Component for App {
                         }
                     }
                     Self::sync_models(&files);
-                    self.set_build_diagnostics();
+                    self.repaint_config_markers();
                 }
                 true
             }
             Msg::BuildFailed {
                 generation,
-                error,
-                script_path,
-                position,
+                message,
+                diagnostics,
             } => {
                 if generation != self.build_generation.get() {
                     return false;
                 }
-                self.deps_status = Some(format!("build error: {error}"));
-                self.build_diagnostics.clear();
-                self.build_error = Some(BuildFailure {
-                    message: error,
-                    script_path,
-                    position,
-                });
+                self.deps_status = Some(format!("build error: {message}"));
+                self.project_diagnostics = diagnostics;
                 if self.editor_ready {
-                    self.set_build_diagnostics();
+                    self.repaint_config_markers();
                 }
                 true
             }
@@ -1470,6 +1471,15 @@ impl Component for App {
                 match result {
                     Ok(resolution) => {
                         self.deps_status = Some(resolution.status);
+                        // The graph phase's diagnostics replace the previous graph phase's while
+                        // leaving the script phase's in place: both are anchored, and each anchor
+                        // has one producer.
+                        self.project_diagnostics
+                            .retain(|diagnostic| diagnostic.anchor != ProjectAnchor::Manifest);
+                        self.project_diagnostics.extend(resolution.diagnostics);
+                        if self.editor_ready {
+                            self.repaint_config_markers();
+                        }
                         if let Some(workspace) = self.workspace() {
                             let link = ctx.link().clone();
                             let build_generation = Rc::clone(&self.build_generation);
@@ -1725,71 +1735,86 @@ mod tests {
         );
     }
 
+    /// The span the assembly resolved, converted into Monaco's one-based UTF-16 coordinates —
+    /// which is the whole of what this host still does with a Rhai position. Resolving the position
+    /// itself is `BuildScriptPosition::byte_range`, tested in `jals-build`.
     #[test]
-    fn build_failure_marker_uses_structured_rhai_position_or_fallback() {
+    fn a_script_failure_marks_the_position_it_reports() {
         block_on_inline(async {
             let manifest_text = ConfigKind::Manifest.seed();
             let manifest: Manifest = manifest_text.parse().expect("seed manifest is valid");
-            let fallback = MonacoRange {
-                start_line: 1,
-                start_col: 1,
-                end_line: 1,
-                end_col: 8,
-            };
             for (script, expected) in [
-                (
-                    "let valid = 1;\nlet broken = ;\n",
-                    MonacoRange {
-                        start_line: 2,
-                        start_col: 14,
-                        end_line: 2,
-                        end_col: 15,
-                    },
-                ),
-                (
-                    "let valid = 1;\nthrow \"boom\";\n",
-                    MonacoRange {
-                        start_line: 2,
-                        start_col: 1,
-                        end_line: 2,
-                        end_col: 2,
-                    },
-                ),
-                ("build.error(\"boom\");\n", fallback),
+                ("let valid = 1;\nlet broken = ;\n", Some(28..29)),
+                ("let valid = 1;\nthrow \"boom\";\n", Some(15..16)),
+                // `build.error` is reported by the script, not thrown by Rhai, so it has no
+                // position and the marker falls back to the head of the file.
+                ("build.error(\"boom\");\n", None),
             ] {
                 let mut workspace = Workspace::new().await;
                 let error = workspace
                     .run_build_script(&manifest, manifest_text, script)
                     .await
                     .expect_err("script should fail");
-                let failure = BuildFailure::from_error(error);
-                assert_eq!(failure.marker_range(script, fallback), expected);
+                let diagnostics =
+                    App::script_diagnostics(ScriptOutcome::Failed(&error), &manifest, script);
+                assert_eq!(
+                    diagnostics
+                        .iter()
+                        .find(|d| d.severity == ProjectDiagnosticSeverity::Error)
+                        .and_then(|d| d.span.clone()),
+                    expected,
+                    "script: {script:?}"
+                );
             }
         });
     }
 
     #[test]
-    fn reported_diagnostics_keep_their_severity_in_the_failure_message() {
+    fn reported_diagnostics_keep_their_own_severity_rather_than_one_message() {
         block_on_inline(async {
             let manifest_text = ConfigKind::Manifest.seed();
             let manifest: Manifest = manifest_text.parse().expect("seed manifest is valid");
+            let script = "build.warning(\"check the version features\");\nbuild.error(\"select at most one\");\n";
             let mut workspace = Workspace::new().await;
             let error = workspace
-                .run_build_script(
-                    &manifest,
-                    manifest_text,
-                    "build.warning(\"check the version features\");\nbuild.error(\"select at most one\");\n",
-                )
+                .run_build_script(&manifest, manifest_text, script)
                 .await
                 .expect_err("script should fail");
 
-            // The whole thing is painted as one error marker, so a warning that arrived unlabelled
-            // used to read as part of the error.
+            // Two markers with two severities. The whole run used to be painted as one error
+            // marker, so a warning that arrived before the fatal one read as part of it.
+            let diagnostics =
+                App::script_diagnostics(ScriptOutcome::Failed(&error), &manifest, script);
             assert_eq!(
-                BuildFailure::from_error(error).message,
-                "build script reported: warning: check the version features; error: select at most one"
+                diagnostics
+                    .iter()
+                    .map(|d| (d.severity, d.message.as_str()))
+                    .collect::<Vec<_>>(),
+                [
+                    (
+                        ProjectDiagnosticSeverity::Warning,
+                        "check the version features"
+                    ),
+                    (ProjectDiagnosticSeverity::Error, "select at most one"),
+                ]
             );
         });
+    }
+
+    /// A marker's severity is typed on the editor's three-arm vocabulary, so the advisory collapses
+    /// onto `Hint`. That renders faintly, which is why the status line keeps it too.
+    #[test]
+    fn a_multi_byte_column_converts_to_utf16() {
+        let index = jals_editor::LineIndex::new("😀x");
+        assert_eq!(
+            MonacoRange::of(&index, "😀x", &(4..5)),
+            MonacoRange {
+                start_line: 1,
+                start_col: 3,
+                end_line: 1,
+                end_col: 4,
+            }
+        );
     }
 
     #[test]
@@ -1808,30 +1833,6 @@ mod tests {
                 "generated 0 file(s); 1 diagnostic(s): warning: kept"
             );
         });
-    }
-
-    #[test]
-    fn build_failure_marker_converts_character_column_to_utf16() {
-        let failure = BuildFailure {
-            message: "boom".to_string(),
-            script_path: Some("scripts/custom.rhai".to_string()),
-            position: Some((1, 2)),
-        };
-        let fallback = MonacoRange {
-            start_line: 1,
-            start_col: 1,
-            end_line: 1,
-            end_col: 1,
-        };
-        assert_eq!(
-            failure.marker_range("😀x", fallback),
-            MonacoRange {
-                start_line: 1,
-                start_col: 3,
-                end_line: 1,
-                end_col: 4,
-            }
-        );
     }
 
     #[test]
@@ -1876,8 +1877,10 @@ mod tests {
             .await
             .unwrap();
 
+            // The status line carries a summary of what the assembly reported; the markers carry
+            // the detail. Both name the entry, because the warning renders whole.
             assert!(
-                resolution.status.contains("1 warning(s)"),
+                resolution.status.contains("warning: "),
                 "{}",
                 resolution.status
             );
@@ -1885,6 +1888,14 @@ mod tests {
                 resolution.status.contains("path leaves the project root"),
                 "{}",
                 resolution.status
+            );
+            assert_eq!(
+                resolution
+                    .diagnostics
+                    .iter()
+                    .filter(|d| d.severity == ProjectDiagnosticSeverity::Warning)
+                    .count(),
+                1
             );
             // The entry the user wrote, which this host reports only because it renders the whole
             // warning: the lowering's message names no path, so a status line without the locator
