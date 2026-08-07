@@ -53,7 +53,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: taiki-e/install-action@v2.85.7
+      - uses: taiki-e/install-action@v2.85.8
         with:
           tool: ast-grep
       - name: Run ast-grep rule tests
@@ -158,7 +158,7 @@ jobs:
       # module skip themselves when the engine is absent (the same shape as `javac_available()`), so
       # without these installed the whole "a real engine executes it" half of `jals-javac` would
       # quietly pass by doing nothing.
-      - uses: taiki-e/install-action@v2.85.7
+      - uses: taiki-e/install-action@v2.85.8
         with:
           tool: nextest,wasm-tools,wasmtime
       # `--no-fail-fast`: with three host cells the first failure is the least interesting thing a
@@ -184,7 +184,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: test-wasm
-      - uses: taiki-e/install-action@v2.85.7
+      - uses: taiki-e/install-action@v2.85.8
         with:
           tool: wasmtime
       # `wasm32-wasip1`, not the shipped `wasm32-unknown-unknown`: the latter has no way to *run* a
@@ -214,7 +214,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: taiki-e/install-action@v2.85.7
+      - uses: taiki-e/install-action@v2.85.8
         with:
           tool: cargo-machete
       - run: cargo machete
@@ -308,7 +308,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: taiki-e/install-action@v2.85.7
+      - uses: taiki-e/install-action@v2.85.8
         with:
           tool: typos
       - run: typos
@@ -487,7 +487,7 @@ jobs:
       # Installs the wasm-tools binary directly into the tool dir each run, so (unlike a
       # `cargo binstall` keyed off `.crates.toml`) the `rust-cache` step's restored install
       # metadata can't make it skip placing the binary the component-encode step needs.
-      - uses: taiki-e/install-action@v2.85.7
+      - uses: taiki-e/install-action@v2.85.8
         with:
           tool: wasm-tools
       - name: Build the extension (wasm32-wasip1 core module)
