@@ -25,6 +25,7 @@ use jals_storage::{
 
 use crate::assemble::{CompileClasspathEntry, ProjectAssemblyError};
 use crate::assembly::{GraphResolveError, ProjectScript, RootProjection};
+use crate::diagnostics::ProjectReport;
 use crate::graph::{
     GraphError, GraphMetadata, GraphPreprocess, GraphWarning, NodeId, PreprocessedProjectGraph,
     ResolvedProjectGraph,
@@ -68,9 +69,20 @@ pub struct NativeProjectAssembly {
     pub inputs: ProjectInputs,
     pub source_roots: Vec<DirKey>,
     pub compile_classpath: Vec<CompileClasspathEntry>,
-    pub warnings: Vec<GraphWarning>,
-    pub errors: Vec<ProjectAssemblyError>,
+    pub(crate) warnings: Vec<GraphWarning>,
+    pub(crate) errors: Vec<ProjectAssemblyError>,
     pub watch_paths: Vec<PathBuf>,
+}
+
+impl NativeProjectAssembly {
+    /// Everything this assembly reported, in one value.
+    ///
+    /// The native half of [`MemoryProjectAssembly::report`], and for the same reason: the graph's
+    /// channels and the classpath's are one report, and a host reading either alone reports half of
+    /// what the procedure said.
+    pub fn report(&self) -> ProjectReport<'_> {
+        ProjectReport::new(&self.warnings, &self.errors, &self.inputs.warnings)
+    }
 }
 
 #[derive(Debug, Default)]

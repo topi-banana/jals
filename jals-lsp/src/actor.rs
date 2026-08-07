@@ -26,10 +26,7 @@ use async_lsp::{ClientSocket, ErrorCode, ResponseError};
 use futures::FutureExt;
 use jals_build::{
     ManifestExt,
-    build_script::{
-        BuildScriptDiagnostic, BuildScriptEnvironment, BuildScriptError, BuildScriptLimits,
-        BuildScriptPosition, BuildScriptSession,
-    },
+    build_script::{BuildScriptEnvironment, BuildScriptLimits, BuildScriptSession},
 };
 use jals_config::{BuildScript, Dependency, FeatureSet, Manifest, ResolvedBuildFeatures};
 use jals_editor::{
@@ -38,8 +35,9 @@ use jals_editor::{
 };
 use jals_exec::Exec;
 use jals_project::{
-    BuildTaskHost, GraphError, GraphResolveError, NativeProjectAssembly, ProjectAssembly,
-    ProjectScript, RootBuildScriptError, RootBuildScriptOptions,
+    BuildTaskHost, GraphOutcome, GraphResolveError, NativeProjectAssembly, ProjectAnchor,
+    ProjectAssembly, ProjectDiagnostic, ProjectDiagnosticCode, ProjectDiagnosticSeverity,
+    ProjectDiagnostics, ProjectScript, RootBuildScriptOptions, ScriptFile, ScriptOutcome,
 };
 use jals_storage::{DirKey, FileKey, NativeScope, NativeStorage, RelativePath};
 use tokio::sync::{mpsc, oneshot};
@@ -209,7 +207,14 @@ pub(crate) struct AssembledWorkspace {
     source_dep_sources: Vec<FileKey>,
     materialized: BTreeMap<FileKey, PathBuf>,
     watch_policy: ProjectWatchPolicy,
-    build_script_diagnostics: BuildScriptDiagnosticUpdate,
+    /// The script `[build] script` names, kept apart from the diagnostics anchored to it.
+    ///
+    /// An *empty* diagnostic vector for the script's URI is meaningful — it clears what a previous
+    /// run published — so which file to clear cannot be derived from the diagnostics themselves.
+    configured_script: Option<FileKey>,
+    /// [`ProjectAnchor::Script`] diagnostics, in this protocol's shape.
+    script_diagnostics: Vec<Diagnostic>,
+    /// [`ProjectAnchor::Manifest`] diagnostics, in this protocol's shape.
     project_diagnostics: Vec<Diagnostic>,
 }
 
@@ -273,105 +278,9 @@ impl ProjectWatchPolicy {
     }
 }
 
-/// Diagnostics produced by the configured script during one assembly. `script = None` is also a
-/// meaningful update: it clears diagnostics for a script removed from the manifest.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct BuildScriptDiagnosticUpdate {
-    script: Option<FileKey>,
-    script_text: Option<String>,
-    diagnostics: Vec<Diagnostic>,
-}
-
-impl BuildScriptDiagnosticUpdate {
-    const fn new(script: Option<FileKey>) -> Self {
-        Self {
-            script,
-            script_text: None,
-            diagnostics: Vec::new(),
-        }
-    }
-
-    fn push_reported(&mut self, diagnostic: &BuildScriptDiagnostic) {
-        // The message stays bare: LSP carries severity in its own field, so rendering the whole
-        // diagnostic here would spell it twice — once for the protocol and once inside the text.
-        let severity = if diagnostic.is_error() {
-            DiagnosticSeverity::ERROR
-        } else {
-            DiagnosticSeverity::WARNING
-        };
-        let diagnostic = self.diagnostic(severity, diagnostic.message().to_owned(), None);
-        self.diagnostics.push(diagnostic);
-    }
-
-    fn push_failure(&mut self, message: String, position: Option<BuildScriptPosition>) {
-        let diagnostic = self.diagnostic(DiagnosticSeverity::ERROR, message, position);
-        self.diagnostics.push(diagnostic);
-    }
-
-    fn diagnostic(
-        &self,
-        severity: DiagnosticSeverity,
-        message: String,
-        position: Option<BuildScriptPosition>,
-    ) -> Diagnostic {
-        let range = position
-            .and_then(|position| {
-                self.script_text
-                    .as_deref()
-                    .and_then(|source| Self::rhai_position_range(source, position))
-            })
-            .unwrap_or_else(|| Range::new(Position::new(0, 0), Position::new(0, 1)));
-        Diagnostic {
-            range,
-            severity: Some(severity),
-            source: Some("jals-build".to_owned()),
-            message,
-            ..Diagnostic::default()
-        }
-    }
-
-    fn rhai_position_range(source: &str, position: BuildScriptPosition) -> Option<Range> {
-        let line_index = position
-            .line()
-            .checked_sub(1)
-            .and_then(|line| usize::try_from(line).ok())?;
-        let character_index = position
-            .column()
-            .checked_sub(1)
-            .and_then(|column| usize::try_from(column).ok())?;
-        let mut line_start = 0;
-        let mut selected = None;
-        for (index, line_text) in source.split_inclusive('\n').enumerate() {
-            if index == line_index {
-                selected = Some(line_text.strip_suffix('\n').unwrap_or(line_text));
-                break;
-            }
-            line_start += line_text.len();
-        }
-        let line_text = selected?;
-        let relative = line_text
-            .char_indices()
-            .map(|(offset, _)| offset)
-            .nth(character_index)
-            .or_else(|| {
-                (character_index == line_text.chars().count()).then_some(line_text.len())
-            })?;
-        let start = line_start + relative;
-        let end = if start < line_start + line_text.len() {
-            start + source[start..].chars().next().map_or(0, char::len_utf8)
-        } else {
-            start
-        };
-        let index = LineIndex::new(source);
-        let start = index.position(source, start);
-        let end = index.position(source, end);
-        Some(Range::new(
-            Position::new(start.line, start.character),
-            Position::new(end.line, end.character),
-        ))
-    }
-}
-
+/// The server's whole answer to "how does a project diagnostic look". Severity, range, code, and
+/// source are decided here and nowhere else; the assembly decided *what* to say and *where*, and
+/// this decides only how LSP spells it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WatchedProjectAction {
     Ignore,
@@ -1031,9 +940,8 @@ impl Actor {
                             let message =
                                 format!("assembling project {} panicked", manifest_path.display());
                             Err(WorkspaceAssemblyFailure {
-                                project_diagnostics: vec![AssembledWorkspace::project_diagnostic(
-                                    DiagnosticSeverity::ERROR,
-                                    "project-assembly",
+                                project_diagnostics: vec![AssembledWorkspace::host_diagnostic(
+                                    ProjectDiagnosticCode::ProjectAssembly,
                                     message.clone(),
                                 )],
                                 message,
@@ -1047,9 +955,8 @@ impl Actor {
                         manifest_path.display()
                     );
                     Err(WorkspaceAssemblyFailure {
-                        project_diagnostics: vec![AssembledWorkspace::project_diagnostic(
-                            DiagnosticSeverity::ERROR,
-                            "project-manifest",
+                        project_diagnostics: vec![AssembledWorkspace::host_diagnostic(
+                            ProjectDiagnosticCode::ProjectManifest,
                             message.clone(),
                         )],
                         message,
@@ -1164,11 +1071,11 @@ impl Actor {
                 }
 
                 let Some(parts) = failure.fallback.take() else {
-                    let cleared = BuildScriptDiagnosticUpdate::new(None);
                     for params in Self::build_script_diagnostic_publications(
                         &root,
                         previous_script.as_ref(),
-                        &cleared,
+                        None,
+                        Vec::new(),
                     ) {
                         let _ = self
                             .client
@@ -1191,13 +1098,15 @@ impl Actor {
             source_dep_sources,
             materialized,
             watch_policy,
-            build_script_diagnostics,
+            configured_script,
+            script_diagnostics,
             project_diagnostics,
         } = *parts;
         for params in Self::build_script_diagnostic_publications(
             &root,
             previous_script.as_ref(),
-            &build_script_diagnostics,
+            configured_script.as_ref(),
+            script_diagnostics,
         ) {
             let _ = self
                 .client
@@ -1253,21 +1162,20 @@ impl Actor {
     fn build_script_diagnostic_publications(
         root: &Path,
         previous_script: Option<&FileKey>,
-        update: &BuildScriptDiagnosticUpdate,
+        configured_script: Option<&FileKey>,
+        diagnostics: Vec<Diagnostic>,
     ) -> Vec<PublishDiagnosticsParams> {
         let mut publications = Vec::new();
-        if previous_script != update.script.as_ref()
+        if previous_script != configured_script
             && let Some(previous) = previous_script
             && let Some(clear) =
                 Self::diagnostic_publication(previous.path().to_host_path(root), Vec::new())
         {
             publications.push(clear);
         }
-        if let Some(script) = &update.script
-            && let Some(current) = Self::diagnostic_publication(
-                script.path().to_host_path(root),
-                update.diagnostics.clone(),
-            )
+        if let Some(script) = configured_script
+            && let Some(current) =
+                Self::diagnostic_publication(script.path().to_host_path(root), diagnostics)
         {
             publications.push(current);
         }
@@ -1764,6 +1672,73 @@ impl Actor {
 }
 
 impl AssembledWorkspace {
+    /// A failure the *host* observed about running the procedure, rather than one the procedure
+    /// reported as a value: a panicked assembly, an unreadable manifest, storage that would not open.
+    ///
+    /// Spelled from the same vocabulary and mapped through the same function as everything else this
+    /// server publishes, so a client sees one shape regardless of which side noticed.
+    fn host_diagnostic(code: ProjectDiagnosticCode, message: String) -> Diagnostic {
+        Self::lsp_diagnostic(
+            &ProjectDiagnostic {
+                anchor: ProjectAnchor::Manifest,
+                span: None,
+                severity: ProjectDiagnosticSeverity::Error,
+                code,
+                message,
+            },
+            None,
+        )
+    }
+
+    /// One [`ProjectDiagnostic`] in this protocol's shape.
+    fn lsp_diagnostic(diagnostic: &ProjectDiagnostic, script_text: Option<&str>) -> Diagnostic {
+        // The anchor gates the conversion, not just the span: `script_text` is the *script's* text,
+        // so converting a manifest-anchored span against it would be a silently wrong range rather
+        // than a missing one. Only `Script` reaches the first arm.
+        let range = match (&diagnostic.anchor, &diagnostic.span, script_text) {
+            (ProjectAnchor::Script(_), Some(span), Some(source)) => {
+                let index = LineIndex::new(source);
+                let start = index.position(source, span.start);
+                let end = index.position(source, span.end);
+                Range::new(
+                    Position::new(start.line, start.character),
+                    Position::new(end.line, end.character),
+                )
+            }
+            // Nothing to point at: a dependency failure has no span in this project's tree. The
+            // client renders it against the head of the file it is anchored to.
+            _ => Range::new(Position::new(0, 0), Position::new(0, 1)),
+        };
+
+        Diagnostic {
+            range,
+            severity: Some(match diagnostic.severity {
+                ProjectDiagnosticSeverity::Error => DiagnosticSeverity::ERROR,
+                ProjectDiagnosticSeverity::Warning => DiagnosticSeverity::WARNING,
+                ProjectDiagnosticSeverity::Info => DiagnosticSeverity::INFORMATION,
+            }),
+            code: Some(NumberOrString::String(diagnostic.code.as_str().to_owned())),
+            source: Some(
+                match diagnostic.anchor {
+                    ProjectAnchor::Script(_) => "jals-build",
+                    ProjectAnchor::Manifest => "jals-project",
+                }
+                .to_owned(),
+            ),
+            message: match diagnostic.code {
+                // The assembly states the condition; the remedy is the host's, because `jals build` is
+                // something only a host with a command line can be told to run. This server never
+                // fetches, so saying what does is the whole point of surfacing the condition.
+                ProjectDiagnosticCode::DependencyCache => format!(
+                    "{}; run `jals build` to fetch them (the language server never does)",
+                    diagnostic.message
+                ),
+                _ => diagnostic.message.clone(),
+            },
+            ..Diagnostic::default()
+        }
+    }
+
     /// Assemble one project's full analysis + navigation inputs against a fresh aggregate:
     /// run its optional build script, snapshot the effective manifest's scopes, resolve the
     /// classpath (async HTTP through the native fetch adapter), and stage/materialize navigation
@@ -1811,9 +1786,8 @@ impl AssembledWorkspace {
             .map_err(|error| {
                 let message = format!("opening project storage failed: {error}");
                 WorkspaceAssemblyFailure {
-                    project_diagnostics: vec![Self::project_diagnostic(
-                        DiagnosticSeverity::ERROR,
-                        "project-storage",
+                    project_diagnostics: vec![Self::host_diagnostic(
+                        ProjectDiagnosticCode::ProjectStorage,
                         message.clone(),
                     )],
                     message,
@@ -1826,8 +1800,6 @@ impl AssembledWorkspace {
             rerun_files: BTreeSet::new(),
         });
         let mut project_sources = BTreeSet::new();
-        let mut build_script_diagnostics =
-            BuildScriptDiagnosticUpdate::new(configured_script.clone());
         // The root project resolves the client's feature selection (`initialize` options /
         // configuration) — defaulting to the manifest's own `default` list, the same selection a
         // plain `jals build` uses, so what the editor analyses matches what the build produces.
@@ -1867,7 +1839,13 @@ impl AssembledWorkspace {
             root.to_path_buf(),
             jals_classpath::NetworkPolicy::Offline,
         );
-        let script = match ProjectAssembly::script(
+        // The script's text, read once and unconditionally when one is configured: it costs an
+        // in-memory read of a file this aggregate already holds, and a failure that turns out to
+        // carry a position has nowhere to get it from afterwards.
+        let script_text = configured_script
+            .as_ref()
+            .and_then(|script| storage.view().file_text(script).ok().map(ToOwned::to_owned));
+        let (script, script_error) = match ProjectAssembly::script(
             &exec,
             &fetcher,
             &mut storage,
@@ -1886,13 +1864,6 @@ impl AssembledWorkspace {
         {
             Ok(script) => {
                 if let Some(output) = script.output() {
-                    for diagnostic in &output.diagnostics {
-                        Self::record_build_script_diagnostic(
-                            root,
-                            &mut build_script_diagnostics,
-                            diagnostic,
-                        );
-                    }
                     build_script_watch
                         .as_mut()
                         .expect("a configured script has a watch policy")
@@ -1904,50 +1875,31 @@ impl AssembledWorkspace {
                 // against, so the script's classpath directives have to land on it and not only
                 // inside the assembly.
                 script.augment_classpath(&mut effective_manifest);
-                script
+                (script, None)
             }
-            Err(RootBuildScriptError::BuildScript(BuildScriptError::ReportedErrors(
-                diagnostics,
-            ))) => {
-                for diagnostic in &diagnostics {
-                    Self::record_build_script_diagnostic(
-                        root,
-                        &mut build_script_diagnostics,
-                        diagnostic,
-                    );
-                }
-                ProjectScript::skipped()
-            }
-            Err(RootBuildScriptError::BuildScript(error)) => {
-                let script_path = error.script_path().cloned();
-                let position = error.position();
-                let message = error.to_string();
+            // A failed script never stops the workspace: ordinary analysis of what is already on
+            // disk is still worth having, and the failure is reported as a diagnostic rather than
+            // by refusing to load. The narrative goes to stderr; the diagnostics are assembled
+            // once, below, from the error itself.
+            Err(error) => {
                 eprintln!(
                     "jals-lsp: build script for {} failed; continuing with ordinary project \
-                         analysis: {message}",
+                     analysis: {error}",
                     root.display()
                 );
-                if let Some(script_path) = script_path {
-                    if position.is_some() {
-                        let view = storage.view();
-                        build_script_diagnostics.script_text =
-                            view.file_text(&script_path).ok().map(ToOwned::to_owned);
-                    }
-                    build_script_diagnostics.script = Some(script_path);
-                }
-                build_script_diagnostics.push_failure(message, position);
-                ProjectScript::skipped()
-            }
-            Err(error) => {
-                let message = error.to_string();
-                eprintln!(
-                    "jals-lsp: build tasks for {} failed; continuing with existing project sources: {message}",
-                    root.display()
-                );
-                build_script_diagnostics.push_failure(message, None);
-                ProjectScript::skipped()
+                (ProjectScript::skipped(), Some(error))
             }
         };
+        // Both halves outlive the assembly calls below, so the outcome can borrow either.
+        let script_outcome = match (&script_error, script.output()) {
+            (Some(error), _) => ScriptOutcome::Failed(error),
+            (None, Some(output)) => ScriptOutcome::Ran(output),
+            (None, None) => ScriptOutcome::Skipped,
+        };
+        let script_file = configured_script.as_ref().map(|key| ScriptFile {
+            key,
+            text: script_text.as_deref(),
+        });
         let assembly =
             match Self::assemble_graph(&script, &effective_manifest, root, &mut storage, &scripts)
                 .await
@@ -1956,18 +1908,18 @@ impl AssembledWorkspace {
                 Err(failure) => {
                     let message = failure.error.to_string();
                     // The root-only fallback below rediscovers without `[dependencies]`, so every
-                    // warning about a dependency is reported here or nowhere. Shape them exactly as
-                    // `finish_assembly` shapes a successful assembly's, so a reader cannot tell
-                    // whether resolution succeeded from the form of the diagnostic alone.
-                    let mut project_diagnostics =
-                        vec![Self::graph_error_diagnostic(&failure.error)];
-                    project_diagnostics.extend(failure.warnings.iter().map(|warning| {
-                        Self::project_diagnostic(
-                            DiagnosticSeverity::WARNING,
-                            "dependency-resolution",
-                            warning.to_string(),
-                        )
-                    }));
+                    // warning about a dependency is reported here or nowhere. The script phase is
+                    // deliberately `Skipped`: the fallback's own `finish_assembly` reports it, and
+                    // `workspace_ready` concatenates both sets — reporting it here too would
+                    // publish every script warning twice on exactly this path.
+                    let project_diagnostics = ProjectDiagnostics::assemble(
+                        ScriptOutcome::Skipped,
+                        GraphOutcome::Failed(&failure),
+                        None,
+                    )
+                    .iter()
+                    .map(|diagnostic| Self::lsp_diagnostic(diagnostic, None))
+                    .collect();
                     let mut root_only = effective_manifest.clone();
                     root_only.dependencies.clear();
                     let fallback_assembly = match Self::assemble_graph(
@@ -1996,7 +1948,9 @@ impl AssembledWorkspace {
                         root,
                         project_sources,
                         build_script_watch,
-                        build_script_diagnostics,
+                        configured_script.clone(),
+                        script_outcome,
+                        script_file,
                         fallback_assembly,
                         features.into_features(),
                     )
@@ -2014,7 +1968,9 @@ impl AssembledWorkspace {
             root,
             project_sources,
             build_script_watch,
-            build_script_diagnostics,
+            configured_script.clone(),
+            script_outcome,
+            script_file,
             assembly,
             features.into_features(),
         )
@@ -2065,66 +2021,43 @@ impl AssembledWorkspace {
         root: &Path,
         project_sources: BTreeSet<FileKey>,
         build_script_watch: Option<BuildWatchPolicy>,
-        build_script_diagnostics: BuildScriptDiagnosticUpdate,
+        configured_script: Option<FileKey>,
+        script_outcome: ScriptOutcome<'_>,
+        script_file: Option<ScriptFile<'_>>,
         assembly: NativeProjectAssembly,
         build_features: BTreeSet<String>,
     ) -> Self {
+        // Everything the procedure had to say, ordered and severity-assigned once. What is left
+        // here is splitting it by the file it is anchored to, because LSP publishes per URI.
+        let assembled = ProjectDiagnostics::assemble(
+            script_outcome,
+            GraphOutcome::Resolved(assembly.report()),
+            script_file,
+        );
+        let script_text = script_file.and_then(|file| file.text);
+        let mut script_diagnostics = Vec::new();
+        let mut project_diagnostics = Vec::new();
+        for diagnostic in &assembled {
+            // stderr is a plain string with no severity channel of its own, so it carries one.
+            eprintln!(
+                "jals-lsp: {}: {}: {}",
+                root.display(),
+                diagnostic.severity.lead(),
+                diagnostic.message
+            );
+            let shaped = Self::lsp_diagnostic(diagnostic, script_text);
+            match diagnostic.anchor {
+                ProjectAnchor::Script(_) => script_diagnostics.push(shaped),
+                ProjectAnchor::Manifest => project_diagnostics.push(shaped),
+            }
+        }
+
         let NativeProjectAssembly {
-            mut inputs,
+            inputs,
             source_roots,
-            warnings,
-            errors,
             watch_paths,
             ..
         } = assembly;
-        let manifest_key = FileKey::parse("jals.toml").expect("constant is a portable file key");
-        let mut project_diagnostics = Vec::new();
-        for warning in warnings {
-            let message = warning.to_string();
-            inputs.warnings.push(jals_classpath::Warning::new(
-                jals_classpath::WarningOrigin::ProjectFile(manifest_key.clone()),
-                message.clone(),
-            ));
-            project_diagnostics.push(Self::project_diagnostic(
-                DiagnosticSeverity::WARNING,
-                "dependency-resolution",
-                message,
-            ));
-        }
-        for error in errors {
-            project_diagnostics.push(Self::project_diagnostic(
-                DiagnosticSeverity::ERROR,
-                "dependency-assembly",
-                error.to_string(),
-            ));
-        }
-        for warning in &inputs.warnings {
-            // Rendered whole. The graph warnings folded in above already name their own node or
-            // entry and gain `jals.toml` on top of it — the manifest is where a reader goes to act
-            // on either — and the classpath ones name a `[build]` entry or a cached artifact the
-            // message itself does not repeat.
-            eprintln!("jals-lsp: {warning}");
-        }
-
-        // The server is unconditionally offline, so a dependency it could not resolve is not a
-        // broken manifest — it is one this machine has never built. Say that once, with the remedy,
-        // rather than leaving a bare refusal that reads like a failure to debug. The advice lives
-        // here and not in `jals-classpath`, which knows neither which host it is under nor that
-        // `jals build` is something a browser could not run anyway.
-        let uncached_dependencies = inputs.warnings.iter().any(|w| {
-            w.message
-                .contains(jals_classpath::NetworkPolicy::OFFLINE_REFUSAL)
-        });
-        if uncached_dependencies {
-            let advice = "some dependencies are not in the verified cache; \
-                          run `jals build` to fetch them (the language server never does)";
-            eprintln!("jals-lsp: {advice}");
-            project_diagnostics.push(Self::project_diagnostic(
-                DiagnosticSeverity::INFORMATION,
-                "dependency-cache",
-                advice.to_owned(),
-            ));
-        }
 
         // Navigation sources are cache artifacts, not host paths. Mount them as overlay files in
         // the same aggregate so the editor reads them from this exact revision, and materialize
@@ -2185,49 +2118,10 @@ impl AssembledWorkspace {
             source_dep_sources,
             materialized,
             watch_policy,
-            build_script_diagnostics,
+            configured_script,
+            script_diagnostics,
             project_diagnostics,
         }
-    }
-
-    fn graph_error_diagnostic(error: &GraphError) -> Diagnostic {
-        let code = match error {
-            GraphError::InvalidRootManifest { .. } => "project-manifest",
-            GraphError::InvalidDependency { .. } => "dependency-invalid",
-            GraphError::MalformedManifest { .. } => "dependency-manifest",
-            GraphError::Cycle { .. } => "dependency-cycle",
-            GraphError::BuildScript { .. } => "dependency-build-script",
-            GraphError::Acquisition { .. } => "dependency-acquisition",
-        };
-        Self::project_diagnostic(DiagnosticSeverity::ERROR, code, error.to_string())
-    }
-
-    fn project_diagnostic(
-        severity: DiagnosticSeverity,
-        code: &'static str,
-        message: String,
-    ) -> Diagnostic {
-        Diagnostic {
-            range: Range::new(Position::new(0, 0), Position::new(0, 1)),
-            severity: Some(severity),
-            code: Some(NumberOrString::String(code.to_owned())),
-            source: Some("jals-project".to_owned()),
-            message,
-            ..Diagnostic::default()
-        }
-    }
-
-    fn record_build_script_diagnostic(
-        root: &Path,
-        update: &mut BuildScriptDiagnosticUpdate,
-        diagnostic: &BuildScriptDiagnostic,
-    ) {
-        // stderr is a plain string with no severity channel, so the diagnostic renders itself.
-        eprintln!(
-            "jals-lsp: build script for {}: {diagnostic}",
-            root.display()
-        );
-        update.push_reported(diagnostic);
     }
 
     fn watch_policy(
@@ -2351,7 +2245,9 @@ mod tests {
         FileChangeType, FileEvent, TextDocumentContentChangeEvent, TextDocumentItem,
         VersionedTextDocumentIdentifier,
     };
+    use jals_build::build_script::{BuildScriptDiagnostic, BuildScriptError};
     use jals_exec::block_on_inline;
+    use jals_project::RootBuildScriptError;
 
     use super::*;
 
@@ -2775,12 +2671,27 @@ mod tests {
     fn build_script_diagnostics_shape_messages_and_clear_previous_state() {
         let root = tempfile::tempdir().unwrap();
         let script = FileKey::parse("build.rhai").unwrap();
-        let mut reported = BuildScriptDiagnosticUpdate::new(Some(script.clone()));
-        reported.push_reported(&BuildScriptDiagnostic::warning("generated fallback"));
-        reported.push_reported(&BuildScriptDiagnostic::error("generation failed"));
+
+        // A run that called `build.error` carries every diagnostic it emitted, each under its own
+        // severity. The assembly decides that; this asserts the protocol shape it maps to.
+        let reported = RootBuildScriptError::BuildScript(BuildScriptError::ReportedErrors(vec![
+            BuildScriptDiagnostic::warning("generated fallback"),
+            BuildScriptDiagnostic::error("generation failed"),
+        ]));
+        let shaped: Vec<Diagnostic> = ProjectDiagnostics::assemble(
+            ScriptOutcome::Failed(&reported),
+            GraphOutcome::NotReached,
+            Some(ScriptFile {
+                key: &script,
+                text: None,
+            }),
+        )
+        .iter()
+        .map(|diagnostic| AssembledWorkspace::lsp_diagnostic(diagnostic, None))
+        .collect();
 
         let publications =
-            Actor::build_script_diagnostic_publications(root.path(), None, &reported);
+            Actor::build_script_diagnostic_publications(root.path(), None, Some(&script), shaped);
         assert_eq!(publications.len(), 1);
         assert_eq!(publications[0].diagnostics.len(), 2);
         assert_eq!(
@@ -2794,33 +2705,79 @@ mod tests {
         // Both messages stay bare: the protocol carries the severity in its own field.
         assert_eq!(publications[0].diagnostics[0].message, "generated fallback");
         assert_eq!(publications[0].diagnostics[1].message, "generation failed");
+        // No position reported, so the client places them at the head of the script.
         assert_eq!(
             publications[0].diagnostics[0].range,
             Range::new(Position::new(0, 0), Position::new(0, 1))
         );
+        assert_eq!(
+            publications[0].diagnostics[0].source.as_deref(),
+            Some("jals-build")
+        );
 
-        let clean = BuildScriptDiagnosticUpdate::new(Some(script.clone()));
-        let publications =
-            Actor::build_script_diagnostic_publications(root.path(), Some(&script), &clean);
+        // A clean rerun still publishes — an empty vector is what clears the previous run's
+        // diagnostics, which is why the configured script travels beside them rather than being
+        // read out of them.
+        let publications = Actor::build_script_diagnostic_publications(
+            root.path(),
+            Some(&script),
+            Some(&script),
+            Vec::new(),
+        );
         assert_eq!(publications.len(), 1);
         assert!(publications[0].diagnostics.is_empty());
 
-        let removed = BuildScriptDiagnosticUpdate::new(None);
-        let publications =
-            Actor::build_script_diagnostic_publications(root.path(), Some(&script), &removed);
+        // A script removed from the manifest clears the file it used to be at.
+        let publications = Actor::build_script_diagnostic_publications(
+            root.path(),
+            Some(&script),
+            None,
+            Vec::new(),
+        );
         assert_eq!(publications.len(), 1);
         assert!(publications[0].diagnostics.is_empty());
+    }
 
-        let mut failed = BuildScriptDiagnosticUpdate::new(Some(script));
-        failed.push_failure("could not compile build script".into(), None);
+    #[test]
+    fn a_positioned_script_failure_points_at_the_line_it_names() {
+        // The byte span the assembly resolved, converted to this protocol's coordinates — the only
+        // thing this server still does with a script position.
+        let script = FileKey::parse("build.rhai").unwrap();
+        let source = "let a = 1;\nlet b = 2;\n";
+        let diagnostic = ProjectDiagnostic {
+            anchor: ProjectAnchor::Script(script),
+            span: Some(15..16),
+            severity: ProjectDiagnosticSeverity::Error,
+            code: ProjectDiagnosticCode::BuildScript,
+            message: "syntax error".to_owned(),
+        };
         assert_eq!(
-            failed.diagnostics[0].severity,
-            Some(DiagnosticSeverity::ERROR)
+            AssembledWorkspace::lsp_diagnostic(&diagnostic, Some(source)).range,
+            Range::new(Position::new(1, 4), Position::new(1, 5))
         );
+        // Without the text there is nothing to convert against, so it falls back rather than
+        // guessing.
         assert_eq!(
-            failed.diagnostics[0].message,
-            "could not compile build script"
+            AssembledWorkspace::lsp_diagnostic(&diagnostic, None).range,
+            Range::new(Position::new(0, 0), Position::new(0, 1))
         );
+    }
+
+    #[test]
+    fn the_offline_advisory_gains_this_host_s_remedy() {
+        // The assembly states the condition; naming `jals build` is the server's to add, because
+        // it is the server that never fetches.
+        let diagnostic = ProjectDiagnostic {
+            anchor: ProjectAnchor::Manifest,
+            span: None,
+            severity: ProjectDiagnosticSeverity::Info,
+            code: ProjectDiagnosticCode::DependencyCache,
+            message: "some dependencies are not in the verified cache".to_owned(),
+        };
+        let shaped = AssembledWorkspace::lsp_diagnostic(&diagnostic, None);
+        assert_eq!(shaped.severity, Some(DiagnosticSeverity::INFORMATION));
+        assert!(shaped.message.contains("run `jals build`"));
+        assert_eq!(shaped.source.as_deref(), Some("jals-project"));
     }
 
     #[test]
@@ -2889,9 +2846,8 @@ mod tests {
                     Err(Box::new(WorkspaceAssemblyFailure {
                         message: "failed".into(),
                         fallback: None,
-                        project_diagnostics: vec![AssembledWorkspace::project_diagnostic(
-                            DiagnosticSeverity::ERROR,
-                            "dependency-acquisition",
+                        project_diagnostics: vec![AssembledWorkspace::host_diagnostic(
+                            ProjectDiagnosticCode::DependencyAcquisition,
                             "failed".into(),
                         )],
                     })),
@@ -2945,14 +2901,11 @@ mod tests {
                     .await
                     .unwrap();
                 assert_eq!(
-                    assembled.build_script_diagnostics.script,
+                    assembled.configured_script,
                     Some(FileKey::parse("build.rhai").unwrap())
                 );
-                assert_eq!(assembled.build_script_diagnostics.diagnostics.len(), 1);
-                assert_eq!(
-                    assembled.build_script_diagnostics.diagnostics[0].range,
-                    expected
-                );
+                assert_eq!(assembled.script_diagnostics.len(), 1);
+                assert_eq!(assembled.script_diagnostics[0].range, expected);
             }
         });
     }
@@ -3056,8 +3009,7 @@ mod tests {
             assert!(!dir.path().join("src/generated").exists());
             assert!(
                 assembled
-                    .build_script_diagnostics
-                    .diagnostics
+                    .script_diagnostics
                     .iter()
                     .any(|diagnostic| diagnostic.message.contains("publication is deferred"))
             );
@@ -3169,13 +3121,24 @@ mod tests {
                 else {
                     panic!("dependency failure unexpectedly assembled");
                 };
-                assert_eq!(
-                    diagnostic_code(&failure.project_diagnostics[0]),
-                    Some(expected_code)
-                );
-                assert_eq!(
-                    failure.project_diagnostics[0].severity,
-                    Some(DiagnosticSeverity::ERROR)
+                // The failure is reported after the warnings the earlier phases produced: the
+                // dependency discovery warned about is usually the one preprocessing then failed
+                // on, so the warnings are context for it and read first.
+                let reported = failure
+                    .project_diagnostics
+                    .iter()
+                    .find(|diagnostic| diagnostic.severity == Some(DiagnosticSeverity::ERROR))
+                    .expect("a graph failure is reported as an error");
+                assert_eq!(diagnostic_code(reported), Some(expected_code));
+                assert!(
+                    failure
+                        .project_diagnostics
+                        .iter()
+                        .take_while(|diagnostic| {
+                            diagnostic.severity != Some(DiagnosticSeverity::ERROR)
+                        })
+                        .all(|diagnostic| diagnostic.severity == Some(DiagnosticSeverity::WARNING)),
+                    "only warnings precede the failure they explain"
                 );
                 let fallback = failure
                     .fallback
@@ -3197,7 +3160,8 @@ mod tests {
                 let script = Actor::build_script_diagnostic_publications(
                     dir.path(),
                     None,
-                    &fallback.build_script_diagnostics,
+                    fallback.configured_script.as_ref(),
+                    fallback.script_diagnostics.clone(),
                 );
                 assert_eq!(
                     graph.uri,
@@ -3209,6 +3173,25 @@ mod tests {
                     graph.uri,
                     Url::from_file_path(dir.path().join("src/Main.java")).unwrap(),
                     "dependency diagnostics cannot replace ordinary Java diagnostics"
+                );
+                // The graph phase runs twice on this path — once for real, once root-only — and
+                // `workspace_ready` publishes both sets. Only the fallback reports the script, so
+                // `root diagnostic` is published once rather than once per traversal.
+                assert_eq!(
+                    script[0]
+                        .diagnostics
+                        .iter()
+                        .filter(|diagnostic| diagnostic.message.contains("root diagnostic"))
+                        .count(),
+                    1,
+                    "the script phase is reported once across both graph traversals"
+                );
+                assert!(
+                    failure
+                        .project_diagnostics
+                        .iter()
+                        .all(|diagnostic| !diagnostic.message.contains("root diagnostic")),
+                    "the failed traversal reports the graph, never the script"
                 );
             }
         });
@@ -3280,6 +3263,37 @@ mod tests {
                     && diagnostic.severity == Some(DiagnosticSeverity::WARNING)
                     && diagnostic.message.contains("missing")
             }));
+        });
+    }
+
+    /// A classpath entry that cannot be used used to reach only the server's stderr: `finish_assembly`
+    /// printed `inputs.warnings` and turned none of them into a diagnostic, so nothing said so in
+    /// the editor. They are part of what the assembly reports now, like every other channel.
+    #[test]
+    fn classpath_input_warnings_reach_the_client() {
+        block_on_inline(async {
+            let dir = tempfile::tempdir().unwrap();
+            write(
+                dir.path(),
+                "jals.toml",
+                "[build]\nsource-dirs = [\"src\"]\nclasspath = [\"../escape.class\"]\n",
+            );
+            write(dir.path(), "src/Main.java", "class Main {}");
+            let manifest = Manifest::from_file(&dir.path().join("jals.toml"))
+                .await
+                .unwrap();
+
+            let assembled = AssembledWorkspace::assemble(&manifest, dir.path(), Exec::inline())
+                .await
+                .unwrap();
+            assert!(
+                assembled.project_diagnostics.iter().any(|diagnostic| {
+                    diagnostic_code(diagnostic) == Some("classpath-input")
+                        && diagnostic.severity == Some(DiagnosticSeverity::WARNING)
+                }),
+                "{:?}",
+                assembled.project_diagnostics
+            );
         });
     }
 

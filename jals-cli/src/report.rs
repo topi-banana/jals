@@ -7,6 +7,9 @@ use std::ops::Range;
 use ariadne::{Color, Config, IndexType, Label, Report, ReportKind, Source};
 use jals_editor::{DiagnosticSeverity, FileDiagnostic};
 use jals_fmt::FormatOutput;
+use jals_project::{
+    ProjectAnchor, ProjectDiagnostic, ProjectDiagnosticCode, ProjectDiagnosticSeverity,
+};
 use similar::{ChangeTag, TextDiff};
 
 const RESET: &str = "\x1b[0m";
@@ -130,6 +133,53 @@ impl Reporter {
         diagnostics
             .iter()
             .any(|d| d.severity != DiagnosticSeverity::Hint)
+    }
+
+    /// Render the project-assembly diagnostics for one run.
+    ///
+    /// `script` is the configured build script as `(label, source)`, when the caller has it: a
+    /// diagnostic that resolved a span inside it points at the offending line through `ariadne`,
+    /// exactly as a lint finding does. Everything else has no span in this project's tree — a
+    /// dependency failure names a node, not a file here — so it follows the CLI's plain
+    /// `error:` / `warning:` / `note:` convention, the same rule
+    /// [`report_format_warnings`](Self::report_format_warnings) applies to a range-less warning.
+    pub(crate) fn report_project(diagnostics: &[ProjectDiagnostic], script: Option<(&str, &str)>) {
+        let mut doc = script.map(|(label, src)| Doc::new(label, src));
+        for diagnostic in diagnostics {
+            let severity = match diagnostic.severity {
+                ProjectDiagnosticSeverity::Error => DiagnosticSeverity::Error,
+                ProjectDiagnosticSeverity::Warning => DiagnosticSeverity::Warning,
+                // `ariadne` has no informational kind, and the plain lead below spells it `note:`.
+                ProjectDiagnosticSeverity::Info => DiagnosticSeverity::Hint,
+            };
+            match (&diagnostic.span, &mut doc) {
+                (Some(span), Some(doc))
+                    if matches!(diagnostic.anchor, ProjectAnchor::Script(_)) =>
+                {
+                    doc.emit(
+                        severity,
+                        Some(diagnostic.code.as_str()),
+                        &diagnostic.message,
+                        span,
+                    );
+                }
+                _ => {
+                    let lead = diagnostic.severity.lead();
+                    // The code carries what a span would have shown: a message names its subject
+                    // but not which part of the procedure produced it, and `warning: no toolchain`
+                    // does not say whether the build script or the dependency graph said so. This
+                    // is the same code `ariadne` prints for the arm above.
+                    eprintln!("{lead}[{}]: {}", diagnostic.code, diagnostic.message);
+                    if diagnostic.code == ProjectDiagnosticCode::DependencyCache {
+                        // The assembly states the condition; the remedy is this host's. It is the
+                        // same sentence whichever command reported it: `jals lint` never fetches,
+                        // and a `jals build --offline` that hit this wants the run without the
+                        // flag — both are `jals build`.
+                        eprintln!("note: run `jals build` to fetch them");
+                    }
+                }
+            }
+        }
     }
 }
 

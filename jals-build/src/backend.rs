@@ -135,6 +135,14 @@ pub struct BackendOutcome {
     pub artifacts: Vec<(RelativePath, Vec<u8>)>,
     /// What the backend has to say about the compile. A backend does not type-check, so these are
     /// reports of source it could not compile, not of source that is wrong.
+    ///
+    /// Errors-only by construction: [`failed`](Self::failed) is the only constructor that
+    /// populates this, and it sets a failing [`code`](Self::code) — which is private, so nothing
+    /// outside this crate can build an outcome that both [`success`](Self::success)es and carries
+    /// messages. A host promoting these into its own error channel — the CLI's `error:` lead, a
+    /// browser's compile-failure text — therefore needs no severity test, exactly as
+    /// `BuildScriptOutput::diagnostics` needs none to promote a warning. Writing a severity beside
+    /// each message would create a second answer that could contradict the code.
     pub messages: Vec<String>,
 }
 

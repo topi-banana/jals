@@ -30,6 +30,7 @@ use jals_storage::{
 use crate::assemble::{
     CompileClasspathEntry, CompileClasspathFile, ProjectAssemblyError, ProjectGraphAssembly,
 };
+use crate::diagnostics::ProjectReport;
 use crate::graph::{
     GraphError, GraphMetadata, GraphPreprocess, GraphWarning, NodeBody, PreprocessedProjectGraph,
 };
@@ -297,8 +298,23 @@ pub struct MemoryProjectAssembly {
     pub(crate) source_roots: Vec<DirKey>,
     #[cfg_attr(not(feature = "native"), allow(dead_code))]
     pub(crate) compile_classpath: Vec<CompileClasspathEntry>,
-    pub warnings: Vec<GraphWarning>,
-    pub errors: Vec<ProjectAssemblyError>,
+    pub(crate) warnings: Vec<GraphWarning>,
+    pub(crate) errors: Vec<ProjectAssemblyError>,
+}
+
+impl MemoryProjectAssembly {
+    /// Everything this assembly reported, in one value.
+    ///
+    /// The three channels are not separately readable. The graph's warnings and errors sit here,
+    /// the classpath's input warnings sit inside `inputs`, and a host that reached for the first
+    /// two alone silently dropped the third — which is how an unreadable jar became something only
+    /// a server's stderr ever mentioned. [`ProjectDiagnostics::assemble`] takes this, so there is
+    /// nothing left to forget.
+    ///
+    /// [`ProjectDiagnostics::assemble`]: crate::ProjectDiagnostics::assemble
+    pub fn report(&self) -> ProjectReport<'_> {
+        ProjectReport::new(&self.warnings, &self.errors, &self.inputs.warnings)
+    }
 }
 
 /// A graph phase that failed, carrying the warnings the phases before it had already produced.

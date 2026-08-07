@@ -165,7 +165,7 @@ impl Workspace {
         manifest: &Manifest,
         manifest_text: &str,
         script_text: &str,
-    ) -> Result<Option<BuildScriptOutput>, BuildScriptError> {
+    ) -> Result<Option<BuildScriptOutput>, RootBuildScriptError> {
         Ok(self
             .run_build_script_with_proxy(manifest, manifest_text, script_text, "")
             .await?
@@ -187,7 +187,7 @@ impl Workspace {
         manifest_text: &str,
         script_text: &str,
         proxy: &str,
-    ) -> Result<ProjectScript, BuildScriptError> {
+    ) -> Result<ProjectScript, RootBuildScriptError> {
         let manifest_key = FileKey::parse(MANIFEST_PATH).expect("manifest pseudo-path is valid");
         let configured_script = match manifest.build.script.as_ref() {
             Some(BuildScript::Rhai { file }) => {
@@ -210,7 +210,8 @@ impl Workspace {
             return Err(BuildScriptError::InvalidScriptPath {
                 path: script.to_string(),
                 reason: "a build script cannot share a path with a project file".to_owned(),
-            });
+            }
+            .into());
         }
 
         let script_changed = self.staged_script != configured_script;
@@ -272,17 +273,7 @@ impl Workspace {
                         publications: jals_project::SourcePublication::Apply,
                     },
                 )
-                .await
-                .map_err(|error| match error {
-                    RootBuildScriptError::BuildScript(error) => error,
-                    other => BuildScriptError::Execute {
-                        script: configured_script
-                            .clone()
-                            .expect("a configured script was parsed"),
-                        position: None,
-                        message: other.to_string(),
-                    },
-                })?;
+                .await?;
                 debug_assert!(script.task_classpath().is_empty());
                 script
             }
@@ -679,11 +670,15 @@ mod tests {
                 )
                 .await
                 .unwrap_err();
-            assert!(matches!(
-                error,
-                BuildScriptError::Execute { message, .. }
-                    if message.contains("physical source-tree publication is not supported")
-            ));
+            // Reported as the task failure it is. It used to arrive flattened into a synthetic
+            // `Execute`, which named the script as the thing that went wrong.
+            assert!(matches!(&error, RootBuildScriptError::Task(_)), "{error:?}");
+            assert!(
+                error
+                    .to_string()
+                    .contains("physical source-tree publication is not supported"),
+                "{error}"
+            );
             assert!(
                 ws.storage_snapshot()
                     .view()
@@ -810,6 +805,9 @@ mod tests {
                 .run_build_script(&custom, custom_text, "let broken = ;")
                 .await
                 .expect_err("custom-path compile error is reported");
+            let RootBuildScriptError::BuildScript(error) = &error else {
+                panic!("a script failure is a build-script error");
+            };
             assert_eq!(error.script_path(), Some(&custom_key));
 
             ws.run_build_script(&Manifest::default(), "", "")
@@ -842,7 +840,10 @@ mod tests {
                     .run_build_script(&manifest, &text, "let x = 1;")
                     .await
                     .expect_err("a colliding script path must be rejected");
-                assert!(matches!(error, BuildScriptError::InvalidScriptPath { .. }));
+                assert!(matches!(
+                    error,
+                    RootBuildScriptError::BuildScript(BuildScriptError::InvalidScriptPath { .. })
+                ));
             }
 
             assert_eq!(

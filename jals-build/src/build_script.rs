@@ -14,6 +14,7 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::error::Error as CoreError;
 use core::fmt;
+use core::ops::Range;
 
 use jals_config::Manifest;
 use jals_storage::{
@@ -722,6 +723,52 @@ impl BuildScriptPosition {
     /// 1-based character column.
     pub const fn column(self) -> u32 {
         self.column
+    }
+
+    /// This position as a byte range within `source`, or `None` when the position does not address
+    /// it — the line does not exist, or the column is past its end.
+    ///
+    /// The range covers the single character at the position, and is empty at end-of-line.
+    ///
+    /// Byte offsets rather than a protocol coordinate: the language server wants UTF-16
+    /// line/character, Monaco wants 1-based UTF-16 line/column, and `ariadne` wants bytes.
+    /// Resolving the 1-based, *character*-counted column this type defines is the part that is the
+    /// same for all three, and it lives here because that contract is documented on this type and
+    /// nowhere else. A host converts the result into its own coordinates and does nothing else.
+    pub fn byte_range(self, source: &str) -> Option<Range<usize>> {
+        let line_index = usize::try_from(self.line.checked_sub(1)?).ok()?;
+        let character_index = usize::try_from(self.column.checked_sub(1)?).ok()?;
+
+        // Only a trailing `\n` is stripped: a CRLF file keeps its `\r` in the line, which is what
+        // makes a column count agree with what the script author sees.
+        let mut line_start = 0;
+        let mut selected = None;
+        for (index, line_text) in source.split_inclusive('\n').enumerate() {
+            if index == line_index {
+                selected = Some(line_text.strip_suffix('\n').unwrap_or(line_text));
+                break;
+            }
+            line_start += line_text.len();
+        }
+        let line_text = selected?;
+
+        // Rhai counts characters, not bytes. The `or_else` admits the one-past-the-end column a
+        // parser reports for "expected something here" at end-of-line.
+        let relative = line_text
+            .char_indices()
+            .map(|(offset, _)| offset)
+            .nth(character_index)
+            .or_else(|| {
+                (character_index == line_text.chars().count()).then_some(line_text.len())
+            })?;
+
+        let start = line_start + relative;
+        let end = if start < line_start + line_text.len() {
+            start + source[start..].chars().next().map_or(0, char::len_utf8)
+        } else {
+            start
+        };
+        Some(start..end)
     }
 }
 
@@ -4602,5 +4649,71 @@ mod tests {
             .unwrap();
             assert_eq!(result, None);
         });
+    }
+
+    /// A position, built the way the Rhai adapter builds one. The fields are private and there is
+    /// no public constructor, which is the whole reason `byte_range` lives on this type rather than
+    /// in the host that used to own the scan: a resolver anywhere else cannot be tested at all.
+    const fn position(line: u32, column: u32) -> BuildScriptPosition {
+        BuildScriptPosition { line, column }
+    }
+
+    #[test]
+    fn a_position_resolves_to_the_character_it_addresses() {
+        let source = "let a = 1;\nlet b = 2;\n";
+        assert_eq!(position(1, 1).byte_range(source), Some(0..1));
+        assert_eq!(position(1, 5).byte_range(source), Some(4..5));
+        assert_eq!(position(2, 1).byte_range(source), Some(11..12));
+        assert_eq!(position(2, 5).byte_range(source), Some(15..16));
+    }
+
+    #[test]
+    fn a_column_one_past_the_line_is_an_empty_range_at_its_end() {
+        // What a parser reports for "expected something here" at end-of-line. It addresses the
+        // line, so it resolves — to the empty range the caret sits in.
+        let source = "abc\ndef";
+        assert_eq!(position(1, 4).byte_range(source), Some(3..3));
+        assert_eq!(position(2, 4).byte_range(source), Some(7..7));
+    }
+
+    #[test]
+    fn a_position_outside_the_source_does_not_resolve() {
+        let source = "abc\ndef";
+        assert_eq!(
+            position(1, 5).byte_range(source),
+            None,
+            "column past the line"
+        );
+        assert_eq!(position(3, 1).byte_range(source), None, "line past EOF");
+        assert_eq!(position(0, 1).byte_range(source), None, "line is 1-based");
+        assert_eq!(position(1, 0).byte_range(source), None, "column is 1-based");
+    }
+
+    #[test]
+    fn a_column_counts_characters_and_the_range_covers_whole_ones() {
+        // Rhai counts characters; the range is bytes. Conflating the two lands the start one byte
+        // inside a multi-byte character.
+        let source = "😀x";
+        assert_eq!(position(1, 1).byte_range(source), Some(0..4));
+        assert_eq!(position(1, 2).byte_range(source), Some(4..5));
+        assert_eq!(position(1, 3).byte_range(source), Some(5..5));
+        assert_eq!(position(1, 4).byte_range(source), None);
+    }
+
+    #[test]
+    fn a_carriage_return_stays_in_the_line_it_terminates() {
+        // Only the `\n` is stripped. A CRLF script's columns are what its author sees, and the
+        // `\r` is a character on the line like any other.
+        let source = "ab\r\ncd";
+        assert_eq!(position(1, 3).byte_range(source), Some(2..3));
+        assert_eq!(position(1, 4).byte_range(source), Some(3..3));
+        assert_eq!(position(2, 1).byte_range(source), Some(4..5));
+    }
+
+    #[test]
+    fn an_empty_line_resolves_only_at_its_start() {
+        let source = "\nx";
+        assert_eq!(position(1, 1).byte_range(source), Some(0..0));
+        assert_eq!(position(1, 2).byte_range(source), None);
     }
 }
