@@ -330,7 +330,7 @@ impl MemoryProjectAssembly {
 #[derive(Debug)]
 pub struct GraphResolveError {
     pub error: GraphError,
-    pub warnings: Vec<GraphWarning>,
+    pub(crate) warnings: Vec<GraphWarning>,
 }
 
 impl GraphResolveError {

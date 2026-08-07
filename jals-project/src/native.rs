@@ -69,7 +69,7 @@ pub struct NativeProjectAssembly {
     pub inputs: ProjectInputs,
     pub source_roots: Vec<DirKey>,
     pub compile_classpath: Vec<CompileClasspathEntry>,
-    pub(crate) warnings: Vec<GraphWarning>,
+    warnings: Vec<GraphWarning>,
     pub(crate) errors: Vec<ProjectAssemblyError>,
     pub watch_paths: Vec<PathBuf>,
 }

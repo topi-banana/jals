@@ -715,16 +715,6 @@ pub struct BuildScriptPosition {
 }
 
 impl BuildScriptPosition {
-    /// 1-based source line.
-    pub const fn line(self) -> u32 {
-        self.line
-    }
-
-    /// 1-based character column.
-    pub const fn column(self) -> u32 {
-        self.column
-    }
-
     /// This position as a byte range within `source`, or `None` when the position does not address
     /// it — the line does not exist, or the column is past its end.
     ///
@@ -819,14 +809,6 @@ impl BuildScriptError {
             Self::ScriptTooLarge { script, .. }
             | Self::Compile { script, .. }
             | Self::Execute { script, .. } => Some(script),
-            _ => None,
-        }
-    }
-
-    /// Structured Rhai source position for compilation and evaluation failures, when available.
-    pub const fn position(&self) -> Option<BuildScriptPosition> {
-        match self {
-            Self::Compile { position, .. } | Self::Execute { position, .. } => *position,
             _ => None,
         }
     }
@@ -3269,14 +3251,14 @@ mod tests {
             .await
             .unwrap_err();
 
-            assert!(matches!(error, BuildScriptError::Compile { .. }));
             assert_eq!(
                 error.script_path(),
                 Some(&FileKey::parse("build.rhai").unwrap())
             );
-            let position = error.position().unwrap();
-            assert_eq!(position.line(), 2);
-            assert_eq!(position.column(), 14);
+            let BuildScriptError::Compile { position: at, .. } = &error else {
+                panic!("a compile failure is reported as one: {error:?}");
+            };
+            assert_eq!(*at, Some(position(2, 14)));
         });
     }
 
@@ -3293,14 +3275,14 @@ mod tests {
             .await
             .unwrap_err();
 
-            assert!(matches!(error, BuildScriptError::Execute { .. }));
             assert_eq!(
                 error.script_path(),
                 Some(&FileKey::parse("build.rhai").unwrap())
             );
-            let position = error.position().unwrap();
-            assert_eq!(position.line(), 2);
-            assert_eq!(position.column(), 1);
+            let BuildScriptError::Execute { position: at, .. } = &error else {
+                panic!("a runtime failure is reported as one: {error:?}");
+            };
+            assert_eq!(*at, Some(position(2, 1)));
         });
     }
 
