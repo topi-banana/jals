@@ -1,11 +1,14 @@
-//! The result of linting: the diagnostics found, plus any parser errors.
+//! The result of linting: the rule findings, and nothing else.
+//!
+//! Syntax errors are deliberately absent. They belong to the parse, not to the rules, and a caller
+//! that wants them reads [`Parse::errors`](jals_syntax::Parse::errors) — which is what
+//! `jals-editor`'s diagnostics assembly does. Restating them here as a `syntax-error` rule was a
+//! second [`SyntaxError`](jals_syntax::SyntaxError)-to-diagnostic conversion that no consumer
+//! outside this crate's own tests ever read.
 
-use alloc::borrow::ToOwned;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::ops::Range;
-
-use jals_syntax::SyntaxError;
 
 use crate::rules::Finding;
 
@@ -48,33 +51,11 @@ impl Diagnostic {
             unnecessary_range: finding.unnecessary_range,
         }
     }
-
-    /// Build an `Error` diagnostic from a parser [`SyntaxError`], under the `syntax-error` rule.
-    pub(crate) fn from_syntax_error(err: &SyntaxError) -> Self {
-        let range = err.range();
-        Self {
-            rule: "syntax-error",
-            severity: Severity::Error,
-            message: err.message().to_owned(),
-            range: usize::from(range.start())..usize::from(range.end()),
-            unnecessary: false,
-            unnecessary_range: None,
-        }
-    }
 }
 
-/// The output of [`lint_source`](crate::lint_source).
+/// The output of [`LintOutput::lint_source`](crate::LintOutput::lint_source).
 #[derive(Debug, Clone)]
 pub struct LintOutput {
     /// Diagnostics produced by the enabled rules, sorted by start offset.
     pub diagnostics: Vec<Diagnostic>,
-    /// Syntax errors recorded by the parser (reported under the `syntax-error` rule).
-    pub parse_errors: Vec<Diagnostic>,
-}
-
-impl LintOutput {
-    /// Whether any diagnostic or parser error was produced.
-    pub const fn has_diagnostics(&self) -> bool {
-        !self.diagnostics.is_empty() || !self.parse_errors.is_empty()
-    }
 }

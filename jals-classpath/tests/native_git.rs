@@ -30,6 +30,20 @@ impl Fetcher for NoFetch {
     }
 }
 
+/// The capability an analysis host hands over: it may not reach the network, and a `git clone` is
+/// reaching the network even though the bytes never pass through `fetch_admitted`.
+struct OfflineFetch;
+
+impl Fetcher for OfflineFetch {
+    fn network(&self) -> jals_classpath::NetworkPolicy {
+        jals_classpath::NetworkPolicy::Offline
+    }
+
+    async fn fetch_admitted(&self, _: &str) -> Result<Vec<u8>, String> {
+        panic!("unexpected fetch")
+    }
+}
+
 fn git(repo: &std::path::Path, args: &[&str]) {
     let status = Command::new("git")
         .current_dir(repo)
@@ -65,6 +79,105 @@ fn fixture_repository(source_text: &[u8]) -> tempfile::TempDir {
     repository
 }
 
+/// An offline capability refuses a remote `git` dependency *before* the clone runs.
+///
+/// The clone is a subprocess, not a fetch, so it does not pass through `fetch_admitted` and the
+/// `no-ungated-fetch` rule cannot see it. What kept an analysis host out of it used to be the
+/// `ProjectInputOptions::Analysis` skip — an accident of that option also declining to read the
+/// result, and one that disappeared the moment analysis started needing a dependency's types.
+///
+/// Hermetic and fast by construction: the refusal is the whole point, so `git` is never spawned and
+/// `example.invalid` is never resolved. The two failure modes read differently — this asserts the
+/// policy's wording, not `git clone failed`.
+#[test]
+fn an_offline_capability_refuses_a_remote_git_dependency_without_cloning() {
+    let project = tempfile::tempdir().unwrap();
+    let manifest = Manifest::from_str(
+        r#"
+[package]
+name = "offline-git"
+
+[dependencies]
+fixture = { git = "https://example.invalid/fixture.git" }
+"#,
+    )
+    .unwrap();
+
+    jals_exec::tokio_rt::run(|exec| async move {
+        let mut storage = NativeStorage::native(
+            project.path(),
+            project.path().join("target/jals/cache"),
+            exec,
+        )
+        .await
+        .unwrap();
+        let mut plan = NativeProjectPlan::from_manifest(
+            &manifest,
+            &features(&manifest),
+            project.path(),
+            &storage.view(),
+        );
+        plan.materialize_git_sources(project.path(), &mut storage, &OfflineFetch)
+            .await;
+
+        let [warning] = plan.warnings.as_slice() else {
+            panic!("expected exactly one refusal: {:?}", plan.warnings);
+        };
+        let rendered = warning.to_string();
+        assert!(
+            rendered.contains(jals_classpath::NetworkPolicy::OFFLINE_REFUSAL),
+            "the policy refused, rather than `git` failing: {rendered}"
+        );
+        assert!(
+            rendered.contains("example.invalid"),
+            "the warning names the locator through its origin: {rendered}"
+        );
+        assert!(plan.plan.source_dependency_artifacts.is_empty());
+    })
+    .unwrap();
+}
+
+/// A `git` dependency whose locator is a host path is not the network, so an offline capability
+/// admits it — the same rule that keeps `jar = "../lib/x.jar"` working under `--offline`.
+#[test]
+fn an_offline_capability_still_clones_a_local_git_dependency() {
+    let repository = fixture_repository(b"package example; public class Hello {}");
+    let locator = repository.path().to_string_lossy().replace('\\', "\\\\");
+    let project = tempfile::tempdir().unwrap();
+    let manifest = Manifest::from_str(&format!(
+        r#"
+[package]
+name = "local-git"
+
+[dependencies]
+fixture = {{ git = "{locator}" }}
+"#
+    ))
+    .unwrap();
+
+    jals_exec::tokio_rt::run(|exec| async move {
+        let mut storage = NativeStorage::native(
+            project.path(),
+            project.path().join("target/jals/cache"),
+            exec,
+        )
+        .await
+        .unwrap();
+        let mut plan = NativeProjectPlan::from_manifest(
+            &manifest,
+            &features(&manifest),
+            project.path(),
+            &storage.view(),
+        );
+        plan.materialize_git_sources(project.path(), &mut storage, &OfflineFetch)
+            .await;
+
+        assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
+        assert_eq!(plan.plan.source_dependency_artifacts.len(), 1);
+    })
+    .unwrap();
+}
+
 #[test]
 fn git_sources_are_verified_artifacts_and_materialize_with_java_names() {
     let repository = fixture_repository(b"package example; public class Hello {}");
@@ -95,7 +208,7 @@ fixture = {{ git = "{locator}" }}
             project.path(),
             &storage.view(),
         );
-        plan.materialize_git_sources(project.path(), &mut storage, ProjectInputOptions::Compile)
+        plan.materialize_git_sources(project.path(), &mut storage, &NoFetch)
             .await;
         assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
 
@@ -174,7 +287,7 @@ fixture = {{ git = "{locator}", rev = "{rev}" }}
             &storage.view(),
         );
         first
-            .materialize_git_sources(project.path(), &mut storage, ProjectInputOptions::Compile)
+            .materialize_git_sources(project.path(), &mut storage, &NoFetch)
             .await;
         assert!(first.warnings.is_empty(), "{:?}", first.warnings);
         assert_eq!(first.plan.source_dependency_artifacts.len(), 1);
@@ -189,7 +302,7 @@ fixture = {{ git = "{locator}", rev = "{rev}" }}
             &storage.view(),
         );
         second
-            .materialize_git_sources(project.path(), &mut storage, ProjectInputOptions::Compile)
+            .materialize_git_sources(project.path(), &mut storage, &NoFetch)
             .await;
         assert!(second.warnings.is_empty(), "{:?}", second.warnings);
         assert_eq!(

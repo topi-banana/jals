@@ -1,9 +1,5 @@
 //! `jals` command-line interface.
 
-// The only `usize`/`u32` casts here build a `FileId` from a linted file's index — bounded by the
-// set of files on the command line, never approaching 2³² — so they cannot truncate in practice.
-#![allow(clippy::cast_possible_truncation)]
-
 mod migrate;
 mod report;
 
@@ -449,91 +445,95 @@ impl FmtArgs {
     }
 }
 
+/// One file this run reports on.
+struct LintFile {
+    /// How the file is named in output: its path, or `<stdin>`.
+    label: String,
+    src: String,
+    parse: jals_syntax::Parse,
+    /// The directory whose `jalslint.toml` governs it — its parent, or the cwd for stdin. Each
+    /// file is looked up separately, so one run can span directories with different configs.
+    config_dir: PathBuf,
+    /// Where the file lives, or `None` for stdin. Only used to tell a named file apart from the
+    /// same file reached through a source root.
+    path: Option<PathBuf>,
+}
+
 impl LintArgs {
     async fn run(&self, exec: &Exec) -> Result<ExitCode> {
         let explicit_config = App::load_explicit::<LintConfig>(self.config.as_deref())?;
-
         let mut discovery = HostConfigs::new(explicit_config);
-        let mut any_finding = false;
 
-        if self.paths.is_empty() {
-            // stdin: a one-file "project". Building a single-file index still lets `type-mismatch`
-            // see in-file project subtyping (a `Sub`/`Base` confusion), matching the multi-file path
-            // below.
-            let mut src = String::new();
-            std::io::stdin()
-                .read_to_string(&mut src)
-                .context("reading stdin")?;
-            let cwd = std::env::current_dir().context("getting current dir")?;
-            let mut cfg = discovery.for_dir(&cwd)?;
-            let parse = jals_syntax::Parse::parse(&src).await;
-            // Fold in the project discovered from the cwd (in a single manifest parse): its classpath
-            // so `type-mismatch` sees external library types, and its feature set (`[package]
-            // features`) so the feature-gated rules run — exactly as the multi-file path does.
-            let ctx = ProjectLintContext::load(&cwd, exec, &self.features).await;
+        // What this run reports on, and where project discovery starts from.
+        let reported = Self::reported_files(&self.paths).await?;
+        let anchor = reported
+            .first()
+            .map_or_else(|| PathBuf::from("."), |file| file.config_dir.clone());
+        let ctx = ProjectLintContext::load(&anchor, exec, &self.features).await;
+
+        // The index spans more than the run reports on. Diagnostics assembly reports every type
+        // name that resolves to nothing, so an index holding only the named files would call every
+        // sibling class unresolved — `jals lint One.java` inside a project has to see the project.
+        //
+        // One `FileId` space across all three vectors, handed out in order: the index tells a
+        // project file from a source dependency by which argument it arrives in, not by its id.
+        // Reported files go first, which is what lets the reporting loop below zip them with `cfgs`.
+        let mut next = 0;
+        let mut project: Vec<(FileId, jals_syntax::SyntaxNode)> = Vec::new();
+        let mut cfgs: Vec<(FileId, jals_syntax::cfg::CfgMap)> = Vec::new();
+        let mut source_deps: Vec<(FileId, jals_syntax::SyntaxNode)> = Vec::new();
+
+        for file in &reported {
+            let id = FileId(next);
+            next += 1;
+            cfgs.push((id, ctx.cfg_map(&file.parse)));
+            project.push((id, file.parse.syntax()));
+        }
+        for path in Self::unreported_project_sources(&reported, &ctx.project_sources) {
+            let Some(parse) = Self::parse_indexed(&path).await else {
+                continue;
+            };
+            let id = FileId(next);
+            next += 1;
+            cfgs.push((id, ctx.cfg_map(&parse)));
+            project.push((id, parse.syntax()));
+        }
+        // A `git`/`path` dependency's sources are a typing authority too, and indexed under their
+        // own authority: a dependency's feature selection is not the root's, so these carry no
+        // entry in `cfgs` and extract in full.
+        for path in &ctx.dependency_sources {
+            let Some(parse) = Self::parse_indexed(path).await else {
+                continue;
+            };
+            source_deps.push((FileId(next), parse.syntax()));
+            next += 1;
+        }
+
+        let index = ctx.build_index(&project, &cfgs, &source_deps).await;
+
+        // Zipped rather than indexed: the reported files are the first `reported.len()` entries of
+        // `cfgs`, so this pairs each with its own id and `cfg` map without restating that numbering.
+        let mut any_finding = false;
+        for (file, (id, cfg_map)) in reported.iter().zip(&cfgs) {
+            let mut cfg = discovery.for_dir(&file.config_dir)?;
             cfg.features = ctx.feature_set;
-            let cfgs = [(FileId(0), ctx.cfg_map(&parse))];
-            let index = ctx.build_index(&[(FileId(0), parse.syntax())], &cfgs).await;
-            let out = jals_lint::LintOutput::lint_parse_with_index(
-                &parse,
+            // The one policy: syntax errors, the rule engine (with `type-mismatch` forced off on a
+            // broken tree), `cfg` hints, and unresolved names, in one order. The language server
+            // and the playground reach it through `Editor`; a CLI run holds its own index and
+            // reaches it here, but it is the same assembly and cannot drift from theirs.
+            //
+            // `resolved` is `None` on purpose. The assembly picks `resolve_node_with_cfg` or
+            // `resolve_node` from whether a `cfg` map is present, and a host that computed one
+            // itself would be restating that choice.
+            let diagnostics = jals_editor::FileDiagnostics::assemble(
+                &file.parse,
+                None,
+                Some((&index, *id)),
                 &cfg,
-                Some((&index, FileId(0))),
-                Some(&cfgs[0].1),
+                Some(cfg_map),
             )
             .await;
-            any_finding |= Reporter::report_lint("<stdin>", &src, &out);
-        } else {
-            // Read and parse every file once, then build a project-wide symbol index from the parsed
-            // trees so the `type-mismatch` rule resolves reference types across files (project
-            // subtyping, cross-file call arguments) — the same checks the language server runs. The
-            // host owns the I/O; `ProjectIndex` itself is pure. Holding every parse at once costs more
-            // memory than the old file-at-a-time pass, but is bounded by the set of files being linted.
-            let mut files = Vec::new();
-            for path in App::collect_java_files(&self.paths)? {
-                let src = std::fs::read_to_string(&path)
-                    .with_context(|| format!("reading {}", path.display()))?;
-                let parse = jals_syntax::Parse::parse(&src).await;
-                files.push((path, src, parse));
-            }
-            let inputs: Vec<_> = files
-                .iter()
-                .enumerate()
-                .map(|(i, (_, _, parse))| (FileId(i as u32), parse.syntax()))
-                .collect();
-            // Anchor project discovery at the first linted file's directory (walked upward for the
-            // `jals.toml` in `ProjectLintContext::load` below).
-            let start_dir = files
-                .first()
-                .and_then(|(path, _, _)| path.parent())
-                .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-            // Discover the project once: its classpath (folded into the cross-file `type-mismatch`
-            // index so a method whose argument type comes from a dependency jar resolves) and its
-            // feature set (`[package] features`, shared across the project's files), from a single
-            // manifest parse.
-            let ctx = ProjectLintContext::load(&start_dir, exec, &self.features).await;
-            // Each file's `#[cfg(...)]` evaluation (empty maps when the `attributes` dialect is
-            // off): the index skips disabled declarations, and each file's lint run drops
-            // findings inside them — matching what the compile frontend will blank.
-            let cfgs: Vec<_> = files
-                .iter()
-                .enumerate()
-                .map(|(i, (_, _, parse))| (FileId(i as u32), ctx.cfg_map(parse)))
-                .collect();
-            let index = ctx.build_index(&inputs, &cfgs).await;
-
-            for (i, (path, src, parse)) in files.iter().enumerate() {
-                let parent = path.parent().unwrap_or_else(|| Path::new("."));
-                let mut cfg = discovery.for_dir(parent)?;
-                cfg.features = ctx.feature_set;
-                let out = jals_lint::LintOutput::lint_parse_with_index(
-                    parse,
-                    &cfg,
-                    Some((&index, FileId(i as u32))),
-                    Some(&cfgs[i].1),
-                )
-                .await;
-                any_finding |= Reporter::report_lint(&path.display().to_string(), src, &out);
-            }
+            any_finding |= Reporter::report_lint(&file.label, &file.src, &diagnostics);
         }
 
         Ok(if any_finding {
@@ -541,6 +541,74 @@ impl LintArgs {
         } else {
             ExitCode::SUCCESS
         })
+    }
+
+    /// The files this run reports on: stdin as one detached file when no paths were given,
+    /// otherwise every `.java` the paths name or contain.
+    ///
+    /// Unlike the project sources folded in beside them, an unreadable file here *is* an error:
+    /// the caller asked for it by name.
+    async fn reported_files(paths: &[PathBuf]) -> Result<Vec<LintFile>> {
+        if paths.is_empty() {
+            let mut src = String::new();
+            std::io::stdin()
+                .read_to_string(&mut src)
+                .context("reading stdin")?;
+            let parse = jals_syntax::Parse::parse(&src).await;
+            return Ok(vec![LintFile {
+                label: "<stdin>".to_owned(),
+                src,
+                parse,
+                config_dir: std::env::current_dir().context("getting current dir")?,
+                path: None,
+            }]);
+        }
+        let mut files = Vec::new();
+        for path in App::collect_java_files(paths)? {
+            let src = std::fs::read_to_string(&path)
+                .with_context(|| format!("reading {}", path.display()))?;
+            let parse = jals_syntax::Parse::parse(&src).await;
+            files.push(LintFile {
+                label: path.display().to_string(),
+                src,
+                parse,
+                config_dir: path
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .to_path_buf(),
+                path: Some(path),
+            });
+        }
+        Ok(files)
+    }
+
+    /// Read and parse one file the run indexes but does not report on, or `None` if it cannot be
+    /// read.
+    ///
+    /// Unreadable is not an error here, unlike in [`reported_files`](Self::reported_files): a
+    /// project source or a dependency source that cannot be read simply widens nothing, and failing
+    /// over it would refuse to lint the files that *were* named because of one that was not.
+    async fn parse_indexed(path: &Path) -> Option<jals_syntax::Parse> {
+        let src = std::fs::read_to_string(path).ok()?;
+        Some(jals_syntax::Parse::parse(&src).await)
+    }
+
+    /// The project's sources that no reported file already covers.
+    ///
+    /// Both sides go through [`App::canonical_path`] first: a path named on the command line and
+    /// the same file reached through a `[build] source-dirs` root are spelled differently, and
+    /// indexing one file twice declares its types twice — which the index resolves by picking a
+    /// winner, so the symptom would be confusing `type-mismatch` output rather than an error.
+    fn unreported_project_sources(reported: &[LintFile], project: &[PathBuf]) -> Vec<PathBuf> {
+        let named: HashSet<PathBuf> = reported
+            .iter()
+            .filter_map(|file| file.path.as_deref().map(App::canonical_path))
+            .collect();
+        project
+            .iter()
+            .filter(|path| !named.contains(&App::canonical_path(path)))
+            .cloned()
+            .collect()
     }
 }
 
@@ -849,6 +917,18 @@ struct ProjectLintContext {
     /// The resolved build features `#[cfg(feature = "…")]` evaluates against. Meaningful only
     /// when `feature_set` enables the `attributes` dialect.
     build_features: BTreeSet<String>,
+    /// Every `.java` under the manifest's `[build] source-dirs`.
+    ///
+    /// The index has to span the project even when the run reports on one file: diagnostics
+    /// assembly reports every type name that resolves to nothing, and a sibling class the caller
+    /// did not name is not an unresolved name — it is a file the index was never given. This
+    /// widens what *resolves*, never what is reported.
+    project_sources: Vec<PathBuf>,
+    /// The `.java` of `git`/`path` dependencies, already materialized to host paths.
+    ///
+    /// The classpath's counterpart for a dependency that exports types as sources rather than as
+    /// classes — the other typing authority, and the other half of the same false-positive.
+    dependency_sources: Vec<PathBuf>,
 }
 
 impl ProjectLintContext {
@@ -871,6 +951,10 @@ impl ProjectLintContext {
             Some(parent) if !parent.as_os_str().is_empty() => parent,
             _ => Path::new("."),
         };
+        // Scanned before the graph phase, so a project whose dependencies fail to assemble still
+        // gets an index over its own files. Otherwise the degraded context would resolve *fewer*
+        // names than it has files for, and report the difference as unresolved.
+        let project_sources = Self::project_sources(&manifest, root);
         // Assemble the project's analysis inputs (best-effort): the classpath `.class` from the
         // `[build] classpath` plus resolved `[dependencies]` jars (folded into the cross-file
         // `type-mismatch` index) and the `[package] features`. Any strict graph failure is reported and
@@ -909,14 +993,34 @@ impl ProjectLintContext {
             Ok(inputs) => inputs,
             Err(error) => {
                 eprintln!("warning: project analysis inputs unavailable: {error:#}");
-                return Self::default();
+                return Self {
+                    project_sources,
+                    ..Self::default()
+                };
             }
         };
         Self {
             classpath: ProjectIndex::lower_classpath(&inputs.classpath_classes).await,
             feature_set: inputs.feature_set,
             build_features: features.into_features(),
+            project_sources,
+            dependency_sources: inputs.extra_sources,
         }
+    }
+
+    /// Every `.java` under the manifest's source roots, best-effort.
+    ///
+    /// Deliberately not [`App::discover_sources`], which a build uses and which fails on a missing
+    /// source directory or an empty tree. Those are build failures, not lint failures: a project
+    /// whose sources cannot be scanned is still a project whose named files can be linted, and the
+    /// scan only ever *widens* what resolves.
+    fn project_sources(manifest: &Manifest, root: &Path) -> Vec<PathBuf> {
+        let roots: Vec<PathBuf> = manifest
+            .source_roots(root)
+            .into_iter()
+            .filter(|dir| dir.is_dir())
+            .collect();
+        App::collect_java_files(&roots).unwrap_or_default()
     }
 
     /// The `#[cfg(...)]` evaluation of one parsed file under this context: computed against the
@@ -930,17 +1034,23 @@ impl ProjectLintContext {
         }
     }
 
-    /// Builds a lint-time [`ProjectIndex`] over `files`, folding in the embedded stdlib stubs and this
-    /// context's lowered classpath so the index-aware `type-mismatch` rule resolves stdlib and
-    /// external library types. Shared by the stdin and multi-file lint paths.
+    /// Builds a lint-time [`ProjectIndex`] over `files`, folding in every typing authority: the
+    /// embedded stdlib stubs, this context's lowered classpath, and `source_deps` (the `.java` of
+    /// `git`/`path` dependencies).
+    ///
+    /// `cfgs` filters *project* files only. A source dependency is indexed under its own
+    /// authority — its `#[cfg]` selection is not the root's — which is why it is a separate
+    /// argument rather than more entries in `files`.
     async fn build_index(
         &self,
         files: &[(FileId, jals_syntax::SyntaxNode)],
         cfgs: &[(FileId, jals_syntax::cfg::CfgMap)],
+        source_deps: &[(FileId, jals_syntax::SyntaxNode)],
     ) -> ProjectIndex {
         ProjectIndex::builder(files)
             .with_stdlib()
             .with_classpath(&self.classpath)
+            .with_source_deps(source_deps)
             .with_disabled(cfgs)
             .build()
             .await
@@ -1764,18 +1874,23 @@ impl App {
         C::from_text(&key, &text).map_err(Into::into)
     }
 
-    /// The path a host config lookup should be keyed by: absolute and symlink-free where
-    /// possible, so `src/a`, `./src/a` and an absolute spelling of one directory agree.
+    /// A path as the filesystem knows it: absolute and symlink-free where possible, so `src/a`,
+    /// `./src/a` and an absolute spelling of the same thing agree.
+    ///
+    /// Two callers need that agreement for different reasons — a host config lookup keys its memo
+    /// by the discovered root, and `jals lint` decides whether a named file and a project source
+    /// are one file before indexing both. Comparing canonicalized paths is also what makes a macOS
+    /// temporary directory (`/var` → `/private/var`) compare equal to itself.
     ///
     /// Falls back to the path as given when it cannot be canonicalized (it may not exist yet),
     /// which is no worse than not canonicalizing at all.
-    fn canonical_dir(dir: &Path) -> PathBuf {
-        let dir = if dir.as_os_str().is_empty() {
+    fn canonical_path(path: &Path) -> PathBuf {
+        let path = if path.as_os_str().is_empty() {
             Path::new(".")
         } else {
-            dir
+            path
         };
-        std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf())
+        std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
     }
 
     /// The config an explicit `--config` path names, when one was given.
@@ -1813,7 +1928,7 @@ impl<C: DiscoverableConfig + Clone + Default> HostConfigs<C> {
     /// project untouched). Nothing seeds the lint config, so `jals lint` keeps its exact
     /// file-or-default behavior.
     fn seed(&mut self, root: &Path, config: C) {
-        self.by_root.insert(App::canonical_dir(root), config);
+        self.by_root.insert(App::canonical_path(root), config);
     }
 
     /// The config governing `dir`: the explicit override, the memoized or seeded config of the
@@ -1823,7 +1938,7 @@ impl<C: DiscoverableConfig + Clone + Default> HostConfigs<C> {
             return Ok(config.clone());
         }
         // Nearest first, so an authored config always beats one seeded further up.
-        let start = App::canonical_dir(dir);
+        let start = App::canonical_path(dir);
         let Some(root) = start.ancestors().find(|candidate| {
             self.by_root.contains_key(*candidate) || candidate.join(C::FILE_NAME).is_file()
         }) else {
@@ -1877,5 +1992,46 @@ mod tests {
             vec![root.join("libs/z.jar"), root.join("libs/a.jar")]
         );
         assert_eq!(manifest.build.classpath, vec!["libs/base.jar"]);
+    }
+
+    /// The named set and the project scan reach the same files by different spellings — a path as
+    /// the caller typed it, and the same path built from a `[build] source-dirs` root. Indexing one
+    /// file under two `FileId`s declares its types twice, and the index answers an FQN clash by
+    /// picking a winner, so the symptom would be confusing rather than an error.
+    ///
+    /// Driven directly because there is no downstream symptom to assert on: two identical
+    /// declarations of one type resolve the same either way. What the deduplication promises is
+    /// *path identity*, and this is where that promise is observable.
+    #[test]
+    fn a_named_file_is_not_indexed_again_as_a_project_source() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let root = dir.path();
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).expect("creating the source root");
+        let named = src.join("A.java");
+        let other = src.join("B.java");
+        std::fs::write(&named, "class A {}").expect("writing A");
+        std::fs::write(&other, "class B {}").expect("writing B");
+
+        // The caller's spelling goes through `.` and a redundant `src/..`; the scan's is direct.
+        // Canonicalizing both is also what makes this hold on macOS, where a temporary directory is
+        // reached through a `/var` → `/private/var` symlink.
+        let reported = vec![LintFile {
+            label: "A.java".to_owned(),
+            src: String::new(),
+            parse: jals_exec::block_on_inline(jals_syntax::Parse::parse("class A {}")),
+            config_dir: src,
+            path: Some(
+                root.join(".")
+                    .join("src")
+                    .join("..")
+                    .join("src")
+                    .join("A.java"),
+            ),
+        }];
+
+        let extra = LintArgs::unreported_project_sources(&reported, &[named, other.clone()]);
+
+        assert_eq!(extra, vec![other], "only the file nobody named is added");
     }
 }

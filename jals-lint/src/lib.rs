@@ -3,8 +3,11 @@
 //!
 //! [`LintOutput::lint_source`] parses `src` and runs every enabled rule over the lossless CST,
 //! returning a [`LintOutput`] of [`Diagnostic`]s. It never panics: a source with syntax errors is
-//! still linted best-effort (the CST is lossless), and the parser's errors are surfaced under the
-//! `syntax-error` rule.
+//! still linted best-effort (the CST is lossless).
+//!
+//! The parser's own errors are **not** in that output. They belong to the parse, so a caller reads
+//! them from [`Parse::errors`](jals_syntax::Parse::errors) — the two halves are assembled into one
+//! list, in one order, by `jals-editor`'s `FileDiagnostics`, which every host goes through.
 //!
 //! Each rule has a kebab-case name and a built-in default [`Severity`]; a `jalslint.toml` may
 //! override any rule's severity, including `allow` to disable it. Rules are read-only and never
@@ -70,16 +73,8 @@ impl LintOutput {
         index: Option<IndexCtx<'_>>,
         cfg: Option<&CfgMap>,
     ) -> Self {
-        let diagnostics = Self::lint_node_with_index(&parse.syntax(), config, index, cfg).await;
-        let parse_errors = parse
-            .errors()
-            .iter()
-            .map(Diagnostic::from_syntax_error)
-            .collect();
-
         Self {
-            diagnostics,
-            parse_errors,
+            diagnostics: Self::lint_node_with_index(&parse.syntax(), config, index, cfg).await,
         }
     }
 
@@ -200,7 +195,7 @@ mod tests {
     use jals_exec::block_on_inline;
 
     #[test]
-    fn lint_node_reports_rule_findings_without_parse_errors() {
+    fn lint_node_reports_rule_findings() {
         // `import java.util.*;` is well-formed but trips the `wildcard-import` rule.
         let root = block_on_inline(jals_syntax::Parse::parse(
             "import java.util.*;\nclass C {}\n",
@@ -211,8 +206,23 @@ mod tests {
             diagnostics.iter().any(|d| d.rule == "wildcard-import"),
             "expected a wildcard-import finding: {diagnostics:?}"
         );
-        // `lint_node` is the rule half only: parser's `syntax-error` rule never appears here.
-        assert!(diagnostics.iter().all(|d| d.rule != "syntax-error"));
+    }
+
+    #[test]
+    fn a_broken_parse_yields_rule_findings_only() {
+        // Syntax errors belong to the parse. Linting a broken tree is still best-effort over the
+        // lossless CST, and what comes back is rules only — the caller reads `Parse::errors`.
+        let src = "import java.util.*;\nclass C { void m( {}\n";
+        let parse = block_on_inline(jals_syntax::Parse::parse(src));
+        assert!(!parse.errors().is_empty(), "the fixture must not parse");
+        let out = block_on_inline(LintOutput::lint_parse_with_index(
+            &parse,
+            &Config::default(),
+            None,
+            None,
+        ));
+        assert!(out.diagnostics.iter().any(|d| d.rule == "wildcard-import"));
+        assert!(out.diagnostics.iter().all(|d| d.rule != "syntax-error"));
     }
 
     #[test]
@@ -236,7 +246,6 @@ mod tests {
             block_on_inline(LintOutput::lint_parse_with_index(&parse, &cfg, None, None));
         let file_local = block_on_inline(LintOutput::lint_source(src, &cfg));
         assert_eq!(with_none.diagnostics, file_local.diagnostics);
-        assert_eq!(with_none.parse_errors, file_local.parse_errors);
     }
 
     #[test]

@@ -5,9 +5,8 @@ use std::io::{IsTerminal, Write};
 use std::ops::Range;
 
 use ariadne::{Color, Config, IndexType, Label, Report, ReportKind, Source};
-use jals_config::Severity;
+use jals_editor::{DiagnosticSeverity, FileDiagnostic};
 use jals_fmt::FormatOutput;
-use jals_lint::LintOutput;
 use similar::{ChangeTag, TextDiff};
 
 const RESET: &str = "\x1b[0m";
@@ -65,62 +64,6 @@ impl Reporter {
         }
     }
 
-    /// A byte range fit to display: parser ranges are often empty (`start == end`), which
-    /// `ariadne` renders as an invisible caret, so widen those to one character (clamped to
-    /// char boundaries, falling back to the preceding character at end-of-input).
-    fn display_range(src: &str, range: &Range<usize>) -> Range<usize> {
-        if range.start != range.end {
-            return range.clone();
-        }
-        let at = range.start.min(src.len());
-        if at < src.len() {
-            let mut end = at + 1;
-            while end < src.len() && !src.is_char_boundary(end) {
-                end += 1;
-            }
-            at..end
-        } else if at > 0 {
-            let mut start = at - 1;
-            while start > 0 && !src.is_char_boundary(start) {
-                start -= 1;
-            }
-            start..at
-        } else {
-            0..0
-        }
-    }
-
-    /// Render one diagnostic through `ariadne` to stderr, reusing `cache` (the parsed source).
-    #[allow(clippy::too_many_arguments)]
-    fn emit<'a>(
-        cache: &mut (&'a str, Source<&'a str>),
-        label: &'a str,
-        src: &str,
-        kind: ReportKind<'_>,
-        color: Color,
-        code: Option<&str>,
-        message: &str,
-        range: &Range<usize>,
-        use_color: bool,
-    ) {
-        let span = Self::display_range(src, range);
-        let config = Config::new()
-            .with_color(use_color)
-            .with_index_type(IndexType::Byte);
-        let mut builder = Report::build(kind, (label, span.clone()))
-            .with_config(config)
-            .with_message(message)
-            .with_label(
-                Label::new((label, span))
-                    .with_message(message)
-                    .with_color(color),
-            );
-        if let Some(code) = code {
-            builder = builder.with_code(code);
-        }
-        let _ = builder.finish().eprint(&mut *cache);
-    }
-
     /// Render every formatter warning for one source.
     ///
     /// A warning with a range is a parser syntax error and gets an `ariadne` report pointing at
@@ -128,24 +71,13 @@ impl Reporter {
     /// whitespace being rounded to the single engine's canonical value — so it has nothing to
     /// point at and follows the CLI's plain `warning:` convention instead.
     pub(crate) fn report_format_warnings(label: &str, src: &str, out: &FormatOutput) {
-        let use_color = Self::color_for(std::io::stderr().is_terminal());
-        let mut cache = (label, Source::from(src));
+        let mut doc = Doc::new(label, src);
         for w in &out.warnings {
             let Some(range) = &w.range else {
                 eprintln!("warning: {}", w.message);
                 continue;
             };
-            Self::emit(
-                &mut cache,
-                label,
-                src,
-                ReportKind::Warning,
-                Color::Yellow,
-                None,
-                &w.message,
-                range,
-                use_color,
-            );
+            doc.emit(DiagnosticSeverity::Warning, None, &w.message, range);
         }
     }
 
@@ -183,28 +115,103 @@ impl Reporter {
         }
     }
 
-    /// Render every lint diagnostic (and parser error) for one source through `ariadne`.
-    /// Returns whether anything was reported.
-    pub(crate) fn report_lint(label: &str, src: &str, out: &LintOutput) -> bool {
-        let use_color = Self::color_for(std::io::stderr().is_terminal());
-        let mut cache = (label, Source::from(src));
-        for d in out.diagnostics.iter().chain(&out.parse_errors) {
-            let (kind, color) = match d.severity {
-                Severity::Error => (ReportKind::Error, Color::Red),
-                _ => (ReportKind::Warning, Color::Yellow),
-            };
-            Self::emit(
-                &mut cache,
-                label,
-                src,
-                kind,
-                color,
-                Some(d.rule),
-                &d.message,
-                &d.range,
-                use_color,
-            );
+    /// Render one file's assembled diagnostics through `ariadne`, in the order
+    /// [`jals_editor::FileDiagnostics`] produced them.
+    ///
+    /// Returns whether anything belongs in the problems list — that is, anything that is not a
+    /// [`Hint`](DiagnosticSeverity::Hint). A hint is supplementary by definition (a `cfg`-disabled
+    /// region, the dead branch of a constant condition); it is worth printing as `ariadne`
+    /// *advice*, and it is not worth failing a run over.
+    pub(crate) fn report_lint(label: &str, src: &str, diagnostics: &[FileDiagnostic]) -> bool {
+        let mut doc = Doc::new(label, src);
+        for d in diagnostics {
+            doc.emit(d.severity, d.code, &d.message, &d.range);
         }
-        out.has_diagnostics()
+        diagnostics
+            .iter()
+            .any(|d| d.severity != DiagnosticSeverity::Hint)
+    }
+}
+
+/// One source being reported on: the `ariadne` cache keyed by its label, and whether this run
+/// paints.
+///
+/// The two travel together for the whole of a file's report, which is why they are one value rather
+/// than parameters repeated at every emission.
+struct Doc<'a> {
+    /// `ariadne`'s `Cache`: the label a span is resolved against, and the parsed source.
+    cache: (&'a str, Source<&'a str>),
+    use_color: bool,
+}
+
+impl<'a> Doc<'a> {
+    fn new(label: &'a str, src: &'a str) -> Self {
+        Self {
+            cache: (label, Source::from(src)),
+            use_color: Reporter::color_for(std::io::stderr().is_terminal()),
+        }
+    }
+
+    /// A byte range fit to display: parser ranges are often empty (`start == end`), which
+    /// `ariadne` renders as an invisible caret, so widen those to one character (clamped to
+    /// char boundaries, falling back to the preceding character at end-of-input).
+    fn display_range(&self, range: &Range<usize>) -> Range<usize> {
+        let src = self.cache.1.text();
+        if range.start != range.end {
+            return range.clone();
+        }
+        let at = range.start.min(src.len());
+        if at < src.len() {
+            let mut end = at + 1;
+            while end < src.len() && !src.is_char_boundary(end) {
+                end += 1;
+            }
+            at..end
+        } else if at > 0 {
+            let mut start = at - 1;
+            while start > 0 && !src.is_char_boundary(start) {
+                start -= 1;
+            }
+            start..at
+        } else {
+            0..0
+        }
+    }
+
+    /// Render one diagnostic to stderr.
+    ///
+    /// The `ariadne` kind and color are derived from `severity` here and nowhere else, so this is
+    /// the CLI's whole answer to "how does a severity look". `code` is optional because a syntax
+    /// error has no producing rule to name.
+    fn emit(
+        &mut self,
+        severity: DiagnosticSeverity,
+        code: Option<&str>,
+        message: &str,
+        range: &Range<usize>,
+    ) {
+        let (kind, color) = match severity {
+            DiagnosticSeverity::Error => (ReportKind::Error, Color::Red),
+            DiagnosticSeverity::Warning => (ReportKind::Warning, Color::Yellow),
+            // Advice, not a warning: a hint is not a problem, and the exit code agrees.
+            DiagnosticSeverity::Hint => (ReportKind::Advice, Color::Cyan),
+        };
+        let span = self.display_range(range);
+        let label = self.cache.0;
+        let config = Config::new()
+            .with_color(self.use_color)
+            .with_index_type(IndexType::Byte);
+        let mut builder = Report::build(kind, (label, span.clone()))
+            .with_config(config)
+            .with_message(message)
+            .with_label(
+                Label::new((label, span))
+                    .with_message(message)
+                    .with_color(color),
+            );
+        if let Some(code) = code {
+            builder = builder.with_code(code);
+        }
+        let _ = builder.finish().eprint(&mut self.cache);
     }
 }

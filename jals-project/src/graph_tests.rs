@@ -910,7 +910,9 @@ fn native_projection_returns_watch_paths_and_applies_mode_downstream() {
             canonicalized(&analysis.watch_paths),
             [fs::canonicalize(project.path().join("dep")).unwrap()]
         );
-        assert!(analysis.inputs.source_dep_sources.is_empty());
+        // A dependency's sources are a typing authority, so the analysis projection reads them too
+        // — the mode decides what a host can *navigate*, never what it can resolve.
+        assert_eq!(analysis.inputs.source_dep_sources.len(), 1);
         assert_eq!(analysis.plan.source_dependency_artifacts.len(), 1);
 
         let editor = ProjectScript::skipped()

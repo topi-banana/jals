@@ -23,6 +23,7 @@ use jals_storage::{
     RelativePath,
 };
 
+use crate::io::Fetch;
 use crate::{
     ClasspathEntry, DependencyLocation, ExternalLocator, Fetcher, LibrarySource, NetworkPolicy,
     ProjectInputOptions, ProjectInputPlan, ProjectInputs, Warning, WarningOrigin,
@@ -198,11 +199,9 @@ impl NativeProjectPlan {
             .materialize_external_classpath(storage, options)
             .await;
         native
-            .materialize_git_sources(project_root, storage, options)
+            .materialize_git_sources(project_root, storage, fetcher)
             .await;
-        native
-            .materialize_path_sources(project_root, storage, options)
-            .await;
+        native.materialize_path_sources(project_root, storage).await;
         let mut inputs = ProjectInputs::assemble(fetcher, storage, &native.plan, options).await;
         native.warnings.append(&mut inputs.warnings);
         inputs.warnings = native.warnings;
@@ -484,19 +483,22 @@ impl NativeProjectPlan {
     }
 
     /// Clone native Git dependencies, scan their selected source roots through the same safe native
-    /// source adapter, and publish every Java file as a verified `GitCheckout` artifact. Analysis
-    /// deliberately skips source dependencies; compile/editor plans retain only typed cache keys.
-    pub async fn materialize_git_sources(
+    /// source adapter, and publish every Java file as a verified `GitCheckout` artifact.
+    ///
+    /// Takes a `fetcher` rather than a [`ProjectInputOptions`]. A source dependency is a typing
+    /// authority, so every option reads it — but the `Analysis` skip that used to stand here was
+    /// also the only thing keeping an analysis host out of `git clone`. The clone is a subprocess,
+    /// so the capability's bytes never carry it; its network access is the capability's all the
+    /// same, and `Fetch::admit` is what answers for it now.
+    pub async fn materialize_git_sources<F: Fetcher>(
         &mut self,
         project_root: &Path,
         storage: &mut NativeStorage,
-        options: ProjectInputOptions,
+        fetcher: &F,
     ) {
-        if matches!(options, ProjectInputOptions::Analysis) {
-            return;
-        }
         for (name, git) in self.git_dependencies.clone() {
-            let outcome = Self::clone_and_publish_git(project_root, storage, &name, &git).await;
+            let outcome =
+                Self::clone_and_publish_git(project_root, storage, fetcher, &name, &git).await;
             self.absorb_sources(git.git, outcome);
         }
     }
@@ -505,15 +507,14 @@ impl NativeProjectPlan {
     /// native source adapter, and publish every Java file as a verified `PathSource` artifact.
     /// In-project `path` dependencies stay portable source roots (see
     /// [`from_manifest`](Self::from_manifest)).
+    ///
+    /// Takes no [`ProjectInputOptions`]: like a `git` dependency's sources, these are a typing
+    /// authority every option reads. It needs no `fetcher` either — a host path is not the network.
     pub async fn materialize_path_sources(
         &mut self,
         project_root: &Path,
         storage: &mut NativeStorage,
-        options: ProjectInputOptions,
     ) {
-        if matches!(options, ProjectInputOptions::Analysis) {
-            return;
-        }
         for (name, dependency) in self.path_dependencies.clone() {
             let outcome =
                 Self::scan_and_publish_path(project_root, storage, &name, &dependency).await;
@@ -533,9 +534,10 @@ impl NativeProjectPlan {
         }
     }
 
-    async fn clone_and_publish_git(
+    async fn clone_and_publish_git<F: Fetcher>(
         project_root: &Path,
         storage: &mut NativeStorage,
+        fetcher: &F,
         name: &Name,
         git: &GitDependency,
     ) -> Result<Vec<LibrarySource>, String> {
@@ -550,6 +552,11 @@ impl NativeProjectPlan {
         {
             return Ok(sources);
         }
+        // Everything below reaches the network, so the gate is here and not above it: a pinned
+        // checkout already in the verified cache is content this machine has, and an offline host
+        // is entitled to resolve against it. Refusing before that check is what the `Analysis` skip
+        // used to do, and it cost a host the types it had already acquired.
+        Fetch::admit(fetcher, &ExternalLocator::new(git.git.clone()))?;
         let temporary =
             tempfile::tempdir().map_err(|error| format!("creating checkout: {error}"))?;
         let checkout = temporary.path().join("checkout");

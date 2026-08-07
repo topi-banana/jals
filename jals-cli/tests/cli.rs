@@ -1,6 +1,7 @@
 //! Integration tests driving the built `jals` binary.
 
-#[cfg(unix)]
+// Ungated since `lint_reads_stdin` writes to the child's stdin on every platform. The gate this
+// import used to carry was for the `#[cfg(unix)]` build-script tests, which were its only readers.
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -1603,6 +1604,250 @@ fn lint_features_flag_selects_cfg_analysis() {
             || stderr.contains("unknown attribute `derive`"),
         "stdout: {stdout}\nstderr: {stderr}"
     );
+}
+
+// --- `jals lint` goes through the canonical diagnostics assembly --------------------------------
+//
+// `jals lint` used to sequence the lint engine itself, so it saw neither unresolved names, nor the
+// `type-mismatch` suppression a broken parse needs, nor `cfg` hints. It now calls the same
+// `jals_editor::FileDiagnostics` assembly the language server and the playground reach through
+// `Editor`. Reporting unresolved names is the point of that move, and it is also what makes the
+// *index* load-bearing: the run reports on the files it was given, but it has to resolve against
+// the whole project, or every name declared elsewhere reads as unknown.
+
+/// Write `text` to `<dir>/src/main/java/com/example/<name>.java` and return its path.
+fn example_source(dir: &Path, name: &str, text: &str) -> PathBuf {
+    let src = host_join(dir, "src/main/java/com/example");
+    std::fs::create_dir_all(&src).unwrap();
+    let path = src.join(format!("{name}.java"));
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+#[test]
+fn lint_resolves_sibling_types_from_the_project_index() {
+    // The regression this whole change turns on: linting one file must not report every type the
+    // rest of the project declares as unresolvable.
+    let dir = project("[package]\nname = \"siblings\"\n");
+    example_source(
+        dir.path(),
+        "Helper",
+        "package com.example;\npublic class Helper {}\n",
+    );
+    let main = example_source(
+        dir.path(),
+        "Main",
+        "package com.example;\npublic class Main { Helper h; }\n",
+    );
+
+    let (stdout, stderr, code) = run_full(&["lint", main.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        !stderr.contains("cannot resolve"),
+        "a sibling the caller did not name is still a project file: {stderr}"
+    );
+}
+
+#[test]
+fn lint_resolves_types_from_a_path_dependency() {
+    // A `path` dependency's sources are a typing authority, not a navigation convenience. The
+    // analysis inputs policy withheld them until this change, which made every reference into a
+    // dependency an unresolved name the moment `jals lint` started reporting those.
+    let dir = project("[package]\nname = \"root\"\n[dependencies]\nlib = { path = \"lib\" }\n");
+    let lib = host_join(dir.path(), "lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    std::fs::write(lib.join("jals.toml"), "[package]\nname = \"lib\"\n").unwrap();
+    example_source(&lib, "Lib", "package com.example;\npublic class Lib {}\n");
+    let main = example_source(
+        dir.path(),
+        "Main",
+        "package com.example;\npublic class Main { Lib l; }\n",
+    );
+
+    let (stdout, stderr, code) = run_full(&["lint", main.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        !stderr.contains("cannot resolve"),
+        "a `path` dependency's types resolve: {stderr}"
+    );
+}
+
+#[test]
+fn lint_reports_a_genuinely_unresolvable_type() {
+    let dir = project("[package]\nname = \"unknowns\"\n");
+    let main = example_source(
+        dir.path(),
+        "Main",
+        "package com.example;\npublic class Main { Nope n; }\n",
+    );
+
+    let (stdout, stderr, code) = run_full(&["lint", main.to_str().unwrap()]);
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("cannot resolve symbol `Nope`"),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+#[test]
+fn lint_reports_only_the_named_files() {
+    // The index spans the project; the report does not. A finding in a file the caller did not
+    // name is not this run's business.
+    let dir = project("[package]\nname = \"scoped\"\n");
+    example_source(
+        dir.path(),
+        "Helper",
+        "package com.example;\nimport java.util.*;\npublic class Helper {}\n",
+    );
+    let main = example_source(
+        dir.path(),
+        "Main",
+        "package com.example;\npublic class Main { Helper h; }\n",
+    );
+
+    let (stdout, stderr, code) = run_full(&["lint", main.to_str().unwrap()]);
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        !stdout.contains("wildcard-import") && !stderr.contains("wildcard-import"),
+        "an unnamed file's findings are not reported: {stdout}{stderr}"
+    );
+}
+
+#[test]
+fn lint_accepts_a_source_root_and_reports_each_file_once() {
+    // Naming the source root makes the reported set cover the project's own sources, which is the
+    // case where the two sets overlap. Whether the overlap is deduplicated is pinned directly by
+    // `a_named_file_is_not_indexed_again_as_a_project_source` — a duplicate declaration has no
+    // downstream symptom to assert on here, because two identical declarations resolve the same.
+    let dir = project("[package]\nname = \"whole\"\n");
+    example_source(
+        dir.path(),
+        "Helper",
+        "package com.example;\npublic class Helper {}\n",
+    );
+    example_source(
+        dir.path(),
+        "Main",
+        "package com.example;\nimport java.util.*;\npublic class Main { Helper h; }\n",
+    );
+    let root = host_join(dir.path(), "src/main/java");
+
+    let (_, stderr, code) = run_full(&["lint", root.to_str().unwrap()]);
+    assert_eq!(code, 1, "the wildcard import is the one finding: {stderr}");
+    assert!(
+        !stderr.contains("cannot resolve"),
+        "a file indexed twice would not stop resolving, but a duplicate declaration is the \
+         failure this guards: {stderr}"
+    );
+    assert_eq!(
+        stderr.matches("wildcard-import").count(),
+        1,
+        "one finding, reported once: {stderr}"
+    );
+}
+
+#[test]
+fn lint_suppresses_resolution_passes_on_a_broken_parse() {
+    // A broken tree yields spurious unknowns and type noise, so the assembly forces
+    // `type-mismatch` off and skips the unresolved pass. `jals lint` used to run neither rule.
+    let dir = project("[package]\nname = \"broken\"\n");
+    let main = example_source(
+        dir.path(),
+        "Main",
+        "package com.example;\npublic class Main { Nope n; int x = \"s\";\n",
+    );
+
+    let (stdout, stderr, code) = run_full(&["lint", main.to_str().unwrap()]);
+    assert_eq!(code, 1, "the syntax error fails the run: {stderr}");
+    assert!(
+        !stderr.contains("cannot resolve") && !stderr.contains("type-mismatch"),
+        "only the syntax errors survive a broken parse: {stdout}{stderr}"
+    );
+}
+
+#[test]
+fn lint_renders_cfg_disabled_regions_as_advice_without_failing() {
+    // A `cfg`-disabled region is a hint: worth printing as advice, not worth failing a run over.
+    let dir = tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("jals.toml"),
+        "[package]\nname = \"hinted\"\nfeatures = [\"attributes\"]\n[features]\nfancy = []\n",
+    )
+    .unwrap();
+    let main = example_source(
+        dir.path(),
+        "Main",
+        "package com.example;\n\
+         public class Main {\n\
+         \x20\x20\x20\x20#[cfg(feature = \"fancy\")]\n\
+         \x20\x20\x20\x20static void go() {}\n\
+         }\n",
+    );
+
+    let (stdout, stderr, code) = run_full(&["lint", main.to_str().unwrap()]);
+    assert_eq!(code, 0, "a hint is not a problem: {stdout}{stderr}");
+    assert!(
+        stderr.contains("disabled by `cfg`"),
+        "the disabled region is still worth saying: {stdout}{stderr}"
+    );
+}
+
+#[test]
+fn lint_does_not_call_an_uncached_dependency_type_unresolved() {
+    // `jals lint` never fetches, so a dependency this machine has not built is a jar the classpath
+    // does not have. Reporting unresolved names could have made that one warning into one error per
+    // reference; it does not, because an imported name is not one the resolver calls unknown. What
+    // the run says about it is the refusal itself — rendered whole, so it names the locator.
+    //
+    // Hermetic: the fetch is refused by the offline policy before any request is made.
+    let dir = project(
+        "[package]\nname = \"uncached\"\n\
+         [dependencies]\nlib = { jar = \"https://example.invalid/lib.jar\" }\n",
+    );
+    let main = example_source(
+        dir.path(),
+        "Main",
+        "package com.example;\nimport com.example.lib.Thing;\n\
+         public class Main { Thing t; Bare b; }\n",
+    );
+
+    let (stdout, stderr, code) = run_full(&["lint", main.to_str().unwrap()]);
+    assert!(
+        stderr.contains("not fetched while offline") && stderr.contains("https://example.invalid"),
+        "the refusal names its locator: {stderr}"
+    );
+    assert!(
+        !stderr.contains("cannot resolve symbol `Thing`"),
+        "an imported type is not an unresolved name: {stdout}{stderr}"
+    );
+    assert_eq!(code, 1, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("cannot resolve symbol `Bare`"),
+        "a genuinely unknown name still is: {stdout}{stderr}"
+    );
+}
+
+#[test]
+fn lint_reads_stdin() {
+    let mut child = jals()
+        .arg("lint")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"import java.util.*;\nclass C {}\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+
+    assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
+    assert!(stderr.contains("wildcard-import"), "stderr: {stderr}");
+    assert!(stderr.contains("<stdin>"), "stderr: {stderr}");
 }
 
 // --- `jalsfmt.toml` migration ----------------------------------------------------------------

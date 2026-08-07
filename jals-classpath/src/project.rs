@@ -20,6 +20,21 @@ use crate::{
     RemapDirection, RemapRequest, SkeletonGroup, Warning, WarningOrigin,
 };
 
+/// Which inputs an assembly reads out of a plan.
+///
+/// The four things a plan can yield split along one axis. A **typing authority** defines types a
+/// consumer's own code names — the classpath `.class` and a `git`/`path` dependency's `.java`. A
+/// **navigation artifact** never defines anything the classpath does not already define; it exists
+/// so a reader can open the real source behind a type — a `-sources.jar`, a published navigation
+/// tree, a synthesized skeleton.
+///
+/// - [`Analysis`](Self::Analysis): every typing authority, no navigation artifact. What a
+///   diagnostics pass needs — it resolves names and never opens a library file. Dropping a typing
+///   authority here does not make the pass cheaper, it makes it *wrong*: the types go unresolved
+///   and every reference to one is reported as unknown.
+/// - [`Compile`](Self::Compile): the sources a backend compiles. No classpath load, because the
+///   caller hands the jars to the compiler rather than decoding them.
+/// - [`Editor`](Self::Editor): everything. An editor both resolves and navigates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProjectInputOptions {
     Analysis,
@@ -164,8 +179,12 @@ impl ProjectInputs {
 
         let exec = storage.exec().clone();
         let view = storage.view();
+        // The first and last columns are navigation artifacts, the middle two are typing
+        // authorities — see [`ProjectInputOptions`]. `Analysis` takes both authorities and neither
+        // artifact; it read only the classpath until a diagnostics pass that reports unresolved
+        // names showed what the missing half costs.
         let (want_sources, want_source_deps, want_classes, want_skeletons) = match options {
-            Analysis => (false, false, true, false),
+            Analysis => (false, true, true, false),
             Compile => (false, true, false, false),
             Editor => (true, true, true, true),
         };

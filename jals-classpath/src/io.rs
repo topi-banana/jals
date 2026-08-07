@@ -130,7 +130,13 @@ impl Fetch {
     ///
     /// The refusal names no locator: every caller attributes it to a `WarningOrigin::External` or
     /// restates the locator itself, and a warning carries its subject in its origin, never twice.
-    fn admit<F: Fetcher>(fetcher: &F, locator: &ExternalLocator) -> Result<(), String> {
+    ///
+    /// `pub(crate)` because not every acquisition this crate performs is a byte fetch through the
+    /// [`Fetcher`]: a `git` dependency is cloned by a subprocess. The bytes do not come through the
+    /// capability, but **the network access does**, so the same gate has to answer — and it answers
+    /// here rather than at that call site, because a second acquisition path deciding for itself is
+    /// how a second policy grows.
+    pub(crate) fn admit<F: Fetcher>(fetcher: &F, locator: &ExternalLocator) -> Result<(), String> {
         if fetcher.network().admits(locator) {
             return Ok(());
         }
