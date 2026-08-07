@@ -1279,10 +1279,8 @@ impl App {
             None,
         );
         Reporter::report_project(&reported, None);
-        if reported
-            .iter()
-            .any(|diagnostic| diagnostic.severity == jals_project::ProjectDiagnosticSeverity::Error)
-        {
+        // What "could not be assembled" means is the assembly's, not a severity test spelled here.
+        if jals_project::ProjectDiagnostics::has_errors(&reported) {
             // No outer phrase and no restated detail: every failure has just been reported in full,
             // and repeating one here would print it twice under two different leads.
             return Err(anyhow!("the project could not be assembled"));

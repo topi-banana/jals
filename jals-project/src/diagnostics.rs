@@ -31,9 +31,11 @@
 //!    including the classpath input warnings a host reading `warnings` alone used to drop.
 //! 3. **The offline advisory.** When a resolved graph's messages report a refusal by an offline
 //!    fetch capability, one [`DependencyCache`](ProjectDiagnosticCode::DependencyCache)
-//!    informational diagnostic states that condition — and only the condition. The remedy belongs
-//!    to the host: `jals build` populates the verified cache, which is something a browser cannot
-//!    run and the CLI already is.
+//!    informational diagnostic states that condition — and only the condition. The sentence that
+//!    clears it is [`ProjectDiagnosticCode::remedy`], beside the code rather than inside the
+//!    message, so a channel with somewhere to put a follow-on line puts it there and one without
+//!    appends it. Whether a host offers it at all is still the host's — a browser tab has no
+//!    `jals build` to name.
 //!
 //! **Severity** is decided once, here.
 //!
@@ -48,6 +50,16 @@
 //! and running it here is why no `ProjectDiagnostic` names a `BuildScriptPosition`. (A
 //! [`ScriptOutcome`] does, transitively, through the error it borrows — the rule is about the value
 //! a host maps, not about the input this assembly reads.)
+//!
+//! **Placement.** Most of what this reports has no span — a dependency failure has no location in
+//! the consumer's tree — so a channel that must name one has to invent a place to put it.
+//! [`ProjectDiagnostic::placement_in`] is that place: the span when there is one, the first line of
+//! the anchor's own text otherwise. Two hosts used to answer it differently, and one of the two
+//! answers left the `\r` of a CRLF line inside the range. A channel that *can* say "no location" —
+//! a terminal line — reads [`span`](ProjectDiagnostic::span) instead and never asks. Which document
+//! a diagnostic goes *to* is still the host's: routing an anchor to a URI, a Monaco model, or an
+//! `ariadne` source is its own map, and picking the text through that map is what satisfies
+//! `placement_in`'s precondition without a second test beside it.
 //!
 //! **Rendering.** [`GraphWarning`], [`jals_classpath::Warning`],
 //! [`ProjectAssemblyError`](crate::ProjectAssemblyError), and [`GraphError`] render through their
@@ -145,7 +157,8 @@ pub enum ProjectDiagnosticCode {
     DependencyAssembly,
     /// A classpath input could not be resolved, loaded, or generated.
     ClasspathInput,
-    /// Dependencies are declared but not in the verified cache. Advisory; the remedy is the host's.
+    /// Dependencies are declared but not in the verified cache. Advisory; the sentence that clears
+    /// it is [`remedy`](Self::remedy), and whether a host can offer it is the host's.
     DependencyCache,
     /// A `[dependencies]` entry is not usable as declared.
     DependencyInvalid,
@@ -176,6 +189,38 @@ impl ProjectDiagnosticCode {
             Self::DependencyCycle => "dependency-cycle",
             Self::DependencyBuildScript => "dependency-build-script",
             Self::DependencyAcquisition => "dependency-acquisition",
+        }
+    }
+
+    /// What a host with a command line can tell a reader to run about this condition.
+    ///
+    /// Here rather than in each host for the same reason [`ProjectDiagnosticSeverity::lead`] is:
+    /// two hosts spelling one sentence is how the two sentences drift, and which code carries one
+    /// becomes an arm the compiler checks against this list rather than a comparison repeated in
+    /// three places. *Offering* the sentence stays the host's, as does saying why that particular
+    /// host is not running the command itself.
+    ///
+    /// Exhaustive on purpose, so a new code has to say whether a command clears it rather than
+    /// inherit whichever answer a wildcard happened to give.
+    pub const fn remedy(self) -> Option<&'static str> {
+        match self {
+            // A build is what populates the verified cache, whichever host says so: `jals lint`
+            // never fetches, and a `jals build --offline` that hit this wants the run without the
+            // flag.
+            Self::DependencyCache => Some("run `jals build` to fetch them"),
+            // Everything else is cleared by editing the project. There is no command to name.
+            Self::ProjectManifest
+            | Self::ProjectStorage
+            | Self::ProjectAssembly
+            | Self::BuildScript
+            | Self::DependencyResolution
+            | Self::DependencyAssembly
+            | Self::ClasspathInput
+            | Self::DependencyInvalid
+            | Self::DependencyManifest
+            | Self::DependencyCycle
+            | Self::DependencyBuildScript
+            | Self::DependencyAcquisition => None,
         }
     }
 
@@ -213,9 +258,32 @@ pub struct ProjectDiagnostic {
     pub severity: ProjectDiagnosticSeverity,
     /// The producing part of the procedure.
     pub code: ProjectDiagnosticCode,
-    /// The condition. No remedy, and no severity restated — both are the host's to add, from
-    /// [`severity`](Self::severity) and its own channel.
+    /// The condition. No remedy and no severity restated — a host adds the first from
+    /// [`ProjectDiagnosticCode::remedy`] and the second from [`severity`](Self::severity), each in
+    /// whatever shape its own channel has for one.
     pub message: String,
+}
+
+impl ProjectDiagnostic {
+    /// Where this goes on a channel that cannot express "no location": the [`span`](Self::span)
+    /// when the procedure resolved one, and the first line of `text` otherwise.
+    ///
+    /// `text` must be the text of this diagnostic's own [`anchor`](Self::anchor) — the same
+    /// precondition `ScriptFile` guards on the way *in*, since resolving against the wrong file's
+    /// text is a silently wrong answer rather than a missing one. Taking the text as an argument
+    /// rather than reaching for it is what lets a host that holds no text at all decline this and
+    /// keep its own channel's answer.
+    pub fn placement_in(&self, text: &str) -> Range<usize> {
+        /// The first line of `text`, with the terminator excluded and the `\r` of a `\r\n` with
+        /// it: a range ending on the `\r` highlights a character the reader cannot see. An empty
+        /// text gives `0..0`, which every channel renders as a caret at the head of the file.
+        fn first_line(text: &str) -> Range<usize> {
+            let end = text.find('\n').unwrap_or(text.len());
+            0..text[..end].trim_end_matches('\r').len()
+        }
+
+        self.span.clone().unwrap_or_else(|| first_line(text))
+    }
 }
 
 /// The configured build script, as a host holds it.
@@ -345,6 +413,21 @@ impl ProjectDiagnostics {
         // Stable, so the production order survives inside each group.
         out.sort_by(|a, b| a.anchor.cmp(&b.anchor));
         out
+    }
+
+    /// Whether the project could not be assembled as it is declared — the gate a host that has to
+    /// stop applies before it goes on.
+    ///
+    /// Here rather than in each host because "could not be assembled" is a statement about
+    /// [`ProjectDiagnosticSeverity::Error`], and a host that spells the test itself is a host that
+    /// will still be spelling the old one when this vocabulary grows. A host that keeps working
+    /// over a broken project reads this and does nothing with it: a language server whose whole
+    /// value is being useful *while* the project is wrong publishes the errors and loads anyway,
+    /// which is a decision about that host and not about the diagnostics.
+    pub fn has_errors(diagnostics: &[ProjectDiagnostic]) -> bool {
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.severity == ProjectDiagnosticSeverity::Error)
     }
 
     /// The anchor a script diagnostic takes when it has nothing narrower to point at: the script
@@ -553,8 +636,46 @@ mod tests {
     use super::*;
     use crate::graph::CycleEdge;
 
+    /// Every code, so a test about *all* of them cannot silently stop covering one. Two tests read
+    /// it, and a new variant fails to compile until it is listed.
+    const EVERY_CODE: [ProjectDiagnosticCode; 13] = [
+        ProjectDiagnosticCode::ProjectManifest,
+        ProjectDiagnosticCode::ProjectStorage,
+        ProjectDiagnosticCode::ProjectAssembly,
+        ProjectDiagnosticCode::BuildScript,
+        ProjectDiagnosticCode::DependencyResolution,
+        ProjectDiagnosticCode::DependencyAssembly,
+        ProjectDiagnosticCode::ClasspathInput,
+        ProjectDiagnosticCode::DependencyCache,
+        ProjectDiagnosticCode::DependencyInvalid,
+        ProjectDiagnosticCode::DependencyManifest,
+        ProjectDiagnosticCode::DependencyCycle,
+        ProjectDiagnosticCode::DependencyBuildScript,
+        ProjectDiagnosticCode::DependencyAcquisition,
+    ];
+
     fn key(path: &str) -> FileKey {
         FileKey::parse(path).expect("test path is a portable file key")
+    }
+
+    /// A diagnostic carrying `span` and `severity`, with the rest of the shape irrelevant to both
+    /// the placement rule and the error gate.
+    fn shaped(
+        span: Option<Range<usize>>,
+        severity: ProjectDiagnosticSeverity,
+    ) -> ProjectDiagnostic {
+        ProjectDiagnostic {
+            anchor: ProjectAnchor::Manifest,
+            span,
+            severity,
+            code: ProjectDiagnosticCode::DependencyResolution,
+            message: String::new(),
+        }
+    }
+
+    /// The same, at the severity placement does not care about.
+    fn placed(span: Option<Range<usize>>) -> ProjectDiagnostic {
+        shaped(span, ProjectDiagnosticSeverity::Warning)
     }
 
     /// The assembly under one outcome pair, with no script file configured.
@@ -783,7 +904,7 @@ mod tests {
     }
 
     #[test]
-    fn an_offline_refusal_adds_one_advisory_carrying_no_remedy() {
+    fn an_offline_refusal_adds_one_advisory_that_does_not_restate_its_remedy() {
         let inputs = vec![
             Warning::new(
                 WarningOrigin::Skeleton,
@@ -803,9 +924,11 @@ mod tests {
             .collect();
         assert_eq!(advisories.len(), 1, "two refusals, one advisory");
         assert_eq!(advisories[0].severity, ProjectDiagnosticSeverity::Info);
-        // The condition only. This crate does not know that `jals build` is something a browser
-        // could not run.
+        // The message states the condition and nothing else. The sentence that clears it travels
+        // beside the code, so a host appending it never says it twice — and a host that cannot run
+        // it (a browser tab has no `jals build`) simply does not ask for it.
         assert!(!advisories[0].message.contains("jals build"));
+        assert!(advisories[0].code.remedy().is_some());
     }
 
     #[test]
@@ -868,25 +991,62 @@ mod tests {
     fn every_code_has_a_distinct_wire_spelling() {
         // A host carries the code as a string; two arms sharing one spelling would silently merge
         // two conditions a client can filter on.
-        let codes = [
-            ProjectDiagnosticCode::ProjectManifest,
-            ProjectDiagnosticCode::ProjectStorage,
-            ProjectDiagnosticCode::ProjectAssembly,
-            ProjectDiagnosticCode::BuildScript,
-            ProjectDiagnosticCode::DependencyResolution,
-            ProjectDiagnosticCode::DependencyAssembly,
-            ProjectDiagnosticCode::ClasspathInput,
-            ProjectDiagnosticCode::DependencyCache,
-            ProjectDiagnosticCode::DependencyInvalid,
-            ProjectDiagnosticCode::DependencyManifest,
-            ProjectDiagnosticCode::DependencyCycle,
-            ProjectDiagnosticCode::DependencyBuildScript,
-            ProjectDiagnosticCode::DependencyAcquisition,
-        ];
-        let mut spellings: Vec<&str> = codes.iter().map(|code| code.as_str()).collect();
+        let mut spellings: Vec<&str> = EVERY_CODE.iter().map(|code| code.as_str()).collect();
         spellings.sort_unstable();
         let count = spellings.len();
         spellings.dedup();
         assert_eq!(spellings.len(), count);
+    }
+
+    #[test]
+    fn only_the_dependency_cache_advisory_names_a_command() {
+        // Every other condition is cleared by editing the project, so naming a command for one
+        // would tell a reader to run something that cannot help.
+        let with_remedy: Vec<_> = EVERY_CODE
+            .iter()
+            .filter(|code| code.remedy().is_some())
+            .collect();
+        assert_eq!(with_remedy, [&ProjectDiagnosticCode::DependencyCache]);
+        assert_eq!(
+            ProjectDiagnosticCode::DependencyCache.remedy(),
+            Some("run `jals build` to fetch them")
+        );
+    }
+
+    #[test]
+    fn a_span_less_diagnostic_is_placed_on_the_first_line_of_its_anchor() {
+        // The one answer two hosts used to give differently. The CRLF case is the reason it is
+        // worth having one: a range ending on the `\r` highlights a character nobody can see.
+        for (text, expected) in [
+            ("[package]\nname = \"a\"\n", 0..9),
+            ("[package]\r\nname = \"a\"\r\n", 0..9),
+            ("only line, no terminator", 0..24),
+            ("", 0..0),
+            ("\n", 0..0),
+        ] {
+            assert_eq!(placed(None).placement_in(text), expected, "text: {text:?}");
+        }
+    }
+
+    #[test]
+    fn a_positioned_diagnostic_is_placed_at_its_span() {
+        // A resolved span is the narrowest thing known, so the text is not consulted at all — not
+        // even to clamp, which is `LineIndex`'s job in whichever coordinates the host wants.
+        assert_eq!(
+            placed(Some(11..15)).placement_in("[package]\nname\n"),
+            11..15
+        );
+        assert_eq!(placed(Some(11..15)).placement_in(""), 11..15);
+    }
+
+    #[test]
+    fn only_an_error_makes_a_project_unassemblable() {
+        let warning = shaped(None, ProjectDiagnosticSeverity::Warning);
+        let info = shaped(None, ProjectDiagnosticSeverity::Info);
+        let error = shaped(None, ProjectDiagnosticSeverity::Error);
+
+        assert!(!ProjectDiagnostics::has_errors(&[]));
+        assert!(!ProjectDiagnostics::has_errors(&[warning.clone(), info]));
+        assert!(ProjectDiagnostics::has_errors(&[warning, error]));
     }
 }

@@ -70,6 +70,10 @@ impl ConfigKind {
     ///
     /// The manifest is where the procedure's dependency half lands, and the script where its own
     /// half does. `jalsfmt.toml` is not part of project assembly, so nothing anchors to it.
+    ///
+    /// Being the map from anchor to model is also what makes a marker's range come from the right
+    /// buffer: `config_marker_entries` places against `config_src(kind)`, and only what this admits
+    /// gets there.
     const fn holds(self, anchor: &ProjectAnchor) -> bool {
         matches!(
             (self, anchor),
@@ -685,40 +689,9 @@ impl App {
     /// model is how a script diagnostic and a config parse error used to erase each other whenever
     /// `build.rhai` happened to be the open editor.
     fn repaint_config_model(&self, kind: ConfigKind) {
-        /// The first line — where a diagnostic with no span goes, there being nothing narrower in
-        /// this file to point at.
-        fn first_line(text: &str) -> Range<usize> {
-            0..text.find('\n').unwrap_or(text.len())
-        }
-
         let text = self.config_src(kind);
-        // Gathered first because a `Marker` borrows its message and these come from two places.
-        let mut entries: Vec<(Range<usize>, jals_editor::DiagnosticSeverity, &str)> = Vec::new();
         let errors = self.config_errors.borrow();
-        if let Some(ConfigParseError { span, message }) = errors.get(&kind) {
-            entries.push((
-                span.clone().unwrap_or_else(|| first_line(text)),
-                jals_editor::DiagnosticSeverity::Error,
-                message.as_str(),
-            ));
-        }
-        for diagnostic in &self.project_diagnostics {
-            if !kind.holds(&diagnostic.anchor) {
-                continue;
-            }
-            entries.push((
-                diagnostic.span.clone().unwrap_or_else(|| first_line(text)),
-                match diagnostic.severity {
-                    ProjectDiagnosticSeverity::Error => jals_editor::DiagnosticSeverity::Error,
-                    ProjectDiagnosticSeverity::Warning => jals_editor::DiagnosticSeverity::Warning,
-                    // Monaco's own Info is 2, but a marker's severity is typed on the editor's
-                    // three-arm vocabulary. `Hint` renders faintly, which is why the offline
-                    // advisory also stays in the status line.
-                    ProjectDiagnosticSeverity::Info => jals_editor::DiagnosticSeverity::Hint,
-                },
-                diagnostic.message.as_str(),
-            ));
-        }
+        let entries = self.config_marker_entries(kind, errors.get(&kind));
         // Published even when empty: an empty marker set is what clears a previous run's.
         let index = jals_editor::LineIndex::new(text);
         let markers: Vec<_> = entries
@@ -741,6 +714,63 @@ impl App {
             })
             .collect();
         monaco::Marker::set_diagnostics_for(kind.path(), markers);
+    }
+
+    /// What `kind`'s model should be marked with: its parse error, if any, then every project
+    /// diagnostic anchored to it, each already placed and graded.
+    ///
+    /// Split out of [`repaint_config_model`](Self::repaint_config_model) because that function ends
+    /// in a Monaco binding and cannot run on the host, while *this* — which range each entry gets
+    /// and which severity — is the part worth pinning. The same split `compile.rs` makes for the
+    /// build pipeline.
+    fn config_marker_entries<'a>(
+        &'a self,
+        kind: ConfigKind,
+        parse_error: Option<&'a ConfigParseError>,
+    ) -> Vec<(Range<usize>, jals_editor::DiagnosticSeverity, &'a str)> {
+        /// The first line — where *this editor's own* config parse error goes when the TOML parser
+        /// reported no span.
+        ///
+        /// A `ConfigParseError` is not a `ProjectDiagnostic`, so it cannot go through
+        /// `ProjectDiagnostic::placement_in`; this mirrors that rule rather than sharing it, `\r`
+        /// trim included, because two answers to "where does a span-less thing go" a few lines
+        /// apart in one function is exactly what moving the other one out was for.
+        fn first_line(text: &str) -> Range<usize> {
+            let end = text.find('\n').unwrap_or(text.len());
+            0..text[..end].trim_end_matches('\r').len()
+        }
+
+        let text = self.config_src(kind);
+        // Gathered rather than mapped straight to markers because a `Marker` borrows its message and
+        // these come from two places.
+        let mut entries = Vec::new();
+        if let Some(ConfigParseError { span, message }) = parse_error {
+            entries.push((
+                span.clone().unwrap_or_else(|| first_line(text)),
+                jals_editor::DiagnosticSeverity::Error,
+                message.as_str(),
+            ));
+        }
+        for diagnostic in &self.project_diagnostics {
+            if !kind.holds(&diagnostic.anchor) {
+                continue;
+            }
+            entries.push((
+                // A marker has to name a range; `holds` above is what makes `text` this
+                // diagnostic's own anchor.
+                diagnostic.placement_in(text),
+                match diagnostic.severity {
+                    ProjectDiagnosticSeverity::Error => jals_editor::DiagnosticSeverity::Error,
+                    ProjectDiagnosticSeverity::Warning => jals_editor::DiagnosticSeverity::Warning,
+                    // Monaco's own Info is 2, but a marker's severity is typed on the editor's
+                    // three-arm vocabulary. `Hint` renders faintly, which is why the offline
+                    // advisory also stays in the status line.
+                    ProjectDiagnosticSeverity::Info => jals_editor::DiagnosticSeverity::Hint,
+                },
+                diagnostic.message.as_str(),
+            ));
+        }
+        entries
     }
 
     /// Parse `jalsfmt.toml` text into the shared formatter [`Config`] and repaint the config editor's
@@ -1028,10 +1058,9 @@ impl App {
             GraphOutcome::Resolved(assembly.report()),
             None,
         );
-        if diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.severity == ProjectDiagnosticSeverity::Error)
-        {
+        // The browser was asked to produce a classpath, so an error stops it. What "error" means is
+        // the assembly's, not a severity test spelled here.
+        if ProjectDiagnostics::has_errors(&diagnostics) {
             return Err(Self::status_line(&diagnostics));
         }
         let inputs = assembly.inputs;
@@ -1474,6 +1503,11 @@ impl Component for App {
                         // The graph phase's diagnostics replace the previous graph phase's while
                         // leaving the script phase's in place: both are anchored, and each anchor
                         // has one producer.
+                        //
+                        // The retain is *unconditional* — driven by the anchor this phase owns, not
+                        // by what arrived. That is what clears the previous run's manifest markers
+                        // when this run had nothing to say; deriving the set from `resolution`
+                        // instead would leave a resolved project wearing a failed one's warnings.
                         self.project_diagnostics
                             .retain(|diagnostic| diagnostic.anchor != ProjectAnchor::Manifest);
                         self.project_diagnostics.extend(resolution.diagnostics);
@@ -1733,6 +1767,53 @@ mod tests {
             jals_build::RunTarget::resolve(&manifest, None),
             Ok("com.example.Main")
         );
+    }
+
+    /// Two things a marker needs that a `ProjectDiagnostic` may not carry: a range, and a severity
+    /// in this editor's vocabulary. The range comes from the placement rule, so a diagnostic with no
+    /// span still lands somewhere a reader can see — the first line of the model it is anchored to,
+    /// and that model only.
+    #[test]
+    fn a_span_less_project_diagnostic_marks_the_first_line_of_its_own_model() {
+        let mut app = App::initial();
+        app.manifest_src = "[package]\r\nname = \"playground\"\r\n".to_owned();
+        app.build_src = "build.error(\"boom\");\n".to_owned();
+        let script = FileKey::parse(BUILD_SCRIPT_PATH).expect("script pseudo-path is valid");
+        app.project_diagnostics = vec![
+            ProjectDiagnostic {
+                anchor: ProjectAnchor::Manifest,
+                span: None,
+                severity: ProjectDiagnosticSeverity::Info,
+                code: jals_project::ProjectDiagnosticCode::DependencyCache,
+                message: "some dependencies are not in the verified cache".to_owned(),
+            },
+            ProjectDiagnostic {
+                anchor: ProjectAnchor::Script(script),
+                span: None,
+                severity: ProjectDiagnosticSeverity::Error,
+                code: jals_project::ProjectDiagnosticCode::BuildScript,
+                message: "boom".to_owned(),
+            },
+        ];
+
+        // The manifest model gets the manifest-anchored one, on its first line — and the `\r` of a
+        // CRLF buffer stays out of the range rather than being drawn as a character.
+        assert_eq!(
+            app.config_marker_entries(ConfigKind::Manifest, None),
+            [(
+                0..9,
+                jals_editor::DiagnosticSeverity::Hint,
+                "some dependencies are not in the verified cache",
+            )]
+        );
+        // The script model gets the script-anchored one, placed against *its* buffer. Neither model
+        // shows the other's, which is what makes placing against `config_src(kind)` sound.
+        assert_eq!(
+            app.config_marker_entries(ConfigKind::Script, None),
+            [(0..20, jals_editor::DiagnosticSeverity::Error, "boom")]
+        );
+        // Nothing anchors to `jalsfmt.toml`; it is not part of project assembly.
+        assert!(app.config_marker_entries(ConfigKind::Fmt, None).is_empty());
     }
 
     /// The span the assembly resolved, converted into Monaco's one-based UTF-16 coordinates —
