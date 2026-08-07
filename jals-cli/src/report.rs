@@ -7,9 +7,7 @@ use std::ops::Range;
 use ariadne::{Color, Config, IndexType, Label, Report, ReportKind, Source};
 use jals_editor::{DiagnosticSeverity, FileDiagnostic};
 use jals_fmt::FormatOutput;
-use jals_project::{
-    ProjectAnchor, ProjectDiagnostic, ProjectDiagnosticCode, ProjectDiagnosticSeverity,
-};
+use jals_project::{ProjectAnchor, ProjectDiagnostic, ProjectDiagnosticSeverity};
 use similar::{ChangeTag, TextDiff};
 
 const RESET: &str = "\x1b[0m";
@@ -143,6 +141,10 @@ impl Reporter {
     /// dependency failure names a node, not a file here — so it follows the CLI's plain
     /// `error:` / `warning:` / `note:` convention, the same rule
     /// [`report_format_warnings`](Self::report_format_warnings) applies to a range-less warning.
+    ///
+    /// This host reads [`ProjectDiagnostic::span`] rather than `placement_in`: a terminal line can
+    /// say "no location", so a diagnostic that has none gets none. Pointing `ariadne` at the head
+    /// of `jals.toml` instead would draw a caret at a place a dependency failure is not.
     pub(crate) fn report_project(diagnostics: &[ProjectDiagnostic], script: Option<(&str, &str)>) {
         let mut doc = script.map(|(label, src)| Doc::new(label, src));
         for diagnostic in diagnostics {
@@ -170,12 +172,10 @@ impl Reporter {
                     // does not say whether the build script or the dependency graph said so. This
                     // is the same code `ariadne` prints for the arm above.
                     eprintln!("{lead}[{}]: {}", diagnostic.code, diagnostic.message);
-                    if diagnostic.code == ProjectDiagnosticCode::DependencyCache {
-                        // The assembly states the condition; the remedy is this host's. It is the
-                        // same sentence whichever command reported it: `jals lint` never fetches,
-                        // and a `jals build --offline` that hit this wants the run without the
-                        // flag — both are `jals build`.
-                        eprintln!("note: run `jals build` to fetch them");
+                    // A `note:` line under the diagnostic is this channel's shape for a follow-on,
+                    // the same one a migration note takes.
+                    if let Some(remedy) = diagnostic.code.remedy() {
+                        eprintln!("note: {remedy}");
                     }
                 }
             }

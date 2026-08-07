@@ -1691,12 +1691,19 @@ impl AssembledWorkspace {
     }
 
     /// One [`ProjectDiagnostic`] in this protocol's shape.
-    fn lsp_diagnostic(diagnostic: &ProjectDiagnostic, script_text: Option<&str>) -> Diagnostic {
-        // The anchor gates the conversion, not just the span: `script_text` is the *script's* text,
-        // so converting a manifest-anchored span against it would be a silently wrong range rather
-        // than a missing one. Only `Script` reaches the first arm.
-        let range = match (&diagnostic.anchor, &diagnostic.span, script_text) {
-            (ProjectAnchor::Script(_), Some(span), Some(source)) => {
+    ///
+    /// `anchor_text` is the text of *this diagnostic's own* [`ProjectAnchor`], or `None` when this
+    /// server does not hold that file. The caller picks it through the same match that routes the
+    /// diagnostic to a URI, so the pairing this used to guard on is now structural: there is no
+    /// second place left for a manifest-anchored span to be resolved against the script's text.
+    fn lsp_diagnostic(diagnostic: &ProjectDiagnostic, anchor_text: Option<&str>) -> Diagnostic {
+        // This protocol cannot say "no location", so it always names one. Without the text there is
+        // nothing to convert against at all, and the head of the file is this protocol's own
+        // fallback rather than a placement rule.
+        let range = anchor_text.map_or_else(
+            || Range::new(Position::new(0, 0), Position::new(0, 1)),
+            |source| {
+                let span = diagnostic.placement_in(source);
                 let index = LineIndex::new(source);
                 let start = index.position(source, span.start);
                 let end = index.position(source, span.end);
@@ -1704,11 +1711,8 @@ impl AssembledWorkspace {
                     Position::new(start.line, start.character),
                     Position::new(end.line, end.character),
                 )
-            }
-            // Nothing to point at: a dependency failure has no span in this project's tree. The
-            // client renders it against the head of the file it is anchored to.
-            _ => Range::new(Position::new(0, 0), Position::new(0, 1)),
-        };
+            },
+        );
 
         Diagnostic {
             range,
@@ -1725,16 +1729,18 @@ impl AssembledWorkspace {
                 }
                 .to_owned(),
             ),
-            message: match diagnostic.code {
-                // The assembly states the condition; the remedy is the host's, because `jals build` is
-                // something only a host with a command line can be told to run. This server never
-                // fetches, so saying what does is the whole point of surfacing the condition.
-                ProjectDiagnosticCode::DependencyCache => format!(
-                    "{}; run `jals build` to fetch them (the language server never does)",
-                    diagnostic.message
-                ),
-                _ => diagnostic.message.clone(),
-            },
+            // The parenthetical is this host's, and about this host: it answers "why are you
+            // telling me instead of doing it?", a question a `jals build` reader never asks. One
+            // message string in this protocol, so it goes inline rather than on its own line.
+            message: diagnostic.code.remedy().map_or_else(
+                || diagnostic.message.clone(),
+                |remedy| {
+                    format!(
+                        "{}; {remedy} (the language server never does)",
+                        diagnostic.message
+                    )
+                },
+            ),
             ..Diagnostic::default()
         }
     }
@@ -2029,6 +2035,11 @@ impl AssembledWorkspace {
     ) -> Self {
         // Everything the procedure had to say, ordered and severity-assigned once. What is left
         // here is splitting it by the file it is anchored to, because LSP publishes per URI.
+        //
+        // No `ProjectDiagnostics::has_errors` gate, deliberately, and this is the one host that
+        // has none: the CLI and the browser stop on an error because they were asked to produce
+        // something, and this server was asked to be useful *while* the project is wrong. The
+        // errors are published against their anchors and the workspace loads anyway.
         let assembled = ProjectDiagnostics::assemble(
             script_outcome,
             GraphOutcome::Resolved(assembly.report()),
@@ -2045,11 +2056,19 @@ impl AssembledWorkspace {
                 diagnostic.severity.lead(),
                 diagnostic.message
             );
-            let shaped = Self::lsp_diagnostic(diagnostic, script_text);
-            match diagnostic.anchor {
-                ProjectAnchor::Script(_) => script_diagnostics.push(shaped),
-                ProjectAnchor::Manifest => project_diagnostics.push(shaped),
-            }
+            // One match for both halves of the same question: which URI this is published to, and
+            // whose text it is placed against. Answering them apart is how the placement rule and
+            // the routing rule drifted three hundred lines away from each other.
+            let (anchor_text, bucket) = match diagnostic.anchor {
+                ProjectAnchor::Script(_) => (script_text, &mut script_diagnostics),
+                // No manifest text here, deliberately. This server reads `jals.toml` through
+                // `Manifest::from_file`, which drops it, and the project snapshot captures it only
+                // when a configured build script forces whole-root scoping — so reading it back
+                // would place a manifest diagnostic on its first line in some projects and at the
+                // head of the file in others, for a reason nothing in the manifest states.
+                ProjectAnchor::Manifest => (None, &mut project_diagnostics),
+            };
+            bucket.push(Self::lsp_diagnostic(diagnostic, anchor_text));
         }
 
         let NativeProjectAssembly {
@@ -2705,7 +2724,10 @@ mod tests {
         // Both messages stay bare: the protocol carries the severity in its own field.
         assert_eq!(publications[0].diagnostics[0].message, "generated fallback");
         assert_eq!(publications[0].diagnostics[1].message, "generation failed");
-        // No position reported, so the client places them at the head of the script.
+        // No text supplied here, so there is nothing to place against and this protocol's own
+        // fallback stands. `finish_assembly` does supply it, and the placement rule then puts these
+        // on the script's first line — which is what
+        // `a_positioned_script_failure_points_at_the_line_it_names` covers.
         assert_eq!(
             publications[0].diagnostics[0].range,
             Range::new(Position::new(0, 0), Position::new(0, 1))
@@ -2761,12 +2783,32 @@ mod tests {
             AssembledWorkspace::lsp_diagnostic(&diagnostic, None).range,
             Range::new(Position::new(0, 0), Position::new(0, 1))
         );
+
+        // Span-less but with the text: the placement rule puts it on the anchor's first line, which
+        // is a range a client can actually show. This used to collapse to the same one-character
+        // stub as the no-text case, so `build.error("boom")` and "we could not read the script"
+        // were indistinguishable on screen.
+        let span_less = ProjectDiagnostic {
+            span: None,
+            ..diagnostic
+        };
+        assert_eq!(
+            AssembledWorkspace::lsp_diagnostic(&span_less, Some(source)).range,
+            Range::new(Position::new(0, 0), Position::new(0, 10))
+        );
+        // And the `\r` of a CRLF script stays out of it — highlighting it would draw a character
+        // the author cannot see.
+        assert_eq!(
+            AssembledWorkspace::lsp_diagnostic(&span_less, Some("let a = 1;\r\nlet b = 2;\r\n"))
+                .range,
+            Range::new(Position::new(0, 0), Position::new(0, 10))
+        );
     }
 
     #[test]
     fn the_offline_advisory_gains_this_host_s_remedy() {
-        // The assembly states the condition; naming `jals build` is the server's to add, because
-        // it is the server that never fetches.
+        // The assembly states the condition and owns the sentence that clears it; offering that
+        // sentence, and saying why this server is not the one running it, are the server's.
         let diagnostic = ProjectDiagnostic {
             anchor: ProjectAnchor::Manifest,
             span: None,
@@ -2887,6 +2929,24 @@ mod tests {
                 (
                     "let emoji = \"😀\"; throw \"boom\";\n",
                     Range::new(Position::new(0, 18), Position::new(0, 19)),
+                ),
+                // `build.error` is reported *by* the script rather than thrown by Rhai, so it
+                // carries no position at all. End to end, that lands on the script's first line —
+                // the placement rule running against the text `finish_assembly` supplies. It used
+                // to land on a one-character stub at the head of the file, indistinguishable from a
+                // script this server could not read.
+                (
+                    "build.error(\"boom\");\n",
+                    Range::new(Position::new(0, 0), Position::new(0, 20)),
+                ),
+                // The same script with the line endings a Windows checkout has. The `\r` stays out
+                // of the range: the script is read back verbatim from the project snapshot, so
+                // without the rule the highlight would run one character past what the author can
+                // see. Written through `std::fs::write` rather than a literal in the loop above so
+                // no platform's newline translation can quietly undo the case.
+                (
+                    "build.error(\"boom\");\r\n",
+                    Range::new(Position::new(0, 0), Position::new(0, 20)),
                 ),
             ] {
                 let dir = tempfile::tempdir().unwrap();

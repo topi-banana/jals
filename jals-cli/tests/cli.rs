@@ -1860,6 +1860,15 @@ fn lint_does_not_call_an_uncached_dependency_type_unresolved() {
         stderr.contains("cannot resolve symbol `Bare`"),
         "a genuinely unknown name still is: {stdout}{stderr}"
     );
+    // The advisory states the condition; the sentence that clears it belongs to the code, and this
+    // channel puts it on its own `note:` line under the diagnostic rather than inside the message.
+    // Asserted as two lines because that separation is the whole of what this host adds.
+    assert!(
+        stderr
+            .contains("note[dependency-cache]: some dependencies are not in the verified cache\n")
+            && stderr.contains("note: run `jals build` to fetch them\n"),
+        "the offline advisory carries its remedy on its own line: {stderr}"
+    );
 }
 
 #[test]
