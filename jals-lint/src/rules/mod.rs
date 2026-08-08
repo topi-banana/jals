@@ -83,7 +83,7 @@ impl Finding {
 }
 
 /// Shared message builder for the feature-gated ([`Checker::Gated`]) rules. The feature-gating
-/// itself lives in the rule driver ([`crate::LintOutput::lint_node`]), which runs a gated rule's
+/// itself lives in the rule driver ([`crate::LintOutput::lint`]), which runs a gated rule's
 /// `find` only when the guarded [`Feature`] is absent from the project's feature set, and stamps
 /// this message on each flagged node — so a rule need only carry the detector, not the gate or
 /// the message.
@@ -117,8 +117,9 @@ impl FeatureGate {
 }
 
 /// How a rule is invoked. Most rules need only the CST; resolution-based rules additionally take
-/// the file-local name resolution, which the library computes at most once per lint (see
-/// [`crate::lint_node`]) and shares across every [`Checker::Resolved`] / [`Checker::Indexed`] rule.
+/// the file-local name resolution, which the library computes at most once per lint (or takes from
+/// [`crate::LintRequest::resolved`]) and shares across every [`Checker::Resolved`] /
+/// [`Checker::Indexed`] rule.
 ///
 /// Rule bodies are `async` (their walks tick cooperatively), so each checker is a plain `fn`
 /// pointer returning the boxed future — one box per rule per file, at the table edge.
