@@ -1156,7 +1156,6 @@ dependencies = [
  "jals-lsp",
  "jals-project",
  "jals-storage",
- "jals-syntax",
  "similar",
  "tempfile",
  "zip",

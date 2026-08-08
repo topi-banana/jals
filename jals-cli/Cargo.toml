@@ -39,9 +39,10 @@ jals-config.workspace = true
 # The indexed project and its canonical diagnostics assembly. `jals lint` builds a
 # `jals_editor::Workspace` exactly as the language server and the playground do, so the three
 # hosts cannot disagree about file identity, `#[cfg]` evaluation, ordering, suppression, or which
-# passes run — and this crate names no `jals-hir` symbol as a result. Adds no crate to the build
-# graph (`jals-lsp` already depends on it) and pulls no feature: `jals-editor` is `no_std` and
-# featureless.
+# passes run. The workspace owns the parse and hands back the text with it, so this crate names
+# neither a `jals-hir` nor a `jals-syntax` symbol and depends on neither. Adds no crate to the
+# build graph (`jals-lsp` already depends on it) and pulls no feature: `jals-editor` is `no_std`
+# and featureless.
 jals-editor.workspace = true
 jals-exec = { workspace = true, features = ["tokio"] }
 # `std` for the XML-backed config importers (Eclipse exported profile, IntelliJ code-style
@@ -53,7 +54,6 @@ jals-frontend.workspace = true
 jals-storage = { workspace = true, features = ["std"] }
 jals-lsp.workspace = true
 jals-project = { workspace = true, features = ["native"] }
-jals-syntax.workspace = true
 similar.workspace = true
 
 [dev-dependencies]
