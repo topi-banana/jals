@@ -6,20 +6,25 @@
 //! marker).
 //!
 //! The policy, in order:
-//! 1. **Syntax errors** — always reported, as [`DiagnosticSeverity::Error`] with no code.
-//! 2. **Lint rules** — one pass through the `jals-lint` rule engine. On a clean parse the
-//!    project index (when any) is threaded in, so the index-aware rules (`type-mismatch`,
-//!    `unreported-exception`) check cross-file facts under their configured severities. On a
-//!    broken parse the engine runs file-locally with `type-mismatch` forced off — a broken tree
-//!    yields spurious type noise, never worth reporting.
-//! 3. **Unresolved types** — `cannot resolve symbol` errors from the project index, only on a
-//!    clean parse.
+//! 1. **Syntax errors** — always reported, as [`DiagnosticSeverity::Error`] with no code. They
+//!    belong to the parse rather than to any rule, which is why they are the one thing assembled
+//!    here rather than produced by `jals-lint`.
+//! 2. **`cfg`-disabled regions** — each as a faded hint. Not a finding: nothing is wrong with code
+//!    the current feature selection excludes, so this is a rendering of inactive code and belongs to
+//!    presentation.
+//! 3. **Lint rules** — one pass through the `jals-lint` rule engine, which produces **every**
+//!    semantic diagnostic, `cannot-resolve` included. What a project index adds and what a broken
+//!    parse withholds are decided in that engine, from the [`Parse`] it is handed; this module does
+//!    not edit the configuration it passes down, and names no rule.
+//!
+//! A finding's secondary unnecessary range (the dead branch of a constant `if`) is flattened into
+//! its own hint here, because a protocol carries one range per diagnostic.
 //!
 //! The result is stably sorted by `(range.start, code)` so hosts and tests see one deterministic
 //! order.
 
 use alloc::borrow::ToOwned;
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::ops::Range;
 
@@ -35,8 +40,8 @@ pub enum DiagnosticSeverity {
     Error,
     /// A warn-severity lint finding.
     Warning,
-    /// Supplementary information kept out of the problems list — today only the faded
-    /// dead-branch range of a constant condition.
+    /// Supplementary information kept out of the problems list: a `cfg`-disabled region and the
+    /// faded dead-branch range of a constant condition.
     Hint,
 }
 
@@ -58,8 +63,8 @@ pub struct FileDiagnostic {
     pub range: Range<usize>,
     /// How to present it.
     pub severity: DiagnosticSeverity,
-    /// The producing rule (`wildcard-import`, `type-mismatch`, …) or pass (`cannot-resolve`);
-    /// `None` for a syntax error.
+    /// The producing rule (`wildcard-import`, `type-mismatch`, `cannot-resolve`, …); `None` for a
+    /// syntax error, which belongs to the parse and so has no rule to name.
     pub code: Option<&'static str>,
     /// Human-readable message.
     pub message: String,
@@ -73,10 +78,12 @@ pub struct FileDiagnostics;
 
 impl FileDiagnostics {
     /// Assemble `parse`'s diagnostics under `config` (which already carries the project's
-    /// resolved feature set), threading the project `index` into the index-aware passes.
+    /// resolved feature set), threading the project `index` into the rule engine.
     ///
-    /// `resolved` is the file's local name resolution when the caller has it cached; `None`
-    /// resolves on demand (only needed for the unresolved-types pass).
+    /// `resolved` is the file's local name resolution when the caller has it cached — passed
+    /// straight through, so every resolution-based rule shares it instead of the engine building a
+    /// second copy of what the caller already keeps. It must be the resolution of this `parse` under
+    /// this `cfg` (see [`jals_lint::LintRequest::resolved`]); `None` lets the engine resolve.
     ///
     /// `cfg`, when present, is the file's `#[cfg(...)]` evaluation: lint findings inside a
     /// disabled host are suppressed, each disabled range is reported as an `unnecessary` hint
@@ -90,8 +97,6 @@ impl FileDiagnostics {
         config: &Config,
         cfg: Option<&CfgMap>,
     ) -> Vec<FileDiagnostic> {
-        let root = parse.syntax();
-
         // 1. Syntax errors.
         let mut out: Vec<FileDiagnostic> = parse
             .errors()
@@ -104,9 +109,8 @@ impl FileDiagnostics {
                 unnecessary: false,
             })
             .collect();
-        let clean_parse = out.is_empty();
 
-        // 1b. Each `cfg`-disabled region as a faded-code hint (the structural attribute errors
+        // 2. Each `cfg`-disabled region as a faded-code hint (the structural attribute errors
         // come out of the lint engine below, under the fixed `cfg` rule).
         if let Some(cfg) = cfg {
             for range in cfg.disabled_ranges() {
@@ -120,24 +124,20 @@ impl FileDiagnostics {
             }
         }
 
-        // 2. Lint rules — one engine pass. A broken tree runs file-locally with `type-mismatch`
-        // forced off; a clean tree threads the index in, so the index-aware rules check
-        // cross-file facts under the user's configured severities. The `cfg` map rides along on
-        // both paths, suppressing findings inside disabled hosts.
-        let findings = if clean_parse {
-            jals_lint::LintOutput::lint_parse_with_index(parse, config, index, cfg)
-                .await
-                .diagnostics
-        } else {
-            let mut quiet = config.clone();
-            quiet.rules.insert(
-                jals_lint::TYPE_MISMATCH_RULE.to_owned(),
-                jals_config::Severity::Allow,
-            );
-            jals_lint::LintOutput::lint_parse_with_index(parse, &quiet, None, cfg)
-                .await
-                .diagnostics
-        };
+        // 3. Every semantic diagnostic, from one engine pass. The request carries the parse, so a
+        // broken tree is the engine's decision under its own rule table — this module neither edits
+        // the configuration nor names a rule, so the two cannot disagree.
+        let findings = jals_lint::LintOutput::lint(
+            jals_lint::LintRequest {
+                index,
+                cfg,
+                resolved,
+                ..jals_lint::LintRequest::new(parse)
+            },
+            config,
+        )
+        .await
+        .diagnostics;
         for finding in findings {
             out.push(FileDiagnostic {
                 range: finding.range,
@@ -159,55 +159,8 @@ impl FileDiagnostics {
             }
         }
 
-        // 3. Unresolved type names, from the project index. Suppressed on a broken tree, whose
-        // spurious unknowns would only echo the syntax errors already reported. Reuses the
-        // caller's cached resolution, resolving on demand otherwise.
-        if clean_parse && let Some((index, file)) = index {
-            if let Some(resolved) = resolved {
-                Self::push_unresolved(&mut out, &root, index, file, resolved).await;
-            } else {
-                // Match the caller-cached shape: with a `cfg` map, resolution skips disabled
-                // hosts, so no `cannot-resolve` is reported for a name only disabled code uses.
-                let resolved = match cfg {
-                    Some(cfg) => Resolved::resolve_node_with_cfg(&root, cfg).await,
-                    None => Resolved::resolve_node(&root).await,
-                };
-                Self::push_unresolved(&mut out, &root, index, file, &resolved).await;
-            }
-        }
-
         out.sort_by(|a, b| (a.range.start, a.code).cmp(&(b.range.start, b.code)));
         out
-    }
-
-    /// Append a `cannot resolve symbol` error for each of `file`'s type-name references that
-    /// resolve to nothing — neither file-locally nor anywhere in the project index.
-    async fn push_unresolved(
-        out: &mut Vec<FileDiagnostic>,
-        root: &jals_syntax::SyntaxNode,
-        index: &ProjectIndex,
-        file: FileId,
-        resolved: &Resolved,
-    ) {
-        let text = root.text();
-        for range in index.unresolved_types(file, resolved).await {
-            let name = text.slice(Self::text_range(&range)).to_string();
-            out.push(FileDiagnostic {
-                range,
-                severity: DiagnosticSeverity::Error,
-                code: Some("cannot-resolve"),
-                message: alloc::format!("cannot resolve symbol `{name}`"),
-                unnecessary: false,
-            });
-        }
-    }
-
-    /// A byte range as a `text_size::TextRange` (for slicing the tree's text).
-    fn text_range(range: &Range<usize>) -> text_size::TextRange {
-        text_size::TextRange::new(
-            crate::sat_text_size(range.start),
-            crate::sat_text_size(range.end),
-        )
     }
 }
 

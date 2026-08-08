@@ -205,11 +205,12 @@ jals lint src/Main.java src/Util.java
 jals lint src/
 ```
 
-`jals lint` checks unused locals, type mismatches, unreported checked exceptions, dead
-(constant-condition) branches, and feature-gated preview features, using name resolution and
-type inference (`jals-hir`) — not just pattern matching over the syntax tree. If a `jals.toml`
-manifest is discovered, its `[build] classpath` and `[dependencies]` are resolved so types
-from external libraries are understood too. Configure via `jalslint.toml` (discovered the same
+`jals lint` checks unresolvable type names, unused locals, type mismatches, unreported checked
+exceptions, dead (constant-condition) branches, and feature-gated preview features, using name
+resolution and type inference (`jals-hir`) — not just pattern matching over the syntax tree. Every
+check is a named rule, so any of them (`cannot-resolve` included) can be re-levelled or switched off.
+If a `jals.toml` manifest is discovered, its `[build] classpath` and `[dependencies]` are resolved so
+types from external libraries are understood too. Configure via `jalslint.toml` (discovered the same
 way as `jalsfmt.toml`).
 
 ### Run the language server

@@ -517,14 +517,16 @@ impl LintArgs {
         for (file, (id, cfg_map)) in reported.iter().zip(&cfgs) {
             let mut cfg = discovery.for_dir(&file.config_dir)?;
             cfg.features = ctx.feature_set;
-            // The one policy: syntax errors, the rule engine (with `type-mismatch` forced off on a
-            // broken tree), `cfg` hints, and unresolved names, in one order. The language server
-            // and the playground reach it through `Editor`; a CLI run holds its own index and
-            // reaches it here, but it is the same assembly and cannot drift from theirs.
+            // The one policy: syntax errors, `cfg` hints, and the rule engine, in one order. The
+            // language server and the playground reach it through `Editor`; a CLI run holds its own
+            // index and reaches it here, but it is the same assembly and cannot drift from theirs.
+            // What a broken tree suppresses is decided inside the engine, from the parse it is
+            // handed, so no host restates it.
             //
-            // `resolved` is `None` on purpose. The assembly picks `resolve_node_with_cfg` or
-            // `resolve_node` from whether a `cfg` map is present, and a host that computed one
-            // itself would be restating that choice.
+            // `resolved` is `None` on purpose: the engine resolves once and shares it across every
+            // rule, picking `resolve_node_with_cfg` or `resolve_node` from whether a `cfg` map is
+            // present. A host that computed one itself would be restating that choice — and unlike
+            // the editor, a CLI run has no cached resolution to save.
             let diagnostics = jals_editor::FileDiagnostics::assemble(
                 &file.parse,
                 None,

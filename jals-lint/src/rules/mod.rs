@@ -20,6 +20,7 @@ use crate::IndexCtx;
 use crate::diagnostic::Severity;
 
 mod attribute;
+mod cannot_resolve;
 mod compact_source_file;
 mod constant_condition;
 mod empty_catch;
@@ -162,6 +163,18 @@ pub(crate) struct RuleMeta {
     pub name: &'static str,
     /// Severity used when the rule is not configured.
     pub default: Severity,
+    /// Whether this rule must not run at all when the file has syntax errors.
+    ///
+    /// The criterion is **findings derived from type inference**, which a half-parsed tree turns into
+    /// noise: a recovered declaration gets a wrong type, and every value written into it then looks
+    /// incompatible. It is *not* "needs the project index" — the driver already withholds the index
+    /// from a broken parse, which silences every [`Checker::Indexed`] rule on its own — and it is
+    /// *not* "reads [`Resolved`]": `unused-local` and `constant-condition` do, but a missing
+    /// reference and a literal condition both survive recovery, so they keep reporting.
+    ///
+    /// Set on `type-mismatch` alone, the one rule that still reports without an index and so is not
+    /// covered by withholding one.
+    pub needs_clean_parse: bool,
     /// The checker, syntactic or resolution-based.
     pub check: Checker,
 }
@@ -180,4 +193,5 @@ pub(crate) const RULES: &[RuleMeta] = &[
     unused_local::RULE,
     type_mismatch::RULE,
     unreported_exception::RULE,
+    cannot_resolve::RULE,
 ];

@@ -25,6 +25,7 @@ use crate::rules::{Checker, Finding, RuleMeta};
 pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "naming-convention",
     default: Severity::Warn,
+    needs_clean_parse: false,
     check: Checker::Syntactic(NamingConvention::check),
 };
 

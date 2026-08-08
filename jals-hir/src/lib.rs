@@ -67,7 +67,7 @@ pub use infer::{Completion, Signature, SignatureHelp, TypeInference, TypeMismatc
 pub use project::{
     FileFacts, FileId, Fqn, Item, ItemId, ItemOrigin, LoweredClasspath, Member, MemberId,
     MemberModifiers, MemberType, Param, ProjectIndex, ProjectIndexBuilder, SourceLocations,
-    Supertype, TypeParamDecl, TypeResolution,
+    Supertype, TypeParamDecl, TypeResolution, UnresolvedType,
 };
 pub use reference::{Reference, Resolution};
 pub use resolve::Resolved;

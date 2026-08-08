@@ -1,10 +1,15 @@
 //! The result of linting: the rule findings, and nothing else.
 //!
-//! Syntax errors are deliberately absent. They belong to the parse, not to the rules, and a caller
-//! that wants them reads [`Parse::errors`](jals_syntax::Parse::errors) — which is what
-//! `jals-editor`'s diagnostics assembly does. Restating them here as a `syntax-error` rule was a
-//! second [`SyntaxError`](jals_syntax::SyntaxError)-to-diagnostic conversion that no consumer
-//! outside this crate's own tests ever read.
+//! Every *semantic* diagnostic is a rule finding, `cannot-resolve` included — so a consumer reads
+//! one list, and each entry names the rule that produced it and the `jalslint.toml` key that
+//! configures it.
+//!
+//! Syntax errors are the one exception, and they are deliberately absent. They belong to the parse,
+//! not to the rules, and a caller that wants them reads
+//! [`Parse::errors`](jals_syntax::Parse::errors) — which is what `jals-editor`'s diagnostics
+//! assembly does. Restating them here as a `syntax-error` rule was a second
+//! [`SyntaxError`](jals_syntax::SyntaxError)-to-diagnostic conversion that no consumer outside this
+//! crate's own tests ever read.
 
 use alloc::string::String;
 use alloc::vec::Vec;

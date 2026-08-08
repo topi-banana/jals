@@ -20,6 +20,7 @@ use crate::rules::{Checker, RuleMeta};
 pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "grouped-import",
     default: Severity::Error,
+    needs_clean_parse: false,
     check: Checker::Gated {
         feature: Feature::GroupedImports,
         subject: "grouped imports (`import a.b.{X, Y};`)",
