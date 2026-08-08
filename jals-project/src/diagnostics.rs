@@ -83,6 +83,7 @@ use core::ops::Range;
 
 use jals_build::build_script::{BuildScriptError, BuildScriptOutput, BuildScriptPosition};
 use jals_classpath::NetworkPolicy;
+use jals_config::DiagnosticSeverity;
 use jals_storage::FileKey;
 
 use crate::assemble::ProjectAssemblyError;
@@ -115,6 +116,28 @@ impl ProjectDiagnosticSeverity {
             Self::Warning => "warning",
             // `note`, not `info`: it matches what the CLI already leads a range-less advisory with.
             Self::Info => "note",
+        }
+    }
+}
+
+/// How a destination that draws diagnostics presents one of these.
+///
+/// Here rather than in each host for the same reason [`ProjectDiagnosticSeverity::lead`] is: a
+/// terminal and a browser had each written this table, arriving at the same three arms two crates
+/// apart. A destination with a severity vocabulary of its *own* — an LSP `DiagnosticSeverity`, a
+/// Monaco marker kind — still maps [`ProjectDiagnostic::severity`] into that one directly and never
+/// reads this; what this answers is the one case those two shared, where the destination presents
+/// through `jals-editor`'s neutral severity.
+///
+/// [`Info`](ProjectDiagnosticSeverity::Info) becomes a hint because it is advice rather than a
+/// defect — the offline-cache advisory is the only producer — and every consumer already agreed:
+/// `ariadne` draws it as advice, Monaco fades it, and no exit code fails over it.
+impl From<ProjectDiagnosticSeverity> for DiagnosticSeverity {
+    fn from(severity: ProjectDiagnosticSeverity) -> Self {
+        match severity {
+            ProjectDiagnosticSeverity::Error => Self::Error,
+            ProjectDiagnosticSeverity::Warning => Self::Warning,
+            ProjectDiagnosticSeverity::Info => Self::Hint,
         }
     }
 }

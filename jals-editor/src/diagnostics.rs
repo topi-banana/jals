@@ -28,33 +28,11 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::ops::Range;
 
+use jals_config::DiagnosticSeverity;
 use jals_config::lint::Config;
 use jals_hir::{FileId, ProjectIndex, Resolved};
 use jals_syntax::Parse;
 use jals_syntax::cfg::CfgMap;
-
-/// How a host should present a [`FileDiagnostic`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DiagnosticSeverity {
-    /// A definite problem (syntax error, unresolvable symbol, error-severity rule).
-    Error,
-    /// A warn-severity lint finding.
-    Warning,
-    /// Supplementary information kept out of the problems list: a `cfg`-disabled region and the
-    /// faded dead-branch range of a constant condition.
-    Hint,
-}
-
-impl DiagnosticSeverity {
-    /// The presentation severity for a lint finding's configured severity. `Allow` rules are
-    /// skipped inside the engine and never reach here; map them alongside `Warn` defensively.
-    const fn of_lint(severity: jals_config::Severity) -> Self {
-        match severity {
-            jals_config::Severity::Error => Self::Error,
-            jals_config::Severity::Warn | jals_config::Severity::Allow => Self::Warning,
-        }
-    }
-}
 
 /// One diagnostic over one file, in byte coordinates.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -141,7 +119,7 @@ impl FileDiagnostics {
         for finding in findings {
             out.push(FileDiagnostic {
                 range: finding.range,
-                severity: DiagnosticSeverity::of_lint(finding.severity),
+                severity: finding.severity.into(),
                 code: Some(finding.rule),
                 message: finding.message,
                 unnecessary: finding.unnecessary,

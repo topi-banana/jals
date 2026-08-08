@@ -265,6 +265,19 @@ impl ProjectLayout {
             ..Self::default()
         }
     }
+
+    /// Lower `classes` into this layout's [`classpath`](Self::classpath).
+    ///
+    /// The field stays public — a host that already holds a [`LoweredClasspath`] still assigns it,
+    /// and the browser replaces one later through [`Workspace::set_classpath`]. This exists so a
+    /// host that holds only the `.class` files does not have to name `jals-hir` to describe its
+    /// own project: lowering is the one thing every such host was doing identically, and it is the
+    /// last reason `jals lint` had to depend on the analysis crate at all.
+    #[must_use]
+    pub async fn with_classpath(mut self, classes: &[jals_classfile::ClassFile]) -> Self {
+        self.classpath = ProjectIndex::lower_classpath(classes).await;
+        self
+    }
 }
 
 /// A single project's symbol index plus the per-file data needed to answer cross-file queries.
@@ -328,7 +341,12 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
     /// per-file work fans out in that order, so the index is deterministic. The execution context
     /// is taken from the storage ([`ProjectStorage::exec`]) — one handle threads through the whole
     /// aggregate.
-    pub(crate) async fn load(storage: ProjectStorage<S, C>, spec: ProjectLayout) -> Self {
+    ///
+    /// [`Editor::load`](crate::Editor::load) pairs this with an [`EditorHost`](crate::EditorHost)
+    /// and is what a host reaches for. A caller that only needs diagnostics — `jals lint` — loads
+    /// one directly and reads [`diagnostics`](Self::diagnostics), which needs no host because it
+    /// decodes no cursor position.
+    pub async fn load(storage: ProjectStorage<S, C>, spec: ProjectLayout) -> Self {
         let exec = storage.exec().clone();
         let view = storage.view();
         let mut project_sources = spec.project_sources;
@@ -835,9 +853,35 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
             .unwrap_or_default()
     }
 
-    /// The canonical diagnostics of `file` under `config`, with the project's feature set, its
-    /// `cfg` evaluation, and the index folded in (see [`FileDiagnostics`]).
-    pub(crate) async fn diagnostics(
+    /// The canonical diagnostics of the project file at `path` under `config`, with the project's
+    /// feature set, its `cfg` evaluation, and the index folded in (see [`FileDiagnostics`]). Empty
+    /// for a path this workspace does not index.
+    ///
+    /// The one query that takes no cursor position, and therefore the one that needs no
+    /// [`EditorHost`](crate::EditorHost) to decode one: it answers in the neutral
+    /// [`FileDiagnostic`], exactly as [`SingleFileProject::diagnostics`] does for a document
+    /// outside any workspace. Every *positional* query stays behind [`Editor`](crate::Editor),
+    /// whose host owns that decoding — which is why this is keyed by [`FileKey`], like the rest of
+    /// the public surface ([`file_id`](Self::file_id), [`owns_path`](Self::owns_path),
+    /// [`set_overlay`](Self::set_overlay)), and the `FileId`-keyed form stays internal.
+    ///
+    /// `config.features` is replaced by the project's own selection: the feature set is the
+    /// workspace's, and a per-directory `jalslint.toml` varies rule severities, never the language
+    /// level.
+    pub async fn diagnostics(
+        &self,
+        path: &FileKey,
+        config: &jals_config::lint::Config,
+    ) -> Vec<FileDiagnostic> {
+        match self.file_id(path) {
+            Some(file) => self.diagnostics_of(file, config).await,
+            None => Vec::new(),
+        }
+    }
+
+    /// [`diagnostics`](Self::diagnostics) for a file already resolved to its id — what
+    /// [`Editor`](crate::Editor) reaches, holding the id from its own document lookup.
+    pub(crate) async fn diagnostics_of(
         &self,
         file: FileId,
         config: &jals_config::lint::Config,
@@ -1103,7 +1147,7 @@ mod tests {
                 .unwrap()
             );
             let diags = ws
-                .diagnostics(main, &jals_config::lint::Config::default())
+                .diagnostics_of(main, &jals_config::lint::Config::default())
                 .await;
             assert!(
                 diags
@@ -1285,7 +1329,7 @@ mod tests {
             let ws = Workspace::load(storage, spec).await;
             let main = ws.file_id(&key("src/Main.java")).unwrap();
             let diags = ws
-                .diagnostics(main, &jals_config::lint::Config::default())
+                .diagnostics_of(main, &jals_config::lint::Config::default())
                 .await;
             assert!(
                 !diags.iter().any(|d| d.code == Some("cannot-resolve")),
@@ -1455,11 +1499,36 @@ mod tests {
             assert!(ws.definition(bogus, 0).await.is_none());
             assert!(ws.references(bogus, 0, true).await.is_empty());
             assert!(
-                ws.diagnostics(bogus, &jals_config::lint::Config::default())
+                ws.diagnostics_of(bogus, &jals_config::lint::Config::default())
                     .await
                     .is_empty()
             );
             assert!(ws.outline(bogus).is_empty());
+        });
+    }
+
+    /// The host-free entry `jals lint` reaches: keyed by [`FileKey`] like the rest of the public
+    /// surface, agreeing with the id-keyed form for a file this workspace indexes, and empty —
+    /// never a panic — for one it does not.
+    #[test]
+    fn the_path_keyed_diagnostics_entry_needs_no_host() {
+        block_on_inline(async {
+            let ws = sample_workspace().await;
+            let config = jals_config::lint::Config::default();
+            let path = key("src/Main.java");
+            let id = ws.file_id(&path).expect("a sample file is indexed");
+
+            assert_eq!(
+                ws.diagnostics(&path, &config).await,
+                ws.diagnostics_of(id, &config).await,
+                "the two spellings answer the same file"
+            );
+            assert!(
+                ws.diagnostics(&key("src/Nowhere.java"), &config)
+                    .await
+                    .is_empty(),
+                "an unindexed path is empty, not an error"
+            );
         });
     }
 
@@ -1516,13 +1585,13 @@ mod tests {
             // and the disabled declaration is reported as a faded `cfg` hint in its own file.
             let ws = cfg_workspace(&[]).await;
             let main = ws.file_id(&key("src/Main.java")).unwrap();
-            let diags = ws.diagnostics(main, &config).await;
+            let diags = ws.diagnostics_of(main, &config).await;
             assert!(
                 diags.iter().any(|d| d.code == Some("cannot-resolve")),
                 "{diags:?}"
             );
             let gated = ws.file_id(&key("src/Gated.java")).unwrap();
-            let diags = ws.diagnostics(gated, &config).await;
+            let diags = ws.diagnostics_of(gated, &config).await;
             assert!(
                 diags.iter().any(|d| d.code == Some("cfg")
                     && d.unnecessary
@@ -1533,13 +1602,13 @@ mod tests {
             // Feature on: the type resolves and nothing is faded.
             let ws = cfg_workspace(&["fancy"]).await;
             let main = ws.file_id(&key("src/Main.java")).unwrap();
-            let diags = ws.diagnostics(main, &config).await;
+            let diags = ws.diagnostics_of(main, &config).await;
             assert!(
                 !diags.iter().any(|d| d.code == Some("cannot-resolve")),
                 "{diags:?}"
             );
             let gated = ws.file_id(&key("src/Gated.java")).unwrap();
-            let diags = ws.diagnostics(gated, &config).await;
+            let diags = ws.diagnostics_of(gated, &config).await;
             assert!(!diags.iter().any(|d| d.unnecessary), "{diags:?}");
         });
     }
@@ -1551,7 +1620,7 @@ mod tests {
             let mut ws = cfg_workspace(&[]).await;
             let main = ws.file_id(&key("src/Main.java")).unwrap();
             assert!(
-                ws.diagnostics(main, &config)
+                ws.diagnostics_of(main, &config)
                     .await
                     .iter()
                     .any(|d| d.code == Some("cannot-resolve"))
@@ -1562,7 +1631,7 @@ mod tests {
             ws.set_features(attrs, BTreeSet::from(["fancy".to_owned()]))
                 .await;
             assert!(
-                !ws.diagnostics(main, &config)
+                !ws.diagnostics_of(main, &config)
                     .await
                     .iter()
                     .any(|d| d.code == Some("cannot-resolve"))
@@ -1573,7 +1642,7 @@ mod tests {
                 .await;
             ws.set_features(attrs, BTreeSet::new()).await;
             assert!(
-                ws.diagnostics(main, &config)
+                ws.diagnostics_of(main, &config)
                     .await
                     .iter()
                     .any(|d| d.code == Some("cannot-resolve"))
@@ -1597,7 +1666,7 @@ mod tests {
             .await;
             let bad = ws.file_id(&key("src/Bad.java")).unwrap();
             let diags = ws
-                .diagnostics(bad, &jals_config::lint::Config::default())
+                .diagnostics_of(bad, &jals_config::lint::Config::default())
                 .await;
             assert!(
                 diags.iter().any(|d| d.code == Some("cfg")

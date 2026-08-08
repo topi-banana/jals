@@ -13,7 +13,6 @@ use jals_config::FeatureSet;
 use jals_editor::{Editor, ProjectLayout, Utf16Position};
 use jals_exec::Exec;
 use jals_exec::tokio_rt::on_blocking_pool;
-use jals_hir::ProjectIndex;
 use jals_storage::{
     DirKey, FileKey, NativeCache, NativeScope, NativeSource, NativeStorage, RelativePath,
 };
@@ -229,14 +228,16 @@ impl ProjectWorkspace {
         let spec = ProjectLayout {
             source_roots,
             project_sources,
-            classpath: ProjectIndex::lower_classpath(classfiles).await,
             library_sources,
             source_dep_sources,
             feature_set,
             // What each project file's `#[cfg(feature = "…")]` evaluates against (used only
             // when `feature_set` enables the `attributes` dialect).
             build_features,
-        };
+            ..ProjectLayout::default()
+        }
+        .with_classpath(classfiles)
+        .await;
         let host = LspHost::for_root(project_root.clone()).with_materialized(materialized);
         Self {
             project_root,
