@@ -1751,9 +1751,9 @@ fn lint_reports_only_the_named_files() {
 #[test]
 fn lint_accepts_a_source_root_and_reports_each_file_once() {
     // Naming the source root makes the reported set cover the project's own sources, which is the
-    // case where the two sets overlap. Whether the overlap is deduplicated is pinned directly by
-    // `a_named_file_is_not_indexed_again_as_a_project_source` — a duplicate declaration has no
-    // downstream symptom to assert on here, because two identical declarations resolve the same.
+    // case where the two sets overlap. The overlap is deduplicated by identity now — the workspace
+    // answers by `FileKey`, so the walk and the named path are one file — rather than by the host
+    // comparing canonicalized paths before indexing.
     let dir = project("[package]\nname = \"whole\"\n");
     example_source(
         dir.path(),
@@ -1892,6 +1892,223 @@ fn lint_reads_stdin() {
     assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
     assert!(stderr.contains("wildcard-import"), "stderr: {stderr}");
     assert!(stderr.contains("<stdin>"), "stderr: {stderr}");
+}
+
+/// Naming a source root *and* a file inside it is one file, reported once.
+///
+/// The observable half of what `FileKey` identity replaced: the host used to compare canonicalized
+/// paths itself before indexing, because indexing one file twice declares its types twice and the
+/// index answers an FQN clash by picking a winner. Now the two spellings produce one key, and a
+/// key is one indexed file — so the duplicate cannot reach the index to be deduplicated.
+#[test]
+fn lint_reports_one_file_once_when_a_root_and_a_file_inside_it_are_both_named() {
+    let dir = project("[package]\nname = \"overlap\"\n");
+    let main = example_source(
+        dir.path(),
+        "Main",
+        "package com.example;\nimport java.util.*;\npublic class Main {}\n",
+    );
+    let root = host_join(dir.path(), "src/main/java");
+
+    let (stdout, stderr, code) = run_full(&[
+        "lint",
+        root.to_str().unwrap(),
+        main.to_str().unwrap(),
+        // The same path a third time, spelled with a redundant `.` and `..` round trip.
+        main.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 1, "the wildcard import is the one finding: {stderr}");
+    assert_eq!(
+        stderr.matches("wildcard-import").count(),
+        1,
+        "three spellings of one file report once: {stdout}{stderr}"
+    );
+    assert!(
+        !stderr.contains("cannot resolve"),
+        "a file indexed twice declares its types twice: {stderr}"
+    );
+
+    // The same promise for a file the project snapshot does *not* hold. That one is mounted, and a
+    // mount takes a fresh key per reported position — so its identity has to be tracked by path,
+    // or two spellings would become two files declaring the same type.
+    let scratch = dir.path().join("scratch");
+    std::fs::create_dir_all(&scratch).unwrap();
+    let stray = scratch.join("Stray.java");
+    std::fs::write(&stray, "import java.util.*;\npublic class Stray {}\n").unwrap();
+    let spelled_again = host_join(dir.path(), "scratch/../scratch/Stray.java");
+
+    let (stdout, stderr, code) = run_full(&[
+        "lint",
+        stray.to_str().unwrap(),
+        spelled_again.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 1, "the wildcard import is the one finding: {stderr}");
+    assert_eq!(
+        stderr.matches("wildcard-import").count(),
+        1,
+        "two spellings of one mounted file report once: {stdout}{stderr}"
+    );
+}
+
+/// One run spans directories with different `jalslint.toml` files.
+///
+/// The config is discovered per reported file, from that file's own directory upward, so a nested
+/// config beats the project's. Nothing pinned this before, and it is the one property the move
+/// onto `jals_editor::Workspace` could most easily have lost — resolving the config once per run
+/// instead of once per file would still pass every other lint test.
+#[test]
+fn lint_discovers_a_jalslint_config_per_reported_file() {
+    let dir = project("[package]\nname = \"perdir\"\n");
+    // The project's own config switches the rule off …
+    std::fs::write(
+        dir.path().join("jalslint.toml"),
+        "[rules]\nwildcard-import = \"allow\"\n",
+    )
+    .unwrap();
+    let quiet = example_source(
+        dir.path(),
+        "Quiet",
+        "package com.example;\nimport java.util.*;\npublic class Quiet {}\n",
+    );
+    // … and a nested one switches it back on for its own directory only.
+    let nested = host_join(dir.path(), "src/main/java/com/example/nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(
+        nested.join("jalslint.toml"),
+        "[rules]\nwildcard-import = \"warn\"\n",
+    )
+    .unwrap();
+    let loud = nested.join("Loud.java");
+    std::fs::write(
+        &loud,
+        "package com.example.nested;\nimport java.util.*;\npublic class Loud {}\n",
+    )
+    .unwrap();
+
+    let (stdout, stderr, code) =
+        run_full(&["lint", quiet.to_str().unwrap(), loud.to_str().unwrap()]);
+    assert_eq!(code, 1, "the nested config re-enables the rule: {stderr}");
+    assert_eq!(
+        stderr.matches("wildcard-import").count(),
+        1,
+        "only the nested file's config warns: {stdout}{stderr}"
+    );
+    assert!(
+        stderr.contains("Loud.java"),
+        "the finding is the nested file's: {stdout}{stderr}"
+    );
+}
+
+/// A named file under no `[build] source-dirs` root is still linted, and still resolves the
+/// project around it.
+///
+/// The project snapshot does not capture it — no scope covers `scratch/` — so it is read by the
+/// host and mounted into the aggregate. Mounting is what makes it a *project file* rather than a
+/// detached one: the index it joins is the project's.
+#[test]
+fn lint_indexes_a_named_file_outside_every_source_root() {
+    let dir = project("[package]\nname = \"outside\"\n");
+    example_source(
+        dir.path(),
+        "Helper",
+        "package com.example;\npublic class Helper {}\n",
+    );
+    let scratch = dir.path().join("scratch");
+    std::fs::create_dir_all(&scratch).unwrap();
+    let stray = scratch.join("Stray.java");
+    std::fs::write(
+        &stray,
+        "import java.util.*;\nimport com.example.Helper;\npublic class Stray { Helper h; }\n",
+    )
+    .unwrap();
+
+    let (stdout, stderr, code) = run_full(&["lint", stray.to_str().unwrap()]);
+    assert_eq!(code, 1, "the wildcard import is reported: {stdout}{stderr}");
+    assert!(
+        stderr.contains("wildcard-import"),
+        "the file outside the source roots is linted: {stdout}{stderr}"
+    );
+    assert!(
+        !stderr.contains("cannot resolve"),
+        "it resolves against the project it was mounted into: {stdout}{stderr}"
+    );
+}
+
+/// A named file outside the project root is linted beside one inside it.
+///
+/// No key under the project addresses it, so it is mounted like stdin. What this pins is that the
+/// two are reported in one run against one index, rather than the out-of-root path being dropped.
+#[test]
+fn lint_reports_a_named_file_outside_the_project_root() {
+    let base = tempdir().unwrap();
+    let root = base.path().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("jals.toml"), "[package]\nname = \"inner\"\n").unwrap();
+    let inside = example_source(
+        &root,
+        "Main",
+        "package com.example;\nimport java.util.*;\npublic class Main {}\n",
+    );
+    let outside_dir = base.path().join("elsewhere");
+    std::fs::create_dir_all(&outside_dir).unwrap();
+    let outside = outside_dir.join("Stray.java");
+    std::fs::write(&outside, "import java.io.*;\npublic class Stray {}\n").unwrap();
+
+    // The first named file anchors project discovery, so this run has a real project *and* a path
+    // that lies outside it.
+    let (stdout, stderr, code) =
+        run_full(&["lint", inside.to_str().unwrap(), outside.to_str().unwrap()]);
+    assert_eq!(code, 1, "both wildcard imports report: {stdout}{stderr}");
+    assert_eq!(
+        stderr.matches("wildcard-import").count(),
+        2,
+        "the out-of-root file is not dropped: {stdout}{stderr}"
+    );
+    assert!(
+        stderr.contains("Stray.java") && stderr.contains("Main.java"),
+        "each is labelled by the path the caller typed: {stdout}{stderr}"
+    );
+}
+
+/// A `[build] source-dirs` entry resolving outside the project root is a typing authority for
+/// `jals lint`, not just for an editor.
+///
+/// It is the project's own code, so the analysis projection publishes it exactly as the editor
+/// projection does. While it did not, every type such a root declared read as unresolved the
+/// moment the lint index came from the project snapshot rather than a raw filesystem walk.
+#[test]
+fn lint_resolves_types_from_a_source_root_outside_the_project() {
+    let base = tempdir().unwrap();
+    let root = base.path().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("jals.toml"),
+        "[package]\nname = \"external\"\n\
+         [build]\nsource-dirs = [\"../shared-src\", \"src/main/java\"]\n",
+    )
+    .unwrap();
+    let shared = base.path().join("shared-src/com/example");
+    std::fs::create_dir_all(&shared).unwrap();
+    std::fs::write(
+        shared.join("Shared.java"),
+        "package com.example;\npublic class Shared {}\n",
+    )
+    .unwrap();
+    let main = example_source(
+        &root,
+        "Main",
+        "package com.example;\npublic class Main { Shared s; }\n",
+    );
+
+    let (stdout, stderr, code) = run_full(&["lint", main.to_str().unwrap()]);
+    assert_eq!(
+        code, 0,
+        "nothing is wrong with this project: {stdout}{stderr}"
+    );
+    assert!(
+        !stderr.contains("cannot resolve"),
+        "a source root outside the project still declares its types: {stdout}{stderr}"
+    );
 }
 
 // --- `jalsfmt.toml` migration ----------------------------------------------------------------

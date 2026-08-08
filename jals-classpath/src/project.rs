@@ -31,7 +31,9 @@ use crate::{
 /// - [`Analysis`](Self::Analysis): every typing authority, no navigation artifact. What a
 ///   diagnostics pass needs — it resolves names and never opens a library file. Dropping a typing
 ///   authority here does not make the pass cheaper, it makes it *wrong*: the types go unresolved
-///   and every reference to one is reported as unknown.
+///   and every reference to one is reported as unknown. That includes a `[build] source-dirs`
+///   entry resolving outside the project root: it is the project's own code, so it is published
+///   here as much as under `Editor`, and only a compile skips it.
 /// - [`Compile`](Self::Compile): the sources a backend compiles. No classpath load, because the
 ///   caller hands the jars to the compiler rather than decoding them.
 /// - [`Editor`](Self::Editor): everything. An editor both resolves and navigates.

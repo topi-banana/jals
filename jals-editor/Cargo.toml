@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+# `ProjectLayout::with_classpath` takes the `.class` files a host resolved, so a host describing
+# its own project never names `jals-hir`. Already in the graph through it; `no_std` and wasm-safe,
+# so this adds no crate and no feature.
+jals-classfile.workspace = true
 jals-config.workspace = true
 jals-exec.workspace = true
 jals-storage.workspace = true
@@ -11,9 +15,6 @@ jals-hir.workspace = true
 jals-lint.workspace = true
 jals-syntax.workspace = true
 text-size.workspace = true
-
-[dev-dependencies]
-jals-classfile.workspace = true
 
 [lints]
 workspace = true

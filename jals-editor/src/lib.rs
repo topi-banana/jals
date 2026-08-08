@@ -19,11 +19,15 @@ mod selection;
 mod semantic;
 mod workspace;
 
-pub use diagnostics::{DiagnosticSeverity, FileDiagnostic, FileDiagnostics};
+pub use diagnostics::{FileDiagnostic, FileDiagnostics};
 pub use document::Document;
 pub use editor::Editor;
 pub use folding::{Fold, FoldKind, Folds};
 pub use host::{EditorHost, FoldingHost, SelectionHost, SemanticTokensHost};
+/// Re-exported so a host that only knows the editor still spells the presented severity
+/// `jals_editor::DiagnosticSeverity`. It lives in `jals-config` because `jals-project` assembles
+/// diagnostics too, and the two crates share nothing else.
+pub use jals_config::DiagnosticSeverity;
 pub use outline::{Outline, OutlineNode};
 pub use queries::{
     Completion, CompletionKind, FileRange, Highlight, HighlightKind, Ident, ProjectQueries,

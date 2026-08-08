@@ -74,7 +74,7 @@ impl<S: SourceBackend, C: CacheBackend, H: EditorHost> Editor<S, C, H> {
             return Vec::new();
         };
         self.workspace
-            .diagnostics(file, config)
+            .diagnostics_of(file, config)
             .await
             .into_iter()
             .map(|diagnostic| self.host.diagnostic(doc, diagnostic))

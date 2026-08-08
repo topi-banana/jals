@@ -378,7 +378,11 @@ impl NativeProjectPlan {
         storage: &mut NativeStorage,
         options: ProjectInputOptions,
     ) {
-        if !matches!(options, ProjectInputOptions::Editor) {
+        // A source root outside the project is the project's *own* code, so it is a typing
+        // authority and every mode that resolves names reads it — the mode decides what a host can
+        // navigate, never what it can resolve. Only a compile is exempt, and only because it hands
+        // those sources to the compiler as host paths instead of indexing them.
+        if matches!(options, ProjectInputOptions::Compile) {
             return;
         }
         for (index, source_root) in self.external_source_roots.clone().into_iter().enumerate() {

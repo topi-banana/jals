@@ -251,34 +251,47 @@ fn sibling_and_absolute_build_inputs_are_adapted_without_being_dropped() {
 
     let absolute_source = absolute_source.to_string_lossy().replace('\\', "\\\\");
     let absolute_class = absolute_class.to_string_lossy().replace('\\', "\\\\");
-    let manifest = manifest(&format!(
+    let source = format!(
         r#"
 [build]
 source-dirs = ["../sibling-source", "{absolute_source}"]
 classpath = ["../sibling-classes", "{absolute_class}"]
 "#
-    ));
-    let (inputs, source_roots) = jals_exec::tokio_rt::run(|exec| async move {
-        let scopes = NativeProjectPlan::snapshot_scopes(&manifest, &project);
-        let mut storage = NativeStorage::for_project_scoped(&project, scopes, exec)
-            .await
-            .unwrap();
-        NativeProjectPlan::assemble_native(
-            &manifest,
-            &features(&manifest),
-            &project,
-            &mut storage,
-            &NoFetch,
-            ProjectInputOptions::Editor,
-        )
-        .await
-    })
-    .expect("test runtime bootstraps");
+    );
 
-    assert!(source_roots.is_empty());
-    assert!(inputs.warnings.is_empty(), "{:?}", inputs.warnings);
-    assert_eq!(inputs.classpath_classes.len(), 2);
-    assert_eq!(inputs.source_dep_sources.len(), 2);
+    // Both modes that resolve names, not just the one that also navigates. A source root outside
+    // the project is the project's own code — a typing authority — so `jals lint` has to see
+    // exactly what an editor sees; before this held, an out-of-root `source-dirs` entry silently
+    // stopped widening the lint index and every type it declared read as unresolved.
+    for options in [ProjectInputOptions::Editor, ProjectInputOptions::Analysis] {
+        let project = project.clone();
+        let manifest = manifest(&source);
+        let (inputs, source_roots) = jals_exec::tokio_rt::run(|exec| async move {
+            let scopes = NativeProjectPlan::snapshot_scopes(&manifest, &project);
+            let mut storage = NativeStorage::for_project_scoped(&project, scopes, exec)
+                .await
+                .unwrap();
+            NativeProjectPlan::assemble_native(
+                &manifest,
+                &features(&manifest),
+                &project,
+                &mut storage,
+                &NoFetch,
+                options,
+            )
+            .await
+        })
+        .expect("test runtime bootstraps");
+
+        assert!(source_roots.is_empty(), "{options:?}");
+        assert!(
+            inputs.warnings.is_empty(),
+            "{options:?}: {:?}",
+            inputs.warnings
+        );
+        assert_eq!(inputs.classpath_classes.len(), 2, "{options:?}");
+        assert_eq!(inputs.source_dep_sources.len(), 2, "{options:?}");
+    }
 }
 
 #[test]

@@ -65,7 +65,13 @@ filesystem reads into portable interfaces.
 
 - `jals-storage`: typed keys, immutable revisions, transactions, overlays, cache, memory/native
   adapters. Only `native.rs` may use `std::path`/`std::fs`.
-- `jals-config`: pure schemas and revision-aware config discovery over `ProjectView`.
+- `jals-config`: pure schemas and revision-aware config discovery over `ProjectView`, plus the
+  shared severity vocabulary — the configured `Severity` and the presented `DiagnosticSeverity` —
+  so a crate that produces diagnostics states how they present without depending on an editor.
+  `jals-editor` and `jals-project` both assemble diagnostics, neither depends on the other, and
+  this is the only crate they share; before it lived here, a terminal and a browser had each
+  written the same `ProjectDiagnosticSeverity` table two crates apart. `jals-editor` re-exports
+  the name, so a host still spells it `jals_editor::DiagnosticSeverity`.
 - `jals-classpath`: resolution over project bytes and cache artifacts. The in-house zip reader is
   isolated in `zip.rs` behind `archive` (portable, `no_std`, over the async io seam; also a
   stored-only writer for jar remap/merge; the `zip` crate is a dev-only fixture oracle). `jar.rs`
@@ -133,7 +139,15 @@ filesystem reads into portable interfaces.
 - `jals-exec`: the execution context (`Exec`, fan-out, yields, runtime adapters). Only its
   `tokio`-feature module may name tokio; the portable core is `no_std`.
 - `jals-editor`: protocol-neutral workspace and query facade over `ProjectStorage`; file identity is
-  `FileKey`, and source/config invalidation follows storage revisions.
+  `FileKey`, and source/config invalidation follows storage revisions. All three hosts index
+  through `Workspace`, so `FileId`'s three-space partition (`workspace/file_id.rs`), `#[cfg]`
+  evaluation, and path identity exist once — a host that built its own `jals_hir::ProjectIndex`
+  re-derived all three, and spelled the id space with a bare counter. **Positional** queries need
+  an `EditorHost` to decode a cursor and stay behind `Editor`; `Workspace::diagnostics` is the one
+  query that takes a `FileKey` and no position, so it is `pub` and answers in the neutral
+  `FileDiagnostic` — which is how `jals lint` joins the seam without implementing nine host
+  methods, eight of which it would have to fabricate. `ProjectLayout::with_classpath` lowers the
+  `.class` files a host resolved, so describing a project needs no `jals-hir` symbol.
 - `jals-frontend`: the compile frontend seam — project sources lowered to the Java sources a backend
   compiles. Featureless and portable in every configuration. `[build.frontend]` selects the
   lowering, and the dialect features in `[package] features` (`grouped-imports`, `attributes`)
@@ -175,7 +189,13 @@ filesystem reads into portable interfaces.
   `ProjectView`, then hands the text to `jals_fmt::import` and the result to
   `jals_fmt::generate`. What it keeps of project assembly is only what a host path forces:
   `NativeScope` selection, `materialize_file`/`materialize_tree`, `to_host_path`, and promoting a
-  structured failure to `anyhow`.
+  structured failure to `anyhow`. It opens the aggregate itself — `App::project_inputs` takes one
+  rather than owning one — because `jals lint` keeps the revision the graph phase read and indexes
+  it through `jals_editor::Workspace`, while `build`/`run` drop it once their artifacts are
+  materialized. A reported file the snapshot does not capture (outside every scope, outside the
+  root, or stdin, which is not even a `Name`) is mounted as an in-memory overlay under
+  `.jals/lint/<n>/`, so it is a project file with the project's own index behind it rather than a
+  detached one. This crate names no `jals-hir` symbol.
 - `jals-lsp`: the only URI↔native-root adapter; watched-file notifications call `refresh()`. What it
   keeps of project assembly is diagnostic shaping, overlay mounting of navigation sources, the watch
   policy, and its own root-only fallback (a second `resolve_native` call, deliberately not folded in

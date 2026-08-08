@@ -33,8 +33,8 @@ use jals_config::fmt::Config;
 use jals_config::{FeatureSet, Manifest, ManifestParseError};
 use jals_hir::{LoweredClasspath, ProjectIndex};
 use jals_project::{
-    GraphOutcome, ProjectAnchor, ProjectDiagnostic, ProjectDiagnosticSeverity, ProjectDiagnostics,
-    ProjectScript, ScriptFile, ScriptOutcome,
+    GraphOutcome, ProjectAnchor, ProjectDiagnostic, ProjectDiagnostics, ProjectScript, ScriptFile,
+    ScriptOutcome,
 };
 use jals_storage::{ArtifactCache, DirKey, FileKey, MemoryCache, MemoryStorage};
 use wasm_bindgen::JsValue;
@@ -759,14 +759,10 @@ impl App {
                 // A marker has to name a range; `holds` above is what makes `text` this
                 // diagnostic's own anchor.
                 diagnostic.placement_in(text),
-                match diagnostic.severity {
-                    ProjectDiagnosticSeverity::Error => jals_editor::DiagnosticSeverity::Error,
-                    ProjectDiagnosticSeverity::Warning => jals_editor::DiagnosticSeverity::Warning,
-                    // Monaco's own Info is 2, but a marker's severity is typed on the editor's
-                    // three-arm vocabulary. `Hint` renders faintly, which is why the offline
-                    // advisory also stays in the status line.
-                    ProjectDiagnosticSeverity::Info => jals_editor::DiagnosticSeverity::Hint,
-                },
+                // A marker's severity is typed on the editor's three-arm vocabulary, which is the
+                // one the assembly converts into. `Hint` renders faintly, which is why the offline
+                // advisory also stays in the status line.
+                jals_editor::DiagnosticSeverity::from(diagnostic.severity),
                 diagnostic.message.as_str(),
             ));
         }
@@ -1730,6 +1726,10 @@ mod tests {
     use jals_storage::{CodeTree, Entry};
 
     use super::*;
+
+    // Only the tests still name the producing severity: production converts through
+    // `DiagnosticSeverity::from` and never matches on it.
+    use jals_project::ProjectDiagnosticSeverity;
 
     /// Switching backend is a `jals.toml` edit followed by *Build*, with no file switch in
     /// between — the case `Msg::Compile`'s "commit the live buffer first" rule exists for. What it

@@ -7,7 +7,7 @@ use std::ops::Range;
 use ariadne::{Color, Config, IndexType, Label, Report, ReportKind, Source};
 use jals_editor::{DiagnosticSeverity, FileDiagnostic};
 use jals_fmt::FormatOutput;
-use jals_project::{ProjectAnchor, ProjectDiagnostic, ProjectDiagnosticSeverity};
+use jals_project::{ProjectAnchor, ProjectDiagnostic};
 use similar::{ChangeTag, TextDiff};
 
 const RESET: &str = "\x1b[0m";
@@ -148,12 +148,9 @@ impl Reporter {
     pub(crate) fn report_project(diagnostics: &[ProjectDiagnostic], script: Option<(&str, &str)>) {
         let mut doc = script.map(|(label, src)| Doc::new(label, src));
         for diagnostic in diagnostics {
-            let severity = match diagnostic.severity {
-                ProjectDiagnosticSeverity::Error => DiagnosticSeverity::Error,
-                ProjectDiagnosticSeverity::Warning => DiagnosticSeverity::Warning,
-                // `ariadne` has no informational kind, and the plain lead below spells it `note:`.
-                ProjectDiagnosticSeverity::Info => DiagnosticSeverity::Hint,
-            };
+            // The assembly owns how one of these presents; this channel draws a `Hint` as
+            // `ariadne` advice, and the plain lead below spells the same thing `note:`.
+            let severity = DiagnosticSeverity::from(diagnostic.severity);
             match (&diagnostic.span, &mut doc) {
                 (Some(span), Some(doc))
                     if matches!(diagnostic.anchor, ProjectAnchor::Script(_)) =>
