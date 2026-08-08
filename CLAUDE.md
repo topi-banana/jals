@@ -306,6 +306,8 @@ cargo check -p jals-project --no-default-features --target wasm32-unknown-unknow
 cargo check -p jals-frontend --target wasm32-unknown-unknown
 cargo check -p jals-javac --no-default-features --target wasm32-unknown-unknown
 cargo build -p jals-playground --target wasm32-unknown-unknown
+
+cargo run -p xtask -- examples --network skip
 ```
 
 CI runs clippy, test, build, and build-release on linux, macOS, Windows **and** wasm; hawk runs on
@@ -329,3 +331,13 @@ wrong (see the job's comment in `.github/workflows/ci.yml`). The three host plat
 
 Run `cargo run -p xtask -- codegen` after changing `jals-syntax/java.ungram`, and commit generated
 AST changes with the grammar change.
+
+`examples/` is a CI gate, not documentation that happens to compile: `cargo run -p xtask -- examples`
+builds every project there, runs the ones that declare an entry point, and compares their stdout
+against what the README promises. The table is `EXAMPLES` in `xtask/src/examples.rs`, and it is the
+only place the split lives — a `network: true` entry runs in the `examples (network)` job (linux,
+`--release`, Mojang downloads restored from jals's own verified cache) and everything else runs on
+all three hosts, so adding a row to that table needs no workflow edit. Two examples deliberately
+ship without the input jar their README tells a reader to supply; the task builds it from a `Fixture`
+with the JDK's own `javac`/`jar`, and each example ends with `jals clean` so a run leaves the tree
+as it found it.

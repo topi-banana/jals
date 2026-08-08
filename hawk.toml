@@ -27,7 +27,7 @@ reason = "golden harness comparing jals-fmt output against google-java-format"
 [[production]]
 package = "xtask"
 bin = "xtask"
-reason = "workspace automation (codegen from java.ungram) via the cargo-xtask pattern"
+reason = "workspace automation (codegen from java.ungram, the examples gate) via the cargo-xtask pattern"
 
 # --- Exclusions -------------------------------------------------------------
 # `ast::generated` is emitted by `xtask codegen` from `java.ungram` with a
