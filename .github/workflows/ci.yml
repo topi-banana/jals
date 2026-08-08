@@ -417,6 +417,132 @@ jobs:
       - run: cargo tree -e features -p jals-build --no-default-features
       - run: cargo tree -e features -p jals-project --no-default-features
 
+  examples:
+    # Every project under `examples/` is documentation that claims something builds, and a claim is
+    # worth what a machine checks of it. One cell per example, each running the three gates a reader
+    # runs from the example's own README — `jals build`, `jals fmt --check`, `jals lint` — against
+    # the `jals` this commit produces rather than against an installed one.
+    #
+    # Beyond `name` and `dir` the cells differ only in the three optional fields below, so every
+    # step is written once:
+    #
+    # - `features`: the selection the README's own command line uses. It is passed to `lint` as well
+    #   as to `build`, because an unset selection resolves to the manifest's `default` list — for
+    #   `minecraft_mod` a *different* release from the one just built, whose artifacts no offline
+    #   analysis could then find.
+    # - `run`: whether `[run] main-class` is something the example can actually run. It is a promise
+    #   the manifest makes, and running it is the only thing that checks it.
+    # - `publications`: set only for the SDK example, whose `jals build` is documented to end in
+    #   `javac` errors (`examples/minecraft/README.md` §Compile-safety — the published skeleton tree
+    #   is reference sources, not a compiling project). There the pipeline is what is gated: the
+    #   publication is the *last* thing the script does, so three non-empty roots is exactly the
+    #   statement "fetch → nested extract → remap → decompile → publish ran".
+    #
+    # Nothing here is cached between runs on purpose. The two Minecraft cells re-fetch and re-remap
+    # a ~50 MiB game jar every time, which is the cost of the gate meaning what it says: build-task
+    # results are memoized under a plan digest that no jals version participates in, so a restored
+    # `target/jals` would let a change to this workspace reuse artifacts the change was supposed to
+    # regenerate — a green cell that ran nothing.
+    name: example (${{ matrix.example.name }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        example:
+          - name: hello_world
+            dir: examples/hello_world
+            run: true
+          - name: rhai_build_script
+            dir: examples/rhai_build_script
+            run: true
+          # The consumer is the entry point; `library/` is built through the dependency edge and has
+          # no sources of its own to format or lint.
+          - name: task_dependency
+            dir: examples/task_dependency/consumer
+            run: true
+          # `[run] main-class` here names a `Main` that declares a field and defines no `main`, so
+          # this one builds only — the example is about what a source archive publishes.
+          - name: task_source_archive
+            dir: examples/task_source_archive
+          - name: minecraft
+            dir: examples/minecraft
+            features: --features 1.20.1
+            publications: net/minecraft org/spongepowered com/llamalad7
+          - name: minecraft_mod
+            dir: examples/minecraft_mod
+            features: --features 1.20.1
+    steps:
+      - uses: actions/checkout@v7
+      # `hello_world` pins `release = 21`; the rest compile against the toolchain's own release, and
+      # `minecraft_mod` compiles against class files from the game jar it selected. A current JDK
+      # reads all of them, so one version serves every cell — the same one the `test` job installs.
+      - name: Set up JDK (the examples compile and run with javac/java)
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: examples
+      # Release, not debug: the Minecraft cells decompress, remap and decompile a whole game jar,
+      # and an unoptimized build turns that from a step into the job.
+      - name: Build the jals binary
+        run: cargo build --release --package jals-cli
+      - name: Put jals on PATH
+        run: echo "$GITHUB_WORKSPACE/target/release" >> "$GITHUB_PATH"
+      # Two examples start from `tasks.project_jar(...)` — a JAR in the project rather than behind a
+      # pinned URL, which is what keeps them network-independent — and a JAR is a binary, so neither
+      # is committed. The generator is the same one a reader runs, and it is unconditional here
+      # rather than per-cell: it costs a second, and a flag whose only job is to skip it is a second
+      # place the example list is written down.
+      - name: Generate the vendor JARs the build-task examples read
+        run: examples/scripts/gen-vendor-jars.sh
+      - name: Build
+        if: ${{ !matrix.example.publications }}
+        working-directory: ${{ matrix.example.dir }}
+        run: jals build ${{ matrix.example.features }}
+      - name: Build the publication pipeline
+        if: ${{ matrix.example.publications }}
+        working-directory: ${{ matrix.example.dir }}
+        # The `javac` step is expected to fail here and its status is deliberately dropped; every
+        # earlier failure — a fetch, a remap, a decompile, the script itself — leaves a root empty
+        # or absent and is caught below, so nothing is being waved through.
+        run: |
+          jals build ${{ matrix.example.features }} || echo "javac errors are expected (README §Compile-safety)"
+          for root in ${{ matrix.example.publications }}; do
+            count=$(find "src/main/java/$root" -name '*.java' 2>/dev/null | wc -l)
+            echo "published $root: $count .java files"
+            if [ "$count" -eq 0 ]; then
+              echo "::error::the build script published nothing under src/main/java/$root"
+              exit 1
+            fi
+          done
+      - name: Run
+        if: ${{ matrix.example.run }}
+        working-directory: ${{ matrix.example.dir }}
+        run: jals run ${{ matrix.example.features }}
+      # After the build, not before it: an example whose dependency fetches (`minecraft_mod`) can
+      # only be analysed once that fetch has landed in the verified cache, because analysis is
+      # always offline.
+      #
+      # Tracked files only. Everything a build script publishes into a source root is untracked by
+      # construction (the examples' `.gitignore`s reserve those roots), so `git ls-files` is what
+      # separates the sources a reader wrote from the thousands of decompiled skeletons a task
+      # produced — without a per-example list of directories that would drift the first time an
+      # example gains one.
+      - name: Check formatting and lint the authored sources
+        working-directory: ${{ matrix.example.dir }}
+        run: |
+          mapfile -t sources < <(git ls-files -- '*.java')
+          if [ ${#sources[@]} -eq 0 ]; then
+            echo "no tracked Java sources in ${{ matrix.example.dir }}"
+            exit 0
+          fi
+          printf 'checking %s\n' "${sources[@]}"
+          jals fmt --check "${sources[@]}"
+          jals lint ${{ matrix.example.features }} "${sources[@]}"
+
   lsp-binary:
     name: lsp binary (${{ matrix.target }})
     # Per-platform `jals` binaries for the Zed extension's auto-download: the extension asks

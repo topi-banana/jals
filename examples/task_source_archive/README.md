@@ -1,9 +1,11 @@
 # Typed source-archive task
 
 This example reserves `src/main/java/net/example` for sources extracted from
-`vendor/example-sources.jar`. Supply a JAR containing `net/example/Generated.java`, then run:
+`vendor/example-sources.jar`. Supply a JAR containing `net/example/Generated.java` — a JAR is a
+binary, so it is generated rather than committed — then run:
 
 ```sh
+../scripts/gen-vendor-jars.sh   # writes vendor/example-sources.jar (any JAR of your own does too)
 jals build
 ```
 

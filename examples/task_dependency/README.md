@@ -9,7 +9,9 @@ example = { path = "../library", features = ["sources"] }
 ```
 
 Supply `library/vendor/example.jar` containing `net/example/Greeter.class` — and, for the `sources`
-feature, `net/example/Greeter.java` — then:
+feature, `net/example/Greeter.java`. A JAR is a binary, so it is generated rather than committed:
+`../scripts/gen-vendor-jars.sh` writes one holding both halves, and any JAR of your own with those
+two members does as well. Then:
 
 ```sh
 cd consumer && jals run
