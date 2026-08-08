@@ -21,6 +21,7 @@ use crate::rules::{Checker, RuleMeta};
 pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "compact-source-file",
     default: Severity::Error,
+    needs_clean_parse: false,
     check: Checker::Gated {
         feature: Feature::CompactSourceFiles,
         subject: "top-level declarations like `main`",

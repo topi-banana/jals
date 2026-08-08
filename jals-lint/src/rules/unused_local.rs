@@ -21,6 +21,7 @@ use crate::rules::{Checker, Finding, RuleMeta};
 pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "unused-local",
     default: Severity::Warn,
+    needs_clean_parse: false,
     check: Checker::Resolved(UnusedLocal::check),
 };
 

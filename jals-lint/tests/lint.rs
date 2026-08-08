@@ -3,7 +3,7 @@ use std::fmt::Write;
 use expect_test::{Expect, expect};
 use jals_config::lint::Config;
 use jals_config::{Feature, FeatureSet, Severity};
-use jals_lint::LintOutput;
+use jals_lint::{LintOutput, LintRequest};
 
 /// Render the diagnostics of a default-config lint run as one line each:
 /// `rule:start..end: message`.
@@ -609,9 +609,13 @@ fn lint_with_cfg(src: &str, build_features: &[&str]) -> String {
         .map(ToString::to_string)
         .collect::<std::collections::BTreeSet<_>>();
     let cfg = jals_syntax::cfg::CfgMap::compute(&parse, &features);
-    render(&jals_exec::block_on_inline(
-        LintOutput::lint_parse_with_index(&parse, &config, None, Some(&cfg)),
-    ))
+    render(&jals_exec::block_on_inline(LintOutput::lint(
+        LintRequest {
+            cfg: Some(&cfg),
+            ..LintRequest::new(&parse)
+        },
+        &config,
+    )))
 }
 
 #[test]

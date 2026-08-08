@@ -19,6 +19,7 @@ use crate::rules::{Checker, RuleMeta};
 pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "attribute",
     default: Severity::Error,
+    needs_clean_parse: false,
     check: Checker::Gated {
         feature: Feature::Attributes,
         subject: "attributes (`#[cfg(...)]`)",

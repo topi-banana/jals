@@ -46,7 +46,7 @@ impl Resolved {
     ///
     /// This is the half a caller holding a cached parse tree (the language server, which keeps an
     /// `Arc<Parse>` per document; a lint rule, which is handed the root) calls without reparsing —
-    /// mirroring `jals_lint::LintOutput::lint_node`.
+    /// mirroring `jals_lint::LintOutput::lint`.
     pub async fn resolve_node(root: &SyntaxNode) -> Self {
         Self::resolve_node_with_cfg(root, &CfgMap::default()).await
     }

@@ -23,8 +23,10 @@ use crate::diagnostic::Severity;
 use crate::rules::{Checker, Finding, RuleMeta};
 
 pub(crate) const RULE: RuleMeta = RuleMeta {
-    name: crate::TYPE_MISMATCH_RULE,
+    name: "type-mismatch",
     default: Severity::Warn,
+    // Every finding here comes from type inference; see `RuleMeta::needs_clean_parse`.
+    needs_clean_parse: true,
     check: Checker::Indexed(TypeMismatch::check),
 };
 

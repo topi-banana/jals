@@ -22,6 +22,7 @@ use crate::rules::{Checker, Finding, RuleMeta};
 pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "unreported-exception",
     default: Severity::Warn,
+    needs_clean_parse: false,
     check: Checker::Indexed(UnreportedExceptionRule::check),
 };
 

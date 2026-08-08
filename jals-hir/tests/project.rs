@@ -203,13 +203,17 @@ fn definition_at_jumps_across_files() {
 #[test]
 fn unresolved_types_reports_only_genuine_unknowns() {
     // `Nope` is nameable from nowhere; `String` is java.lang (external); `Helper` resolves
-    // file-locally. Only `Nope` is a diagnostic span.
+    // file-locally. Only `Nope` is reported.
     let srcs = ["package a; class Bar { Nope n; String s; Helper h; } class Helper { }"];
     let nodes = nodes(&srcs);
     let index = jals_exec::block_on_inline(ProjectIndex::builder(&nodes).build());
     let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&nodes[0].1));
 
-    let spans = jals_exec::block_on_inline(index.unresolved_types(FileId(0), &resolved));
-    assert_eq!(spans.len(), 1);
-    assert_eq!(&srcs[0][spans[0].clone()], "Nope");
+    let found = jals_exec::block_on_inline(index.unresolved_types(FileId(0), &resolved));
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].name, "Nope");
+    assert_eq!(found[0].message(), "cannot resolve symbol `Nope`");
+    // The name is the lookup's own, and it agrees with the span — which is why a consumer never has
+    // to slice it back out of the source to word the diagnostic.
+    assert_eq!(&srcs[0][found[0].range.clone()], found[0].name);
 }

@@ -405,6 +405,27 @@ impl TypeResolution {
     }
 }
 
+/// A type-name reference that resolves to nothing: what
+/// [`unresolved_types`](ProjectIndex::unresolved_types) answers with.
+///
+/// `name` is the one the lookup ran with ([`Reference::name`] — the simple name, so for a dotted
+/// `a.b.C` the last segment, which is exactly what `range` covers). Carrying it is the point: a
+/// consumer wording the diagnostic reads it here instead of slicing it back out of the source text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnresolvedType {
+    /// The byte range of the referencing identifier token.
+    pub range: Range<usize>,
+    /// The simple name that resolved to nothing.
+    pub name: String,
+}
+
+impl UnresolvedType {
+    /// The human-readable diagnostic message.
+    pub fn message(&self) -> String {
+        format!("cannot resolve symbol `{}`", self.name)
+    }
+}
+
 /// Per-file resolution context: its package and the imports that bring type names into scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FileMeta {
@@ -1325,10 +1346,13 @@ impl ProjectIndex {
         }
     }
 
-    /// The byte ranges of `file`'s type-name references that resolve to nothing — neither
-    /// file-locally nor across the project. These are the "cannot resolve symbol" spans; a name
-    /// that might come from outside the indexed sources is deliberately excluded.
-    pub async fn unresolved_types(&self, file: FileId, resolved: &Resolved) -> Vec<Range<usize>> {
+    /// `file`'s type-name references that resolve to nothing — neither file-locally nor across the
+    /// project. This is the "cannot resolve symbol" signal; a name that might come from outside the
+    /// indexed sources ([`TypeResolution::External`]) is deliberately excluded.
+    ///
+    /// Each answer carries the name it failed to bind, not just its span, so the rule that reports
+    /// it words the message from the lookup rather than from the source text.
+    pub async fn unresolved_types(&self, file: FileId, resolved: &Resolved) -> Vec<UnresolvedType> {
         let mut yielder = Yielder::new();
         let mut out = Vec::new();
         for r in &resolved.references {
@@ -1337,7 +1361,10 @@ impl ProjectIndex {
                 && r.resolution == Resolution::Unresolved
                 && self.resolve_reference(file, r) == TypeResolution::Unresolved
             {
-                out.push(r.range.clone());
+                out.push(UnresolvedType {
+                    range: r.range.clone(),
+                    name: r.name.clone(),
+                });
             }
         }
         out
