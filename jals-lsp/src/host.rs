@@ -518,7 +518,6 @@ mod tests {
         block_on_inline(jals_editor::FileDiagnostics::assemble(
             &document.parse,
             None,
-            None,
             &jals_config::lint::Config::default(),
             None,
         ))

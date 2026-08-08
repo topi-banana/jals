@@ -5,7 +5,8 @@
 //! unchanged (those types stay `external`), and a stub is never offered as a navigation target.
 
 use jals_hir::{
-    FileId, ItemOrigin, ProjectIndex, Resolved, Ty, TypeInference, TypeMismatch, TypeResolution,
+    FileAnalysis, FileId, FileSemantics, ItemOrigin, ProjectIndex, Ty, TypeMismatch,
+    TypeResolution, TypedFile,
 };
 use jals_syntax::SyntaxNode;
 
@@ -23,45 +24,56 @@ fn nodes(sources: &[&str]) -> Vec<(FileId, SyntaxNode)> {
         .collect()
 }
 
-/// Analyses a single-file project *with the stdlib stubs*, returning the pieces a test queries.
-fn analyse_with_stdlib(src: &str) -> (SyntaxNode, Resolved, TypeInference, ProjectIndex) {
-    let node = jals_exec::block_on_inline(jals_syntax::Parse::parse(src)).syntax();
-    let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&node));
-    let index = jals_exec::block_on_inline(
-        ProjectIndex::builder(&[(FileId(0), node.clone())])
-            .with_stdlib()
-            .build(),
-    );
-    let ti = jals_exec::block_on_inline(TypeInference::infer(&node, &resolved, &index, FileId(0)));
-    (node, resolved, ti, index)
+/// A single-file project analysed *with the stdlib stubs*. Owns what a binding borrows.
+struct Fixture {
+    analysis: FileAnalysis,
+    index: ProjectIndex,
+}
+
+impl Fixture {
+    fn new(src: &str) -> Self {
+        let node = jals_exec::block_on_inline(jals_syntax::Parse::parse(src)).syntax();
+        let analysis = jals_exec::block_on_inline(FileAnalysis::of(&node));
+        let index = jals_exec::block_on_inline(
+            ProjectIndex::builder(&[(FileId(0), node)])
+                .with_stdlib()
+                .build(),
+        );
+        Self { analysis, index }
+    }
+
+    const fn semantics(&self) -> FileSemantics<'_> {
+        self.analysis.in_project(&self.index, FileId(0))
+    }
 }
 
 /// The type-mismatch diagnostics for a single-file project analysed *with the stdlib stubs*.
 fn mismatches_with_stdlib(src: &str) -> Vec<TypeMismatch> {
-    let (node, resolved, _ti, index) = analyse_with_stdlib(src);
-    jals_exec::block_on_inline(TypeInference::type_mismatches(
-        &node,
-        &resolved,
-        Some((&index, FileId(0))),
-    ))
+    let fixture = Fixture::new(src);
+    let semantics = fixture.semantics();
+    jals_exec::block_on_inline(semantics.type_mismatches())
 }
 
 /// The inferred type of the first definition named `name`.
-fn def_ty(ti: &TypeInference, resolved: &Resolved, name: &str) -> Ty {
-    let def = resolved
-        .defs
+fn def_ty(typed: TypedFile<'_>, name: &str) -> Ty {
+    let def = typed
+        .analysis()
+        .defs()
         .iter()
         .find(|d| d.name == name)
         .unwrap_or_else(|| panic!("no definition named `{name}`"));
-    ti.type_of_def(def.id).clone()
+    typed.type_of_def(def.id).clone()
 }
 
 #[test]
 fn string_resolves_to_a_stdlib_project_item() {
     let src = "class C { void m() { String s = null; } }";
-    let (_node, resolved, ti, index) = analyse_with_stdlib(src);
+    let fixture = Fixture::new(src);
+    let semantics = fixture.semantics();
+    let typed = jals_exec::block_on_inline(semantics.typed());
+    let index = &fixture.index;
 
-    let ty = def_ty(&ti, &resolved, "s");
+    let ty = def_ty(typed, "s");
     assert_eq!(ty.to_string(), "String");
     let id = ty
         .project_id()
@@ -74,13 +86,16 @@ fn string_resolves_to_a_stdlib_project_item() {
 fn string_length_infers_int() {
     // The member call sees through `String` to the stub's `int length()`.
     let src = "class C { void m() { String s = null; var n = s.length(); } }";
-    let (_node, resolved, ti, _index) = analyse_with_stdlib(src);
-    assert_eq!(def_ty(&ti, &resolved, "n").to_string(), "int");
+    let fixture = Fixture::new(src);
+    let semantics = fixture.semantics();
+    let typed = jals_exec::block_on_inline(semantics.typed());
+    assert_eq!(def_ty(typed, "n").to_string(), "int");
 }
 
 #[test]
 fn object_is_a_supertype_of_string() {
-    let (_node, _resolved, _ti, index) = analyse_with_stdlib("class C { }");
+    let fixture = Fixture::new("class C { }");
+    let index = &fixture.index;
     let string_id = index
         .resolve_type_name(FileId(0), "String", None)
         .project_id()
@@ -102,9 +117,9 @@ fn object_is_a_supertype_of_string() {
 fn stdlib_symbol_goto_is_none() {
     // A stub type has no host-openable file, so go-to-definition on it yields nothing.
     let src = "class C { String f; }";
-    let (_node, resolved, _ti, index) = analyse_with_stdlib(src);
+    let fixture = Fixture::new(src);
     let offset = src.find("String f").expect("type reference present");
-    assert_eq!(index.definition_at(FileId(0), &resolved, offset), None);
+    assert_eq!(fixture.semantics().definition_at(offset), None);
 }
 
 #[test]
@@ -124,23 +139,29 @@ fn default_build_keeps_string_external() {
 fn list_element_access_substitutes_the_type_argument() {
     // `List<String>.get(int)` returns `E`, bound to `String` by the receiver's argument.
     let src = "import java.util.List; class C { void m() { List<String> xs = null; var x = xs.get(0); } }";
-    let (_n, resolved, ti, _i) = analyse_with_stdlib(src);
-    assert_eq!(def_ty(&ti, &resolved, "x").to_string(), "String");
+    let fixture = Fixture::new(src);
+    let semantics = fixture.semantics();
+    let typed = jals_exec::block_on_inline(semantics.typed());
+    assert_eq!(def_ty(typed, "x").to_string(), "String");
 }
 
 #[test]
 fn a_raw_container_leaves_its_member_type_a_variable() {
     // A raw `Map` (no arguments) does not bind `V`, so `get` stays the type variable, shown by name.
     let src = "import java.util.Map; class C { void m() { Map m = null; var v = m.get(null); } }";
-    let (_n, resolved, ti, _i) = analyse_with_stdlib(src);
-    assert_eq!(def_ty(&ti, &resolved, "v").to_string(), "V");
+    let fixture = Fixture::new(src);
+    let semantics = fixture.semantics();
+    let typed = jals_exec::block_on_inline(semantics.typed());
+    assert_eq!(def_ty(typed, "v").to_string(), "V");
 }
 
 #[test]
 fn map_value_access_substitutes_the_second_argument() {
     let src = "import java.util.Map; class C { void m() { Map<String, Integer> m = null; var v = m.get(null); } }";
-    let (_n, resolved, ti, _i) = analyse_with_stdlib(src);
-    assert_eq!(def_ty(&ti, &resolved, "v").to_string(), "Integer");
+    let fixture = Fixture::new(src);
+    let semantics = fixture.semantics();
+    let typed = jals_exec::block_on_inline(semantics.typed());
+    assert_eq!(def_ty(typed, "v").to_string(), "Integer");
 }
 
 #[test]
@@ -148,15 +169,19 @@ fn inherited_generic_member_substitutes_through_the_supertype_chain() {
     // `ArrayList<String>` inherits `get` from `List<E>` (via `implements List<E>`); the argument must
     // propagate `E := String` down the chain.
     let src = "import java.util.ArrayList; class C { void m() { ArrayList<String> xs = null; var x = xs.get(0); } }";
-    let (_n, resolved, ti, _i) = analyse_with_stdlib(src);
-    assert_eq!(def_ty(&ti, &resolved, "x").to_string(), "String");
+    let fixture = Fixture::new(src);
+    let semantics = fixture.semantics();
+    let typed = jals_exec::block_on_inline(semantics.typed());
+    assert_eq!(def_ty(typed, "x").to_string(), "String");
 }
 
 #[test]
 fn optional_unwraps_to_its_argument() {
     let src = "import java.util.Optional; class C { void m() { Optional<String> o = null; var v = o.get(); } }";
-    let (_n, resolved, ti, _i) = analyse_with_stdlib(src);
-    assert_eq!(def_ty(&ti, &resolved, "v").to_string(), "String");
+    let fixture = Fixture::new(src);
+    let semantics = fixture.semantics();
+    let typed = jals_exec::block_on_inline(semantics.typed());
+    assert_eq!(def_ty(typed, "v").to_string(), "String");
 }
 
 #[test]
@@ -164,7 +189,8 @@ fn java_util_types_need_an_import_but_then_resolve_to_stubs() {
     // Without an import `List` is unresolved (java.util is not implicitly imported); with one it
     // binds to the stub item.
     let imported = "import java.util.List; class C { List<String> f; }";
-    let (_n, _r, _ti, index) = analyse_with_stdlib(imported);
+    let fixture = Fixture::new(imported);
+    let index = &fixture.index;
     let id = index
         .resolve_type_name(FileId(0), "List", None)
         .project_id()
@@ -263,7 +289,8 @@ fn calling_a_stub_method_with_an_odd_argument_is_not_flagged() {
 fn a_stub_types_method_set_is_never_complete() {
     // A stub carries only the common members, so its overload set is treated as incomplete — the
     // guard that keeps `check_call` from ever concluding "no overload" against a JDK type.
-    let (_n, _r, _ti, index) = analyse_with_stdlib("class C {}");
+    let fixture = Fixture::new("class C {}");
+    let index = &fixture.index;
     let string_id = index
         .resolve_type_name(FileId(0), "String", None)
         .project_id()

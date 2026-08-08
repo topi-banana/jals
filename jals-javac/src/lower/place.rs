@@ -86,7 +86,7 @@ impl Place {
         let member = match context.def_at(name.syntax()) {
             Some(id) => {
                 if let Some(slot) = emit.slots.slot_of(id) {
-                    let ty = context.inference.type_of_def(id).clone();
+                    let ty = context.typed.type_of_def(id).clone();
                     return Ok(Self::Local {
                         slot,
                         descriptor: Descriptor::descriptor_of(&ty, context.index)?.to_string(),
@@ -128,7 +128,7 @@ impl Place {
         emit: &mut Emit<'_, '_>,
     ) -> Result<Self> {
         let member = context
-            .inference
+            .typed
             .field_target_of(Context::span(access.syntax()))
             .ok_or_else(|| LowerError::Unresolved(access.field().unwrap_or_default()))?;
         let (owner, name, descriptor) = Expr::field_ref(member, context)?;

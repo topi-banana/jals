@@ -56,7 +56,7 @@ use crate::ty::{ClassTy, Primitive, Ty};
 /// Produced by [`infer`] / [`infer_node`]. Declaration types are indexed by [`DefId`] (parallel to
 /// [`Resolved::defs`](crate::Resolved)); expression types are keyed by the expression's byte span,
 /// and [`type_at`](TypeInference::type_at) answers the hover query "what type is under the cursor".
-pub struct TypeInference {
+pub(crate) struct TypeInference {
     /// One entry per [`Def`](crate::Def), in [`DefId`] order; [`Ty::Unknown`] where not inferred.
     def_types: Vec<Ty>,
     /// Every expression's type, keyed by its byte span `(start, end)`. Read by exact span
@@ -163,10 +163,14 @@ pub struct TypeMismatch {
     kind: MismatchKind,
 }
 
-/// What kind of type error a [`TypeMismatch`] is — its `message` differs by kind, but consumers read
-/// only [`TypeMismatch::range`] and [`TypeMismatch::message`].
+/// What kind of type error a [`TypeMismatch`] is, and the types involved.
+///
+/// Structured rather than a rendered string: the *fact* belongs here, and the wording belongs to
+/// the rule that reports it — `jals-lint` produces every semantic diagnostic, so it owns the
+/// message, the `jalslint.toml` key, and the severity together. A consumer that only groups or
+/// counts mismatches reads the discriminant instead of parsing prose.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum MismatchKind {
+pub enum MismatchKind {
     /// A value of type `found` assigned where `expected` is required.
     Assignment { expected: Ty, found: Ty },
     /// A call to `name` whose argument types `args` match none of its overloads.
@@ -191,43 +195,64 @@ impl TypeMismatch {
         }
     }
 
-    /// A human-readable description of the type error.
-    pub fn message(&self) -> String {
-        match &self.kind {
-            MismatchKind::Assignment { expected, found } => {
-                format!("incompatible types: `{found}` cannot be assigned to `{expected}`")
-            }
-            MismatchKind::NoOverload { name, args } => {
-                let list = args
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("no overload of `{name}` accepts the argument types ({list})")
-            }
-        }
+    /// What kind of type error this is, and the types involved.
+    pub const fn kind(&self) -> &MismatchKind {
+        &self.kind
+    }
+}
+
+impl crate::analysis::FileAnalysis {
+    /// The file-local half of type checking: reference types resolve only by spelling, so this
+    /// catches primitive narrowing (`int x = 1.0;`), `boolean`/numeric confusion, `null` to a
+    /// primitive, and array element mismatches — and nothing that needs the project.
+    ///
+    /// [`FileSemantics::type_mismatches`](crate::FileSemantics::type_mismatches) is the same walk
+    /// over a project-aware inference, and additionally catches project subtyping and bad call
+    /// arguments. Conservative in both shapes (see [`Ty::is_assignable_to`]).
+    pub async fn type_mismatches(&self) -> Vec<TypeMismatch> {
+        let inference = TypeInference::infer_node(self.root(), self.resolved()).await;
+        inference
+            .mismatches(self.root(), self.resolved(), None)
+            .await
+    }
+}
+
+impl crate::analysis::FileSemantics<'_> {
+    /// The assignment-context type mismatches in the file, resolved against the project: a
+    /// variable initializer, a simple `=` assignment, a `return`, or a call argument whose value
+    /// type is not assignable to its slot type.
+    ///
+    /// Sees project-internal subtyping (a `Sub`/`Base` confusion) and checks call arguments, which
+    /// the file-local [`FileAnalysis::type_mismatches`](crate::FileAnalysis::type_mismatches)
+    /// cannot. Conservative throughout (it builds on [`Ty::is_assignable_to`]): an `Unknown` type,
+    /// an external/boxing pair, and a numeric constant that narrowing could rescue are never
+    /// reported, so a consumer turning these into diagnostics never shows a false positive.
+    pub async fn type_mismatches(&self) -> Vec<TypeMismatch> {
+        let typed = self.typed().await;
+        typed
+            .inference()
+            .mismatches(
+                self.root(),
+                self.resolved(),
+                Some((self.index(), self.file())),
+            )
+            .await
     }
 }
 
 impl TypeInference {
-    /// Reports the assignment-context type mismatches in `root` (a `SOURCE_FILE`): a variable
-    /// initializer or a simple `=` assignment whose value type is not assignable to its slot type.
+    /// The mismatch walk, over an inference the caller already ran.
     ///
-    /// `project = Some((index, file))` infers reference types against the project, so a project-internal
-    /// subtyping mismatch (a `Sub`/`Base` confusion) is caught; `None` infers file-locally, where
-    /// reference types stay external and lenient, so only primitive, `null`, and array mismatches
-    /// surface. Conservative throughout (it builds on [`Ty::is_assignable_to`]): an `Unknown` type, an
-    /// external/boxing pair, and a numeric constant that narrowing could rescue are never reported, so a
-    /// consumer turning these into diagnostics never shows a false positive. Pure; never panics.
-    pub async fn type_mismatches(
+    /// One implementation for both public entry points: `project` decides only what the walk may
+    /// conclude (argument checking and project subtyping need the member model), never how the
+    /// types were inferred — that is already settled by which inference `self` is. Pure; never
+    /// panics.
+    pub(crate) async fn mismatches(
+        &self,
         root: &SyntaxNode,
         resolved: &Resolved,
         project: Option<(&ProjectIndex, FileId)>,
     ) -> Vec<TypeMismatch> {
-        let ti = match project {
-            Some((index, file)) => Self::infer(root, resolved, index, file).await,
-            None => Self::infer_node(root, resolved).await,
-        };
         let index = project.map(|(index, _)| index);
         let mut yielder = Yielder::new();
         let mut out = Vec::new();
@@ -235,15 +260,15 @@ impl TypeInference {
             yielder.tick().await;
             match node.kind() {
                 LOCAL_VAR_DECL | FIELD_DECL => {
-                    ti.check_initializer(&node, resolved, index, &mut out);
+                    self.check_initializer(&node, resolved, index, &mut out);
                 }
-                ASSIGNMENT_EXPR => ti.check_assignment(&node, index, &mut out),
-                RETURN_STMT => ti.check_return(&node, resolved, index, &mut out),
+                ASSIGNMENT_EXPR => self.check_assignment(&node, index, &mut out),
+                RETURN_STMT => self.check_return(&node, resolved, index, &mut out),
                 // Argument checking needs the project member model (formal parameter types), so it runs
                 // only with an index — like project subtyping.
                 CALL_EXPR => {
                     if let Some((index, file)) = project {
-                        ti.check_call(&node, index, file, &mut out);
+                        self.check_call(&node, index, file, &mut out);
                     }
                 }
                 _ => {}
@@ -1828,14 +1853,15 @@ impl Cst {
 
 /// Signature help for a call site: the callee's overloads and where the cursor sits.
 ///
-/// Produced by [`signature_help`]. A pure data shape (no LSP types), so a host can map it to its
+/// Produced by [`FileSemantics::signature_help`](crate::FileSemantics::signature_help). A pure
+/// data shape (no LSP types), so a host can map it to its
 /// protocol — the language server turns each [`Signature`] into an LSP `SignatureInformation`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignatureHelp {
-    /// The callee's overloads, nearest-type first (the order of
-    /// [`ProjectIndex::resolve_members_all`]).
+    /// The callee's overloads, nearest-type first (the index's own member-resolution order).
     pub signatures: Vec<Signature>,
-    /// The overload to highlight: the first that has a parameter at [`active_parameter`], else 0.
+    /// The overload to highlight: the first that has a parameter at
+    /// [`active_parameter`](Self::active_parameter), else 0.
     pub active_signature: usize,
     /// The zero-based index of the argument the cursor is in (the count of commas before it).
     pub active_parameter: usize,
@@ -1851,28 +1877,25 @@ pub struct Signature {
     pub parameters: Vec<Range<usize>>,
 }
 
-impl ProjectIndex {
+impl crate::analysis::FileSemantics<'_> {
     /// Signature help for the call whose argument list contains byte `offset`: the overloads of the
     /// method being called, plus the argument index the cursor is on.
     ///
-    /// Resolves the callee like [`TypeInference::check_call`] — a qualified `recv.m(..)` on the
+    /// Resolves the callee the same way call checking does — a qualified `recv.m(..)` on the
     /// receiver's project type, or a bare `m(..)` on the enclosing type — then renders every overload.
     /// Returns `None` when the cursor is in no call, the receiver is not an indexed project type (e.g.
     /// an external/JDK type), or the method names no project member. Never panics.
-    pub async fn signature_help(
-        &self,
-        root: &SyntaxNode,
-        resolved: &Resolved,
-        file: FileId,
-        offset: usize,
-    ) -> Option<SignatureHelp> {
-        let (call, active_parameter) = Cst::enclosing_call(root, offset)?;
-        let ti = TypeInference::infer(root, resolved, self, file).await;
-        let (owner, name) = ti.call_target(&call, self, file)?;
-        let signatures: Vec<Signature> = self
+    ///
+    /// Anchors structurally first: a cursor in no call answers without running inference at all.
+    pub async fn signature_help(&self, offset: usize) -> Option<SignatureHelp> {
+        let index = self.index();
+        let (call, active_parameter) = Cst::enclosing_call(self.root(), offset)?;
+        let typed = self.typed().await;
+        let (owner, name) = typed.inference().call_target(&call, index, self.file())?;
+        let signatures: Vec<Signature> = index
             .resolve_members_all(owner, &name, Namespace::Method)
             .into_iter()
-            .map(|id| self.render_signature(self.member(id)))
+            .map(|id| index.render_signature(index.member(id)))
             .collect();
         if signatures.is_empty() {
             return None;
@@ -1889,10 +1912,12 @@ impl ProjectIndex {
             active_parameter,
         })
     }
+}
 
+impl ProjectIndex {
     /// Renders one member's signature as `name(type1 p1, type2 p2)`, recording each parameter's byte
     /// range within the label. A parameter with no readable name is rendered as its type alone.
-    fn render_signature(&self, member: &crate::Member) -> Signature {
+    pub(crate) fn render_signature(&self, member: &crate::Member) -> Signature {
         let mut label = String::new();
         label.push_str(&member.name);
         label.push('(');
@@ -1952,7 +1977,8 @@ impl Cst {
 
 /// One member-access completion candidate: a field or method reachable on the receiver's type.
 ///
-/// Produced by [`member_completions`]. A pure data shape (no LSP types), so a host maps it to its
+/// Produced by [`FileSemantics::member_completions`](crate::FileSemantics::member_completions). A
+/// pure data shape (no LSP types), so a host maps it to its
 /// protocol — the language server turns each into an LSP `CompletionItem`, using [`kind`](Completion::kind)
 /// for the item icon and [`detail`](Completion::detail) for the type / signature shown beside it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1967,7 +1993,7 @@ pub struct Completion {
     pub detail: String,
 }
 
-impl ProjectIndex {
+impl crate::analysis::FileSemantics<'_> {
     /// The member-access completions for `receiver.` at byte `offset`: the fields and methods
     /// reachable on the receiver's type, when that receiver is an indexed project type.
     ///
@@ -1979,22 +2005,17 @@ impl ProjectIndex {
     /// an indexed project type (an external / JDK type, whose members are not indexed). One entry per
     /// distinct name (a field shadows, overloads collapse to one); the editor filters by the typed
     /// prefix. Never panics.
-    pub async fn member_completions(
-        &self,
-        root: &SyntaxNode,
-        resolved: &Resolved,
-        file: FileId,
-        offset: usize,
-    ) -> Vec<Completion> {
-        let Some(owner) = self.receiver_owner(root, resolved, file, offset).await else {
+    pub async fn member_completions(&self, offset: usize) -> Vec<Completion> {
+        let index = self.index();
+        let Some(owner) = self.receiver_owner(offset).await else {
             return Vec::new();
         };
         let mut yielder = Yielder::new();
         let mut seen: HashSet<(String, Namespace)> = HashSet::new();
         let mut out = Vec::new();
-        for id in self.members_of(owner) {
+        for id in index.members_of(owner) {
             yielder.tick().await;
-            let member = self.member(id);
+            let member = index.member(id);
             // Only instance-accessible members complete after `.`: fields and methods, not
             // constructors or enum constants.
             if !matches!(member.kind, DefKind::Field | DefKind::Method) {
@@ -2004,16 +2025,18 @@ impl ProjectIndex {
             // keep the first per (name, name-space) and drop the rest (a shadowed field, a further
             // overload).
             if seen.insert((member.name.clone(), member.kind.namespace())) {
-                out.push(self.completion_of(member));
+                out.push(index.completion_of(member));
             }
         }
         out
     }
+}
 
+impl ProjectIndex {
     /// Builds a [`Completion`] for `member`: a field's detail is its type; a method's is its parameter
     /// list and return type (`(int w, int h): int`), reusing
     /// [`render_signature`](ProjectIndex::render_signature) for the parameters.
-    fn completion_of(&self, member: &crate::Member) -> Completion {
+    pub(crate) fn completion_of(&self, member: &crate::Member) -> Completion {
         let detail = match member.kind {
             DefKind::Method => {
                 let signature = self.render_signature(member);
@@ -2031,7 +2054,23 @@ impl ProjectIndex {
             detail,
         }
     }
+}
 
+impl crate::analysis::FileAnalysis {
+    /// Whether the cursor at byte `offset` is in a member-access position (just after a `.`, or in a
+    /// member name following one).
+    ///
+    /// The host dispatches on this: a member access completes members
+    /// ([`FileSemantics::member_completions`](crate::FileSemantics::member_completions)); any other
+    /// position completes the scope
+    /// ([`FileSemantics::scope_completions`](crate::FileSemantics::scope_completions)). A purely
+    /// syntactic pre-check — it reads only the CST and `offset`, which is why it needs no project.
+    pub fn at_member_access(&self, offset: usize) -> bool {
+        Cst::member_access_dot(self.root(), offset).is_some()
+    }
+}
+
+impl crate::analysis::FileSemantics<'_> {
     /// The indexed project type whose member is being completed at `offset`: the inferred type of the
     /// expression before the `.` just left of the cursor, or — for a `this.` / `super.` receiver — the
     /// enclosing type. `None` when the cursor is on no member access or the receiver is not a project
@@ -2040,42 +2079,27 @@ impl ProjectIndex {
     /// Anchors structurally first and only runs the (whole-file) type inference once a real receiver
     /// expression is found — so a cursor on no member access, or a `this.` / `super.` receiver, costs
     /// no inference at all (member completion is triggered on every `.`).
-    async fn receiver_owner(
-        &self,
-        root: &SyntaxNode,
-        resolved: &Resolved,
-        file: FileId,
-        offset: usize,
-    ) -> Option<ItemId> {
-        let dot = Cst::member_access_dot(root, offset)?;
+    async fn receiver_owner(&self, offset: usize) -> Option<ItemId> {
+        let dot = Cst::member_access_dot(self.root(), offset)?;
         let before = Cst::prev_significant(&dot)?;
         // A `this` / `super` receiver has no inferred type; its members are the enclosing type's (for
         // `super` the strictly-inherited ones — approximated here by the whole enclosing member set).
         if matches!(before.kind(), THIS_KW | SUPER_KW) {
-            return self.enclosing_item(file, &before.parent()?);
+            return self.index().enclosing_item(self.file(), &before.parent()?);
         }
         let dot_start = usize::from(dot.text_range().start());
         let receiver = Cst::receiver_node(&before, dot_start)?;
-        let ti = TypeInference::infer(root, resolved, self, file).await;
-        ti.type_of_expr(Collect::node_span(&receiver))?.project_id()
-    }
-
-    /// Whether the cursor at byte `offset` is in a member-access position (just after a `.`, or in a
-    /// member name following one).
-    ///
-    /// The host dispatches on this: a member access completes members
-    /// ([`member_completions`](ProjectIndex::member_completions)); any other position completes the
-    /// scope ([`scope_completions`](ProjectIndex::scope_completions)). A purely syntactic pre-check —
-    /// it reads only `root` and `offset`, not the index.
-    pub fn at_member_access(root: &SyntaxNode, offset: usize) -> bool {
-        Cst::member_access_dot(root, offset).is_some()
+        let typed = self.typed().await;
+        typed
+            .type_of_expr(Collect::node_span(&receiver))?
+            .project_id()
     }
 
     /// The scope completions at byte `offset`: every binding visible there plus every project type by
     /// simple name.
     ///
     /// These are the candidates for a bare identifier position (not after a `.`; the host gates on
-    /// [`at_member_access`](ProjectIndex::at_member_access)).
+    /// [`at_member_access`](crate::FileAnalysis::at_member_access)).
     ///
     /// Bindings come from the cursor's scope chain, innermost outward: a block / `for` / resources
     /// scope contributes only the locals declared before the cursor (sequential visibility), every
@@ -2083,32 +2107,26 @@ impl ProjectIndex {
     /// field or method is reachable without `this.`). An inner binding shadows an outer one of the
     /// same name and name-space. Project types from other files are then added by simple name. One
     /// entry per (name, name-space); the editor filters by the typed prefix. Never panics.
-    pub async fn scope_completions(
-        &self,
-        root: &SyntaxNode,
-        resolved: &Resolved,
-        file: FileId,
-        offset: usize,
-    ) -> Vec<Completion> {
-        let ti = TypeInference::infer(root, resolved, self, file).await;
+    pub async fn scope_completions(&self, offset: usize) -> Vec<Completion> {
+        let typed = self.typed().await;
         let mut yielder = Yielder::new();
         let mut seen: HashSet<(String, Namespace)> = HashSet::new();
         let mut out = Vec::new();
         // Visible bindings, innermost scope outward (the first seen per name / name-space wins, so an
         // inner binding shadows an outer one).
-        for def in resolved.visible_defs(offset) {
+        for def in self.resolved().visible_defs(offset) {
             yielder.tick().await;
             // A constructor is not a name completed in an expression position.
             if def.kind == DefKind::Constructor {
                 continue;
             }
             if seen.insert((def.name.clone(), def.kind.namespace())) {
-                out.push(ti.binding_completion(def));
+                out.push(typed.inference().binding_completion(def));
             }
         }
         // Project type names from other files (a sibling type already in scope is deduped away). The
         // simple name completes; the fully-qualified name is the detail.
-        for (_, item) in self.items() {
+        for (_, item) in self.index().items() {
             yielder.tick().await;
             let name = item.fqn.simple_name().to_owned();
             if seen.insert((name.clone(), Namespace::Type)) {

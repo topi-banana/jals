@@ -7,8 +7,8 @@
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 
-use jals_hir::{FileId, ProjectIndex, Resolved, TypeInference};
-use jals_javac::wasm::{CompileWasm, WasmError, WasmInput};
+use jals_hir::{FileAnalysis, FileId, FileSemantics, ProjectIndex, TypedFile};
+use jals_javac::wasm::{CompileWasm, WasmError};
 use jals_syntax::SyntaxNode;
 
 /// Whether `name` is on this host. A missing engine is a missing *oracle*, not a broken compiler,
@@ -42,24 +42,19 @@ fn compile(sources: &[&str]) -> Result<Vec<u8>, WasmError> {
         .collect();
     let index = jals_exec::block_on_inline(ProjectIndex::builder(&roots).with_stdlib().build());
 
-    let analyses: Vec<(Resolved, TypeInference)> = roots
+    let analyses: Vec<FileAnalysis> = roots
         .iter()
-        .map(|(file, root)| {
-            let resolved = jals_exec::block_on_inline(Resolved::resolve_node(root));
-            let inference =
-                jals_exec::block_on_inline(TypeInference::infer(root, &resolved, &index, *file));
-            (resolved, inference)
-        })
+        .map(|(_, root)| jals_exec::block_on_inline(FileAnalysis::of(root)))
         .collect();
-    let inputs: Vec<WasmInput<'_>> = roots
+    // The bindings own the inference memo the witnesses borrow, so both live to the end.
+    let semantics: Vec<FileSemantics<'_>> = roots
         .iter()
         .zip(&analyses)
-        .map(|((file, root), (resolved, inference))| WasmInput {
-            file: *file,
-            root,
-            resolved,
-            inference,
-        })
+        .map(|((file, _), analysis)| analysis.in_project(&index, *file))
+        .collect();
+    let inputs: Vec<TypedFile<'_>> = semantics
+        .iter()
+        .map(|binding| jals_exec::block_on_inline(binding.typed()))
         .collect();
     CompileWasm::project(&inputs, &index)
 }

@@ -30,7 +30,7 @@ use core::ops::Range;
 
 use jals_config::DiagnosticSeverity;
 use jals_config::lint::Config;
-use jals_hir::{FileId, ProjectIndex, Resolved};
+use jals_hir::FileSemantics;
 use jals_syntax::Parse;
 use jals_syntax::cfg::CfgMap;
 
@@ -58,10 +58,11 @@ impl FileDiagnostics {
     /// Assemble `parse`'s diagnostics under `config` (which already carries the project's
     /// resolved feature set), threading the project `index` into the rule engine.
     ///
-    /// `resolved` is the file's local name resolution when the caller has it cached — passed
-    /// straight through, so every resolution-based rule shares it instead of the engine building a
-    /// second copy of what the caller already keeps. It must be the resolution of this `parse` under
-    /// this `cfg` (see [`jals_lint::LintRequest::resolved`]); `None` lets the engine resolve.
+    /// `file` is the caller's cached analysis bound to the project index — passed straight
+    /// through, so every rule shares one analysis and one type inference instead of the engine
+    /// building a second copy of what the caller already keeps. Its analysis must be the analysis
+    /// of this `parse` under this `cfg` (see [`jals_lint::LintRequest::file`]); `None` lets the
+    /// engine analyse, file-locally.
     ///
     /// `cfg`, when present, is the file's `#[cfg(...)]` evaluation: lint findings inside a
     /// disabled host are suppressed, each disabled range is reported as an `unnecessary` hint
@@ -70,8 +71,7 @@ impl FileDiagnostics {
     /// edit time.
     pub async fn assemble(
         parse: &Parse,
-        resolved: Option<&Resolved>,
-        index: Option<(&ProjectIndex, FileId)>,
+        file: Option<&FileSemantics<'_>>,
         config: &Config,
         cfg: Option<&CfgMap>,
     ) -> Vec<FileDiagnostic> {
@@ -107,9 +107,8 @@ impl FileDiagnostics {
         // the configuration nor names a rule, so the two cannot disagree.
         let findings = jals_lint::LintOutput::lint(
             jals_lint::LintRequest {
-                index,
                 cfg,
-                resolved,
+                file,
                 ..jals_lint::LintRequest::new(parse)
             },
             config,
@@ -156,7 +155,6 @@ mod tests {
             FileDiagnostics::assemble(
                 &jals_syntax::Parse::parse(text).await,
                 None,
-                None,
                 &Config::default(),
                 None,
             )
@@ -172,7 +170,9 @@ mod tests {
                 .with_stdlib()
                 .build()
                 .await;
-            FileDiagnostics::assemble(&parse, None, Some((&index, FileId(0))), config, None).await
+            let analysis = jals_hir::FileAnalysis::of(&parse.syntax()).await;
+            let semantics = analysis.in_project(&index, FileId(0));
+            FileDiagnostics::assemble(&parse, Some(&semantics), config, None).await
         })
     }
 
@@ -217,14 +217,14 @@ mod tests {
                 ..Default::default()
             };
             let parse = jals_syntax::Parse::parse(text).await;
-            let diags = FileDiagnostics::assemble(&parse, None, None, &config, None).await;
+            let diags = FileDiagnostics::assemble(&parse, None, &config, None).await;
             let gated = with_code(&diags, "compact-source-file");
             assert_eq!(gated.len(), 1);
             assert_eq!(gated[0].severity, DiagnosticSeverity::Error);
 
             // A `java25` set (or no features at all) allows the syntax: nothing is reported.
             config.features = jals_config::FeatureSet::resolve(&[jals_config::Feature::Java25]);
-            let diags = FileDiagnostics::assemble(&parse, None, None, &config, None).await;
+            let diags = FileDiagnostics::assemble(&parse, None, &config, None).await;
             assert!(with_code(&diags, "compact-source-file").is_empty());
         });
     }
@@ -286,14 +286,10 @@ mod tests {
             .with_stdlib()
             .build()
             .await;
-            let diags = FileDiagnostics::assemble(
-                &parse,
-                None,
-                Some((&index, FileId(0))),
-                &Config::default(),
-                None,
-            )
-            .await;
+            let analysis = jals_hir::FileAnalysis::of(&parse.syntax()).await;
+            let semantics = analysis.in_project(&index, FileId(0));
+            let diags =
+                FileDiagnostics::assemble(&parse, Some(&semantics), &Config::default(), None).await;
             let unresolved = with_code(&diags, "cannot-resolve");
             assert_eq!(unresolved.len(), 1);
             assert_eq!(unresolved[0].message, "cannot resolve symbol `Nope`");

@@ -18,7 +18,6 @@
 //! nothing here panics.
 
 use alloc::collections::BTreeMap;
-use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::ops::Range;
@@ -49,20 +48,31 @@ pub struct DeadIf {
 }
 
 impl DeadIf {
-    /// The human-readable diagnostic message.
-    pub fn message(&self) -> String {
-        format!(
-            "`if` condition is always {}",
-            if self.value { "true" } else { "false" }
-        )
+    /// The byte span of `node` with the leading trivia it carries trimmed off (this CST attaches the
+    /// trivia between two siblings to the *following* node, so a branch statement's range would
+    /// otherwise start at the space before it).
+    fn trimmed_span(node: &SyntaxNode) -> Range<usize> {
+        let full = Collect::node_span(node);
+        let start = node
+            .descendants_with_tokens()
+            .filter_map(SyntaxElement::into_token)
+            .find(|t| !t.kind().is_trivia())
+            .map_or(full.start, |t| usize::from(t.text_range().start()));
+        start..full.end
     }
+}
 
-    /// Every `if` statement in `root` whose condition folds to a constant, in source order.
-    /// `resolved` is the file's name resolution, used to fold `final` constant variables.
-    pub async fn collect(root: &SyntaxNode, resolved: &Resolved) -> Vec<Self> {
+impl crate::analysis::FileAnalysis {
+    /// Every `if` statement in the file whose condition folds to a constant, in source order.
+    ///
+    /// File-local by nature: the fold reads this file's `final` constant variables and nothing
+    /// else, so it needs no project index (a constant declared in another file is a documented
+    /// miss). See the module docs for what is and is not proven constant.
+    pub async fn dead_ifs(&self) -> Vec<DeadIf> {
+        let root = self.root();
         let mut evaluator = Evaluator {
             root,
-            resolved,
+            resolved: self.resolved(),
             decls: None,
             visiting: Vec::new(),
         };
@@ -84,26 +94,13 @@ impl DeadIf {
             let then_branch = branches.next();
             let else_branch = branches.next();
             let dead = if value { else_branch } else { then_branch };
-            out.push(Self {
-                condition_range: Self::trimmed_span(condition.syntax()),
+            out.push(DeadIf {
+                condition_range: DeadIf::trimmed_span(condition.syntax()),
                 value,
-                dead_range: dead.map(|stmt| Self::trimmed_span(stmt.syntax())),
+                dead_range: dead.map(|stmt| DeadIf::trimmed_span(stmt.syntax())),
             });
         }
         out
-    }
-
-    /// The byte span of `node` with the leading trivia it carries trimmed off (this CST attaches the
-    /// trivia between two siblings to the *following* node, so a branch statement's range would
-    /// otherwise start at the space before it).
-    fn trimmed_span(node: &SyntaxNode) -> Range<usize> {
-        let full = Collect::node_span(node);
-        let start = node
-            .descendants_with_tokens()
-            .filter_map(SyntaxElement::into_token)
-            .find(|t| !t.kind().is_trivia())
-            .map_or(full.start, |t| usize::from(t.text_range().start()));
-        start..full.end
     }
 }
 

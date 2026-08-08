@@ -1,6 +1,6 @@
 //! Property tests: resolution never panics and produces internally consistent, in-bounds results.
 
-use jals_hir::{FileId, ProjectIndex, Resolution, Resolved, TypeInference};
+use jals_hir::{FileAnalysis, FileId, ProjectIndex, Resolution};
 use jals_syntax::SyntaxNode;
 use proptest::prelude::*;
 
@@ -54,41 +54,37 @@ proptest! {
     /// Resolution never panics on Java-ish input.
     #[test]
     fn never_panics(src in javaish()) {
-        let _ = jals_exec::block_on_inline(Resolved::resolve(&src));
+        let _ = jals_exec::block_on_inline(FileAnalysis::parse(&src));
     }
 
     /// Resolution never panics on arbitrary input (including arbitrary Unicode).
     #[test]
     fn never_panics_on_arbitrary(src in ".*") {
-        let _ = jals_exec::block_on_inline(Resolved::resolve(&src));
+        let _ = jals_exec::block_on_inline(FileAnalysis::parse(&src));
     }
 
     /// Every definition, reference, and scope range is well-formed and within the source bounds.
     #[test]
     fn ranges_in_bounds(src in javaish()) {
-        let resolved = jals_exec::block_on_inline(Resolved::resolve(&src));
+        let analysis = jals_exec::block_on_inline(FileAnalysis::parse(&src));
         let n = src.len();
-        for d in &resolved.defs {
+        for d in analysis.defs() {
             prop_assert!(d.name_range.start <= d.name_range.end);
             prop_assert!(d.name_range.end <= n);
         }
-        for r in &resolved.references {
+        for r in analysis.references() {
             prop_assert!(r.range.start <= r.range.end);
             prop_assert!(r.range.end <= n);
-        }
-        for s in &resolved.scopes {
-            prop_assert!(s.range.start <= s.range.end);
-            prop_assert!(s.range.end <= n);
         }
     }
 
     /// A resolved reference points at a real definition whose name and name-space match it.
     #[test]
     fn resolutions_are_consistent(src in javaish()) {
-        let resolved = jals_exec::block_on_inline(Resolved::resolve(&src));
-        for r in &resolved.references {
+        let analysis = jals_exec::block_on_inline(FileAnalysis::parse(&src));
+        for r in analysis.references() {
             if let Resolution::Def(id) = r.resolution {
-                let d = resolved.def(id);
+                let d = analysis.def(id);
                 prop_assert_eq!(&d.name, &r.name);
                 prop_assert_eq!(d.kind.namespace(), r.namespace);
             }
@@ -106,10 +102,11 @@ proptest! {
             .collect();
         let index = jals_exec::block_on_inline(ProjectIndex::builder(&nodes).build());
         for (file, root) in &nodes {
-            let resolved = jals_exec::block_on_inline(Resolved::resolve_node(root));
-            let _ = jals_exec::block_on_inline(index.unresolved_types(*file, &resolved));
-            for r in &resolved.references {
-                let _ = index.definition_at(*file, &resolved, r.range.start);
+            let analysis = jals_exec::block_on_inline(FileAnalysis::of(root));
+            let semantics = analysis.in_project(&index, *file);
+            let _ = jals_exec::block_on_inline(semantics.unresolved_types());
+            for r in analysis.references() {
+                let _ = semantics.definition_at(r.range.start);
             }
         }
         for (_, item) in index.items() {
@@ -123,21 +120,16 @@ proptest! {
     #[test]
     fn infer_never_panics(src in javaish()) {
         let node = jals_exec::block_on_inline(jals_syntax::Parse::parse(&src)).syntax();
-        let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&node));
-        let index = jals_exec::block_on_inline(ProjectIndex::builder(&[(FileId(0), node.clone())]).build());
+        let analysis = jals_exec::block_on_inline(FileAnalysis::of(&node));
+        let index = jals_exec::block_on_inline(ProjectIndex::builder(&[(FileId(0), node)]).build());
 
-        let ti = jals_exec::block_on_inline(TypeInference::infer(&node, &resolved, &index, FileId(0)));
-        for d in &resolved.defs {
-            let _ = ti.type_of_def(d.id);
+        let semantics = analysis.in_project(&index, FileId(0));
+        let typed = jals_exec::block_on_inline(semantics.typed());
+        for d in analysis.defs() {
+            let _ = typed.type_of_def(d.id);
         }
         for offset in 0..=src.len() {
-            let _ = ti.type_at(offset);
-        }
-
-        // The project-free path must hold up too.
-        let ti_local = jals_exec::block_on_inline(TypeInference::infer_node(&node, &resolved));
-        for d in &resolved.defs {
-            let _ = ti_local.type_of_def(d.id);
+            let _ = typed.type_at(offset);
         }
     }
 
@@ -146,18 +138,19 @@ proptest! {
     #[test]
     fn type_mismatches_never_panic(src in javaish()) {
         let node = jals_exec::block_on_inline(jals_syntax::Parse::parse(&src)).syntax();
-        let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&node));
-        let index = jals_exec::block_on_inline(ProjectIndex::builder(&[(FileId(0), node.clone())]).build());
+        let analysis = jals_exec::block_on_inline(FileAnalysis::of(&node));
+        let index = jals_exec::block_on_inline(ProjectIndex::builder(&[(FileId(0), node)]).build());
         let n = src.len();
 
+        // Both shapes: bound to a project, and file-locally.
         for mismatches in [
-            jals_exec::block_on_inline(TypeInference::type_mismatches(&node, &resolved, Some((&index, FileId(0))))),
-            jals_exec::block_on_inline(TypeInference::type_mismatches(&node, &resolved, None)),
+            jals_exec::block_on_inline(analysis.in_project(&index, FileId(0)).type_mismatches()),
+            jals_exec::block_on_inline(analysis.type_mismatches()),
         ] {
             for m in &mismatches {
                 prop_assert!(m.range.start <= m.range.end);
                 prop_assert!(m.range.end <= n);
-                let _ = m.message();
+                let _ = m.kind();
             }
         }
     }

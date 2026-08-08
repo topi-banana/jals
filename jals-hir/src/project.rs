@@ -96,11 +96,11 @@ pub struct ItemId(u32);
 pub enum ItemOrigin {
     /// Declared in one of the project source files the host supplied to [`ProjectIndex::builder`].
     Project,
-    /// Declared in an embedded `java.lang` stub (see [`crate::stdlib`]); present only via
+    /// Declared in an embedded `java.lang` stub; present only via
     /// [`ProjectIndexBuilder::with_stdlib`]. Carries signatures for inference and hover, but no
     /// host-openable location.
     Stdlib,
-    /// Decoded from a `.class` file on the classpath (see [`crate::classpath`]); present only via
+    /// Decoded from a `.class` file on the classpath; present only via
     /// [`ProjectIndexBuilder::with_classpath`]. Like a stub it has no host-openable source, but its
     /// declared member set is *complete* for that class, so it is not treated leniently the way a
     /// (deliberately partial) stub is.
@@ -247,7 +247,8 @@ pub struct Member {
     /// The checked exceptions a method / constructor declares in its `throws` clause, captured like
     /// [`ty`](Member::ty) as resolvable data (each a named reference type). Empty for a non-executable
     /// member and for one that declares no `throws`. Consumed by the checked-exception analysis
-    /// ([`crate::unreported_exceptions`]) to tell whether a called method propagates a checked
+    /// ([`FileSemantics::unreported_exceptions`](crate::FileSemantics::unreported_exceptions)) to
+    /// tell whether a called method propagates a checked
     /// exception the caller must in turn declare or catch.
     pub(crate) throws: Vec<MemberType>,
     /// A real-source go-to-definition override for a classpath member whose library *sources* jar is
@@ -406,7 +407,7 @@ impl TypeResolution {
 }
 
 /// A type-name reference that resolves to nothing: what
-/// [`unresolved_types`](ProjectIndex::unresolved_types) answers with.
+/// [`unresolved_types`](crate::FileSemantics::unresolved_types) answers with.
 ///
 /// `name` is the one the lookup ran with ([`Reference::name`] — the simple name, so for a dotted
 /// `a.b.C` the last segment, which is exactly what `range` covers). Carrying it is the point: a
@@ -419,10 +420,40 @@ pub struct UnresolvedType {
     pub name: String,
 }
 
-impl UnresolvedType {
-    /// The human-readable diagnostic message.
-    pub fn message(&self) -> String {
-        format!("cannot resolve symbol `{}`", self.name)
+impl crate::analysis::FileSemantics<'_> {
+    /// The cross-file go-to-definition target for the reference covering byte `offset`: a
+    /// file-local definition if there is one, otherwise the project type the reference names.
+    /// Returns the target file and the name's byte range.
+    ///
+    /// Needs no type inference, so a definition jump that lands on a name costs none.
+    pub fn definition_at(&self, offset: usize) -> Option<(FileId, Range<usize>)> {
+        self.index()
+            .definition_at(self.file(), self.resolved(), offset)
+    }
+
+    /// The file's type-name references that resolve to nothing — neither file-locally nor across
+    /// the project. This is the "cannot resolve symbol" signal; a name that might come from
+    /// outside the indexed sources ([`TypeResolution::External`]) is deliberately excluded.
+    ///
+    /// Each answer carries the name it failed to bind, not just its span, so the rule that reports
+    /// it words the message from the lookup rather than from the source text. Needs no inference.
+    pub async fn unresolved_types(&self) -> Vec<UnresolvedType> {
+        let (index, file) = (self.index(), self.file());
+        let mut yielder = Yielder::new();
+        let mut out = Vec::new();
+        for r in self.analysis().references() {
+            yielder.tick().await;
+            if r.namespace == Namespace::Type
+                && r.resolution == Resolution::Unresolved
+                && index.resolve_reference(file, r) == TypeResolution::Unresolved
+            {
+                out.push(UnresolvedType {
+                    range: r.range.clone(),
+                    name: r.name.clone(),
+                });
+            }
+        }
+        out
     }
 }
 
@@ -460,7 +491,7 @@ struct RawType {
 }
 
 /// One source file's cacheable contribution to a [`ProjectIndex`]: its resolution context (package +
-/// imports) and its type declarations' [`RawType`] facts.
+/// imports) and its type declarations' facts.
 ///
 /// Produced by [`ProjectIndex::extract_file`] — the CST-walking half of indexing — and folded into
 /// an index by [`ProjectIndex::assemble`] without re-walking. A host that re-indexes on every edit
@@ -570,7 +601,7 @@ pub struct ProjectIndexBuilder<'a> {
 }
 
 impl<'a> ProjectIndexBuilder<'a> {
-    /// Also index the embedded `java.lang` stubs ([`crate::stdlib`]) as
+    /// Also index the embedded `java.lang` stubs as
     /// [`Stdlib`](ItemOrigin::Stdlib)-origin types. With them, a reference to a core JDK type
     /// (`String`, `Object`, …) resolves to a real [`Item`] with members and supertypes, so inference
     /// and hover see through it instead of stopping at an external name. Still pure and
@@ -754,7 +785,7 @@ impl ProjectIndex {
     }
 
     /// Like [`extract_file`](Self::extract_file), but skipping every `cfg`-disabled host in
-    /// `cfg` (computed over the same text as `root`): a disabled type contributes no [`RawType`],
+    /// `cfg` (computed over the same text as `root`): a disabled type contributes no facts,
     /// a disabled member no [`Member`], a disabled import no entry in the import tables — the
     /// analysis-side mirror of the compile frontend blanking the host. An empty (default) map
     /// extracts identically to [`extract_file`](Self::extract_file).
@@ -1309,9 +1340,9 @@ impl ProjectIndex {
     }
 
     /// The cross-file go-to-definition target for the reference covering byte `offset` in `file`,
-    /// given that file's [`Resolved`]: a file-local definition if there is one, otherwise the
+    /// given that file's resolution: a file-local definition if there is one, otherwise the
     /// project type the reference names. Returns the target file and the name's byte range.
-    pub fn definition_at(
+    pub(crate) fn definition_at(
         &self,
         file: FileId,
         resolved: &Resolved,
@@ -1344,30 +1375,6 @@ impl ProjectIndex {
             }
             TypeResolution::External | TypeResolution::Unresolved => None,
         }
-    }
-
-    /// `file`'s type-name references that resolve to nothing — neither file-locally nor across the
-    /// project. This is the "cannot resolve symbol" signal; a name that might come from outside the
-    /// indexed sources ([`TypeResolution::External`]) is deliberately excluded.
-    ///
-    /// Each answer carries the name it failed to bind, not just its span, so the rule that reports
-    /// it words the message from the lookup rather than from the source text.
-    pub async fn unresolved_types(&self, file: FileId, resolved: &Resolved) -> Vec<UnresolvedType> {
-        let mut yielder = Yielder::new();
-        let mut out = Vec::new();
-        for r in &resolved.references {
-            yielder.tick().await;
-            if r.namespace == Namespace::Type
-                && r.resolution == Resolution::Unresolved
-                && self.resolve_reference(file, r) == TypeResolution::Unresolved
-            {
-                out.push(UnresolvedType {
-                    range: r.range.clone(),
-                    name: r.name.clone(),
-                });
-            }
-        }
-        out
     }
 
     /// The item with the given id.
@@ -1524,8 +1531,8 @@ impl ProjectIndex {
 
     /// Every member reachable from `owner` — its own and those of its project-internal supertypes —
     /// in nearest-first order (the type itself, then each supertype, cycle-guarded). Unlike
-    /// [`resolve_member`](Self::resolve_member) / [`resolve_members_all`](Self::resolve_members_all),
-    /// which look one name up, this enumerates *every* member, for member completion. An inherited
+    /// [`resolve_member`](Self::resolve_member), which looks one name up, this enumerates *every*
+    /// member, for member completion. An inherited
     /// member overridden or shadowed nearer appears more than once (nearest first); the caller applies
     /// its own de-duplication policy. A member of an external supertype is not reachable and absent.
     pub fn members_of(&self, owner: ItemId) -> Vec<MemberId> {
@@ -1542,7 +1549,7 @@ impl ProjectIndex {
     /// Whether the full set of overloads named `name` on `owner` is knowable from the index — a
     /// precondition for concluding "no overload matches" without a false positive.
     ///
-    /// It is *not* knowable when `name` is an [`Object`](is_object_method) method (every type inherits
+    /// It is *not* knowable when `name` is an `Object` method (every type inherits
     /// `Object`'s overloads, which are not indexed), when `owner` or any project supertype `extends`
     /// / `implements` a type outside the project (which may declare further overloads we cannot see),
     /// or when the walk reaches a standard-library *stub* type, whose member set is deliberately

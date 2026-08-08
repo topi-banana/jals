@@ -4,29 +4,46 @@
 //! These are not checking questions. Nothing here decides whether a program is legal — it decides
 //! which instruction and which descriptor a backend has to emit for a program already assumed to be.
 
-use jals_hir::{FileId, ProjectIndex, Resolved, TypeInference};
+use jals_hir::{FileAnalysis, FileId, FileSemantics, ProjectIndex};
 use jals_syntax::SyntaxNode;
 use jals_syntax::ast::AstNode;
 
-/// Parses `src` and indexes it as a single-file project, with the embedded stdlib stubs folded in
-/// so `System.out.println` resolves.
-fn analyse(src: &str) -> (SyntaxNode, ProjectIndex, TypeInference) {
-    let node = jals_exec::block_on_inline(jals_syntax::Parse::parse(src)).syntax();
-    let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&node));
-    let index = jals_exec::block_on_inline(
-        ProjectIndex::builder(&[(FileId(0), node.clone())])
-            .with_stdlib()
-            .build(),
-    );
-    let inference =
-        jals_exec::block_on_inline(TypeInference::infer(&node, &resolved, &index, FileId(0)));
-    (node, index, inference)
+/// A single-file project with the embedded stdlib stubs folded in so `System.out.println`
+/// resolves. Owns what a binding borrows.
+struct Fixture {
+    node: SyntaxNode,
+    analysis: FileAnalysis,
+    index: ProjectIndex,
+}
+
+impl Fixture {
+    fn new(src: &str) -> Self {
+        let node = jals_exec::block_on_inline(jals_syntax::Parse::parse(src)).syntax();
+        let analysis = jals_exec::block_on_inline(FileAnalysis::of(&node));
+        let index = jals_exec::block_on_inline(
+            ProjectIndex::builder(&[(FileId(0), node.clone())])
+                .with_stdlib()
+                .build(),
+        );
+        Self {
+            node,
+            analysis,
+            index,
+        }
+    }
+
+    const fn semantics(&self) -> FileSemantics<'_> {
+        self.analysis.in_project(&self.index, FileId(0))
+    }
 }
 
 /// The member the (first) call whose source text is exactly `text` binds to, rendered as
 /// `Owner.name(paramTypes)`.
 fn call_target(src: &str, text: &str) -> String {
-    let (node, index, inference) = analyse(src);
+    let fixture = Fixture::new(src);
+    let semantics = fixture.semantics();
+    let inference = jals_exec::block_on_inline(semantics.typed());
+    let (node, index) = (&fixture.node, &fixture.index);
     let call = node
         .descendants()
         .filter_map(jals_syntax::ast::CallExpr::cast)
@@ -98,7 +115,8 @@ fn a_member_records_how_it_is_reached() {
             int plain() { return 0; }
         }
     ";
-    let (_, index, _) = analyse(src);
+    let fixture = Fixture::new(src);
+    let index = &fixture.index;
     let main = index
         .resolve_type_name(FileId(0), "Main", None)
         .project_id()
@@ -132,7 +150,8 @@ fn implicit_modifiers_are_folded_in() {
             static Shape unit() { return null; }
         }
     ";
-    let (_, index, _) = analyse(src);
+    let fixture = Fixture::new(src);
+    let index = &fixture.index;
     let shape = index
         .resolve_type_name(FileId(0), "Shape", None)
         .project_id()
@@ -164,7 +183,8 @@ fn a_constructor_records_its_parameters() {
             Point(int x, int y) {}
         }
     ";
-    let (_, index, _) = analyse(src);
+    let fixture = Fixture::new(src);
+    let index = &fixture.index;
     let point = index
         .resolve_type_name(FileId(0), "Point", None)
         .project_id()
@@ -190,7 +210,10 @@ fn a_constructor_records_its_parameters() {
 /// Keyed by the `NEW_EXPR`'s own span, because that is what a code generator emitting the
 /// allocation is looking at.
 fn new_target(src: &str, text: &str) -> String {
-    let (node, index, inference) = analyse(src);
+    let fixture = Fixture::new(src);
+    let semantics = fixture.semantics();
+    let inference = jals_exec::block_on_inline(semantics.typed());
+    let (node, index) = (&fixture.node, &fixture.index);
     let new = node
         .descendants()
         .filter_map(jals_syntax::ast::NewExpr::cast)

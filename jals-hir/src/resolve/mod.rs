@@ -27,7 +27,7 @@ use collect::Collect;
 
 /// The result of resolving names within one file.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Resolved {
+pub(crate) struct Resolved {
     /// Every definition, indexed by [`DefId`].
     pub defs: Vec<Def>,
     /// Every scope, indexed by [`ScopeId`]; scope `0` is the file scope.
@@ -37,26 +37,16 @@ pub struct Resolved {
 }
 
 impl Resolved {
-    /// Parses `src` and resolves names within it.
-    pub async fn resolve(src: &str) -> Self {
-        Self::resolve_node(&jals_syntax::Parse::parse(src).await.syntax()).await
-    }
-
-    /// Resolves names over an already-parsed CST `root` (the `SOURCE_FILE` node).
+    /// Resolves names over an already-parsed CST `root` (the `SOURCE_FILE` node), skipping every
+    /// `cfg`-disabled host in `cfg` (computed over the same text as `root`): a disabled
+    /// declaration contributes no definition and nothing inside it is recorded as a reference —
+    /// the analysis-side mirror of the compile frontend blanking the host. An empty (default) map
+    /// resolves the whole file.
     ///
-    /// This is the half a caller holding a cached parse tree (the language server, which keeps an
-    /// `Arc<Parse>` per document; a lint rule, which is handed the root) calls without reparsing —
-    /// mirroring `jals_lint::LintOutput::lint`.
-    pub async fn resolve_node(root: &SyntaxNode) -> Self {
-        Self::resolve_node_with_cfg(root, &CfgMap::default()).await
-    }
-
-    /// Like [`resolve_node`](Self::resolve_node), but skipping every `cfg`-disabled host in
-    /// `cfg` (computed over the same text as `root`): a disabled declaration contributes no
-    /// definition and nothing inside it is recorded as a reference — the analysis-side mirror of
-    /// the compile frontend blanking the host. An empty (default) map resolves identically to
-    /// [`resolve_node`](Self::resolve_node).
-    pub async fn resolve_node_with_cfg(root: &SyntaxNode, cfg: &CfgMap) -> Self {
+    /// The one entry point, reached only through [`FileAnalysis`](crate::FileAnalysis): resolution
+    /// is a step of the analysis, and a caller holding one on its own could sequence the steps
+    /// itself.
+    pub(crate) async fn resolve_node_with_cfg(root: &SyntaxNode, cfg: &CfgMap) -> Self {
         Resolver::new(root, cfg).run().await
     }
 
@@ -376,5 +366,56 @@ impl Resolver {
             cur = scope.parent;
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use jals_exec::block_on_inline;
+    use jals_syntax::cfg::CfgMap;
+    use proptest::prelude::*;
+
+    use super::Resolved;
+
+    /// Java-ish source built from brace-bearing fragments, so the generated trees actually nest
+    /// scopes. Deliberately allowed to be unbalanced: a recovered tree still gets a scope tree, and
+    /// that is where an out-of-bounds range would come from.
+    fn braced() -> impl Strategy<Value = String> {
+        proptest::collection::vec(
+            prop_oneof![
+                Just("class C"),
+                Just("void m()"),
+                Just("if (x)"),
+                Just("for (;;)"),
+                Just("int x = 1;"),
+                Just("{"),
+                Just("}"),
+                Just("("),
+                Just(")"),
+                Just(" "),
+            ],
+            0..40,
+        )
+        .prop_map(|parts| parts.concat())
+    }
+
+    proptest! {
+        /// Every scope's range is well-formed and within the source bounds.
+        ///
+        /// The definition and reference halves of this property are checked through the public
+        /// surface in `tests/invariants.rs`; the scope tree is crate-internal — it is a step of the
+        /// analysis, not a result — so its half is checked here rather than by exporting the step.
+        #[test]
+        fn scope_ranges_are_in_bounds(src in braced()) {
+            let parse = block_on_inline(jals_syntax::Parse::parse(&src));
+            let resolved = block_on_inline(Resolved::resolve_node_with_cfg(
+                &parse.syntax(),
+                &CfgMap::default(),
+            ));
+            for scope in &resolved.scopes {
+                prop_assert!(scope.range.start <= scope.range.end);
+                prop_assert!(scope.range.end <= src.len());
+            }
+        }
     }
 }

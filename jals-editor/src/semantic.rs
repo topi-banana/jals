@@ -80,7 +80,7 @@ pub struct SemanticTokens;
 impl SemanticTokens {
     /// Classify every significant token under `root`, in document order. Whitespace, operators,
     /// delimiters, and unclassifiable identifiers are skipped. Async because the resolution
-    /// pass ([`jals_hir::Resolved::resolve_node`]) yields cooperatively.
+    /// pass ([`jals_hir::FileAnalysis::of`]) yields cooperatively.
     pub async fn classify(
         root: &SyntaxNode,
         project: Option<(&ProjectIndex, FileId)>,
@@ -115,13 +115,13 @@ impl SemanticTokens {
         root: &SyntaxNode,
         project: Option<(&ProjectIndex, FileId)>,
     ) -> BTreeMap<usize, (SemanticTokenKind, bool)> {
-        let resolved = jals_hir::Resolved::resolve_node(root).await;
+        let analysis = jals_hir::FileAnalysis::of(root).await;
         let mut by_start: BTreeMap<usize, (SemanticTokenKind, bool)> = BTreeMap::new();
-        for reference in &resolved.references {
+        for reference in analysis.references() {
             if let Some(id) = reference.resolution.def_id() {
                 by_start.insert(
                     reference.range.start,
-                    (Self::kind_for(resolved.def(id).kind), false),
+                    (Self::kind_for(analysis.def(id).kind), false),
                 );
             } else if let Some((index, file)) = project
                 && reference.namespace == Namespace::Type
@@ -135,7 +135,7 @@ impl SemanticTokens {
                 );
             }
         }
-        for def in &resolved.defs {
+        for def in analysis.defs() {
             by_start
                 .entry(def.name_range.start)
                 .or_insert_with(|| (Self::kind_for(def.kind), true));

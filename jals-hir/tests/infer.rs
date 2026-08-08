@@ -7,7 +7,7 @@
 use core::fmt::Write;
 
 use expect_test::{Expect, expect};
-use jals_hir::{FileId, Namespace, ProjectIndex, Resolved, Ty, TypeInference};
+use jals_hir::{FileAnalysis, FileId, FileSemantics, Namespace, ProjectIndex, Ty, TypedFile};
 use jals_syntax::SyntaxNode;
 use jals_syntax::ast::{self, AstNode};
 
@@ -16,52 +16,90 @@ fn parse(src: &str) -> SyntaxNode {
     jals_exec::block_on_inline(jals_syntax::Parse::parse(src)).syntax()
 }
 
-/// Infers a single-file project (so reference type names can resolve to project items).
-fn analyse(src: &str) -> (SyntaxNode, Resolved, TypeInference) {
-    let node = parse(src);
-    let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&node));
-    let index =
-        jals_exec::block_on_inline(ProjectIndex::builder(&[(FileId(0), node.clone())]).build());
-    let ti = jals_exec::block_on_inline(TypeInference::infer(&node, &resolved, &index, FileId(0)));
-    (node, resolved, ti)
+/// A single-file project, holding what a [`TypedFile`] borrows.
+///
+/// The analysis and the index are owned here because a binding — and the type witness it hands
+/// out — borrow both; a helper returning one directly would be returning a borrow of its own
+/// locals.
+struct Fixture {
+    node: SyntaxNode,
+    analysis: FileAnalysis,
+    index: ProjectIndex,
+}
+
+impl Fixture {
+    /// Analyse `src` as file 0 of a project containing only it (so reference type names can
+    /// resolve to project items).
+    fn new(src: &str) -> Self {
+        let node = parse(src);
+        let analysis = jals_exec::block_on_inline(FileAnalysis::of(&node));
+        let index =
+            jals_exec::block_on_inline(ProjectIndex::builder(&[(FileId(0), node.clone())]).build());
+        Self {
+            node,
+            analysis,
+            index,
+        }
+    }
+
+    /// This file bound to its project. The caller keeps the binding: the type witness borrows its
+    /// memo cell, so the binding has to outlive it.
+    const fn semantics(&self) -> FileSemantics<'_> {
+        self.analysis.in_project(&self.index, FileId(0))
+    }
 }
 
 /// The inferred type of the first definition named `name`.
 fn def_ty(src: &str, name: &str) -> String {
-    let (_, resolved, ti) = analyse(src);
-    let def = resolved
-        .defs
+    let fixture = Fixture::new(src);
+    let semantics = fixture.semantics();
+    let typed = jals_exec::block_on_inline(semantics.typed());
+    let def = typed
+        .analysis()
+        .defs()
         .iter()
         .find(|d| d.name == name)
         .unwrap_or_else(|| panic!("no definition named `{name}`"));
-    ti.type_of_def(def.id).to_string()
+    typed.type_of_def(def.id).to_string()
 }
 
 /// The recorded type of the expression node `n` — the `type_of_expr` lookup keyed by `n`'s span.
-fn type_at<'t>(ti: &'t TypeInference, n: &SyntaxNode) -> Option<&'t Ty> {
+fn type_at<'t>(typed: TypedFile<'t>, n: &SyntaxNode) -> Option<&'t Ty> {
     let r = n.text_range();
-    ti.type_of_expr(usize::from(r.start())..usize::from(r.end()))
+    typed.type_of_expr(usize::from(r.start())..usize::from(r.end()))
 }
 
 /// The inferred type of the (first) expression whose source text is exactly `text`.
 fn expr_ty(src: &str, text: &str) -> String {
-    let (node, _, ti) = analyse(src);
-    let expr = node
+    let fixture = Fixture::new(src);
+    let semantics = fixture.semantics();
+    let typed = jals_exec::block_on_inline(semantics.typed());
+    let expr = fixture
+        .node
         .descendants()
         .filter_map(ast::Expr::cast)
         .find(|e| e.syntax().text().to_string().trim() == text)
         .unwrap_or_else(|| panic!("no expression `{text}`"));
-    type_at(&ti, expr.syntax()).unwrap().to_string()
+    type_at(typed, expr.syntax()).unwrap().to_string()
 }
 
 /// The inferred types of every switch *expression* in `src`, in source (pre-order) order — the
 /// outer switch first, then any nested ones — so one call checks every switch of a fixture
 /// without repeating each switch's full text as an `expr_ty` match.
 fn switch_tys(src: &str) -> Vec<String> {
-    let (node, _, ti) = analyse(src);
-    node.descendants()
+    let fixture = Fixture::new(src);
+    let semantics = fixture.semantics();
+    let typed = jals_exec::block_on_inline(semantics.typed());
+    fixture
+        .node
+        .descendants()
         .filter(|n| n.kind() == jals_syntax::SyntaxKind::SWITCH_EXPR)
-        .map(|n| type_at(&ti, &n).cloned().unwrap_or(Ty::Unknown).to_string())
+        .map(|n| {
+            type_at(typed, &n)
+                .cloned()
+                .unwrap_or(Ty::Unknown)
+                .to_string()
+        })
         .collect()
 }
 
@@ -291,19 +329,6 @@ fn a_missing_member_on_a_project_type_is_unknown() {
 
 // --- Project vs. project-free resolution ----------------------------------------------------------
 
-#[test]
-fn project_free_inference_names_reference_types_externally() {
-    // infer_node has no index, so a sibling type is known only by spelling — but structural
-    // inference (the `int`, the `var`) still works.
-    let node = parse("class C { void m() { Helper h = make(); var n = 1; } } class Helper { }");
-    let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&node));
-    let ti = jals_exec::block_on_inline(TypeInference::infer_node(&node, &resolved));
-    let helper = resolved.defs.iter().find(|d| d.name == "h").unwrap();
-    let n = resolved.defs.iter().find(|d| d.name == "n").unwrap();
-    assert_eq!(ti.type_of_def(helper.id).to_string(), "Helper");
-    assert_eq!(ti.type_of_def(n.id).to_string(), "int");
-}
-
 // --- Switch expressions ---------------------------------------------------------------------------
 
 #[test]
@@ -367,17 +392,26 @@ fn nested_switch_yields_are_attributed_to_their_own_switch() {
 // --- Snapshots ------------------------------------------------------------------------------------
 
 fn render(src: &str) -> String {
-    let (node, resolved, ti) = analyse(src);
+    let fixture = Fixture::new(src);
+    let semantics = fixture.semantics();
+    let typed = jals_exec::block_on_inline(semantics.typed());
     let mut out = String::from("defs:\n");
-    for d in &resolved.defs {
+    for d in typed.analysis().defs() {
         if d.kind.namespace() != Namespace::Value {
             continue;
         }
-        writeln!(out, "  {:?} {}: {}", d.kind, d.name, ti.type_of_def(d.id)).unwrap();
+        writeln!(
+            out,
+            "  {:?} {}: {}",
+            d.kind,
+            d.name,
+            typed.type_of_def(d.id)
+        )
+        .unwrap();
     }
     out.push_str("exprs:\n");
-    for e in node.descendants().filter_map(ast::Expr::cast) {
-        let ty = type_at(&ti, e.syntax()).cloned().unwrap_or(Ty::Unknown);
+    for e in fixture.node.descendants().filter_map(ast::Expr::cast) {
+        let ty = type_at(typed, e.syntax()).cloned().unwrap_or(Ty::Unknown);
         let text = e.syntax().text().to_string().trim().replace('\n', " ");
         writeln!(out, "  {text}: {ty}").unwrap();
     }

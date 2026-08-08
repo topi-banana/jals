@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 
-use jals_hir::{FileId, Namespace, ProjectIndex, Resolution, Resolved, TypeResolution};
+use jals_hir::{FileAnalysis, FileId, Namespace, ProjectIndex, Resolution, TypeResolution};
 use jals_syntax::cfg::CfgMap;
 use jals_syntax::{Parse, SyntaxNode};
 
@@ -24,28 +24,27 @@ fn disabled_defs_and_their_contents_are_not_resolved() {
     let src = "class C {\n    #[cfg(feature = \"x\")]\n    void gone() { helper(); }\n    void kept() { helper(); }\n    void helper() {}\n}";
     let p = parse(src);
     let cfg = cfg_of(&p, &[]);
-    let resolved = jals_exec::block_on_inline(Resolved::resolve_node_with_cfg(&p.syntax(), &cfg));
+    let analysis = jals_exec::block_on_inline(FileAnalysis::of_with_cfg(&p.syntax(), &cfg));
 
     // `gone` contributes no definition; `kept` and `helper` survive.
-    let names: Vec<&str> = resolved.defs.iter().map(|d| d.name.as_str()).collect();
+    let names: Vec<&str> = analysis.defs().iter().map(|d| d.name.as_str()).collect();
     assert!(!names.contains(&"gone"), "defs: {names:?}");
     assert!(names.contains(&"kept") && names.contains(&"helper"));
 
     // Only the live `helper()` call is recorded — the one inside the disabled body is not.
-    let helper_refs = resolved
-        .references
+    let helper_refs = analysis
+        .references()
         .iter()
         .filter(|r| r.name == "helper")
         .count();
     assert_eq!(helper_refs, 1);
 
     // The empty map resolves identically to the plain entry point.
-    let plain = jals_exec::block_on_inline(Resolved::resolve_node(&p.syntax()));
-    let with_empty = jals_exec::block_on_inline(Resolved::resolve_node_with_cfg(
-        &p.syntax(),
-        &CfgMap::default(),
-    ));
-    assert_eq!(plain, with_empty);
+    let plain = jals_exec::block_on_inline(FileAnalysis::of(&p.syntax()));
+    let with_empty =
+        jals_exec::block_on_inline(FileAnalysis::of_with_cfg(&p.syntax(), &CfgMap::default()));
+    assert_eq!(plain.defs(), with_empty.defs());
+    assert_eq!(plain.references(), with_empty.references());
 }
 
 #[test]
@@ -55,12 +54,12 @@ fn enabled_attribute_changes_nothing_in_resolution() {
     let src = "class C {\n    #[cfg(feature = \"x\")]\n    void m() { f(); }\n    void f() {}\n}";
     let p = parse(src);
     let cfg = cfg_of(&p, &["x"]);
-    let resolved = jals_exec::block_on_inline(Resolved::resolve_node_with_cfg(&p.syntax(), &cfg));
-    let names: Vec<&str> = resolved.defs.iter().map(|d| d.name.as_str()).collect();
+    let analysis = jals_exec::block_on_inline(FileAnalysis::of_with_cfg(&p.syntax(), &cfg));
+    let names: Vec<&str> = analysis.defs().iter().map(|d| d.name.as_str()).collect();
     assert!(names.contains(&"m") && names.contains(&"f"));
     assert!(
-        resolved
-            .references
+        analysis
+            .references()
             .iter()
             .filter(|r| r.namespace == Namespace::Method)
             .any(|r| r.name == "f" && matches!(r.resolution, Resolution::Def(_)))
@@ -119,9 +118,9 @@ fn disabled_import_no_longer_resolves_a_simple_name() {
     let resolve_list = |cfgs: &[(FileId, CfgMap)]| {
         let index =
             jals_exec::block_on_inline(ProjectIndex::builder(&nodes).with_disabled(cfgs).build());
-        let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&nodes[1].1));
-        let reference = resolved
-            .references
+        let analysis = jals_exec::block_on_inline(FileAnalysis::of(&nodes[1].1));
+        let reference = analysis
+            .references()
             .iter()
             .find(|r| r.name == "List" && r.namespace == Namespace::Type)
             .expect("the `List l;` type reference");
@@ -147,9 +146,9 @@ fn cross_file_reference_to_a_disabled_type_unresolves() {
     let resolve_gone = |cfgs: &[(FileId, CfgMap)]| {
         let index =
             jals_exec::block_on_inline(ProjectIndex::builder(&nodes).with_disabled(cfgs).build());
-        let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&nodes[1].1));
-        let reference = resolved
-            .references
+        let analysis = jals_exec::block_on_inline(FileAnalysis::of(&nodes[1].1));
+        let reference = analysis
+            .references()
             .iter()
             .find(|r| r.name == "Gone" && r.namespace == Namespace::Type)
             .expect("the `Gone g;` type reference");

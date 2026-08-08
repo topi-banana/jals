@@ -345,7 +345,8 @@ impl Stmt {
             match clause.binding() {
                 Some(name) => {
                     let id = context
-                        .resolved
+                        .typed
+                        .analysis()
                         .symbol_at(usize::from(name.text_range().start()))
                         .ok_or_else(|| LowerError::Unresolved(name.text().into()))?;
                     let slot = emit.slots.declare(id, 1);
@@ -477,7 +478,8 @@ impl Stmt {
         let slot = match resource.binding() {
             Some(name) => {
                 let id = context
-                    .resolved
+                    .typed
+                    .analysis()
                     .symbol_at(usize::from(name.text_range().start()))
                     .ok_or_else(|| LowerError::Unresolved(name.text().into()))?;
                 emit.slots.declare(id, 1)
@@ -602,10 +604,11 @@ impl Stmt {
             .collect();
         for (index, name) in names.iter().enumerate() {
             let id = context
-                .resolved
+                .typed
+                .analysis()
                 .symbol_at(usize::from(name.text_range().start()))
                 .ok_or_else(|| LowerError::Unresolved(name.text().into()))?;
-            let ty = context.inference.type_of_def(id).clone();
+            let ty = context.typed.type_of_def(id).clone();
             let slot = emit.slots.declare(id, Slots::ty_width(&ty));
             let Some(value) = values.get(index) else {
                 // A declaration with no initialiser writes nothing; the slot stays unset until an
@@ -976,20 +979,17 @@ impl Stmt {
         // The loop variable is written from the element at the top of every iteration, which is what
         // makes it a fresh binding per pass rather than one the body carries over.
         let binding = Self::for_each_binding(statement, context)?;
-        let variable = emit.slots.declare(
-            binding,
-            Slots::ty_width(context.inference.type_of_def(binding)),
-        );
+        let variable = emit
+            .slots
+            .declare(binding, Slots::ty_width(context.typed.type_of_def(binding)));
         emit.asm.load(array)?;
         emit.asm.load(cursor)?;
         emit.asm.array_load(&descriptor)?;
         // The element descriptor is the array's, and the binding's declared type may be wider than
         // it (`for (Object o : strings)`), so the slot is typed by the declaration.
-        let declared = Descriptor::descriptor_of(
-            &context.inference.type_of_def(binding).clone(),
-            context.index,
-        )?
-        .to_string();
+        let declared =
+            Descriptor::descriptor_of(&context.typed.type_of_def(binding).clone(), context.index)?
+                .to_string();
         emit.asm.store_as(variable, &declared)?;
 
         Self::in_scope(labels, done, Some(next), emit, |emit| {
@@ -1057,7 +1057,7 @@ impl Stmt {
         emit.asm.branch(Branch::IntZero(Compare::Eq), done)?;
 
         let binding = Self::for_each_binding(statement, context)?;
-        let element = context.inference.type_of_def(binding).clone();
+        let element = context.typed.type_of_def(binding).clone();
         let variable = emit.slots.declare(binding, Slots::ty_width(&element));
         emit.asm.load(cursor)?;
         emit.asm
@@ -1087,7 +1087,8 @@ impl Stmt {
             .name_token()
             .ok_or(LowerError::Unsupported("a `for`-each with no variable"))?;
         context
-            .resolved
+            .typed
+            .analysis()
             .symbol_at(usize::from(name.text_range().start()))
             .ok_or_else(|| LowerError::Unresolved(name.text().into()))
     }

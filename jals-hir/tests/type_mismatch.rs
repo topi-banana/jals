@@ -1,14 +1,14 @@
-//! Tests for assignment-context type-mismatch detection (`jals_hir::TypeInference::type_mismatches`): the
+//! Tests for assignment-context type-mismatch detection: the
 //! index-free subset (primitives, `null`, arrays) and the index-aware project subtyping cases.
 
-use jals_hir::{FileId, ProjectIndex, Resolved, TypeInference, TypeMismatch};
+use jals_hir::{FileAnalysis, FileId, MismatchKind, ProjectIndex, TypeMismatch};
 use jals_syntax::SyntaxNode;
 
 /// Mismatches found without a project index (reference types stay external / lenient).
 fn free(src: &str) -> Vec<TypeMismatch> {
     let root = jals_exec::block_on_inline(jals_syntax::Parse::parse(src)).syntax();
-    let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&root));
-    jals_exec::block_on_inline(TypeInference::type_mismatches(&root, &resolved, None))
+    let analysis = jals_exec::block_on_inline(FileAnalysis::of(&root));
+    jals_exec::block_on_inline(analysis.type_mismatches())
 }
 
 /// Mismatches found in `sources[file]` with a project index built over every source.
@@ -25,12 +25,8 @@ fn indexed(sources: &[&str], file: u32) -> Vec<TypeMismatch> {
         .collect();
     let index = jals_exec::block_on_inline(ProjectIndex::builder(&nodes).build());
     let (fid, root) = &nodes[file as usize];
-    let resolved = jals_exec::block_on_inline(Resolved::resolve_node(root));
-    jals_exec::block_on_inline(TypeInference::type_mismatches(
-        root,
-        &resolved,
-        Some((&index, *fid)),
-    ))
+    let analysis = jals_exec::block_on_inline(FileAnalysis::of(root));
+    jals_exec::block_on_inline(analysis.in_project(&index, *fid).type_mismatches())
 }
 
 /// Wraps a statement body in a method so it parses as a valid local context.
@@ -58,8 +54,11 @@ fn boolean_and_null_mismatches_are_flagged() {
     assert_eq!(free(&in_method("int x = null;")).len(), 1);
 
     let m = &free(&in_method("int x = null;"))[0];
-    assert!(m.message().contains("`null`"));
-    assert!(m.message().contains("`int`"));
+    let MismatchKind::Assignment { expected, found } = m.kind() else {
+        panic!("an initializer mismatch is an assignment-context one");
+    };
+    assert_eq!(found.to_string(), "null");
+    assert_eq!(expected.to_string(), "int");
 }
 
 #[test]
@@ -280,7 +279,10 @@ fn no_applicable_overload_is_reported_once() {
     let src = "class C { void f(int x) {} void f(boolean b) {} void g() { f(1.0); } }";
     let found = indexed(&[src], 0);
     assert_eq!(found.len(), 1);
-    assert!(found[0].message().contains("no overload") && found[0].message().contains("`f`"));
+    let MismatchKind::NoOverload { name, .. } = found[0].kind() else {
+        panic!("an unmatched call is a no-overload mismatch");
+    };
+    assert_eq!(name, "f");
 }
 
 #[test]

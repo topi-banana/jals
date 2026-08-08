@@ -6,34 +6,29 @@ use alloc::vec::Vec;
 use core::ops::Range;
 
 use jals_hir::{
-    DefKind, FileId, ItemId, ItemOrigin, Namespace, ProjectIndex, Resolution, Resolved, Ty,
-    TypeResolution,
+    DefKind, FileAnalysis, FileId, FileSemantics, ItemId, ItemOrigin, Namespace, ProjectIndex,
+    Resolution, Ty, TypeResolution,
 };
 use jals_syntax::ast::{self, AstNode};
 use jals_syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
 
-/// A parsed and file-locally resolved file supplied to a project query.
+/// One project file supplied to a query that scans several of them.
 ///
-/// The CST handle is a cheap clone of rowan's immutable tree; the comparatively large resolution
-/// result is borrowed so hosts can keep it in a lazy cache.
-#[derive(Clone)]
+/// The comparatively large [`FileAnalysis`] is borrowed, so a host keeps it in a lazy per-file
+/// cache and a project-wide scan reads every file's resolution without re-analysing any of them —
+/// and, because nothing here is bound to the index, without running a single type inference.
+#[derive(Clone, Copy)]
 pub struct QueryFile<'a> {
     /// Stable identity within the associated [`ProjectIndex`].
     file: FileId,
-    /// The file's immutable syntax tree.
-    syntax: SyntaxNode,
-    /// File-local name resolution for `syntax`.
-    resolved: &'a Resolved,
+    /// The file's CST and name resolution.
+    analysis: &'a FileAnalysis,
 }
 
 impl<'a> QueryFile<'a> {
     /// Bundle one file's analysis inputs.
-    pub(crate) const fn new(file: FileId, syntax: SyntaxNode, resolved: &'a Resolved) -> Self {
-        Self {
-            file,
-            syntax,
-            resolved,
-        }
+    pub(crate) const fn new(file: FileId, analysis: &'a FileAnalysis) -> Self {
+        Self { file, analysis }
     }
 }
 
@@ -91,23 +86,39 @@ enum ReferenceAnchor {
 }
 
 /// Semantic editor queries shared by protocol adapters.
+///
+/// Holds **one** [`FileSemantics`] for its whole lifetime, deliberately: that binding is where the
+/// file's type inference is memoized, so a host that answers several questions from one
+/// `ProjectQueries` runs the inference once. Building a fresh binding per query would silently
+/// restore the per-question inference this seam removed.
 pub struct ProjectQueries<'a> {
-    index: &'a ProjectIndex,
-    current: QueryFile<'a>,
+    current: FileSemantics<'a>,
 }
 
 impl<'a> ProjectQueries<'a> {
-    /// Create a query module over `index` and the current file.
-    pub(crate) const fn new(index: &'a ProjectIndex, current: QueryFile<'a>) -> Self {
-        Self { index, current }
+    /// Create a query module over the current file, bound to its project.
+    pub(crate) const fn new(current: FileSemantics<'a>) -> Self {
+        Self { current }
+    }
+
+    /// The project index the current file is bound to.
+    const fn index(&self) -> &'a ProjectIndex {
+        self.current.index()
+    }
+
+    /// The current file's own analysis.
+    const fn analysis(&self) -> &'a FileAnalysis {
+        self.current.analysis()
+    }
+
+    /// The current file's id within the index.
+    const fn file(&self) -> FileId {
+        self.current.file()
     }
 
     /// Resolve a definition in file-local → project type → inferred member order.
     pub async fn definition(&self, offset: usize) -> Option<FileRange> {
-        if let Some((file, range)) =
-            self.index
-                .definition_at(self.current.file, self.current.resolved, offset)
-        {
+        if let Some((file, range)) = self.current.definition_at(offset) {
             return Some(FileRange { file, range });
         }
         let (file, range) = self.member_definition(offset).await?;
@@ -159,20 +170,19 @@ impl<'a> ProjectQueries<'a> {
         };
         let anchor = usize::from(ident.text_range().start());
 
-        if let Some(def_id) = self.current.resolved.symbol_at(anchor) {
-            if let Some(item) = self.index.item_by_decl(
-                self.current.file,
-                self.current.resolved.def(def_id).name_range.start,
-            ) {
+        if let Some(def_id) = self.analysis().symbol_at(anchor) {
+            if let Some(item) = self
+                .index()
+                .item_by_decl(self.file(), self.analysis().def(def_id).name_range.start)
+            {
                 return ReferenceAnchor::Item(item);
             }
             return ReferenceAnchor::Local(
-                self.current
-                    .resolved
+                self.analysis()
                     .occurrences(def_id, include_declaration)
                     .into_iter()
                     .map(|range| FileRange {
-                        file: self.current.file,
+                        file: self.file(),
                         range,
                     })
                     .collect(),
@@ -187,14 +197,7 @@ impl<'a> ProjectQueries<'a> {
 
     /// The inferred type under `offset`, suppressing an uninformative unknown result.
     async fn hover(&self, offset: usize) -> Option<Ty> {
-        let inference = jals_hir::TypeInference::infer(
-            &self.current.syntax,
-            self.current.resolved,
-            self.index,
-            self.current.file,
-        )
-        .await;
-        let ty = inference.type_at(offset)?;
+        let ty = self.current.typed().await.type_at(offset)?;
         (!matches!(ty, Ty::Unknown)).then(|| ty.clone())
     }
 
@@ -218,46 +221,31 @@ impl<'a> ProjectQueries<'a> {
     pub fn renamable_range(&self, offset: usize) -> Option<Range<usize>> {
         let ident = self.ident_at(offset)?;
         let anchor = usize::from(ident.text_range().start());
-        let renamable = self.current.resolved.symbol_at(anchor).map_or_else(
+        let renamable = self.analysis().symbol_at(anchor).map_or_else(
             || {
-                self.current
-                    .resolved
+                self.analysis()
                     .reference_at(anchor)
                     .is_some_and(|reference| {
                         reference.namespace == Namespace::Type
                             && matches!(
-                                self.index.resolve_reference(self.current.file, reference),
+                                self.index().resolve_reference(self.file(), reference),
                                 TypeResolution::Project(id)
-                                    if self.index.item(id).origin.is_host_editable()
+                                    if self.index().item(id).origin.is_host_editable()
                             )
                     })
             },
-            |id| Ident::is_renamable_kind(self.current.resolved.def(id).kind),
+            |id| Ident::is_renamable_kind(self.analysis().def(id).kind),
         );
         renamable.then(|| crate::byte_range(ident.text_range()))
     }
 
     /// Member completions after `.`, otherwise scope completions followed by Java keywords.
     pub async fn completions(&self, offset: usize) -> Vec<Completion> {
-        let at_member_access = ProjectIndex::at_member_access(&self.current.syntax, offset);
+        let at_member_access = self.analysis().at_member_access(offset);
         let semantic = if at_member_access {
-            self.index
-                .member_completions(
-                    &self.current.syntax,
-                    self.current.resolved,
-                    self.current.file,
-                    offset,
-                )
-                .await
+            self.current.member_completions(offset).await
         } else {
-            self.index
-                .scope_completions(
-                    &self.current.syntax,
-                    self.current.resolved,
-                    self.current.file,
-                    offset,
-                )
-                .await
+            self.current.scope_completions(offset).await
         };
         let mut completions: Vec<_> = semantic
             .into_iter()
@@ -279,14 +267,7 @@ impl<'a> ProjectQueries<'a> {
 
     /// Signature help for the call containing `offset`.
     pub async fn signature_help(&self, offset: usize) -> Option<jals_hir::SignatureHelp> {
-        self.index
-            .signature_help(
-                &self.current.syntax,
-                self.current.resolved,
-                self.current.file,
-                offset,
-            )
-            .await
+        self.current.signature_help(offset).await
     }
 
     /// Highlights for the symbol at `offset`, in document order.
@@ -296,10 +277,9 @@ impl<'a> ProjectQueries<'a> {
         };
         let anchor = usize::from(target.text_range().start());
 
-        if let Some(id) = self.current.resolved.symbol_at(anchor) {
+        if let Some(id) = self.analysis().symbol_at(anchor) {
             return self
-                .current
-                .resolved
+                .analysis()
                 .occurrences(id, true)
                 .into_iter()
                 .map(|range| self.highlight_at(range))
@@ -307,9 +287,8 @@ impl<'a> ProjectQueries<'a> {
         }
         if let Some(item) = self.cross_file_type_at(anchor) {
             return self
-                .current
-                .resolved
-                .references
+                .analysis()
+                .references()
                 .iter()
                 .filter(|reference| {
                     reference.namespace == Namespace::Type
@@ -317,16 +296,16 @@ impl<'a> ProjectQueries<'a> {
                         && reference.name == target.text()
                 })
                 .filter(|reference| {
-                    self.index
-                        .resolve_reference(self.current.file, reference)
+                    self.index()
+                        .resolve_reference(self.file(), reference)
                         .project_id()
                         == Some(item)
                 })
                 .map(|reference| self.highlight_at(reference.range.clone()))
                 .collect();
         }
-        self.current
-            .syntax
+        self.analysis()
+            .root()
             .descendants_with_tokens()
             .filter_map(SyntaxElement::into_token)
             .filter(|token| token.kind() == SyntaxKind::IDENT && token.text() == target.text())
@@ -351,19 +330,15 @@ impl<'a> ProjectQueries<'a> {
             } else {
                 Namespace::Value
             };
-        let inference = jals_hir::TypeInference::infer(
-            &self.current.syntax,
-            self.current.resolved,
-            self.index,
-            self.current.file,
-        )
-        .await;
-        let owner = inference
+        let owner = self
+            .current
+            .typed()
+            .await
             .type_of_expr(crate::byte_range(receiver.syntax().text_range()))?
             .project_id()?;
         let member = self
-            .index
-            .member(self.index.resolve_member(owner, &name, namespace)?);
+            .index()
+            .member(self.index().resolve_member(owner, &name, namespace)?);
         // A member the *compiler* writes — an `enum`'s `values()`, a record's canonical constructor —
         // has no declaration range, and `0..0` is the sentinel that says so rather than a position.
         // Jumping there lands at the top of the file, which reads as an answer and is not one.
@@ -373,9 +348,9 @@ impl<'a> ProjectQueries<'a> {
     }
 
     fn cross_file_type_at(&self, anchor: usize) -> Option<ItemId> {
-        let reference = self.current.resolved.reference_at(anchor)?;
+        let reference = self.analysis().reference_at(anchor)?;
         (reference.namespace == Namespace::Type)
-            .then(|| self.index.resolve_reference(self.current.file, reference))?
+            .then(|| self.index().resolve_reference(self.file(), reference))?
             .project_id()
     }
 
@@ -387,18 +362,18 @@ impl<'a> ProjectQueries<'a> {
     ) -> Vec<FileRange> {
         let mut ranges = Vec::new();
         for source in files {
-            for reference in &source.resolved.references {
+            for reference in source.analysis.references() {
                 if reference.namespace != Namespace::Type {
                     continue;
                 }
                 let hit = match reference.resolution {
                     Resolution::Def(id) => {
-                        self.index
-                            .item_by_decl(source.file, source.resolved.def(id).name_range.start)
+                        self.index()
+                            .item_by_decl(source.file, source.analysis.def(id).name_range.start)
                             == Some(item)
                     }
                     Resolution::Unresolved => matches!(
-                        self.index.resolve_reference(source.file, reference),
+                        self.index().resolve_reference(source.file, reference),
                         TypeResolution::Project(target) if target == item
                     ),
                 };
@@ -423,7 +398,7 @@ impl<'a> ProjectQueries<'a> {
     }
 
     fn item_location(&self, item: ItemId) -> Option<FileRange> {
-        let item = self.index.item(item);
+        let item = self.index().item(item);
         let (file, range) = match item.origin {
             ItemOrigin::Project | ItemOrigin::Source => (item.file, item.name_range.clone()),
             ItemOrigin::Classpath => item.source_location.clone()?,
@@ -442,7 +417,7 @@ impl<'a> ProjectQueries<'a> {
     /// The `IDENT` token at `offset` in the current file, preferring it at a token boundary (so a
     /// cursor at the end of a word still anchors to it). `offset` is clamped into the file's range.
     fn ident_at(&self, offset: usize) -> Option<SyntaxToken> {
-        let root = &self.current.syntax;
+        let root = self.analysis().root();
         let end = usize::from(root.text_range().end());
         root.token_at_offset(crate::sat_text_size(offset.min(end)))
             .find(|token| token.kind() == SyntaxKind::IDENT)
@@ -673,7 +648,7 @@ mod tests {
 
     struct Fixture {
         roots: Vec<(FileId, SyntaxNode)>,
-        resolved: Vec<Resolved>,
+        analyses: Vec<FileAnalysis>,
         index: ProjectIndex,
     }
 
@@ -686,34 +661,27 @@ mod tests {
                     Parse::parse(text).await.syntax(),
                 ));
             }
-            let mut resolved = Vec::new();
+            let mut analyses = Vec::new();
             for (_, root) in &roots {
-                resolved.push(Resolved::resolve_node(root).await);
+                analyses.push(FileAnalysis::of(root).await);
             }
             let index = ProjectIndex::builder(&roots).with_stdlib().build().await;
             Self {
                 roots,
-                resolved,
+                analyses,
                 index,
             }
         }
 
         fn queries(&self, file: usize) -> ProjectQueries<'_> {
-            ProjectQueries::new(
-                &self.index,
-                QueryFile::new(
-                    self.roots[file].0,
-                    self.roots[file].1.clone(),
-                    &self.resolved[file],
-                ),
-            )
+            ProjectQueries::new(self.analyses[file].in_project(&self.index, self.roots[file].0))
         }
 
         fn files(&self) -> impl Iterator<Item = QueryFile<'_>> {
             self.roots
                 .iter()
-                .zip(&self.resolved)
-                .map(|((id, root), resolved)| QueryFile::new(*id, root.clone(), resolved))
+                .zip(&self.analyses)
+                .map(|((id, _), analysis)| QueryFile::new(*id, analysis))
         }
     }
 
@@ -743,6 +711,42 @@ mod tests {
                     range: component..component + 1,
                 })
             );
+        });
+    }
+
+    /// One [`ProjectQueries`] holds one binding, so several questions asked of it share a single
+    /// type inference. That sharing is an optimisation and must not be observable: the same
+    /// questions asked of one instance and of a fresh instance each must answer identically.
+    ///
+    /// Without this, folding the binding back into each query — which is what the seam removed —
+    /// would look like a harmless refactor rather than a return to inferring once per question.
+    #[test]
+    fn sharing_one_binding_across_queries_changes_no_answer() {
+        block_on_inline(async {
+            let files = [
+                "package p; class Box { int size; int size() { return size; } }",
+                "package p; class Use { void f(Box b) { int n = b.size(); } }",
+            ];
+            let fixture = Fixture::new(&files).await;
+            let call = files[1].find("size()").unwrap();
+            let ty = files[1].find("Box b").unwrap();
+
+            // Two questions through one instance — the second reads the first's inference.
+            let shared = fixture.queries(1);
+            let shared_answers = (
+                shared.definition(call).await,
+                shared.hover_markdown(call).await,
+                shared.definition(ty).await,
+            );
+
+            // The same questions, each through its own instance — each infers for itself.
+            let separate_answers = (
+                fixture.queries(1).definition(call).await,
+                fixture.queries(1).hover_markdown(call).await,
+                fixture.queries(1).definition(ty).await,
+            );
+
+            assert_eq!(shared_answers, separate_answers);
         });
     }
 

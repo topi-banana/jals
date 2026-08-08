@@ -17,11 +17,11 @@
 
 use alloc::vec::Vec;
 
-use jals_exec::LocalBoxFuture;
-use jals_hir::Resolved;
-use jals_syntax::SyntaxNode;
+use alloc::format;
 
-use crate::IndexCtx;
+use jals_exec::LocalBoxFuture;
+use jals_hir::{FileAnalysis, FileSemantics};
+
 use crate::diagnostic::Severity;
 use crate::rules::{Checker, Finding, RuleMeta};
 
@@ -29,7 +29,7 @@ pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "cannot-resolve",
     default: Severity::Error,
     needs_clean_parse: false,
-    check: Checker::Indexed(CannotResolve::check),
+    check: Checker::Semantic(CannotResolve::check),
 };
 
 /// The `cannot-resolve` rule.
@@ -38,30 +38,27 @@ struct CannotResolve;
 impl CannotResolve {
     /// The table-edge shim: boxes the async rule body once per file.
     fn check<'a>(
-        root: &'a SyntaxNode,
-        resolved: &'a Resolved,
-        index: Option<IndexCtx<'a>>,
+        analysis: &'a FileAnalysis,
+        project: Option<&'a FileSemantics<'a>>,
     ) -> LocalBoxFuture<'a, Vec<Finding>> {
-        alloc::boxed::Box::pin(Self::check_impl(root, resolved, index))
+        alloc::boxed::Box::pin(Self::check_impl(analysis, project))
     }
 
     async fn check_impl(
-        _root: &SyntaxNode,
-        resolved: &Resolved,
-        index: Option<IndexCtx<'_>>,
+        _analysis: &FileAnalysis,
+        project: Option<&FileSemantics<'_>>,
     ) -> Vec<Finding> {
-        // Returning nothing without an index is the `Checker::Indexed` contract the driver leans on
-        // to silence this rule on a broken parse without naming it.
-        let Some((index, file)) = index else {
+        // Reporting nothing without a project is the `Checker::Semantic` contract the driver leans
+        // on to silence this rule on a broken parse without naming it.
+        let Some(semantics) = project else {
             return Vec::new();
         };
-
-        index
-            .unresolved_types(file, resolved)
+        semantics
+            .unresolved_types()
             .await
             .into_iter()
             .map(|u| Finding {
-                message: u.message(),
+                message: format!("cannot resolve symbol `{}`", u.name),
                 range: u.range,
                 ..Finding::default()
             })

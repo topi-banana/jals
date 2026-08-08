@@ -2,9 +2,9 @@
 //! that is neither declared in its `throws` clause nor handled by an enclosing `try` / `catch`.
 //!
 //! This is javac's "unreported exception X; must be caught or declared to be thrown". It is the
-//! index-aware counterpart of [`type_mismatches`](crate::type_mismatches) and is built on the same
-//! machinery: [`infer`] for expression types, [`call_target`] + [`ProjectIndex::resolve_members_all`]
-//! for call resolution, and [`ProjectIndex::is_subtype`] for the exception-hierarchy walk.
+//! project-aware counterpart of the type-mismatch analysis and is built on the same machinery: the
+//! file's type inference for expression types, call-target resolution for what a call may raise,
+//! and [`ProjectIndex::is_subtype`] for the exception-hierarchy walk.
 //!
 //! **Conservative — never a false positive.** A source is reported only when every fact it depends on
 //! is *provable* from the index:
@@ -18,10 +18,10 @@
 //!   e.g. a `catch` type that does not resolve to an indexed type — suppresses the report.
 //!
 //! It requires a [`ProjectIndex`] with the standard-library stubs folded in (so `Throwable` and the
-//! `RuntimeException` / `Error` cut resolve); with no index, or with the stubs absent, it reports
-//! nothing.
+//! `RuntimeException` / `Error` cut resolve); with the stubs absent it reports nothing. There is no
+//! index-free shape at all — it hangs off [`FileSemantics`](crate::FileSemantics), so "no project"
+//! is a receiver a caller does not have rather than an argument it passes.
 
-use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::ops::Range;
@@ -36,7 +36,6 @@ use jals_syntax::ast::{self, AstNode};
 use crate::def::{DefKind, Namespace};
 use crate::infer::TypeInference;
 use crate::project::{FileId, ItemId, ProjectIndex, TypeResolution};
-use crate::resolve::Resolved;
 use crate::resolve::collect::Collect;
 
 /// A checked exception a method / constructor can raise that is neither declared nor caught.
@@ -48,40 +47,30 @@ pub struct UnreportedException {
     pub name: String,
 }
 
-impl UnreportedException {
-    /// The human-readable diagnostic message.
-    pub fn message(&self) -> String {
-        format!(
-            "unreported exception {}; must be caught or declared to be thrown",
-            self.name
-        )
-    }
-
-    /// Every checked exception raised in `root` that its enclosing method / constructor neither
-    /// declares in `throws` nor catches. Requires a project `index` (with stdlib stubs) — returns
-    /// empty otherwise.
-    pub async fn collect(
-        root: &SyntaxNode,
-        resolved: &Resolved,
-        project: Option<(&ProjectIndex, FileId)>,
-    ) -> Vec<Self> {
-        let Some((index, file)) = project else {
-            return Vec::new();
-        };
+impl crate::analysis::FileSemantics<'_> {
+    /// Every checked exception raised in the file that its enclosing method / constructor neither
+    /// declares in `throws` nor catches.
+    ///
+    /// Needs the project: checked / unchecked classification walks the `Throwable` hierarchy and
+    /// a `throws` clause may name a type from another file. Returns empty when the index does not
+    /// model the top of that hierarchy (no stdlib stubs folded in), because then nothing can be
+    /// classified checked at all.
+    pub async fn unreported_exceptions(&self) -> Vec<UnreportedException> {
+        let (index, file) = (self.index(), self.file());
         // Without the modelled top of the `Throwable` hierarchy nothing can be classified checked.
         let Some(classifier) = Classifier::new(index, file) else {
             return Vec::new();
         };
-        let ti = TypeInference::infer(root, resolved, index, file).await;
+        let typed = self.typed().await;
         let cx = Cx {
             index,
             file,
-            ti: &ti,
+            ti: typed.inference(),
             classifier,
         };
         let mut yielder = jals_exec::Yielder::new();
         let mut out = Vec::new();
-        for node in root.descendants() {
+        for node in self.root().descendants() {
             yielder.tick().await;
             if matches!(node.kind(), METHOD_DECL | CONSTRUCTOR_DECL) {
                 cx.check_decl(&node, &mut out).await;

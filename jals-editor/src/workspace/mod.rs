@@ -24,10 +24,10 @@ use core::ops::Range;
 
 use jals_config::FeatureSet;
 use jals_exec::Exec;
-use jals_hir::{FileFacts, FileId, LoweredClasspath, ProjectIndex, Resolved, SourceLocations};
+use jals_hir::{FileAnalysis, FileFacts, FileId, LoweredClasspath, ProjectIndex, SourceLocations};
 use jals_storage::{CacheBackend, DirKey, FileKey, ProjectStorage, ProjectView, SourceBackend};
+use jals_syntax::Parse;
 use jals_syntax::cfg::CfgMap;
-use jals_syntax::{Parse, SyntaxNode};
 
 use crate::document::Document;
 use crate::{
@@ -59,12 +59,14 @@ struct SourceFile {
     /// [`reset_analysis`](SourceFile::reset_analysis). Empty (and free) when the `attributes`
     /// dialect feature is off.
     cfg: OnceCell<CfgMap>,
-    /// The file's name resolution, computed once on first use and cached. A pure function of the
-    /// parse and the `cfg` map, so it stays valid for this file's lifetime — an edit replaces the
-    /// whole struct (see [`Workspace::set_overlay`]), starting fresh. Lets a project-wide query
-    /// that scans every file (find-references) resolve each one only once instead of on every
-    /// request.
-    resolved: OnceCell<Resolved>,
+    /// The file's parsed-and-resolved analysis, computed once on first use and cached. A pure
+    /// function of the parse and the `cfg` map — and, deliberately, of nothing else: it is
+    /// independent of the [`ProjectIndex`], which is rebuilt on every keystroke, so it stays valid
+    /// for this file's lifetime and an edit replaces the whole struct (see
+    /// [`Workspace::set_overlay`]). Lets a project-wide query that scans every file
+    /// (find-references) analyse each one only once instead of on every request — and, because
+    /// nothing here is bound to the index, without running a type inference for any of them.
+    analysis: OnceCell<FileAnalysis>,
     /// The file's cached index facts — the CST-walking half of building the [`ProjectIndex`],
     /// computed once on first use. Like `resolved`, a pure function of the parse and the `cfg`
     /// map, so an edit (which replaces the whole struct) re-extracts them while every other file
@@ -81,7 +83,7 @@ impl SourceFile {
             path,
             doc,
             cfg: OnceCell::new(),
-            resolved: OnceCell::new(),
+            analysis: OnceCell::new(),
             facts: OnceCell::new(),
         }
     }
@@ -103,23 +105,23 @@ impl SourceFile {
     /// feature-selection change — the parse itself is a pure function of the text and survives.
     fn reset_analysis(&mut self) {
         self.cfg = OnceCell::new();
-        self.resolved = OnceCell::new();
+        self.analysis = OnceCell::new();
         self.facts = OnceCell::new();
     }
 
-    /// The file's cached name resolution (computed on first use), skipping `cfg`-disabled hosts.
+    /// The file's cached analysis (computed on first use), skipping `cfg`-disabled hosts.
     ///
     /// Async-once over the `OnceCell`: compute, then publish. The workspace is single-threaded,
     /// but two queries interleaved at an await point can both see the empty cell and both
     /// compute — the value is a pure function of the parse and `cfg`, so the duplicate work is
     /// benign and the first `set` wins. No locking or single-flight gate keeps the pattern
     /// cancellation-safe (a dropped query leaves the cell either empty or fully published).
-    async fn resolved(&self, cfg: &CfgMap) -> &Resolved {
-        if self.resolved.get().is_none() {
-            let resolved = Resolved::resolve_node_with_cfg(&self.doc.parse.syntax(), cfg).await;
-            let _ = self.resolved.set(resolved);
+    async fn analysis(&self, cfg: &CfgMap) -> &FileAnalysis {
+        if self.analysis.get().is_none() {
+            let analysis = FileAnalysis::of_with_cfg(&self.doc.parse.syntax(), cfg).await;
+            let _ = self.analysis.set(analysis);
         }
-        self.resolved.get().expect("published just above")
+        self.analysis.get().expect("published just above")
     }
 
     /// The file's cached index facts (computed on first use), the input to the incremental
@@ -534,18 +536,15 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
     }
 
     /// Shared semantic query module for one project file, or `None` for an id that addresses no
-    /// project file. Awaits only this file's lazy resolution; project-wide references receive
+    /// project file. Awaits only this file's lazy analysis; project-wide references receive
     /// the other files separately.
+    ///
+    /// One binding per call, held by the returned [`ProjectQueries`] — so several questions asked
+    /// of it share one type inference, and a caller that wants that sharing keeps the value.
     async fn queries(&self, file: FileId) -> Option<ProjectQueries<'_>> {
         let source = self.project_file(file)?;
-        Some(ProjectQueries::new(
-            &self.index,
-            QueryFile::new(
-                file,
-                source.doc.parse.syntax(),
-                source.resolved(self.cfg_of(source)).await,
-            ),
-        ))
+        let analysis = source.analysis(self.cfg_of(source)).await;
+        Some(ProjectQueries::new(analysis.in_project(&self.index, file)))
     }
 
     /// Replace the resolved feature selection — the language feature set (the browser
@@ -793,8 +792,7 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
         for (index, source) in self.files.iter().enumerate() {
             files.push(QueryFile::new(
                 WorkspaceFileId::of_index(WorkspaceFileId::Project, index),
-                source.doc.parse.syntax(),
-                source.resolved(self.cfg_of(source)).await,
+                source.analysis(self.cfg_of(source)).await,
             ));
         }
         queries.references(offset, include_declaration, files)
@@ -892,14 +890,9 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
         let mut config = config.clone();
         config.features = self.feature_set;
         let cfg = self.cfg_of(source);
-        FileDiagnostics::assemble(
-            &source.doc.parse,
-            Some(source.resolved(cfg).await),
-            Some((&self.index, file)),
-            &config,
-            Some(cfg),
-        )
-        .await
+        // One binding for the whole run, so the rules that need types share one inference.
+        let semantics = source.analysis(cfg).await.in_project(&self.index, file);
+        FileDiagnostics::assemble(&source.doc.parse, Some(&semantics), &config, Some(cfg)).await
     }
 
     /// prepareRename for the cursor at `offset` in `file`: the byte range of the identifier under
@@ -934,8 +927,7 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
 /// `jals.toml` project. Every fallback request drives the same [`ProjectQueries`] the workspace
 /// does.
 pub struct SingleFileProject {
-    root: SyntaxNode,
-    resolved: Resolved,
+    analysis: FileAnalysis,
     index: ProjectIndex,
 }
 
@@ -948,26 +940,25 @@ impl SingleFileProject {
     /// Build the one-file project over an already-parsed document.
     pub async fn new(parse: &Parse) -> Self {
         let root = parse.syntax();
-        let resolved = Resolved::resolve_node(&root).await;
-        let index = ProjectIndex::builder(&[(Self::FILE, root.clone())])
+        let analysis = FileAnalysis::of(&root).await;
+        let index = ProjectIndex::builder(&[(Self::FILE, root)])
             .with_stdlib()
             .build()
             .await;
-        Self {
-            root,
-            resolved,
-            index,
-        }
+        Self { analysis, index }
     }
 
     /// The query module over this one file.
-    pub fn queries(&self) -> ProjectQueries<'_> {
-        ProjectQueries::new(&self.index, self.file())
+    ///
+    /// Synchronous, because binding an analysis to an index is: the detached document's inference
+    /// still runs lazily, inside the returned value, only if a query needs it.
+    pub const fn queries(&self) -> ProjectQueries<'_> {
+        ProjectQueries::new(self.analysis.in_project(&self.index, Self::FILE))
     }
 
     /// The file's query inputs (for the project-files iterator of a references query).
-    pub fn file(&self) -> QueryFile<'_> {
-        QueryFile::new(Self::FILE, self.root.clone(), &self.resolved)
+    pub const fn file(&self) -> QueryFile<'_> {
+        QueryFile::new(Self::FILE, &self.analysis)
     }
 
     /// The canonical diagnostics of the file under `config`, with the one-file index folded in
@@ -979,8 +970,7 @@ impl SingleFileProject {
     ) -> Vec<FileDiagnostic> {
         FileDiagnostics::assemble(
             parse,
-            Some(&self.resolved),
-            Some((&self.index, Self::FILE)),
+            Some(&self.analysis.in_project(&self.index, Self::FILE)),
             config,
             // A single detached file has no manifest, so no `attributes` dialect and no `cfg`.
             None,

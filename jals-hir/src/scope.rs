@@ -10,11 +10,11 @@ use crate::def::DefId;
 /// It indexes [`Resolved::scopes`](crate::Resolved::scopes). The file scope is always the zeroth
 /// [`ScopeId`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ScopeId(pub(crate) u32);
+pub(crate) struct ScopeId(pub(crate) u32);
 
 /// What sort of region a scope covers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScopeKind {
+pub(crate) enum ScopeKind {
     /// The whole compilation unit: top-level type declarations.
     File,
     /// A type body (class / interface / enum / record / annotation type / anonymous class): its
@@ -49,7 +49,7 @@ impl ScopeKind {
 
 /// A lexical scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Scope {
+pub(crate) struct Scope {
     /// This scope's identifier.
     pub(crate) id: ScopeId,
     /// What sort of region it covers.

@@ -169,7 +169,7 @@ impl Primitive {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClassTy {
     /// Resolved to a type declared in the indexed project. `name` is the simple name, kept so the
-    /// type displays without the index (and so a [`DefId`]-free `Ty` stays self-describing).
+    /// type displays without the index (and so an id-free `Ty` stays self-describing).
     Project {
         id: ItemId,
         name: String,
@@ -179,7 +179,7 @@ pub enum ClassTy {
         args: Vec<Ty>,
     },
     /// A type known only by name — a JDK / external type, or one we chose not to resolve (the
-    /// project-free [`infer_node`](crate::infer_node) path). Carries the spelling as written.
+    /// project-free [`FileAnalysis`](crate::FileAnalysis) path). Carries the spelling as written.
     External {
         name: String,
         /// The type arguments as written, like [`Project`](ClassTy::Project)'s `args`.
@@ -253,7 +253,7 @@ impl Ty {
     /// that emits a diagnostic on `false` never reports a spurious one.
     ///
     /// `index` supplies the project class hierarchy for reference subtyping; without it (the
-    /// [`infer_node`](crate::infer_node) path, which has no [`ProjectIndex`]) subtyping between two
+    /// [`FileAnalysis`](crate::FileAnalysis) path, which has no [`ProjectIndex`]) subtyping between two
     /// distinct project types is unknowable, so it too stays conservatively `true`.
     // Each arm names one JLS conversion case; keeping them separate (rather than merging equal
     // bodies) is what documents which conversions are/aren't modelled.
