@@ -444,7 +444,7 @@ impl Expr {
     fn name(name: &ast::NameRef, context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
         // `this` is not a name that resolves to anything — it is slot 0, which is why it has no
         // identifier token to look up.
-        if Self::is_this(name.syntax()) {
+        if Facts::is_this(name.syntax()) {
             return emit.load_this();
         }
         let text = name.syntax().text().to_string();
@@ -462,11 +462,11 @@ impl Expr {
                     emit.asm.get_field(&context.this_class, &read.0, &read.1)?;
                     return Ok(());
                 }
-                Self::own_field(id, context)
+                context.facts().member_of_def(id)
             }
             // Nothing in the file declared it, which an *inherited* field never is.
-            None => Self::name_text(name.syntax())
-                .and_then(|written| Self::inherited_field(&written, context)),
+            None => Facts::name_token(name.syntax())
+                .and_then(|written| Self::inherited_field(written.text(), context)),
         };
         let member = member.ok_or_else(unresolved)?;
         let (owner, field, descriptor) = Self::field_ref(member, context)?;
@@ -479,19 +479,6 @@ impl Expr {
         Ok(())
     }
 
-    /// The indexed member a file-local definition declares, when that definition is a field of the
-    /// enclosing type rather than a local.
-    ///
-    /// A name that is not a local is one of the enclosing type's own fields, written without the
-    /// `this.` the JVM still requires. A field declaration is a file-local definition like any
-    /// other, so its id maps straight back to the indexed member.
-    /// Whether a `NAME_REF` node is the bare `this`.
-    fn is_this(node: &SyntaxNode) -> bool {
-        node.children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .any(|token| token.kind() == jals_syntax::SyntaxKind::THIS_KW)
-    }
-
     /// The `(field, descriptor)` a captured local is read through, or `None` when `id` is not one of the
     /// current class's captures.
     fn captured_read(id: DefId, context: &Context<'_>) -> Result<Option<(String, String)>> {
@@ -502,24 +489,6 @@ impl Expr {
             alloc::format!("val${}", context.typed.analysis().def(id).name),
             Descriptor::descriptor_of(context.typed.type_of_def(id), context.index)?.to_string(),
         )))
-    }
-
-    pub(crate) fn own_field(id: DefId, context: &Context<'_>) -> Option<MemberId> {
-        let declaration = context.typed.analysis().def(id);
-        context
-            .index
-            .member_by_decl(context.file, declaration.name_range.start)
-    }
-
-    /// The identifier a name reference is written with, without the trivia the node carries.
-    ///
-    /// A `NAME_REF`'s text runs from the start of its leading trivia, so a comment on the line above is
-    /// part of it. The token is the name; everything else is layout.
-    pub(crate) fn name_text(node: &SyntaxNode) -> Option<String> {
-        node.children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
-            .map(|token| token.text().to_owned())
     }
 
     /// The field an unqualified name reaches when nothing in the file declared it: one of a supertype's.
@@ -1778,19 +1747,15 @@ impl Expr {
     /// The operator a compound assignment fuses in.
     ///
     /// Most arrive as one token (`PLUS_EQ`), but the right shifts do not: the lexer never joins a `>`
-    /// to what follows, so `>>=` is `GT GT EQ` and `>>>=` is `GT GT GT EQ`.
+    /// to what follows, so `>>=` is `GT GT EQ` and `>>>=` is `GT GT GT EQ`. That is the shared
+    /// fact's rule, and reading the run here rather than restating it is what keeps this from being
+    /// the one place the rule is written a third time.
     fn compound_operator(node: &SyntaxNode) -> Result<BinOp> {
         use jals_syntax::SyntaxKind::{
             AMP_EQ, CARET_EQ, EQ, LSHIFT_EQ, MINUS_EQ, PERCENT_EQ, PIPE_EQ, PLUS_EQ, SLASH_EQ,
             STAR_EQ,
         };
-        let operator: alloc::vec::Vec<_> = node
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .map(|token| token.kind())
-            .filter(|kind| !kind.is_trivia())
-            .collect();
-        Ok(match operator.as_slice() {
+        Ok(match Facts::operator(node).as_slice() {
             [PLUS_EQ] => BinOp::Add,
             [MINUS_EQ] => BinOp::Sub,
             [STAR_EQ] => BinOp::Mul,

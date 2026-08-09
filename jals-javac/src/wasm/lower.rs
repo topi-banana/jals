@@ -909,9 +909,7 @@ impl CompileWasm {
                 }
                 let member_name = Self::member_name_token(&node, is_constructor)
                     .ok_or(WasmError::Unsupported("a member with no name"))?;
-                let member = index
-                    .member_by_decl(input.file(), usize::from(member_name.text_range().start()))
-                    .ok_or_else(|| WasmError::Unresolved(member_name.text().into()))?;
+                let member = Facts::of(*input).member_at(&member_name)?;
                 let is_static = index.member(member).modifiers.is_static;
 
                 let mut params = Vec::new();
@@ -1142,9 +1140,7 @@ impl Layout {
             // Each declarator with the value written after its own `=`, which is not the same as
             // pairing names with expressions by index — see `Facts::declarators`.
             for (name, value) in Facts::declarators(&node) {
-                let Some(member) =
-                    index.member_by_decl(input.file(), usize::from(name.text_range().start()))
-                else {
+                let Ok(member) = Facts::of(*input).member_at(&name) else {
                     continue;
                 };
                 if !index.member(member).modifiers.is_static {
@@ -1204,9 +1200,7 @@ impl Layout {
                 let name = constant
                     .name_token()
                     .ok_or(WasmError::Unsupported("an `enum` constant with no name"))?;
-                let id = index
-                    .member_by_decl(input.file(), usize::from(name.text_range().start()))
-                    .ok_or_else(|| WasmError::Unresolved(name.text().into()))?;
+                let id = Facts::of(*input).member_at(&name)?;
                 let ty = self.class_ref(owner)?;
                 let mut init = Insn::new();
                 Self::default_value(ty, &mut init);
@@ -1969,10 +1963,7 @@ impl Lowering<'_> {
                 let Some(value) = value else {
                     continue;
                 };
-                let Some(member) = self
-                    .index
-                    .member_by_decl(self.input.file(), usize::from(name.text_range().start()))
-                else {
+                let Ok(member) = self.facts().member_at(&name) else {
                     continue;
                 };
                 if self.index.member(member).modifiers.is_static {
@@ -3431,9 +3422,7 @@ impl Lowering<'_> {
                 }
                 // Not a local: a field of the enclosing class. A `static` one is a global and needs no
                 // receiver; an instance one is reached through `this`, which is local 0.
-                let declaration = self.input.analysis().def(id);
-                self.index
-                    .member_by_decl(self.input.file(), declaration.name_range.start)
+                self.facts().member_of_def(id)
             }
             // Nothing in the file declared it, which an *inherited* field never is.
             None => self.inherited_field(name.syntax()),
@@ -4136,13 +4125,7 @@ impl Lowering<'_> {
             AMP_EQ, CARET_EQ, EQ, GT, LSHIFT_EQ, MINUS_EQ, PERCENT_EQ, PIPE_EQ, PLUS_EQ, SLASH_EQ,
             STAR_EQ,
         };
-        let operator: Vec<_> = node
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .map(|token| token.kind())
-            .filter(|kind| !kind.is_trivia())
-            .collect();
-        Ok(match operator.as_slice() {
+        Ok(match Facts::operator(node).as_slice() {
             [PLUS_EQ] => NumOp::Add,
             [MINUS_EQ] => NumOp::Sub,
             [STAR_EQ] => NumOp::Mul,
@@ -4343,9 +4326,7 @@ impl Lowering<'_> {
                         // A bare name that is no local is a field of the enclosing class. A `static`
                         // one is a global; an instance one needs no spill, local 0 being a stable
                         // receiver already.
-                        let declaration = self.input.analysis().def(id);
-                        self.index
-                            .member_by_decl(self.input.file(), declaration.name_range.start)
+                        self.facts().member_of_def(id)
                     }
                     // Nothing in the file declared it, which an *inherited* field never is.
                     None => self.inherited_field(name.syntax()),

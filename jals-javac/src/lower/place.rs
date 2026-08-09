@@ -94,11 +94,11 @@ impl Place {
                         ty,
                     });
                 }
-                Expr::own_field(id, context)
+                context.facts().member_of_def(id)
             }
             // Nothing in the file declared it, which an *inherited* field never is.
-            None => Expr::name_text(name.syntax())
-                .and_then(|written| Expr::inherited_field(&written, context)),
+            None => Facts::name_token(name.syntax())
+                .and_then(|written| Expr::inherited_field(written.text(), context)),
         };
         let member = member.ok_or_else(text)?;
         let (owner, field, descriptor) = Expr::field_ref(member, context)?;

@@ -193,7 +193,10 @@ impl<'a> Facts<'a> {
     }
 
     /// The primitive a `TYPE` node's keyword names.
-    fn primitive_of(node: &ast::Type) -> Option<jals_hir::Primitive> {
+    ///
+    /// The JVM backend carried a verbatim second copy of this, down to the keyword list, because the
+    /// one here was private and the erasure path needed it.
+    pub(crate) fn primitive_of(node: &ast::Type) -> Option<jals_hir::Primitive> {
         use jals_hir::Primitive;
         use jals_syntax::SyntaxKind::{
             BOOLEAN_KW, BYTE_KW, CHAR_KW, DOUBLE_KW, FLOAT_KW, INT_KW, LONG_KW, SHORT_KW,
@@ -326,12 +329,33 @@ impl<'a> Facts<'a> {
             .or_else(|| self.typed.analysis().symbol_at(start))
     }
 
-    /// Where a node's own first identifier token starts. Direct children only.
-    fn first_name(node: &SyntaxNode) -> Option<usize> {
+    /// A node's own first identifier token. Direct children only.
+    ///
+    /// The token, not the node's text: a `NAME_REF`'s text runs from the start of its leading
+    /// trivia, so a comment on the line above is part of it. The token is the name and everything
+    /// else is layout — which is why a lookup keyed on the text of the node found nothing whenever
+    /// the name happened to be commented.
+    pub(crate) fn name_token(node: &SyntaxNode) -> Option<SyntaxToken> {
         node.children_with_tokens()
             .filter_map(jals_syntax::SyntaxElement::into_token)
             .find(|token| token.kind() == SyntaxKind::IDENT)
-            .map(|token| usize::from(token.text_range().start()))
+    }
+
+    /// Where a node's own first identifier token starts. Direct children only.
+    fn first_name(node: &SyntaxNode) -> Option<usize> {
+        Self::name_token(node).map(|token| usize::from(token.text_range().start()))
+    }
+
+    /// The indexed member a file-local definition declares.
+    ///
+    /// A name that resolved to a definition but to no *local* is one of the enclosing type's own
+    /// fields, written without the `this.` the JVM still requires. Reached by the **declaration's**
+    /// offset rather than the reference's — which is the one thing the three hand-written copies
+    /// each had to remember.
+    pub(crate) fn member_of_def(self, id: DefId) -> Option<MemberId> {
+        let declaration = self.typed.analysis().def(id);
+        self.index()
+            .member_by_decl(self.file(), declaration.name_range.start)
     }
 
     /// The indexed member the name token `token` declares.

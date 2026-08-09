@@ -3241,7 +3241,7 @@ impl Context<'_> {
             .count();
 
         let mut ty = if node.is_primitive_or_var() {
-            jals_hir::Ty::Primitive(Self::primitive_of(node).ok_or(DescError::Unknown)?)
+            jals_hir::Ty::Primitive(Facts::primitive_of(node).ok_or(DescError::Unknown)?)
         } else {
             let name = node.simple_name().ok_or(DescError::Unknown)?;
             let qualified = node.is_qualified().then(|| node.qualified_text()).flatten();
@@ -3336,30 +3336,6 @@ impl Context<'_> {
             name: simple,
             args: Vec::new(),
         }))
-    }
-
-    /// The primitive a `TYPE` node's keyword names.
-    fn primitive_of(node: &ast::Type) -> Option<jals_hir::Primitive> {
-        use jals_hir::Primitive;
-        use jals_syntax::SyntaxKind::{
-            BOOLEAN_KW, BYTE_KW, CHAR_KW, DOUBLE_KW, FLOAT_KW, INT_KW, LONG_KW, SHORT_KW,
-        };
-        node.syntax()
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .find_map(|token| {
-                Some(match token.kind() {
-                    BOOLEAN_KW => Primitive::Boolean,
-                    BYTE_KW => Primitive::Byte,
-                    SHORT_KW => Primitive::Short,
-                    CHAR_KW => Primitive::Char,
-                    INT_KW => Primitive::Int,
-                    LONG_KW => Primitive::Long,
-                    FLOAT_KW => Primitive::Float,
-                    DOUBLE_KW => Primitive::Double,
-                    _ => return None,
-                })
-            })
     }
 
     /// The source facts of the file being lowered.
