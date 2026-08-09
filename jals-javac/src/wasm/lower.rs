@@ -51,6 +51,7 @@ use jals_syntax::SyntaxKind::{
 use jals_syntax::ast::{self, AstNode as _};
 use jals_syntax::{SyntaxNode, SyntaxToken};
 
+use crate::facts::{Facts, Hierarchy, Overrides};
 use crate::wasm::encode::{
     CompType, ExportKind, FieldType, Func, Global, HeapType, Module, RefType, StorageType, SubType,
     ValType,
@@ -88,6 +89,18 @@ impl core::fmt::Display for WasmError {
 }
 
 impl core::error::Error for WasmError {}
+
+/// A source fact this backend could not be given. Both variants are ones `WasmError` already
+/// spells, so the `&'static str` of an `Unsupported` reaches a caller verbatim — several are pinned
+/// by name in the integration tests.
+impl From<crate::facts::FactError> for WasmError {
+    fn from(error: crate::facts::FactError) -> Self {
+        match error {
+            crate::facts::FactError::Unsupported(what) => Self::Unsupported(what),
+            crate::facts::FactError::Unresolved(name) => Self::Unresolved(name),
+        }
+    }
+}
 
 type Result<T> = core::result::Result<T, WasmError>;
 
@@ -187,7 +200,7 @@ impl CompileWasm {
         // types the analyses already recorded rather than discovered while emitting.
         for input in inputs {
             for node in input.root().descendants() {
-                if let Some(ty) = input.type_of_expr(Lowering::span(&node)) {
+                if let Some(ty) = input.type_of_expr(Facts::span(&node)) {
                     layout.declare_array(ty, &mut module)?;
                 }
             }
@@ -632,7 +645,15 @@ impl CompileWasm {
                     interfaces.push(item);
                     continue;
                 }
-                let captured = Self::captured_by(&node, input);
+                // The set is the shared fact; the type beside each is this backend's, because the
+                // layout wants a `ValType` where the JVM wants a descriptor. It is read from the
+                // *declaring* input, which is the only place it is known — the layout is built long
+                // before any body is lowered.
+                let captured: Vec<(DefId, Ty)> = Facts::of(*input)
+                    .captured_by(&node)
+                    .into_iter()
+                    .map(|id| (id, input.type_of_def(id).clone()))
+                    .collect();
                 if !captured.is_empty() {
                     captures.push((item, captured));
                 }
@@ -688,50 +709,6 @@ impl CompileWasm {
             ) || Self::is_anonymous(node)
                 || Self::is_functional(node)
         })
-    }
-
-    /// The locals a class declared inside a block captures, in source order and without repeats.
-    ///
-    /// A capture is what it sounds like: a name inside the class that resolves to a definition *outside*
-    /// it. Each becomes a struct field and a trailing constructor parameter.
-    fn captured_by(node: &SyntaxNode, input: &TypedFile<'_>) -> Vec<(DefId, Ty)> {
-        let mut out = Vec::new();
-        let inside_block = node
-            .ancestors()
-            .skip(1)
-            .any(|ancestor| ancestor.kind() == jals_syntax::SyntaxKind::BLOCK);
-        if !inside_block {
-            return out;
-        }
-        let range = node.text_range();
-        for token in node
-            .descendants_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .filter(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
-        {
-            let Some(id) = input
-                .analysis()
-                .reference_at(usize::from(token.text_range().start()))
-                .and_then(|reference| reference.resolution.def_id())
-            else {
-                continue;
-            };
-            let def = input.analysis().def(id);
-            // Only a *local* is captured: a field is reached through an instance and a type name is not a
-            // value at all.
-            if !matches!(def.kind, DefKind::Local | DefKind::Param) {
-                continue;
-            }
-            let Ok(start) = u32::try_from(def.name_range.start) else {
-                continue;
-            };
-            if !range.contains(start.into()) && !out.iter().any(|(seen, _)| *seen == id) {
-                // The type is read from the *declaring* input's analysis, which is the only place it is
-                // known — the layout is built long before any body is lowered.
-                out.push((id, input.type_of_def(id).clone()));
-            }
-        }
-        out
     }
 
     /// Whether `node` is an anonymous class body: a `new` with a class body of its own. It is a type
@@ -1579,7 +1556,13 @@ impl Body {
                     code: insn.into_body(),
                 });
             }
-            let (target, bound) = Lowering::referenced_method(&method.node, input, index)?;
+            let reference = Facts::of(*input).method_ref(&method.node)?;
+            // This backend lowers a plain delegation only: a bound reference captures its receiver
+            // and a constructor one needs an allocation, and neither is one.
+            let target = reference.target.ok_or(WasmError::Unsupported(
+                "a method reference to a constructor",
+            ))?;
+            let bound = matches!(reference.receiver, crate::facts::RefReceiver::Bound(_));
             let function = *layout.functions.get(&target).ok_or(WasmError::Unsupported(
                 "a method reference to a method outside this module",
             ))?;
@@ -1614,6 +1597,7 @@ impl Body {
                 .filter(|node| node.kind() == jals_syntax::SyntaxKind::PARAM)
             {
                 let id = lowering
+                    .facts()
                     .def_at(&param)
                     .ok_or(WasmError::Unsupported("a lambda parameter with no binding"))?;
                 let ty = lowering.layout.val_type(lowering.input.type_of_def(id))?;
@@ -1731,31 +1715,12 @@ impl Body {
 impl Body {
     /// Whether a constructor body begins with `this(…)` rather than `super(…)` or a statement.
     fn delegates_to_this(block: &ast::Block) -> bool {
-        Self::delegation(block, jals_syntax::SyntaxKind::THIS_KW)
+        Facts::body_delegates_to(block, jals_syntax::SyntaxKind::THIS_KW)
     }
 
     /// Whether a constructor body begins with an explicit `super(…)`.
     fn delegates_to_super(block: &ast::Block) -> bool {
-        Self::delegation(block, jals_syntax::SyntaxKind::SUPER_KW)
-    }
-
-    /// Whether the body's first statement is a bare `this(…)` / `super(…)` naming `keyword`.
-    ///
-    /// JLS §8.8.7 puts an explicit constructor invocation first or nowhere, so only the first statement
-    /// is examined. `this.m()` and `super.m()` are qualified calls whose callee is a field access.
-    fn delegation(block: &ast::Block, keyword: jals_syntax::SyntaxKind) -> bool {
-        let Some(ast::Stmt::Expr(first)) = block.stmts().next() else {
-            return false;
-        };
-        let Some(ast::Expr::Call(call)) = first.expr() else {
-            return false;
-        };
-        matches!(call.callee(), Some(ast::Expr::NameRef(name))
-            if name
-                .syntax()
-                .children_with_tokens()
-                .filter_map(jals_syntax::SyntaxElement::into_token)
-                .any(|token| token.kind() == keyword))
+        Facts::body_delegates_to(block, jals_syntax::SyntaxKind::SUPER_KW)
     }
 
     /// The function an implicit `super()` calls: the nearest ancestor with initialisers to run.
@@ -2038,6 +2003,7 @@ impl Lowering<'_> {
 
     fn declare_param(&mut self, node: &SyntaxNode) -> Result<ValType> {
         let id = self
+            .facts()
             .def_at(node)
             .ok_or(WasmError::Unsupported("an unresolved parameter"))?;
         let ty = self.layout.val_type(self.input.type_of_def(id))?;
@@ -2065,28 +2031,19 @@ impl Lowering<'_> {
             .map(|(_, slot)| *slot)
     }
 
-    fn def_at(&self, node: &SyntaxNode) -> Option<DefId> {
-        let token = node
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)?;
-        let start = usize::from(token.text_range().start());
-        self.input
-            .analysis()
-            .reference_at(start)
-            .and_then(|reference| reference.resolution.def_id())
-            .or_else(|| self.input.analysis().symbol_at(start))
-    }
-
-    fn span(node: &SyntaxNode) -> core::ops::Range<usize> {
-        let range = node.text_range();
-        usize::from(range.start())..usize::from(range.end())
+    /// The source facts of the file being lowered.
+    ///
+    /// A projection, not a store: [`Facts`] is a `Copy` handle over the same [`TypedFile`] this
+    /// lowering already holds. It is where the span keying, the name binding, and the constant
+    /// evaluation live, so neither backend spells them itself.
+    const fn facts(&self) -> Facts<'_> {
+        Facts::of(*self.input)
     }
 
     fn ty_of(&self, node: &SyntaxNode) -> Result<ValType> {
         let ty = self
             .input
-            .type_of_expr(Self::span(node))
+            .type_of_expr(Facts::span(node))
             .ok_or(WasmError::Unsupported(
                 "an expression with no inferred type",
             ))?;
@@ -2343,7 +2300,7 @@ impl Lowering<'_> {
         let name: SyntaxToken = statement
             .name_token()
             .ok_or(WasmError::Unsupported("a `for`-each with no variable"))?;
-        let Some(Ty::Array(element)) = self.input.type_of_expr(Self::span(iterable.syntax()))
+        let Some(Ty::Array(element)) = self.input.type_of_expr(Facts::span(iterable.syntax()))
         else {
             return Err(WasmError::Unsupported("a `for`-each over this type"));
         };
@@ -2830,12 +2787,12 @@ impl Lowering<'_> {
         let arms: Vec<Arm> = if rules.is_empty() {
             groups
                 .iter()
-                .map(|group| Self::arm(group.labels()))
+                .map(|group| self.arm(group.labels()))
                 .collect::<Result<_>>()?
         } else {
             rules
                 .iter()
-                .map(|rule| Self::arm(rule.label().into_iter()))
+                .map(|rule| self.arm(rule.label().into_iter()))
                 .collect::<Result<_>>()?
         };
         let count = u32::try_from(arms.len()).map_err(|_| WasmError::TooLarge)?;
@@ -2892,7 +2849,7 @@ impl Lowering<'_> {
     }
 
     /// One arm's `case` keys and patterns. `default` contributes neither.
-    fn arm(labels: impl Iterator<Item = ast::SwitchLabel>) -> Result<Arm> {
+    fn arm(&self, labels: impl Iterator<Item = ast::SwitchLabel>) -> Result<Arm> {
         use jals_syntax::SyntaxKind::{RECORD_PATTERN, TYPE_PATTERN, UNNAMED_PATTERN};
         let mut keys = Vec::new();
         let mut patterns = Vec::new();
@@ -2918,7 +2875,11 @@ impl Lowering<'_> {
             // when there is no guard to have contributed one.
             if guard.is_none() {
                 for value in label.syntax().children().filter_map(ast::Expr::cast) {
-                    keys.push(Self::switch_key(&value)?);
+                    // A `String` key has no wasm representation — this backend compiles primitives and
+                    // project classes, and a host with no `java.base` has no `String` to hash.
+                    keys.push(self.facts().case_key(&value)?.as_int().ok_or_else(|| {
+                        WasmError::NoRepresentation("a `String` `case` label".to_owned())
+                    })?);
                 }
             }
         }
@@ -2979,55 +2940,6 @@ impl Lowering<'_> {
         Ok(())
     }
 
-    /// The integral constant a `case` label names.
-    ///
-    /// Only a literal or a negated literal: a named constant would have to be folded, and `String`
-    /// has no representation in this module at all.
-    fn switch_key(value: &ast::Expr) -> Result<i32> {
-        use jals_syntax::SyntaxKind::{CHAR_LITERAL, INT_LITERAL, MINUS};
-        match value {
-            ast::Expr::Paren(paren) => {
-                let inner = paren
-                    .expr()
-                    .ok_or(WasmError::Unsupported("an empty parenthesis"))?;
-                Self::switch_key(&inner)
-            }
-            ast::Expr::Unary(unary) => {
-                let negated = unary
-                    .syntax()
-                    .children_with_tokens()
-                    .filter_map(jals_syntax::SyntaxElement::into_token)
-                    .any(|token| token.kind() == MINUS);
-                let operand = unary
-                    .operand()
-                    .ok_or(WasmError::Unsupported("a `case` with no value"))?;
-                let key = Self::switch_key(&operand)?;
-                if negated { Ok(-key) } else { Ok(key) }
-            }
-            ast::Expr::Literal(literal) => {
-                let token = literal
-                    .syntax()
-                    .children_with_tokens()
-                    .filter_map(jals_syntax::SyntaxElement::into_token)
-                    .find(|token| !token.kind().is_trivia())
-                    .ok_or(WasmError::Unsupported("an empty literal"))?;
-                match token.kind() {
-                    INT_LITERAL => crate::lower::expr::Expr::integer_literal(token.text())
-                        .ok()
-                        .and_then(|value| i32::try_from(value).ok())
-                        .ok_or(WasmError::Unsupported("an out-of-range `case` key")),
-                    CHAR_LITERAL => crate::lower::expr::Expr::literal_text(token.text())
-                        .ok()
-                        .and_then(|text| text.chars().next())
-                        .map(|value| value as i32)
-                        .ok_or(WasmError::Unsupported("a `case` key this cannot read")),
-                    _ => Err(WasmError::Unsupported("a `case` key of this kind")),
-                }
-            }
-            _ => Err(WasmError::Unsupported("a `case` key that is no constant")),
-        }
-    }
-
     /// Emit the selector and the jump into the arms.
     fn dispatch(
         &mut self,
@@ -3046,7 +2958,7 @@ impl Lowering<'_> {
         // silently: a `long` selector is not a Java program, but an `i32.wrap_i64` would turn it into
         // one that switches on the low 32 bits.
         if !matches!(
-            self.input.type_of_expr(Self::span(selector.syntax())),
+            self.input.type_of_expr(Facts::span(selector.syntax())),
             Some(Ty::Primitive(
                 Primitive::Byte | Primitive::Short | Primitive::Char | Primitive::Int
             ))
@@ -3112,7 +3024,15 @@ impl Lowering<'_> {
         result: Option<ValType>,
         insn: &mut Insn,
     ) -> Result<()> {
-        let _ = result;
+        // A value switch must leave every arm. The colon form falls through, so it is the *last*
+        // group that decides whether the fall-out path exists — and that path has no value to
+        // leave on the stack. Emitting it anyway produced a `block` with a declared result type
+        // whose fall-out was filled with `unreachable`: a module that loads, validates, and traps.
+        if result.is_some() && !groups.last().is_some_and(Facts::arm_leaves) {
+            return Err(WasmError::Unsupported(
+                "a `switch` expression arm that yields nothing",
+            ));
+        }
         for group in groups {
             insn.end();
             for statement in group.stmts() {
@@ -3255,7 +3175,7 @@ impl Lowering<'_> {
             }
             // `this` parses as a name reference but carries no identifier token, so nothing
             // resolves it as a name; it is always local 0.
-            ast::Expr::NameRef(_) if Self::is_this(expr.syntax()) => {
+            ast::Expr::NameRef(_) if Facts::is_this(expr.syntax()) => {
                 let owner = self
                     .owner
                     .ok_or(WasmError::Unsupported("`this` in a `static` method"))?;
@@ -3298,7 +3218,7 @@ impl Lowering<'_> {
                 // reference captures nothing to write into it.
                 let item = self
                     .index
-                    .item_by_decl(self.input.file(), Self::span(reference.syntax()).start)
+                    .item_by_decl(self.input.file(), Facts::span(reference.syntax()).start)
                     .ok_or(WasmError::Unsupported("a method reference with no item"))?;
                 let struct_type = *self
                     .layout
@@ -3332,7 +3252,7 @@ impl Lowering<'_> {
             ast::Expr::Lambda(lambda) => {
                 let item = self
                     .index
-                    .item_by_decl(self.input.file(), Self::span(lambda.syntax()).start)
+                    .item_by_decl(self.input.file(), Facts::span(lambda.syntax()).start)
                     .ok_or(WasmError::Unsupported("a lambda with no item"))?;
                 let struct_type = *self
                     .layout
@@ -3416,14 +3336,6 @@ impl Lowering<'_> {
         Ok((target, delta))
     }
 
-    /// Whether `node` is the `this` expression. It carries no identifier token, so nothing
-    /// resolves it as a name; its keyword is the only thing that identifies it.
-    fn is_this(node: &SyntaxNode) -> bool {
-        node.children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .any(|token| token.kind() == jals_syntax::SyntaxKind::THIS_KW)
-    }
-
     /// The member a field access names, and the class that declares it.
     ///
     /// A `this.`-qualified access is resolved against the enclosing class directly: `this` has no
@@ -3434,7 +3346,7 @@ impl Lowering<'_> {
             .ok_or(WasmError::Unsupported("a field access with no name"))?;
         let unresolved = || WasmError::Unresolved(name.clone());
         let member = match access.receiver() {
-            Some(receiver) if Self::is_this(receiver.syntax()) => {
+            Some(receiver) if Facts::is_this(receiver.syntax()) => {
                 let owner = self.owner.ok_or_else(unresolved)?;
                 self.index
                     .resolve_member(owner, &name, jals_hir::Namespace::Value)
@@ -3442,7 +3354,7 @@ impl Lowering<'_> {
             }
             _ => self
                 .input
-                .field_target_of(Self::span(access.syntax()))
+                .field_target_of(Facts::span(access.syntax()))
                 .ok_or_else(unresolved)?,
         };
         Ok((self.index.member(member).owner, member))
@@ -3519,7 +3431,7 @@ impl Lowering<'_> {
     fn name(&self, name: &ast::NameRef, insn: &mut Insn) -> Result<ValType> {
         let text = name.syntax().text().to_string();
         let unresolved = || WasmError::Unresolved(text.trim().into());
-        let member = match self.def_at(name.syntax()) {
+        let member = match self.facts().def_at(name.syntax()) {
             Some(id) => {
                 if let Some(slot) = self.slot_of(id) {
                     insn.local_get(slot);
@@ -3622,7 +3534,7 @@ impl Lowering<'_> {
         // array whose elements happen to be written as `int` literals, and reading the type off the
         // elements built an `i32` array instead — a module the validator rejects, and the wrong type if
         // it had not.
-        let inferred = self.input.type_of_expr(Self::span(init.syntax())).cloned();
+        let inferred = self.input.type_of_expr(Facts::span(init.syntax())).cloned();
         let Some(Ty::Array(element)) = target.cloned().or(inferred) else {
             return Err(WasmError::Unsupported(
                 "an array initialiser with no target type",
@@ -3689,7 +3601,7 @@ impl Lowering<'_> {
         if access.field().as_deref() == Some("length")
             && let Some(receiver) = access.receiver()
             && matches!(
-                self.input.type_of_expr(Self::span(receiver.syntax())),
+                self.input.type_of_expr(Facts::span(receiver.syntax())),
                 Some(Ty::Array(_))
             )
         {
@@ -3737,13 +3649,7 @@ impl Lowering<'_> {
         let operand = unary
             .operand()
             .ok_or(WasmError::Unsupported("a unary with no operand"))?;
-        let operator: Vec<_> = unary
-            .syntax()
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .map(|token| token.kind())
-            .filter(|kind| !kind.is_trivia())
-            .collect();
+        let operator = Facts::operator(unary.syntax());
         match operator.as_slice() {
             // A prefix `++` / `--` is an assignment, not an operator on a value.
             [PLUS_PLUS] => return self.update(&operand, 1, true, keep, insn),
@@ -3833,13 +3739,7 @@ impl Lowering<'_> {
             AMP, AMP_AMP, BANG_EQ, CARET, EQ, EQ_EQ, GT, INSTANCEOF_KW, LSHIFT, LT, LT_EQ, MINUS,
             PERCENT, PIPE, PIPE_PIPE, PLUS, SLASH, STAR,
         };
-        let operator: Vec<_> = binary
-            .syntax()
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .map(|token| token.kind())
-            .filter(|kind| !kind.is_trivia())
-            .collect();
+        let operator = Facts::operator(binary.syntax());
 
         // Before the operands: an `instanceof` whose right side is a *pattern* has no right operand at
         // all — the pattern is a binding, not an expression, and asking for one reported the wrong thing.
@@ -3930,7 +3830,7 @@ impl Lowering<'_> {
     fn num_of(&self, node: &SyntaxNode) -> Result<Num> {
         let ty = self
             .input
-            .type_of_expr(Self::span(node))
+            .type_of_expr(Facts::span(node))
             .ok_or(WasmError::Unsupported("a value with no inferred type"))?;
         let Ty::Primitive(primitive) = ty else {
             return Err(WasmError::Unsupported("an arithmetic operand of this type"));
@@ -3951,7 +3851,7 @@ impl Lowering<'_> {
     /// Whether `node`'s recorded type is a reference.
     fn is_reference(&self, node: &SyntaxNode) -> bool {
         matches!(
-            self.input.type_of_expr(Self::span(node)),
+            self.input.type_of_expr(Facts::span(node)),
             Some(Ty::Class(_) | Ty::Array(_) | Ty::Null)
         )
     }
@@ -4082,6 +3982,7 @@ impl Lowering<'_> {
             UNNAMED_PATTERN => Ok(()),
             TYPE_PATTERN => {
                 let bound = self
+                    .facts()
                     .def_at(pattern)
                     .ok_or(WasmError::Unsupported("a pattern with no binding"))?;
                 let bound_ty = self.input.type_of_def(bound).clone();
@@ -4449,7 +4350,7 @@ impl Lowering<'_> {
             ast::Expr::NameRef(name) => {
                 let text = name.syntax().text().to_string();
                 let unresolved = || WasmError::Unresolved(text.trim().into());
-                let member = match self.def_at(name.syntax()) {
+                let member = match self.facts().def_at(name.syntax()) {
                     Some(id) => {
                         if let Some(slot) = self.slot_of(id) {
                             return Ok(Place::Local { slot, ty });
@@ -4572,7 +4473,7 @@ impl Lowering<'_> {
         let ty = self.ty_of(new.syntax())?;
         // `new T[n]`: one instruction, and every element starts at its type's default — which is
         // exactly Java's rule for a fresh array.
-        if let Some(Ty::Array(element)) = self.input.type_of_expr(Self::span(new.syntax())) {
+        if let Some(Ty::Array(element)) = self.input.type_of_expr(Facts::span(new.syntax())) {
             let element = self.layout.val_type(element)?;
             let array_type = self
                 .layout
@@ -4591,11 +4492,11 @@ impl Lowering<'_> {
         let anonymous = CompileWasm::is_anonymous(new.syntax());
         let item = if anonymous {
             self.index
-                .item_by_decl(self.input.file(), Self::span(new.syntax()).start)
+                .item_by_decl(self.input.file(), Facts::span(new.syntax()).start)
                 .ok_or(WasmError::Unsupported("an anonymous class with no item"))?
         } else {
             self.input
-                .type_of_expr(Self::span(new.syntax()))
+                .type_of_expr(Facts::span(new.syntax()))
                 .and_then(Ty::project_id)
                 .ok_or(WasmError::Unsupported("a `new` of an unindexed type"))?
         };
@@ -4635,7 +4536,7 @@ impl Lowering<'_> {
         // Which constructor, read from the index rather than re-picked here. Matching on argument
         // *count* alone took the first of any same-arity pair, and a second selection free to
         // disagree with the analysis is the drift `call_target_of` exists to prevent.
-        let constructor = self.input.call_target_of(Self::span(new.syntax()));
+        let constructor = self.input.call_target_of(Facts::span(new.syntax()));
         let declares_constructor = self
             .index
             .own_members(item)
@@ -4741,18 +4642,23 @@ impl Lowering<'_> {
         if info.kind != DefKind::Method {
             return Vec::new();
         }
-        let (name, arity, owner) = (info.name.clone(), info.params.len(), info.owner);
+        let owner = info.owner;
         let mut found: Vec<(ItemId, MemberId)> = Vec::new();
         for &item in self.layout.structs.keys() {
             if item == owner || !self.index.is_subtype(item, owner) {
                 continue;
             }
-            let over = self.index.own_members(item).iter().copied().find(|&id| {
-                let candidate = self.index.member(id);
-                candidate.kind == DefKind::Method
-                    && candidate.name == name
-                    && candidate.params.len() == arity
-            });
+            // Only a definite override. A false positive here routes a call to the wrong method
+            // — output that loads, validates, and runs wrongly, which no later stage catches —
+            // while a false negative leaves the direct `call` a non-overridden method would have
+            // had anyway. That is the opposite collapse from the bridge emission's, and it is why
+            // the shared fact has three answers rather than two.
+            let over = self
+                .index
+                .own_members(item)
+                .iter()
+                .copied()
+                .find(|&id| Hierarchy::of(self.index).overrides(id, member) == Overrides::Yes);
             if let Some(over) = over {
                 found.push((item, over));
             }
@@ -4913,53 +4819,6 @@ impl Lowering<'_> {
             ))
     }
 
-    /// The method a `Type::name` reference names.
-    ///
-    /// Only a reference qualified by a *type*: a bound one (`x::m`) captures its receiver and a constructor one
-    /// needs an allocation, and neither is a plain delegation.
-    fn referenced_method(
-        node: &SyntaxNode,
-        input: &TypedFile<'_>,
-        index: &ProjectIndex,
-    ) -> Result<(MemberId, bool)> {
-        let name = node
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .filter(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
-            .last()
-            .ok_or(WasmError::Unsupported("a method reference with no name"))?;
-        // The qualifier names a type, which is what makes this a delegation rather than a capture.
-        let qualifier = node
-            .children()
-            .find_map(ast::Expr::cast)
-            .ok_or(WasmError::Unsupported(
-                "a method reference with no qualifier",
-            ))?;
-        // A qualifier with a *type* of its own is a value, and the reference is bound to it; one that is only
-        // a name the index resolves is a type, and the reference is static or unbound. That is the whole
-        // difference, and it decides where the receiver comes from.
-        let bound = input
-            .type_of_expr(Lowering::span(qualifier.syntax()))
-            .and_then(Ty::project_id);
-        let owner = bound
-            .or_else(|| index.item_by_fqn(qualifier.syntax().text().to_string().trim()))
-            .ok_or(WasmError::Unsupported(
-                "a method reference whose qualifier is no indexed type",
-            ))?;
-        let member = index
-            .own_members(owner)
-            .iter()
-            .copied()
-            .find(|&id| {
-                let info = index.member(id);
-                info.kind == DefKind::Method && info.name == name.text()
-            })
-            .ok_or(WasmError::Unsupported(
-                "a method reference to a method this cannot find",
-            ))?;
-        Ok((member, bound.is_some()))
-    }
-
     /// The `(struct field, type)` a captured local is read through, when `id` is one of the enclosing
     /// class's captures.
     fn capture_field(&self, id: DefId) -> Option<(u32, Ty)> {
@@ -5012,7 +4871,7 @@ impl Lowering<'_> {
     fn call(&mut self, call: &ast::CallExpr, insn: &mut Insn) -> Result<Option<ValType>> {
         let member = self
             .input
-            .call_target_of(Self::span(call.syntax()))
+            .call_target_of(Facts::span(call.syntax()))
             .ok_or_else(|| WasmError::Unresolved(call.syntax().text().to_string().trim().into()))?;
         let info = self.index.member(member);
         let is_static = info.modifiers.is_static;

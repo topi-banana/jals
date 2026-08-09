@@ -46,7 +46,7 @@ impl Slots {
         };
         for param in params.into_iter().flat_map(ast::ParamList::params) {
             let width = Self::width(context, param.syntax());
-            if let Some(id) = context.def_at(param.syntax()) {
+            if let Some(id) = context.facts().def_at(param.syntax()) {
                 slots.entries.push((id, slots.next));
             }
             slots.next += width;
@@ -70,7 +70,7 @@ impl Slots {
         };
         for param in params.into_iter().flat_map(ast::ParamList::params) {
             let width = Self::width(context, param.syntax());
-            if let Some(id) = context.def_at(param.syntax()) {
+            if let Some(id) = context.facts().def_at(param.syntax()) {
                 slots.entries.push((id, slots.next));
             }
             slots.next += width;
@@ -114,6 +114,7 @@ impl Slots {
     /// How many slots a declaration's type occupies: two for `long` / `double`, one otherwise.
     fn width(context: &Context<'_>, node: &jals_syntax::SyntaxNode) -> u16 {
         context
+            .facts()
             .def_at(node)
             .map_or(1, |id| Self::ty_width(context.typed.type_of_def(id)))
     }

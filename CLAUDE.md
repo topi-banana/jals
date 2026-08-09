@@ -221,7 +221,17 @@ filesystem reads into portable interfaces.
   resolution with the widening fixpoint, `max_stack`/`max_locals`, and the `StackMapTable`, which
   is emitted as `full_frame` only. On the wasm side the host's collector owns every object —
   `struct.new_default`, declared subtyping, no `memory` section, and no allocator or collector of
-  its own. Portable and featureless; no host filesystem APIs.
+  its own. The two lowerings share one layer and it has a name: `facts` answers what the *source*
+  says — the span the inference memo is keyed on, the definition a name binds to, the locals a class
+  captures, the constant a `case` label denotes (a full JLS §15.29 evaluator, `static final`
+  constants included), the operator token run (`>>` is `[GT, GT]`, because the lexer never joins a
+  `>` to what follows). It reads `TypedFile` and nothing else, so it names no instruction: `Layout`,
+  `Slots`, `Descriptor`, and control flow stay with the backend that owns them. Crate-internal — a
+  consumer wanting a fact about Java source asks `jals-hir`, not a compiler. Before it existed the
+  layer was written twice and the copies drifted into wrong *output*, not merely duplication: `case
+  ~5` (a constant expression whose value is -6) was rejected by the JVM lowering and silently
+  compiled as `5` by the wasm one. A fact both backends need goes here; one that names an
+  instruction does not. Portable and featureless; no host filesystem APIs.
 - `jals-hir`: the semantic analysis. Its three layers have one order — resolve a file, index the
   project, infer types against both — and that order lives in `FileAnalysis` / `FileSemantics` /
   `TypedFile` rather than in each consumer. `FileAnalysis` is index-independent, so it is the half a
