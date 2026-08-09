@@ -1,0 +1,25 @@
+id: no-jvm-into-wasm-lowering
+
+valid:
+    # The shared fact, which is where a fact both backends read belongs.
+    - |
+        use crate::facts::{Facts, Hierarchy, Literal, Overrides};
+
+    # The JVM backend's own modules, including its own `lower` submodules.
+    - |
+        use crate::lower::place::Place;
+
+    - |
+        use crate::jvm::{AsmError, Assembler, BinOp};
+
+    - |
+        let descriptor = crate::desc::Descriptor::descriptor_of(&ty, index)?;
+
+invalid:
+    # A `ValType` or an `Insn` answers about the *other* target; reaching for one here is the
+    # mirror of the reach this seam removed.
+    - |
+        let ty = crate::wasm::lower::CompileWasm::representation(&declared);
+
+    - |
+        use crate::wasm::insn::Insn;

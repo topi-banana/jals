@@ -1,0 +1,36 @@
+id: no-wasm-into-jvm-lowering
+
+valid:
+    # The shared fact, which is where a literal reader belongs.
+    - |
+        use crate::facts::{Facts, Hierarchy, Literal, Overrides};
+
+    - |
+        let (value, _) = Literal::integer(text)?;
+
+    # The wasm backend's own modules are its own.
+    - |
+        use crate::wasm::insn::Insn;
+
+    - |
+        let ty = crate::wasm::layout::Layout::of(item);
+
+    # A local `lower` that is not the JVM backend's module.
+    - |
+        let lower = value.to_ascii_lowercase();
+
+invalid:
+    # The reach this rule exists for: the wasm backend reading a literal through the JVM
+    # backend's private expression module.
+    - |
+        let value = crate::lower::expr::Expr::literal_text(text)?;
+
+    - |
+        let value = crate::lower::expr::Expr::integer_literal(text.trim_end_matches(['l', 'L']))?;
+
+    # The `use` form is the same node shape, so importing it is caught too.
+    - |
+        use crate::lower::expr::Expr;
+
+    - |
+        use crate::lower::{Context, LowerError};
