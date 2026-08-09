@@ -3092,17 +3092,10 @@ impl Compile {
             let Some(decl) = ast::FieldDecl::cast(member.clone()) else {
                 continue;
             };
-            // The CST is flat, like a local declaration's: `int a = 1, b = 2;` is one declaration
-            // whose names and expressions are siblings. Pairing them *by index* — which this did —
-            // is right only when every declarator has an initialiser: `int a, b = 2;` has one
-            // expression and two names, so `a` was given `2` and `b` was left unset. The shared
-            // fact walks the tokens instead, so each declarator gets the value written after its
-            // own `=`.
-            for name in decl.names() {
-                let Some(value) = Facts::declarator_initialiser(
-                    decl.syntax(),
-                    usize::from(name.text_range().start()),
-                ) else {
+            // Each declarator with the value written after its own `=`, which is not the same as
+            // pairing names with expressions by index — see `Facts::declarators`.
+            for (name, value) in Facts::declarators(decl.syntax()) {
+                let Some(value) = value else {
                     continue;
                 };
                 let value = &value;

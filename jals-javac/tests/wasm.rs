@@ -2802,3 +2802,62 @@ public class Holder {
 ";
     assert_invoke(&[source], "run", &["5"], "105");
 }
+
+/// `static int a, b = 2;` gives `2` to **`b`**, and this backend gave it to `a`.
+///
+/// The CST is flat — one declaration whose names and expressions are siblings — so pairing them by
+/// index is right only when every declarator has an initialiser. With one expression and two names
+/// the value folded into `a`'s global and `b`'s kept the type's default, which is exactly the
+/// mistake the JVM field lowering had already been fixed for. Both now read the same declarator
+/// walk.
+///
+/// Silent, unlike the JVM's local case: a wasm global always holds *something*, so the wrong answer
+/// came out of a module that validates.
+#[test]
+fn a_static_declarator_gets_the_value_written_after_its_own_equals() {
+    let source = r"
+public class Decl {
+    static int a, b = 2;
+    static int c = 3, d;
+    static long e, g = 4;
+
+    public static int sum() {
+        return a + b * 10 + c * 100 + d * 1000 + (int) e * 10000 + (int) g * 100000;
+    }
+}
+";
+    // b = 2, c = 3, g = 4; a, d, and e hold their defaults.
+    assert_invoke(&[source], "sum", &[], "400320");
+}
+
+/// The same rule for a *local* declaration, where the wrong answer is quieter still.
+///
+/// A wasm local is always readable — it starts at its type's zero — so a declarator left unwritten
+/// reads `0` rather than failing anything. The JVM's counterpart at least rejects the class at
+/// load; here the module runs and returns the wrong number.
+///
+/// `int h, i = f();` pins the order as well as the pairing: `f()` runs once, for `i`.
+#[test]
+fn a_local_declarator_gets_the_value_written_after_its_own_equals() {
+    let source = r"
+public class LocalDecl {
+    static int calls = 0;
+
+    static int f() {
+        calls = calls + 1;
+        return 7;
+    }
+
+    public static int run() {
+        int a, b = 2;
+        int c = 3, d;
+        int h, i = f();
+        a = 1;
+        d = 5;
+        h = 8;
+        return a + b * 10 + c * 100 + d * 1000 + h * 10000 + i * 100000 + calls * 1000000;
+    }
+}
+";
+    assert_invoke(&[source], "run", &[], "1785321");
+}

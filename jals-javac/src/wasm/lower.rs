@@ -1139,12 +1139,9 @@ impl Layout {
             if node.kind() != FIELD_DECL {
                 continue;
             }
-            let Some(declaration) = ast::FieldDecl::cast(node.clone()) else {
-                continue;
-            };
-            let names: Vec<SyntaxToken> = declaration.names().collect();
-            let values: Vec<ast::Expr> = node.children().filter_map(ast::Expr::cast).collect();
-            for (position, name) in names.iter().enumerate() {
+            // Each declarator with the value written after its own `=`, which is not the same as
+            // pairing names with expressions by index — see `Facts::declarators`.
+            for (name, value) in Facts::declarators(&node) {
                 let Some(member) =
                     index.member_by_decl(input.file(), usize::from(name.text_range().start()))
                 else {
@@ -1160,7 +1157,7 @@ impl Layout {
                 let Ok(ty) = self.val_type(&index.resolved_member_ty(member)) else {
                     continue;
                 };
-                let (init, deferred) = Self::constant_init(values.get(position), ty);
+                let (init, deferred) = Self::constant_init(value.as_ref(), ty);
                 module.globals.push(Global { ty, init });
                 let global =
                     u32::try_from(module.globals.len() - 1).map_err(|_| WasmError::TooLarge)?;
@@ -1168,8 +1165,8 @@ impl Layout {
                 // A global's own initialiser is a constant expression, so anything that has to be
                 // *computed* runs in the start function instead — over the global the default already
                 // holds, which is exactly the order a `<clinit>` gives.
-                if deferred && let Some(value) = values.get(position) {
-                    out.push((member, value.clone()));
+                if deferred && let Some(value) = value {
+                    out.push((member, value));
                 }
             }
         }
@@ -1966,13 +1963,10 @@ impl Lowering<'_> {
                 }
                 continue;
             }
-            let Some(declaration) = ast::FieldDecl::cast(node.clone()) else {
-                continue;
-            };
-            let names: Vec<SyntaxToken> = declaration.names().collect();
-            let values: Vec<ast::Expr> = node.children().filter_map(ast::Expr::cast).collect();
-            for (position, name) in names.iter().enumerate() {
-                let Some(value) = values.get(position) else {
+            // Each declarator with the value written after its own `=`, which is not the same as
+            // pairing names with expressions by index — see `Facts::declarators`.
+            for (name, value) in Facts::declarators(&node) {
+                let Some(value) = value else {
                     continue;
                 };
                 let Some(member) = self
@@ -1989,7 +1983,7 @@ impl Lowering<'_> {
                 };
                 insn.local_get(receiver);
                 let declared = self.index.resolved_member_ty(member);
-                self.value_as(value, &declared, insn)?;
+                self.value_as(&value, &declared, insn)?;
                 insn.struct_set(struct_type, slot);
             }
         }
@@ -2122,22 +2116,20 @@ impl Lowering<'_> {
     }
 
     fn local(&mut self, declaration: &ast::LocalVarDecl, insn: &mut Insn) -> Result<()> {
-        let names: Vec<_> = declaration.names().collect();
-        let values: Vec<_> = declaration
-            .syntax()
-            .children()
-            .filter_map(ast::Expr::cast)
-            .collect();
-        for (position, name) in names.iter().enumerate() {
+        // Each declarator with the value written after its own `=`. Pairing names with expressions
+        // by index — which this did — gave `int a, b = 2;` its `2` on `a` and left `b` holding the
+        // local's zero default, which is silent: unlike the JVM's frame, a wasm local is always
+        // readable.
+        for (name, value) in Facts::declarators(declaration.syntax()) {
             let id = self
                 .input
                 .analysis()
                 .symbol_at(usize::from(name.text_range().start()))
                 .ok_or_else(|| WasmError::Unresolved(name.text().into()))?;
             let slot = self.declare_local(id)?;
-            if let Some(value) = values.get(position) {
+            if let Some(value) = value {
                 let declared = self.input.type_of_def(id).clone();
-                self.value_as(value, &declared, insn)?;
+                self.value_as(&value, &declared, insn)?;
                 insn.local_set(slot);
             }
         }
