@@ -5,32 +5,36 @@
 // `u32` by design and never approaches its limit — so the truncation lint is allowed crate-wide
 // rather than papered over with `as`-site attributes.
 #![allow(clippy::cast_possible_truncation)]
-//! File-local name resolution for Java/JALS source, over the `jals-syntax` CST.
+//! Semantic analysis for Java/JALS source, over the `jals-syntax` CST.
 //!
-//! [`Resolved::resolve`] binds each *reference* (an identifier use) to the *definition* (binding) it
-//! names, within a single source file. This is the foundation for go-to-definition, find-references,
-//! unused-binding detection, and type inference.
+//! The analysis binds each *reference* (an identifier use) to the *definition* (binding) it names,
+//! resolves type names across a project, and infers a type for every declaration and expression.
+//! This is the foundation for go-to-definition, find-references, unused-binding detection, hover,
+//! completion, and every semantic lint.
 //!
-//! Three layers:
-//! - **File-local** ([`Resolved::resolve`] / [`Resolved::resolve_node`] → [`Resolved`]): binds value, method, and
-//!   type-name references within one file. Resolved: locals, parameters (method / constructor /
-//!   lambda), fields (including forward references), methods (bare-callee calls), type parameters,
-//!   enum constants, catch / resource / for-each / pattern variables, and file-local type names
-//!   (a sibling class, a type parameter). Left [`Unresolved`](Resolution::Unresolved):
-//!   member-access right-hand names
-//!   (`obj.field` — needs a type) and any name with no file-local definition (imported or external
-//!   types, inherited members). `this` / `super` are not recorded as references at all.
+//! Three layers, in the one order they compose:
+//! - **File-local** ([`FileAnalysis`]): binds value, method, and type-name references within one
+//!   file. Resolved: locals, parameters (method / constructor / lambda), fields (including forward
+//!   references), methods (bare-callee calls), type parameters, enum constants, catch / resource /
+//!   for-each / pattern variables, and file-local type names (a sibling class, a type parameter).
+//!   Left [`Unresolved`](Resolution::Unresolved): member-access right-hand names (`obj.field` —
+//!   needs a type) and any name with no file-local definition (imported or external types,
+//!   inherited members). `this` / `super` are not recorded as references at all.
 //! - **Project-wide** ([`ProjectIndex`]): a symbol index over many files. It resolves the
 //!   type-name references the file-local pass left [`Unresolved`](Resolution::Unresolved) against
-//!   the project's other
-//!   source files — the basis for cross-file go-to-definition and "cannot resolve symbol".
-//! - **Type inference** ([`TypeInference::infer`] / [`TypeInference::infer_node`] → [`TypeInference`]): assigns each declaration
-//!   and expression a structural [`Ty`], reusing the [`Resolved`] bindings and the [`ProjectIndex`]
-//!   for reference type names and members — the basis for hover and member go-to-definition. It
-//!   covers the structural / local subset (literals, names, arithmetic, casts, `new`, arrays,
-//!   `var`) and member access (`obj.field`, `recv.method()`) on project types, resolved through the
-//!   [`ProjectIndex`] member model; an external type's members and target-typed forms (lambdas,
-//!   method references, switch expressions) stay [`Ty::Unknown`].
+//!   the project's other source files — the basis for cross-file go-to-definition and "cannot
+//!   resolve symbol".
+//! - **Bound and typed** ([`FileSemantics`] → [`TypedFile`]): a [`FileAnalysis`] bound to a
+//!   [`ProjectIndex`] with [`in_project`](FileAnalysis::in_project), which assigns each declaration
+//!   and expression a structural [`Ty`] from both. It covers the structural / local subset
+//!   (literals, names, arithmetic, casts, `new`, arrays, `var`) and member access (`obj.field`,
+//!   `recv.method()`) on project types; an external type's members and target-typed forms
+//!   (lambdas, method references, switch expressions) stay [`Ty::Unknown`].
+//!
+//! **The order is the interface.** A caller never sequences the layers itself: it analyses a file,
+//! binds it to a project, and asks. The inference is run once per binding, on demand, and shared —
+//! which is why the intermediate resolution and inference results are not exported. Holding one
+//! would be holding a step.
 //!
 //! It never panics: an incomplete or erroneous tree yields a best-effort result, an unresolvable
 //! reference is recorded as [`Resolution::Unresolved`], and an un-inferable type is [`Ty::Unknown`].
@@ -38,17 +42,19 @@
 //! # Example
 //!
 //! ```
-//! use jals_hir::Resolved;
-//! let resolved =
-//!     jals_exec::block_on_inline(Resolved::resolve("class C { int x; int get() { return x; } }"));
+//! use jals_hir::FileAnalysis;
+//! let analysis = jals_exec::block_on_inline(FileAnalysis::parse(
+//!     "class C { int x; int get() { return x; } }",
+//! ));
 //! // The `x` in `return x;` resolves back to the field `x`.
-//! let r = resolved.references.iter().find(|r| r.name == "x").unwrap();
+//! let r = analysis.references().iter().find(|r| r.name == "x").unwrap();
 //! let jals_hir::Resolution::Def(id) = r.resolution else { panic!("x should resolve") };
-//! assert_eq!(resolved.def(id).name, "x");
+//! assert_eq!(analysis.def(id).name, "x");
 //! ```
 
 extern crate alloc;
 
+mod analysis;
 mod classpath;
 mod dead_if;
 mod def;
@@ -61,17 +67,16 @@ mod stdlib;
 mod throws;
 mod ty;
 
+pub use analysis::{FileAnalysis, FileSemantics, TypedFile};
 pub use dead_if::DeadIf;
 pub use def::{Def, DefId, DefKind, Namespace};
-pub use infer::{Completion, Signature, SignatureHelp, TypeInference, TypeMismatch};
+pub use infer::{Completion, MismatchKind, Signature, SignatureHelp, TypeMismatch};
 pub use project::{
     FileFacts, FileId, Fqn, Item, ItemId, ItemOrigin, LoweredClasspath, Member, MemberId,
     MemberModifiers, MemberType, Param, ProjectIndex, ProjectIndexBuilder, SourceLocations,
     Supertype, TypeParamDecl, TypeResolution, UnresolvedType,
 };
 pub use reference::{Reference, Resolution};
-pub use resolve::Resolved;
-pub use scope::{Scope, ScopeId, ScopeKind};
 pub use throws::UnreportedException;
 pub use ty::{ClassTy, Primitive, Ty};
 
@@ -80,15 +85,15 @@ mod tests {
     use super::*;
     use jals_exec::block_on_inline;
 
-    /// Synchronous test-side driver for the async [`Resolved::resolve`].
-    fn resolve(src: &str) -> Resolved {
-        block_on_inline(Resolved::resolve(src))
+    /// Synchronous test-side driver for the async [`FileAnalysis::parse`].
+    fn resolve(src: &str) -> FileAnalysis {
+        block_on_inline(FileAnalysis::parse(src))
     }
 
     /// The `Resolution` of the first reference named `name`.
-    fn resolution_of(resolved: &Resolved, name: &str) -> Resolution {
+    fn resolution_of(resolved: &FileAnalysis, name: &str) -> Resolution {
         resolved
-            .references
+            .references()
             .iter()
             .find(|r| r.name == name)
             .unwrap_or_else(|| panic!("no reference named `{name}`"))
@@ -126,14 +131,33 @@ mod tests {
         assert_eq!(resolution_of(&resolved, "nope"), Resolution::Unresolved);
     }
 
+    /// Parsing inside [`FileAnalysis::parse`] and analysing a tree the caller already parsed reach
+    /// the same answer — the two entry points differ only in who owns the parse.
     #[test]
-    fn resolve_node_matches_resolve() {
+    fn parsing_and_analysing_an_existing_tree_agree() {
         let src = "class C { void m() { int x = 1; use(x); } }";
         let parse = block_on_inline(jals_syntax::Parse::parse(src));
-        assert_eq!(
-            resolve(src),
-            block_on_inline(Resolved::resolve_node(&parse.syntax()))
-        );
+        let parsed = resolve(src);
+        let existing = block_on_inline(FileAnalysis::of(&parse.syntax()));
+        assert_eq!(parsed.defs(), existing.defs());
+        assert_eq!(parsed.references(), existing.references());
+    }
+
+    /// Without an index a reference type name is known only by spelling, but the structural
+    /// inference (the `int`, the `var`) still answers. Lives here because the file-local inference
+    /// it exercises is a step of the analysis and is not exported.
+    #[test]
+    fn project_free_inference_names_reference_types_externally() {
+        let src = "class C { void m() { Helper h = make(); var n = 1; } } class Helper { }";
+        let analysis = resolve(src);
+        let inference = block_on_inline(infer::TypeInference::infer_node(
+            analysis.root(),
+            analysis.resolved(),
+        ));
+        let helper = analysis.defs().iter().find(|d| d.name == "h").unwrap();
+        let n = analysis.defs().iter().find(|d| d.name == "n").unwrap();
+        assert_eq!(inference.type_of_def(helper.id).to_string(), "Helper");
+        assert_eq!(inference.type_of_def(n.id).to_string(), "int");
     }
 
     #[test]

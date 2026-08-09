@@ -11,9 +11,10 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use alloc::format;
+
 use jals_exec::LocalBoxFuture;
-use jals_hir::Resolved;
-use jals_syntax::SyntaxNode;
+use jals_hir::FileAnalysis;
 
 use crate::diagnostic::Severity;
 use crate::rules::{Checker, Finding, RuleMeta};
@@ -22,7 +23,7 @@ pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "constant-condition",
     default: Severity::Warn,
     needs_clean_parse: false,
-    check: Checker::Resolved(ConstantCondition::check),
+    check: Checker::Analyzed(ConstantCondition::check),
 };
 
 /// The `constant-condition` rule.
@@ -30,16 +31,20 @@ struct ConstantCondition;
 
 impl ConstantCondition {
     /// The table-edge shim: boxes the async rule body once per file.
-    fn check<'a>(root: &'a SyntaxNode, resolved: &'a Resolved) -> LocalBoxFuture<'a, Vec<Finding>> {
-        alloc::boxed::Box::pin(Self::check_impl(root, resolved))
+    fn check(analysis: &FileAnalysis) -> LocalBoxFuture<'_, Vec<Finding>> {
+        alloc::boxed::Box::pin(Self::check_impl(analysis))
     }
 
-    async fn check_impl(root: &SyntaxNode, resolved: &Resolved) -> Vec<Finding> {
-        jals_hir::DeadIf::collect(root, resolved)
+    async fn check_impl(analysis: &FileAnalysis) -> Vec<Finding> {
+        analysis
+            .dead_ifs()
             .await
             .into_iter()
             .map(|d| Finding {
-                message: d.message(),
+                message: format!(
+                    "`if` condition is always {}",
+                    if d.value { "true" } else { "false" }
+                ),
                 range: d.condition_range,
                 unnecessary_range: d
                     .dead_range

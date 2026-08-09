@@ -5,7 +5,7 @@
 //!
 //! Every semantic question this asks has already been answered. Which overload a call selected,
 //! whether a member is `static`, what a name binds to — all of it is read from
-//! [`jals_hir`](jals_hir) rather than recomputed, because a second answer would be free to disagree
+//! [`jals_hir`] rather than recomputed, because a second answer would be free to disagree
 //! with the first and the disagreement would surface as a `NoSuchMethodError` at run time. What is
 //! *not* asked is whether the program is correct: a construct this layer cannot lower is reported
 //! as [`LowerError`], never as a type error.
@@ -71,7 +71,7 @@ use jals_classfile::{
     ClassAccessFlags, ClassFile, ConstantPool, FieldAccessFlags, FieldInfo, MethodAccessFlags,
     MethodDescriptor, MethodInfo, VerificationType,
 };
-use jals_hir::{DefKind, FileId, ItemId, ProjectIndex, Resolved, TypeInference};
+use jals_hir::{DefKind, FileAnalysis, FileId, ItemId, ProjectIndex, TypedFile};
 use jals_syntax::SyntaxKind::{
     ANNOTATION_TYPE_DECL, CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL, ENUM_DECL, FIELD_DECL,
     INTERFACE_DECL, METHOD_DECL, RECORD_DECL,
@@ -155,9 +155,13 @@ pub(crate) type Result<T> = core::result::Result<T, LowerError>;
 /// Everything a body needs to read while it is being lowered. Immutable throughout: the mutable
 /// state is the assembler and the slot map, which are threaded separately.
 pub(crate) struct Context<'a> {
+    /// The index and the file id are lifted out of `typed` so the hundred-odd member lookups below
+    /// read as `self.index.member(..)` rather than reaching through the type witness each time.
     index: &'a ProjectIndex,
-    inference: &'a TypeInference,
-    resolved: &'a Resolved,
+    /// The file with its inference already run — the whole reason this lowering is synchronous.
+    /// Its [`analysis`](TypedFile::analysis) is the same file's name resolution, for the handful of
+    /// lookups that need no types.
+    typed: TypedFile<'a>,
     file: FileId,
     /// The internal name of the type being emitted, for a `this`-qualified access.
     this_class: String,
@@ -235,14 +239,8 @@ impl Compile {
     /// One class file per declared type is the JVM's own unit, so this returns a list rather than a
     /// single file even for a source file that declares one type — a nested or secondary type is
     /// the same shape of output, arriving with the milestone that emits it.
-    pub fn file(
-        root: &SyntaxNode,
-        resolved: &Resolved,
-        inference: &TypeInference,
-        index: &ProjectIndex,
-        file: FileId,
-        class_version: u16,
-    ) -> Result<Vec<CompiledClass>> {
+    pub fn file(typed: TypedFile<'_>, class_version: u16) -> Result<Vec<CompiledClass>> {
+        let (root, index, file) = (typed.root(), typed.index(), typed.file());
         let mut out = Vec::new();
         // `descendants`, not `children`: a nested type is its own class file, so it is compiled here
         // rather than inside its enclosing one. Which is also why the enclosing class skips it as a
@@ -264,15 +262,7 @@ impl Compile {
                     && let Some(item) =
                         index.item_by_decl(file, usize::from(node.text_range().start()))
                 {
-                    out.push(Self::class(
-                        &node,
-                        item,
-                        resolved,
-                        inference,
-                        index,
-                        file,
-                        class_version,
-                    )?);
+                    out.push(Self::class(&node, item, typed, class_version)?);
                 }
                 continue;
             }
@@ -286,15 +276,7 @@ impl Compile {
             let item = index
                 .item_by_decl(file, usize::from(name.text_range().start()))
                 .ok_or_else(|| LowerError::Unresolved(name.text().into()))?;
-            out.push(Self::class(
-                &node,
-                item,
-                resolved,
-                inference,
-                index,
-                file,
-                class_version,
-            )?);
+            out.push(Self::class(&node, item, typed, class_version)?);
         }
         Ok(out)
     }
@@ -309,12 +291,10 @@ impl Compile {
     fn class(
         node: &SyntaxNode,
         item: ItemId,
-        resolved: &Resolved,
-        inference: &TypeInference,
-        index: &ProjectIndex,
-        file: FileId,
+        typed: TypedFile<'_>,
         class_version: u16,
     ) -> Result<CompiledClass> {
+        let (index, file) = (typed.index(), typed.file());
         // A non-`static` nested class holds its enclosing instance in a synthetic field, and every one
         // of its constructors takes that instance as an extra first parameter. The index computed its
         // descriptors from the declaration, so all of them would be one parameter short — which is a
@@ -336,8 +316,7 @@ impl Compile {
         let is_record = index.item(item).kind == DefKind::Record;
         let context = Context {
             index,
-            inference,
-            resolved,
+            typed,
             file,
             this_class: internal_name.clone(),
             in_interface: is_interface,
@@ -349,7 +328,7 @@ impl Compile {
                     .any(|n| n.children().any(|child| child.kind() == CLASS_BODY)),
             encloses: encloses.clone(),
             inner: Self::inner_classes_of(node, index, file),
-            captures: Self::captures_of(node, resolved, index, file),
+            captures: Self::captures_of(node, typed.analysis(), index, file),
             this_item: item,
             lambdas: alloc::collections::BTreeMap::new(),
         };
@@ -502,7 +481,7 @@ impl Compile {
                 Some(descriptor)
             } else {
                 (node.kind() == jals_syntax::SyntaxKind::NEW_EXPR)
-                    .then(|| inference.call_target_of(Context::span(node)))
+                    .then(|| typed.call_target_of(Context::span(node)))
                     .flatten()
                     .map(|member| Descriptor::method_descriptor(member, index, true))
                     .transpose()?
@@ -831,7 +810,7 @@ impl Compile {
     /// A capture is what it sounds like: a name inside the class that resolves to a definition *outside*
     /// it. Each becomes a `final synthetic` field and a trailing constructor parameter, which is how a
     /// class outlives the frame the local lived in.
-    fn captured_by(node: &SyntaxNode, resolved: &Resolved) -> alloc::vec::Vec<jals_hir::DefId> {
+    fn captured_by(node: &SyntaxNode, analysis: &FileAnalysis) -> alloc::vec::Vec<jals_hir::DefId> {
         let mut out = alloc::vec::Vec::new();
         let inside_block = node
             .ancestors()
@@ -846,13 +825,13 @@ impl Compile {
             .filter_map(jals_syntax::SyntaxElement::into_token)
             .filter(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
         {
-            let Some(id) = resolved
+            let Some(id) = analysis
                 .reference_at(usize::from(token.text_range().start()))
                 .and_then(|reference| reference.resolution.def_id())
             else {
                 continue;
             };
-            let def = resolved.def(id);
+            let def = analysis.def(id);
             // Only a *local* is captured: a field of the enclosing class is reached through its instance,
             // and a type name is not a value at all.
             if !matches!(def.kind, DefKind::Local | DefKind::Param) {
@@ -871,7 +850,7 @@ impl Compile {
     /// Every local class in the file `node` belongs to, mapped to the locals it captures.
     fn captures_of(
         node: &SyntaxNode,
-        resolved: &Resolved,
+        analysis: &FileAnalysis,
         index: &ProjectIndex,
         file: FileId,
     ) -> alloc::collections::BTreeMap<ItemId, alloc::vec::Vec<jals_hir::DefId>> {
@@ -901,7 +880,7 @@ impl Compile {
                 }
                 _ => continue,
             };
-            let captured = Self::captured_by(&scanned, resolved);
+            let captured = Self::captured_by(&scanned, analysis);
             if captured.is_empty() {
                 continue;
             }
@@ -917,15 +896,12 @@ impl Compile {
 
     /// The synthetic field name a captured local gets, as javac names it.
     fn capture_field(id: jals_hir::DefId, context: &Context<'_>) -> String {
-        alloc::format!("val${}", context.resolved.def(id).name)
+        alloc::format!("val${}", context.typed.analysis().def(id).name)
     }
 
     /// The descriptor of a captured local's type.
     fn capture_descriptor(id: jals_hir::DefId, context: &Context<'_>) -> Result<String> {
-        Ok(
-            Descriptor::descriptor_of(context.inference.type_of_def(id), context.index)?
-                .to_string(),
-        )
+        Ok(Descriptor::descriptor_of(context.typed.type_of_def(id), context.index)?.to_string())
     }
 
     /// Find every lambda in `members`, synthesise the method that holds each body, and build the
@@ -1000,7 +976,7 @@ impl Compile {
             // the call-site arguments line up, and the body still reads `bump` as neither a local nor a
             // field. Reported until that is chased down, rather than emitted as a handle whose parameter
             // nothing fills.
-            let captured = Self::captured_by(lambda, context.resolved);
+            let captured = Self::captured_by(lambda, context.typed.analysis());
 
             // A capturing lambda: the descriptor, the leading slots, and the call-site arguments now all
             // line up, and the synthetic method still fails the assembler's frame check — reported until
@@ -1022,7 +998,7 @@ impl Compile {
                 // The captures come first, in the order the call site pushes them: the metafactory prepends
                 // the captured values to the interface method's own arguments when it invokes the handle.
                 for &id in &captured {
-                    let width = Slots::ty_width(context.inference.type_of_def(id));
+                    let width = Slots::ty_width(context.typed.type_of_def(id));
                     slots.declare(id, width);
                 }
                 for param in decl.params().into_iter().flat_map(|list| list.params()) {
@@ -1031,7 +1007,7 @@ impl Compile {
                         .ok_or(LowerError::Unsupported(
                             "a lambda parameter with no binding",
                         ))?;
-                    let width = Slots::ty_width(context.inference.type_of_def(id));
+                    let width = Slots::ty_width(context.typed.type_of_def(id));
                     slots.declare(id, width);
                 }
                 let mut emit = Emit::new(&mut asm, slots, returns.clone(), false);
@@ -1155,24 +1131,27 @@ impl Compile {
         };
         // Not a type: the qualifier is a *value*, so the reference is bound to it and the receiver is what
         // the call site captures. Only a local is read, because a capture is loaded from a slot.
-        let (owner_item, receiver) = if let Some(item) = named_type {
-            (item, None)
-        } else {
-            {
-                let expr = qualifier.as_ref().ok_or(LowerError::Unsupported(
-                    "a method reference with no qualifier",
-                ))?;
-                let id = context
-                    .def_at(expr.syntax())
-                    .ok_or(LowerError::Unsupported(
-                        "a method reference whose qualifier is no local",
+        let (owner_item, receiver) =
+            if let Some(item) = named_type {
+                (item, None)
+            } else {
+                {
+                    let expr = qualifier.as_ref().ok_or(LowerError::Unsupported(
+                        "a method reference with no qualifier",
                     ))?;
-                let item = context.inference.type_of_def(id).project_id().ok_or(
-                    LowerError::Unsupported("a method reference on a value of an unindexed type"),
-                )?;
-                (item, Some(id))
-            }
-        };
+                    let id = context
+                        .def_at(expr.syntax())
+                        .ok_or(LowerError::Unsupported(
+                            "a method reference whose qualifier is no local",
+                        ))?;
+                    let item = context.typed.type_of_def(id).project_id().ok_or(
+                        LowerError::Unsupported(
+                            "a method reference on a value of an unindexed type",
+                        ),
+                    )?;
+                    (item, Some(id))
+                }
+            };
         if constructs {
             return Self::constructor_reference(owner_item, member, item, context, pool);
         }
@@ -1922,7 +1901,7 @@ impl Compile {
         // The captures go *after* every declared parameter, so a declared one keeps its slot.
         for &captured in context.captured_here() {
             descriptor.params.push(Descriptor::descriptor_of(
-                context.inference.type_of_def(captured),
+                context.typed.type_of_def(captured),
                 context.index,
             )?);
         }
@@ -2654,7 +2633,7 @@ impl Compile {
             for (param, (_, component)) in params.iter().zip(components) {
                 let written = match context.def_at(param.syntax()) {
                     Some(id) => {
-                        Descriptor::descriptor_of(context.inference.type_of_def(id), context.index)?
+                        Descriptor::descriptor_of(context.typed.type_of_def(id), context.index)?
                             .to_string()
                     }
                     // A parameter with nothing resolved says nothing either way, and the safe
@@ -3554,9 +3533,10 @@ impl Context<'_> {
             .filter_map(jals_syntax::SyntaxElement::into_token)
             .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)?;
         let start = usize::from(token.text_range().start());
-        self.resolved
+        self.typed
+            .analysis()
             .reference_at(start)
             .and_then(|reference| reference.resolution.def_id())
-            .or_else(|| self.resolved.symbol_at(start))
+            .or_else(|| self.typed.analysis().symbol_at(start))
     }
 }

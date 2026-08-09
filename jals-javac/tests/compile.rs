@@ -7,7 +7,7 @@
 use std::fmt::Write as _;
 use std::process::{Command, Stdio};
 
-use jals_hir::{FileId, ProjectIndex, Resolved, TypeInference};
+use jals_hir::{FileAnalysis, FileId, ProjectIndex};
 use jals_javac::lower::{Compile, CompiledClass, LowerError};
 
 /// Java 25, matching the class files the rest of the workspace pins its fixtures to.
@@ -32,22 +32,15 @@ fn java_available() -> bool {
 /// Compile `source` as a one-file project, with the embedded stdlib stubs available.
 fn compile(source: &str) -> Result<Vec<CompiledClass>, LowerError> {
     let root = jals_exec::block_on_inline(jals_syntax::Parse::parse(source)).syntax();
-    let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&root));
+    let analysis = jals_exec::block_on_inline(FileAnalysis::of(&root));
     let index = jals_exec::block_on_inline(
-        ProjectIndex::builder(&[(FileId(0), root.clone())])
+        ProjectIndex::builder(&[(FileId(0), root)])
             .with_stdlib()
             .build(),
     );
-    let inference =
-        jals_exec::block_on_inline(TypeInference::infer(&root, &resolved, &index, FileId(0)));
-    Compile::file(
-        &root,
-        &resolved,
-        &inference,
-        &index,
-        FileId(0),
-        MAJOR_JAVA_25,
-    )
+    let semantics = analysis.in_project(&index, FileId(0));
+    let typed = jals_exec::block_on_inline(semantics.typed());
+    Compile::file(typed, MAJOR_JAVA_25)
 }
 
 /// Compile `source`, run its `main` class on a real JVM, and return stdout.

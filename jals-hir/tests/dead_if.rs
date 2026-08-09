@@ -1,12 +1,12 @@
 //! Tests for constant `if` condition detection (`jals_hir::DeadIf::collect`): literal and operator
 //! folding, `final` constant-variable propagation, and the conservative bails.
 
-use jals_hir::{DeadIf, Resolved};
+use jals_hir::{DeadIf, FileAnalysis};
 
 fn dead(src: &str) -> Vec<DeadIf> {
     let root = jals_exec::block_on_inline(jals_syntax::Parse::parse(src)).syntax();
-    let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&root));
-    jals_exec::block_on_inline(DeadIf::collect(&root, &resolved))
+    let analysis = jals_exec::block_on_inline(FileAnalysis::of(&root));
+    jals_exec::block_on_inline(analysis.dead_ifs())
 }
 
 /// Wraps a statement body in a method so it parses as a valid local context.

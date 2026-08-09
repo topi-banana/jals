@@ -42,9 +42,7 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString as _};
 use alloc::vec::Vec;
 
-use jals_hir::{
-    DefId, DefKind, FileId, ItemId, MemberId, Primitive, ProjectIndex, Resolved, Ty, TypeInference,
-};
+use jals_hir::{DefId, DefKind, ItemId, MemberId, Primitive, ProjectIndex, Ty, TypedFile};
 use jals_syntax::SyntaxKind::{
     ANNOTATION_TYPE_DECL, CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL, ENUM_BODY, ENUM_CONSTANT,
     ENUM_DECL, FIELD_DECL, INITIALIZER, INTERFACE_DECL, LAMBDA_EXPR, METHOD_DECL, METHOD_REF_EXPR,
@@ -93,14 +91,6 @@ impl core::error::Error for WasmError {}
 
 type Result<T> = core::result::Result<T, WasmError>;
 
-/// One parsed source and its analyses.
-pub struct WasmInput<'a> {
-    pub file: FileId,
-    pub root: &'a SyntaxNode,
-    pub resolved: &'a Resolved,
-    pub inference: &'a TypeInference,
-}
-
 /// A method the module defines: where its body is and what it compiled to.
 struct Method {
     /// The declaring class, or `None` for a `static` method that needs no receiver.
@@ -137,7 +127,7 @@ pub struct CompileWasm;
 
 impl CompileWasm {
     /// Emit the module. `index` must have been built over exactly `inputs`.
-    pub fn project(inputs: &[WasmInput<'_>], index: &ProjectIndex) -> Result<Vec<u8>> {
+    pub fn project(inputs: &[TypedFile<'_>], index: &ProjectIndex) -> Result<Vec<u8>> {
         let mut module = Module::new();
         let mut layout = Layout::default();
 
@@ -196,13 +186,13 @@ impl CompileWasm {
         // type, and a body cannot introduce one mid-lowering, so they are collected from the
         // types the analyses already recorded rather than discovered while emitting.
         for input in inputs {
-            for node in input.root.descendants() {
-                if let Some(ty) = input.inference.type_of_expr(Lowering::span(&node)) {
+            for node in input.root().descendants() {
+                if let Some(ty) = input.type_of_expr(Lowering::span(&node)) {
                     layout.declare_array(ty, &mut module)?;
                 }
             }
-            for def in &input.resolved.defs {
-                let ty = input.inference.type_of_def(def.id).clone();
+            for def in input.analysis().defs() {
+                let ty = input.type_of_def(def.id).clone();
                 layout.declare_array(&ty, &mut module)?;
             }
         }
@@ -254,7 +244,7 @@ impl CompileWasm {
             .iter()
             .enumerate()
             .flat_map(|(position, input)| {
-                Self::static_initializers(input.root, input, index)
+                Self::static_initializers(input.root(), input, index)
                     .into_iter()
                     .map(move |(owner, block)| (position, owner, block))
             })
@@ -324,7 +314,7 @@ impl CompileWasm {
     /// reading it. The flag is what makes calling it again free, and what makes the re-entrant call a
     /// class's own initialiser produces a no-op rather than a loop — the same answer §12.4.2 gives.
     fn reserve_class_inits(
-        inputs: &[WasmInput<'_>],
+        inputs: &[TypedFile<'_>],
         index: &ProjectIndex,
         layout: &mut Layout,
         module: &mut Module,
@@ -344,7 +334,7 @@ impl CompileWasm {
                     owners.push(owner);
                 }
             };
-            for node in input.root.descendants() {
+            for node in input.root().descendants() {
                 if !Self::declares_a_type(&node) {
                     continue;
                 }
@@ -381,7 +371,7 @@ impl CompileWasm {
     /// One function per class with static state: its `enum` constants, then its computed `static`
     /// field initialisers and `static { … }` blocks, in source order (§8.9.3, §12.4.2).
     fn class_initializers(
-        inputs: &[WasmInput<'_>],
+        inputs: &[TypedFile<'_>],
         index: &ProjectIndex,
         layout: &Layout,
         state: &StaticState<'_>,
@@ -412,7 +402,7 @@ impl CompileWasm {
                 // Every constant first: a `static { … }` block or a field initialiser may name one, and
                 // §8.9.3 builds them before either runs.
                 for (member, item, node) in constants {
-                    if *item != owner || index.member(*member).file != input.file {
+                    if *item != owner || index.member(*member).file != input.file() {
                         continue;
                     }
                     let global = *layout
@@ -428,7 +418,7 @@ impl CompileWasm {
                 let mut sequence: Vec<(usize, StaticStep<'_>)> = Vec::new();
                 for entry in deferred {
                     let info = index.member(entry.0);
-                    if info.owner == owner && info.file == input.file {
+                    if info.owner == owner && info.file == input.file() {
                         sequence.push((info.name_range.start, StaticStep::Field(entry)));
                     }
                 }
@@ -478,7 +468,7 @@ impl CompileWasm {
     /// `java.lang.Record` and two of them involve a `String`, which has no wasm representation by this
     /// backend's design — a call to one reports rather than being guessed at.
     fn record_members(
-        inputs: &[WasmInput<'_>],
+        inputs: &[TypedFile<'_>],
         index: &ProjectIndex,
         layout: &mut Layout,
         module: &mut Module,
@@ -486,7 +476,7 @@ impl CompileWasm {
     ) -> Result<Vec<Func>> {
         let mut out = Vec::new();
         for input in inputs {
-            for node in input.root.descendants() {
+            for node in input.root().descendants() {
                 if node.kind() != RECORD_DECL {
                     continue;
                 }
@@ -575,7 +565,7 @@ impl CompileWasm {
     /// class is what makes the grouping observable.
     fn static_initializers(
         root: &SyntaxNode,
-        input: &WasmInput<'_>,
+        input: &TypedFile<'_>,
         index: &ProjectIndex,
     ) -> Vec<(ItemId, ast::Block)> {
         let mut out = Vec::new();
@@ -595,7 +585,7 @@ impl CompileWasm {
                 .find(Self::declares_a_type)
                 .and_then(|declaration| ast::Decl::name_token_of(&declaration))
                 .and_then(|name| {
-                    index.item_by_decl(input.file, usize::from(name.text_range().start()))
+                    index.item_by_decl(input.file(), usize::from(name.text_range().start()))
                 });
             if let (Some(owner), Some(block)) = (owner, node.children().find_map(ast::Block::cast))
             {
@@ -619,7 +609,7 @@ impl CompileWasm {
     /// first. The order is a depth-first walk of the `extends` chain; a cycle is impossible in a
     /// well-formed program and is simply not revisited here.
     fn classes_in_order(
-        inputs: &[WasmInput<'_>],
+        inputs: &[TypedFile<'_>],
         index: &ProjectIndex,
         interfaces: &mut Vec<ItemId>,
         inner: &mut Vec<(ItemId, ItemId)>,
@@ -628,7 +618,7 @@ impl CompileWasm {
     ) -> Result<Vec<ItemId>> {
         let mut declared = Vec::new();
         for input in inputs {
-            for node in Self::type_declarations(input.root) {
+            for node in Self::type_declarations(input.root()) {
                 // A type this backend does not lay out at all. Dropping one is what the class walk used
                 // to do to *every* nested declaration: the type never exists, and the first use of it
                 // reports an unresolved name that points at nothing a reader can act on.
@@ -704,7 +694,7 @@ impl CompileWasm {
     ///
     /// A capture is what it sounds like: a name inside the class that resolves to a definition *outside*
     /// it. Each becomes a struct field and a trailing constructor parameter.
-    fn captured_by(node: &SyntaxNode, input: &WasmInput<'_>) -> Vec<(DefId, Ty)> {
+    fn captured_by(node: &SyntaxNode, input: &TypedFile<'_>) -> Vec<(DefId, Ty)> {
         let mut out = Vec::new();
         let inside_block = node
             .ancestors()
@@ -720,13 +710,13 @@ impl CompileWasm {
             .filter(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
         {
             let Some(id) = input
-                .resolved
+                .analysis()
                 .reference_at(usize::from(token.text_range().start()))
                 .and_then(|reference| reference.resolution.def_id())
             else {
                 continue;
             };
-            let def = input.resolved.def(id);
+            let def = input.analysis().def(id);
             // Only a *local* is captured: a field is reached through an instance and a type name is not a
             // value at all.
             if !matches!(def.kind, DefKind::Local | DefKind::Param) {
@@ -738,7 +728,7 @@ impl CompileWasm {
             if !range.contains(start.into()) && !out.iter().any(|(seen, _)| *seen == id) {
                 // The type is read from the *declaring* input's analysis, which is the only place it is
                 // known — the layout is built long before any body is lowered.
-                out.push((id, input.inference.type_of_def(id).clone()));
+                out.push((id, input.type_of_def(id).clone()));
             }
         }
         out
@@ -763,18 +753,18 @@ impl CompileWasm {
     /// The item a type declaration declares, whether it has a name to look up or only a position.
     fn item_of(
         node: &SyntaxNode,
-        input: &WasmInput<'_>,
+        input: &TypedFile<'_>,
         index: &ProjectIndex,
     ) -> Result<Option<ItemId>> {
         // A lambda and an anonymous body are both nameless, and the index keys each on its own start
         // offset — the only thing either has to be found by.
         if Self::is_anonymous(node) || Self::is_functional(node) {
-            return Ok(index.item_by_decl(input.file, usize::from(node.text_range().start())));
+            return Ok(index.item_by_decl(input.file(), usize::from(node.text_range().start())));
         }
         let name =
             ast::Decl::name_token_of(node).ok_or(WasmError::Unsupported("a class with no name"))?;
         index
-            .item_by_decl(input.file, usize::from(name.text_range().start()))
+            .item_by_decl(input.file(), usize::from(name.text_range().start()))
             .ok_or_else(|| WasmError::Unresolved(name.text().into()))
             .map(Some)
     }
@@ -835,14 +825,14 @@ impl CompileWasm {
 
     /// Register every method and constructor `input` declares.
     fn collect_methods(
-        input: &WasmInput<'_>,
+        input: &TypedFile<'_>,
         position: usize,
         index: &ProjectIndex,
         layout: &mut Layout,
         module: &mut Module,
         out: &mut Vec<Method>,
     ) -> Result<()> {
-        for class in Self::type_declarations(input.root) {
+        for class in Self::type_declarations(input.root()) {
             let Some(item) = Self::item_of(&class, input, index)? else {
                 continue;
             };
@@ -943,7 +933,7 @@ impl CompileWasm {
                 let member_name = Self::member_name_token(&node, is_constructor)
                     .ok_or(WasmError::Unsupported("a member with no name"))?;
                 let member = index
-                    .member_by_decl(input.file, usize::from(member_name.text_range().start()))
+                    .member_by_decl(input.file(), usize::from(member_name.text_range().start()))
                     .ok_or_else(|| WasmError::Unresolved(member_name.text().into()))?;
                 let is_static = index.member(member).modifiers.is_static;
 
@@ -1163,12 +1153,12 @@ impl Layout {
     /// dropping a `static` initialiser is a wrong value in a module that validates.
     fn declare_statics(
         &mut self,
-        input: &WasmInput<'_>,
+        input: &TypedFile<'_>,
         index: &ProjectIndex,
         module: &mut Module,
         out: &mut Vec<(MemberId, ast::Expr)>,
     ) -> Result<()> {
-        for node in input.root.descendants() {
+        for node in input.root().descendants() {
             if node.kind() != FIELD_DECL {
                 continue;
             }
@@ -1179,7 +1169,7 @@ impl Layout {
             let values: Vec<ast::Expr> = node.children().filter_map(ast::Expr::cast).collect();
             for (position, name) in names.iter().enumerate() {
                 let Some(member) =
-                    index.member_by_decl(input.file, usize::from(name.text_range().start()))
+                    index.member_by_decl(input.file(), usize::from(name.text_range().start()))
                 else {
                     continue;
                 };
@@ -1222,12 +1212,12 @@ impl Layout {
     /// constructor, with nothing ahead of them.
     fn declare_constants(
         &mut self,
-        input: &WasmInput<'_>,
+        input: &TypedFile<'_>,
         index: &ProjectIndex,
         module: &mut Module,
         out: &mut Vec<(MemberId, ItemId, SyntaxNode)>,
     ) -> Result<()> {
-        for node in input.root.descendants() {
+        for node in input.root().descendants() {
             if node.kind() != ENUM_DECL {
                 continue;
             }
@@ -1241,7 +1231,7 @@ impl Layout {
                     .name_token()
                     .ok_or(WasmError::Unsupported("an `enum` constant with no name"))?;
                 let id = index
-                    .member_by_decl(input.file, usize::from(name.text_range().start()))
+                    .member_by_decl(input.file(), usize::from(name.text_range().start()))
                     .ok_or_else(|| WasmError::Unresolved(name.text().into()))?;
                 let ty = self.class_ref(owner)?;
                 let mut init = Insn::new();
@@ -1260,11 +1250,11 @@ impl Layout {
     }
 
     /// The indexed item a type declaration declares.
-    fn owner_of(node: &SyntaxNode, input: &WasmInput<'_>, index: &ProjectIndex) -> Result<ItemId> {
+    fn owner_of(node: &SyntaxNode, input: &TypedFile<'_>, index: &ProjectIndex) -> Result<ItemId> {
         let name = ast::Decl::name_token_of(node)
             .ok_or(WasmError::Unsupported("a type declaration with no name"))?;
         index
-            .item_by_decl(input.file, usize::from(name.text_range().start()))
+            .item_by_decl(input.file(), usize::from(name.text_range().start()))
             .ok_or_else(|| WasmError::Unresolved(name.text().into()))
     }
 
@@ -1482,7 +1472,7 @@ struct Body {
 impl Body {
     fn lower(
         method: &Method,
-        input: &WasmInput<'_>,
+        input: &TypedFile<'_>,
         index: &ProjectIndex,
         layout: &Layout,
     ) -> Result<Self> {
@@ -1626,9 +1616,7 @@ impl Body {
                 let id = lowering
                     .def_at(&param)
                     .ok_or(WasmError::Unsupported("a lambda parameter with no binding"))?;
-                let ty = lowering
-                    .layout
-                    .val_type(lowering.input.inference.type_of_def(id))?;
+                let ty = lowering.layout.val_type(lowering.input.type_of_def(id))?;
                 lowering.slots.push((id, lowering.next));
                 lowering.next += 1;
                 let _ = ty;
@@ -1804,7 +1792,7 @@ impl Body {
 
 /// The mutable state of lowering one body.
 struct Lowering<'a> {
-    input: &'a WasmInput<'a>,
+    input: &'a TypedFile<'a>,
     index: &'a ProjectIndex,
     layout: &'a Layout,
     /// `(definition, local index)` pairs, parameters first.
@@ -1865,7 +1853,7 @@ impl Lowering<'_> {
     /// enclosing loop, and it carries the locals a previous input's share of the body already used so
     /// two inputs never claim the same index.
     fn for_static<'a>(
-        input: &'a WasmInput<'a>,
+        input: &'a TypedFile<'a>,
         index: &'a ProjectIndex,
         layout: &'a Layout,
         locals: Vec<ValType>,
@@ -1916,7 +1904,7 @@ impl Lowering<'_> {
         // live. Its global still has the enum's type, so nothing else changes.
         let built = if node.children().any(|child| child.kind() == CLASS_BODY) {
             self.index
-                .item_by_decl(self.input.file, usize::from(node.text_range().start()))
+                .item_by_decl(self.input.file(), usize::from(node.text_range().start()))
                 .ok_or(WasmError::Unsupported("an `enum` constant with no item"))?
         } else {
             owner
@@ -2029,7 +2017,7 @@ impl Lowering<'_> {
                 };
                 let Some(member) = self
                     .index
-                    .member_by_decl(self.input.file, usize::from(name.text_range().start()))
+                    .member_by_decl(self.input.file(), usize::from(name.text_range().start()))
                 else {
                     continue;
                 };
@@ -2052,14 +2040,14 @@ impl Lowering<'_> {
         let id = self
             .def_at(node)
             .ok_or(WasmError::Unsupported("an unresolved parameter"))?;
-        let ty = self.layout.val_type(self.input.inference.type_of_def(id))?;
+        let ty = self.layout.val_type(self.input.type_of_def(id))?;
         self.slots.push((id, self.next));
         self.next += 1;
         Ok(ty)
     }
 
     fn declare_local(&mut self, id: DefId) -> Result<u32> {
-        let ty = self.layout.val_type(self.input.inference.type_of_def(id))?;
+        let ty = self.layout.val_type(self.input.type_of_def(id))?;
         let slot = self.next;
         self.slots.push((id, slot));
         self.locals.push(ty);
@@ -2084,10 +2072,10 @@ impl Lowering<'_> {
             .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)?;
         let start = usize::from(token.text_range().start());
         self.input
-            .resolved
+            .analysis()
             .reference_at(start)
             .and_then(|reference| reference.resolution.def_id())
-            .or_else(|| self.input.resolved.symbol_at(start))
+            .or_else(|| self.input.analysis().symbol_at(start))
     }
 
     fn span(node: &SyntaxNode) -> core::ops::Range<usize> {
@@ -2096,13 +2084,12 @@ impl Lowering<'_> {
     }
 
     fn ty_of(&self, node: &SyntaxNode) -> Result<ValType> {
-        let ty =
-            self.input
-                .inference
-                .type_of_expr(Self::span(node))
-                .ok_or(WasmError::Unsupported(
-                    "an expression with no inferred type",
-                ))?;
+        let ty = self
+            .input
+            .type_of_expr(Self::span(node))
+            .ok_or(WasmError::Unsupported(
+                "an expression with no inferred type",
+            ))?;
         self.layout.val_type(ty)
     }
 
@@ -2192,12 +2179,12 @@ impl Lowering<'_> {
         for (position, name) in names.iter().enumerate() {
             let id = self
                 .input
-                .resolved
+                .analysis()
                 .symbol_at(usize::from(name.text_range().start()))
                 .ok_or_else(|| WasmError::Unresolved(name.text().into()))?;
             let slot = self.declare_local(id)?;
             if let Some(value) = values.get(position) {
-                let declared = self.input.inference.type_of_def(id).clone();
+                let declared = self.input.type_of_def(id).clone();
                 self.value_as(value, &declared, insn)?;
                 insn.local_set(slot);
             }
@@ -2356,10 +2343,7 @@ impl Lowering<'_> {
         let name: SyntaxToken = statement
             .name_token()
             .ok_or(WasmError::Unsupported("a `for`-each with no variable"))?;
-        let Some(Ty::Array(element)) = self
-            .input
-            .inference
-            .type_of_expr(Self::span(iterable.syntax()))
+        let Some(Ty::Array(element)) = self.input.type_of_expr(Self::span(iterable.syntax()))
         else {
             return Err(WasmError::Unsupported("a `for`-each over this type"));
         };
@@ -2380,7 +2364,7 @@ impl Lowering<'_> {
 
         let id = self
             .input
-            .resolved
+            .analysis()
             .symbol_at(usize::from(name.text_range().start()))
             .ok_or_else(|| WasmError::Unresolved(name.text().into()))?;
         let variable = self.declare_local(id)?;
@@ -2638,11 +2622,11 @@ impl Lowering<'_> {
                 .ok_or(WasmError::Unsupported("a resource with no initialiser"))?;
             let id = self
                 .input
-                .resolved
+                .analysis()
                 .symbol_at(usize::from(name.text_range().start()))
                 .ok_or_else(|| WasmError::Unresolved(name.text().into()))?;
             let slot = self.declare_local(id)?;
-            let declared = self.input.inference.type_of_def(id).clone();
+            let declared = self.input.type_of_def(id).clone();
             self.value_as(&value, &declared, insn)?;
             insn.local_set(slot);
             slots.push((slot, declared));
@@ -2793,7 +2777,7 @@ impl Lowering<'_> {
         // is no struct type for a bound this backend does not compute.
         let id = self
             .input
-            .resolved
+            .analysis()
             .symbol_at(usize::from(name.text_range().start()))
             .ok_or_else(|| WasmError::Unresolved(name.text().into()))?;
         for ty in &types {
@@ -3062,9 +3046,7 @@ impl Lowering<'_> {
         // silently: a `long` selector is not a Java program, but an `i32.wrap_i64` would turn it into
         // one that switches on the low 32 bits.
         if !matches!(
-            self.input
-                .inference
-                .type_of_expr(Self::span(selector.syntax())),
+            self.input.type_of_expr(Self::span(selector.syntax())),
             Some(Ty::Primitive(
                 Primitive::Byte | Primitive::Short | Primitive::Char | Primitive::Int
             ))
@@ -3316,7 +3298,7 @@ impl Lowering<'_> {
                 // reference captures nothing to write into it.
                 let item = self
                     .index
-                    .item_by_decl(self.input.file, Self::span(reference.syntax()).start)
+                    .item_by_decl(self.input.file(), Self::span(reference.syntax()).start)
                     .ok_or(WasmError::Unsupported("a method reference with no item"))?;
                 let struct_type = *self
                     .layout
@@ -3350,7 +3332,7 @@ impl Lowering<'_> {
             ast::Expr::Lambda(lambda) => {
                 let item = self
                     .index
-                    .item_by_decl(self.input.file, Self::span(lambda.syntax()).start)
+                    .item_by_decl(self.input.file(), Self::span(lambda.syntax()).start)
                     .ok_or(WasmError::Unsupported("a lambda with no item"))?;
                 let struct_type = *self
                     .layout
@@ -3460,7 +3442,6 @@ impl Lowering<'_> {
             }
             _ => self
                 .input
-                .inference
                 .field_target_of(Self::span(access.syntax()))
                 .ok_or_else(unresolved)?,
         };
@@ -3542,7 +3523,7 @@ impl Lowering<'_> {
             Some(id) => {
                 if let Some(slot) = self.slot_of(id) {
                     insn.local_get(slot);
-                    return self.layout.val_type(self.input.inference.type_of_def(id));
+                    return self.layout.val_type(self.input.type_of_def(id));
                 }
                 // A captured local is not a local *here*: it lives in the field the constructor filled.
                 if let Some((field, ty)) = self.capture_field(id) {
@@ -3553,9 +3534,9 @@ impl Lowering<'_> {
                 }
                 // Not a local: a field of the enclosing class. A `static` one is a global and needs no
                 // receiver; an instance one is reached through `this`, which is local 0.
-                let declaration = self.input.resolved.def(id);
+                let declaration = self.input.analysis().def(id);
                 self.index
-                    .member_by_decl(self.input.file, declaration.name_range.start)
+                    .member_by_decl(self.input.file(), declaration.name_range.start)
             }
             // Nothing in the file declared it, which an *inherited* field never is.
             None => self.inherited_field(name.syntax()),
@@ -3641,11 +3622,7 @@ impl Lowering<'_> {
         // array whose elements happen to be written as `int` literals, and reading the type off the
         // elements built an `i32` array instead — a module the validator rejects, and the wrong type if
         // it had not.
-        let inferred = self
-            .input
-            .inference
-            .type_of_expr(Self::span(init.syntax()))
-            .cloned();
+        let inferred = self.input.type_of_expr(Self::span(init.syntax())).cloned();
         let Some(Ty::Array(element)) = target.cloned().or(inferred) else {
             return Err(WasmError::Unsupported(
                 "an array initialiser with no target type",
@@ -3712,9 +3689,7 @@ impl Lowering<'_> {
         if access.field().as_deref() == Some("length")
             && let Some(receiver) = access.receiver()
             && matches!(
-                self.input
-                    .inference
-                    .type_of_expr(Self::span(receiver.syntax())),
+                self.input.type_of_expr(Self::span(receiver.syntax())),
                 Some(Ty::Array(_))
             )
         {
@@ -3955,7 +3930,6 @@ impl Lowering<'_> {
     fn num_of(&self, node: &SyntaxNode) -> Result<Num> {
         let ty = self
             .input
-            .inference
             .type_of_expr(Self::span(node))
             .ok_or(WasmError::Unsupported("a value with no inferred type"))?;
         let Ty::Primitive(primitive) = ty else {
@@ -3977,7 +3951,7 @@ impl Lowering<'_> {
     /// Whether `node`'s recorded type is a reference.
     fn is_reference(&self, node: &SyntaxNode) -> bool {
         matches!(
-            self.input.inference.type_of_expr(Self::span(node)),
+            self.input.type_of_expr(Self::span(node)),
             Some(Ty::Class(_) | Ty::Array(_) | Ty::Null)
         )
     }
@@ -4110,7 +4084,7 @@ impl Lowering<'_> {
                 let bound = self
                     .def_at(pattern)
                     .ok_or(WasmError::Unsupported("a pattern with no binding"))?;
-                let bound_ty = self.input.inference.type_of_def(bound).clone();
+                let bound_ty = self.input.type_of_def(bound).clone();
                 let slot = self.declare_local(bound)?;
                 // Two cases carry no test. A primitive one because a `ref` instruction over it is not a
                 // program. And a component pattern of the component's *own* type because it matches
@@ -4140,7 +4114,7 @@ impl Lowering<'_> {
                 let item = self
                     .index
                     .resolve_type_name(
-                        self.input.file,
+                        self.input.file(),
                         &ty.simple_name()
                             .ok_or(WasmError::Unsupported("a type with no name"))?,
                         None,
@@ -4221,7 +4195,7 @@ impl Lowering<'_> {
         let qualified = ty.is_qualified().then(|| ty.qualified_text()).flatten();
         let item = self
             .index
-            .resolve_type_name(self.input.file, &name, qualified.as_deref())
+            .resolve_type_name(self.input.file(), &name, qualified.as_deref())
             .project_id()
             .ok_or_else(|| WasmError::Unresolved(name.clone()))?;
         let index = self
@@ -4483,9 +4457,9 @@ impl Lowering<'_> {
                         // A bare name that is no local is a field of the enclosing class. A `static`
                         // one is a global; an instance one needs no spill, local 0 being a stable
                         // receiver already.
-                        let declaration = self.input.resolved.def(id);
+                        let declaration = self.input.analysis().def(id);
                         self.index
-                            .member_by_decl(self.input.file, declaration.name_range.start)
+                            .member_by_decl(self.input.file(), declaration.name_range.start)
                     }
                     // Nothing in the file declared it, which an *inherited* field never is.
                     None => self.inherited_field(name.syntax()),
@@ -4598,9 +4572,7 @@ impl Lowering<'_> {
         let ty = self.ty_of(new.syntax())?;
         // `new T[n]`: one instruction, and every element starts at its type's default — which is
         // exactly Java's rule for a fresh array.
-        if let Some(Ty::Array(element)) =
-            self.input.inference.type_of_expr(Self::span(new.syntax()))
-        {
+        if let Some(Ty::Array(element)) = self.input.type_of_expr(Self::span(new.syntax())) {
             let element = self.layout.val_type(element)?;
             let array_type = self
                 .layout
@@ -4619,11 +4591,10 @@ impl Lowering<'_> {
         let anonymous = CompileWasm::is_anonymous(new.syntax());
         let item = if anonymous {
             self.index
-                .item_by_decl(self.input.file, Self::span(new.syntax()).start)
+                .item_by_decl(self.input.file(), Self::span(new.syntax()).start)
                 .ok_or(WasmError::Unsupported("an anonymous class with no item"))?
         } else {
             self.input
-                .inference
                 .type_of_expr(Self::span(new.syntax()))
                 .and_then(Ty::project_id)
                 .ok_or(WasmError::Unsupported("a `new` of an unindexed type"))?
@@ -4664,10 +4635,7 @@ impl Lowering<'_> {
         // Which constructor, read from the index rather than re-picked here. Matching on argument
         // *count* alone took the first of any same-arity pair, and a second selection free to
         // disagree with the analysis is the drift `call_target_of` exists to prevent.
-        let constructor = self
-            .input
-            .inference
-            .call_target_of(Self::span(new.syntax()));
+        let constructor = self.input.call_target_of(Self::span(new.syntax()));
         let declares_constructor = self
             .index
             .own_members(item)
@@ -4928,7 +4896,7 @@ impl Lowering<'_> {
     /// The type a `T::new` reference constructs.
     fn constructed_item(
         node: &SyntaxNode,
-        input: &WasmInput<'_>,
+        input: &TypedFile<'_>,
         index: &ProjectIndex,
     ) -> Result<ItemId> {
         let qualifier = node
@@ -4951,7 +4919,7 @@ impl Lowering<'_> {
     /// needs an allocation, and neither is a plain delegation.
     fn referenced_method(
         node: &SyntaxNode,
-        input: &WasmInput<'_>,
+        input: &TypedFile<'_>,
         index: &ProjectIndex,
     ) -> Result<(MemberId, bool)> {
         let name = node
@@ -4971,7 +4939,6 @@ impl Lowering<'_> {
         // a name the index resolves is a type, and the reference is static or unbound. That is the whole
         // difference, and it decides where the receiver comes from.
         let bound = input
-            .inference
             .type_of_expr(Lowering::span(qualifier.syntax()))
             .and_then(Ty::project_id);
         let owner = bound
@@ -5045,7 +5012,6 @@ impl Lowering<'_> {
     fn call(&mut self, call: &ast::CallExpr, insn: &mut Insn) -> Result<Option<ValType>> {
         let member = self
             .input
-            .inference
             .call_target_of(Self::span(call.syntax()))
             .ok_or_else(|| WasmError::Unresolved(call.syntax().text().to_string().trim().into()))?;
         let info = self.index.member(member);

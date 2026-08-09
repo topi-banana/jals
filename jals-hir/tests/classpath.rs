@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use jals_classfile::ClassFile;
-use jals_hir::{FileId, Namespace, ProjectIndex, Resolved, SourceLocations, TypeInference};
+use jals_hir::{FileAnalysis, FileId, Namespace, ProjectIndex, SourceLocations};
 use jals_syntax::SyntaxNode;
 use jals_syntax::ast::{self, AstNode};
 
@@ -28,7 +28,7 @@ fn parse(src: &str) -> SyntaxNode {
 /// into the index as classpath types.
 fn expr_ty(src: &str, text: &str, classfiles: &[ClassFile]) -> String {
     let node = parse(src);
-    let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&node));
+    let analysis = jals_exec::block_on_inline(FileAnalysis::of(&node));
     let index = jals_exec::block_on_inline(
         ProjectIndex::builder(&[(FileId(0), node.clone())])
             .with_stdlib()
@@ -37,7 +37,8 @@ fn expr_ty(src: &str, text: &str, classfiles: &[ClassFile]) -> String {
             )))
             .build(),
     );
-    let ti = jals_exec::block_on_inline(TypeInference::infer(&node, &resolved, &index, FileId(0)));
+    let semantics = analysis.in_project(&index, FileId(0));
+    let ti = jals_exec::block_on_inline(semantics.typed());
     let expr = node
         .descendants()
         .filter_map(ast::Expr::cast)
@@ -71,7 +72,7 @@ fn classpath_type_is_not_a_navigation_target() {
     // A classpath type has no host-openable source, so go-to-definition is suppressed (like a stub).
     let src = "class Test { Box<String> field; }";
     let node = parse(src);
-    let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&node));
+    let analysis = jals_exec::block_on_inline(FileAnalysis::of(&node));
     let index = jals_exec::block_on_inline(
         ProjectIndex::builder(&[(FileId(0), node)])
             .with_stdlib()
@@ -82,7 +83,10 @@ fn classpath_type_is_not_a_navigation_target() {
     );
     let offset = src.find("Box").expect("Box in source");
     assert!(
-        index.definition_at(FileId(0), &resolved, offset).is_none(),
+        analysis
+            .in_project(&index, FileId(0))
+            .definition_at(offset)
+            .is_none(),
         "go-to-def into a classpath type should be suppressed"
     );
 }
@@ -93,7 +97,7 @@ fn classpath_type_navigates_to_library_source() {
     // classpath type lands on its real source declaration instead of being suppressed.
     let src = "class Test { Box<String> field; }";
     let node = parse(src);
-    let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&node));
+    let analysis = jals_exec::block_on_inline(FileAnalysis::of(&node));
 
     let lib = FileId(100);
     let sources = jals_exec::block_on_inline(ProjectIndex::index_source_locations(&[(
@@ -112,8 +116,9 @@ fn classpath_type_navigates_to_library_source() {
     );
 
     let offset = src.find("Box").expect("Box in source");
-    let (file, range) = index
-        .definition_at(FileId(0), &resolved, offset)
+    let (file, range) = analysis
+        .in_project(&index, FileId(0))
+        .definition_at(offset)
         .expect("a classpath type with sources is a navigation target");
     assert_eq!(file, lib, "navigates into the library source file");
     // The target is the `Box` name token of the `class Box` declaration (not the word "Box" in the
@@ -127,7 +132,7 @@ fn source_dep_type_is_typed_from_source_and_navigates() {
     // A `git`/`path` dependency: `Box.java` is folded in as a `Source`-origin type with NO `.class`
     // backing it, so the source is both the typing authority and the navigation target.
     let node = parse(SRC);
-    let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&node));
+    let analysis = jals_exec::block_on_inline(FileAnalysis::of(&node));
 
     let lib = FileId(100);
     let lib_box = parse(BOX_SOURCE);
@@ -143,7 +148,8 @@ fn source_dep_type_is_typed_from_source_and_navigates() {
     );
 
     // Typing flows through the library source: `Box<String>.get()` substitutes `T` ↦ `String`.
-    let ti = jals_exec::block_on_inline(TypeInference::infer(&node, &resolved, &index, FileId(0)));
+    let semantics = analysis.in_project(&index, FileId(0));
+    let ti = jals_exec::block_on_inline(semantics.typed());
     let expr = node
         .descendants()
         .filter_map(ast::Expr::cast)
@@ -160,8 +166,9 @@ fn source_dep_type_is_typed_from_source_and_navigates() {
     // Go-to-definition on the `Box` type reference lands on the `class Box` declaration in the
     // library source — directly via the item's own file/range, no overlay needed.
     let offset = SRC.find("Box").expect("Box in source");
-    let (file, range) = index
-        .definition_at(FileId(0), &resolved, offset)
+    let (file, range) = analysis
+        .in_project(&index, FileId(0))
+        .definition_at(offset)
         .expect("a source-dep type is a navigation target");
     assert_eq!(file, lib);
     let want = BOX_SOURCE.find("class Box").expect("Box decl") + "class ".len();

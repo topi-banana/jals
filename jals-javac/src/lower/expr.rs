@@ -324,7 +324,7 @@ impl Expr {
     /// [`Ty::Unknown`] counts as no answer rather than as an answer: it is what inference records
     /// where it gave up, and treating it as a type would turn a gap into a wrong descriptor.
     pub(crate) fn type_of(node: &SyntaxNode, context: &Context<'_>) -> Result<Ty> {
-        match context.inference.type_of_expr(Context::span(node)) {
+        match context.typed.type_of_expr(Context::span(node)) {
             Some(Ty::Unknown) | None => Err(DescError::Unknown.into()),
             Some(ty) => Ok(ty.clone()),
         }
@@ -593,14 +593,13 @@ impl Expr {
             return Ok(None);
         }
         Ok(Some((
-            alloc::format!("val${}", context.resolved.def(id).name),
-            Descriptor::descriptor_of(context.inference.type_of_def(id), context.index)?
-                .to_string(),
+            alloc::format!("val${}", context.typed.analysis().def(id).name),
+            Descriptor::descriptor_of(context.typed.type_of_def(id), context.index)?.to_string(),
         )))
     }
 
     pub(crate) fn own_field(id: DefId, context: &Context<'_>) -> Option<MemberId> {
-        let declaration = context.resolved.def(id);
+        let declaration = context.typed.analysis().def(id);
         context
             .index
             .member_by_decl(context.file, declaration.name_range.start)
@@ -666,7 +665,7 @@ impl Expr {
             return Ok(());
         }
         let member = context
-            .inference
+            .typed
             .field_target_of(Context::span(access.syntax()))
             .ok_or_else(|| LowerError::Unresolved(access.field().unwrap_or_default()))?;
         let (owner, name, descriptor) = Self::field_ref(member, context)?;
@@ -757,7 +756,7 @@ impl Expr {
     /// A call, dispatched by how the selected member is reached.
     fn call(call: &ast::CallExpr, context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
         let member = context
-            .inference
+            .typed
             .call_target_of(Context::span(call.syntax()))
             .ok_or_else(|| {
                 LowerError::Unresolved(call.syntax().text().to_string().trim().into())
@@ -954,9 +953,7 @@ impl Expr {
                     .ok_or_else(|| LowerError::Unresolved("an anonymous class".into()))
             })
             .transpose()?;
-        let selected = context
-            .inference
-            .call_target_of(Context::span(new.syntax()));
+        let selected = context.typed.call_target_of(Context::span(new.syntax()));
         // A class that declares no constructor has the implicit no-argument one (JLS §8.8.9), and
         // *nothing declared it* — so there is no indexed member for selection to have found, and
         // `new Foo()` on the most ordinary class in Java arrives with none. Its descriptor is fixed.
@@ -1023,7 +1020,7 @@ impl Expr {
             let mut trailing = String::new();
             for &id in &captured {
                 trailing.push_str(
-                    &Descriptor::descriptor_of(context.inference.type_of_def(id), context.index)?
+                    &Descriptor::descriptor_of(context.typed.type_of_def(id), context.index)?
                         .to_string(),
                 );
             }
@@ -1615,7 +1612,7 @@ impl Expr {
             let Some(bound) = context.def_at(&node) else {
                 return Err(LowerError::Unsupported("a pattern with no binding"));
             };
-            let ty = context.inference.type_of_def(bound).clone();
+            let ty = context.typed.type_of_def(bound).clone();
             let slot = emit
                 .slots
                 .declare(bound, crate::lower::Slots::ty_width(&ty));
@@ -1663,7 +1660,7 @@ impl Expr {
                     .slots
                     .slot_of(bound)
                     .ok_or(LowerError::Unsupported("a pattern with no slot"))?;
-                let bound_ty = context.inference.type_of_def(bound).clone();
+                let bound_ty = context.typed.type_of_def(bound).clone();
                 // Two cases carry no test. A primitive one because a `ref` instruction over it is not
                 // a program. And a component pattern of the component's *own* type because it matches
                 // unconditionally (§14.30.2) — including a `null` component, which an `instanceof`

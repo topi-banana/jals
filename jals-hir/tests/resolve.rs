@@ -1,18 +1,18 @@
 //! Snapshot tests for file-local name resolution: each reference rendered as one line,
-//! `name@start..end -> <target>`, where the target is the resolved definition or `<unresolved>`.
+//! `name@start..end -> <target>`, where the target is the analysis definition or `<unresolved>`.
 
 use core::fmt::Write;
 
 use expect_test::{Expect, expect};
-use jals_hir::{DefKind, Resolution, Resolved};
+use jals_hir::{DefKind, FileAnalysis, Resolution};
 
 fn render(src: &str) -> String {
-    let resolved = jals_exec::block_on_inline(Resolved::resolve(src));
+    let analysis = jals_exec::block_on_inline(FileAnalysis::parse(src));
     let mut s = String::new();
-    for r in &resolved.references {
+    for r in analysis.references() {
         let target = match r.resolution {
             Resolution::Def(id) => {
-                let d = resolved.def(id);
+                let d = analysis.def(id);
                 format!(
                     "{:?} `{}`@{}..{}",
                     d.kind, d.name, d.name_range.start, d.name_range.end
@@ -240,23 +240,23 @@ fn symbol_at_recovers_binding_from_use_or_declaration() {
     // From either the use in `use(x)` or the declaration `int x`, `symbol_at` recovers the same
     // local binding — the symbol-under-cursor query both ends of a binding share.
     let src = "class C { void m() { int x = 1; use(x); } }";
-    let resolved = jals_exec::block_on_inline(Resolved::resolve(src));
-    let from_decl = resolved
+    let analysis = jals_exec::block_on_inline(FileAnalysis::parse(src));
+    let from_decl = analysis
         .symbol_at(src.find('x').unwrap())
         .expect("on the declaration");
-    let from_use = resolved
+    let from_use = analysis
         .symbol_at(src.rfind('x').unwrap())
         .expect("on the use");
     assert_eq!(from_decl, from_use);
-    assert_eq!(resolved.def(from_decl).kind, DefKind::Local);
+    assert_eq!(analysis.def(from_decl).kind, DefKind::Local);
 }
 
 #[test]
 fn symbol_at_is_none_off_a_symbol_or_on_an_unresolved_name() {
     let src = "class C { void m() { use(nope); } }";
-    let resolved = jals_exec::block_on_inline(Resolved::resolve(src));
+    let analysis = jals_exec::block_on_inline(FileAnalysis::parse(src));
     // The undeclared `nope` (and the unresolved call `use`) bind to no file-local definition.
-    assert_eq!(resolved.symbol_at(src.find("nope").unwrap()), None);
+    assert_eq!(analysis.symbol_at(src.find("nope").unwrap()), None);
     // A position on no identifier at all (the space after `class`) is likewise nothing.
-    assert_eq!(resolved.symbol_at(src.find(' ').unwrap()), None);
+    assert_eq!(analysis.symbol_at(src.find(' ').unwrap()), None);
 }

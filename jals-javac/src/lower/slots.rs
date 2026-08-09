@@ -115,7 +115,7 @@ impl Slots {
     fn width(context: &Context<'_>, node: &jals_syntax::SyntaxNode) -> u16 {
         context
             .def_at(node)
-            .map_or(1, |id| Self::ty_width(context.inference.type_of_def(id)))
+            .map_or(1, |id| Self::ty_width(context.typed.type_of_def(id)))
     }
 
     /// How many slots a value of `ty` occupies.

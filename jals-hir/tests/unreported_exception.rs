@@ -1,9 +1,9 @@
-//! Tests for the checked-exception analysis (`jals_hir::UnreportedException::collect`): a checked exception a
+//! Tests for the checked-exception analysis: a checked exception a
 //! method / constructor can raise that is neither declared in its `throws` clause nor caught by an
 //! enclosing `try` / `catch`. All cases build a single-file project index with the stdlib stubs (the
 //! `Throwable` hierarchy the classifier needs).
 
-use jals_hir::{FileId, ProjectIndex, Resolved, UnreportedException};
+use jals_hir::{FileAnalysis, FileId, ProjectIndex, UnreportedException};
 
 /// The simple names of the exceptions reported unreported in `src`, index built over the whole file.
 fn reported(src: &str) -> Vec<String> {
@@ -13,12 +13,12 @@ fn reported(src: &str) -> Vec<String> {
             .with_stdlib()
             .build(),
     );
-    let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&root));
-    jals_exec::block_on_inline(UnreportedException::collect(
-        &root,
-        &resolved,
-        Some((&index, FileId(0))),
-    ))
+    let analysis = jals_exec::block_on_inline(FileAnalysis::of(&root));
+    jals_exec::block_on_inline(
+        analysis
+            .in_project(&index, FileId(0))
+            .unreported_exceptions(),
+    )
     .into_iter()
     .map(|e| e.name)
     .collect()
@@ -173,19 +173,29 @@ fn a_throw_inside_a_lambda_is_not_attributed_to_the_method() {
 }
 
 #[test]
-fn without_an_index_nothing_is_reported() {
+fn without_the_stdlib_stubs_nothing_is_reported() {
+    // The classifier needs `Throwable` / `RuntimeException` / `Error` to partition the hierarchy.
+    // Without them nothing can be *proven* checked, so the analysis reports nothing rather than
+    // guessing — the same conservative answer it gives for an unindexable supertype chain.
     let root = jals_exec::block_on_inline(jals_syntax::Parse::parse(&with_checked(
         "throw new MyEx();",
     )))
     .syntax();
-    let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&root));
+    let index =
+        jals_exec::block_on_inline(ProjectIndex::builder(&[(FileId(0), root.clone())]).build());
+    let analysis = jals_exec::block_on_inline(FileAnalysis::of(&root));
     assert!(
-        jals_exec::block_on_inline(UnreportedException::collect(&root, &resolved, None)).is_empty()
+        jals_exec::block_on_inline(
+            analysis
+                .in_project(&index, FileId(0))
+                .unreported_exceptions()
+        )
+        .is_empty()
     );
 }
 
 #[test]
-fn the_message_names_the_exception() {
+fn the_finding_names_the_exception() {
     let root = jals_exec::block_on_inline(jals_syntax::Parse::parse(&with_checked(
         "throw new MyEx();",
     )))
@@ -195,15 +205,13 @@ fn the_message_names_the_exception() {
             .with_stdlib()
             .build(),
     );
-    let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&root));
-    let found = jals_exec::block_on_inline(UnreportedException::collect(
-        &root,
-        &resolved,
-        Some((&index, FileId(0))),
-    ));
-    assert_eq!(found.len(), 1);
-    assert_eq!(
-        found[0].message(),
-        "unreported exception MyEx; must be caught or declared to be thrown"
+    let analysis = jals_exec::block_on_inline(FileAnalysis::of(&root));
+    let found: Vec<UnreportedException> = jals_exec::block_on_inline(
+        analysis
+            .in_project(&index, FileId(0))
+            .unreported_exceptions(),
     );
+    assert_eq!(found.len(), 1);
+    // The wording is `jals-lint`'s (`unreported-exception`); what this crate owes is the name.
+    assert_eq!(found[0].name, "MyEx");
 }

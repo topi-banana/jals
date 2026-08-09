@@ -32,7 +32,7 @@ use core::cell::OnceCell;
 
 use jals_config::Severity;
 use jals_config::lint::Config;
-use jals_hir::{FileId, ProjectIndex, Resolved};
+use jals_hir::{FileAnalysis, FileSemantics};
 use jals_syntax::cfg::CfgMap;
 use jals_syntax::{Parse, SyntaxNode};
 
@@ -40,17 +40,11 @@ use rules::{Checker, FeatureGate, Finding};
 
 pub use diagnostic::{Diagnostic, LintOutput};
 
-/// The project context the index-aware rules resolve reference types against.
-///
-/// A project-wide symbol index plus the id of the file being linted within it. `None` selects the
-/// file-local behavior. See [`LintRequest::index`].
-pub type IndexCtx<'a> = (&'a ProjectIndex, FileId);
-
 /// Everything one lint run reads about the file, apart from the configuration.
 ///
-/// The three optional fields are what a caller *can* supply rather than what it must: a project
-/// index widens the analysis to cross-file facts, a `cfg` map narrows it to the enabled code, and a
-/// cached resolution saves recomputing what the caller already has. Construct with
+/// The two optional fields are what a caller *can* supply rather than what it must: a `cfg` map
+/// narrows the analysis to the enabled code, and a [`FileSemantics`] both widens it to cross-file
+/// facts and saves recomputing the resolution the caller already holds. Construct with
 /// [`new`](LintRequest::new) and fill in what applies:
 ///
 /// ```
@@ -61,40 +55,38 @@ pub type IndexCtx<'a> = (&'a ProjectIndex, FileId);
 ///     cfg: Some(&cfg),
 ///     ..LintRequest::new(&parse)
 /// };
-/// # assert!(request.index.is_none());
+/// # assert!(request.file.is_none());
 /// ```
 pub struct LintRequest<'a> {
     /// The parsed file. Its [`errors`](Parse::errors) decide what a broken tree suppresses.
     pub parse: &'a Parse,
-    /// The project-wide symbol index and this file's id within it.
-    ///
-    /// With `None` the index-aware rules report nothing and the rest run file-locally, where
-    /// reference types resolve only by spelling.
-    pub index: Option<IndexCtx<'a>>,
     /// The file's `#[cfg(...)]` evaluation, from a host with the `attributes` dialect feature on.
     ///
     /// It applies twice: name resolution skips every disabled host, and any finding landing inside a
     /// disabled range is dropped — the analysis-side mirror of the compile frontend blanking it.
     /// The structural attribute errors surface under the fixed `cfg` rule.
     pub cfg: Option<&'a CfgMap>,
-    /// Name resolution the caller already holds, shared with every resolution-based rule instead of
-    /// being recomputed here.
+    /// The file bound to the project it is linted in: the caller's cached analysis and the project
+    /// index in one value.
     ///
-    /// **It must be the resolution of this `parse` under this `cfg`** — `resolve_node_with_cfg` for a
-    /// `Some(cfg)`, `resolve_node` for a `None`. Nothing checks it, and a resolution computed under a
-    /// different `cfg` would carry references the map then hides, so findings about them would be
-    /// dropped rather than reported.
-    pub resolved: Option<&'a Resolved>,
+    /// One field and not two, because a caller that holds a resolution holds the index it was
+    /// resolved alongside — every host reaching this seam builds both together. With `None` the
+    /// project-aware rules report nothing and the rest resolve here, file-locally.
+    ///
+    /// **Its analysis must be the analysis of this `parse` under this `cfg`** —
+    /// [`FileAnalysis::of_with_cfg`] for a `Some(cfg)`, [`FileAnalysis::of`] for a `None`. Nothing
+    /// checks it, and an analysis computed under a different `cfg` would carry references the map
+    /// then hides, so findings about them would be dropped rather than reported.
+    pub file: Option<&'a FileSemantics<'a>>,
 }
 
 impl<'a> LintRequest<'a> {
-    /// A request over `parse` alone: no project index, no `cfg` evaluation, no cached resolution.
+    /// A request over `parse` alone: no project, no `cfg` evaluation, no cached analysis.
     pub const fn new(parse: &'a Parse) -> Self {
         Self {
             parse,
-            index: None,
             cfg: None,
-            resolved: None,
+            file: None,
         }
     }
 }
@@ -102,9 +94,9 @@ impl<'a> LintRequest<'a> {
 impl LintOutput {
     /// Lint `src` according to `config`.
     ///
-    /// The file-local shorthand: it parses `src` and lints it with no project index, so reference
-    /// types resolve only by spelling and the index-aware rules report nothing. A caller holding a
-    /// [`ProjectIndex`] (the CLI over a multi-file run, the language server) builds a
+    /// The file-local shorthand: it parses `src` and lints it with no project, so reference types
+    /// resolve only by spelling and the project-aware rules report nothing. A caller holding a
+    /// [`FileSemantics`] (the CLI over a multi-file run, the language server) builds a
     /// [`LintRequest`] and calls [`lint`](LintOutput::lint) instead.
     pub async fn lint_source(src: &str, config: &Config) -> Self {
         Self::lint(
@@ -117,7 +109,7 @@ impl LintOutput {
     /// Lint `request` according to `config`.
     ///
     /// Name resolution is computed at most once and shared across every resolution-based rule (or
-    /// taken from [`LintRequest::resolved`] when the caller has it cached). What a project index
+    /// taken from [`LintRequest::file`] when the caller has it cached). What a project index
     /// adds, what a `cfg` map removes, and what a broken parse suppresses are all documented on
     /// [`LintRequest`]'s fields.
     pub async fn lint(request: LintRequest<'_>, config: &Config) -> Self {
@@ -128,16 +120,17 @@ impl LintOutput {
 
     /// The rule engine: every enabled rule over `request`, sorted by start offset.
     ///
-    /// File-local name resolution is shared across every resolution-based rule and computed lazily,
-    /// so a configuration that enables only syntactic rules (or disables the resolution-based ones)
-    /// never pays for it, and one that enables several resolves just once — unless the caller cached
-    /// one already, which wins outright. The `index` is threaded only into [`Checker::Indexed`]
-    /// rules.
+    /// The file's analysis is shared across every rule that reads one and computed lazily, so a
+    /// configuration that enables only syntactic rules never pays for it, and one that enables
+    /// several analyses just once — unless the caller cached one already, which wins outright. The
+    /// project binding is threaded only into [`Checker::Semantic`] rules, which is also what keeps
+    /// a resolution-only rule from forcing the file's type inference.
     ///
-    /// A broken parse is answered here rather than by a caller, in two steps: the index is withheld,
-    /// which silences every [`Checker::Indexed`] rule (each reports nothing without one), and a rule
-    /// marked [`needs_clean_parse`](rules::RuleMeta::needs_clean_parse) does not run at all, which
-    /// covers the one rule that still reports file-locally.
+    /// A broken parse is answered here rather than by a caller, in two steps: the project binding
+    /// is withheld, which silences every [`Checker::Semantic`] rule (each reports nothing without
+    /// one), and a rule marked [`needs_clean_parse`](rules::RuleMeta::needs_clean_parse) does not
+    /// run at all, which covers the one rule that still reports file-locally. The caller's
+    /// *analysis* is kept either way: it is the analysis of this tree, broken or not.
     ///
     /// The `cfg` map applies twice: resolution skips disabled hosts (so resolution-based rules
     /// never see a disabled definition), and a post-pass drops any finding whose range lands
@@ -146,18 +139,15 @@ impl LintOutput {
     /// only when the `attributes` dialect feature is on, and exactly then `config.features`
     /// permits the feature and the gate is silent.
     async fn run_rules(request: LintRequest<'_>, config: &Config) -> Vec<Diagnostic> {
-        let LintRequest {
-            parse,
-            index,
-            cfg,
-            resolved: supplied,
-        } = request;
+        let LintRequest { parse, cfg, file } = request;
         let root = &parse.syntax();
         let clean = parse.errors().is_empty();
         // A half-parsed tree's types are recovery artefacts, so nothing may be concluded across the
-        // project from it.
-        let index = if clean { index } else { None };
-        let resolved = OnceCell::new();
+        // project from it — but the caller's *analysis* is still the analysis of this tree, so the
+        // resolution-based rules keep sharing it rather than resolving a second copy.
+        let supplied = file.map(FileSemantics::analysis);
+        let project = if clean { file } else { None };
+        let analysis = OnceCell::new();
         let mut diagnostics = Vec::new();
         for rule in rules::RULES {
             let severity = config.severity(rule.name, rule.default);
@@ -166,18 +156,13 @@ impl LintOutput {
             }
             let findings = match rule.check {
                 Checker::Syntactic(check) => check(root).await,
-                Checker::Resolved(check) => {
-                    check(
-                        root,
-                        Self::resolved_once(&resolved, supplied, root, cfg).await,
-                    )
-                    .await
+                Checker::Analyzed(check) => {
+                    check(Self::analysis_once(&analysis, supplied, root, cfg).await).await
                 }
-                Checker::Indexed(check) => {
+                Checker::Semantic(check) => {
                     check(
-                        root,
-                        Self::resolved_once(&resolved, supplied, root, cfg).await,
-                        index,
+                        Self::analysis_once(&analysis, supplied, root, cfg).await,
+                        project,
                     )
                     .await
                 }
@@ -227,27 +212,27 @@ impl LintOutput {
         diagnostics
     }
 
-    /// The shared file-local name resolution, computed at most once per lint. The async-once
-    /// shape (compute, then `get_or_init` with the ready value) is single-threaded, so at worst a
-    /// re-entrant caller would compute twice — benign, since resolution is pure.
+    /// The shared file analysis, computed at most once per lint. The async-once shape (compute,
+    /// then publish) is single-threaded, so at worst a re-entrant caller would compute twice —
+    /// benign, since the analysis is pure.
     ///
-    /// `supplied` is the caller's own cached resolution, which wins outright: the editor keeps one
+    /// `supplied` is the caller's own cached analysis, which wins outright: the editor keeps one
     /// per open file, and resolving again here would do identical work a second time on every
     /// keystroke. It is the caller's obligation that it matches `root` and `cfg`
-    /// ([`LintRequest::resolved`]); the cell is only the fallback for a caller that has none.
-    async fn resolved_once<'c>(
-        cell: &'c OnceCell<Resolved>,
-        supplied: Option<&'c Resolved>,
+    /// ([`LintRequest::file`]); the cell is only the fallback for a caller that has none.
+    async fn analysis_once<'c>(
+        cell: &'c OnceCell<FileAnalysis>,
+        supplied: Option<&'c FileAnalysis>,
         root: &SyntaxNode,
         cfg: Option<&CfgMap>,
-    ) -> &'c Resolved {
-        if let Some(resolved) = supplied {
-            return resolved;
+    ) -> &'c FileAnalysis {
+        if let Some(analysis) = supplied {
+            return analysis;
         }
         if cell.get().is_none() {
             let computed = match cfg {
-                Some(cfg) => Resolved::resolve_node_with_cfg(root, cfg).await,
-                None => Resolved::resolve_node(root).await,
+                Some(cfg) => FileAnalysis::of_with_cfg(root, cfg).await,
+                None => FileAnalysis::of(root).await,
             };
             let _ = cell.set(computed);
         }
@@ -299,9 +284,11 @@ mod tests {
         let index = block_on_inline(
             jals_hir::ProjectIndex::builder(&[(jals_hir::FileId(0), parse.syntax())]).build(),
         );
+        let analysis = block_on_inline(jals_hir::FileAnalysis::of(&parse.syntax()));
+        let semantics = analysis.in_project(&index, jals_hir::FileId(0));
         let out = block_on_inline(LintOutput::lint(
             LintRequest {
-                index: Some((&index, jals_hir::FileId(0))),
+                file: Some(&semantics),
                 ..LintRequest::new(&parse)
             },
             &Config::default(),
@@ -349,6 +336,59 @@ mod tests {
     }
 
     #[test]
+    fn a_broken_parse_keeps_the_callers_analysis() {
+        // The one thing collapsing `index` + `resolved` into a single field could have lost: on a
+        // broken parse the *project* is withheld, but the caller's analysis is still the analysis of
+        // this tree and must go on being shared rather than resolved a second time.
+        //
+        // Observed the same way `a_supplied_resolution_is_the_one_the_rules_read` does — by handing
+        // over an analysis of a *different* tree, where the binding is used. `unused-local` reads
+        // only the analysis, so if the request's is still consumed the rule falls silent; if the
+        // engine resolved the broken tree itself, it would fire.
+        let broken = block_on_inline(jals_syntax::Parse::parse(
+            "class C { void m() { int a = 1; } void n( {}\n",
+        ));
+        assert!(!broken.errors().is_empty(), "the fixture must not parse");
+        let used = block_on_inline(jals_syntax::Parse::parse(
+            "class C { int m() { int a = 1; return a; } }",
+        ));
+        let used_analysis = block_on_inline(jals_hir::FileAnalysis::of(&used.syntax()));
+        let used_index = block_on_inline(
+            jals_hir::ProjectIndex::builder(&[(jals_hir::FileId(0), used.syntax())]).build(),
+        );
+        let used_semantics = used_analysis.in_project(&used_index, jals_hir::FileId(0));
+        let cfg = Config::default();
+
+        assert!(
+            block_on_inline(LintOutput::lint(LintRequest::new(&broken), &cfg))
+                .diagnostics
+                .iter()
+                .any(|d| d.rule == "unused-local"),
+            "the fixture must be unused when the engine analyses it itself"
+        );
+        let out = block_on_inline(LintOutput::lint(
+            LintRequest {
+                file: Some(&used_semantics),
+                ..LintRequest::new(&broken)
+            },
+            &cfg,
+        ));
+        assert!(
+            out.diagnostics.iter().all(|d| d.rule != "unused-local"),
+            "a broken parse withholds the project, not the caller's analysis: {:?}",
+            out.diagnostics
+        );
+        // And the project really was withheld: the project-aware rules stay silent.
+        assert!(
+            out.diagnostics
+                .iter()
+                .all(|d| d.rule != "cannot-resolve" && d.rule != "unreported-exception"),
+            "a broken tree's types are recovery artefacts: {:?}",
+            out.diagnostics
+        );
+    }
+
+    #[test]
     fn a_bare_request_matches_lint_source() {
         // A request with nothing filled in is exactly `lint_source` — the delegation must not drift.
         let src = "import java.util.*;\nclass C { int x = 1.0; }\n";
@@ -366,10 +406,14 @@ mod tests {
         let src = "class C { void m() { int unused = 1; if (true) { a(); } else { b(); } } }";
         let cfg = Config::default();
         let parse = block_on_inline(jals_syntax::Parse::parse(src));
-        let resolved = block_on_inline(jals_hir::Resolved::resolve_node(&parse.syntax()));
+        let analysis = block_on_inline(jals_hir::FileAnalysis::of(&parse.syntax()));
+        let index = block_on_inline(
+            jals_hir::ProjectIndex::builder(&[(jals_hir::FileId(0), parse.syntax())]).build(),
+        );
+        let semantics = analysis.in_project(&index, jals_hir::FileId(0));
         let supplied = block_on_inline(LintOutput::lint(
             LintRequest {
-                resolved: Some(&resolved),
+                file: Some(&semantics),
                 ..LintRequest::new(&parse)
             },
             &cfg,
@@ -393,7 +437,12 @@ mod tests {
         let used = block_on_inline(jals_syntax::Parse::parse(
             "class C { int m() { int a = 1; return a; } }",
         ));
-        let used_resolution = block_on_inline(jals_hir::Resolved::resolve_node(&used.syntax()));
+        // The analysis of the *other* tree, bound to an index over it.
+        let used_analysis = block_on_inline(jals_hir::FileAnalysis::of(&used.syntax()));
+        let used_index = block_on_inline(
+            jals_hir::ProjectIndex::builder(&[(jals_hir::FileId(0), used.syntax())]).build(),
+        );
+        let used_semantics = used_analysis.in_project(&used_index, jals_hir::FileId(0));
         let cfg = Config::default();
 
         assert!(
@@ -406,7 +455,7 @@ mod tests {
         assert!(
             block_on_inline(LintOutput::lint(
                 LintRequest {
-                    resolved: Some(&used_resolution),
+                    file: Some(&used_semantics),
                     ..LintRequest::new(&unused)
                 },
                 &cfg,
@@ -439,9 +488,11 @@ mod tests {
         let index = block_on_inline(
             jals_hir::ProjectIndex::builder(&[(jals_hir::FileId(0), parse.syntax())]).build(),
         );
+        let analysis = block_on_inline(jals_hir::FileAnalysis::of(&parse.syntax()));
+        let semantics = analysis.in_project(&index, jals_hir::FileId(0));
         let out = block_on_inline(LintOutput::lint(
             LintRequest {
-                index: Some((&index, jals_hir::FileId(0))),
+                file: Some(&semantics),
                 ..LintRequest::new(&parse)
             },
             &cfg,
@@ -507,9 +558,11 @@ mod tests {
                 .with_stdlib()
                 .build(),
         );
+        let analysis = block_on_inline(jals_hir::FileAnalysis::of(&parse.syntax()));
+        let semantics = analysis.in_project(&index, jals_hir::FileId(0));
         let out = block_on_inline(LintOutput::lint(
             LintRequest {
-                index: Some((&index, jals_hir::FileId(0))),
+                file: Some(&semantics),
                 ..LintRequest::new(&parse)
             },
             &cfg,
@@ -530,9 +583,11 @@ mod tests {
             let index = jals_hir::ProjectIndex::builder(&[(jals_hir::FileId(0), parse.syntax())])
                 .build()
                 .await;
+            let analysis = jals_hir::FileAnalysis::of(&parse.syntax()).await;
+            let semantics = analysis.in_project(&index, jals_hir::FileId(0));
             LintOutput::lint(
                 LintRequest {
-                    index: Some((&index, jals_hir::FileId(0))),
+                    file: Some(&semantics),
                     ..LintRequest::new(&parse)
                 },
                 config,

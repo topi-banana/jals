@@ -222,6 +222,20 @@ filesystem reads into portable interfaces.
   is emitted as `full_frame` only. On the wasm side the host's collector owns every object —
   `struct.new_default`, declared subtyping, no `memory` section, and no allocator or collector of
   its own. Portable and featureless; no host filesystem APIs.
+- `jals-hir`: the semantic analysis. Its three layers have one order — resolve a file, index the
+  project, infer types against both — and that order lives in `FileAnalysis` / `FileSemantics` /
+  `TypedFile` rather than in each consumer. `FileAnalysis` is index-independent, so it is the half a
+  host caches per file and the half a project-wide find-references reads without inferring anything;
+  `FileAnalysis::in_project` binds it to a `ProjectIndex` and is where the file's inference is
+  memoized, so one lint pass, one editor request, or one file's compile runs it **once** instead of
+  once per question. `Resolved` and `TypeInference` are the intermediate states and are **not
+  exported**, exactly as `jals-project` withholds `ResolvedProjectGraph`: holding one would be
+  holding a step, and the steps are not separately orderable. `TypedFile` is the witness that the
+  inference has run, and therefore the only place types are readable without an `await` — which is
+  what keeps `jals-javac`'s lowering synchronous. `jals-hir` states *facts* (`DeadIf`,
+  `UnreportedException`, `TypeMismatch` with its `MismatchKind`, `UnresolvedType`); the **wording**
+  of every semantic diagnostic belongs to the `jals-lint` rule that reports it, alongside the rule
+  name and the `jalslint.toml` key.
 - `jals-classfile`, `jals-hir`, `jals-syntax`, `jals-fmt`, `jals-lint`, `jals-decompile`: portable
   domain crates; do not add host filesystem APIs. `jals-fmt` has **one layout engine** — a port of
   google-java-format's greedy `computeBreaks` over a GJF-shaped `Doc`/`Level`/`Break` IR — and

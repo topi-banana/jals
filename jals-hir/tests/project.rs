@@ -7,7 +7,7 @@
 use core::fmt::Write;
 
 use expect_test::{Expect, expect};
-use jals_hir::{FileId, Namespace, ProjectIndex, Resolution, Resolved, TypeResolution};
+use jals_hir::{FileAnalysis, FileId, Namespace, ProjectIndex, Resolution, TypeResolution};
 use jals_syntax::SyntaxNode;
 
 /// Parses each source and keeps its `SOURCE_FILE` node alive (rowan nodes are ref-counted, so the
@@ -30,14 +30,14 @@ fn render(sources: &[&str]) -> String {
     let index = jals_exec::block_on_inline(ProjectIndex::builder(&nodes).build());
     let mut out = String::new();
     for (file, root) in &nodes {
-        let resolved = jals_exec::block_on_inline(Resolved::resolve_node(root));
-        for r in &resolved.references {
+        let analysis = jals_exec::block_on_inline(FileAnalysis::of(root));
+        for r in analysis.references() {
             if r.namespace != Namespace::Type {
                 continue;
             }
             let target = match r.resolution {
                 Resolution::Def(id) => {
-                    let d = resolved.def(id);
+                    let d = analysis.def(id);
                     format!("local {:?} `{}`", d.kind, d.name)
                 }
                 Resolution::Unresolved => {
@@ -190,11 +190,12 @@ fn definition_at_jumps_across_files() {
     ];
     let nodes = nodes(&srcs);
     let index = jals_exec::block_on_inline(ProjectIndex::builder(&nodes).build());
-    let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&nodes[1].1));
+    let analysis = jals_exec::block_on_inline(FileAnalysis::of(&nodes[1].1));
     let offset = srcs[1].find("Foo").unwrap();
 
-    let (file, range) = index
-        .definition_at(FileId(1), &resolved, offset)
+    let (file, range) = analysis
+        .in_project(&index, FileId(1))
+        .definition_at(offset)
         .expect("type reference resolves cross-file");
     assert_eq!(file, FileId(0));
     assert_eq!(&srcs[0][range], "Foo");
@@ -207,12 +208,13 @@ fn unresolved_types_reports_only_genuine_unknowns() {
     let srcs = ["package a; class Bar { Nope n; String s; Helper h; } class Helper { }"];
     let nodes = nodes(&srcs);
     let index = jals_exec::block_on_inline(ProjectIndex::builder(&nodes).build());
-    let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&nodes[0].1));
+    let analysis = jals_exec::block_on_inline(FileAnalysis::of(&nodes[0].1));
 
-    let found = jals_exec::block_on_inline(index.unresolved_types(FileId(0), &resolved));
+    let found =
+        jals_exec::block_on_inline(analysis.in_project(&index, FileId(0)).unresolved_types());
     assert_eq!(found.len(), 1);
+    // The wording is `jals-lint`'s (`cannot-resolve`); what this crate owes is the name and span.
     assert_eq!(found[0].name, "Nope");
-    assert_eq!(found[0].message(), "cannot resolve symbol `Nope`");
     // The name is the lookup's own, and it agrees with the span — which is why a consumer never has
     // to slice it back out of the source to word the diagnostic.
     assert_eq!(&srcs[0][found[0].range.clone()], found[0].name);

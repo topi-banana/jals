@@ -11,11 +11,11 @@
 
 use alloc::vec::Vec;
 
-use jals_exec::LocalBoxFuture;
-use jals_hir::Resolved;
-use jals_syntax::SyntaxNode;
+use alloc::format;
 
-use crate::IndexCtx;
+use jals_exec::LocalBoxFuture;
+use jals_hir::{FileAnalysis, FileSemantics};
+
 use crate::diagnostic::Severity;
 use crate::rules::{Checker, Finding, RuleMeta};
 
@@ -23,7 +23,7 @@ pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "unreported-exception",
     default: Severity::Warn,
     needs_clean_parse: false,
-    check: Checker::Indexed(UnreportedExceptionRule::check),
+    check: Checker::Semantic(UnreportedExceptionRule::check),
 };
 
 /// The `unreported-exception` rule (named with a `Rule` suffix to avoid clashing with the
@@ -33,23 +33,30 @@ struct UnreportedExceptionRule;
 impl UnreportedExceptionRule {
     /// The table-edge shim: boxes the async rule body once per file.
     fn check<'a>(
-        root: &'a SyntaxNode,
-        resolved: &'a Resolved,
-        index: Option<IndexCtx<'a>>,
+        analysis: &'a FileAnalysis,
+        project: Option<&'a FileSemantics<'a>>,
     ) -> LocalBoxFuture<'a, Vec<Finding>> {
-        alloc::boxed::Box::pin(Self::check_impl(root, resolved, index))
+        alloc::boxed::Box::pin(Self::check_impl(analysis, project))
     }
 
     async fn check_impl(
-        root: &SyntaxNode,
-        resolved: &Resolved,
-        index: Option<IndexCtx<'_>>,
+        _analysis: &FileAnalysis,
+        project: Option<&FileSemantics<'_>>,
     ) -> Vec<Finding> {
-        jals_hir::UnreportedException::collect(root, resolved, index)
+        // Reporting nothing without a project is the `Checker::Semantic` contract the driver leans
+        // on to silence this rule on a broken parse without naming it.
+        let Some(semantics) = project else {
+            return Vec::new();
+        };
+        semantics
+            .unreported_exceptions()
             .await
             .into_iter()
             .map(|e| Finding {
-                message: e.message(),
+                message: format!(
+                    "unreported exception {}; must be caught or declared to be thrown",
+                    e.name
+                ),
                 range: e.range,
                 ..Finding::default()
             })

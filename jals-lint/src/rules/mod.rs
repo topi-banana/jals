@@ -12,10 +12,8 @@ use core::ops::Range;
 
 use jals_config::Feature;
 use jals_exec::LocalBoxFuture;
-use jals_hir::Resolved;
+use jals_hir::{FileAnalysis, FileSemantics};
 use jals_syntax::{SyntaxNode, SyntaxToken};
-
-use crate::IndexCtx;
 
 use crate::diagnostic::Severity;
 
@@ -116,10 +114,15 @@ impl FeatureGate {
     }
 }
 
-/// How a rule is invoked. Most rules need only the CST; resolution-based rules additionally take
-/// the file-local name resolution, which the library computes at most once per lint (or takes from
-/// [`crate::LintRequest::resolved`]) and shares across every [`Checker::Resolved`] /
-/// [`Checker::Indexed`] rule.
+/// How a rule is invoked, and — because the driver reads it before calling — what a rule is
+/// allowed to make the library compute.
+///
+/// A [`Syntactic`](Checker::Syntactic) rule costs nothing beyond the walk. An
+/// [`Analyzed`](Checker::Analyzed) one takes the file's [`FileAnalysis`], which the library
+/// computes at most once per lint (or takes from [`crate::LintRequest::file`]) and shares. A
+/// [`Semantic`](Checker::Semantic) one additionally receives the project binding, and is therefore
+/// the only kind that can reach [`FileSemantics::typed`](jals_hir::FileSemantics::typed) — so the
+/// variant is what keeps a resolution-only rule from paying for type inference.
 ///
 /// Rule bodies are `async` (their walks tick cooperatively), so each checker is a plain `fn`
 /// pointer returning the boxed future — one box per rule per file, at the table edge.
@@ -127,16 +130,17 @@ impl FeatureGate {
 pub(crate) enum Checker {
     /// A pure syntactic rule: given the CST root, return every finding.
     Syntactic(for<'a> fn(&'a SyntaxNode) -> LocalBoxFuture<'a, Vec<Finding>>),
-    /// A rule that also consumes `jals-hir` file-local name resolution.
-    Resolved(for<'a> fn(&'a SyntaxNode, &'a Resolved) -> LocalBoxFuture<'a, Vec<Finding>>),
-    /// A rule that, in addition to name resolution, may resolve reference types against a
-    /// project-wide symbol index when the caller supplies one ([`IndexCtx`]); with no index it
-    /// falls back to the file-local behavior. The basis for cross-file type checking.
-    Indexed(
+    /// A rule over the file's own analysis: its name resolution, and the analyses that need no
+    /// project. The root comes with it, so this takes one argument rather than two.
+    Analyzed(for<'a> fn(&'a FileAnalysis) -> LocalBoxFuture<'a, Vec<Finding>>),
+    /// A rule that additionally reads the project when the caller supplied one: it resolves
+    /// reference types across files and may run type inference. With `None` it either reports
+    /// nothing (`cannot-resolve`, `unreported-exception`) or falls back to the file-local analysis
+    /// (`type-mismatch`). The basis for cross-file type checking.
+    Semantic(
         for<'a> fn(
-            &'a SyntaxNode,
-            &'a Resolved,
-            Option<IndexCtx<'a>>,
+            &'a FileAnalysis,
+            Option<&'a FileSemantics<'a>>,
         ) -> LocalBoxFuture<'a, Vec<Finding>>,
     ),
     /// A syntactic rule gated on the project's language [`FeatureSet`](jals_config::FeatureSet): it
@@ -168,9 +172,9 @@ pub(crate) struct RuleMeta {
     ///
     /// The criterion is **findings derived from type inference**, which a half-parsed tree turns into
     /// noise: a recovered declaration gets a wrong type, and every value written into it then looks
-    /// incompatible. It is *not* "needs the project index" — the driver already withholds the index
-    /// from a broken parse, which silences every [`Checker::Indexed`] rule on its own — and it is
-    /// *not* "reads [`Resolved`]": `unused-local` and `constant-condition` do, but a missing
+    /// incompatible. It is *not* "needs the project index" — the driver already withholds the project
+    /// from a broken parse, which silences every [`Checker::Semantic`] rule on its own — and it is
+    /// *not* "reads the resolution": `unused-local` and `constant-condition` do, but a missing
     /// reference and a literal condition both survive recovery, so they keep reporting.
     ///
     /// Set on `type-mismatch` alone, the one rule that still reports without an index and so is not

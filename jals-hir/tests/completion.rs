@@ -1,7 +1,7 @@
 //! Tests for `jals_hir::ProjectIndex::member_completions`: anchoring on the `.` before the cursor,
 //! inferring the receiver, and enumerating its fields and methods (own and inherited) on a project type.
 
-use jals_hir::{Completion, DefKind, FileId, ProjectIndex, Resolved};
+use jals_hir::{Completion, DefKind, FileAnalysis, FileId, FileSemantics, ProjectIndex};
 use jals_syntax::SyntaxNode;
 
 /// Build an index over `sources`, place the cursor at the `$0` marker in `sources[file]` (removed
@@ -9,7 +9,7 @@ use jals_syntax::SyntaxNode;
 fn at(
     sources: &[&str],
     file: usize,
-    run: impl Fn(&SyntaxNode, &Resolved, &ProjectIndex, FileId, usize) -> Vec<Completion>,
+    run: impl Fn(&FileSemantics<'_>, usize) -> Vec<Completion>,
 ) -> Vec<Completion> {
     let mut texts: Vec<String> = sources.iter().map(ToString::to_string).collect();
     let offset = texts[file].find("$0").expect("a $0 cursor marker");
@@ -26,21 +26,21 @@ fn at(
         .collect();
     let index = jals_exec::block_on_inline(ProjectIndex::builder(&nodes).build());
     let (fid, root) = &nodes[file];
-    let resolved = jals_exec::block_on_inline(Resolved::resolve_node(root));
-    run(root, &resolved, &index, *fid, offset)
+    let analysis = jals_exec::block_on_inline(FileAnalysis::of(root));
+    run(&analysis.in_project(&index, *fid), offset)
 }
 
 /// Run member completion at the `$0` marker in `sources[file]`.
 fn complete(sources: &[&str], file: usize) -> Vec<Completion> {
-    at(sources, file, |root, resolved, index, file, offset| {
-        jals_exec::block_on_inline(index.member_completions(root, resolved, file, offset))
+    at(sources, file, |semantics, offset| {
+        jals_exec::block_on_inline(semantics.member_completions(offset))
     })
 }
 
 /// Run scope completion (a non-member-access position) at the `$0` marker in `sources[file]`.
 fn scope(sources: &[&str], file: usize) -> Vec<Completion> {
-    at(sources, file, |root, resolved, index, file, offset| {
-        jals_exec::block_on_inline(index.scope_completions(root, resolved, file, offset))
+    at(sources, file, |semantics, offset| {
+        jals_exec::block_on_inline(semantics.scope_completions(offset))
     })
 }
 
@@ -179,12 +179,13 @@ fn scope_offers_project_types_from_other_files() {
 fn at_member_access_distinguishes_the_two_contexts() {
     let src = "class C { void m(C c) { c. } }";
     let root = jals_exec::block_on_inline(jals_syntax::Parse::parse(src)).syntax();
+    let analysis = jals_exec::block_on_inline(FileAnalysis::of(&root));
     // Right after `c.`: a member-access position.
     let dot = src.find("c.").unwrap() + 2;
-    assert!(ProjectIndex::at_member_access(&root, dot));
+    assert!(analysis.at_member_access(dot));
     // Inside the method body but not after a dot: a scope position.
     let body = src.find("{ c").unwrap() + 1;
-    assert!(!ProjectIndex::at_member_access(&root, body));
+    assert!(!analysis.at_member_access(body));
 }
 
 #[test]
@@ -202,14 +203,10 @@ fn never_panics_on_broken_input() {
             jals_exec::block_on_inline(jals_syntax::Parse::parse(src)).syntax(),
         )];
         let index = jals_exec::block_on_inline(ProjectIndex::builder(&nodes).build());
-        let resolved = jals_exec::block_on_inline(Resolved::resolve_node(&nodes[0].1));
+        let analysis = jals_exec::block_on_inline(FileAnalysis::of(&nodes[0].1));
+        let semantics = analysis.in_project(&index, FileId(0));
         for offset in [0, src.len(), src.len().saturating_sub(1)] {
-            let _ = jals_exec::block_on_inline(index.member_completions(
-                &nodes[0].1,
-                &resolved,
-                FileId(0),
-                offset,
-            ));
+            let _ = jals_exec::block_on_inline(semantics.member_completions(offset));
         }
     }
 }

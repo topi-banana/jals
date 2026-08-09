@@ -17,9 +17,9 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use jals_hir::{FileId, ProjectIndex, Resolved, TypeInference};
+use jals_hir::{FileAnalysis, FileId, FileSemantics, ProjectIndex, TypedFile};
 use jals_javac::lower::Compile;
-use jals_javac::wasm::{CompileWasm, WasmInput};
+use jals_javac::wasm::CompileWasm;
 use jals_storage::{ContentDigest, ProvenanceFold, RelativePath};
 use jals_syntax::{Parse, SyntaxNode};
 
@@ -97,15 +97,27 @@ impl JalsBackend {
             return BackendOutcome::failed(messages);
         }
 
+        // Each file's own analysis first: it needs no index, so it is the half that could be
+        // computed before one exists.
+        let mut analyses: Vec<FileAnalysis> = Vec::with_capacity(roots.len());
+        for (_, root) in &roots {
+            analyses.push(FileAnalysis::of(root).await);
+        }
+
         // The stdlib stubs stand in for `java.base`: the JVM supplies the implementations at run
         // time, so a compile only ever needs the signatures.
         let index = ProjectIndex::builder(&roots).with_stdlib().build().await;
 
-        let mut analyses: Vec<(Resolved, TypeInference)> = Vec::with_capacity(roots.len());
-        for (file, root) in &roots {
-            let resolved = Resolved::resolve_node(root).await;
-            let inference = TypeInference::infer(root, &resolved, &index, *file).await;
-            analyses.push((resolved, inference));
+        // Bind each analysis to the index, then force the inference. The bindings must outlive the
+        // witnesses that borrow their memo cells, so both vectors are held for the whole compile.
+        let semantics: Vec<FileSemantics<'_>> = roots
+            .iter()
+            .zip(&analyses)
+            .map(|((file, _), analysis)| analysis.in_project(&index, *file))
+            .collect();
+        let mut typed_files: Vec<TypedFile<'_>> = Vec::with_capacity(semantics.len());
+        for binding in &semantics {
+            typed_files.push(binding.typed().await);
         }
 
         let class_version = match self.target {
@@ -113,17 +125,7 @@ impl JalsBackend {
             // wasm has no dynamic loading and no classpath, so the whole project is one module
             // rather than one artifact per declared type.
             Target::Wasm => {
-                let inputs: Vec<WasmInput<'_>> = roots
-                    .iter()
-                    .zip(&analyses)
-                    .map(|((file, root), (resolved, inference))| WasmInput {
-                        file: *file,
-                        root,
-                        resolved,
-                        inference,
-                    })
-                    .collect();
-                return match CompileWasm::project(&inputs, &index) {
+                return match CompileWasm::project(&typed_files, &index) {
                     Ok(module) => match RelativePath::parse("project.wasm") {
                         Ok(path) => BackendOutcome::compiled(alloc::vec![(path, module)]),
                         Err(error) => BackendOutcome::failed(alloc::vec![format!("{error:?}")]),
@@ -134,10 +136,8 @@ impl JalsBackend {
         };
 
         let mut classes = Vec::new();
-        for (((file, root), source), (resolved, inference)) in
-            roots.iter().zip(request.tree).zip(&analyses)
-        {
-            match Compile::file(root, resolved, inference, &index, *file, class_version) {
+        for (source, typed) in request.tree.iter().zip(&typed_files) {
+            match Compile::file(*typed, class_version) {
                 Ok(compiled) => {
                     for class in compiled {
                         // A type's internal name is also its output path, `/` separators and all.

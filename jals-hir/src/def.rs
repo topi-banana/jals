@@ -5,9 +5,10 @@ use core::ops::Range;
 
 use crate::scope::ScopeId;
 
-/// A stable, dense identifier for a [`Def`] within one [`Resolved`](crate::Resolved) file.
+/// A stable, dense identifier for a [`Def`] within one analysed file.
 ///
-/// It indexes [`Resolved::defs`](crate::Resolved::defs) and is stable for that value's lifetime.
+/// It indexes [`FileAnalysis::defs`](crate::FileAnalysis::defs) and is stable for that value's
+/// lifetime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DefId(pub(crate) u32);
 

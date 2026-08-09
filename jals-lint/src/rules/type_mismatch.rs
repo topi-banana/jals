@@ -14,11 +14,12 @@
 
 use alloc::vec::Vec;
 
-use jals_exec::LocalBoxFuture;
-use jals_hir::Resolved;
-use jals_syntax::SyntaxNode;
+use alloc::format;
+use alloc::string::ToString;
 
-use crate::IndexCtx;
+use jals_exec::LocalBoxFuture;
+use jals_hir::{FileAnalysis, FileSemantics, MismatchKind};
+
 use crate::diagnostic::Severity;
 use crate::rules::{Checker, Finding, RuleMeta};
 
@@ -27,7 +28,7 @@ pub(crate) const RULE: RuleMeta = RuleMeta {
     default: Severity::Warn,
     // Every finding here comes from type inference; see `RuleMeta::needs_clean_parse`.
     needs_clean_parse: true,
-    check: Checker::Indexed(TypeMismatch::check),
+    check: Checker::Semantic(TypeMismatch::check),
 };
 
 /// The `type-mismatch` rule.
@@ -36,23 +37,38 @@ struct TypeMismatch;
 impl TypeMismatch {
     /// The table-edge shim: boxes the async rule body once per file.
     fn check<'a>(
-        root: &'a SyntaxNode,
-        resolved: &'a Resolved,
-        index: Option<IndexCtx<'a>>,
+        analysis: &'a FileAnalysis,
+        project: Option<&'a FileSemantics<'a>>,
     ) -> LocalBoxFuture<'a, Vec<Finding>> {
-        alloc::boxed::Box::pin(Self::check_impl(root, resolved, index))
+        alloc::boxed::Box::pin(Self::check_impl(analysis, project))
     }
 
     async fn check_impl(
-        root: &SyntaxNode,
-        resolved: &Resolved,
-        index: Option<IndexCtx<'_>>,
+        analysis: &FileAnalysis,
+        project: Option<&FileSemantics<'_>>,
     ) -> Vec<Finding> {
-        jals_hir::TypeInference::type_mismatches(root, resolved, index)
-            .await
+        // The only rule with a real answer either way: with a project it also sees cross-file
+        // subtyping and call arguments, without one it still catches the primitive half.
+        let mismatches = match project {
+            Some(semantics) => semantics.type_mismatches().await,
+            None => analysis.type_mismatches().await,
+        };
+        mismatches
             .into_iter()
             .map(|m| Finding {
-                message: m.message(),
+                message: match m.kind() {
+                    MismatchKind::Assignment { expected, found } => {
+                        format!("incompatible types: `{found}` cannot be assigned to `{expected}`")
+                    }
+                    MismatchKind::NoOverload { name, args } => {
+                        let list = args
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        format!("no overload of `{name}` accepts the argument types ({list})")
+                    }
+                },
                 range: m.range,
                 ..Finding::default()
             })

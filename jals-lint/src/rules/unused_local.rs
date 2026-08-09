@@ -12,8 +12,7 @@ use alloc::format;
 use alloc::vec::Vec;
 
 use jals_exec::{LocalBoxFuture, Yielder};
-use jals_hir::{DefKind, Resolved};
-use jals_syntax::SyntaxNode;
+use jals_hir::{DefKind, FileAnalysis};
 
 use crate::diagnostic::Severity;
 use crate::rules::{Checker, Finding, RuleMeta};
@@ -22,7 +21,7 @@ pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "unused-local",
     default: Severity::Warn,
     needs_clean_parse: false,
-    check: Checker::Resolved(UnusedLocal::check),
+    check: Checker::Analyzed(UnusedLocal::check),
 };
 
 /// The `unused-local` rule.
@@ -30,14 +29,14 @@ struct UnusedLocal;
 
 impl UnusedLocal {
     /// The table-edge shim: boxes the async rule body once per file.
-    fn check<'a>(root: &'a SyntaxNode, resolved: &'a Resolved) -> LocalBoxFuture<'a, Vec<Finding>> {
-        alloc::boxed::Box::pin(Self::check_impl(root, resolved))
+    fn check(analysis: &FileAnalysis) -> LocalBoxFuture<'_, Vec<Finding>> {
+        alloc::boxed::Box::pin(Self::check_impl(analysis))
     }
 
-    async fn check_impl(_root: &SyntaxNode, resolved: &Resolved) -> Vec<Finding> {
+    async fn check_impl(analysis: &FileAnalysis) -> Vec<Finding> {
         let mut yielder = Yielder::new();
         let mut out = Vec::new();
-        for def in resolved.unused_defs() {
+        for def in analysis.unused_defs() {
             yielder.tick().await;
             let what = match def.kind {
                 DefKind::Local => "local variable",
