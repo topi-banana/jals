@@ -341,5 +341,21 @@ wrong (see the job's comment in `.github/workflows/ci.yml`). The three host plat
   or a temporary directory reached through a symlink (macOS `/var` → `/private/var`, so compare
   canonicalized paths).
 
+Every project under `examples/` is a CI cell of its own (`example (<name>)`), running what its README
+tells a reader to run: `jals build`, then `jals fmt --check` and `jals lint` over the example's
+**tracked** `.java` files. Tracked is what separates authored source from published output — a build
+script's publication into a source root is untracked by construction (that is what each example's
+`.gitignore` reserves), so the gate never scores a decompiled skeleton as something someone wrote.
+Two consequences for an example:
+
+- A `tasks.project_jar` example needs its JAR, and a JAR is a binary, so none is committed:
+  `examples/scripts/gen-vendor-jars.sh` writes the two the `task_dependency` and
+  `task_source_archive` examples read, and CI runs it before every cell.
+- `minecraft` is the one example whose `jals build` is *not* required to succeed, because its
+  published skeleton tree is documented not to compile (`examples/minecraft/README.md`
+  §Compile-safety). That cell asserts the pipeline instead — fetch → nested extract → remap →
+  decompile → publish — by requiring all three publication roots to come out non-empty, which is a
+  statement only a run that reached the last step can make.
+
 Run `cargo run -p xtask -- codegen` after changing `jals-syntax/java.ungram`, and commit generated
 AST changes with the grammar change.
