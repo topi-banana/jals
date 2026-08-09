@@ -188,8 +188,10 @@ impl<'a> FileSemantics<'a> {
         self.file
     }
 
-    /// The `SOURCE_FILE` node, for a caller that has only the binding.
-    pub const fn root(&self) -> &'a SyntaxNode {
+    /// The `SOURCE_FILE` node, for a caller that has only the binding. Crate-internal: outside the
+    /// crate the same node is reached through [`analysis`](Self::analysis), and every analysis that
+    /// needs the tree *and* the project lives in here.
+    pub(crate) const fn root(&self) -> &'a SyntaxNode {
         self.analysis.root()
     }
 

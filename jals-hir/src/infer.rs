@@ -247,7 +247,7 @@ impl TypeInference {
     /// conclude (argument checking and project subtyping need the member model), never how the
     /// types were inferred — that is already settled by which inference `self` is. Pure; never
     /// panics.
-    pub(crate) async fn mismatches(
+    async fn mismatches(
         &self,
         root: &SyntaxNode,
         resolved: &Resolved,
@@ -1917,7 +1917,7 @@ impl crate::analysis::FileSemantics<'_> {
 impl ProjectIndex {
     /// Renders one member's signature as `name(type1 p1, type2 p2)`, recording each parameter's byte
     /// range within the label. A parameter with no readable name is rendered as its type alone.
-    pub(crate) fn render_signature(&self, member: &crate::Member) -> Signature {
+    fn render_signature(&self, member: &crate::Member) -> Signature {
         let mut label = String::new();
         label.push_str(&member.name);
         label.push('(');
@@ -2036,7 +2036,7 @@ impl ProjectIndex {
     /// Builds a [`Completion`] for `member`: a field's detail is its type; a method's is its parameter
     /// list and return type (`(int w, int h): int`), reusing
     /// [`render_signature`](ProjectIndex::render_signature) for the parameters.
-    pub(crate) fn completion_of(&self, member: &crate::Member) -> Completion {
+    fn completion_of(&self, member: &crate::Member) -> Completion {
         let detail = match member.kind {
             DefKind::Method => {
                 let signature = self.render_signature(member);
@@ -2192,7 +2192,7 @@ impl Cst {
     /// The `.` of the member access at byte `offset`, if the cursor is in one: the `.` token itself
     /// for `receiver.|`, or the `.` before a partially-typed member name for `receiver.fo|`. The
     /// anchor both member completion and
-    /// [`ProjectIndex::at_member_access`] are built on.
+    /// [`FileAnalysis::at_member_access`](crate::FileAnalysis::at_member_access) are built on.
     fn member_access_dot(root: &SyntaxNode, offset: usize) -> Option<SyntaxToken> {
         let token = Self::token_left_of(root, offset)?;
         match token.kind() {

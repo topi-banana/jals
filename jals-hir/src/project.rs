@@ -1342,7 +1342,7 @@ impl ProjectIndex {
     /// The cross-file go-to-definition target for the reference covering byte `offset` in `file`,
     /// given that file's resolution: a file-local definition if there is one, otherwise the
     /// project type the reference names. Returns the target file and the name's byte range.
-    pub(crate) fn definition_at(
+    fn definition_at(
         &self,
         file: FileId,
         resolved: &Resolved,
