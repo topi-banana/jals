@@ -159,6 +159,46 @@ impl<'a> Facts<'a> {
         Self::has_keyword(node, SyntaxKind::THIS_KW)
     }
 
+    /// Whether a declaration's modifiers carry `keyword`.
+    ///
+    /// Distinct from [`has_keyword`](Self::has_keyword), which reads the node's *own* tokens: a
+    /// declaration's modifiers live in a `MODIFIERS` child, so `static` on an initialiser block is
+    /// inside one rather than on the block.
+    ///
+    /// Every `MODIFIERS` child is read, not the first. The JVM backend used `.find` and the wasm one
+    /// `.filter(…).flat_map(…)`, so the two answered differently for a declaration the parser gave
+    /// more than one — and reading all of them can only ever be the superset.
+    pub(crate) fn has_modifier(node: &SyntaxNode, keyword: SyntaxKind) -> bool {
+        node.children()
+            .filter(|child| child.kind() == SyntaxKind::MODIFIERS)
+            .flat_map(|modifiers| modifiers.children_with_tokens())
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .any(|token| token.kind() == keyword)
+    }
+
+    /// Whether a type declaration sits directly inside another type's body.
+    pub(crate) fn is_nested(node: &SyntaxNode) -> bool {
+        node.parent()
+            .is_some_and(|parent| parent.kind() == SyntaxKind::CLASS_BODY)
+    }
+
+    /// Whether a class declaration is a non-`static` nested one — an *inner* class.
+    ///
+    /// A nested interface, `@interface`, `enum`, and `record` are implicitly `static` and hold no
+    /// enclosing instance, so only a nested *class* can be one. An inner class holds its enclosing
+    /// instance in a synthetic field and every constructor takes it as an extra first parameter, so
+    /// a backend that answers this differently from the other emits constructors one parameter
+    /// short — a `NoSuchMethodError` at the first `new`, not a missing convenience.
+    ///
+    /// Pure CST, deliberately: the JVM backend additionally asks the index whether the item is a
+    /// `DefKind::Class`, and folding an index lookup in here would make one caller's extra
+    /// precondition part of the shared answer.
+    pub(crate) fn is_inner_class(node: &SyntaxNode) -> bool {
+        node.kind() == SyntaxKind::CLASS_DECL
+            && Self::is_nested(node)
+            && !Self::has_modifier(node, SyntaxKind::STATIC_KW)
+    }
+
     /// A body's explicit constructor invocation — a bare `this(…)` or `super(…)`.
     ///
     /// JLS §8.8.7 puts it first or nowhere, so only the first statement is examined. Only the bare

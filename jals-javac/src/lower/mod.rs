@@ -294,12 +294,6 @@ impl Compile {
         Ok(out)
     }
 
-    /// Whether `node` is a type declaration nested directly inside another type's body.
-    fn is_nested(node: &SyntaxNode) -> bool {
-        node.parent()
-            .is_some_and(|parent| ast::ClassBody::cast(parent).is_some())
-    }
-
     /// Compile one type declaration.
     fn class(
         node: &SyntaxNode,
@@ -315,8 +309,7 @@ impl Compile {
         // A nested interface, `@interface`, and `enum` are implicitly `static` and hold no enclosing
         // instance, so only a nested *class* can be an inner one. One that is holds its enclosing
         // instance in a synthetic field, and every constructor takes it as an extra first parameter.
-        let encloses = (Self::is_nested(node)
-            && !Self::has_modifier(node, jals_syntax::SyntaxKind::STATIC_KW)
+        let encloses = (Facts::is_inner_class(node)
             && matches!(index.item(item).kind, DefKind::Class))
         .then(|| Self::enclosing_name(node, index, file))
         .transpose()?;
@@ -350,12 +343,7 @@ impl Compile {
         let this_class = pool.class_index(&internal_name).ok_or(AsmError::PoolFull)?;
         // Only a project-internal supertype can be named here; anything else is `Object`, which is
         // also the right answer for a class with no `extends` clause at all.
-        let super_item = index
-            .item(item)
-            .supertypes
-            .iter()
-            .map(|supertype| supertype.id)
-            .find(|&id| index.item(id).kind != DefKind::Interface);
+        let super_item = Hierarchy::of(index).superclass(item);
         // An `enum`'s supertype is `java.lang.Enum` and the source never writes it, so there is no
         // `extends` clause for the index to have recorded.
         let super_name = if is_enum {
@@ -649,7 +637,7 @@ impl Compile {
                 flags |= ClassAccessFlags::FINAL;
             } else if members.iter().any(|member| {
                 member.kind() == METHOD_DECL
-                    && Self::has_modifier(member, jals_syntax::SyntaxKind::ABSTRACT_KW)
+                    && Facts::has_modifier(member, jals_syntax::SyntaxKind::ABSTRACT_KW)
             }) {
                 // A constant body may implement an `abstract` member, which the enum itself does not.
                 flags |= ClassAccessFlags::ABSTRACT;
@@ -699,7 +687,7 @@ impl Compile {
             })
             .collect();
         nested.extend(inner);
-        if Self::is_nested(node) {
+        if Facts::is_nested(node) {
             nested.push(node);
         }
         if nested.is_empty() {
@@ -751,7 +739,7 @@ impl Compile {
             let mut flags = Self::class_flags(declaration, is_interface, is_annotation)
                 & !ClassAccessFlags::SUPER;
             flags |= Self::access_level(declaration);
-            if Self::has_modifier(declaration, jals_syntax::SyntaxKind::STATIC_KW) {
+            if Facts::has_modifier(declaration, jals_syntax::SyntaxKind::STATIC_KW) {
                 // `ClassAccessFlags` has no `STATIC`, because a *class* file cannot be static — only
                 // an `InnerClasses` entry records it (JVMS §4.7.6, `ACC_STATIC` = 0x0008).
                 flags |= MethodAccessFlags::STATIC;
@@ -783,11 +771,11 @@ impl Compile {
     /// three.
     fn access_level(node: &SyntaxNode) -> u16 {
         use jals_syntax::SyntaxKind::{PRIVATE_KW, PROTECTED_KW, PUBLIC_KW};
-        if Self::has_modifier(node, PRIVATE_KW) {
+        if Facts::has_modifier(node, PRIVATE_KW) {
             MethodAccessFlags::PRIVATE
-        } else if Self::has_modifier(node, PROTECTED_KW) {
+        } else if Facts::has_modifier(node, PROTECTED_KW) {
             MethodAccessFlags::PROTECTED
-        } else if Self::has_modifier(node, PUBLIC_KW) {
+        } else if Facts::has_modifier(node, PUBLIC_KW) {
             MethodAccessFlags::PUBLIC
         } else {
             0
@@ -809,10 +797,10 @@ impl Compile {
             // wants it, and the JVM ignores it from version 52 on.
             flags |= ClassAccessFlags::SUPER;
         }
-        if Self::has_modifier(node, jals_syntax::SyntaxKind::FINAL_KW) {
+        if Facts::has_modifier(node, jals_syntax::SyntaxKind::FINAL_KW) {
             flags |= ClassAccessFlags::FINAL;
         }
-        if !is_interface && Self::has_modifier(node, jals_syntax::SyntaxKind::ABSTRACT_KW) {
+        if !is_interface && Facts::has_modifier(node, jals_syntax::SyntaxKind::ABSTRACT_KW) {
             flags |= ClassAccessFlags::ABSTRACT;
         }
         flags
@@ -1232,8 +1220,8 @@ impl Compile {
             return out;
         };
         for declaration in root.descendants().filter(|n| n.kind() == CLASS_DECL) {
-            if !Self::is_nested(&declaration)
-                || Self::has_modifier(&declaration, jals_syntax::SyntaxKind::STATIC_KW)
+            if !Facts::is_nested(&declaration)
+                || Facts::has_modifier(&declaration, jals_syntax::SyntaxKind::STATIC_KW)
             {
                 continue;
             }
@@ -1406,17 +1394,6 @@ impl Compile {
     }
 
     /// Whether a declaration's `MODIFIERS` child carries `keyword`.
-    fn has_modifier(node: &SyntaxNode, keyword: jals_syntax::SyntaxKind) -> bool {
-        node.children()
-            .find(|child| child.kind() == jals_syntax::SyntaxKind::MODIFIERS)
-            .is_some_and(|modifiers| {
-                modifiers
-                    .children_with_tokens()
-                    .filter_map(jals_syntax::SyntaxElement::into_token)
-                    .any(|token| token.kind() == keyword)
-            })
-    }
-
     /// A method's or constructor's access flags.
     ///
     /// `in_interface` supplies the level JLS §9.4 leaves unwritten: an interface method with no
@@ -1444,7 +1421,7 @@ impl Compile {
             (SYNCHRONIZED_KW, MethodAccessFlags::SYNCHRONIZED),
             (NATIVE_KW, MethodAccessFlags::NATIVE),
         ] {
-            if Self::has_modifier(node, keyword) {
+            if Facts::has_modifier(node, keyword) {
                 flags |= bit;
             }
         }
@@ -1471,7 +1448,7 @@ impl Compile {
             (TRANSIENT_KW, FieldAccessFlags::TRANSIENT),
             (VOLATILE_KW, FieldAccessFlags::VOLATILE),
         ] {
-            if Self::has_modifier(node, keyword) {
+            if Facts::has_modifier(node, keyword) {
                 flags |= bit;
             }
         }
@@ -1621,7 +1598,7 @@ impl Compile {
         // (JLS §9.4). Anything else with no body is a declaration the JVM would refuse.
         let flags = if decl.body().is_none() && flags & MethodAccessFlags::NATIVE == 0 {
             if context.in_interface
-                || Self::has_modifier(node, jals_syntax::SyntaxKind::ABSTRACT_KW)
+                || Facts::has_modifier(node, jals_syntax::SyntaxKind::ABSTRACT_KW)
             {
                 flags | MethodAccessFlags::ABSTRACT
             } else {
@@ -3057,11 +3034,11 @@ impl Compile {
             // An interface field is implicitly `static` (JLS §9.3), so it is written without the
             // keyword and still runs in `<clinit>`.
             FIELD_DECL => {
-                (Self::has_modifier(member, STATIC_KW) || in_interface) == statics
+                (Facts::has_modifier(member, STATIC_KW) || in_interface) == statics
                     && ast::FieldDecl::cast(member.clone())
                         .is_some_and(|decl| decl.value().is_some())
             }
-            INITIALIZER => Self::has_modifier(member, STATIC_KW) == statics,
+            INITIALIZER => Facts::has_modifier(member, STATIC_KW) == statics,
             _ => false,
         }
     }
@@ -3293,14 +3270,7 @@ impl Context<'_> {
                     args: Vec::new(),
                 });
             }
-            let Some(next) = self
-                .index
-                .item(candidate)
-                .supertypes
-                .iter()
-                .map(|supertype| supertype.id)
-                .find(|&id| self.index.item(id).kind != DefKind::Interface)
-            else {
+            let Some(next) = Hierarchy::of(self.index).superclass(candidate) else {
                 return throwable();
             };
             candidate = next;

@@ -46,7 +46,7 @@ use jals_hir::{DefId, DefKind, ItemId, MemberId, Primitive, ProjectIndex, Ty, Ty
 use jals_syntax::SyntaxKind::{
     ANNOTATION_TYPE_DECL, CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL, ENUM_BODY, ENUM_CONSTANT,
     ENUM_DECL, FIELD_DECL, INITIALIZER, INTERFACE_DECL, LAMBDA_EXPR, METHOD_DECL, METHOD_REF_EXPR,
-    MODIFIERS, NEW_EXPR, RECORD_DECL,
+    NEW_EXPR, RECORD_DECL,
 };
 use jals_syntax::ast::{self, AstNode as _};
 use jals_syntax::{SyntaxNode, SyntaxToken};
@@ -173,7 +173,7 @@ impl CompileWasm {
         // after *its* own — so a subclass would place its first field on top of it. Reported rather than
         // laid out wrong.
         for &item in &classes {
-            if let Some(parent) = Self::superclass(item, index)
+            if let Some(parent) = Hierarchy::of(index).superclass(item)
                 && layout.inner.contains_key(&parent)
             {
                 return Err(WasmError::Unsupported("a subclass of an inner class"));
@@ -584,12 +584,7 @@ impl CompileWasm {
         let mut out = Vec::new();
         for node in root.descendants() {
             if node.kind() != INITIALIZER
-                || !node
-                    .children()
-                    .filter(|child| child.kind() == MODIFIERS)
-                    .flat_map(|modifiers| modifiers.children_with_tokens())
-                    .filter_map(jals_syntax::SyntaxElement::into_token)
-                    .any(|token| token.kind() == jals_syntax::SyntaxKind::STATIC_KW)
+                || !Facts::has_modifier(&node, jals_syntax::SyntaxKind::STATIC_KW)
             {
                 continue;
             }
@@ -658,7 +653,7 @@ impl CompileWasm {
                     captures.push((item, captured));
                 }
                 bodies.push((item, node.clone()));
-                if Self::is_inner(&node) {
+                if Facts::is_inner_class(&node) {
                     let enclosing = node.parent().and_then(|body| body.parent()).ok_or(
                         WasmError::Unsupported("an inner class with no enclosing type"),
                     )?;
@@ -746,25 +741,6 @@ impl CompileWasm {
             .map(Some)
     }
 
-    /// Whether a class declaration is a non-`static` nested one.
-    fn is_inner(node: &SyntaxNode) -> bool {
-        // A nested interface, `enum`, `record`, and `@interface` are all implicitly `static` and hold no
-        // enclosing instance, so only a nested *class* can be an inner one.
-        if node.kind() != CLASS_DECL {
-            return false;
-        }
-        let nested = node
-            .parent()
-            .is_some_and(|parent| parent.kind() == jals_syntax::SyntaxKind::CLASS_BODY);
-        nested
-            && !node
-                .children()
-                .filter(|child| child.kind() == MODIFIERS)
-                .flat_map(|modifiers| modifiers.children_with_tokens())
-                .filter_map(jals_syntax::SyntaxElement::into_token)
-                .any(|token| token.kind() == jals_syntax::SyntaxKind::STATIC_KW)
-    }
-
     fn push_with_supertypes(
         item: ItemId,
         index: &ProjectIndex,
@@ -774,30 +750,12 @@ impl CompileWasm {
         if ordered.contains(&item) {
             return;
         }
-        if let Some(parent) = Self::superclass(item, index)
+        if let Some(parent) = Hierarchy::of(index).superclass(item)
             && declared.contains(&parent)
         {
             Self::push_with_supertypes(parent, index, declared, ordered);
         }
         ordered.push(item);
-    }
-
-    /// The class a type extends, when that class is itself indexed.
-    fn superclass(item: ItemId, index: &ProjectIndex) -> Option<ItemId> {
-        index
-            .item(item)
-            .supertypes
-            .iter()
-            .map(|supertype| supertype.id)
-            // An `enum` counts: a constant with a body is a subclass of one, and it is the only way a
-            // declaration that is not a `class` ever appears here. Its struct has to hold the enum's
-            // fields, which is what makes the layout inherit and the subtyping declared.
-            .find(|&id| {
-                matches!(
-                    index.item(id).kind,
-                    DefKind::Class | DefKind::Enum | DefKind::Record
-                )
-            })
     }
 
     /// Register every method and constructor `input` declares.
@@ -1048,8 +1006,9 @@ impl Layout {
         if self.structs.contains_key(&item) {
             return;
         }
-        let parent =
-            CompileWasm::superclass(item, index).filter(|id| self.structs.contains_key(id));
+        let parent = Hierarchy::of(index)
+            .superclass(item)
+            .filter(|id| self.structs.contains_key(id));
         let mut members: Vec<MemberId> = parent
             .and_then(|id| self.fields.get(&id))
             .cloned()
@@ -1107,8 +1066,9 @@ impl Layout {
                 });
             }
         }
-        let parent =
-            CompileWasm::superclass(item, index).and_then(|id| self.structs.get(&id).copied());
+        let parent = Hierarchy::of(index)
+            .superclass(item)
+            .and_then(|id| self.structs.get(&id).copied());
         module.set_type(
             type_index,
             SubType {
@@ -1472,7 +1432,8 @@ impl Body {
             // a subclass whose *constant site* calls the enum's constructor, that being the one place
             // the constant's arguments exist — calling it here too would run the enum's twice, and the
             // no-argument one at that, which is a different constructor from the one selected.
-            let under_enum = CompileWasm::superclass(owner, index)
+            let under_enum = Hierarchy::of(index)
+                .superclass(owner)
                 .is_some_and(|parent| index.item(parent).kind == DefKind::Enum);
             if let Some(function) = Self::super_constructor(owner, index, layout)
                 && !under_enum
@@ -1719,7 +1680,7 @@ impl Body {
     /// `None` at a class whose declared constructors all take arguments: Java requires an explicit
     /// `super(…)` there, so there is nothing implicit to call, and the source wrote what to run.
     fn super_constructor(owner: ItemId, index: &ProjectIndex, layout: &Layout) -> Option<u32> {
-        let mut candidate = CompileWasm::superclass(owner, index);
+        let mut candidate = Hierarchy::of(index).superclass(owner);
         while let Some(item) = candidate {
             let mut declared = index
                 .own_members(item)
@@ -1735,7 +1696,7 @@ impl Body {
             if let Some(&function) = layout.default_constructors.get(&item) {
                 return Some(function);
             }
-            candidate = CompileWasm::superclass(item, index);
+            candidate = Hierarchy::of(index).superclass(item);
         }
         None
     }
@@ -1943,13 +1904,7 @@ impl Lowering<'_> {
                 // and this backend has no start function to run it in — so it is reported rather than
                 // run in every constructor, which would be a different program.
                 // A `static { … }` runs once in the module's start function, not per instance.
-                if node
-                    .children()
-                    .filter(|child| child.kind() == MODIFIERS)
-                    .flat_map(|modifiers| modifiers.children_with_tokens())
-                    .filter_map(jals_syntax::SyntaxElement::into_token)
-                    .any(|token| token.kind() == jals_syntax::SyntaxKind::STATIC_KW)
-                {
+                if Facts::has_modifier(&node, jals_syntax::SyntaxKind::STATIC_KW) {
                     continue;
                 }
                 if let Some(block) = node.children().find_map(ast::Block::cast) {
@@ -3469,27 +3424,8 @@ impl Lowering<'_> {
     /// chain, nearest first, which is the order that makes a shadowing field win. A struct holds its
     /// supertype's fields first, so the slot the inherited member lands in is the enclosing type's own.
     fn inherited_field(&self, node: &SyntaxNode) -> Option<MemberId> {
-        let name = node
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)?;
-        let mut candidate = self.owner;
-        while let Some(item) = candidate {
-            if let Some(member) = self
-                .index
-                .own_members(item)
-                .iter()
-                .copied()
-                .find(|&member| {
-                    let info = self.index.member(member);
-                    info.kind == DefKind::Field && info.name == name.text()
-                })
-            {
-                return Some(member);
-            }
-            candidate = CompileWasm::superclass(item, self.index);
-        }
-        None
+        let name = Facts::name_token(node)?;
+        Hierarchy::of(self.index).inherited_field(self.owner?, name.text())
     }
 
     /// `{1, 2, 3}`, whose elements are written rather than defaulted.

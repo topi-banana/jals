@@ -33,7 +33,7 @@ use jals_syntax::ast::{self, AstNode as _};
 use jals_syntax::{SyntaxKind, SyntaxNode};
 
 use crate::desc::{DescError, Descriptor};
-use crate::facts::{Facts, Literal};
+use crate::facts::{Facts, Hierarchy, Literal};
 use crate::jvm::{BinOp, Branch, Compare, Numeric};
 use crate::lower::place::Place;
 use crate::lower::{Context, Emit, LowerError, Result};
@@ -498,29 +498,7 @@ impl Expr {
     /// So a name that resolved to nothing is looked up by name on the enclosing type and then up the
     /// superclass chain, nearest first, which is the order that makes a shadowing field win.
     pub(crate) fn inherited_field(name: &str, context: &Context<'_>) -> Option<MemberId> {
-        let mut candidate = Some(context.this_item);
-        while let Some(item) = candidate {
-            if let Some(member) = context
-                .index
-                .own_members(item)
-                .iter()
-                .copied()
-                .find(|&member| {
-                    let info = context.index.member(member);
-                    info.kind == DefKind::Field && info.name == name
-                })
-            {
-                return Some(member);
-            }
-            candidate = context
-                .index
-                .item(item)
-                .supertypes
-                .iter()
-                .map(|supertype| supertype.id)
-                .find(|&id| context.index.item(id).kind != DefKind::Interface);
-        }
-        None
+        Hierarchy::of(context.index).inherited_field(context.this_item, name)
     }
 
     /// `receiver.name`: a field read, `static` or instance.

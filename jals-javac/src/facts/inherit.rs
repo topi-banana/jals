@@ -69,6 +69,62 @@ impl<'a> Hierarchy<'a> {
         Self { index }
     }
 
+    /// The one supertype that is a *superclass* — the `extends` a class file names, and the struct a
+    /// wasm layout inherits from.
+    ///
+    /// Three sites answered this three ways. Two asked which supertype is `kind != Interface`, one
+    /// asked which is `Class | Enum | Record`. The negative form is not the same question: an
+    /// `@interface` is [`DefKind::AnnotationType`], which the rest of this crate treats *as* an
+    /// interface, so the negative filter would follow one as a superclass. The positive form is the
+    /// rule, and it is stated here once.
+    ///
+    /// An `enum` counts: a constant with a body is a subclass of one, and it is the only way a
+    /// declaration that is not a `class` appears here at all.
+    pub(crate) fn superclass(self, item: ItemId) -> Option<ItemId> {
+        self.index
+            .item(item)
+            .supertypes
+            .iter()
+            .map(|supertype| supertype.id)
+            .find(|&id| {
+                matches!(
+                    self.index.item(id).kind,
+                    DefKind::Class | DefKind::Enum | DefKind::Record
+                )
+            })
+    }
+
+    /// The field `name` reaches from `from`, searched up the superclass chain, nearest first.
+    ///
+    /// File-local resolution binds a name to a declaration it can see, and a superclass's field is
+    /// not one of those — it may not even be in this file. Nearest-first is what makes a shadowing
+    /// field win, and it is also what the wasm struct layout relies on: a struct holds its
+    /// supertype's fields first, so the slot an inherited member lands in is the enclosing type's
+    /// own.
+    ///
+    /// Bounded by [`DEPTH`], which neither hand-written copy was: a malformed index whose supertype
+    /// chain cycles hung the compiler rather than reporting anything.
+    pub(crate) fn inherited_field(self, from: ItemId, name: &str) -> Option<MemberId> {
+        let mut candidate = Some(from);
+        for _ in 0..DEPTH {
+            let item = candidate?;
+            if let Some(member) = self
+                .index
+                .own_members(item)
+                .iter()
+                .copied()
+                .find(|&member| {
+                    let info = self.index.member(member);
+                    info.kind == DefKind::Field && info.name == name
+                })
+            {
+                return Some(member);
+            }
+            candidate = self.superclass(item);
+        }
+        None
+    }
+
     /// The one method a functional interface declares, or `None` when it declares none or several.
     pub(crate) fn functional_member(self, item: ItemId) -> Option<MemberId> {
         let mut methods = self
