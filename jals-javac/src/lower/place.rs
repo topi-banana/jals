@@ -16,6 +16,7 @@ use jals_hir::Ty;
 use jals_syntax::ast::{self, AstNode as _};
 
 use crate::desc::Descriptor;
+use crate::facts::Facts;
 use crate::jvm::Assembler;
 use crate::lower::expr::Expr;
 use crate::lower::{Context, Emit, LowerError, Result};
@@ -78,12 +79,12 @@ impl Place {
     /// A bare name: a local, or an unqualified field of the enclosing type.
     fn name(name: &ast::NameRef, context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<Self> {
         // `this = …` is not a Java program, and `this` is the one name with nothing to resolve.
-        if Expr::is_this(name.syntax()) {
+        if Facts::is_this(name.syntax()) {
             return Err(LowerError::Unsupported("an assignment to `this`"));
         }
         let written = name.syntax().text().to_string();
         let text = || LowerError::Unresolved(written.trim().into());
-        let member = match context.def_at(name.syntax()) {
+        let member = match context.facts().def_at(name.syntax()) {
             Some(id) => {
                 if let Some(slot) = emit.slots.slot_of(id) {
                     let ty = context.typed.type_of_def(id).clone();
@@ -129,7 +130,7 @@ impl Place {
     ) -> Result<Self> {
         let member = context
             .typed
-            .field_target_of(Context::span(access.syntax()))
+            .field_target_of(Facts::span(access.syntax()))
             .ok_or_else(|| LowerError::Unresolved(access.field().unwrap_or_default()))?;
         let (owner, name, descriptor) = Expr::field_ref(member, context)?;
         let ty = context.index.resolved_member_ty(member);

@@ -23,11 +23,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use jals_hir::{Primitive, Ty};
-use jals_syntax::SyntaxKind::{
-    CHAR_LITERAL, INT_LITERAL, MINUS, PLUS, RECORD_PATTERN, TYPE_PATTERN, UNNAMED_PATTERN,
-};
+use jals_syntax::SyntaxKind::{RECORD_PATTERN, TYPE_PATTERN, UNNAMED_PATTERN};
 use jals_syntax::ast::{self, AstNode as _};
 
+use crate::facts::CaseKey;
 use crate::jvm::{Branch, Compare, Label};
 use crate::lower::expr::Expr;
 use crate::lower::stmt::Stmt;
@@ -36,7 +35,7 @@ use crate::lower::{Context, Emit, LowerError, Result};
 /// One arm of a lowered `switch`: what it matches, and where its body is.
 struct Arm {
     /// The `case` keys that reach this arm, already evaluated. Empty for `default`.
-    keys: Vec<Key>,
+    keys: Vec<CaseKey>,
     /// The `case T t` patterns that reach this arm, in the order they are written.
     ///
     /// A pattern is not a constant, so it indexes no jump table: a `switch` with one dispatches by
@@ -48,15 +47,6 @@ struct Arm {
     is_default: bool,
     /// Where the arm's body begins.
     entry: Label,
-}
-
-/// A `case` label's value.
-#[derive(Clone, PartialEq, Eq)]
-enum Key {
-    /// An integral constant, which is what the jump table indexes on directly.
-    Int(i32),
-    /// A `String` constant, matched by hash and then by `equals`.
-    Text(String),
 }
 
 /// `switch` lowering.
@@ -115,12 +105,12 @@ impl Switch {
         let arms: Vec<Arm> = if rules.is_empty() {
             groups
                 .iter()
-                .map(|group| Self::arm(group.labels(), emit))
+                .map(|group| Self::arm(group.labels(), context, emit))
                 .collect::<Result<_>>()?
         } else {
             rules
                 .iter()
-                .map(|rule| Self::arm(rule.label().into_iter(), emit))
+                .map(|rule| Self::arm(rule.label().into_iter(), context, emit))
                 .collect::<Result<_>>()?
         };
         // A `switch` *expression* has to produce a value on every path, so an unmatched key cannot
@@ -160,7 +150,11 @@ impl Switch {
     }
 
     /// One arm's keys and entry label, from its `case` / `default` labels.
-    fn arm(labels: impl Iterator<Item = ast::SwitchLabel>, emit: &mut Emit<'_, '_>) -> Result<Arm> {
+    fn arm(
+        labels: impl Iterator<Item = ast::SwitchLabel>,
+        context: &Context<'_>,
+        emit: &mut Emit<'_, '_>,
+    ) -> Result<Arm> {
         let mut keys = Vec::new();
         let mut patterns = Vec::new();
         let mut guard = None;
@@ -185,7 +179,7 @@ impl Switch {
             // when there is no guard to have contributed one.
             if guard.is_none() {
                 for value in label.syntax().children().filter_map(ast::Expr::cast) {
-                    keys.push(Self::key(&value)?);
+                    keys.push(context.facts().case_key(&value)?);
                 }
             }
         }
@@ -215,7 +209,7 @@ impl Switch {
         let text = arms
             .iter()
             .flat_map(|arm| &arm.keys)
-            .any(|key| matches!(key, Key::Text(_)));
+            .any(|key| matches!(key, CaseKey::Text(_)));
         if text {
             return Self::dispatch_text(selector, arms, fallback, context, emit);
         }
@@ -287,7 +281,7 @@ impl Switch {
         let mut cases = Vec::new();
         for arm in arms {
             for key in &arm.keys {
-                let Key::Int(value) = key else {
+                let CaseKey::Int(value) = key else {
                     return Err(LowerError::Unsupported("a `switch` mixing key types"));
                 };
                 cases.push((*value, arm.entry));
@@ -319,7 +313,7 @@ impl Switch {
         let mut buckets: Vec<(i32, Vec<(String, Label)>)> = Vec::new();
         for arm in arms {
             for key in &arm.keys {
-                let Key::Text(text) = key else {
+                let CaseKey::Text(text) = key else {
                     return Err(LowerError::Unsupported("a `switch` mixing key types"));
                 };
                 let hash = Self::java_hash(text);
@@ -363,72 +357,6 @@ impl Switch {
         text.encode_utf16().fold(0i32, |hash, unit| {
             hash.wrapping_mul(31).wrapping_add(i32::from(unit))
         })
-    }
-
-    /// A `case` label's constant value.
-    fn key(value: &ast::Expr) -> Result<Key> {
-        match value {
-            ast::Expr::Paren(paren) => {
-                let inner = paren
-                    .expr()
-                    .ok_or(LowerError::Unsupported("a `case` with no value"))?;
-                Self::key(&inner)
-            }
-            ast::Expr::Unary(unary) => {
-                let operand = unary
-                    .operand()
-                    .ok_or(LowerError::Unsupported("a `case` with no value"))?;
-                let Key::Int(inner) = Self::key(&operand)? else {
-                    return Err(LowerError::Unsupported("a `case` this cannot evaluate"));
-                };
-                let signs: Vec<_> = unary
-                    .syntax()
-                    .children_with_tokens()
-                    .filter_map(jals_syntax::SyntaxElement::into_token)
-                    .map(|token| token.kind())
-                    .filter(|kind| !kind.is_trivia())
-                    .collect();
-                match signs.as_slice() {
-                    [PLUS] => Ok(Key::Int(inner)),
-                    [MINUS] => Ok(Key::Int(inner.wrapping_neg())),
-                    _ => Err(LowerError::Unsupported("a `case` this cannot evaluate")),
-                }
-            }
-            ast::Expr::Literal(literal) => Self::literal_key(literal),
-            // A name is a constant only if it is a `static final` with a constant initialiser, and
-            // resolving *that* means evaluating the initialiser of a member that may be in another
-            // file. An enum constant is not a value expression at all — it names an arm by identity.
-            _ => Err(LowerError::Unsupported("a non-literal `case`")),
-        }
-    }
-
-    /// A literal `case` label: an integer, a character, or a string.
-    fn literal_key(literal: &ast::Literal) -> Result<Key> {
-        use jals_syntax::SyntaxKind::STRING_LITERAL;
-        let token = literal
-            .syntax()
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .find(|token| !token.kind().is_trivia())
-            .ok_or(LowerError::Unsupported("a `case` with no value"))?;
-        match token.kind() {
-            INT_LITERAL => {
-                let value = Expr::integer_literal(token.text())?;
-                i32::try_from(value)
-                    .map(Key::Int)
-                    .map_err(|_| LowerError::Unsupported("a `case` outside an `int`"))
-            }
-            CHAR_LITERAL => {
-                let text = Expr::literal_text(token.text())?;
-                let character = text
-                    .chars()
-                    .next()
-                    .ok_or(LowerError::Unsupported("an empty character `case`"))?;
-                Ok(Key::Int(character as i32))
-            }
-            STRING_LITERAL => Ok(Key::Text(Expr::literal_text(token.text())?)),
-            _ => Err(LowerError::Unsupported("a `case` of this literal kind")),
-        }
     }
 
     /// The colon form, which falls through from one group into the next.

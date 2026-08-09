@@ -20,8 +20,14 @@
 //!
 //! # Layers
 //!
+//! - `facts` — the source facts both lowerings read: the span the inference memo is keyed on, the
+//!   definition a name binds to, the constant a `case` label names, whether one method overrides
+//!   another. Derived from the CST plus [`jals_hir`] and nothing else, so it names no instruction.
+//!   Crate-internal: it answers *about the source*, and a consumer wanting that should ask
+//!   [`jals_hir`] rather than reach through a compiler.
 //! - [`desc`] — erasure: a resolved [`jals_hir::Ty`] to the class file's internal names and
-//!   descriptors.
+//!   descriptors. The JVM backend's; the wasm one maps types through its own `Layout` and names
+//!   nothing here.
 //! - [`jvm`] — the JVM backend: a label-based assembler over `jals_classfile::Instruction` that
 //!   resolves branches, sizes the frame, and derives the `StackMapTable`.
 //! - [`lower`] — the compiler proper: a parsed source file plus its semantic index in, class files
@@ -43,6 +49,8 @@ extern crate alloc;
 /// Within one workspace build this moves only when the workspace version does, so it separates
 /// releases and not individual commits. That is the same granularity a `javac` version string has.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+mod facts;
 
 pub mod desc;
 pub mod jvm;

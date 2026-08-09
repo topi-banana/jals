@@ -4672,3 +4672,200 @@ public class Unwind {
 "#;
     assert_eq!(run(source, "Unwind"), "2\n0\n11\ncleanup\n3\n");
 }
+
+/// A `case` label is a constant *expression*, not just a literal with a sign.
+///
+/// The two backends used to evaluate labels separately and disagree: this one matched the unary
+/// operator token run exactly and read `+` / `-`, while the wasm one asked only whether a `MINUS`
+/// token was present — so `case ~5:`, whose value is `-6`, was rejected here and silently compiled
+/// as `5` there. Both now ask the same shared fact, which evaluates the whole of JLS §15.29.
+///
+/// Run on a real JVM because the point is the *value* that reaches the jump table: a wrong key
+/// produces a class file that verifies and then takes the wrong arm.
+#[test]
+fn a_case_label_is_a_folded_constant_expression() {
+    let source = r#"
+public class Fold {
+    static final int A = 1;
+    static final int B = 2;
+    static final int SHIFTED = 1 << 4;
+
+    static String pick(int n) {
+        switch (n) {
+            case ~5: return "tilde";
+            case 2 + 3: return "sum";
+            case SHIFTED: return "shift";
+            case A | B: return "or";
+            case (byte) 200: return "narrowed";
+            case 'a': return "char";
+            case -1 >>> 28: return "ushr";
+            case (1 > 0) ? 9 : 8: return "ternary";
+            default: return "none";
+        }
+    }
+
+    public static void main(String[] args) {
+        System.out.println(pick(-6));
+        System.out.println(pick(5));
+        System.out.println(pick(16));
+        System.out.println(pick(3));
+        System.out.println(pick(-56));
+        System.out.println(pick(97));
+        System.out.println(pick(15));
+        System.out.println(pick(9));
+        System.out.println(pick(0));
+    }
+}
+"#;
+    assert_eq!(
+        run(source, "Fold"),
+        "tilde\nsum\nshift\nor\nnarrowed\nchar\nushr\nternary\nnone\n"
+    );
+}
+
+/// A `String` `case` label may be a concatenation, and a `char` operand of one renders as its
+/// character rather than as its code — which is why the shared constant carries `char` as its own
+/// kind instead of promoting it to `int` on the way in.
+#[test]
+fn a_string_case_label_folds_a_concatenation() {
+    let source = r#"
+public class Joined {
+    static int pick(String s) {
+        switch (s) {
+            case "a" + "b": return 1;
+            case 'c' + "d": return 2;
+            default: return 0;
+        }
+    }
+
+    public static void main(String[] args) {
+        System.out.println(pick("ab") + pick("cd") + pick("zz"));
+    }
+}
+"#;
+    assert_eq!(run(source, "Joined"), "3\n");
+}
+
+/// A name that is not a *constant variable* is still no constant: `final` is what makes one, and a
+/// declaration this cannot read — another file's — is reported rather than guessed at.
+#[test]
+fn a_case_label_that_is_no_constant_is_still_reported() {
+    for (source, expected) in [
+        // Not `final`, so its value may change before the switch runs.
+        (
+            "int k = 1; switch (args.length) { case k: break; }",
+            "a non-literal `case`",
+        ),
+        // `--` is its own token, so this is a prefix decrement and not a double negation. The wasm
+        // backend used to read the `MINUS` inside it and compile the label as `5`.
+        (
+            "switch (args.length) { case --5: break; }",
+            "a `case` this cannot evaluate",
+        ),
+        // Division by zero is not a constant expression at all.
+        (
+            "switch (args.length) { case 1 / 0: break; }",
+            "a constant division by zero",
+        ),
+    ] {
+        let program = format!(
+            r"
+public class NotConst {{
+    public static void main(String[] args) {{
+        {source}
+    }}
+}}
+"
+        );
+        let error = compile(&program).expect_err("this case label is no constant");
+        assert!(
+            matches!(error, LowerError::Unsupported(what) if what == expected),
+            "`{source}` should report {expected:?}, got {error}"
+        );
+    }
+}
+
+/// A constant that refers to itself, directly or through another, terminates rather than recursing
+/// until the stack runs out.
+#[test]
+fn a_cyclic_constant_terminates() {
+    let source = r"
+public class Cycle {
+    static final int A = B;
+    static final int B = A;
+
+    public static void main(String[] args) {
+        switch (args.length) {
+            case A: break;
+            default: break;
+        }
+    }
+}
+";
+    let error = compile(source).expect_err("this constant has no value");
+    assert!(
+        matches!(error, LowerError::Unsupported(_)),
+        "expected a report, got {error}"
+    );
+}
+
+/// `int a, b = 2;` gives `2` to **`b`**, not to `a`.
+///
+/// The field lowering paired a declaration's names with its expressions by index, which is right
+/// only when every declarator has an initialiser. With one expression and two names the value
+/// landed on the first name and the second stayed unset — so this printed `2 0` where Java prints
+/// `0 2`. Both are now read through the same declarator walk the constant evaluator uses.
+#[test]
+fn a_declarator_gets_the_value_written_after_its_own_equals() {
+    let source = r#"
+public class Decl {
+    static int a, b = 2;
+    static int c = 3, d;
+
+    public static void main(String[] args) {
+        System.out.println(a + " " + b + " " + c + " " + d);
+    }
+}
+"#;
+    assert_eq!(run(source, "Decl"), "0 2 3 0\n");
+}
+
+/// A bridge belongs to the method that actually overrides, not to whichever same-arity overload the
+/// member walk reached first.
+///
+/// `Holder<String>` binds `T := String`, so `put(String)` overrides `Holder.put(T)` and needs the
+/// `put(Object)` bridge; `put(int)` overrides nothing. Both backends used to decide by name and
+/// argument *count* alone, which cannot tell them apart — so the bridge could land on `put(int)`
+/// and a call through the interface would reach the wrong method.
+///
+/// Run through the interface on a real JVM, which is the only thing that answers whether the bridge
+/// went to the right place.
+#[test]
+fn a_bridge_follows_the_substituted_parameter_type() {
+    let source = r#"
+interface Holder<T> {
+    void put(T value);
+}
+
+public class Box implements Holder<String> {
+    static String seen = "none";
+
+    public void put(String value) {
+        seen = "string:" + value;
+    }
+
+    public void put(int value) {
+        seen = "int:" + value;
+    }
+
+    public static void main(String[] args) {
+        Holder<String> h = new Box();
+        h.put("x");
+        System.out.println(seen);
+        new Box().put(7);
+        System.out.println(seen);
+    }
+}
+"#;
+    assert_eq!(run(source, "Box"), "string:x\nint:7\n");
+}

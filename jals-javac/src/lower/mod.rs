@@ -71,7 +71,7 @@ use jals_classfile::{
     ClassAccessFlags, ClassFile, ConstantPool, FieldAccessFlags, FieldInfo, MethodAccessFlags,
     MethodDescriptor, MethodInfo, VerificationType,
 };
-use jals_hir::{DefKind, FileAnalysis, FileId, ItemId, ProjectIndex, TypedFile};
+use jals_hir::{DefKind, FileId, ItemId, ProjectIndex, TypedFile};
 use jals_syntax::SyntaxKind::{
     ANNOTATION_TYPE_DECL, CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL, ENUM_DECL, FIELD_DECL,
     INTERFACE_DECL, METHOD_DECL, RECORD_DECL,
@@ -80,6 +80,7 @@ use jals_syntax::ast::{self, AstNode as _};
 use jals_syntax::{SyntaxNode, SyntaxToken};
 
 use crate::desc::{DescError, Descriptor};
+use crate::facts::{Facts, Hierarchy, Overrides};
 use crate::jvm::{AsmError, Assembler, BinOp, Branch, Compare, Numeric, Receiver};
 use crate::lower::slots::Slots;
 
@@ -123,6 +124,18 @@ pub enum LowerError {
     Descriptor(DescError),
     /// The assembler rejected an emission.
     Assembly(AsmError),
+}
+
+/// A source fact this backend could not be given. Both variants are ones `LowerError` already
+/// spells, so the `&'static str` of an `Unsupported` reaches a caller verbatim — several are pinned
+/// by name in the integration tests.
+impl From<crate::facts::FactError> for LowerError {
+    fn from(error: crate::facts::FactError) -> Self {
+        match error {
+            crate::facts::FactError::Unsupported(what) => Self::Unsupported(what),
+            crate::facts::FactError::Unresolved(name) => Self::Unresolved(name),
+        }
+    }
 }
 
 impl From<DescError> for LowerError {
@@ -328,7 +341,7 @@ impl Compile {
                     .any(|n| n.children().any(|child| child.kind() == CLASS_BODY)),
             encloses: encloses.clone(),
             inner: Self::inner_classes_of(node, index, file),
-            captures: Self::captures_of(node, typed.analysis(), index, file),
+            captures: Self::captures_of(node, Facts::of(typed)),
             this_item: item,
             lambdas: alloc::collections::BTreeMap::new(),
         };
@@ -481,7 +494,7 @@ impl Compile {
                 Some(descriptor)
             } else {
                 (node.kind() == jals_syntax::SyntaxKind::NEW_EXPR)
-                    .then(|| typed.call_target_of(Context::span(node)))
+                    .then(|| typed.call_target_of(Facts::span(node)))
                     .flatten()
                     .map(|member| Descriptor::method_descriptor(member, index, true))
                     .transpose()?
@@ -805,55 +818,12 @@ impl Compile {
         flags
     }
 
-    /// The locals a class declared inside a block captures, in source order and without repeats.
-    ///
-    /// A capture is what it sounds like: a name inside the class that resolves to a definition *outside*
-    /// it. Each becomes a `final synthetic` field and a trailing constructor parameter, which is how a
-    /// class outlives the frame the local lived in.
-    fn captured_by(node: &SyntaxNode, analysis: &FileAnalysis) -> alloc::vec::Vec<jals_hir::DefId> {
-        let mut out = alloc::vec::Vec::new();
-        let inside_block = node
-            .ancestors()
-            .skip(1)
-            .any(|ancestor| ancestor.kind() == jals_syntax::SyntaxKind::BLOCK);
-        if !inside_block {
-            return out;
-        }
-        let range = node.text_range();
-        for token in node
-            .descendants_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .filter(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
-        {
-            let Some(id) = analysis
-                .reference_at(usize::from(token.text_range().start()))
-                .and_then(|reference| reference.resolution.def_id())
-            else {
-                continue;
-            };
-            let def = analysis.def(id);
-            // Only a *local* is captured: a field of the enclosing class is reached through its instance,
-            // and a type name is not a value at all.
-            if !matches!(def.kind, DefKind::Local | DefKind::Param) {
-                continue;
-            }
-            let Ok(start) = u32::try_from(def.name_range.start) else {
-                continue;
-            };
-            if !range.contains(start.into()) && !out.contains(&id) {
-                out.push(id);
-            }
-        }
-        out
-    }
-
     /// Every local class in the file `node` belongs to, mapped to the locals it captures.
     fn captures_of(
         node: &SyntaxNode,
-        analysis: &FileAnalysis,
-        index: &ProjectIndex,
-        file: FileId,
+        facts: Facts<'_>,
     ) -> alloc::collections::BTreeMap<ItemId, alloc::vec::Vec<jals_hir::DefId>> {
+        let (index, file) = (facts.index(), facts.file());
         let mut out = alloc::collections::BTreeMap::new();
         let Some(root) = node.ancestors().last() else {
             return out;
@@ -880,7 +850,7 @@ impl Compile {
                 }
                 _ => continue,
             };
-            let captured = Self::captured_by(&scanned, analysis);
+            let captured = facts.captured_by(&scanned);
             if captured.is_empty() {
                 continue;
             }
@@ -941,7 +911,7 @@ impl Compile {
                 let (call, entry) = Self::method_reference(lambda, &context, pool)?;
                 let index = u16::try_from(bootstraps.len()).map_err(|_| AsmError::PoolFull)?;
                 bootstraps.push(entry);
-                let span = Context::span(lambda);
+                let span = Facts::span(lambda);
                 context.lambdas.insert(
                     (span.start, span.end),
                     Lambda {
@@ -976,7 +946,7 @@ impl Compile {
             // the call-site arguments line up, and the body still reads `bump` as neither a local nor a
             // field. Reported until that is chased down, rather than emitted as a handle whose parameter
             // nothing fills.
-            let captured = Self::captured_by(lambda, context.typed.analysis());
+            let captured = context.facts().captured_by(lambda);
 
             // A capturing lambda: the descriptor, the leading slots, and the call-site arguments now all
             // line up, and the synthetic method still fails the assembler's frame check — reported until
@@ -992,51 +962,52 @@ impl Compile {
             // also what seeds its initial locals. The assembler borrows the pool for as long as it lives,
             // so its code comes out first and every entry the method *info* needs is interned after.
             let synthetic = alloc::format!("lambda${ordinal}");
-            let code = {
-                let mut asm = Assembler::new(pool, Receiver::Static, &synthetic_descriptor)?;
-                let mut slots = Slots::new(&context, None, true);
-                // The captures come first, in the order the call site pushes them: the metafactory prepends
-                // the captured values to the interface method's own arguments when it invokes the handle.
-                for &id in &captured {
-                    let width = Slots::ty_width(context.typed.type_of_def(id));
-                    slots.declare(id, width);
-                }
-                for param in decl.params().into_iter().flat_map(|list| list.params()) {
-                    let id = context
-                        .def_at(param.syntax())
-                        .ok_or(LowerError::Unsupported(
-                            "a lambda parameter with no binding",
-                        ))?;
-                    let width = Slots::ty_width(context.typed.type_of_def(id));
-                    slots.declare(id, width);
-                }
-                let mut emit = Emit::new(&mut asm, slots, returns.clone(), false);
-                match (decl.expr_body(), decl.block_body()) {
-                    // An expression body *is* the returned value, or is evaluated for its effect when the
-                    // interface method returns nothing.
-                    (Some(value), _) => {
-                        if matches!(returns, jals_hir::Ty::Void) {
-                            stmt::Stmt::discarded(&value, &context, &mut emit)?;
-                            asm.return_(None)?;
-                        } else {
-                            expr::Expr::lower_as(&value, &returns, &context, &mut emit)?;
-                            let top = asm
-                                .stack_top()
-                                .ok_or(LowerError::Unsupported("a lambda body with no value"))?;
-                            asm.return_(Some(&top))?;
+            let code =
+                {
+                    let mut asm = Assembler::new(pool, Receiver::Static, &synthetic_descriptor)?;
+                    let mut slots = Slots::new(&context, None, true);
+                    // The captures come first, in the order the call site pushes them: the metafactory prepends
+                    // the captured values to the interface method's own arguments when it invokes the handle.
+                    for &id in &captured {
+                        let width = Slots::ty_width(context.typed.type_of_def(id));
+                        slots.declare(id, width);
+                    }
+                    for param in decl.params().into_iter().flat_map(|list| list.params()) {
+                        let id = context.facts().def_at(param.syntax()).ok_or(
+                            LowerError::Unsupported("a lambda parameter with no binding"),
+                        )?;
+                        let width = Slots::ty_width(context.typed.type_of_def(id));
+                        slots.declare(id, width);
+                    }
+                    let mut emit = Emit::new(&mut asm, slots, returns.clone(), false);
+                    match (decl.expr_body(), decl.block_body()) {
+                        // An expression body *is* the returned value, or is evaluated for its effect when the
+                        // interface method returns nothing.
+                        (Some(value), _) => {
+                            if matches!(returns, jals_hir::Ty::Void) {
+                                stmt::Stmt::discarded(&value, &context, &mut emit)?;
+                                asm.return_(None)?;
+                            } else {
+                                expr::Expr::lower_as(&value, &returns, &context, &mut emit)?;
+                                let top = asm.stack_top().ok_or(LowerError::Unsupported(
+                                    "a lambda body with no value",
+                                ))?;
+                                asm.return_(Some(&top))?;
+                            }
+                        }
+                        // A block body returns for itself, except that a `void` one may run off its end.
+                        (None, Some(block)) => {
+                            stmt::Stmt::block(&block, &context, &mut emit)?;
+                            if matches!(returns, jals_hir::Ty::Void) && asm.reachable() {
+                                asm.return_(None)?;
+                            }
+                        }
+                        (None, None) => {
+                            return Err(LowerError::Unsupported("a lambda with no body"));
                         }
                     }
-                    // A block body returns for itself, except that a `void` one may run off its end.
-                    (None, Some(block)) => {
-                        stmt::Stmt::block(&block, &context, &mut emit)?;
-                        if matches!(returns, jals_hir::Ty::Void) && asm.reachable() {
-                            asm.return_(None)?;
-                        }
-                    }
-                    (None, None) => return Err(LowerError::Unsupported("a lambda with no body")),
-                }
-                asm.finish()?
-            };
+                    asm.finish()?
+                };
             out.push(MethodInfo {
                 // private | static | synthetic
                 access_flags: MethodAccessFlags(0x0002 | 0x0008 | 0x1000),
@@ -1069,7 +1040,7 @@ impl Compile {
                 bootstrap_arguments: alloc::vec![shape, handle, shape],
             });
             let index = u16::try_from(bootstraps.len() - 1).map_err(|_| AsmError::PoolFull)?;
-            let span = Context::span(lambda);
+            let span = Facts::span(lambda);
             context.lambdas.insert(
                 (span.start, span.end),
                 Lambda {
@@ -1094,15 +1065,13 @@ impl Compile {
     ) -> Result<(Lambda, jals_classfile::BootstrapMethod)> {
         const METAFACTORY: &str = "java/lang/invoke/LambdaMetafactory";
         const METAFACTORY_DESCRIPTOR: &str = "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;";
-        // The interface the context asked for, and the one method it declares.
-        let item =
-            expr::Expr::type_of(node, context)?
-                .project_id()
-                .ok_or(LowerError::Unsupported(
-                    "a method reference with no target type",
-                ))?;
-        let member = Self::functional_member(item, context)
-            .ok_or(LowerError::Unsupported("a target with no single method"))?;
+        // Which member the reference names, and how its receiver is reached, is the shared source
+        // fact — the wasm backend asks the same question and used to answer it by name alone, off
+        // an owner it recovered from the qualifier's raw text. What stays here is the constant-pool
+        // work below, which is the JVM's own vocabulary.
+        let reference = context.facts().method_ref(node)?;
+        let item = reference.interface;
+        let member = reference.interface_method;
         let name = context.index.member(member).name.clone();
         let descriptor = MethodDescriptor::to_string(&Descriptor::method_descriptor(
             member,
@@ -1111,100 +1080,25 @@ impl Compile {
         )?);
         let interface = Descriptor::internal_name_of(item, context.index);
 
-        // A constructor reference names `new` rather than a method: the handle is `newInvokeSpecial` on the
-        // type's own constructor, and there is nothing to capture.
-        let constructs = node
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .any(|token| token.kind() == jals_syntax::SyntaxKind::NEW_KW);
-
-        // The class the method belongs to. `Uses::twice` parses its qualifier as an *expression* — a name
-        // reference is what a type name looks like before anything resolves it — so both spellings are read.
-        let qualifier = node.children().find_map(ast::Expr::cast);
-        let named_type = if let Some(owner_ty) = node.children().find_map(ast::Type::cast) {
-            context.ty_of_type(&owner_ty)?.project_id()
-        } else {
-            qualifier
-                .as_ref()
-                .and_then(|q| context.ty_of_name(q.syntax()).ok())
-                .and_then(|ty| ty.project_id())
+        let owner_item = reference.owner;
+        // A bound reference captures the local it is qualified by; an unbound one is an instance
+        // method named through its *type*, whose receiver the interface supplies as its first
+        // argument. The `Cell` that used to carry the second out of a selection closure is gone
+        // with the closure.
+        let receiver = match reference.receiver {
+            crate::facts::RefReceiver::Bound(id) => Some(id),
+            _ => None,
         };
-        // Not a type: the qualifier is a *value*, so the reference is bound to it and the receiver is what
-        // the call site captures. Only a local is read, because a capture is loaded from a slot.
-        let (owner_item, receiver) =
-            if let Some(item) = named_type {
-                (item, None)
-            } else {
-                {
-                    let expr = qualifier.as_ref().ok_or(LowerError::Unsupported(
-                        "a method reference with no qualifier",
-                    ))?;
-                    let id = context
-                        .def_at(expr.syntax())
-                        .ok_or(LowerError::Unsupported(
-                            "a method reference whose qualifier is no local",
-                        ))?;
-                    let item = context.typed.type_of_def(id).project_id().ok_or(
-                        LowerError::Unsupported(
-                            "a method reference on a value of an unindexed type",
-                        ),
-                    )?;
-                    (item, Some(id))
-                }
-            };
-        if constructs {
+        let unbound = reference.receiver == crate::facts::RefReceiver::Unbound;
+        // A constructor reference names `new` rather than a method: the handle is `newInvokeSpecial`
+        // on the type's own constructor, and there is nothing to capture.
+        if reference.receiver == crate::facts::RefReceiver::Constructs {
             return Self::constructor_reference(owner_item, member, item, context, pool);
         }
-        let arity = context.index.member(member).params.len();
-        // Set when the referenced method turns out to be an instance one named through its *type*, whose
-        // receiver the interface supplies as its first argument.
-        let unbound = core::cell::Cell::new(false);
-        // The method's own name is a direct token of the reference: everything before the `::` is a node.
-        let referenced = node
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .filter(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
-            .last()
-            .ok_or(LowerError::Unsupported("a method reference with no name"))?;
-        let target = context
-            .index
-            .own_members(owner_item)
-            .iter()
-            .copied()
-            .find(|&id| {
-                let info = context.index.member(id);
-                info.kind == DefKind::Method
-                    && info.name == referenced.text()
-                    && info.modifiers.is_static == receiver.is_none()
-                    // A bound reference passes the receiver separately, so the interface method's own
-                    // arity is what the referenced method takes.
-                    && info.params.len() == arity
-            })
-            // Not found as that shape: a reference qualified by a *type* may still name an instance method,
-            // and then the interface's first argument is the receiver — `Type::method` with one fewer
-            // parameter than the interface declares. That is the *unbound* form.
-            .or_else(|| {
-                (receiver.is_none() && arity > 0)
-                    .then(|| {
-                        context
-                            .index
-                            .own_members(owner_item)
-                            .iter()
-                            .copied()
-                            .find(|&id| {
-                                let info = context.index.member(id);
-                                info.kind == DefKind::Method
-                                    && info.name == referenced.text()
-                                    && !info.modifiers.is_static
-                                    && info.params.len() == arity - 1
-                            })
-                    })
-                    .flatten()
-                    .inspect(|_| unbound.set(true))
-            })
-            .ok_or(LowerError::Unsupported(
-                "a method reference to a method this cannot find",
-            ))?;
+        let target = reference.target.ok_or(LowerError::Unsupported(
+            "a method reference to a method this cannot find",
+        ))?;
+        let referenced_name = context.index.member(target).name.clone();
         let owner = Descriptor::internal_name_of(owner_item, context.index);
         let target_descriptor = MethodDescriptor::to_string(&Descriptor::method_descriptor(
             target,
@@ -1215,13 +1109,9 @@ impl Compile {
         // 6 is `invokeStatic` and 5 is `invokeVirtual` (JVMS Table 5.4.3.5-A): both a bound reference and an
         // unbound one call the method *on* a receiver — the difference is only where that receiver comes
         // from, and the handle cannot tell.
-        let kind = if receiver.is_some() || unbound.get() {
-            5
-        } else {
-            6
-        };
+        let kind = if receiver.is_some() || unbound { 5 } else { 6 };
         let handle = pool
-            .method_handle_index(kind, &owner, referenced.text(), &target_descriptor, false)
+            .method_handle_index(kind, &owner, &referenced_name, &target_descriptor, false)
             .ok_or(AsmError::PoolFull)?;
         let shape = pool
             .method_type_index(&descriptor)
@@ -1387,7 +1277,7 @@ impl Compile {
                 continue;
             };
             let name = token.text().to_owned();
-            let own = context.member_at(&token)?;
+            let own = context.facts().member_at(&token)?;
             if context.index.member(own).modifiers.is_static {
                 continue;
             }
@@ -1399,15 +1289,17 @@ impl Compile {
             // Every inherited method of the same name and arity: an override of a *generic* one erases
             // differently, and that difference is exactly what needs bridging.
             for &inherited in &context.index.members_of(item) {
-                let info = context.index.member(inherited);
-                if inherited == own
-                    || info.owner == item
-                    || info.kind != DefKind::Method
-                    || info.name != name
-                    || info.params.len() != context.index.member(own).params.len()
-                {
+                // Whether this *is* an override is the shared fact; whether it needs a bridge is
+                // the descriptor comparison below, which stays here because it is erasure.
+                //
+                // `Unknown` proceeds. Where the rule cannot decide, this keeps the leniency it had:
+                // a missing bridge is an `AbstractMethodError` at run time, a spurious one is dead
+                // code. What the fact removes is the same-arity overload it used to accept —
+                // `put(int)` against `Holder<T>.put(T)`, which took the bridge `put(String)` needed.
+                if Hierarchy::of(context.index).overrides(own, inherited) == Overrides::No {
                     continue;
                 }
+                let info = context.index.member(inherited);
                 // The declaring type's own parameters, so `Holder<T>.put(T)` erases to `put(Object)`
                 // rather than failing on a name the index resolves to nothing.
                 let vars: Vec<String> = context
@@ -1608,7 +1500,7 @@ impl Compile {
             _ => None,
         };
         for name in decl.names() {
-            let member = context.member_at(&name)?;
+            let member = context.facts().member_at(&name)?;
             let descriptor = Descriptor::field_descriptor(member, context.index)?.to_string();
             let mut attributes = Vec::new();
             if let Some(signature) = &signature {
@@ -1643,7 +1535,7 @@ impl Compile {
             .name_token()
             .ok_or(LowerError::Unsupported("a method declaration with no name"))?;
         let name = token.text().to_owned();
-        let member = context.member_at(&token)?;
+        let member = context.facts().member_at(&token)?;
         // The method's own type parameters are not the class's, so the index resolved each as an
         // external name it has never heard of. Naming them here is what lets the descriptor erase them.
         let own_vars: Vec<String> = node
@@ -1873,7 +1765,7 @@ impl Compile {
         let name_token = ast::ConstructorDecl::cast(node.clone())
             .and_then(|decl| decl.name_token())
             .ok_or(LowerError::Unsupported("a malformed constructor"))?;
-        let member = context.member_at(&name_token)?;
+        let member = context.facts().member_at(&name_token)?;
         let mut descriptor = Descriptor::method_descriptor(member, context.index, true)?;
         // An inner class's constructor takes the enclosing instance first: the index computed the
         // descriptor from the declaration, which does not write it.
@@ -1912,7 +1804,7 @@ impl Compile {
         let body = node.children().find_map(ast::Block::cast);
         let delegation = body
             .as_ref()
-            .and_then(Self::explicit_constructor_invocation);
+            .and_then(Facts::explicit_constructor_invocation);
         // A `this(…)` between two `enum` constructors would be lowered from the descriptor the index
         // computed, which is two parameters short of the one emitted here — a `NoSuchMethodError` in
         // `<clinit>` rather than anything a verifier catches. (`super(…)` is not a Java program in an
@@ -1934,7 +1826,7 @@ impl Compile {
             // replaces only the `super()` call, so the initialisers still follow it.
             Some(call) => {
                 expr::Expr::lower(&ast::Expr::Call(call.clone()), context, &mut emit)?;
-                if !Self::delegates_to_this(call) {
+                if !Facts::delegates_to(call, jals_syntax::SyntaxKind::THIS_KW) {
                     Self::initializers(context, &mut emit, members, false)?;
                 }
             }
@@ -2293,7 +2185,7 @@ impl Compile {
         let mut infos = Vec::with_capacity(components.len());
         let mut descriptors = Vec::with_capacity(components.len());
         for name in &components {
-            let member = context.member_at(name)?;
+            let member = context.facts().member_at(name)?;
             let descriptor = Descriptor::field_descriptor(member, context.index)?.to_string();
             // `private final`, which is what makes a record's state immutable and reachable only
             // through the accessors.
@@ -2631,7 +2523,7 @@ impl Compile {
             }
             let mut canonical = true;
             for (param, (_, component)) in params.iter().zip(components) {
-                let written = match context.def_at(param.syntax()) {
+                let written = match context.facts().def_at(param.syntax()) {
                     Some(id) => {
                         Descriptor::descriptor_of(context.typed.type_of_def(id), context.index)?
                             .to_string()
@@ -2707,7 +2599,7 @@ impl Compile {
             let bound = compact
                 .and_then(|(_, names)| names.get(position))
                 .and_then(SyntaxToken::parent)
-                .and_then(|node| context.def_at(&node));
+                .and_then(|node| context.facts().def_at(&node));
             placements.push(match bound {
                 Some(id) => slots.declare(id, width),
                 None => slots.declare_temporary(width),
@@ -3202,18 +3094,20 @@ impl Compile {
                 continue;
             };
             // The CST is flat, like a local declaration's: `int a = 1, b = 2;` is one declaration
-            // whose two names take the two expression siblings in order. `value()` returns only the
-            // first, which gave `b` the value of `a`.
-            let values: Vec<_> = decl
-                .syntax()
-                .children()
-                .filter_map(ast::Expr::cast)
-                .collect();
-            for (index, name) in decl.names().enumerate() {
-                let Some(value) = values.get(index) else {
+            // whose names and expressions are siblings. Pairing them *by index* — which this did —
+            // is right only when every declarator has an initialiser: `int a, b = 2;` has one
+            // expression and two names, so `a` was given `2` and `b` was left unset. The shared
+            // fact walks the tokens instead, so each declarator gets the value written after its
+            // own `=`.
+            for name in decl.names() {
+                let Some(value) = Facts::declarator_initialiser(
+                    decl.syntax(),
+                    usize::from(name.text_range().start()),
+                ) else {
                     continue;
                 };
-                let field = context.member_at(&name)?;
+                let value = &value;
+                let field = context.facts().member_at(&name)?;
                 let ty = context.index.resolved_member_ty(field);
                 let descriptor = Descriptor::descriptor_of(&ty, context.index)?.to_string();
                 if !statics {
@@ -3232,39 +3126,6 @@ impl Compile {
             }
         }
         Ok(())
-    }
-
-    /// The body's explicit constructor invocation — a bare `this(…)` or `super(…)`.
-    ///
-    /// JLS §8.8.7 puts it first or nowhere, so only the first statement is examined. Only the bare
-    /// forms count: `this.method()` and `super.method()` are qualified calls whose callee is a field
-    /// access rather than a name reference.
-    fn explicit_constructor_invocation(body: &ast::Block) -> Option<ast::CallExpr> {
-        use jals_syntax::SyntaxKind::{SUPER_KW, THIS_KW};
-        let ast::Stmt::Expr(first) = body.stmts().next()? else {
-            return None;
-        };
-        let ast::Expr::Call(call) = first.expr()? else {
-            return None;
-        };
-        let ast::Expr::NameRef(name) = call.callee()? else {
-            return None;
-        };
-        name.syntax()
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .any(|token| matches!(token.kind(), THIS_KW | SUPER_KW))
-            .then_some(call)
-    }
-
-    /// Whether an explicit constructor invocation is the `this(…)` form rather than `super(…)`.
-    fn delegates_to_this(call: &ast::CallExpr) -> bool {
-        matches!(call.callee(), Some(ast::Expr::NameRef(name))
-            if name
-                .syntax()
-                .children_with_tokens()
-                .filter_map(jals_syntax::SyntaxElement::into_token)
-                .any(|token| token.kind() == jals_syntax::SyntaxKind::THIS_KW))
     }
 
     /// `super()` followed by every instance field's initialiser — what a constructor runs before
@@ -3369,13 +3230,6 @@ impl Context<'_> {
         self.captures
             .get(&self.this_item)
             .map_or(&[], alloc::vec::Vec::as_slice)
-    }
-
-    /// The indexed member the name token `token` declares.
-    fn member_at(&self, token: &SyntaxToken) -> Result<jals_hir::MemberId> {
-        self.index
-            .member_by_decl(self.file, usize::from(token.text_range().start()))
-            .ok_or_else(|| LowerError::Unresolved(token.text().into()))
     }
 
     /// The type a `TYPE` node names.
@@ -3516,27 +3370,12 @@ impl Context<'_> {
             })
     }
 
-    /// A node's byte span, keyed the way the inference memo is: the node's own range, leading
-    /// trivia included, because that is what the analysis recorded against.
-    fn span(node: &SyntaxNode) -> core::ops::Range<usize> {
-        let range = node.text_range();
-        usize::from(range.start())..usize::from(range.end())
-    }
-
-    /// The definition a name-reference node binds to.
+    /// The source facts of the file being lowered.
     ///
-    /// Keyed by the identifier *token*, not the node: a `NAME_REF` carries its leading trivia and
-    /// the resolver indexes references by where the name itself starts.
-    fn def_at(&self, node: &SyntaxNode) -> Option<jals_hir::DefId> {
-        let token = node
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)?;
-        let start = usize::from(token.text_range().start());
-        self.typed
-            .analysis()
-            .reference_at(start)
-            .and_then(|reference| reference.resolution.def_id())
-            .or_else(|| self.typed.analysis().symbol_at(start))
+    /// A projection, not a store: [`Facts`] is a `Copy` handle over the same [`TypedFile`] this
+    /// context already holds. It is where the span keying, the name binding, and the constant
+    /// evaluation live, so neither backend spells them itself.
+    pub(crate) const fn facts(&self) -> Facts<'_> {
+        Facts::of(self.typed)
     }
 }

@@ -33,6 +33,7 @@ use jals_syntax::ast::{self, AstNode as _};
 use jals_syntax::{SyntaxKind, SyntaxNode};
 
 use crate::desc::{DescError, Descriptor};
+use crate::facts::Facts;
 use crate::jvm::{BinOp, Branch, Compare, Numeric};
 use crate::lower::place::Place;
 use crate::lower::{Context, Emit, LowerError, Result};
@@ -130,7 +131,7 @@ impl Expr {
             // that is left here is the call site: no arguments, because nothing is captured, returning the
             // functional interface the context asked for.
             ast::Expr::Lambda(lambda) => {
-                let span = Context::span(lambda.syntax());
+                let span = Facts::span(lambda.syntax());
                 let info = context
                     .lambda_at(&span)
                     .ok_or(LowerError::Unsupported("a lambda outside a class body"))?;
@@ -152,7 +153,7 @@ impl Expr {
             // The same call site a lambda gets; the difference is entirely in the handle, which points at
             // the method the source named rather than at a synthesised one.
             ast::Expr::MethodRef(reference) => {
-                let span = Context::span(reference.syntax());
+                let span = Facts::span(reference.syntax());
                 let info = context.lambda_at(&span).ok_or(LowerError::Unsupported(
                     "a method reference outside a class body",
                 ))?;
@@ -324,7 +325,7 @@ impl Expr {
     /// [`Ty::Unknown`] counts as no answer rather than as an answer: it is what inference records
     /// where it gave up, and treating it as a type would turn a gap into a wrong descriptor.
     pub(crate) fn type_of(node: &SyntaxNode, context: &Context<'_>) -> Result<Ty> {
-        match context.typed.type_of_expr(Context::span(node)) {
+        match context.typed.type_of_expr(Facts::span(node)) {
             Some(Ty::Unknown) | None => Err(DescError::Unknown.into()),
             Some(ty) => Ok(ty.clone()),
         }
@@ -543,7 +544,7 @@ impl Expr {
         }
         let text = name.syntax().text().to_string();
         let unresolved = || LowerError::Unresolved(text.trim().into());
-        let member = match context.def_at(name.syntax()) {
+        let member = match context.facts().def_at(name.syntax()) {
             Some(id) => {
                 if let Some(slot) = emit.slots.slot_of(id) {
                     emit.asm.load(slot)?;
@@ -666,7 +667,7 @@ impl Expr {
         }
         let member = context
             .typed
-            .field_target_of(Context::span(access.syntax()))
+            .field_target_of(Facts::span(access.syntax()))
             .ok_or_else(|| LowerError::Unresolved(access.field().unwrap_or_default()))?;
         let (owner, name, descriptor) = Self::field_ref(member, context)?;
         if context.index.member(member).modifiers.is_static {
@@ -757,7 +758,7 @@ impl Expr {
     fn call(call: &ast::CallExpr, context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
         let member = context
             .typed
-            .call_target_of(Context::span(call.syntax()))
+            .call_target_of(Facts::span(call.syntax()))
             .ok_or_else(|| {
                 LowerError::Unresolved(call.syntax().text().to_string().trim().into())
             })?;
@@ -949,11 +950,11 @@ impl Expr {
             .then(|| {
                 context
                     .index
-                    .item_by_decl(context.file, Context::span(new.syntax()).start)
+                    .item_by_decl(context.file, Facts::span(new.syntax()).start)
                     .ok_or_else(|| LowerError::Unresolved("an anonymous class".into()))
             })
             .transpose()?;
-        let selected = context.typed.call_target_of(Context::span(new.syntax()));
+        let selected = context.typed.call_target_of(Facts::span(new.syntax()));
         // A class that declares no constructor has the implicit no-argument one (JLS §8.8.9), and
         // *nothing declared it* — so there is no indexed member for selection to have found, and
         // `new Foo()` on the most ordinary class in Java arrives with none. Its descriptor is fixed.
@@ -1273,7 +1274,7 @@ impl Expr {
 
     fn unary(unary: &ast::UnaryExpr, context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
         let operand = Self::inner(unary.operand())?;
-        match Self::operator(unary.syntax()).as_slice() {
+        match Facts::operator(unary.syntax()).as_slice() {
             // `+` is not a no-op: unary numeric promotion still applies, so `+aByte` is an `int`.
             [PLUS] => {
                 let promoted = Self::promote_one(Self::numeric_of(operand.syntax(), context)?);
@@ -1316,7 +1317,7 @@ impl Expr {
         emit: &mut Emit<'_, '_>,
     ) -> Result<()> {
         let operand = Self::inner(postfix.operand())?;
-        match Self::operator(postfix.syntax()).as_slice() {
+        match Facts::operator(postfix.syntax()).as_slice() {
             [PLUS_PLUS] => Self::update(&operand, 1, false, context, emit),
             [MINUS_MINUS] => Self::update(&operand, -1, false, context, emit),
             _ => Err(LowerError::Unsupported("this postfix operator")),
@@ -1384,7 +1385,7 @@ impl Expr {
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
     ) -> Result<()> {
-        let operator = Self::operator(binary.syntax());
+        let operator = Facts::operator(binary.syntax());
         // `instanceof` has no right *operand*: its right-hand side is a type or a pattern, so it is
         // recognised before the two operands are taken apart.
         if operator.first() == Some(&INSTANCEOF_KW) {
@@ -1492,7 +1493,7 @@ impl Expr {
                 return Self::append(&Self::inner(paren.expr())?, context, emit);
             }
             ast::Expr::Binary(binary)
-                if Self::operator(binary.syntax()).as_slice() == [PLUS]
+                if Facts::operator(binary.syntax()).as_slice() == [PLUS]
                     && Self::is_string(&Self::type_of(binary.syntax(), context)?, context) =>
             {
                 Self::append(&Self::inner(binary.lhs())?, context, emit)?;
@@ -1609,7 +1610,7 @@ impl Expr {
             .descendants()
             .filter(|node| node.kind() == TYPE_PATTERN)
         {
-            let Some(bound) = context.def_at(&node) else {
+            let Some(bound) = context.facts().def_at(&node) else {
                 return Err(LowerError::Unsupported("a pattern with no binding"));
             };
             let ty = context.typed.type_of_def(bound).clone();
@@ -1654,6 +1655,7 @@ impl Expr {
             UNNAMED_PATTERN => Ok(()),
             TYPE_PATTERN => {
                 let bound = context
+                    .facts()
                     .def_at(pattern)
                     .ok_or(LowerError::Unsupported("a pattern with no binding"))?;
                 let slot = emit
@@ -1990,17 +1992,5 @@ impl Expr {
             [GT, jals_syntax::SyntaxKind::EQ] => Compare::Ge,
             _ => return None,
         })
-    }
-
-    /// The operator tokens of a unary or binary expression, in order.
-    ///
-    /// The CST holds them as plain tokens between the operands rather than in a labelled slot, and
-    /// there can be more than one — see [`comparison`](Self::comparison).
-    fn operator(node: &SyntaxNode) -> alloc::vec::Vec<SyntaxKind> {
-        node.children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .map(|token| token.kind())
-            .filter(|kind| !kind.is_trivia())
-            .collect()
     }
 }

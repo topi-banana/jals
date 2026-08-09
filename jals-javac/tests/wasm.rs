@@ -2716,3 +2716,89 @@ public class Unwind {
     assert_invoke(&[source], "breakDiscardsAReturn", &[], "0");
     assert_invoke(&[source], "outerCleanupStillRuns", &[], "11");
 }
+
+/// A colon-form `switch` *expression* whose last group falls out yields nothing on that path.
+///
+/// The JVM backend rejects it (`lower/switch.rs`, "a `switch` expression arm that yields nothing");
+/// this backend used to open `switch_groups` with `let _ = result;` and lower it anyway. What came
+/// out was a `block` with a declared result type and a path that leaves no value on the stack —
+/// which is a module an engine refuses to load, reported at the wrong end of the toolchain.
+#[test]
+fn a_colon_form_switch_expression_that_yields_nothing_is_reported() {
+    let source = r"
+public class Fall {
+    static int pick(int n) {
+        int v = switch (n) {
+            case 0: yield 1;
+            default:
+        };
+        return v;
+    }
+}
+";
+    let error =
+        compile(&[source]).expect_err("this switch expression has a path that yields nothing");
+    assert!(
+        matches!(error, WasmError::Unsupported(_)),
+        "expected a report, got {error}"
+    );
+}
+
+/// `case ~5:` is a legal Java constant expression whose value is `-6`.
+///
+/// This backend used to evaluate a `case` label by asking whether a `MINUS` token appeared anywhere
+/// under the unary node. `~` is not one, so the negation never happened and the label silently
+/// became `5` — a module that loads, validates, runs, and takes the wrong arm. The JVM backend
+/// rejected the same source outright. Both now read the one shared constant evaluator.
+#[test]
+fn a_tilde_case_label_is_the_value_java_gives_it() {
+    let source = r"
+public class Tilde {
+    static int pick(int n) {
+        switch (n) {
+            case ~5: return 1;
+            case 2 + 3: return 2;
+            default: return 0;
+        }
+    }
+}
+";
+    // -6 takes the `~5` arm and 5 takes the folded `2 + 3` one; before the fix `~5` was `5`, so
+    // both keys collided on one arm and `-6` fell through to `default`.
+    assert_invoke(&[source], "pick", &["-6"], "1");
+    assert_invoke(&[source], "pick", &["5"], "2");
+    assert_invoke(&[source], "pick", &["0"], "0");
+}
+
+/// A method reference names one *overload*, and which one is decided by the functional interface's
+/// arity — not by whichever member happens to be declared first.
+///
+/// This backend used to select by name alone, so `Holder::get` bound to whatever `get` the member
+/// list reached first. Declaring the one-argument one first makes that the wrong answer, and it is
+/// wrong silently: the module validates and calls a function whose signature does not match the
+/// call site's. The unbound form is the one under test — the interface supplies the receiver as its
+/// first argument, so a one-parameter interface method selects a *zero*-parameter instance method.
+#[test]
+fn a_method_reference_selects_the_overload_the_interface_asks_for() {
+    let source = r"
+interface Unary {
+    int apply(Holder h);
+}
+
+public class Holder {
+    int value;
+
+    int get(int extra) { return value + extra; }
+
+    int get() { return value + 100; }
+
+    static int run(int seed) {
+        Holder h = new Holder();
+        h.value = seed;
+        Unary u = Holder::get;
+        return u.apply(h);
+    }
+}
+";
+    assert_invoke(&[source], "run", &["5"], "105");
+}
