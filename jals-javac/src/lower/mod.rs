@@ -3375,7 +3375,7 @@ impl Context<'_> {
     /// A projection, not a store: [`Facts`] is a `Copy` handle over the same [`TypedFile`] this
     /// context already holds. It is where the span keying, the name binding, and the constant
     /// evaluation live, so neither backend spells them itself.
-    pub(crate) const fn facts(&self) -> Facts<'_> {
+    const fn facts(&self) -> Facts<'_> {
         Facts::of(self.typed)
     }
 }

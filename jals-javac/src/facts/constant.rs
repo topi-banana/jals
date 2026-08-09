@@ -81,7 +81,7 @@ const DEPTH: usize = 64;
 
 impl Facts<'_> {
     /// The constant `expr` denotes.
-    pub(crate) fn constant(self, expr: &ast::Expr) -> Result<ConstValue> {
+    fn constant(self, expr: &ast::Expr) -> Result<ConstValue> {
         Const {
             facts: self,
             active: Vec::new(),
@@ -683,7 +683,7 @@ impl Const<'_> {
 
 impl Facts<'_> {
     /// The declaration whose declaring name starts at `name_start`.
-    pub(crate) fn declaration_of(self, name_start: usize) -> Option<jals_syntax::SyntaxNode> {
+    fn declaration_of(self, name_start: usize) -> Option<jals_syntax::SyntaxNode> {
         use jals_syntax::SyntaxKind::{FIELD_DECL, LOCAL_VAR_DECL};
         let offset = u32::try_from(name_start).ok()?;
         self.root()
@@ -700,7 +700,7 @@ impl Facts<'_> {
     /// and `is_private`: `final` changes no instruction, so nothing upstream keeps it. A field
     /// declared directly in an interface is implicitly `public static final` (§9.3), which is what
     /// makes `interface Flags { int A = 1; }` a constant without a modifier token.
-    pub(crate) fn is_constant_declaration(decl: &jals_syntax::SyntaxNode) -> bool {
+    fn is_constant_declaration(decl: &jals_syntax::SyntaxNode) -> bool {
         use jals_syntax::SyntaxKind::{
             ANNOTATION_TYPE_DECL, FIELD_DECL, FINAL_KW, INTERFACE_DECL, STATIC_KW,
         };

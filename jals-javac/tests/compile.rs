@@ -4684,6 +4684,9 @@ public class Unwind {
 /// produces a class file that verifies and then takes the wrong arm.
 #[test]
 fn a_case_label_is_a_folded_constant_expression() {
+    if !java_available() {
+        return;
+    }
     let source = r#"
 public class Fold {
     static final int A = 1;
@@ -4728,6 +4731,9 @@ public class Fold {
 /// kind instead of promoting it to `int` on the way in.
 #[test]
 fn a_string_case_label_folds_a_concatenation() {
+    if !java_available() {
+        return;
+    }
     let source = r#"
 public class Joined {
     static int pick(String s) {
@@ -4817,6 +4823,9 @@ public class Cycle {
 /// `0 2`. Both are now read through the same declarator walk the constant evaluator uses.
 #[test]
 fn a_declarator_gets_the_value_written_after_its_own_equals() {
+    if !java_available() {
+        return;
+    }
     let source = r#"
 public class Decl {
     static int a, b = 2;
@@ -4842,6 +4851,9 @@ public class Decl {
 /// went to the right place.
 #[test]
 fn a_bridge_follows_the_substituted_parameter_type() {
+    if !java_available() {
+        return;
+    }
     let source = r#"
 interface Holder<T> {
     void put(T value);

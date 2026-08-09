@@ -581,7 +581,7 @@ impl Expr {
     /// `this.` the JVM still requires. A field declaration is a file-local definition like any
     /// other, so its id maps straight back to the indexed member.
     /// Whether a `NAME_REF` node is the bare `this`.
-    pub(crate) fn is_this(node: &SyntaxNode) -> bool {
+    fn is_this(node: &SyntaxNode) -> bool {
         node.children_with_tokens()
             .filter_map(jals_syntax::SyntaxElement::into_token)
             .any(|token| token.kind() == jals_syntax::SyntaxKind::THIS_KW)

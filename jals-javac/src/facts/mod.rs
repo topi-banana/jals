@@ -88,7 +88,7 @@ impl<'a> Facts<'a> {
     }
 
     /// The file with its inference already run.
-    pub(crate) const fn typed(self) -> TypedFile<'a> {
+    const fn typed(self) -> TypedFile<'a> {
         self.typed
     }
 
@@ -103,12 +103,12 @@ impl<'a> Facts<'a> {
     }
 
     /// The index-only facts, for a question this file's contents do not bear on.
-    pub(crate) const fn hierarchy(self) -> Hierarchy<'a> {
+    const fn hierarchy(self) -> Hierarchy<'a> {
         Hierarchy::of(self.typed.index())
     }
 
     /// The file's syntax tree.
-    pub(crate) const fn root(self) -> &'a SyntaxNode {
+    const fn root(self) -> &'a SyntaxNode {
         self.typed.root()
     }
 
@@ -144,7 +144,7 @@ impl<'a> Facts<'a> {
 
     /// Whether one of `node`'s own tokens is `keyword`. Direct children only: a nested expression's
     /// keyword is not this node's.
-    pub(crate) fn has_keyword(node: &SyntaxNode, keyword: SyntaxKind) -> bool {
+    fn has_keyword(node: &SyntaxNode, keyword: SyntaxKind) -> bool {
         node.children_with_tokens()
             .filter_map(jals_syntax::SyntaxElement::into_token)
             .any(|token| token.kind() == keyword)
@@ -192,7 +192,7 @@ impl<'a> Facts<'a> {
     }
 
     /// The primitive a `TYPE` node's keyword names.
-    pub(crate) fn primitive_of(node: &ast::Type) -> Option<jals_hir::Primitive> {
+    fn primitive_of(node: &ast::Type) -> Option<jals_hir::Primitive> {
         use jals_hir::Primitive;
         use jals_syntax::SyntaxKind::{
             BOOLEAN_KW, BYTE_KW, CHAR_KW, DOUBLE_KW, FLOAT_KW, INT_KW, LONG_KW, SHORT_KW,

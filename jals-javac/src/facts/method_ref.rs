@@ -54,7 +54,7 @@ impl Facts<'_> {
     /// `instanceof`'s target has nowhere to be read from and is resolved here instead. A name the
     /// index does not hold is reported rather than guessed at, because an invented package produces
     /// a class that loads and then throws `NoClassDefFoundError`.
-    pub(crate) fn ty_of_type(self, node: &ast::Type) -> Result<Ty> {
+    fn ty_of_type(self, node: &ast::Type) -> Result<Ty> {
         let dimensions = node
             .syntax()
             .children_with_tokens()
@@ -93,7 +93,7 @@ impl Facts<'_> {
     /// `String.class`'s base is a name reference, not a type node, because nothing tells the parser
     /// which of the two it is until the `.class` arrives. So the dotted text is resolved against
     /// the index directly.
-    pub(crate) fn ty_of_name(self, node: &SyntaxNode) -> Result<Ty> {
+    fn ty_of_name(self, node: &SyntaxNode) -> Result<Ty> {
         let mut text = alloc::string::String::new();
         for token in node
             .children_with_tokens()
