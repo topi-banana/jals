@@ -80,7 +80,7 @@ use jals_syntax::ast::{self, AstNode as _};
 use jals_syntax::{SyntaxNode, SyntaxToken};
 
 use crate::desc::{DescError, Descriptor};
-use crate::facts::{Facts, Hierarchy, Overrides};
+use crate::facts::{Facts, Hierarchy, Literal, Overrides};
 use crate::jvm::{AsmError, Assembler, BinOp, Branch, Compare, Numeric, Receiver};
 use crate::lower::slots::Slots;
 
@@ -1704,14 +1704,16 @@ impl Compile {
             return Err(unsupported());
         };
         let literal = text(literal.syntax()).ok_or_else(unsupported)?;
+        // The *declared* type decides the tag, so the width each fact reads off the suffix is
+        // dropped: `@A(x = 1)` on a `long` element is a `J` whatever the literal was spelled as.
         let integer = || {
-            expr::Expr::integer_literal(literal.trim_end_matches(['l', 'L']))
+            Literal::integer(&literal)
+                .map(|(value, _)| value)
                 .map_err(|_| unsupported())
         };
         let floating = || {
-            literal
-                .trim_end_matches(['f', 'F', 'd', 'D'])
-                .parse::<f64>()
+            Literal::floating(&literal)
+                .map(|(value, _)| value)
                 .map_err(|_| unsupported())
         };
         let (tag, const_value_index) = match declared {
@@ -1722,10 +1724,7 @@ impl Compile {
             Ty::Primitive(Primitive::Byte) => (b'B', pool.integer_index(Self::narrow(integer()?))),
             Ty::Primitive(Primitive::Short) => (b'S', pool.integer_index(Self::narrow(integer()?))),
             Ty::Primitive(Primitive::Char) => {
-                let character = expr::Expr::literal_text(&literal)
-                    .ok()
-                    .and_then(|text| text.chars().next())
-                    .ok_or_else(unsupported)?;
+                let character = Literal::character(&literal).map_err(|_| unsupported())?;
                 (b'C', pool.integer_index(character as i32))
             }
             Ty::Primitive(Primitive::Int) => (b'I', pool.integer_index(Self::narrow(integer()?))),
@@ -1734,7 +1733,7 @@ impl Compile {
             Ty::Primitive(Primitive::Float) => (b'F', pool.float_index(floating()? as f32)),
             Ty::Primitive(Primitive::Double) => (b'D', pool.double_index(floating()?)),
             Ty::Class(_) if expr::Expr::is_string(declared, context) => {
-                let text = expr::Expr::literal_text(&literal).map_err(|_| unsupported())?;
+                let text = Literal::text(&literal).map_err(|_| unsupported())?;
                 (b's', pool.utf8_index(&text))
             }
             _ => return Err(unsupported()),

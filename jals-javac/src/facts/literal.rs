@@ -2,13 +2,25 @@
 //!
 //! Reading `0xFF`, `1_000`, `'A'`, and `"a\\nb"` is a source fact: the answer is the same
 //! whichever backend asked, and reading them twice was two chances to disagree about one of them.
-//! The `case`-label evaluator reads them here. Both lowerings' *expression* paths still reach into
-//! the JVM backend's own expression module for the same job, which is where those readers live only
-//! because that is where they were needed first; folding them in is the rest of this move.
+//! Every reader goes through here — both `case`-label evaluators, both expression paths, and the
+//! JVM's annotation element-value folder.
+//!
+//! For a while only the `case`-label evaluator did. The expression paths kept a second copy in the
+//! *JVM backend's* own module, and the wasm backend called into it across the seam — with comments
+//! at both call sites saying the sharing was deliberate, which it was, at the wrong layer: a fact
+//! reached through the other backend is one that moves when that backend is refactored. Floating
+//! point never even got that far and was parsed inline in four places.
 //!
 //! A suffix is part of the token, so it is stripped **here** rather than by each caller. That is
 //! not tidiness: the two `case`-label paths passed the text untrimmed while the expression paths
-//! trimmed it, so `case 1L:` failed in both backends for a reason neither stated.
+//! trimmed it, so `case 1L:` failed in both backends for a reason neither stated. Exactly one
+//! suffix comes off, where a caller's `trim_end_matches` took every trailing letter.
+//!
+//! The [`Width`] a suffix names is reported, and every caller outside the constant evaluator drops
+//! it: an expression's width comes from the inferred type, a wasm global's from the field, and an
+//! annotation element's from the declared element type. Reading the type rather than re-reading the
+//! suffix is what keeps the two from disagreeing — so the fact states what the source spells and
+//! the caller states what it is being spelled *into*.
 
 use alloc::string::String;
 
@@ -134,6 +146,22 @@ impl Literal {
             }
         }
         Ok(out)
+    }
+
+    /// The single character a `char` literal spells.
+    ///
+    /// Delegated to [`text`](Self::text) rather than written again, so an escape that cannot be read
+    /// is reported in the *same* words whichever kind of literal held it — a wording both backends'
+    /// error types carry verbatim and the integration tests match by exact text.
+    ///
+    /// Four call sites wrote `text(t).ok().and_then(|s| s.chars().next())` — the JVM expression path,
+    /// the JVM annotation element-value folder, and the wasm global and expression paths — and each
+    /// invented its own answer for the empty case, two of them silently falling back to a default.
+    pub(crate) fn character(text: &str) -> Result<char> {
+        Self::text(text)?
+            .chars()
+            .next()
+            .ok_or(FactError::Unsupported("an empty character literal"))
     }
 }
 

@@ -37,6 +37,7 @@ mod method_ref;
 
 pub(crate) use constant::CaseKey;
 pub(crate) use inherit::{Hierarchy, Overrides};
+pub(crate) use literal::Literal;
 pub(crate) use method_ref::RefReceiver;
 
 use alloc::string::String;

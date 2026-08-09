@@ -51,7 +51,7 @@ use jals_syntax::SyntaxKind::{
 use jals_syntax::ast::{self, AstNode as _};
 use jals_syntax::{SyntaxNode, SyntaxToken};
 
-use crate::facts::{Facts, Hierarchy, Overrides};
+use crate::facts::{Facts, Hierarchy, Literal, Overrides};
 use crate::wasm::encode::{
     CompType, ExportKind, FieldType, Func, Global, HeapType, Module, RefType, StorageType, SubType,
     ValType,
@@ -1281,21 +1281,17 @@ impl Layout {
                 insn.i32_const(0);
             }
             (CHAR_LITERAL, ValType::I32) => {
-                let Some(character) = crate::lower::expr::Expr::literal_text(text)
-                    .ok()
-                    .and_then(|text| text.chars().next())
-                else {
+                let Ok(character) = Literal::character(text) else {
                     return default();
                 };
                 insn.i32_const(character as i32);
             }
             // An `int` literal into a wider field is an assignment conversion, and the *constant* form
             // of one is folding: `static long n = 1` writes `i64.const 1`, not `i32.const` plus an
-            // extension no constant expression may hold.
+            // extension no constant expression may hold. Which width to fold *into* is the field's,
+            // so the one the fact reads off the suffix is dropped.
             (INT_LITERAL, _) => {
-                let Ok(value) =
-                    crate::lower::expr::Expr::integer_literal(text.trim_end_matches(['l', 'L']))
-                else {
+                let Ok((value, _)) = Literal::integer(text) else {
                     return default();
                 };
                 #[allow(clippy::cast_precision_loss)]
@@ -1310,8 +1306,7 @@ impl Layout {
                 };
             }
             (FLOAT_LITERAL, ValType::F32 | ValType::F64) => {
-                let text = text.trim_end_matches(['f', 'F', 'd', 'D']);
-                let Ok(value) = text.parse::<f64>() else {
+                let Ok((value, _)) = Literal::floating(text) else {
                     return default();
                 };
                 #[allow(clippy::cast_possible_truncation)]
@@ -3385,14 +3380,11 @@ impl Lowering<'_> {
                 insn.i32_const(0);
             }
             INT_LITERAL => {
-                // Read by the same routine the JVM backend uses: `0xFF`, `0b1010`, `017`, and `1_000`
-                // all mean what they mean in both, and reading them twice would be two chances to
-                // disagree about one of them.
-                let value =
-                    crate::lower::expr::Expr::integer_literal(text.trim_end_matches(['l', 'L']))
-                        .map_err(|_| {
-                            WasmError::Unsupported("an integer literal this cannot read")
-                        })?;
+                // The shared fact, not the other backend's: `0xFF`, `0b1010`, `017`, and `1_000` all
+                // mean what they mean in both, and reading them twice was two chances to disagree
+                // about one of them. The width comes from the inferred type below, so the one the
+                // fact reads off the suffix is dropped.
+                let (value, _) = Literal::integer(text)?;
                 match ty {
                     ValType::I64 => insn.i64_const(value),
                     _ => insn
@@ -3402,11 +3394,15 @@ impl Lowering<'_> {
                 };
             }
             FLOAT_LITERAL => {
-                let text = text.trim_end_matches(['f', 'F', 'd', 'D']);
-                let unreadable = || WasmError::Unsupported("a floating literal this cannot read");
+                let (value, _) = Literal::floating(text)?;
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "the inferred type says `f32`, and that narrowing is what a `float` \
+                              constant is"
+                )]
                 match ty {
-                    ValType::F32 => insn.f32_const(text.parse().map_err(|_| unreadable())?),
-                    _ => insn.f64_const(text.parse().map_err(|_| unreadable())?),
+                    ValType::F32 => insn.f32_const(value as f32),
+                    _ => insn.f64_const(value),
                 };
             }
             // A `char` is an unsigned 16-bit integer, so it is an `i32` here like every other integral
@@ -3414,10 +3410,7 @@ impl Lowering<'_> {
             // `'\u0041'` mean what they mean in both, and reading them twice would be two chances to
             // disagree about one of them.
             CHAR_LITERAL => {
-                let value = crate::lower::expr::Expr::literal_text(text)
-                    .ok()
-                    .and_then(|text| text.chars().next())
-                    .ok_or(WasmError::Unsupported("a `char` literal this cannot read"))?;
+                let value = Literal::character(text)?;
                 match ty {
                     ValType::I64 => insn.i64_const(i64::from(u32::from(value))),
                     _ => insn.i32_const(i32::try_from(u32::from(value)).unwrap_or(0)),
