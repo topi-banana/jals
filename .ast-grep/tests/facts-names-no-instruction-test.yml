@@ -1,0 +1,37 @@
+id: facts-names-no-instruction
+
+valid:
+    # Source vocabulary: a CST node, a `jals-hir` handle, a value the source spells.
+    - |
+        pub(crate) fn declarators(decl: &SyntaxNode) -> Vec<(SyntaxToken, Option<ast::Expr>)> {
+            Vec::new()
+        }
+
+    - |
+        pub(crate) fn member_at(self, token: &SyntaxToken) -> Result<MemberId> {
+            self.index().member_by_decl(self.file(), 0).ok_or(FactError::Unresolved(String::new()))
+        }
+
+    # A `switch` *label* is what the source wrote; `Label` is what the assembler allocates. The
+    # regex is anchored, so the two do not collide.
+    - |
+        pub(crate) fn switch_arm(self, labels: impl Iterator<Item = ast::SwitchLabel>) -> Result<ArmLabels> {
+            Err(FactError::Unsupported("unimplemented"))
+        }
+
+invalid:
+    # A descriptor is how the JVM spells a type — one target's answer, not the source's.
+    - |
+        pub(crate) fn field_descriptor(&self, id: MemberId) -> Result<Descriptor> {
+            Descriptor::descriptor_of(&self.index.resolved_member_ty(id), self.index)
+        }
+
+    # A wasm value type is the other target's answer to the same question.
+    - |
+        fn representation(ty: &Ty) -> ValType {
+            ValType::I32
+        }
+
+    # Slot numbering is the JVM's frame layout, and a branch target is an instruction.
+    - |
+        fn declare(slots: &mut Slots, entry: Label) {}

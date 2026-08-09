@@ -136,3 +136,126 @@ impl Literal {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Literal, Width};
+    use crate::facts::FactError;
+
+    /// These run where the end-to-end tests do not.
+    ///
+    /// Every value this file decodes is checked today by compiling Java and running it on a JVM,
+    /// which `jals-javac/tests/compile.rs` stands down from when the host has no `java`. CI also
+    /// runs this crate's tests as `wasm32-wasip1`, where there is no JVM at all — so on that cell,
+    /// and on any machine without a JDK, the reader below ran unchecked. It needs no host: a
+    /// literal's text is a `&str`, and its value is a fact about that `&str` alone.
+    ///
+    /// A number's base is named by its prefix and its `_` separators mean nothing, both of which
+    /// are cheap. The one that is not: `0x8000_0000_0000_0000L` is a legal `long` whose value is
+    /// negative, because the source spells the bit pattern rather than the number. Parsing signed
+    /// first and falling back to unsigned is what accepts it.
+    #[test]
+    fn an_integer_literal_is_read_in_the_base_its_prefix_names() {
+        assert_eq!(Literal::integer("10"), Ok((10, Width::Int)));
+        assert_eq!(Literal::integer("0x1F"), Ok((31, Width::Int)));
+        assert_eq!(Literal::integer("0b1010"), Ok((10, Width::Int)));
+        assert_eq!(Literal::integer("017"), Ok((15, Width::Int)));
+        assert_eq!(Literal::integer("1_000_000"), Ok((1_000_000, Width::Int)));
+        assert_eq!(
+            Literal::integer("0x8000_0000_0000_0000L"),
+            Ok((i64::MIN, Width::Long))
+        );
+    }
+
+    /// The suffix is part of the token, so it comes off **here** rather than at each caller.
+    ///
+    /// It used not to: the two `case`-label paths passed the text untrimmed while the expression
+    /// paths trimmed it, so `case 1L:` failed in both backends for a reason neither stated.
+    ///
+    /// Exactly one suffix comes off, not every trailing letter. No legal literal ends in `LL`, so
+    /// this only ever rejects something the lexer should not have produced.
+    #[test]
+    fn a_suffix_is_stripped_here_and_names_the_width() {
+        assert_eq!(Literal::integer("1L"), Ok((1, Width::Long)));
+        assert_eq!(Literal::integer("1l"), Ok((1, Width::Long)));
+        assert_eq!(Literal::integer("1"), Ok((1, Width::Int)));
+        assert_eq!(Literal::floating("1.5f"), Ok((1.5, true)));
+        assert_eq!(Literal::floating("1.5F"), Ok((1.5, true)));
+        assert_eq!(Literal::floating("1.5"), Ok((1.5, false)));
+        assert_eq!(Literal::floating("1_0.5d"), Ok((10.5, false)));
+    }
+
+    /// Exactly **one** quote comes off each end.
+    ///
+    /// `trim_end_matches` took every trailing quote, so `"a\""` — whose last two characters are an
+    /// escaped quote and the closing one — lost both and compiled to `a`. An unterminated literal
+    /// the lexer recovered still yields its text rather than nothing, because a lossless parse
+    /// hands this reader a token it already knows is broken.
+    #[test]
+    fn exactly_one_quote_comes_off_each_end() {
+        assert_eq!(Literal::text(r#""a\"""#).as_deref(), Ok("a\""));
+        assert_eq!(Literal::text(r#""""#).as_deref(), Ok(""));
+        assert_eq!(Literal::text(r#""ab"#).as_deref(), Ok("ab"));
+        assert_eq!(Literal::text("'a'").as_deref(), Ok("a"));
+    }
+
+    /// Every escape family, resolved rather than approximated.
+    ///
+    /// A unicode escape may carry any number of `u`s (JLS §3.3), and an octal one takes at most
+    /// three digits and at most `\377` — so a leading digit above `3` takes only one more (§3.10.7).
+    /// Both rules are easy to write down and easy to get subtly wrong, and neither has any
+    /// observable effect until a string constant reaches a class file nothing downstream checks.
+    #[test]
+    fn every_escape_family_resolves() {
+        assert_eq!(Literal::text(r#""a\nb""#).as_deref(), Ok("a\nb"));
+        assert_eq!(
+            Literal::text(r#""\t\r\b\f\s""#).as_deref(),
+            Ok("\t\r\u{8}\u{c} ")
+        );
+        assert_eq!(Literal::text(r#""\\""#).as_deref(), Ok("\\"));
+        assert_eq!(Literal::text(r"'\''").as_deref(), Ok("'"));
+        assert_eq!(Literal::text(r"'A'").as_deref(), Ok("A"));
+        assert_eq!(Literal::text(r"'\uuu0041'").as_deref(), Ok("A"));
+        assert_eq!(Literal::text(r"'\101'").as_deref(), Ok("A"));
+        assert_eq!(Literal::text(r"'\47'").as_deref(), Ok("'"));
+        // A leading `4` cannot take *two* more digits and stay under `\377`, so `\477` is the two
+        // characters `\47` and `7` rather than one escape.
+        assert_eq!(Literal::text(r#""\477""#).as_deref(), Ok("'7"));
+    }
+
+    /// An escape this does not know is reported, not approximated.
+    ///
+    /// Pushing the character after the backslash — the old fallback — turned `A` into `u0041`
+    /// and `\101` into `101`. The wording travels verbatim into both backends' error types and is
+    /// matched by exact text in `jals-javac/tests/compile.rs`, which only runs where a JDK is
+    /// installed. This is where it is pinned everywhere else.
+    #[test]
+    fn an_unknown_escape_is_reported_in_the_pinned_words() {
+        let unknown = Err(FactError::Unsupported(
+            "an escape sequence this lowering cannot read",
+        ));
+        assert_eq!(Literal::text(r#""\q""#), unknown);
+        // A lone surrogate is a UTF-16 code unit Rust's `char` cannot hold.
+        assert_eq!(Literal::text(r#""\ud800""#), unknown);
+        // Four hex digits are required; `\u00` runs out of literal first.
+        assert_eq!(Literal::text(r#""\u00""#), unknown);
+    }
+
+    /// A number the reader cannot make sense of is reported rather than approximated, for the same
+    /// reason: this crate does not check, so a value it invents is one nothing downstream re-derives.
+    #[test]
+    fn an_unreadable_number_is_reported() {
+        assert_eq!(
+            Literal::integer("0xZZ"),
+            Err(FactError::Unsupported(
+                "an integer literal this lowering cannot read"
+            ))
+        );
+        assert_eq!(
+            Literal::floating("1.2.3"),
+            Err(FactError::Unsupported(
+                "a floating-point literal this lowering cannot read"
+            ))
+        );
+    }
+}
