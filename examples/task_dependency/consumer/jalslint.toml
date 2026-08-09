@@ -1,0 +1,6 @@
+# The JVM launcher fixes `main`'s signature, so `String[] args` is written whether or not the
+# program reads it. This one prints the greeting that crossed the dependency edge and takes no
+# arguments, so `unused-local` would flag a parameter the example cannot drop — the suppression the
+# rule's own documentation prescribes for a signature it does not get to choose.
+[rules]
+unused-local = "allow"
