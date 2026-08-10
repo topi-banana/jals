@@ -19,11 +19,11 @@ use alloc::string::{String, ToString as _};
 use alloc::vec::Vec;
 
 use jals_hir::Ty;
-use jals_syntax::SyntaxKind::IDENT;
 use jals_syntax::ast::{self, AstNode as _};
 use jals_syntax::{SyntaxNode, SyntaxToken};
 
 use crate::desc::Descriptor;
+use crate::facts::Facts;
 use crate::jvm::{Branch, Compare, Label};
 use crate::lower::emit::Cleanup;
 use crate::lower::expr::Expr;
@@ -108,8 +108,8 @@ impl Stmt {
             ast::Stmt::Expr(expression) => Self::expression(expression, context, emit),
             ast::Stmt::Return(statement) => Self::ret(statement, context, emit),
             ast::Stmt::If(statement) => Self::conditional(statement, context, emit),
-            ast::Stmt::Break(statement) => Self::leave(statement.syntax(), true, context, emit),
-            ast::Stmt::Continue(statement) => Self::leave(statement.syntax(), false, context, emit),
+            ast::Stmt::Break(statement) => Self::leave(statement.label(), true, context, emit),
+            ast::Stmt::Continue(statement) => Self::leave(statement.label(), false, context, emit),
             ast::Stmt::Throw(statement) => Self::throw(statement, context, emit),
             ast::Stmt::Synchronized(statement) => Self::synchronized(statement, context, emit),
             ast::Stmt::Try(statement) => Self::try_catch(statement, context, emit),
@@ -595,14 +595,10 @@ impl Stmt {
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
     ) -> Result<()> {
-        // The CST is flat: each declarator name takes the next expression sibling as its value.
-        let names: Vec<_> = declaration.names().collect();
-        let values: Vec<_> = declaration
-            .syntax()
-            .children()
-            .filter_map(ast::Expr::cast)
-            .collect();
-        for (index, name) in names.iter().enumerate() {
+        // Each declarator with the value written after its own `=`. Pairing names with expressions
+        // by index — which this did — gave `int a, b = 2;` its `2` on `a` and left `b`'s slot
+        // unwritten, which the verifier rejects on the first read of `b`.
+        for (name, value) in Facts::declarators(declaration.syntax()) {
             let id = context
                 .typed
                 .analysis()
@@ -610,13 +606,13 @@ impl Stmt {
                 .ok_or_else(|| LowerError::Unresolved(name.text().into()))?;
             let ty = context.typed.type_of_def(id).clone();
             let slot = emit.slots.declare(id, Slots::ty_width(&ty));
-            let Some(value) = values.get(index) else {
+            let Some(value) = value else {
                 // A declaration with no initialiser writes nothing; the slot stays unset until an
                 // assignment gives it a type, which is exactly what the verifier assumes.
                 continue;
             };
             // Converted to the *declared* type, which is where `long n = 1;` gets its `i2l`.
-            Expr::lower_as(value, &ty, context, emit)?;
+            Expr::lower_as(&value, &ty, context, emit)?;
             let descriptor = Descriptor::descriptor_of(&ty, context.index)?.to_string();
             emit.asm.store_as(slot, &descriptor)?;
         }
@@ -780,19 +776,15 @@ impl Stmt {
 
     /// `break;` / `break l;` / `continue;` / `continue l;`.
     ///
-    /// The optional label is a bare `IDENT` token on the statement — the grammar has no slot for it,
-    /// because there is nothing else it could be.
+    /// The label comes in already read: where it lives on the statement is a grammar fact, and both
+    /// lowerings used to walk for it themselves.
     fn leave(
-        node: &SyntaxNode,
+        label: Option<SyntaxToken>,
         exit: bool,
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
     ) -> Result<()> {
-        let label = node
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .find(|token| token.kind() == IDENT)
-            .map(|token| String::from(token.text()));
+        let label = label.map(|token| String::from(token.text()));
         let (target, depth) = if exit {
             emit.exit_of(label.as_deref())?
         } else {

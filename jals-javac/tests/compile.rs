@@ -4839,6 +4839,52 @@ public class Decl {
     assert_eq!(run(source, "Decl"), "0 2 3 0\n");
 }
 
+/// The same rule for a *local* declaration, where getting it wrong failed differently.
+///
+/// A field left unset holds its type's default, so the field version printed a wrong number. A
+/// local left unset has no value at all: the store went to `a`'s slot and `b`'s was never written,
+/// so reading `b` loads a slot the `StackMapTable` never defined and the JVM rejects the class at
+/// load. Two failure modes, one cause — which is why the local half stayed broken for as long as
+/// the field half was fixed on its own.
+///
+/// Every declarator with no initialiser is assigned before it is read, because a definitely
+/// unassigned local is not something Java lets you read either. That does not soften the test: it
+/// is `b`, `g`, and `i` — the ones written *with* a value — that were left unwritten, so the
+/// misalignment surfaces as a verify error on the very first line that prints.
+///
+/// `int h, i = f();` is included because the order matters as much as the pairing: `f()` runs once,
+/// for `i`, and its value is not silently handed to `h`.
+#[test]
+fn a_local_declarator_gets_the_value_written_after_its_own_equals() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class LocalDecl {
+    static int calls = 0;
+
+    static int f() {
+        calls = calls + 1;
+        return 7;
+    }
+
+    public static void main(String[] args) {
+        int a, b = 2;
+        int c = 3, d;
+        long e, g = 4;
+        int h, i = f();
+        a = 1;
+        d = 5;
+        e = 6;
+        h = 8;
+        System.out.println(a + " " + b + " " + c + " " + d);
+        System.out.println(e + " " + g + " " + h + " " + i + " " + calls);
+    }
+}
+"#;
+    assert_eq!(run(source, "LocalDecl"), "1 2 3 5\n6 4 8 7 1\n");
+}
+
 /// A bridge belongs to the method that actually overrides, not to whichever same-arity overload the
 /// member walk reached first.
 ///

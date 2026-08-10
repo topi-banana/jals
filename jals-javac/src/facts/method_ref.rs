@@ -134,7 +134,7 @@ impl Facts<'_> {
         let arity = index.member(interface_method).params.len();
 
         // A constructor reference names `new` rather than a method.
-        let constructs = Self::has_keyword(node, SyntaxKind::NEW_KW);
+        let constructs = Self::constructs(node);
 
         // `Uses::twice` parses its qualifier as an *expression* — a name reference is what a type
         // name looks like before anything resolves it — so both spellings are read.

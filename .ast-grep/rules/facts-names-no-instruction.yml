@@ -1,0 +1,24 @@
+id: facts-names-no-instruction
+language: Rust
+severity: error
+message: '`facts` answers about the source, not about a target. It names no instruction.'
+note: |
+  `facts` states what the *program as written* says — the span the inference memo is keyed on, the
+  definition a name binds to, the constant a `case` label denotes. `Descriptor`, `Assembler`,
+  `ValType`, `Slots`, `Layout`, and the instruction vocabulary are answers about a *target*, and each
+  stays with the backend that owns it. A fact both backends need goes here; one that names an
+  instruction does not.
+
+  That sentence is the whole seam. It was prose until the layer it describes had already been
+  written twice and the copies drifted into wrong output, so this is what keeps it a rule.
+
+  It is a name blacklist, not a semantic check: a fact returning `u32` that happens to be a local
+  slot number passes it. What it stops is the easy version — reaching for the backend's own type
+  because it was the nearest thing that already said what you meant.
+
+files:
+  - 'jals-javac/src/facts/**/*.rs'
+
+rule:
+  kind: type_identifier
+  regex: '^(Descriptor|Assembler|ValType|Slots|Layout|Insn|Label|Branch|NumOp|BinOp|HeapType|RefType|StorageType)$'

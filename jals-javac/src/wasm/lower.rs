@@ -46,12 +46,12 @@ use jals_hir::{DefId, DefKind, ItemId, MemberId, Primitive, ProjectIndex, Ty, Ty
 use jals_syntax::SyntaxKind::{
     ANNOTATION_TYPE_DECL, CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL, ENUM_BODY, ENUM_CONSTANT,
     ENUM_DECL, FIELD_DECL, INITIALIZER, INTERFACE_DECL, LAMBDA_EXPR, METHOD_DECL, METHOD_REF_EXPR,
-    MODIFIERS, NEW_EXPR, RECORD_DECL,
+    NEW_EXPR, RECORD_DECL,
 };
 use jals_syntax::ast::{self, AstNode as _};
 use jals_syntax::{SyntaxNode, SyntaxToken};
 
-use crate::facts::{Facts, Hierarchy, Overrides};
+use crate::facts::{ArmLabels, Facts, Hierarchy, Literal, Overrides};
 use crate::wasm::encode::{
     CompType, ExportKind, FieldType, Func, Global, HeapType, Module, RefType, StorageType, SubType,
     ValType,
@@ -173,7 +173,7 @@ impl CompileWasm {
         // after *its* own — so a subclass would place its first field on top of it. Reported rather than
         // laid out wrong.
         for &item in &classes {
-            if let Some(parent) = Self::superclass(item, index)
+            if let Some(parent) = Hierarchy::of(index).superclass(item)
                 && layout.inner.contains_key(&parent)
             {
                 return Err(WasmError::Unsupported("a subclass of an inner class"));
@@ -584,12 +584,7 @@ impl CompileWasm {
         let mut out = Vec::new();
         for node in root.descendants() {
             if node.kind() != INITIALIZER
-                || !node
-                    .children()
-                    .filter(|child| child.kind() == MODIFIERS)
-                    .flat_map(|modifiers| modifiers.children_with_tokens())
-                    .filter_map(jals_syntax::SyntaxElement::into_token)
-                    .any(|token| token.kind() == jals_syntax::SyntaxKind::STATIC_KW)
+                || !Facts::has_modifier(&node, jals_syntax::SyntaxKind::STATIC_KW)
             {
                 continue;
             }
@@ -658,7 +653,7 @@ impl CompileWasm {
                     captures.push((item, captured));
                 }
                 bodies.push((item, node.clone()));
-                if Self::is_inner(&node) {
+                if Facts::is_inner_class(&node) {
                     let enclosing = node.parent().and_then(|body| body.parent()).ok_or(
                         WasmError::Unsupported("an inner class with no enclosing type"),
                     )?;
@@ -746,25 +741,6 @@ impl CompileWasm {
             .map(Some)
     }
 
-    /// Whether a class declaration is a non-`static` nested one.
-    fn is_inner(node: &SyntaxNode) -> bool {
-        // A nested interface, `enum`, `record`, and `@interface` are all implicitly `static` and hold no
-        // enclosing instance, so only a nested *class* can be an inner one.
-        if node.kind() != CLASS_DECL {
-            return false;
-        }
-        let nested = node
-            .parent()
-            .is_some_and(|parent| parent.kind() == jals_syntax::SyntaxKind::CLASS_BODY);
-        nested
-            && !node
-                .children()
-                .filter(|child| child.kind() == MODIFIERS)
-                .flat_map(|modifiers| modifiers.children_with_tokens())
-                .filter_map(jals_syntax::SyntaxElement::into_token)
-                .any(|token| token.kind() == jals_syntax::SyntaxKind::STATIC_KW)
-    }
-
     fn push_with_supertypes(
         item: ItemId,
         index: &ProjectIndex,
@@ -774,30 +750,12 @@ impl CompileWasm {
         if ordered.contains(&item) {
             return;
         }
-        if let Some(parent) = Self::superclass(item, index)
+        if let Some(parent) = Hierarchy::of(index).superclass(item)
             && declared.contains(&parent)
         {
             Self::push_with_supertypes(parent, index, declared, ordered);
         }
         ordered.push(item);
-    }
-
-    /// The class a type extends, when that class is itself indexed.
-    fn superclass(item: ItemId, index: &ProjectIndex) -> Option<ItemId> {
-        index
-            .item(item)
-            .supertypes
-            .iter()
-            .map(|supertype| supertype.id)
-            // An `enum` counts: a constant with a body is a subclass of one, and it is the only way a
-            // declaration that is not a `class` ever appears here. Its struct has to hold the enum's
-            // fields, which is what makes the layout inherit and the subtyping declared.
-            .find(|&id| {
-                matches!(
-                    index.item(id).kind,
-                    DefKind::Class | DefKind::Enum | DefKind::Record
-                )
-            })
     }
 
     /// Register every method and constructor `input` declares.
@@ -909,9 +867,7 @@ impl CompileWasm {
                 }
                 let member_name = Self::member_name_token(&node, is_constructor)
                     .ok_or(WasmError::Unsupported("a member with no name"))?;
-                let member = index
-                    .member_by_decl(input.file(), usize::from(member_name.text_range().start()))
-                    .ok_or_else(|| WasmError::Unresolved(member_name.text().into()))?;
+                let member = Facts::of(*input).member_at(&member_name)?;
                 let is_static = index.member(member).modifiers.is_static;
 
                 let mut params = Vec::new();
@@ -1050,8 +1006,9 @@ impl Layout {
         if self.structs.contains_key(&item) {
             return;
         }
-        let parent =
-            CompileWasm::superclass(item, index).filter(|id| self.structs.contains_key(id));
+        let parent = Hierarchy::of(index)
+            .superclass(item)
+            .filter(|id| self.structs.contains_key(id));
         let mut members: Vec<MemberId> = parent
             .and_then(|id| self.fields.get(&id))
             .cloned()
@@ -1109,8 +1066,9 @@ impl Layout {
                 });
             }
         }
-        let parent =
-            CompileWasm::superclass(item, index).and_then(|id| self.structs.get(&id).copied());
+        let parent = Hierarchy::of(index)
+            .superclass(item)
+            .and_then(|id| self.structs.get(&id).copied());
         module.set_type(
             type_index,
             SubType {
@@ -1139,15 +1097,10 @@ impl Layout {
             if node.kind() != FIELD_DECL {
                 continue;
             }
-            let Some(declaration) = ast::FieldDecl::cast(node.clone()) else {
-                continue;
-            };
-            let names: Vec<SyntaxToken> = declaration.names().collect();
-            let values: Vec<ast::Expr> = node.children().filter_map(ast::Expr::cast).collect();
-            for (position, name) in names.iter().enumerate() {
-                let Some(member) =
-                    index.member_by_decl(input.file(), usize::from(name.text_range().start()))
-                else {
+            // Each declarator with the value written after its own `=`, which is not the same as
+            // pairing names with expressions by index — see `Facts::declarators`.
+            for (name, value) in Facts::declarators(&node) {
+                let Ok(member) = Facts::of(*input).member_at(&name) else {
                     continue;
                 };
                 if !index.member(member).modifiers.is_static {
@@ -1160,7 +1113,7 @@ impl Layout {
                 let Ok(ty) = self.val_type(&index.resolved_member_ty(member)) else {
                     continue;
                 };
-                let (init, deferred) = Self::constant_init(values.get(position), ty);
+                let (init, deferred) = Self::constant_init(value.as_ref(), ty);
                 module.globals.push(Global { ty, init });
                 let global =
                     u32::try_from(module.globals.len() - 1).map_err(|_| WasmError::TooLarge)?;
@@ -1168,8 +1121,8 @@ impl Layout {
                 // A global's own initialiser is a constant expression, so anything that has to be
                 // *computed* runs in the start function instead — over the global the default already
                 // holds, which is exactly the order a `<clinit>` gives.
-                if deferred && let Some(value) = values.get(position) {
-                    out.push((member, value.clone()));
+                if deferred && let Some(value) = value {
+                    out.push((member, value));
                 }
             }
         }
@@ -1207,9 +1160,7 @@ impl Layout {
                 let name = constant
                     .name_token()
                     .ok_or(WasmError::Unsupported("an `enum` constant with no name"))?;
-                let id = index
-                    .member_by_decl(input.file(), usize::from(name.text_range().start()))
-                    .ok_or_else(|| WasmError::Unresolved(name.text().into()))?;
+                let id = Facts::of(*input).member_at(&name)?;
                 let ty = self.class_ref(owner)?;
                 let mut init = Insn::new();
                 Self::default_value(ty, &mut init);
@@ -1281,21 +1232,17 @@ impl Layout {
                 insn.i32_const(0);
             }
             (CHAR_LITERAL, ValType::I32) => {
-                let Some(character) = crate::lower::expr::Expr::literal_text(text)
-                    .ok()
-                    .and_then(|text| text.chars().next())
-                else {
+                let Ok(character) = Literal::character(text) else {
                     return default();
                 };
                 insn.i32_const(character as i32);
             }
             // An `int` literal into a wider field is an assignment conversion, and the *constant* form
             // of one is folding: `static long n = 1` writes `i64.const 1`, not `i32.const` plus an
-            // extension no constant expression may hold.
+            // extension no constant expression may hold. Which width to fold *into* is the field's,
+            // so the one the fact reads off the suffix is dropped.
             (INT_LITERAL, _) => {
-                let Ok(value) =
-                    crate::lower::expr::Expr::integer_literal(text.trim_end_matches(['l', 'L']))
-                else {
+                let Ok((value, _)) = Literal::integer(text) else {
                     return default();
                 };
                 #[allow(clippy::cast_precision_loss)]
@@ -1310,8 +1257,7 @@ impl Layout {
                 };
             }
             (FLOAT_LITERAL, ValType::F32 | ValType::F64) => {
-                let text = text.trim_end_matches(['f', 'F', 'd', 'D']);
-                let Ok(value) = text.parse::<f64>() else {
+                let Ok((value, _)) = Literal::floating(text) else {
                     return default();
                 };
                 #[allow(clippy::cast_possible_truncation)]
@@ -1486,7 +1432,8 @@ impl Body {
             // a subclass whose *constant site* calls the enum's constructor, that being the one place
             // the constant's arguments exist — calling it here too would run the enum's twice, and the
             // no-argument one at that, which is a different constructor from the one selected.
-            let under_enum = CompileWasm::superclass(owner, index)
+            let under_enum = Hierarchy::of(index)
+                .superclass(owner)
                 .is_some_and(|parent| index.item(parent).kind == DefKind::Enum);
             if let Some(function) = Self::super_constructor(owner, index, layout)
                 && !under_enum
@@ -1507,7 +1454,7 @@ impl Body {
             // name — they are forwarded by position.
             let mut insn = Insn::new();
             // `T::new` allocates rather than delegating: the object *is* what the interface method returns.
-            if Lowering::constructs(&method.node) {
+            if Facts::constructs(&method.node) {
                 let created = Lowering::constructed_item(&method.node, input, index)?;
                 let struct_type = layout.structs[&created];
                 insn.struct_new_default(struct_type);
@@ -1733,7 +1680,7 @@ impl Body {
     /// `None` at a class whose declared constructors all take arguments: Java requires an explicit
     /// `super(…)` there, so there is nothing implicit to call, and the source wrote what to run.
     fn super_constructor(owner: ItemId, index: &ProjectIndex, layout: &Layout) -> Option<u32> {
-        let mut candidate = CompileWasm::superclass(owner, index);
+        let mut candidate = Hierarchy::of(index).superclass(owner);
         while let Some(item) = candidate {
             let mut declared = index
                 .own_members(item)
@@ -1749,7 +1696,7 @@ impl Body {
             if let Some(&function) = layout.default_constructors.get(&item) {
                 return Some(function);
             }
-            candidate = CompileWasm::superclass(item, index);
+            candidate = Hierarchy::of(index).superclass(item);
         }
         None
     }
@@ -1957,13 +1904,7 @@ impl Lowering<'_> {
                 // and this backend has no start function to run it in — so it is reported rather than
                 // run in every constructor, which would be a different program.
                 // A `static { … }` runs once in the module's start function, not per instance.
-                if node
-                    .children()
-                    .filter(|child| child.kind() == MODIFIERS)
-                    .flat_map(|modifiers| modifiers.children_with_tokens())
-                    .filter_map(jals_syntax::SyntaxElement::into_token)
-                    .any(|token| token.kind() == jals_syntax::SyntaxKind::STATIC_KW)
-                {
+                if Facts::has_modifier(&node, jals_syntax::SyntaxKind::STATIC_KW) {
                     continue;
                 }
                 if let Some(block) = node.children().find_map(ast::Block::cast) {
@@ -1971,19 +1912,13 @@ impl Lowering<'_> {
                 }
                 continue;
             }
-            let Some(declaration) = ast::FieldDecl::cast(node.clone()) else {
-                continue;
-            };
-            let names: Vec<SyntaxToken> = declaration.names().collect();
-            let values: Vec<ast::Expr> = node.children().filter_map(ast::Expr::cast).collect();
-            for (position, name) in names.iter().enumerate() {
-                let Some(value) = values.get(position) else {
+            // Each declarator with the value written after its own `=`, which is not the same as
+            // pairing names with expressions by index — see `Facts::declarators`.
+            for (name, value) in Facts::declarators(&node) {
+                let Some(value) = value else {
                     continue;
                 };
-                let Some(member) = self
-                    .index
-                    .member_by_decl(self.input.file(), usize::from(name.text_range().start()))
-                else {
+                let Ok(member) = self.facts().member_at(&name) else {
                     continue;
                 };
                 if self.index.member(member).modifiers.is_static {
@@ -1994,7 +1929,7 @@ impl Lowering<'_> {
                 };
                 insn.local_get(receiver);
                 let declared = self.index.resolved_member_ty(member);
-                self.value_as(value, &declared, insn)?;
+                self.value_as(&value, &declared, insn)?;
                 insn.struct_set(struct_type, slot);
             }
         }
@@ -2092,8 +2027,8 @@ impl Lowering<'_> {
             ast::Stmt::DoWhile(statement) => self.do_while(statement, insn),
             ast::Stmt::For(statement) => self.for_loop(statement, insn),
             ast::Stmt::ForEach(statement) => self.for_each(statement, insn),
-            ast::Stmt::Break(statement) => self.leave(statement.syntax(), false, insn),
-            ast::Stmt::Continue(statement) => self.leave(statement.syntax(), true, insn),
+            ast::Stmt::Break(statement) => self.leave(statement.label(), false, insn),
+            ast::Stmt::Continue(statement) => self.leave(statement.label(), true, insn),
             ast::Stmt::Labeled(statement) => self.labelled(statement, insn),
             // Each of these names itself rather than going through a catch-all, so a report says which
             // construct is missing. All four wait on the same thing: the exception-handling proposal's
@@ -2127,22 +2062,20 @@ impl Lowering<'_> {
     }
 
     fn local(&mut self, declaration: &ast::LocalVarDecl, insn: &mut Insn) -> Result<()> {
-        let names: Vec<_> = declaration.names().collect();
-        let values: Vec<_> = declaration
-            .syntax()
-            .children()
-            .filter_map(ast::Expr::cast)
-            .collect();
-        for (position, name) in names.iter().enumerate() {
+        // Each declarator with the value written after its own `=`. Pairing names with expressions
+        // by index — which this did — gave `int a, b = 2;` its `2` on `a` and left `b` holding the
+        // local's zero default, which is silent: unlike the JVM's frame, a wasm local is always
+        // readable.
+        for (name, value) in Facts::declarators(declaration.syntax()) {
             let id = self
                 .input
                 .analysis()
                 .symbol_at(usize::from(name.text_range().start()))
                 .ok_or_else(|| WasmError::Unresolved(name.text().into()))?;
             let slot = self.declare_local(id)?;
-            if let Some(value) = values.get(position) {
+            if let Some(value) = value {
                 let declared = self.input.type_of_def(id).clone();
-                self.value_as(value, &declared, insn)?;
+                self.value_as(&value, &declared, insn)?;
                 insn.local_set(slot);
             }
         }
@@ -2850,39 +2783,23 @@ impl Lowering<'_> {
 
     /// One arm's `case` keys and patterns. `default` contributes neither.
     fn arm(&self, labels: impl Iterator<Item = ast::SwitchLabel>) -> Result<Arm> {
-        use jals_syntax::SyntaxKind::{RECORD_PATTERN, TYPE_PATTERN, UNNAMED_PATTERN};
-        let mut keys = Vec::new();
-        let mut patterns = Vec::new();
-        let mut guard = None;
-        let mut is_default = false;
-        for label in labels {
-            if label.is_default() {
-                is_default = true;
-            }
-            patterns.extend(label.syntax().children().filter(|child| {
-                matches!(
-                    child.kind(),
-                    TYPE_PATTERN | RECORD_PATTERN | UNNAMED_PATTERN
-                )
-            }));
-            if let Some(clause) = label.syntax().children().find_map(ast::Guard::cast) {
-                guard = clause.condition();
-                if guard.is_none() {
-                    return Err(WasmError::Unsupported("a guarded `case`"));
-                }
-            }
-            // A `Guard`'s condition is an expression child of the label too, so the keys are read only
-            // when there is no guard to have contributed one.
-            if guard.is_none() {
-                for value in label.syntax().children().filter_map(ast::Expr::cast) {
-                    // A `String` key has no wasm representation — this backend compiles primitives and
-                    // project classes, and a host with no `java.base` has no `String` to hash.
-                    keys.push(self.facts().case_key(&value)?.as_int().ok_or_else(|| {
-                        WasmError::NoRepresentation("a `String` `case` label".to_owned())
-                    })?);
-                }
-            }
-        }
+        let ArmLabels {
+            keys,
+            patterns,
+            guard,
+            is_default,
+        } = self.facts().switch_arm(labels)?;
+        // A `String` key is a fact the source states and a value this target cannot hold — this
+        // backend compiles primitives and project classes, and a host with no `java.base` has no
+        // `String` to hash. So it is read there and refused here.
+        let keys = keys
+            .into_iter()
+            .map(|key| {
+                key.as_int().ok_or_else(|| {
+                    WasmError::NoRepresentation("a `String` `case` label".to_owned())
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         Ok(Arm {
             keys,
             patterns,
@@ -3100,12 +3017,13 @@ impl Lowering<'_> {
     ///
     /// The branch depth comes from the emitter, not from the source: an `if` between a loop header and
     /// the branch shifts every target, and only the emitter knows how many structures are open.
-    fn leave(&mut self, node: &SyntaxNode, continuing: bool, insn: &mut Insn) -> Result<()> {
-        let label = node
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
-            .map(|token| token.text().to_owned());
+    fn leave(
+        &mut self,
+        label: Option<jals_syntax::SyntaxToken>,
+        continuing: bool,
+        insn: &mut Insn,
+    ) -> Result<()> {
+        let label = label.map(|token| token.text().to_owned());
         let target = self
             .loops
             .iter()
@@ -3365,10 +3283,7 @@ impl Lowering<'_> {
             CHAR_LITERAL, FALSE_KW, FLOAT_LITERAL, INT_LITERAL, NULL_KW, TRUE_KW,
         };
         let token = literal
-            .syntax()
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .find(|token| !token.kind().is_trivia())
+            .token()
             .ok_or(WasmError::Unsupported("an empty literal"))?;
         // `null` has no type of its own, so it is answered before `ty_of` is asked for one.
         if token.kind() == NULL_KW {
@@ -3385,14 +3300,11 @@ impl Lowering<'_> {
                 insn.i32_const(0);
             }
             INT_LITERAL => {
-                // Read by the same routine the JVM backend uses: `0xFF`, `0b1010`, `017`, and `1_000`
-                // all mean what they mean in both, and reading them twice would be two chances to
-                // disagree about one of them.
-                let value =
-                    crate::lower::expr::Expr::integer_literal(text.trim_end_matches(['l', 'L']))
-                        .map_err(|_| {
-                            WasmError::Unsupported("an integer literal this cannot read")
-                        })?;
+                // The shared fact, not the other backend's: `0xFF`, `0b1010`, `017`, and `1_000` all
+                // mean what they mean in both, and reading them twice was two chances to disagree
+                // about one of them. The width comes from the inferred type below, so the one the
+                // fact reads off the suffix is dropped.
+                let (value, _) = Literal::integer(text)?;
                 match ty {
                     ValType::I64 => insn.i64_const(value),
                     _ => insn
@@ -3402,11 +3314,15 @@ impl Lowering<'_> {
                 };
             }
             FLOAT_LITERAL => {
-                let text = text.trim_end_matches(['f', 'F', 'd', 'D']);
-                let unreadable = || WasmError::Unsupported("a floating literal this cannot read");
+                let (value, _) = Literal::floating(text)?;
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "the inferred type says `f32`, and that narrowing is what a `float` \
+                              constant is"
+                )]
                 match ty {
-                    ValType::F32 => insn.f32_const(text.parse().map_err(|_| unreadable())?),
-                    _ => insn.f64_const(text.parse().map_err(|_| unreadable())?),
+                    ValType::F32 => insn.f32_const(value as f32),
+                    _ => insn.f64_const(value),
                 };
             }
             // A `char` is an unsigned 16-bit integer, so it is an `i32` here like every other integral
@@ -3414,10 +3330,7 @@ impl Lowering<'_> {
             // `'\u0041'` mean what they mean in both, and reading them twice would be two chances to
             // disagree about one of them.
             CHAR_LITERAL => {
-                let value = crate::lower::expr::Expr::literal_text(text)
-                    .ok()
-                    .and_then(|text| text.chars().next())
-                    .ok_or(WasmError::Unsupported("a `char` literal this cannot read"))?;
+                let value = Literal::character(text)?;
                 match ty {
                     ValType::I64 => insn.i64_const(i64::from(u32::from(value))),
                     _ => insn.i32_const(i32::try_from(u32::from(value)).unwrap_or(0)),
@@ -3446,9 +3359,7 @@ impl Lowering<'_> {
                 }
                 // Not a local: a field of the enclosing class. A `static` one is a global and needs no
                 // receiver; an instance one is reached through `this`, which is local 0.
-                let declaration = self.input.analysis().def(id);
-                self.index
-                    .member_by_decl(self.input.file(), declaration.name_range.start)
+                self.facts().member_of_def(id)
             }
             // Nothing in the file declared it, which an *inherited* field never is.
             None => self.inherited_field(name.syntax()),
@@ -3495,27 +3406,8 @@ impl Lowering<'_> {
     /// chain, nearest first, which is the order that makes a shadowing field win. A struct holds its
     /// supertype's fields first, so the slot the inherited member lands in is the enclosing type's own.
     fn inherited_field(&self, node: &SyntaxNode) -> Option<MemberId> {
-        let name = node
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)?;
-        let mut candidate = self.owner;
-        while let Some(item) = candidate {
-            if let Some(member) = self
-                .index
-                .own_members(item)
-                .iter()
-                .copied()
-                .find(|&member| {
-                    let info = self.index.member(member);
-                    info.kind == DefKind::Field && info.name == name.text()
-                })
-            {
-                return Some(member);
-            }
-            candidate = CompileWasm::superclass(item, self.index);
-        }
-        None
+        let name = Facts::name_token(node)?;
+        Hierarchy::of(self.index).inherited_field(self.owner?, name.text())
     }
 
     /// `{1, 2, 3}`, whose elements are written rather than defaulted.
@@ -4151,13 +4043,7 @@ impl Lowering<'_> {
             AMP_EQ, CARET_EQ, EQ, GT, LSHIFT_EQ, MINUS_EQ, PERCENT_EQ, PIPE_EQ, PLUS_EQ, SLASH_EQ,
             STAR_EQ,
         };
-        let operator: Vec<_> = node
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .map(|token| token.kind())
-            .filter(|kind| !kind.is_trivia())
-            .collect();
-        Ok(match operator.as_slice() {
+        Ok(match Facts::operator(node).as_slice() {
             [PLUS_EQ] => NumOp::Add,
             [MINUS_EQ] => NumOp::Sub,
             [STAR_EQ] => NumOp::Mul,
@@ -4358,9 +4244,7 @@ impl Lowering<'_> {
                         // A bare name that is no local is a field of the enclosing class. A `static`
                         // one is a global; an instance one needs no spill, local 0 being a stable
                         // receiver already.
-                        let declaration = self.input.analysis().def(id);
-                        self.index
-                            .member_by_decl(self.input.file(), declaration.name_range.start)
+                        self.facts().member_of_def(id)
                     }
                     // Nothing in the file declared it, which an *inherited* field never is.
                     None => self.inherited_field(name.syntax()),
@@ -4790,13 +4674,6 @@ impl Lowering<'_> {
             }
         }
         Ok(())
-    }
-
-    /// Whether a reference names `new` rather than a method.
-    fn constructs(node: &SyntaxNode) -> bool {
-        node.children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .any(|token| token.kind() == jals_syntax::SyntaxKind::NEW_KW)
     }
 
     /// The type a `T::new` reference constructs.

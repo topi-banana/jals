@@ -80,7 +80,7 @@ use jals_syntax::ast::{self, AstNode as _};
 use jals_syntax::{SyntaxNode, SyntaxToken};
 
 use crate::desc::{DescError, Descriptor};
-use crate::facts::{Facts, Hierarchy, Overrides};
+use crate::facts::{Facts, Hierarchy, Literal, Overrides};
 use crate::jvm::{AsmError, Assembler, BinOp, Branch, Compare, Numeric, Receiver};
 use crate::lower::slots::Slots;
 
@@ -294,12 +294,6 @@ impl Compile {
         Ok(out)
     }
 
-    /// Whether `node` is a type declaration nested directly inside another type's body.
-    fn is_nested(node: &SyntaxNode) -> bool {
-        node.parent()
-            .is_some_and(|parent| ast::ClassBody::cast(parent).is_some())
-    }
-
     /// Compile one type declaration.
     fn class(
         node: &SyntaxNode,
@@ -315,8 +309,7 @@ impl Compile {
         // A nested interface, `@interface`, and `enum` are implicitly `static` and hold no enclosing
         // instance, so only a nested *class* can be an inner one. One that is holds its enclosing
         // instance in a synthetic field, and every constructor takes it as an extra first parameter.
-        let encloses = (Self::is_nested(node)
-            && !Self::has_modifier(node, jals_syntax::SyntaxKind::STATIC_KW)
+        let encloses = (Facts::is_inner_class(node)
             && matches!(index.item(item).kind, DefKind::Class))
         .then(|| Self::enclosing_name(node, index, file))
         .transpose()?;
@@ -350,12 +343,7 @@ impl Compile {
         let this_class = pool.class_index(&internal_name).ok_or(AsmError::PoolFull)?;
         // Only a project-internal supertype can be named here; anything else is `Object`, which is
         // also the right answer for a class with no `extends` clause at all.
-        let super_item = index
-            .item(item)
-            .supertypes
-            .iter()
-            .map(|supertype| supertype.id)
-            .find(|&id| index.item(id).kind != DefKind::Interface);
+        let super_item = Hierarchy::of(index).superclass(item);
         // An `enum`'s supertype is `java.lang.Enum` and the source never writes it, so there is no
         // `extends` clause for the index to have recorded.
         let super_name = if is_enum {
@@ -649,7 +637,7 @@ impl Compile {
                 flags |= ClassAccessFlags::FINAL;
             } else if members.iter().any(|member| {
                 member.kind() == METHOD_DECL
-                    && Self::has_modifier(member, jals_syntax::SyntaxKind::ABSTRACT_KW)
+                    && Facts::has_modifier(member, jals_syntax::SyntaxKind::ABSTRACT_KW)
             }) {
                 // A constant body may implement an `abstract` member, which the enum itself does not.
                 flags |= ClassAccessFlags::ABSTRACT;
@@ -699,7 +687,7 @@ impl Compile {
             })
             .collect();
         nested.extend(inner);
-        if Self::is_nested(node) {
+        if Facts::is_nested(node) {
             nested.push(node);
         }
         if nested.is_empty() {
@@ -751,7 +739,7 @@ impl Compile {
             let mut flags = Self::class_flags(declaration, is_interface, is_annotation)
                 & !ClassAccessFlags::SUPER;
             flags |= Self::access_level(declaration);
-            if Self::has_modifier(declaration, jals_syntax::SyntaxKind::STATIC_KW) {
+            if Facts::has_modifier(declaration, jals_syntax::SyntaxKind::STATIC_KW) {
                 // `ClassAccessFlags` has no `STATIC`, because a *class* file cannot be static — only
                 // an `InnerClasses` entry records it (JVMS §4.7.6, `ACC_STATIC` = 0x0008).
                 flags |= MethodAccessFlags::STATIC;
@@ -783,11 +771,11 @@ impl Compile {
     /// three.
     fn access_level(node: &SyntaxNode) -> u16 {
         use jals_syntax::SyntaxKind::{PRIVATE_KW, PROTECTED_KW, PUBLIC_KW};
-        if Self::has_modifier(node, PRIVATE_KW) {
+        if Facts::has_modifier(node, PRIVATE_KW) {
             MethodAccessFlags::PRIVATE
-        } else if Self::has_modifier(node, PROTECTED_KW) {
+        } else if Facts::has_modifier(node, PROTECTED_KW) {
             MethodAccessFlags::PROTECTED
-        } else if Self::has_modifier(node, PUBLIC_KW) {
+        } else if Facts::has_modifier(node, PUBLIC_KW) {
             MethodAccessFlags::PUBLIC
         } else {
             0
@@ -809,10 +797,10 @@ impl Compile {
             // wants it, and the JVM ignores it from version 52 on.
             flags |= ClassAccessFlags::SUPER;
         }
-        if Self::has_modifier(node, jals_syntax::SyntaxKind::FINAL_KW) {
+        if Facts::has_modifier(node, jals_syntax::SyntaxKind::FINAL_KW) {
             flags |= ClassAccessFlags::FINAL;
         }
-        if !is_interface && Self::has_modifier(node, jals_syntax::SyntaxKind::ABSTRACT_KW) {
+        if !is_interface && Facts::has_modifier(node, jals_syntax::SyntaxKind::ABSTRACT_KW) {
             flags |= ClassAccessFlags::ABSTRACT;
         }
         flags
@@ -1232,9 +1220,7 @@ impl Compile {
             return out;
         };
         for declaration in root.descendants().filter(|n| n.kind() == CLASS_DECL) {
-            if !Self::is_nested(&declaration)
-                || Self::has_modifier(&declaration, jals_syntax::SyntaxKind::STATIC_KW)
-            {
+            if !Facts::is_inner_class(&declaration) {
                 continue;
             }
             let Some(name) = ast::Decl::name_token_of(&declaration) else {
@@ -1405,18 +1391,6 @@ impl Compile {
         })
     }
 
-    /// Whether a declaration's `MODIFIERS` child carries `keyword`.
-    fn has_modifier(node: &SyntaxNode, keyword: jals_syntax::SyntaxKind) -> bool {
-        node.children()
-            .find(|child| child.kind() == jals_syntax::SyntaxKind::MODIFIERS)
-            .is_some_and(|modifiers| {
-                modifiers
-                    .children_with_tokens()
-                    .filter_map(jals_syntax::SyntaxElement::into_token)
-                    .any(|token| token.kind() == keyword)
-            })
-    }
-
     /// A method's or constructor's access flags.
     ///
     /// `in_interface` supplies the level JLS §9.4 leaves unwritten: an interface method with no
@@ -1444,7 +1418,7 @@ impl Compile {
             (SYNCHRONIZED_KW, MethodAccessFlags::SYNCHRONIZED),
             (NATIVE_KW, MethodAccessFlags::NATIVE),
         ] {
-            if Self::has_modifier(node, keyword) {
+            if Facts::has_modifier(node, keyword) {
                 flags |= bit;
             }
         }
@@ -1471,7 +1445,7 @@ impl Compile {
             (TRANSIENT_KW, FieldAccessFlags::TRANSIENT),
             (VOLATILE_KW, FieldAccessFlags::VOLATILE),
         ] {
-            if Self::has_modifier(node, keyword) {
+            if Facts::has_modifier(node, keyword) {
                 flags |= bit;
             }
         }
@@ -1621,7 +1595,7 @@ impl Compile {
         // (JLS §9.4). Anything else with no body is a declaration the JVM would refuse.
         let flags = if decl.body().is_none() && flags & MethodAccessFlags::NATIVE == 0 {
             if context.in_interface
-                || Self::has_modifier(node, jals_syntax::SyntaxKind::ABSTRACT_KW)
+                || Facts::has_modifier(node, jals_syntax::SyntaxKind::ABSTRACT_KW)
             {
                 flags | MethodAccessFlags::ABSTRACT
             } else {
@@ -1704,14 +1678,16 @@ impl Compile {
             return Err(unsupported());
         };
         let literal = text(literal.syntax()).ok_or_else(unsupported)?;
+        // The *declared* type decides the tag, so the width each fact reads off the suffix is
+        // dropped: `@A(x = 1)` on a `long` element is a `J` whatever the literal was spelled as.
         let integer = || {
-            expr::Expr::integer_literal(literal.trim_end_matches(['l', 'L']))
+            Literal::integer(&literal)
+                .map(|(value, _)| value)
                 .map_err(|_| unsupported())
         };
         let floating = || {
-            literal
-                .trim_end_matches(['f', 'F', 'd', 'D'])
-                .parse::<f64>()
+            Literal::floating(&literal)
+                .map(|(value, _)| value)
                 .map_err(|_| unsupported())
         };
         let (tag, const_value_index) = match declared {
@@ -1722,10 +1698,7 @@ impl Compile {
             Ty::Primitive(Primitive::Byte) => (b'B', pool.integer_index(Self::narrow(integer()?))),
             Ty::Primitive(Primitive::Short) => (b'S', pool.integer_index(Self::narrow(integer()?))),
             Ty::Primitive(Primitive::Char) => {
-                let character = expr::Expr::literal_text(&literal)
-                    .ok()
-                    .and_then(|text| text.chars().next())
-                    .ok_or_else(unsupported)?;
+                let character = Literal::character(&literal).map_err(|_| unsupported())?;
                 (b'C', pool.integer_index(character as i32))
             }
             Ty::Primitive(Primitive::Int) => (b'I', pool.integer_index(Self::narrow(integer()?))),
@@ -1734,7 +1707,7 @@ impl Compile {
             Ty::Primitive(Primitive::Float) => (b'F', pool.float_index(floating()? as f32)),
             Ty::Primitive(Primitive::Double) => (b'D', pool.double_index(floating()?)),
             Ty::Class(_) if expr::Expr::is_string(declared, context) => {
-                let text = expr::Expr::literal_text(&literal).map_err(|_| unsupported())?;
+                let text = Literal::text(&literal).map_err(|_| unsupported())?;
                 (b's', pool.utf8_index(&text))
             }
             _ => return Err(unsupported()),
@@ -3058,11 +3031,11 @@ impl Compile {
             // An interface field is implicitly `static` (JLS §9.3), so it is written without the
             // keyword and still runs in `<clinit>`.
             FIELD_DECL => {
-                (Self::has_modifier(member, STATIC_KW) || in_interface) == statics
+                (Facts::has_modifier(member, STATIC_KW) || in_interface) == statics
                     && ast::FieldDecl::cast(member.clone())
                         .is_some_and(|decl| decl.value().is_some())
             }
-            INITIALIZER => Self::has_modifier(member, STATIC_KW) == statics,
+            INITIALIZER => Facts::has_modifier(member, STATIC_KW) == statics,
             _ => false,
         }
     }
@@ -3093,20 +3066,12 @@ impl Compile {
             let Some(decl) = ast::FieldDecl::cast(member.clone()) else {
                 continue;
             };
-            // The CST is flat, like a local declaration's: `int a = 1, b = 2;` is one declaration
-            // whose names and expressions are siblings. Pairing them *by index* — which this did —
-            // is right only when every declarator has an initialiser: `int a, b = 2;` has one
-            // expression and two names, so `a` was given `2` and `b` was left unset. The shared
-            // fact walks the tokens instead, so each declarator gets the value written after its
-            // own `=`.
-            for name in decl.names() {
-                let Some(value) = Facts::declarator_initialiser(
-                    decl.syntax(),
-                    usize::from(name.text_range().start()),
-                ) else {
+            // Each declarator with the value written after its own `=`, which is not the same as
+            // pairing names with expressions by index — see `Facts::declarators`.
+            for (name, value) in Facts::declarators(decl.syntax()) {
+                let Some(value) = value else {
                     continue;
                 };
-                let value = &value;
                 let field = context.facts().member_at(&name)?;
                 let ty = context.index.resolved_member_ty(field);
                 let descriptor = Descriptor::descriptor_of(&ty, context.index)?.to_string();
@@ -3115,7 +3080,7 @@ impl Compile {
                 }
                 // Converted to the field's declared type, which is where `long total = 0;` gets its
                 // `i2l`.
-                expr::Expr::lower_as(value, &ty, context, emit)?;
+                expr::Expr::lower_as(&value, &ty, context, emit)?;
                 if statics {
                     emit.asm
                         .put_static(&context.this_class, name.text(), &descriptor)?;
@@ -3249,7 +3214,7 @@ impl Context<'_> {
             .count();
 
         let mut ty = if node.is_primitive_or_var() {
-            jals_hir::Ty::Primitive(Self::primitive_of(node).ok_or(DescError::Unknown)?)
+            jals_hir::Ty::Primitive(Facts::primitive_of(node).ok_or(DescError::Unknown)?)
         } else {
             let name = node.simple_name().ok_or(DescError::Unknown)?;
             let qualified = node.is_qualified().then(|| node.qualified_text()).flatten();
@@ -3301,14 +3266,7 @@ impl Context<'_> {
                     args: Vec::new(),
                 });
             }
-            let Some(next) = self
-                .index
-                .item(candidate)
-                .supertypes
-                .iter()
-                .map(|supertype| supertype.id)
-                .find(|&id| self.index.item(id).kind != DefKind::Interface)
-            else {
+            let Some(next) = Hierarchy::of(self.index).superclass(candidate) else {
                 return throwable();
             };
             candidate = next;
@@ -3344,30 +3302,6 @@ impl Context<'_> {
             name: simple,
             args: Vec::new(),
         }))
-    }
-
-    /// The primitive a `TYPE` node's keyword names.
-    fn primitive_of(node: &ast::Type) -> Option<jals_hir::Primitive> {
-        use jals_hir::Primitive;
-        use jals_syntax::SyntaxKind::{
-            BOOLEAN_KW, BYTE_KW, CHAR_KW, DOUBLE_KW, FLOAT_KW, INT_KW, LONG_KW, SHORT_KW,
-        };
-        node.syntax()
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .find_map(|token| {
-                Some(match token.kind() {
-                    BOOLEAN_KW => Primitive::Boolean,
-                    BYTE_KW => Primitive::Byte,
-                    SHORT_KW => Primitive::Short,
-                    CHAR_KW => Primitive::Char,
-                    INT_KW => Primitive::Int,
-                    LONG_KW => Primitive::Long,
-                    FLOAT_KW => Primitive::Float,
-                    DOUBLE_KW => Primitive::Double,
-                    _ => return None,
-                })
-            })
     }
 
     /// The source facts of the file being lowered.
