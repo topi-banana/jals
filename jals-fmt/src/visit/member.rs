@@ -179,6 +179,24 @@ impl Ctx<'_> {
         }
     }
 
+    /// Whether this **field**'s leading annotations each take a line of their own.
+    ///
+    /// A method or a type is separated by its own `[blank-lines]` rule and is annotated far too
+    /// often for this to say anything about it; the question only distinguishes one field from
+    /// the next.
+    fn has_vertical_annotations(&self, member: &SyntaxNode) -> bool {
+        if member.kind() != S::FIELD_DECL {
+            return false;
+        }
+        let Some(modifiers) = Self::child_of(member, S::MODIFIERS) else {
+            return false;
+        };
+        modifiers
+            .children()
+            .any(|child| matches!(child.kind(), S::ANNOTATION | S::ATTRIBUTE))
+            && self.annotation_policy(&modifiers) == WrapPolicy::AlwaysPerItem
+    }
+
     /// A break inside a body: negotiable when the body may collapse, forced otherwise.
     fn body_break(&mut self, collapsible: bool, blanks: usize, plus_indent: Indent) {
         if collapsible && blanks == 0 {
@@ -194,9 +212,12 @@ impl Ctx<'_> {
         let in_interface = body
             .parent()
             .is_some_and(|parent| parent.kind() == S::INTERFACE_DECL);
-        // A documented member is separated whatever its kind says — see
+        // A documented member is separated whatever its kind says — and so is one whose
+        // annotations take lines of their own, which is the other half of google-java-format's
+        // `thisOneGetsBlankLineBefore`: a field under a vertical `@SuppressWarnings("serial")`
+        // reads as its own unit exactly as a documented one does. See
         // `[blank-lines] around-documented-member`.
-        if self.has_javadoc(member) {
+        if self.has_javadoc(member) || self.has_vertical_annotations(member) {
             return blank.around_documented_member;
         }
         match member.kind() {

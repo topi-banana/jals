@@ -337,7 +337,7 @@ IntelliJ の `SPACE_*` 45 とはほぼ 1:1。代表例（全数は importer の 
 | `imports.remove-unused` | — | —（`CLASS_COUNT_TO_USE_IMPORT_ON_DEMAND` 等は classpath 依存で §7） | `RemoveUnusedImports`（`--skip-removing-unused-imports` の否定、既定 true） |
 | `wrapping.reflow-long-strings` | — | — | `JavaFormatterOptions.reflowLongStrings` → `StringWrapper`（既定 true） |
 | `wrapping.inline-argumentless-annotations` (`never`/`locals`/`declarations`) | — | — | `fieldAnnotationDirection`（引数付き注釈が 1 つでもあれば縦、なければ横）→ `declarations`。Palantir は field を常に縦にするので `locals` |
-| `blank-lines.around-documented-member` | — | — | `hasJavaDoc(bodyDeclaration)` → `thisOneGetsBlankLineBefore`（固定 1） |
+| `blank-lines.around-documented-member` | — | — | `thisOneGetsBlankLineBefore`（Javadoc 付きメンバ、および注釈が縦に並ぶ field。固定 1。jals 側の既定は 0 で、GJF profile だけが 1 にする） |
 | `wrapping.fill-item-width` | —（構文ごとの split bit で表す） | — | `hasOnlyShortItems` / `MAX_ITEM_LENGTH_FOR_FILLING`（固定 10） |
 | `wrapping.format-string-arguments` | — | — | `isFormatMethod`（先頭引数が `%` / `{0}` を含む文字列リテラル連結なら、それだけを 1 行に。固定 true） |
 | `wrapping.tabular-array-initializers` | — | — | `argumentsAreTabular` / 配列初期化子の table 判定（引数リストにも効く。固定 true） |

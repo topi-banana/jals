@@ -192,7 +192,7 @@ impl Ctx<'_> {
     }
 
     /// Which `[wrapping]` rule governs this `MODIFIERS` node's leading annotations.
-    fn annotation_policy(&self, node: &SyntaxNode) -> WrapPolicy {
+    pub(super) fn annotation_policy(&self, node: &SyntaxNode) -> WrapPolicy {
         let wrapping = &self.style.cfg.wrapping;
         let parent = node.parent().map(|parent| parent.kind());
         // `inline-argumentless-annotations` decides from the annotations themselves, so it is

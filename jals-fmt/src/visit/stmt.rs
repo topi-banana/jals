@@ -309,7 +309,13 @@ impl Ctx<'_> {
     /// it, otherwise indented on its own line.
     async fn emit_braceless_body(&mut self, branch: &SyntaxNode) {
         let indent = self.style.indent();
-        if self.style.cfg.braces.keep_control_statement_on_one_line {
+        // An *empty* body is the exception every reference makes: `while (poll() != null) ;`
+        // reads as a call whose result is discarded, so the lone `;` takes a line of its own
+        // whatever the rule says — google-java-format's `visitEmptyStatement` forces the break,
+        // and Eclipse and IntelliJ write it the same way.
+        if self.style.cfg.braces.keep_control_statement_on_one_line
+            && branch.kind() != S::EMPTY_STMT
+        {
             self.open(indent.clone());
             self.break_op(Indent::ZERO);
             self.visit(branch).await;

@@ -58,6 +58,11 @@ inline-argumentless-annotations = "declarations"
 # `StringWrapper`: re-wrap a string concatenation that overflows the column limit.
 reflow-long-strings = true
 
+[blank-lines]
+# `thisOneGetsBlankLineBefore`: a member carrying Javadoc — and a field whose annotations went
+# vertical — is separated from its neighbours whatever its kind says.
+around-documented-member = 1
+
 [braces]
 # GJF collapses an empty body to `{}` and never joins a non-empty one, and `visitStatement`
 # separates a braceless body from its header with a break whose flat form is a space, so

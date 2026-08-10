@@ -23,8 +23,8 @@ use alloc::borrow::ToOwned;
 use alloc::vec;
 
 use jals_config::fmt::{
-    Comments, Config, ImportOrder, Imports, IndentStyle, InlineAnnotations, KeepOnOneLine, Layout,
-    ParenPositions, Spacing, WrapPolicy, Wrapping,
+    BlankLines, Comments, Config, ImportOrder, Imports, IndentStyle, InlineAnnotations,
+    KeepOnOneLine, Layout, ParenPositions, Spacing, WrapPolicy, Wrapping,
 };
 use serde::Deserialize;
 
@@ -191,6 +191,12 @@ impl GoogleJavaFormatConfig {
                 inline_argumentless_annotations: InlineAnnotations::Declarations,
                 reflow_long_strings: native.reflow_long_strings,
                 ..Wrapping::default()
+            },
+            // `thisOneGetsBlankLineBefore`: a member with Javadoc, and a field whose annotations
+            // went vertical, is separated from its neighbours whatever its kind says.
+            blank_lines: BlankLines {
+                around_documented_member: 1,
+                ..BlankLines::default()
             },
             // `new String[] {…}` and `{{1}, {2}}` both take a space before the initializer's
             // brace; every other spacing decision is already the jals default.
