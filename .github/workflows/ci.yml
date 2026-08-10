@@ -595,10 +595,21 @@ jobs:
           rm -rf "$assets" && mkdir -p "$assets"
           cp "target/release/$bin" "$assets/$bin"
           archive="jals-v$version-$target.$extension"
-          # `upload-rust-binary-action` puts the executable at the archive root, and both formats
-          # are written by the same bsdtar/GNU tar the action later extracts them with.
+          # `upload-rust-binary-action` puts the executable at the archive root.
+          #
+          # The zip has to be a real zip, which rules out the `tar` on PATH: in git-bash that is GNU
+          # tar, and `tar -a -cf x.zip` there writes a *tar* named `.zip` — an archive the action
+          # would then extract with GNU tar and "pass" on, while the real release asset (a genuine
+          # zip from `upload-rust-binary-action`) is something GNU tar cannot read at all. The
+          # bsdtar Windows ships is what writes the format this is meant to be testing.
           if [ "$extension" = zip ]; then
-            (cd "$assets" && tar -a -cf "$archive" "$bin")
+            (cd "$assets" && "$SYSTEMROOT/System32/tar.exe" -a -cf "$archive" "$bin")
+            # Two bytes that say the gate is testing what it claims to.
+            magic=$(head -c 2 "$assets/$archive")
+            if [ "$magic" != "PK" ]; then
+              echo "::error::$archive is not a zip (magic '$magic'); the Windows cell would be testing the wrong format"
+              exit 1
+            fi
           else
             (cd "$assets" && tar -czf "$archive" "$bin")
           fi

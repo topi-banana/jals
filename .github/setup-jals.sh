@@ -66,6 +66,45 @@ archive_extension() {
 # filename contains one. On Windows `RUNNER_TEMP` is `D:\a\_temp`, so every path this script
 # builds under it does, and the digest came back as `\786745e6…`. Reading stdin prints `<hex>  -`
 # with no filename to escape, on every platform.
+# Unpack `$2` (a basename) inside directory `$1`, leaving the executable there.
+#
+# Run from *inside* the directory with a relative name, never as `-C dir path/to/archive`: GNU tar
+# reads an argument whose colon precedes the first slash as a remote `host:path`, so a staging path
+# under Windows' `D:\a\_temp` made it try to reach a machine called `D`.
+#
+# Which extractor can do the job is not a given either. `.zip` is produced for the Windows targets
+# only, and the `tar` on `PATH` in git-bash is GNU tar, which cannot read a zip in any form — the
+# bsdtar that Windows itself ships is a different binary further down `PATH`. So a zip names its
+# candidates explicitly and the first one that yields the executable wins; success is "the binary is
+# there", not an exit status, because an extractor that half-works is not a success.
+extract_archive() {
+  local dir="$1" archive="$2" format="$3"
+  local -a candidates=()
+  if [[ "${format}" == "zip" ]]; then
+    local bsdtar="${SYSTEMROOT:-/c/Windows}/System32/tar.exe"
+    bsdtar="${bsdtar//\\//}"
+    bsdtar="${bsdtar/#C:/\/c}"
+    bsdtar="${bsdtar/#c:/\/c}"
+    [[ -x "${bsdtar}" ]] && candidates+=("${bsdtar} -xf")
+    command -v unzip >/dev/null 2>&1 && candidates+=("unzip -q -o")
+    candidates+=("tar -xf")
+  else
+    candidates+=("tar -xzf")
+  fi
+
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    # shellcheck disable=SC2086 # `candidate` is a command plus flags, assembled above; word
+    # splitting is the point.
+    ( cd "${dir}" && ${candidate} "${archive}" ) >/dev/null 2>&1 || true
+    if [[ -f "${dir}/${BIN_NAME}" ]]; then
+      return
+    fi
+    log "${candidate%% *} did not unpack ${BIN_NAME} from ${archive}"
+  done
+  fail "could not extract ${BIN_NAME} from ${archive} (tried: ${candidates[*]%% *})"
+}
+
 sha256_of() {
   local digest
   if command -v sha256sum >/dev/null 2>&1; then
@@ -203,10 +242,7 @@ download_prebuilt() {
     fail "checksum mismatch for ${archive}: expected ${want}, got ${got}"
   log "sha256 verified (${got})"
 
-  tar -xf "${staging}/${archive}" -C "${staging}" ||
-    fail "could not extract ${archive}"
-  [[ -f "${staging}/${BIN_NAME}" ]] ||
-    fail "${archive} did not contain ${BIN_NAME}"
+  extract_archive "${staging}" "${archive}" "${extension}"
 
   mkdir -p "${BIN_DIR}"
   # Staged inside the destination and renamed, so a concurrent install on the same self-hosted
