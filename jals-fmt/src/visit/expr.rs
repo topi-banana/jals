@@ -11,7 +11,7 @@
 //! fits or splits at every operator under `if-long-per-item`, and packs under `if-long`.
 
 use jals_config::fmt::WrapPolicy;
-use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode};
+use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::ir::Indent;
 use crate::visit::{Ctx, Spacing};
@@ -131,10 +131,10 @@ impl Ctx<'_> {
                 continue;
             }
             // The first child that is not another piece of the operator: the deferred break falls
-            // here, in front of the right operand, which is the gap it always stood for.
-            if !Self::fuses_with_previous(&children, nth)
-                && let Some(flat) = deferred.take()
-            {
+            // here, in front of the right operand, which is the gap it always stood for — so the
+            // spacing it carries is that gap's, not the one in front of the operator.
+            if !Self::fuses_with_previous(&children, nth) && deferred.take().is_some() {
+                let flat = self.gap_flat(child);
                 self.list_break_flat(policy, flat, Indent::ZERO);
             }
             self.visit_element(child).await;
@@ -183,6 +183,35 @@ impl Ctx<'_> {
         Self::flat_space(space)
     }
 
+    /// The flat rendering of a break placed *in front of* `next`, rather than in front of an
+    /// operator.
+    ///
+    /// [`operator_flat`](Self::operator_flat) answers for the pair (previous token, operator),
+    /// which is the gap a `before` break stands in. An `after` break stands in the other gap —
+    /// (operator, right operand) — and on a **fused** operator the two are not interchangeable:
+    /// `x >>= 2` spells its operator as `GT GT EQ`, so the pair in front of the `=` is *inside*
+    /// the operator and [`Spacing::fused`] answers "tight". Asking about the gap the break is
+    /// actually placed in renders `x >>= 2`, where asking about the operator rendered `x >>=2`.
+    fn gap_flat(&self, next: &SyntaxElement) -> &'static str {
+        let space = Self::leading_token(next).is_some_and(|tok| {
+            self.previous
+                .as_ref()
+                .is_none_or(|previous| Spacing::between(previous, &tok, self.style))
+        });
+        Self::flat_space(space)
+    }
+
+    /// The first significant token `element` emits — the one a break in front of it precedes.
+    fn leading_token(element: &SyntaxElement) -> Option<SyntaxToken> {
+        match element {
+            SyntaxElement::Token(tok) => Some(tok.clone()),
+            SyntaxElement::Node(node) => node
+                .descendants_with_tokens()
+                .filter_map(SyntaxElement::into_token)
+                .find(|tok| !tok.kind().is_trivia()),
+        }
+    }
+
     /// Whether a token kind is an infix operator that may carry a break.
     const fn is_binary_operator(kind: S) -> bool {
         matches!(
@@ -214,17 +243,23 @@ impl Ctx<'_> {
         let continuation = self.style.continuation();
         self.open(continuation.clone());
         let children = Self::children(node);
-        for child in &children {
+        for (nth, child) in children.iter().enumerate() {
             let is_operator = child
                 .as_token()
                 .is_some_and(|tok| Self::is_assignment_operator(tok.kind()));
             if is_operator {
-                let flat = self.operator_flat(child);
                 if before {
+                    let flat = self.operator_flat(child);
                     self.list_break_flat(policy, flat, Indent::ZERO);
                 }
                 self.visit_element(child).await;
                 if !before {
+                    // The gap this break stands in is (operator, right-hand side), and on `>>=`
+                    // — `GT GT EQ` — that is not the gap in front of the `=`. See
+                    // [`Ctx::gap_flat`].
+                    let flat = children
+                        .get(nth + 1)
+                        .map_or(" ", |next| self.gap_flat(next));
                     self.list_break_flat(policy, flat, Indent::ZERO);
                 }
                 continue;
@@ -387,21 +422,18 @@ mod tests {
     fn a_compound_shift_assignment_survives_its_own_break() {
         // `>>=` and `>>>=` are the same multi-token shape one method over, in `visit_assignment`,
         // which places its break the same way — and under the *default* config, since
-        // `before-assignment-operator` is off. The operator has to come out spelled as one piece.
-        //
-        // What this deliberately does not assert is the space *after* it: `x >>= 2` is currently
-        // rendered `x >>=2`, because `operator_flat` asks about the pair (previous token,
-        // operator) while a `!before` break stands for (operator, right operand) — and on a fused
-        // operator the first of those pairs is *inside* it, so `Spacing::fused` answers "tight".
-        // That is a separate, pre-existing spacing defect, not a token loss, and pinning today's
-        // output here would make it look intended.
+        // `before-assignment-operator` is off. The operator has to come out spelled as one piece,
+        // and separated from its right operand: the break stands in the gap *after* the operator,
+        // so it carries that gap's spacing rather than the one in front of the `=`, which on a
+        // fused operator is inside it and answers "tight". Asking the wrong pair rendered
+        // `x >>=2`.
         let out = jals_exec::block_on_inline(crate::FormatOutput::format_source(
             "class Z { void m() { int x = 1; x >>= 2; x >>>= 3; } }\n",
             &Config::default(),
         ));
         assert!(!out.fell_back(), "the fail-safe refused the output");
-        assert!(out.formatted.contains(">>="), "{}", out.formatted);
-        assert!(out.formatted.contains(">>>="), "{}", out.formatted);
+        assert!(out.formatted.contains("x >>= 2;"), "{}", out.formatted);
+        assert!(out.formatted.contains("x >>>= 3;"), "{}", out.formatted);
     }
 
     #[test]

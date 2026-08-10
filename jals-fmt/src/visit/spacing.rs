@@ -310,8 +310,12 @@ impl Spacing {
             | S::SYNCHRONIZED_STMT
             | S::TRY_STMT
             | S::RESOURCE_LIST => rules.before_keyword_parentheses,
-            // A record header and a lambda parameter list hug their name.
-            S::RECORD_HEADER | S::LAMBDA_PARAMS => false,
+            // A record header hugs the name it follows: `record Point(int x, int y)`.
+            S::RECORD_HEADER => false,
+            // A lambda's parameter list follows *nothing* of the lambda's own — the `(` opens the
+            // expression. Answering `false` here made it hug whatever preceded the expression
+            // instead, which spells `return(a, b) -> f(a)`; `None` hands the gap back to the rule
+            // that owns the token on its left, exactly as a cast's or a group's parenthesis does.
             _ => return None,
         })
     }
@@ -417,10 +421,16 @@ impl Spacing {
             (true, false) => Some(Self::is_word(nk)),
             (false, true) if nk == S::GT => Some(rules.within_angle_brackets),
             // A generic method writes its type parameters *before* the return type, so the `<`
-            // follows a modifier keyword and has to separate from it: `public static <T, U> …`.
-            // A list that follows the declared name (`class Foo<T>`) hugs unless
+            // follows a modifier and has to separate from it: `public static <T, U> …`, and
+            // `final @ForceInline <M> …` for the modifier that is an annotation rather than a
+            // keyword — gluing that one spells `@ForceInline<M>`, an annotation the source never
+            // wrote. A list that follows the declared name (`class Foo<T>`) hugs unless
             // `before-type-parameter-list` says otherwise.
-            (false, true) if np == S::TYPE_PARAMS && Self::is_keyword(pk) => Some(true),
+            (false, true)
+                if np == S::TYPE_PARAMS && (Self::is_keyword(pk) || Self::ends_annotation(prev)) =>
+            {
+                Some(true)
+            }
             (false, true) => Some(pp != S::IDENT && Self::before_angle(np, rules)),
             (false, false) => None,
         }
