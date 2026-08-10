@@ -543,6 +543,120 @@ jobs:
           jals fmt --check "${sources[@]}"
           jals lint ${{ matrix.example.features }} "${sources[@]}"
 
+  setup-action:
+    # The repository-root `action.yml` claims a consumer installs `jals` in one step. A claim is
+    # worth what a machine checks of it, and checking this one needs release assets — which a pull
+    # request does not have. So each cell *packs the archive this commit would publish*, points the
+    # action at it through the `base-url` override the action already exposes for mirrors (the same
+    # override the npm launcher takes as `JALS_INSTALL_BASE_URL`), and installs from that. Only the
+    # address is substituted: the asset name, the sha256 companion, the verification, the
+    # extraction, the tool-cache layout and the PATH export are all the production path.
+    #
+    # One cell per host platform, because the three differ in exactly the places this script can
+    # break — the archive is a zip on Windows and a tarball elsewhere, and `sha256sum` is absent
+    # from the macOS image, where the script falls back to `shasum`.
+    name: setup-jals action (${{ matrix.platform.name }})
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: linux-x64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - name: macos-arm
+            runner: macos-latest
+            target: aarch64-apple-darwin
+          - name: windows-x64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: setup-action-${{ matrix.platform.name }}
+      - name: Build the jals binary
+        run: cargo build --release --package jals-cli
+      - name: Pack the release archive this commit would publish
+        id: pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          target='${{ matrix.platform.target }}'
+          case "$target" in
+            *-pc-windows-msvc) extension=zip; bin=jals.exe ;;
+            *) extension=tar.gz; bin=jals ;;
+          esac
+          # The version the action asks for is the one the binary reports, so this never drifts
+          # from `jals-cli`'s Cargo.toml the way a second copy of the number would.
+          version=$(target/release/"$bin" --version | awk '{print $2}')
+          assets="$RUNNER_TEMP/jals-assets"
+          rm -rf "$assets" && mkdir -p "$assets"
+          cp "target/release/$bin" "$assets/$bin"
+          archive="jals-v$version-$target.$extension"
+          # `upload-rust-binary-action` puts the executable at the archive root.
+          #
+          # The zip has to be a real zip, which rules out the `tar` on PATH: in git-bash that is GNU
+          # tar, and `tar -a -cf x.zip` there writes a *tar* named `.zip` — an archive the action
+          # would then extract with GNU tar and "pass" on, while the real release asset (a genuine
+          # zip from `upload-rust-binary-action`) is something GNU tar cannot read at all. The
+          # bsdtar Windows ships is what writes the format this is meant to be testing.
+          if [ "$extension" = zip ]; then
+            (cd "$assets" && "$SYSTEMROOT/System32/tar.exe" -a -cf "$archive" "$bin")
+            # Two bytes that say the gate is testing what it claims to.
+            magic=$(head -c 2 "$assets/$archive")
+            if [ "$magic" != "PK" ]; then
+              echo "::error::$archive is not a zip (magic '$magic'); the Windows cell would be testing the wrong format"
+              exit 1
+            fi
+          else
+            (cd "$assets" && tar -czf "$archive" "$bin")
+          fi
+          # The `<hex>  <filename>` line the release publishes beside every archive.
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd "$assets" && sha256sum "$archive" > "$archive.sha256")
+          else
+            (cd "$assets" && shasum -a 256 "$archive" > "$archive.sha256")
+          fi
+          rm -f "$assets/$bin"
+          # A `file://` URL needs a drive-letter path on Windows; `cygpath -m` is what turns the
+          # runner's `D:\a\...` into one.
+          if [ "$RUNNER_OS" = Windows ]; then
+            echo "base-url=file:///$(cygpath -m "$assets")" >> "$GITHUB_OUTPUT"
+          else
+            echo "base-url=file://$assets" >> "$GITHUB_OUTPUT"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Install jals through the action
+        id: setup
+        uses: ./
+        with:
+          version: ${{ steps.pack.outputs.version }}
+          base-url: ${{ steps.pack.outputs.base-url }}
+          from-source: never
+      - name: The installed jals is on PATH and is the one that was packed
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${{ steps.setup.outputs.source }}" = prebuilt
+          test "${{ steps.setup.outputs.cache-hit }}" = false
+          test "${{ steps.setup.outputs.version }}" = '${{ steps.pack.outputs.version }}'
+          # `jals` resolved off PATH, not through the action's `path` output: the PATH export is
+          # the half a consumer's later steps actually depend on.
+          jals --version
+          test "$(jals --version | awk '{print $2}')" = '${{ steps.pack.outputs.version }}'
+      - name: A second install of the same version comes out of the tool cache
+        id: again
+        uses: ./
+        with:
+          version: ${{ steps.pack.outputs.version }}
+          base-url: ${{ steps.pack.outputs.base-url }}
+          from-source: never
+      - name: The second install hit the cache
+        shell: bash
+        run: test "${{ steps.again.outputs.cache-hit }}" = true
+
   lsp-binary:
     name: lsp binary (${{ matrix.target }})
     # Per-platform `jals` binaries for the Zed extension's auto-download: the extension asks

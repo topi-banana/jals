@@ -628,6 +628,21 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
                 Some(from) => self.graph.features.get(from),
                 None => Some(&self.graph.root_features),
             };
+            // An `optional` entry the declaring project did not activate is not on its classpath —
+            // the same rule `Manifest::active_dependencies` states, applied here because discovery
+            // walks every entry (a node's own selection is settled by preprocessing, after the
+            // edges exist). Skipping at projection rather than at discovery is also what keeps the
+            // jar unfetched: resolution reads this plan, so an entry that never reaches it is never
+            // downloaded.
+            if edge.optional {
+                let activated = match &edge.from {
+                    Some(from) => self.graph.activated.get(from),
+                    None => Some(&self.graph.root_activated),
+                };
+                if !activated.is_some_and(|set| set.contains(&edge.dependency)) {
+                    continue;
+                }
+            }
             let active = edge
                 .remap
                 .as_ref()

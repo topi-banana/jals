@@ -148,6 +148,43 @@ cargo install --path jals-cli
 
 リリースビルドのバイナリは `target/release/jals` に生成されます。
 
+### GitHub Actions
+
+リポジトリのルート自体が composite action になっているので、ワークフローでは 1 ステップで `jals` を
+インストールして `PATH` に通せます:
+
+```yaml
+- uses: topi-banana/jals@main
+- run: jals fmt --check $(git ls-files '*.java')
+- run: jals lint
+```
+
+インストール対象は `version` で選びます。既定の `latest` は最新のリリースを解決してプリビルド
+バイナリを取得し、併せて公開されている `.sha256` で検証します。`v0.2.0` / `0.2.0` のようなリリース
+バージョンを書けばそれに固定されます。それ以外の値（`main`・ブランチ・タグ・コミット SHA）は git ref
+として扱われ、リリースアセットが存在しないため `cargo install` でビルドされます。この場合はジョブに
+Rust ツールチェインが必要です:
+
+```yaml
+- uses: dtolnay/rust-toolchain@stable
+- uses: topi-banana/jals@main
+  with:
+    version: main
+```
+
+| 入力          | 既定値                | 意味                                                                                       |
+| ------------- | --------------------- | ------------------------------------------------------------------------------------------ |
+| `version`     | `latest`              | `latest` / リリースバージョン / ビルドする git ref。                                         |
+| `repository`  | `topi-banana/jals`    | アセットとソースの取得元（フォークを指定可能）。                                             |
+| `from-source` | `auto`                | `auto` はランナーに合うアセットが無ければビルドへフォールバック。`always` は常にビルド、`never` はビルドせず失敗。 |
+| `base-url`    | —                     | GitHub リリースの代わりにミラーのディレクトリからアセットを取得（`JALS_INSTALL_BASE_URL` 相当）。 |
+| `cache`       | `true`                | 同じバージョンの導入済みインストールをランナーのツールキャッシュから再利用。                  |
+| `token`       | `${{ github.token }}` | `latest` を GitHub API で解決するときにのみ使用。                                            |
+
+出力は `version` / `path` / `bin-dir` / `source`（`prebuilt` か `source`）/ `cache-hit` です。
+Linux・macOS・Windows の `x64` / `arm64` ランナーに対応しています。
+
+
 ## 使い方
 
 `jals` はサブコマンド方式で、`fmt`（ソース整形）・`lint`（ソース lint）・`lsp`（language server）

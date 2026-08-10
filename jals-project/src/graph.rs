@@ -87,6 +87,19 @@ pub struct GraphEdge {
     /// The mapping set this entry's `remap` names, still ungated. `None` when the entry declares
     /// none, or when the name it declares is not a `[mappings]` entry the declaring manifest has.
     pub(crate) remap: Option<EdgeRemap>,
+    /// Whether the `[dependencies]` entry that declared this edge is `optional`.
+    ///
+    /// Recorded here because the gate cannot be applied where the edge is created: whether the
+    /// declaring project activated the entry is part of *its* resolved selection, which
+    /// preprocessing settles only after every edge exists. Assembly pairs this with
+    /// [`PreprocessedProjectGraph::activated`], which is the same rule
+    /// [`Manifest::active_dependencies`](jals_config::Manifest::active_dependencies) states, moved
+    /// to where the edges are.
+    ///
+    /// Only *binary* projection reads it. A source form's optionality is carried faithfully but not
+    /// yet acted on: an unactivated `git`/`path` entry is still acquired and preprocessed, because
+    /// its own build script is what settles the selection this flag would be gated against.
+    pub(crate) optional: bool,
 }
 
 /// A `remap` reference resolved against the declaring manifest, with its gate still to apply.
@@ -203,24 +216,29 @@ pub(crate) struct DeclaredBinaryEdge {
     /// The entry's `remap`, still ungated. Always `None` on the `sources` edge: the manifest rejects
     /// declaring both keys on one entry.
     pub(crate) remap: Option<EdgeRemap>,
+    /// Whether the entry is `optional`. Both edges of one entry carry the same answer — an entry
+    /// the selection did not activate contributes neither its classes nor its sources.
+    pub(crate) optional: bool,
 }
 
 impl DeclaredBinaryEdge {
     /// The classes edge of a `jar` entry.
-    pub(crate) const fn classes(recursive: bool, remap: Option<EdgeRemap>) -> Self {
+    pub(crate) const fn classes(recursive: bool, remap: Option<EdgeRemap>, optional: bool) -> Self {
         Self {
             recursive,
             source_archive: false,
             remap,
+            optional,
         }
     }
 
     /// The companion `sources` edge of a `jar` entry: never recursive, never remapped.
-    pub(crate) const fn sources() -> Self {
+    pub(crate) const fn sources(optional: bool) -> Self {
         Self {
             recursive: false,
             source_archive: true,
             remap: None,
+            optional,
         }
     }
 }
@@ -1346,10 +1364,7 @@ impl ResolvedProjectGraph {
     /// ever points from a project to its dependency, `order` is the discovery DFS's post-order, and
     /// cycles are already rejected — so its reverse visits every node after every project that can
     /// send to it. `BTreeMap`/`BTreeSet` keep the result independent of traversal order.
-    fn resolve_node_features(
-        &self,
-        root: &ResolvedBuildFeatures,
-    ) -> BTreeMap<NodeId, BTreeSet<String>> {
+    fn resolve_node_features(&self, root: &ResolvedBuildFeatures) -> NodeSelections {
         debug_assert_eq!(
             self.order.iter().copied().collect::<BTreeSet<_>>().len(),
             self.nodes.len(),
@@ -1396,23 +1411,31 @@ impl ResolvedProjectGraph {
         };
         route(None, root, &mut arrived);
 
-        let mut features: BTreeMap<NodeId, BTreeSet<String>> = BTreeMap::new();
+        let mut selections = NodeSelections::default();
         for index in self.order.iter().rev() {
             let node = &self.nodes[*index];
             let seed = arrived.remove(&node.id).unwrap_or_default();
             let NodeBody::JalsSource { manifest, .. } = &node.body else {
                 // No manifest: nothing to close over and no outgoing edge to forward to. A plain
-                // source node keeps what it was sent, inert until it grows a `jals.toml`.
+                // source node keeps what it was sent, inert until it grows a `jals.toml`. It
+                // declares no `[dependencies]` either, so it activates nothing.
                 if !seed.is_empty() {
-                    features.insert(node.id.clone(), seed);
+                    selections.features.insert(node.id.clone(), seed);
                 }
                 continue;
             };
             let resolved = manifest
                 .expand_build_features(seed, defaults.get(&node.id).copied().unwrap_or(false));
             route(Some(&node.id), &resolved, &mut arrived);
+            if !resolved.activated().is_empty() {
+                selections
+                    .activated
+                    .insert(node.id.clone(), resolved.activated().clone());
+            }
             if !resolved.features().is_empty() {
-                features.insert(node.id.clone(), resolved.into_features());
+                selections
+                    .features
+                    .insert(node.id.clone(), resolved.into_features());
             }
         }
         // Every node takes its seed out, so anything left was routed to a node already past — the
@@ -1421,7 +1444,7 @@ impl ResolvedProjectGraph {
             arrived.is_empty(),
             "a forwarded feature reached an already-resolved node"
         );
-        features
+        selections
     }
 
     /// Preprocess every resolved node exactly once in dependency-first order.
@@ -1450,11 +1473,15 @@ impl ResolvedProjectGraph {
             });
         }
 
-        let features_by_node = self.resolve_node_features(options.root_features);
+        let selections = self.resolve_node_features(options.root_features);
         let mut exports = BTreeMap::new();
         for index in &self.order {
             let node = &self.nodes[*index];
-            let features = features_by_node.get(&node.id).cloned().unwrap_or_default();
+            let features = selections
+                .features
+                .get(&node.id)
+                .cloned()
+                .unwrap_or_default();
             let output = node.preprocess(cache, features, &options).await?;
             exports.insert(node.id.clone(), output);
         }
@@ -1463,12 +1490,27 @@ impl ResolvedProjectGraph {
             edges: self.edges,
             warnings: self.warnings,
             exports,
-            features: features_by_node,
+            features: selections.features,
+            activated: selections.activated,
             root_features: options.root_features.features().clone(),
+            root_activated: options.root_features.activated().clone(),
             #[cfg(feature = "native")]
             native: self.native,
         })
     }
+}
+
+/// The two halves of one pass of per-node feature resolution.
+///
+/// Returned together rather than as two calls: both come out of the same single topological walk,
+/// and a second walk for the activation half is a second place the routing could disagree.
+#[derive(Debug, Default)]
+struct NodeSelections {
+    /// Each node's unified queryable build features.
+    features: BTreeMap<NodeId, BTreeSet<String>>,
+    /// Each node's activated `optional` `[dependencies]` entries. Absent for a node that activated
+    /// none, exactly as `features` is absent for a node that resolved none.
+    activated: BTreeMap<NodeId, BTreeSet<String>>,
 }
 
 /// Graph whose every node has passed preprocessing. Assembly exists only on this state.
@@ -1482,12 +1524,20 @@ pub struct PreprocessedProjectGraph {
     /// [`resolve_node_features`](ResolvedProjectGraph::resolve_node_features)), kept so assembly
     /// can hand a node's own features to its dialect frontend (`#[cfg(feature = "…")]`).
     pub(crate) features: BTreeMap<NodeId, BTreeSet<String>>,
+    /// Each node's activated `optional` `[dependencies]` entries, from the same resolution.
+    ///
+    /// Separate from [`features`](Self::features) because an activation is not a queryable feature:
+    /// `dep:carpet` switches an entry on and enables no name, so a build script never sees it and
+    /// it must not reach one. Assembly pairs it with [`GraphEdge::optional`].
+    pub(crate) activated: BTreeMap<NodeId, BTreeSet<String>>,
     /// The root project's own resolved selection.
     ///
     /// Kept beside the per-node map because the root has no node — discovery gives it none — and an
     /// edge the root declared still has to be gated against *something*. Without this, a root
     /// `[dependencies] remap` would be evaluated against an empty set and silently never apply.
     pub(crate) root_features: BTreeSet<String>,
+    /// The root project's activated `optional` entries, for the same reason.
+    pub(crate) root_activated: BTreeSet<String>,
     #[cfg(feature = "native")]
     pub(crate) native: crate::native::NativeGraphState,
 }

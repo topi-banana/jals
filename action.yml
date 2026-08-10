@@ -1,0 +1,80 @@
+name: "Setup jals"
+description: "Install the jals Java toolchain (formatter, linter, LSP, build front end) and put it on PATH"
+author: "topi-banana"
+
+branding:
+  icon: "coffee"
+  color: "orange"
+
+inputs:
+  version:
+    description: >-
+      Which jals to install. `latest` (the default) resolves the newest published release; a
+      release version — `v0.2.0` or `0.2.0` — installs that release's prebuilt binary. Any other
+      value is taken as a git ref (`main`, a tag, a commit SHA) and is always built from source,
+      because no release asset is published for a ref that is not a release.
+    required: false
+    default: "latest"
+  repository:
+    description: "The `owner/repo` the release assets and the source are fetched from."
+    required: false
+    default: "topi-banana/jals"
+  from-source:
+    description: >-
+      When to compile with `cargo install` instead of downloading a prebuilt binary.
+      `auto` (the default) downloads when an asset exists for this runner and falls back to
+      compiling when it does not; `always` never downloads; `never` fails instead of compiling.
+    required: false
+    default: "auto"
+  base-url:
+    description: >-
+      Where the release assets are fetched from, replacing the GitHub release download URL. Points
+      at the *directory* holding `jals-v<version>-<target>.<ext>` and its `.sha256`; `file://` URLs
+      work, which is how this repository's own CI exercises the download path without a published
+      release. The same override the npm launcher takes as `JALS_INSTALL_BASE_URL`.
+    required: false
+    default: ""
+  cache:
+    description: >-
+      Reuse an install of the same version already in the runner tool cache, and leave this one
+      there for later steps and jobs on the same runner.
+    required: false
+    default: "true"
+  token:
+    description: "The token used to resolve `latest` through the GitHub API."
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  version:
+    description: "The resolved version (a release version without its `v`, or the git ref that was built)."
+    value: ${{ steps.install.outputs.version }}
+  path:
+    description: "Absolute path of the installed `jals` executable."
+    value: ${{ steps.install.outputs.path }}
+  bin-dir:
+    description: "The directory added to PATH."
+    value: ${{ steps.install.outputs.bin-dir }}
+  source:
+    description: "`prebuilt` if a release asset was downloaded, `source` if `cargo install` compiled it."
+    value: ${{ steps.install.outputs.source }}
+  cache-hit:
+    description: "`true` when the tool cache already held this version and nothing was installed."
+    value: ${{ steps.install.outputs.cache-hit }}
+
+runs:
+  using: composite
+  steps:
+    # `cargo` is only needed on the source path, and asking for a toolchain the download path will
+    # not use would make every prebuilt install depend on rustup being present. So the check is
+    # deferred into the script, which fails with a message naming the fix.
+    - id: install
+      shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_REPOSITORY: ${{ inputs.repository }}
+        INPUT_FROM_SOURCE: ${{ inputs.from-source }}
+        INPUT_BASE_URL: ${{ inputs.base-url }}
+        INPUT_CACHE: ${{ inputs.cache }}
+        GH_TOKEN: ${{ inputs.token }}
+      run: bash "${GITHUB_ACTION_PATH}/.github/setup-jals.sh"

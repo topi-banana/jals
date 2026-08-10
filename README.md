@@ -148,6 +148,43 @@ cargo install --path jals-cli
 
 The release binary is produced at `target/release/jals`.
 
+### GitHub Actions
+
+The repository root is itself a composite action, so a workflow installs `jals` and puts it on
+`PATH` in one step:
+
+```yaml
+- uses: topi-banana/jals@main
+- run: jals fmt --check $(git ls-files '*.java')
+- run: jals lint
+```
+
+`version` selects what is installed. `latest` (the default) resolves the newest published release
+and downloads its prebuilt binary, verifying the `.sha256` published beside it; a release version
+(`v0.2.0` or `0.2.0`) pins one. Any other value — `main`, a branch, a tag, a commit SHA — is a git
+ref, which has no release asset, so it is compiled with `cargo install` and needs a Rust toolchain
+in the job:
+
+```yaml
+- uses: dtolnay/rust-toolchain@stable
+- uses: topi-banana/jals@main
+  with:
+    version: main
+```
+
+| input         | default              | meaning                                                                                                                     |
+| ------------- | -------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `version`     | `latest`             | `latest`, a release version, or a git ref to build.                                                                          |
+| `repository`  | `topi-banana/jals`   | Where the assets and the source come from (a fork).                                                                          |
+| `from-source` | `auto`               | `auto` falls back to compiling when no asset fits the runner; `always` never downloads; `never` fails instead of compiling.   |
+| `base-url`    | —                    | Fetch the assets from a mirror directory instead of the GitHub release (the action's `JALS_INSTALL_BASE_URL` equivalent).     |
+| `cache`       | `true`               | Reuse an install of the same version from the runner tool cache.                                                             |
+| `token`       | `${{ github.token }}`| Used only to resolve `latest` through the GitHub API.                                                                        |
+
+It outputs `version`, `path`, `bin-dir`, `source` (`prebuilt` or `source`), and `cache-hit`.
+Linux, macOS and Windows runners are all supported, on `x64` and `arm64`.
+
+
 ## Usage
 
 `jals` is invoked through subcommands: `fmt` (format source), `lint` (lint source), `lsp`
