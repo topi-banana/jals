@@ -562,7 +562,7 @@ rule の一般性とエンジン忠実度が衝突したら、**単一エンジ�
 ### 8.4 rustfmt 風オプションとの関係
 
 前段の考察は rustfmt 風の**設定可能**フォーマッタを志向していた。本書はその語彙を捨て
-（`MAPPING.md` §1 の P1–P4）、**Java フォーマッタ 4 者の観測から選んだ rule set**（8 節・189 rule）に
+（`MAPPING.md` §1 の P1–P4）、**Java フォーマッタ 4 者の観測から選んだ rule set**（8 節・190 rule）に
 置き換える。単一エンジン方針の下では、rule set はエンジンの上の薄い層であり、**エンジンが表現できない
 rule は最初から置かない**（`MAPPING.md` §2 の基準に「到達可能な 2 つのターゲットが食い違う」を課して
 いるのはそのため。列揃えのようにエンジンが表現できない概念は rule にせず、native モデル側に型付きで
@@ -663,7 +663,7 @@ IntelliJ IDEA / Palantir へ拡げ、**「エンジンを増やさずに rule �
    以上 import」の計数＝実 import 解決が要り、pure CST では不可。⇒ **恒久差分**（§18）。
 
 5. **jalsfmt.toml 自動生成は「共通語彙への射影」として行う。** 生成 toml は engine 多重化器ではなく、
-   `jals_config::fmt::Config`（8 節・189 rule）**そのもの**であり、単一エンジンが読む唯一の形である。
+   `jals_config::fmt::Config`（8 節・190 rule）**そのもの**であり、単一エンジンが読む唯一の形である。
    射影は**全単射ではない**（写せない native option は importer の native モデル側に型付きで残る）。
    写像の台帳が `MAPPING.md`、実装が `jals_fmt::import`。§15 が生成の流れと限界を扱う。
 
@@ -790,7 +790,7 @@ rule で分岐させる近似で行う（▲）。つまり `jals-fmt` は「マ
         │  jals_fmt::import                              │
         └──────────────┬─────────────────────────────────┘
                        ▼
-        jals_config::fmt::Config  ── 8 節 / 189 rule（唯一の style 表面）
+        jals_config::fmt::Config  ── 8 節 / 190 rule（唯一の style 表面）
                        │  style::reify  ← 解決済みパラメータ束（§8 の seam S1–S4）
  ┌─────────────────────┼──────────────────────────────────────────────┐
  │ 単一パイプライン                                                    │
@@ -814,7 +814,7 @@ rule で分岐させる近似で行う（▲）。つまり `jals-fmt` は「マ
 
 ## 15. jalsfmt.toml 自動生成
 
-**方式: 共通語彙への射影**。生成 toml は `jals_config::fmt::Config` そのもの（8 節・189 rule）であり、
+**方式: 共通語彙への射影**。生成 toml は `jals_config::fmt::Config` そのもの（8 節・190 rule）であり、
 engine 選択子も engine 固有 option の透過テーブルも持たない。生成例（Eclipse `.prefs` 由来）:
 
 ```toml
@@ -955,7 +955,7 @@ T1 の差分を消すためにエンジンへ特殊分岐を足すことはせ�
 | D4 | **rewind による再折り** — 行が溢れた時点で直近の wrap 候補（`CHOP_DOWN_IF_LONG` なら list 先頭）まで戻って折り直す | IntelliJ `WrapProcessor` | intellij |
 | D5 | **入力の既存改行の保持** — `keep*` 系による「元が 1 行なら 1 行のまま」 | IntelliJ `keepLineBreaks` / `ij_java_keep_*`、Eclipse `join_wrapped_lines=false` | intellij, eclipse |
 | D6 | **wildcard 集約 / classpath 依存の import 操作** | IntelliJ `CLASS_COUNT_TO_USE_IMPORT_ON_DEMAND` ほか（§11 結論 4） | intellij |
-| D7 | **Javadoc / コメント整形の細部** — `comment.javadoc_paragraphs_tags_with_content`, `comment.new_lines_at_javadoc_boundaries` ほか | Eclipse `CommentsPreparator` / `CommentWrapExecutor` | eclipse |
+| D7 | **Javadoc / コメント整形の細部** — `comment.javadoc_paragraphs_tags_with_content` ほか、写像先を持たない `comment.*` | Eclipse `CommentsPreparator` / `CommentWrapExecutor` | eclipse |
 | D8 | **非対称な paren 位置** — lparen だけ / rparen だけ次行 | IntelliJ `*_LPAREN_ON_NEXT_LINE` と `*_RPAREN_ON_NEXT_LINE` の非対称組合せ（`MAPPING.md` §5.4） | intellij |
 | D10 | **import 削除が残す空行** — `import` を 1 つも残さず削除した block の跡に、GJF は空行が 2 本残る（block の前後の空行が隣接するため）。jals は 1 本に正規化する | GJF は `RemoveUnusedImports` / `ImportOrderer` / `StringWrapper` を **レイアウトの後**にテキストパスとして走らせる（`FormatFileCallable.call`）。GJF 自身もこの出力は冪等でなく、2 回目で 1 本に潰れる | gjf |
 | D9 | **`spacing.after-case-colon` が到達不能** — colon 形 `case` ラベルの `:` の後でエンジンは常に折るため、`:` と同じ行に続くものが存在しない | 単一エンジンの colon 形 switch レイアウト | eclipse |
@@ -972,7 +972,12 @@ D8 は共通語彙の粒度の問題（native モデルには両 bool が残る�
 similarity** を計算すれば、残りは D1–D4（レイアウト解決アルゴリズムの違い）だけになり、恒久差分の
 値段が数字で出る。Ratcliff/Obershelp 比 `2M/(a+b)` は、コメント行を両側から落とした比較から
 `M` を取り、期待側のコメント行数 `C` を `M` と両辺の長さに足し戻せば `2(M+C)/(a+C+b+C)` として
-求まる。**この計算は harness が持っている**ので、formatter が動いたあとに引き直せる:
+求まる。コメント行かどうかは字面ではなく**トークン**が決める — `before-binary-operator`（GJF /
+Palantir / Eclipse の全員がそうする）の下では折り返された乗算が継続行の先頭に `*` を置くので、
+`starts_with('*')` で判定すると**その行が両方の列を同時に持ち上げる**（code 側から消え、かつ
+「一致するはずのコメント行」として数えられる）。しかもその誤差はエンジンが二項演算子を折る頻度に
+連動して動くので、次の計測と比較できなくなる。**この計算は harness が持っている**ので、formatter が
+動いたあとに引き直せる:
 
 ```sh
 cargo run -p jals-tests --bin jals-golden -- --allow-missing --worst 0 --ceiling
@@ -982,21 +987,21 @@ cargo run -p jals-tests --bin jals-golden -- --allow-missing --worst 0 --ceiling
 
 | target | pairs | exact | 実測 mean similarity | code のみ | **コメント完全一致なら** | 上限を決めている恒久差分 |
 |---|--:|--:|--:|--:|--:|---|
-| `gjf` | 13920 | 81.62% | 99.61% | 99.70% | **99.82%** | —（T1。残りは D10 と細部） |
-| `palantir` | 12180 | 59.90% | 97.66% | 96.79% | **97.90%** | **D3**（`PartialInlineability` の仮説探索） |
-| `eclipse` | 13866 | 23.34% | 94.42% | 96.08% | **97.58%** | **D2**（`WrapExecutor.findWraps` の penalty 最小化） |
-| `intellij` | 3103 | 4.87% | 92.61% | 94.99% | **97.39%** | **D4**（`WrapProcessor` の rewind） |
+| `gjf` | 13920 | 81.67% | 99.62% | 99.79% | **99.88%** | —（T1。残りは D10 と細部） |
+| `palantir` | 12180 | 59.90% | 97.66% | 97.14% | **98.04%** | **D3**（`PartialInlineability` の仮説探索） |
+| `eclipse` | 13866 | 23.66% | 94.43% | 96.12% | **97.59%** | **D2**（`WrapExecutor.findWraps` の penalty 最小化） |
+| `intellij` | 3103 | 7.64% | 92.72% | 95.45% | **97.51%** | **D4**（`WrapProcessor` の rewind） |
 
 読み方は 3 つ。**(1) コメント整形は rule で埋まる** — eclipse はコメント側の rule を足すだけで
-86.06% → 94.42% まで動いた（`comments.paragraph-tags` / `tag-alignment` /
+86.06% → 94.43% まで動いた（`comments.paragraph-tags` / `tag-alignment` /
 `javadoc-boundaries-on-own-lines` / `tables-are-preformatted` ほか）。**(2) レイアウトは埋まらない** —
-コメントが 1 行残らず一致したとしても T2 の 3 者は 97.4〜97.9% で頭打ちで、**99% には届かない**。
+コメントが 1 行残らず一致したとしても T2 の 3 者は 97.5〜98.1% で頭打ちで、**99% には届かない**。
 これは努力量ではなく §11 結論 1 の帰結であり、数字を上げるために engine を増やす選択は §8.3 の
 優先順位が禁じている。そのうえコメント側にも独自の上限がある: **D5**（元が 1 行で書かれた Javadoc を
 JDT はそのまま残す）と **D7**（JDT のコメント折り返しも penalty 最小化）。
 
 **(3) exact rate は similarity より遥かに遅れて動く。** 1 ファイル中の 1 か所の差分でも byte 一致は
-落ちるので、`gjf` の 99.61% mean は 81.62% exact にしかならない。この列を並べているのは、
+落ちるので、`gjf` の 99.62% mean は 81.67% exact にしかならない。この列を並べているのは、
 similarity が上限に貼りついたあとも改善が測れる指標が要るからであり、**T2 の exact は約束ではない**
 （`jals-tests/README.md`）。T1 の exact に残っている距離のうち、`blank-line` 分類の大半は D10 —
 GJF が unused import を消した跡に残す 2 本の空行 — で、これは冪等性と引き換えでしか埋まらない。

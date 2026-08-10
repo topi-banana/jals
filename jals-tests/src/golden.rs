@@ -40,6 +40,7 @@
 //! `.github/workflows/ci.yml` must agree with; vendored corpora are pinned by
 //! their submodule commit.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use jals_config::fmt::Config;
@@ -397,21 +398,72 @@ impl Ceiling {
 
     /// `text` without its comment lines, and how many were dropped.
     ///
-    /// A line is a comment when it *starts* as one — `//`, `/*`, or the `*` continuing a block.
-    /// A trailing comment after code is not one: the line is code that also says something, and
-    /// dropping it would take the code with it.
+    /// A line is a comment when everything on it belongs to a comment **token**, which is a
+    /// question for the lexer rather than for the line's first two characters. Under
+    /// `before-binary-operator` — what google-java-format, Palantir and Eclipse all do — a wrapped
+    /// multiplication puts a `*` at the head of its continuation line, and a `starts_with('*')`
+    /// test ate it: the line vanished from the code-only comparison *and* was counted as a comment
+    /// line that would match perfectly, so it biased **both** published columns upward. Worse, the
+    /// error moves with how often the layout engine wraps a binary operator, which is exactly the
+    /// property `DESIGN.md` §18.2.1 needs in order to be a measurement the harness can retake.
+    ///
+    /// A trailing comment after code is not a comment line: the line is code that also says
+    /// something, and dropping it would take the code with it.
     fn without_comments(text: &str) -> (String, usize) {
+        let comment = Self::comment_lines(text);
         let mut kept: Vec<&str> = Vec::new();
         let mut dropped = 0usize;
-        for line in text.lines() {
-            let head = line.trim_start();
-            if head.starts_with("//") || head.starts_with("/*") || head.starts_with('*') {
+        for (nth, line) in text.lines().enumerate() {
+            if comment.contains(&nth) {
                 dropped += 1;
             } else {
                 kept.push(line);
             }
         }
         (kept.join("\n"), dropped)
+    }
+
+    /// The zero-based lines of `text` that hold nothing but comment.
+    ///
+    /// Read off the **tokens** the parser found: a line is one when every non-whitespace byte on
+    /// it lies inside trivia, and trivia that is not whitespace is a comment. So a `*` opening a
+    /// continuation line is an operator, a `*` inside a block comment is not, and a line inside an
+    /// unterminated comment still counts — the parser is lossless on malformed input. A line that
+    /// is wholly blank is neither, on either side, exactly as a blank line between statements is.
+    fn comment_lines(text: &str) -> BTreeSet<usize> {
+        let parse = jals_exec::block_on_inline(jals_syntax::Parse::parse(text));
+        let mut trivia = vec![false; text.len()];
+        for token in parse
+            .syntax()
+            .descendants_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .filter(|token| token.kind().is_trivia())
+        {
+            let start = usize::from(token.text_range().start());
+            let end = usize::from(token.text_range().end()).min(trivia.len());
+            for byte in &mut trivia[start.min(end)..end] {
+                *byte = true;
+            }
+        }
+
+        let mut out = BTreeSet::new();
+        let mut at = 0usize;
+        for (nth, line) in text.split('\n').enumerate() {
+            let mut content = false;
+            let mut all_trivia = true;
+            for (offset, ch) in line.char_indices() {
+                if ch.is_whitespace() {
+                    continue;
+                }
+                content = true;
+                all_trivia &= trivia.get(at + offset).copied().unwrap_or(false);
+            }
+            if content && all_trivia {
+                out.insert(nth);
+            }
+            at += line.len() + 1;
+        }
+        out
     }
 }
 
