@@ -48,39 +48,63 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Step-level parallelism (`parallel:` / `background:` / `wait-all:`) is used below wherever two
+# steps of one job are genuinely independent. Four rules hold everywhere it appears, and they are
+# the reason it appears where it does and not elsewhere:
+#
+# - Two `cargo` steps of one job do **not** overlap. Cargo takes an exclusive lock on the target
+#   directory for the whole of a build, so a second invocation waits rather than runs. The `test`
+#   job is the one place a pair is grouped anyway, and the comment there says why that one is safe.
+# - Nothing runs beside `actions/checkout`. It removes and recreates the workspace, so only a step
+#   writing somewhere else — a toolchain into `~/.rustup`, a JDK into the tool cache — may share a
+#   group with it. Anything that writes into the workspace stays after it.
+# - `taiki-e/install-action` stays after `Swatinem/rust-cache`. rust-cache restores `~/.cargo/bin`
+#   (its `cache-bin` input is on by default), which is exactly where install-action puts its
+#   binaries; overlapping the two is a restore racing the install it would overwrite.
+# - Prefer `parallel:` to a bare `background:`. A `parallel:` group waits for its members
+#   implicitly, so a gate inside one cannot be left unjoined, whereas a `background:` step whose
+#   failure reaches no `wait` is a gate that reports green without having run. Every `background:`
+#   below is joined by a `wait`/`wait-all` on every path to the end of its job.
+
 jobs:
   ast-grep:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: taiki-e/install-action@v2.85.8
-        with:
-          tool: ast-grep
-      - name: Run ast-grep rule tests
-        run: ast-grep test --skip-snapshot-tests
-      # `--error` is required to gate CI: a plain `ast-grep scan` exits 0 even when it
-      # reports error-severity findings, so without it a rule violation would pass silently.
-      - name: Scan the codebase against ast-grep rules
-        run: ast-grep scan --error
+      - parallel:
+          - uses: actions/checkout@v7
+          - uses: taiki-e/install-action@v2.85.8
+            with:
+              tool: ast-grep
+      # Both gates only read the tree — the rule tests their fixtures, the scan the workspace — so
+      # they are one group rather than two steps.
+      - parallel:
+          - name: Run ast-grep rule tests
+            run: ast-grep test --skip-snapshot-tests
+          # `--error` is required to gate CI: a plain `ast-grep scan` exits 0 even when it
+          # reports error-severity findings, so without it a rule violation would pass silently.
+          - name: Scan the codebase against ast-grep rules
+            run: ast-grep scan --error
 
   fmt:
     name: rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
+      - parallel:
+          - uses: actions/checkout@v7
+          - uses: dtolnay/rust-toolchain@stable
+            with:
+              components: rustfmt
       - run: cargo fmt --all --check
 
   codegen:
     name: generated code up to date
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
+      - parallel:
+          - uses: actions/checkout@v7
+          - uses: dtolnay/rust-toolchain@stable
+            with:
+              components: rustfmt
       - uses: Swatinem/rust-cache@v2
       - run: cargo run -p xtask -- codegen --check
 
@@ -113,11 +137,12 @@ jobs:
             target: wasm32-unknown-unknown
             args: --target wasm32-unknown-unknown $WASM_CORE_PACKAGES
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-          targets: ${{ matrix.target }}
+      - parallel:
+          - uses: actions/checkout@v7
+          - uses: dtolnay/rust-toolchain@stable
+            with:
+              components: clippy
+              targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
           # Keyed by cell, not by target: with three host platforms in one matrix a target-only key
@@ -141,16 +166,18 @@ jobs:
           - name: windows
             runner: windows-latest
     steps:
-      - uses: actions/checkout@v7
-      # On every host, not only linux: the JDK-backed tests stand themselves down when `javac` /
-      # `java` is absent (`javac_available()` and friends), so a cell without a JDK is a cell that
-      # passes by checking less — the same failure mode the `wasm-tools` note below guards against.
-      - name: Set up JDK (for generated-source type checks)
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "25"
-      - uses: dtolnay/rust-toolchain@stable
+      - parallel:
+          - uses: actions/checkout@v7
+          # On every host, not only linux: the JDK-backed tests stand themselves down when `javac` /
+          # `java` is absent (`javac_available()` and friends), so a cell without a JDK is a cell
+          # that passes by checking less — the same failure mode the `wasm-tools` note below guards
+          # against.
+          - name: Set up JDK (for generated-source type checks)
+            uses: actions/setup-java@v5
+            with:
+              distribution: temurin
+              java-version: "25"
+          - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           key: test-${{ matrix.name }}
@@ -161,26 +188,34 @@ jobs:
       - uses: taiki-e/install-action@v2.85.8
         with:
           tool: nextest,wasm-tools,wasmtime
-      # `--no-fail-fast`: with three host cells the first failure is the least interesting thing a
-      # run can report. Stopping there hides the other 1600 tests' verdict on that platform, so a
-      # platform-specific break costs one full CI round per failure to enumerate. The gate is
-      # unchanged — a failed test still fails the job — only the report is complete.
-      - name: Run the test suite
-        shell: bash
-        run: cargo nextest run --workspace --all-features --no-fail-fast
-      # nextest does not run doctests, so keep them covered with a separate `cargo test --doc`.
-      - name: Run the doctests
-        shell: bash
-        run: cargo test --workspace --all-features --doc
+      # The one pair of cargo steps that shares a group, and the target-directory lock is what makes
+      # it safe rather than what it evades: `cargo nextest run` compiles under the lock, hands it
+      # back, and spends the rest of the step *running* ~1600 tests — which is exactly when the
+      # doctest build wants it. The two build disjoint units, so neither leaves the other anything
+      # to recompile. nextest is listed first because it is the long pole; the worst case is that
+      # the second one simply queues on the lock, which is today's behaviour.
+      - parallel:
+          # `--no-fail-fast`: with three host cells the first failure is the least interesting thing
+          # a run can report. Stopping there hides the other 1600 tests' verdict on that platform,
+          # so a platform-specific break costs one full CI round per failure to enumerate. The gate
+          # is unchanged — a failed test still fails the job — only the report is complete.
+          - name: Run the test suite
+            shell: bash
+            run: cargo nextest run --workspace --all-features --no-fail-fast
+          # nextest does not run doctests, so keep them covered with a separate `cargo test --doc`.
+          - name: Run the doctests
+            shell: bash
+            run: cargo test --workspace --all-features --doc
 
   test-wasm:
     name: test (wasm)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-wasip1
+      - parallel:
+          - uses: actions/checkout@v7
+          - uses: dtolnay/rust-toolchain@stable
+            with:
+              targets: wasm32-wasip1
       - uses: Swatinem/rust-cache@v2
         with:
           key: test-wasm
@@ -205,28 +240,33 @@ jobs:
     name: taplo fmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - run: curl -fsSL https://github.com/tamasfe/taplo/releases/latest/download/taplo-linux-x86_64.gz | gzip -d - | install -m 755 /dev/stdin /usr/local/bin/taplo
+      # The installer writes `/usr/local/bin`, not the workspace the checkout replaces.
+      - parallel:
+          - uses: actions/checkout@v7
+          - run: curl -fsSL https://github.com/tamasfe/taplo/releases/latest/download/taplo-linux-x86_64.gz | gzip -d - | install -m 755 /dev/stdin /usr/local/bin/taplo
       - run: taplo fmt --check --diff
 
   machete:
     name: cargo machete
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: taiki-e/install-action@v2.85.8
-        with:
-          tool: cargo-machete
+      # No `Swatinem/rust-cache` here, so install-action has no `~/.cargo/bin` restore to race.
+      - parallel:
+          - uses: actions/checkout@v7
+          - uses: taiki-e/install-action@v2.85.8
+            with:
+              tool: cargo-machete
       - run: cargo machete
 
   unused-allow:
     name: cargo unused-allow
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+      - parallel:
+          - uses: actions/checkout@v7
+          - uses: dtolnay/rust-toolchain@stable
+            with:
+              components: clippy
       - uses: Swatinem/rust-cache@v2
       # Not in taiki-e/install-action's prebuilt set, so it is compiled from source (cached above).
       # Version-pinned to match the rest of the workflow's tool pins.
@@ -272,17 +312,21 @@ jobs:
       HAWK_VERSION: "0.1.9"
       HAWK_RUSTC: "1.97.1"
     steps:
-      - uses: actions/checkout@v7
-      # The plain `HAWK_RUSTC` toolchain (minimal profile) is all a prebuilt hawk needs — it runs an
-      # instrumented workspace build under this exact compiler. The compiler is selected by the
-      # `toolchain` input, never by pinning the action ref to it: dependabot reads a `@1.97.1` ref
-      # as the *action's* version and would keep opening PRs bumping it off hawk's rustc.
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: ${{ env.HAWK_RUSTC }}
+      - parallel:
+          - uses: actions/checkout@v7
+          # The plain `HAWK_RUSTC` toolchain (minimal profile) is all a prebuilt hawk needs — it
+          # runs an instrumented workspace build under this exact compiler. The compiler is
+          # selected by the `toolchain` input, never by pinning the action ref to it: dependabot
+          # reads a `@1.97.1` ref as the *action's* version and would keep opening PRs bumping it
+          # off hawk's rustc.
+          - uses: dtolnay/rust-toolchain@stable
+            with:
+              toolchain: ${{ env.HAWK_RUSTC }}
       - uses: Swatinem/rust-cache@v2
         with:
           key: hawk-${{ matrix.name }}
+      # Installed after the cache restore, not beside it: ~/.cargo/bin is what rust-cache restores.
+      #
       # Not in taiki-e/install-action's prebuilt set. The official cargo-dist installer drops
       # `cargo-hawk` and its `cargo-hawk-driver` into ~/.cargo/bin (on PATH); the version-pinned
       # release URL keeps the gate reproducible against the hawk.toml this workspace was tuned to.
@@ -307,22 +351,24 @@ jobs:
     name: typos
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: taiki-e/install-action@v2.85.8
-        with:
-          tool: typos
+      - parallel:
+          - uses: actions/checkout@v7
+          - uses: taiki-e/install-action@v2.85.8
+            with:
+              tool: typos
       - run: typos
 
   biome:
     name: biome
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: biomejs/setup-biome@v2
-        with:
-          # Version-pinned like the rest of the workflow's tools; keep it in sync with the
-          # `$schema` pin in `biome.json` so the CLI and the config schema never drift.
-          version: 2.5.5
+      - parallel:
+          - uses: actions/checkout@v7
+          - uses: biomejs/setup-biome@v2
+            with:
+              # Version-pinned like the rest of the workflow's tools; keep it in sync with the
+              # `$schema` pin in `biome.json` so the CLI and the config schema never drift.
+              version: 2.5.5
       # `biome ci` format- and lint-checks the JS sources (scoped by `biome.json`) without writing.
       # `--error-on-warnings` promotes every lint warning to a hard failure, so the gate is strict:
       # a plain `biome ci` exits 0 on warnings and would let a lint regression through silently.
@@ -378,10 +424,11 @@ jobs:
             target: wasm32-unknown-unknown
             packages: $WASM_CORE_PACKAGES
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.platform.target }}
+      - parallel:
+          - uses: actions/checkout@v7
+          - uses: dtolnay/rust-toolchain@stable
+            with:
+              targets: ${{ matrix.platform.target }}
       - uses: Swatinem/rust-cache@v2
         with:
           key: build-${{ matrix.profile }}-${{ matrix.platform.name }}
@@ -395,11 +442,16 @@ jobs:
     name: portable core and feature audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
+      - parallel:
+          - uses: actions/checkout@v7
+          - uses: dtolnay/rust-toolchain@stable
+            with:
+              targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
+      # The fourteen checks below stay sequential, and deliberately so: they share one target
+      # directory, whose lock cargo holds for a whole build, and they select deliberately different
+      # feature sets — so grouping them would trade a queue for a fingerprint fight and check the
+      # same things more slowly.
       - run: cargo check -p jals-storage --no-default-features
       - run: cargo check -p jals-classpath --no-default-features
       - run: cargo check -p jals-build --no-default-features
@@ -472,32 +524,43 @@ jobs:
             dir: examples/minecraft_mod
             features: --features 1.20.1
     steps:
-      - uses: actions/checkout@v7
-      # `hello_world` pins `release = 21`; the rest compile against the toolchain's own release, and
-      # `minecraft_mod` compiles against class files from the game jar it selected. A current JDK
-      # reads all of them, so one version serves every cell — the same one the `test` job installs.
-      - name: Set up JDK (the examples compile and run with javac/java)
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "25"
-      - uses: dtolnay/rust-toolchain@stable
+      - parallel:
+          - uses: actions/checkout@v7
+          # `hello_world` pins `release = 21`; the rest compile against the toolchain's own
+          # release, and `minecraft_mod` compiles against class files from the game jar it
+          # selected. A current JDK reads all of them, so one version serves every cell — the same
+          # one the `test` job installs.
+          - name: Set up JDK (the examples compile and run with javac/java)
+            uses: actions/setup-java@v5
+            with:
+              distribution: temurin
+              java-version: "25"
+          - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           key: examples
+      # Two examples start from `tasks.project_jar(...)` — a JAR in the project rather than behind a
+      # pinned URL, which is what keeps them network-independent — and a JAR is a binary, so neither
+      # is committed. The generator is the same one a reader runs, and it is unconditional here
+      # rather than per-cell: it costs a second, and a flag whose only job is to skip it is a second
+      # place the example list is written down.
+      #
+      # It runs beside the binary build rather than after it: it drives `javac`/`jar` and writes
+      # under `examples/`, so it shares nothing with cargo but the CPU. The `jals build` below is
+      # the first step that reads its output, and where it is joined.
+      - name: Generate the vendor JARs the build-task examples read
+        id: vendor-jars
+        background: true
+        run: examples/scripts/gen-vendor-jars.sh
       # Release, not debug: the Minecraft cells decompress, remap and decompile a whole game jar,
       # and an unoptimized build turns that from a step into the job.
       - name: Build the jals binary
         run: cargo build --release --package jals-cli
       - name: Put jals on PATH
         run: echo "$GITHUB_WORKSPACE/target/release" >> "$GITHUB_PATH"
-      # Two examples start from `tasks.project_jar(...)` — a JAR in the project rather than behind a
-      # pinned URL, which is what keeps them network-independent — and a JAR is a binary, so neither
-      # is committed. The generator is the same one a reader runs, and it is unconditional here
-      # rather than per-cell: it costs a second, and a flag whose only job is to skip it is a second
-      # place the example list is written down.
-      - name: Generate the vendor JARs the build-task examples read
-        run: examples/scripts/gen-vendor-jars.sh
+      # The generator is a gate like any other step — a failure in it is reported here.
+      - name: Wait for the vendor JARs
+        wait: vendor-jars
       - name: Build
         if: ${{ !matrix.example.publications }}
         working-directory: ${{ matrix.example.dir }}
@@ -571,8 +634,9 @@ jobs:
             runner: windows-latest
             target: x86_64-pc-windows-msvc
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - parallel:
+          - uses: actions/checkout@v7
+          - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           key: setup-action-${{ matrix.platform.name }}
@@ -682,10 +746,11 @@ jobs:
           - target: x86_64-pc-windows-msvc
             runner: windows-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+      - parallel:
+          - uses: actions/checkout@v7
+          - uses: dtolnay/rust-toolchain@stable
+            with:
+              targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
         with:
           key: lsp-binary-${{ matrix.target }}
@@ -715,10 +780,11 @@ jobs:
       # the artifact loads. Bump this when Zed bumps its wasmtime.
       WASMTIME_VERSION: "36.0.0"
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-wasip1
+      - parallel:
+          - uses: actions/checkout@v7
+          - uses: dtolnay/rust-toolchain@stable
+            with:
+              targets: wasm32-wasip1
       # The extension (`editors/zed`) is its own workspace root (excluded from the outer one), so
       # its target dir is `editors/zed/target`.
       - uses: Swatinem/rust-cache@v2
@@ -730,13 +796,16 @@ jobs:
       - uses: taiki-e/install-action@v2.85.8
         with:
           tool: wasm-tools
-      - name: Build the extension (wasm32-wasip1 core module)
-        run: cargo build --release --locked --target wasm32-wasip1 --manifest-path editors/zed/Cargo.toml
-      - name: Download the wasi-preview1 reactor adapter
-        run: |
-          curl -fL --retry 3 \
-            -o wasi_snapshot_preview1.reactor.wasm \
-            "https://github.com/bytecodealliance/wasmtime/releases/download/v${WASMTIME_VERSION}/wasi_snapshot_preview1.reactor.wasm"
+      # The adapter is fetched from the network and the module is compiled from source; neither
+      # reads the other's output, and the component encode below is the first step that needs both.
+      - parallel:
+          - name: Build the extension (wasm32-wasip1 core module)
+            run: cargo build --release --locked --target wasm32-wasip1 --manifest-path editors/zed/Cargo.toml
+          - name: Download the wasi-preview1 reactor adapter
+            run: |
+              curl -fL --retry 3 \
+                -o wasi_snapshot_preview1.reactor.wasm \
+                "https://github.com/bytecodealliance/wasmtime/releases/download/v${WASMTIME_VERSION}/wasi_snapshot_preview1.reactor.wasm"
       - name: Component-encode the extension
         run: |
           mkdir -p dist
@@ -771,21 +840,27 @@ jobs:
       ECLIPSE_JDT_VERSION: "3.46.0"
       IDEA_VERSION: "2025.3"
     steps:
-      - uses: actions/checkout@v7
-        with:
-          # Every corpus: OpenJDK (parse soundness) plus the google-java-format and
-          # palantir-java-format regression suites (fidelity).
-          submodules: true
-          fetch-depth: 1
-      - uses: dtolnay/rust-toolchain@stable
+      - parallel:
+          - uses: actions/checkout@v7
+            with:
+              # Every corpus: OpenJDK (parse soundness) plus the google-java-format and
+              # palantir-java-format regression suites (fidelity).
+              submodules: true
+              fetch-depth: 1
+          - uses: dtolnay/rust-toolchain@stable
+          - name: Set up JDK (for google-java-format and Eclipse JDT)
+            uses: actions/setup-java@v5
+            with:
+              distribution: temurin
+              java-version: "25"
       - uses: Swatinem/rust-cache@v2
+      # Backgrounded across everything the reference formatters need: the vendor downloads, the
+      # classpath resolution and the corpus generation drive `curl` and the JVM, and none of them
+      # reads a Rust artifact. `Generate corpus reports` is the first that does, so the `wait-all`
+      # below is both this build's join and where a failure in it is reported.
       - name: Build the corpus tools
+        background: true
         run: cargo build --release -p jals-tests --bins
-      - name: Set up JDK (for google-java-format and Eclipse JDT)
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: "25"
       - name: Cache the google-java-format jar
         id: gjf-jar
         uses: actions/cache@v6
@@ -830,6 +905,36 @@ jobs:
         id: openjdk
         # Reads the gitlink the superproject pins, no submodule history needed.
         run: echo "sha=$(git rev-parse HEAD:jals-tests/sources/openjdk)" >> "$GITHUB_OUTPUT"
+
+      # The IntelliJ half is decided here rather than beside its generator, three formatters later,
+      # because on a cache miss it is a ~1.5 GB download and nothing else in this job waits on it.
+      # Starting it now spends it under the three generation steps below instead of after them; the
+      # `wait-all` before the IntelliJ generator is where it is joined. The cache restore stays in
+      # the foreground — it is what decides whether the download runs at all.
+      - name: Cache the OpenJDK java.base intellij corpus
+        id: intellij-corpus
+        uses: actions/cache@v6
+        with:
+          path: jals-tests/sources/openjdk-intellij
+          key: openjdk-intellij-javabase-${{ env.IDEA_VERSION }}-${{ steps.openjdk.outputs.sha }}-${{ hashFiles('jals-tests/scripts/gen-openjdk-corpus.sh', 'jals-tests/config/intellij-jals.xml') }}
+      - name: Download IntelliJ IDEA
+        id: idea
+        background: true
+        continue-on-error: true
+        # Only on a corpus cache miss: this is a ~1.5 GB download that would otherwise
+        # crowd out the corpus caches themselves, so the IDE is fetched rather than cached.
+        #
+        # The unified distribution, not `ideaIC-*`: IntelliJ IDEA Community Edition stopped
+        # shipping as a separate download at 2025.3, and everything it used to contain —
+        # the Java code formatter this step drives included — stays free in the one
+        # distribution, for commercial use as well. No license is involved.
+        if: steps.intellij-corpus.outputs.cache-hit != 'true'
+        run: |
+          curl -fL --retry 3 -o idea.tar.gz \
+            "https://download.jetbrains.com/idea/idea-${IDEA_VERSION}.tar.gz"
+          mkdir -p jals-tests/vendor/idea
+          tar xzf idea.tar.gz -C jals-tests/vendor/idea --strip-components=1
+          rm idea.tar.gz
 
       # One cache + one generation step per reference formatter. Each corpus is generated,
       # never committed (they are GPL'd OpenJDK derivatives), and regenerated only when the
@@ -888,29 +993,11 @@ jobs:
           JOBS: "2"
         run: jals-tests/scripts/gen-openjdk-corpus.sh eclipse 0
 
-      - name: Cache the OpenJDK java.base intellij corpus
-        id: intellij-corpus
-        uses: actions/cache@v6
-        with:
-          path: jals-tests/sources/openjdk-intellij
-          key: openjdk-intellij-javabase-${{ env.IDEA_VERSION }}-${{ steps.openjdk.outputs.sha }}-${{ hashFiles('jals-tests/scripts/gen-openjdk-corpus.sh', 'jals-tests/config/intellij-jals.xml') }}
-      - name: Download IntelliJ IDEA
-        id: idea
-        continue-on-error: true
-        # Only on a corpus cache miss: this is a ~1.5 GB download that would otherwise
-        # crowd out the corpus caches themselves, so the IDE is fetched rather than cached.
-        #
-        # The unified distribution, not `ideaIC-*`: IntelliJ IDEA Community Edition stopped
-        # shipping as a separate download at 2025.3, and everything it used to contain —
-        # the Java code formatter this step drives included — stays free in the one
-        # distribution, for commercial use as well. No license is involved.
-        if: steps.intellij-corpus.outputs.cache-hit != 'true'
-        run: |
-          curl -fL --retry 3 -o idea.tar.gz \
-            "https://download.jetbrains.com/idea/idea-${IDEA_VERSION}.tar.gz"
-          mkdir -p jals-tests/vendor/idea
-          tar xzf idea.tar.gz -C jals-tests/vendor/idea --strip-components=1
-          rm idea.tar.gz
+      # `wait-all`, not `wait: idea`: the download is `if`-guarded, so on a corpus cache hit there
+      # is no such step to name. This is the job's one join — after it the IDE is on disk if it was
+      # fetched at all, and the corpus tools are built.
+      - name: Wait for the IDE download and the corpus tools
+        wait-all:
       - name: Generate the OpenJDK java.base intellij corpus
         continue-on-error: true
         if: steps.intellij-corpus.outputs.cache-hit != 'true'
