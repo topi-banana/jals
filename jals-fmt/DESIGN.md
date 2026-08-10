@@ -976,13 +976,13 @@ similarity** を計算すれば、残りは D1–D4（レイアウト解決ア�
 
 | target | 実測 mean similarity | code のみ | **コメント完全一致なら** | 上限を決めている恒久差分 |
 |---|--:|--:|--:|---|
-| `gjf` | 98.98% | 99.15% | **99.57%** | —（T1。残りは D10 と細部） |
-| `palantir` | 98.94% | 98.06% | **98.96%** | **D3**（`PartialInlineability` の仮説探索） |
-| `eclipse` | 93.60% | 96.97% | **98.59%** | **D2**（`WrapExecutor.findWraps` の penalty 最小化） |
-| `intellij` | 92.07% | 96.13% | **98.12%** | **D4**（`WrapProcessor` の rewind） |
+| `gjf` | 99.00% | 99.20% | **99.59%** | —（T1。残りは D10 と細部） |
+| `palantir` | 98.96% | 98.10% | **98.98%** | **D3**（`PartialInlineability` の仮説探索） |
+| `eclipse` | 93.62% | 97.01% | **98.61%** | **D2**（`WrapExecutor.findWraps` の penalty 最小化） |
+| `intellij` | 92.09% | 96.17% | **98.14%** | **D4**（`WrapProcessor` の rewind） |
 
 読み方は 2 つ。**(1) コメント整形は rule で埋まる** — eclipse はコメント側の rule を足すだけで
-86.06% → 94.38% まで動いた（`comments.paragraph-tags` / `tag-alignment` /
+86.06% → 94.40% まで動いた（`comments.paragraph-tags` / `tag-alignment` /
 `javadoc-boundaries-on-own-lines` / `tables-are-preformatted` ほか）。**(2) レイアウトは埋まらない** —
 コメントが 1 行残らず一致したとしても T2 の 3 者は 98.1〜99.0% で頭打ちで、**99% には届かない**。
 これは努力量ではなく §11 結論 1 の帰結であり、数字を上げるために engine を増やす選択は §8.3 の
@@ -991,7 +991,7 @@ JDT はそのまま残す）と **D7**（JDT のコメント折り返しも pena
 
 intellij はさらに **D5** が効く: 委譲先の `WRAP_COMMENTS` は stock IDEA で off なので、`.output` の
 Javadoc は OpenJDK の手折りをそのまま保存している。単一エンジンは入力の改行を読まないので、ここは
-**近づけるほど数字が下がる**（実測: `format-javadoc` を on にすると 92.07% → 76.52%）。
+**近づけるほど数字が下がる**（実測: `format-javadoc` を on にすると 92.09% → 76.5%）。
 `jals-tests/config/intellij-jals.xml` が `KEEP_*` を off にして D5 を封じたのはコード側だけで、
 コメント側は封じられていない、というのがこの行の正体である。
 
