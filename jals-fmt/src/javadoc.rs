@@ -536,6 +536,12 @@ impl CommentFormatter {
         if lower.contains("href=") {
             return true;
         }
+        // A heading opens one too: `HeaderOpenTag`, `ListItemOpenTag` and `ParagraphOpenTag` are
+        // the three `StartOfLineToken`s, and the writer withholds a space after one of those
+        // however the author spaced it — `<h2> Thread safety` is written `<h2>Thread safety`.
+        if lower.starts_with("<h") && lower[2..].starts_with(|c: char| ('1'..='6').contains(&c)) {
+            return true;
+        }
         ["<li", "<dt", "<dd", "<a "]
             .iter()
             .any(|tag| lower.starts_with(tag))
@@ -776,6 +782,13 @@ impl CommentFormatter {
                         lines: region,
                         first: fence_indent,
                     });
+                    // `writePreClose` and `writeSnippetEnd` ask for a blank line after the region
+                    // they close, the mirror of the one `writePreOpen` asks for in front of it —
+                    // and the same list rule silences it, since `flushWhitespace` writes no blank
+                    // line while a list is open.
+                    if depth == 0 {
+                        blocks.push(Block::Blank);
+                    }
                     fence = None;
                     if !tail.is_empty() {
                         queue.insert(at, tail.into());
@@ -923,8 +936,11 @@ impl CommentFormatter {
                 // "Nothing significant written yet" is what makes an opening `<p>` disappear,
                 // and a run of blank lines is not significant.
                 if blocks.iter().any(|block| !matches!(block, Block::Blank)) {
-                    // A blank line the author already wrote *is* the paragraph break.
-                    if !matches!(blocks.last(), Some(Block::Blank)) {
+                    // A blank line the author already wrote *is* the paragraph break — and
+                    // inside a list there is none at all, because `flushWhitespace` downgrades
+                    // the request to a newline while one is open. A `<p>` continuing an `<li>`
+                    // therefore opens the next line, not the line after a gap.
+                    if depth == 0 && !matches!(blocks.last(), Some(Block::Blank)) {
                         blocks.push(Block::Blank);
                     }
                     pending = Some("<p>".into());
@@ -1084,30 +1100,28 @@ impl CommentFormatter {
 
     /// Whether a block ends with a tag that is not a literal to google-java-format's lexer.
     ///
-    /// `inferParagraphTags` inserts a `<p>` only *between two literals*. A heading's, a
-    /// blockquote's or a list's close tag is its own token, so the paragraph after one opens
-    /// without a `<p>`.
+    /// `inferParagraphTags` inserts a `<p>` only *between two literals*. A heading, a blockquote,
+    /// a list or a preformatted region is its own token at **either** end, so the paragraph after
+    /// one opens without a `<p>` — `<blockquote>` followed by a blank line and a `{@code …}` is
+    /// the quote's own first paragraph, not a new one.
     fn ends_block_tag(block: &Block) -> bool {
-        const TAGS: [&str; 9] = [
-            "</h1>",
-            "</h2>",
-            "</h3>",
-            "</h4>",
-            "</h5>",
-            "</h6>",
-            "</blockquote>",
-            "</pre>",
-            "</table>",
+        const NAMES: [&str; 10] = [
+            "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre", "table", "p",
         ];
         let Block::Prose { words, .. } = block else {
             return false;
         };
         words.last().is_some_and(|word| {
             let lower = word.text.to_ascii_lowercase();
-            TAGS.iter().any(|tag| lower.ends_with(tag))
-                || ["</ul>", "</ol>", "</dl>"]
+            let Some(open) = lower.rfind('<') else {
+                return false;
+            };
+            let tag = lower[open + 1..].trim_start_matches('/');
+            (NAMES.iter().any(|name| tag.starts_with(name))
+                || ["ul", "ol", "dl", "li", "dt", "dd"]
                     .iter()
-                    .any(|tag| lower.ends_with(tag))
+                    .any(|name| tag.starts_with(name)))
+                && lower.ends_with('>')
         })
     }
 

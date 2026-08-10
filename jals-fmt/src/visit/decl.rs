@@ -56,6 +56,16 @@ impl Ctx<'_> {
                 self.visit_element(child).await;
                 return;
             }
+            // A record's component list breaks from the header level, which the declared name
+            // already opened — the same reason a method's parameter list takes no indent of its
+            // own (`Ctx::visit_method`). Letting it open a second one wrapped the components
+            // eight columns in where `visitRecordDeclaration` puts them at four.
+            if child
+                .as_node()
+                .is_some_and(|node| node.kind() == S::RECORD_HEADER)
+            {
+                self.list_indent = Some(Indent::ZERO);
+            }
             self.visit_element(child).await;
             if !opened && name == Some(nth) {
                 self.open(continuation.clone());
