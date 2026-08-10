@@ -41,6 +41,12 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 ///   google-java-format separates them. [`Preserve`](Self::Preserve).
 ///
 /// Spelled in `jalsfmt.toml` as `"inherit"`, a count, or `"preserve"`.
+///
+/// A count of `0` is [`AtLeast(0)`](Self::AtLeast) — "at least none", which the kind rule wins
+/// over — and **not** `Preserve`. The two were the same spelling while this key overrode the kind
+/// rule outright, which is what made a documented member come out separated by *less* than a plain
+/// neighbour; a config that meant "suppress" has to say `"preserve"` now, and one that meant
+/// "nothing extra" can drop the key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DocumentedMember {
     /// The member's own `[blank-lines]` rule decides. Eclipse, IntelliJ, and the default.
