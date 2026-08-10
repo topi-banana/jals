@@ -1793,12 +1793,24 @@ impl CommentFormatter {
             "</blockquote",
         ];
         let lower = line.to_ascii_lowercase();
-        let at = (0..lower.len())
-            .filter(|at| lower.is_char_boundary(*at))
-            // Inside an inline tag there is no HTML to interpret: `{@code <ul>}` is one token to
-            // the lexer, and splitting it would break the tag rather than set off a list.
-            .filter(|at| Self::brace_delta(&lower[..*at]) <= 0)
-            .find(|at| TAGS.iter().any(|tag| lower[*at..].starts_with(tag)))?;
+        // One pass, carrying the brace depth: inside an inline tag there is no HTML to interpret
+        // — `{@code <ul>}` is one token to the lexer, and splitting it would break the tag rather
+        // than set off a list. Re-counting the braces in front of each position instead would be
+        // quadratic in the line, which is a cliff a line of encoded data would fall off.
+        let mut depth = 0i32;
+        let mut found = None;
+        for (at, ch) in lower.char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => depth -= 1,
+                '<' if depth <= 0 && TAGS.iter().any(|tag| lower[at..].starts_with(tag)) => {
+                    found = Some(at);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let at = found?;
         if at > 0 {
             return Some((line[..at].trim_end(), line[at..].trim_start()));
         }
