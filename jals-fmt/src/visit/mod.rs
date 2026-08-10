@@ -486,7 +486,7 @@ impl<'a> Ctx<'a> {
                     None,
                 );
             }
-            self.emit_comment(comment);
+            self.emit_comment(comment, false);
             self.space();
         }
     }
@@ -569,12 +569,12 @@ impl<'a> Ctx<'a> {
             if tok.kind() == S::LBRACE && !comment.is_line() && comment.text.ends_with("*/") {
                 let indent = self.style.indent();
                 self.forced_break(indent);
-                self.emit_comment(&comment);
+                self.emit_comment(&comment, true);
                 self.ops.force_next_break();
                 continue;
             }
             self.space();
-            self.emit_comment(&comment);
+            self.emit_comment(&comment, false);
             if comment.is_line() {
                 // A `//` swallows the rest of the line, so whatever follows must start a new one.
                 self.ops.force_next_break();
@@ -596,14 +596,18 @@ impl<'a> Ctx<'a> {
                 self.ops.ensure_blank_lines(kept, Indent::ZERO);
             }
         }
-        self.emit_comment(comment);
+        self.emit_comment(comment, true);
         if comment.is_line() {
             self.ops.force_next_break();
         }
     }
 
     /// Emit a comment's text, reflowed when its `[comments]` rule is on.
-    fn emit_comment(&mut self, comment: &Comment) {
+    ///
+    /// `own_line` says the comment starts a line of its own. A `/* … */` written inside an
+    /// expression does not, and the rule that gives a block comment's delimiters lines of their
+    /// own would tear the expression across three lines if it applied there.
+    fn emit_comment(&mut self, comment: &Comment, own_line: bool) {
         let is_header = !self.header_seen;
         let text = CommentFormatter::render(
             &comment.text,
@@ -611,6 +615,7 @@ impl<'a> Ctx<'a> {
             self.indent,
             comment.column,
             is_header,
+            own_line,
             self.style,
         );
         self.ops.comment(&text);

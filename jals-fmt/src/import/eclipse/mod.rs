@@ -1024,6 +1024,8 @@ impl From<EclipseConfig> for Config {
         // JDT writes an HTML list flush with the rest of the comment and asks for no blank line
         // above it; the gap and the two columns per level are `JavadocWriter`'s alone.
         jcomments.set_off_html_lists = false;
+        // A `<table>` is HTML to JDT, not a preformatted region.
+        jcomments.tables_are_preformatted = false;
 
         config
     }

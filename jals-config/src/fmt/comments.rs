@@ -124,6 +124,13 @@ pub struct Comments {
     /// line, `continuingListStack` and `continuingListItemStack` the two indents. Eclipse writes a
     /// list flush with the rest of the comment and asks for no gap. No native option either way.
     pub set_off_html_lists: bool,
+    /// Treat an HTML `<table>` in Javadoc as preformatted, emitting it byte-for-byte.
+    ///
+    /// google-java-format's `JavadocLexer` has a `TABLE_OPEN` / `TABLE_CLOSE` pair that switches
+    /// it into preformatted mode; Eclipse reads a table as ordinary HTML and gives `<tr>`, `<td>`
+    /// and `<th>` lines of their own while reflowing what is inside them. No native option either
+    /// way.
+    pub tables_are_preformatted: bool,
     /// Rewrite a parameter-name block comment into google-java-format's canonical spaced form
     /// (`/*a=*/` → `/* a= */`). Its `CommentsHelper.reformatParameterComment`; no Eclipse or
     /// IntelliJ equivalent.
@@ -157,6 +164,7 @@ impl Default for Comments {
             javadoc_boundaries_on_own_lines: false,
             block_boundaries_on_own_lines: false,
             set_off_html_lists: true,
+            tables_are_preformatted: true,
             normalize_parameter_comments: false,
             inline_block_comments: false,
         }

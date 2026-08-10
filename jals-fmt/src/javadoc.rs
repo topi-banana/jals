@@ -95,6 +95,7 @@ impl CommentFormatter {
         indent: usize,
         column: usize,
         is_header: bool,
+        own_line: bool,
         style: &Style,
     ) -> String {
         let cfg = style.comments();
@@ -109,7 +110,7 @@ impl CommentFormatter {
         }
         match kind {
             SyntaxKind::LINE_COMMENT => Self::render_line(text, indent, style),
-            _ => Self::render_block(text, kind, indent, style),
+            _ => Self::render_block(text, kind, indent, own_line, style),
         }
     }
 
@@ -224,7 +225,13 @@ impl CommentFormatter {
     }
 
     /// Reflow a `/* … */` or `/** … */` comment.
-    fn render_block(text: &str, kind: SyntaxKind, indent: usize, style: &Style) -> String {
+    fn render_block(
+        text: &str,
+        kind: SyntaxKind,
+        indent: usize,
+        own_line: bool,
+        style: &Style,
+    ) -> String {
         let cfg = style.comments();
         let doc = kind == SyntaxKind::DOC_COMMENT;
         let opener = if doc { "/**" } else { "/*" };
@@ -232,7 +239,7 @@ impl CommentFormatter {
         let Some(body) = Self::body(text, doc) else {
             return text.into();
         };
-        let blocks = Self::parse(&body, style);
+        let mut blocks = Self::parse(&body, style);
         if blocks.is_empty() {
             return if doc { "/** */".into() } else { "/* */".into() };
         }
@@ -243,7 +250,7 @@ impl CommentFormatter {
         let collapses = if doc {
             !cfg.javadoc_boundaries_on_own_lines
         } else {
-            !cfg.block_boundaries_on_own_lines
+            !cfg.block_boundaries_on_own_lines || !own_line
         };
         if collapses
             && let [
@@ -269,6 +276,17 @@ impl CommentFormatter {
             .comment_width(indent)
             .saturating_sub(indent + prefix_width)
             .max(16);
+
+        if !cfg.break_inside_inline_tags {
+            for block in &mut blocks {
+                match block {
+                    Block::Prose { words, .. } | Block::Tag { words, .. } => {
+                        Self::join_inline_tags(words, budget);
+                    }
+                    Block::Blank | Block::Verbatim { .. } => {}
+                }
+            }
+        }
 
         // `tag-alignment` lines descriptions up under a shared column, so the width belongs to a
         // run of tags rather than to any one of them: `all` measures the whole comment, `grouped`
@@ -679,6 +697,8 @@ impl CommentFormatter {
         // Everything after a block tag belongs to that tag's description, so it sits at the
         // description's continuation indent — headings, paragraphs and lists included.
         let mut tag_indent = 0usize;
+        // Whether a `<table>` is a preformatted region rather than ordinary HTML.
+        let tables = cfg.tables_are_preformatted;
 
         for raw in body.split('\n') {
             let mut line = raw.trim();
@@ -709,7 +729,7 @@ impl CommentFormatter {
                 let closed = if *snippet {
                     snippet_depth <= 0
                 } else {
-                    Self::closes_fence(line)
+                    Self::closes_fence(line, tables)
                 };
                 if closed {
                     let mut region = core::mem::take(lines);
@@ -725,13 +745,13 @@ impl CommentFormatter {
                 }
                 continue;
             }
-            if Self::opens_fence(line) {
+            if Self::opens_fence(line, tables) {
                 // A `<pre>…</pre>` written inside a sentence is an *element* of that sentence,
                 // not a line of its own: `writePreOpen` asks for a blank line around the region
                 // and leaves the prose on either side to reflow.
                 let lower = line.to_ascii_lowercase();
                 let mut trailing = "";
-                let split = Self::self_closing_fence(line)
+                let split = Self::self_closing_fence(line, tables)
                     && lower
                         .find("<pre>")
                         .zip(lower.rfind("</pre>"))
@@ -763,7 +783,7 @@ impl CommentFormatter {
                     rest
                 };
                 let lines = alloc::vec![String::from(line)];
-                if Self::self_closing_fence(line) {
+                if Self::self_closing_fence(line, tables) {
                     blocks.push(Block::Verbatim {
                         lines,
                         first: fence_indent,
@@ -857,7 +877,7 @@ impl CommentFormatter {
                 blocks.push(Block::Blank);
                 continue;
             }
-            if cfg.format_html && Self::is_html_block(line) {
+            if cfg.format_html && Self::is_html_block(line, tables) {
                 Self::flush(&mut prose, &mut blocks, first, rest);
                 // `writeListOpen` requests a blank line before a classic-Javadoc list — but a
                 // list is a *block*, and `requestBlankLine` is ignored inside one, so a nested
@@ -955,16 +975,6 @@ impl CommentFormatter {
         if cfg.format_html && cfg.paragraph_tags != ParagraphTags::Authored {
             Self::infer_paragraph_tags(&mut blocks, cfg.paragraph_tags == ParagraphTags::OwnLine);
         }
-        if !cfg.break_inside_inline_tags {
-            for block in &mut blocks {
-                match block {
-                    Block::Prose { words, .. } | Block::Tag { words, .. } => {
-                        Self::join_inline_tags(words);
-                    }
-                    Block::Blank | Block::Verbatim { .. } => {}
-                }
-            }
-        }
         blocks
     }
 
@@ -997,12 +1007,13 @@ impl CommentFormatter {
         })
     }
 
-    /// Fuse each `{@… }` and everything up to its closing brace into one word.
+    /// Fuse each `{@… }` and everything up to its closing brace into one word, while it fits.
     ///
-    /// The refill never breaks a word, so a fused tag stays on one line — Eclipse's shape. A tag
-    /// whose brace never closes inside this block is left alone: swallowing the rest of the
-    /// paragraph would be a worse answer than the break it avoids.
-    fn join_inline_tags(words: &mut Vec<Word>) {
+    /// The refill never breaks a word, so a fused tag stays on one line — Eclipse's shape. Two
+    /// tags are left alone: one whose brace never closes inside this block, because swallowing
+    /// the rest of the paragraph is a worse answer than the break it avoids, and one wider than
+    /// `budget`, because Eclipse splits a tag that cannot fit a line either.
+    fn join_inline_tags(words: &mut Vec<Word>, budget: usize) {
         let mut at = 0usize;
         while at < words.len() {
             if !words[at].text.starts_with("{@") || Self::brace_delta(&words[at].text) <= 0 {
@@ -1024,6 +1035,10 @@ impl CommentFormatter {
                 .map(|word| word.text.as_str())
                 .collect::<Vec<_>>()
                 .join(" ");
+            if Width::utf16(&joined) > budget {
+                at += 1;
+                continue;
+            }
             words[at].text = joined;
             words.drain(at + 1..end);
             at += 1;
@@ -1139,11 +1154,11 @@ impl CommentFormatter {
     /// HTML tag names are case-insensitive, and hand-written Javadoc really does close a `<pre>`
     /// with `</PRE>`. Matching only the lower-case spelling leaves the fence open to the end of
     /// the comment, which grows a blank line on every run.
-    fn opens_fence(line: &str) -> bool {
+    fn opens_fence(line: &str, tables: bool) -> bool {
         let lower = line.to_ascii_lowercase();
         lower.starts_with("```")
             || lower.contains("<pre>")
-            || lower.contains("<table")
+            || (tables && lower.contains("<table"))
             || (line.contains("{@snippet") && !line.contains('}'))
             || (lower.starts_with("{@code") && !lower.contains('}'))
     }
@@ -1211,10 +1226,7 @@ impl CommentFormatter {
         // Only a region that says it holds *code*. A bare `<pre>` fences ASCII art and hand-laid
         // tables at least as often as it fences Java, and re-indenting one of those is the
         // destruction the fence exists to prevent.
-        if !lines
-            .first()
-            .is_some_and(|line| line.contains("{@code") || line.contains("{@snippet"))
-        {
+        if !lines.first().is_some_and(|line| line.contains("{@code")) {
             return;
         }
         let tab = style.tab_width();
@@ -1249,16 +1261,18 @@ impl CommentFormatter {
     }
 
     /// Whether a line closes such a region.
-    fn closes_fence(line: &str) -> bool {
+    fn closes_fence(line: &str, tables: bool) -> bool {
         let lower = line.to_ascii_lowercase();
-        lower.starts_with("```") || lower.contains("</pre>") || lower.contains("</table>")
+        lower.starts_with("```")
+            || lower.contains("</pre>")
+            || (tables && lower.contains("</table>"))
     }
 
     /// Whether a line both opens and closes a region, so it is verbatim on its own.
-    fn self_closing_fence(line: &str) -> bool {
+    fn self_closing_fence(line: &str, tables: bool) -> bool {
         let lower = line.to_ascii_lowercase();
         (lower.contains("<pre>") && lower.contains("</pre>"))
-            || (lower.contains("<table") && lower.contains("</table>"))
+            || (tables && lower.contains("<table") && lower.contains("</table>"))
             || (lower.contains("{@code") && lower.contains('}'))
             || (line.contains("{@snippet") && line.contains('}'))
     }
@@ -1366,13 +1380,20 @@ impl CommentFormatter {
     ///
     /// Matched case-insensitively: HTML tag names are, and hand-written Javadoc really does say
     /// `<UL>`.
-    fn is_html_block(line: &str) -> bool {
+    fn is_html_block(line: &str, tables: bool) -> bool {
         const BLOCK_TAGS: [&str; 13] = [
             "<p>", "<p ", "<br>", "<ul", "<ol", "<li", "<dl", "<dt", "<dd", "<h", "</ul", "</ol",
             "</dl",
         ];
+        // A table read as HTML rather than as a preformatted region: its rows and cells are the
+        // block elements, and `<caption>` / `<thead>` / `<tbody>` are not — which is JDT's own
+        // classification, not a simplification of it.
+        const TABLE_TAGS: [&str; 8] = [
+            "<table", "</table", "<tr", "</tr", "<td", "</td", "<th", "</th",
+        ];
         let lower = line.trim_start().to_ascii_lowercase();
         BLOCK_TAGS.iter().any(|tag| lower.starts_with(tag))
+            || (!tables && TABLE_TAGS.iter().any(|tag| lower.starts_with(tag)))
     }
 
     /// Whether a line is a `<blockquote>` tag.

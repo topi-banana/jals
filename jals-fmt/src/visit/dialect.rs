@@ -47,19 +47,19 @@ impl Ctx<'_> {
     fn emit_comments_without_token(&mut self, tok: &SyntaxToken) {
         for comment in self.comments.leading(tok).to_vec() {
             self.forced_break(Indent::ZERO);
-            self.emit_comment(&comment);
+            self.emit_comment(&comment, true);
         }
         for comment in self.comments.leading_inline(tok).to_vec() {
             self.space();
-            self.emit_comment(&comment);
+            self.emit_comment(&comment, false);
         }
         for comment in self.comments.trailing(tok).to_vec() {
             self.space();
-            self.emit_comment(&comment);
+            self.emit_comment(&comment, false);
         }
         for comment in self.comments.trailing_below(tok).to_vec() {
             self.forced_break(Indent::ZERO);
-            self.emit_comment(&comment);
+            self.emit_comment(&comment, true);
         }
     }
 }
