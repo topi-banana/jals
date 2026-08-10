@@ -59,14 +59,30 @@ archive_extension() {
   esac
 }
 
+# The digest of a file, as 64 lowercase hex characters and nothing else.
+#
+# Fed on **stdin** rather than by name, which is not a style choice: GNU coreutils escapes its
+# output line — a leading `\` on the digest, and backslashes doubled in the name — whenever the
+# filename contains one. On Windows `RUNNER_TEMP` is `D:\a\_temp`, so every path this script
+# builds under it does, and the digest came back as `\786745e6…`. Reading stdin prints `<hex>  -`
+# with no filename to escape, on every platform.
 sha256_of() {
+  local digest
   if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$1" | cut -d' ' -f1
+    digest=$(sha256sum <"$1" | cut -d' ' -f1)
   elif command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 "$1" | cut -d' ' -f1
+    digest=$(shasum -a 256 <"$1" | cut -d' ' -f1)
   else
     fail "no sha256sum or shasum on this runner; cannot verify the download"
   fi
+  # A digest that is not a digest must not reach the comparison: it would read as a plain mismatch
+  # and send the next reader looking at the *asset* rather than at whatever produced this.
+  is_sha256 "${digest}" || fail "could not read a sha256 digest for $1 (got '${digest}')"
+  printf '%s' "${digest}"
+}
+
+is_sha256() {
+  [[ "$1" =~ ^[0-9a-f]{64}$ ]]
 }
 
 # A release version is `X.Y.Z…` with an optional `v`. Anything else — `main`, a tag that is not a
@@ -176,8 +192,12 @@ download_prebuilt() {
 
   local want got
   # `upload-rust-binary-action` writes `<hex>  <filename>`; only the digest is read, so the file
-  # name recorded inside it never has to match where curl happened to put the bytes.
+  # name recorded inside it never has to match where curl happened to put the bytes. A leading `\`
+  # is coreutils' escaped form (see `sha256_of`) and is not part of the digest.
   want=$(tr -d '\r' <"${staging}/${archive}.sha256" | awk 'NR==1 {print tolower($1)}')
+  want="${want#\\}"
+  is_sha256 "${want}" ||
+    fail "${archive}.sha256 does not begin with a sha256 digest (got '${want}')"
   got=$(sha256_of "${staging}/${archive}")
   [[ "${want}" == "${got}" ]] ||
     fail "checksum mismatch for ${archive}: expected ${want}, got ${got}"
