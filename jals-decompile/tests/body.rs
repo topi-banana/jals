@@ -1768,7 +1768,7 @@ fn try_with_resources_bails() {
 }
 
 #[test]
-fn a_loop_at_the_trys_entry_block_stays_inside_it() {
+fn a_loop_heading_a_protected_range_stays_inside_the_try() {
     // The loop header *is* the try's entry block, so the structurer must look for a `try` there
     // before it looks for a loop — the other order lets the loop swallow the statement. The counter
     // is a parameter, which is what keeps a fresh slot from competing with the catch parameter.
