@@ -1,6 +1,6 @@
 //! Every rule in `jals_config::fmt::Config` must actually reach the formatter.
 //!
-//! "All 185 rules are implemented" is not a claim to make in prose. This walks the **schema** — so
+//! "All 188 rules are implemented" is not a claim to make in prose. This walks the **schema** — so
 //! a rule added later is covered the moment it exists — moves each leaf away from its default one
 //! at a time, and requires the formatter to notice.
 //!
@@ -216,6 +216,10 @@ package p;
 /**
  * A description whose last sentence runs long enough that the inline tag near the column limit
  * has to move, which is the only place {@code breakInsideInlineTags} can be seen deciding.
+ * <ul>
+ * <li>a list item, so the list indent and the gap above the list have somewhere to appear
+ * <li>a second one
+ * </ul>
  *
  * @param x the first
  *
@@ -288,7 +292,7 @@ fn format(src: &str, config: &Config) -> jals_fmt::FormatOutput {
 /// The `section.key = value` pairs where `config` differs from [`Config::default`].
 ///
 /// The sweep moves one leaf at a time, so this is normally one entry — plus whatever
-/// [`base_for`] had to turn on first. Enough to reproduce a failure without printing all 185 rules.
+/// [`base_for`] had to turn on first. Enough to reproduce a failure without printing all 188 rules.
 fn off_default(config: &Config) -> Vec<String> {
     let Value::Object(current) = serde_json::to_value(config).expect("serializable") else {
         panic!("the config is a table of tables");
@@ -493,7 +497,7 @@ fn the_schema_is_the_documented_size() {
         .map(|section| section.as_object().map_or(0, Map::len))
         .sum();
     assert_eq!(
-        total, 185,
-        "the rule set is documented as 185 keys in jals-fmt/MAPPING.md",
+        total, 188,
+        "the rule set is documented as 188 keys in jals-fmt/MAPPING.md",
     );
 }

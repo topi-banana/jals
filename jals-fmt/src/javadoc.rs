@@ -238,12 +238,19 @@ impl CommentFormatter {
         }
 
         // A comment that is one short paragraph collapses to a single line, which is what
-        // google-java-format does and what most one-line Javadoc already looks like.
-        if let [
-            Block::Prose {
-                words, first: 0, ..
-            },
-        ] = blocks.as_slice()
+        // google-java-format does and what most one-line Javadoc already looks like. Eclipse's
+        // `new_lines_at_*_boundaries` asks for the delimiters to keep lines of their own instead.
+        let collapses = if doc {
+            !cfg.javadoc_boundaries_on_own_lines
+        } else {
+            !cfg.block_boundaries_on_own_lines
+        };
+        if collapses
+            && let [
+                Block::Prose {
+                    words, first: 0, ..
+                },
+            ] = blocks.as_slice()
         {
             // `makeSingleLineIfPossible` collapses a comment that renders as *one* content line.
             // A `<br>` ends its line however wide the comment is, so a paragraph holding one is
@@ -676,7 +683,10 @@ impl CommentFormatter {
         for raw in body.split('\n') {
             let mut line = raw.trim();
             let stripped;
-            if cfg.format_html && Self::has_paragraph_close(line) {
+            if cfg.format_html
+                && cfg.paragraph_tags == ParagraphTags::Leading
+                && Self::has_paragraph_close(line)
+            {
                 // google-java-format drops `</p>` outright (`case ParagraphCloseTag -> {}`).
                 stripped = Self::drop_paragraph_close(line);
                 line = stripped.trim();
@@ -852,7 +862,8 @@ impl CommentFormatter {
                 // `writeListOpen` requests a blank line before a classic-Javadoc list — but a
                 // list is a *block*, and `requestBlankLine` is ignored inside one, so a nested
                 // list continues its item rather than starting a paragraph.
-                if depth == 0
+                if cfg.set_off_html_lists
+                    && depth == 0
                     && Self::opens_list(line)
                     && !matches!(blocks.last(), Some(Block::Blank) | None)
                 {
@@ -884,7 +895,11 @@ impl CommentFormatter {
                 // They are read *before* this line's own tags, so a line that opens a list is
                 // still at the enclosing level.
                 if prose.is_empty() {
-                    let (list_first, list_rest) = Self::list_indents(depth, line);
+                    let (list_first, list_rest) = if cfg.set_off_html_lists {
+                        Self::list_indents(depth, line)
+                    } else {
+                        (0, 0)
+                    };
                     first = list_first + tag_indent;
                     rest = list_rest + tag_indent;
                 }

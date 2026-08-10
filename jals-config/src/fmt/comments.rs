@@ -108,6 +108,22 @@ pub struct Comments {
     pub indent_tag_description: bool,
     /// Emit the leading `*` on every Javadoc line. IntelliJ `JD_LEADING_ASTERISKS_ARE_ENABLED`.
     pub leading_asterisks: bool,
+    /// Give `/**` and `*/` lines of their own instead of collapsing a Javadoc that would fit on
+    /// one. Eclipse `comment.new_lines_at_javadoc_boundaries`.
+    ///
+    /// Off is google-java-format's `makeSingleLineIfPossible`. JDT's own reading of the option
+    /// spares a comment the *source* wrote on one line; the single engine does not read the
+    /// source's line breaks, so on means always — `DESIGN.md` §18.2's **D5** covers the residue.
+    pub javadoc_boundaries_on_own_lines: bool,
+    /// The same for a `/* … */` block comment. Eclipse `comment.new_lines_at_block_boundaries`.
+    pub block_boundaries_on_own_lines: bool,
+    /// Set an HTML list in Javadoc off from the prose around it: a blank line before it opens,
+    /// two columns of indent per `<ul>` level, and four more for the lines continuing an `<li>`.
+    ///
+    /// google-java-format's `JavadocWriter` does all three — `writeListOpen` requests the blank
+    /// line, `continuingListStack` and `continuingListItemStack` the two indents. Eclipse writes a
+    /// list flush with the rest of the comment and asks for no gap. No native option either way.
+    pub set_off_html_lists: bool,
     /// Rewrite a parameter-name block comment into google-java-format's canonical spaced form
     /// (`/*a=*/` → `/* a= */`). Its `CommentsHelper.reformatParameterComment`; no Eclipse or
     /// IntelliJ equivalent.
@@ -138,6 +154,9 @@ impl Default for Comments {
             tag_alignment: TagAlignment::None,
             indent_tag_description: true,
             leading_asterisks: true,
+            javadoc_boundaries_on_own_lines: false,
+            block_boundaries_on_own_lines: false,
+            set_off_html_lists: true,
             normalize_parameter_comments: false,
             inline_block_comments: false,
         }

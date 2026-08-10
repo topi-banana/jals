@@ -1005,12 +1005,25 @@ impl From<EclipseConfig> for Config {
             comments.comment_indent_tag_description,
             |b| b,
         );
+        Lower::set(
+            &mut jcomments.javadoc_boundaries_on_own_lines,
+            comments.comment_new_lines_at_javadoc_boundaries,
+            |b| b,
+        );
+        Lower::set(
+            &mut jcomments.block_boundaries_on_own_lines,
+            comments.comment_new_lines_at_block_boundaries,
+            |b| b,
+        );
         // JDT has no option for either of these — both are `CommentsPreparator`'s own reading of
         // Javadoc. `<p>` is a block-level HTML element, so it always takes a line of its own and
         // is never invented at a blank line; an inline `{@… }` is one token, so a break falls
         // inside one only where the tag cannot fit a line at all.
         jcomments.paragraph_tags = ParagraphTags::Authored;
         jcomments.break_inside_inline_tags = false;
+        // JDT writes an HTML list flush with the rest of the comment and asks for no blank line
+        // above it; the gap and the two columns per level are `JavadocWriter`'s alone.
+        jcomments.set_off_html_lists = false;
 
         config
     }

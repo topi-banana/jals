@@ -77,7 +77,7 @@ rule 単位で次の 1 行を適用する。
 | 層 | 成果物 | 完全性の基準 | 規模 |
 |---|---|---|---|
 | **native モデル** | `jals_fmt::import::{eclipse, intellij, gjf, palantir, spotless}` | **全数**。ベンダー option は 1 つも落とさない。jals に写像先が無い option も**型付きで保持**する | Eclipse 416 / IntelliJ 297 |
-| **共通語彙** | `jals_config::fmt::Config` | **選別**。§2 の基準を満たすものだけ。union ではない | 8 節・185 |
+| **共通語彙** | `jals_config::fmt::Config` | **選別**。§2 の基準を満たすものだけ。union ではない | 8 節・188 |
 
 「jals-config でキャプチャされない rule が構造化されていない」という問題への答えがこの表である。
 **捨てるのではなく、native モデル側に型付きで残す。** 未写像の option は
@@ -324,6 +324,9 @@ IntelliJ の `SPACE_*` 45 とはほぼ 1:1。代表例（全数は importer の 
 | `comments.tag-alignment` (`none`/`grouped`/`all`) | `comment.align_tags_names_descriptions` → `all`、`comment.align_tags_descriptions_grouped` → `grouped`（JDT は前者を優先） | `JD_ALIGN_PARAM_COMMENTS` → `all` | `none` |
 | `comments.indent-tag-description` | `comment.indent_tag_description` | `JD_INDENT_ON_CONTINUATION` | true |
 | `comments.leading-asterisks` | — | `JD_LEADING_ASTERISKS_ARE_ENABLED` | true |
+| `comments.javadoc-boundaries-on-own-lines` | `comment.new_lines_at_javadoc_boundaries` | — | false（`makeSingleLineIfPossible`） |
+| `comments.block-boundaries-on-own-lines` | `comment.new_lines_at_block_boundaries` | — | false |
+| `comments.set-off-html-lists` | —（list を字下げも空行分離もしない → false） | — | `JavadocWriter` の `writeListOpen` / `continuingListStack` → true |
 | `comments.normalize-parameter-comments` | — | — | `CommentsHelper.reformatParameterComment`（固定） |
 | `comments.inline-block-comments` | — | — | 固定 |
 | `imports.order` (`preserve`/`sort`/`group`) | —（JDT formatter は import を触らない） | `IMPORT_LAYOUT_TABLE` の有無 | `ImportOrderer`（常に group） |

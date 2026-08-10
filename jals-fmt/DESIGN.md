@@ -562,7 +562,7 @@ rule の一般性とエンジン忠実度が衝突したら、**単一エンジ�
 ### 8.4 rustfmt 風オプションとの関係
 
 前段の考察は rustfmt 風の**設定可能**フォーマッタを志向していた。本書はその語彙を捨て
-（`MAPPING.md` §1 の P1–P4）、**Java フォーマッタ 4 者の観測から選んだ rule set**（8 節・185 rule）に
+（`MAPPING.md` §1 の P1–P4）、**Java フォーマッタ 4 者の観測から選んだ rule set**（8 節・188 rule）に
 置き換える。単一エンジン方針の下では、rule set はエンジンの上の薄い層であり、**エンジンが表現できない
 rule は最初から置かない**（`MAPPING.md` §2 の基準に「到達可能な 2 つのターゲットが食い違う」を課して
 いるのはそのため。列揃えのようにエンジンが表現できない概念は rule にせず、native モデル側に型付きで
@@ -663,7 +663,7 @@ IntelliJ IDEA / Palantir へ拡げ、**「エンジンを増やさずに rule �
    以上 import」の計数＝実 import 解決が要り、pure CST では不可。⇒ **恒久差分**（§18）。
 
 5. **jalsfmt.toml 自動生成は「共通語彙への射影」として行う。** 生成 toml は engine 多重化器ではなく、
-   `jals_config::fmt::Config`（8 節・185 rule）**そのもの**であり、単一エンジンが読む唯一の形である。
+   `jals_config::fmt::Config`（8 節・188 rule）**そのもの**であり、単一エンジンが読む唯一の形である。
    射影は**全単射ではない**（写せない native option は importer の native モデル側に型付きで残る）。
    写像の台帳が `MAPPING.md`、実装が `jals_fmt::import`。§15 が生成の流れと限界を扱う。
 
@@ -790,7 +790,7 @@ rule で分岐させる近似で行う（▲）。つまり `jals-fmt` は「マ
         │  jals_fmt::import                              │
         └──────────────┬─────────────────────────────────┘
                        ▼
-        jals_config::fmt::Config  ── 8 節 / 185 rule（唯一の style 表面）
+        jals_config::fmt::Config  ── 8 節 / 188 rule（唯一の style 表面）
                        │  style::reify  ← 解決済みパラメータ束（§8 の seam S1–S4）
  ┌─────────────────────┼──────────────────────────────────────────────┐
  │ 単一パイプライン                                                    │
@@ -814,7 +814,7 @@ rule で分岐させる近似で行う（▲）。つまり `jals-fmt` は「マ
 
 ## 15. jalsfmt.toml 自動生成
 
-**方式: 共通語彙への射影**。生成 toml は `jals_config::fmt::Config` そのもの（8 節・185 rule）であり、
+**方式: 共通語彙への射影**。生成 toml は `jals_config::fmt::Config` そのもの（8 節・188 rule）であり、
 engine 選択子も engine 固有 option の透過テーブルも持たない。生成例（Eclipse `.prefs` 由来）:
 
 ```toml
