@@ -123,6 +123,6 @@ impl Formatter {
         let (mut doc, tags) = ctx.finish();
 
         let rendered = Engine::new(style, tags).render(&mut doc).await;
-        Finalize::apply(&rendered, style)
+        Finalize::apply(&rendered, src, style)
     }
 }

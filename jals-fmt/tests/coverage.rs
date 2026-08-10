@@ -1,6 +1,6 @@
 //! Every rule in `jals_config::fmt::Config` must actually reach the formatter.
 //!
-//! "All 176 rules are implemented" is not a claim to make in prose. This walks the **schema** — so
+//! "All 185 rules are implemented" is not a claim to make in prose. This walks the **schema** — so
 //! a rule added later is covered the moment it exists — moves each leaf away from its default one
 //! at a time, and requires the formatter to notice.
 //!
@@ -207,8 +207,46 @@ class Packed {
 class Second {}
 "#;
 
+/// The Javadoc shapes whose rules are about *gaps and units* rather than about width: a blank
+/// line between two block tags, a blank line between a doc comment and what it documents, and an
+/// inline `{@code …}` sitting exactly where a refill wants to break.
+const JAVADOC: &str = r"/** A header comment, so the type's own Javadoc is not the header one. */
+package p;
+
+/**
+ * A description whose last sentence runs long enough that the inline tag near the column limit
+ * has to move, which is the only place {@code breakInsideInlineTags} can be seen deciding.
+ *
+ * @param x the first
+ *
+ * @throws IllegalStateException when the description is long enough to wrap onto a second line
+ * @since 1.0
+ */
+class Documented {
+
+  /** Documented, with a blank line before the field it documents. */
+
+  int a = 1;
+
+  /**
+   * A fenced snippet whose own indentation is not the configured one.
+   *
+   * <pre>{@code
+   * if (a > 0) {
+   *   report();
+   * }
+   * }</pre>
+   */
+  void m() {}
+}
+";
+
+/// A file that does not end with a newline, so `insert-final-newline` has one to add. Every other
+/// fixture already ends with one, and adding a newline that is there changes nothing.
+const NO_FINAL_NEWLINE: &str = "class Bare {}";
+
 /// Every fixture; a rule may be noticed on any of them.
-const FIXTURES: [&str; 7] = [
+const FIXTURES: [&str; 9] = [
     KITCHEN_SINK,
     WRAPPING,
     TAGGED,
@@ -216,6 +254,8 @@ const FIXTURES: [&str; 7] = [
     LONG_STRING,
     ONE_LINERS,
     PACKED,
+    JAVADOC,
+    NO_FINAL_NEWLINE,
 ];
 
 /// An import-group list that leaves the static block's position to `static-first`.
@@ -248,7 +288,7 @@ fn format(src: &str, config: &Config) -> jals_fmt::FormatOutput {
 /// The `section.key = value` pairs where `config` differs from [`Config::default`].
 ///
 /// The sweep moves one leaf at a time, so this is normally one entry — plus whatever
-/// [`base_for`] had to turn on first. Enough to reproduce a failure without printing all 176 rules.
+/// [`base_for`] had to turn on first. Enough to reproduce a failure without printing all 185 rules.
 fn off_default(config: &Config) -> Vec<String> {
     let Value::Object(current) = serde_json::to_value(config).expect("serializable") else {
         panic!("the config is a table of tables");
@@ -349,6 +389,8 @@ fn variants(section: &str, key: &str) -> Vec<&'static str> {
         ("layout", "formatter-off-tag") => vec!["@fmt:off"],
         ("layout", "formatter-on-tag") => vec!["@fmt:on"],
         ("imports", "order") => vec!["group", "sort"],
+        ("comments", "paragraph-tags") => vec!["own-line", "authored"],
+        ("comments", "tag-alignment") => vec!["grouped", "all"],
         ("literals", "hex-case" | "suffix-case") => vec!["upper", "lower"],
         ("literals", "float-trailing-zero") => vec!["always", "never"],
         ("braces", key) if key.starts_with("force-") => vec!["always", "if-multiline"],
@@ -450,7 +492,7 @@ fn the_schema_is_the_documented_size() {
         .map(|section| section.as_object().map_or(0, Map::len))
         .sum();
     assert_eq!(
-        total, 181,
-        "the rule set is documented as 181 keys in jals-fmt/MAPPING.md",
+        total, 185,
+        "the rule set is documented as 185 keys in jals-fmt/MAPPING.md",
     );
 }

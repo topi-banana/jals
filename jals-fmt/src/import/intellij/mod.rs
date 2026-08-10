@@ -31,7 +31,7 @@ use alloc::string::String;
 
 use jals_config::fmt::{
     BraceStyle, Config, ForceBraces, ImportOrder, IndentStyle, KeepOnOneLine, LineEnding,
-    ParenPositions, WrapPolicy,
+    ParagraphTags, ParenPositions, TagAlignment, WrapPolicy,
 };
 use serde::{Deserialize, Deserializer};
 
@@ -854,14 +854,33 @@ impl From<IntellijConfig> for Config {
             |b| b,
         );
         Lower::set(
-            &mut comments.align_tag_descriptions,
+            &mut comments.tag_alignment,
             javadoc.jd_align_param_comments,
-            |b| b,
+            |on| {
+                if on {
+                    TagAlignment::All
+                } else {
+                    TagAlignment::None
+                }
+            },
         );
         Lower::set(
             &mut comments.indent_tag_description,
             javadoc.jd_indent_on_continuation,
             |b| b,
+        );
+        // IDEA writes the `<p>` it adds at a blank line on a line of its own, and with the option
+        // off it adds none — either way it never glues one to the paragraph's first word.
+        Lower::set(
+            &mut comments.paragraph_tags,
+            javadoc.jd_p_at_empty_lines,
+            |add| {
+                if add {
+                    ParagraphTags::OwnLine
+                } else {
+                    ParagraphTags::Authored
+                }
+            },
         );
         Lower::set(
             &mut comments.leading_asterisks,

@@ -509,14 +509,21 @@ impl<'a> Ctx<'a> {
             self.emit_comment_line(comment);
             self.forced_break(Indent::ZERO);
         }
-        // Only a `//` or a plain `/* … */` may leave a blank line behind it. A Javadoc documents
-        // the declaration that follows, so a blank line between the two is dropped however the
-        // author wrote it — google-java-format's `allowBlankAfterLastComment`.
-        let separable = comments
+        // A Javadoc documents the declaration that follows, so how much of the gap between the
+        // two survives is its own rule — zero is google-java-format's `allowBlankAfterLastComment`
+        // returning false for a doc comment. Behind a `//` or a plain `/* … */` the ordinary
+        // in-code cap applies, and a gap the caller is owed cannot be lost.
+        let blanks = &self.style.cfg.blank_lines;
+        let documenting = comments
             .last()
-            .is_some_and(|comment| comment.kind != S::DOC_COMMENT);
-        let after = Self::source_blank_lines(tok).min(self.style.cfg.blank_lines.max_in_code);
-        let after = if separable { after.max(owed) } else { 0 };
+            .is_some_and(|comment| comment.kind == S::DOC_COMMENT);
+        let after = if documenting {
+            Self::source_blank_lines(tok).min(blanks.max_after_doc_comment)
+        } else {
+            Self::source_blank_lines(tok)
+                .min(blanks.max_in_code)
+                .max(owed)
+        };
         if after > 0 {
             self.ops.ensure_blank_lines(after, Indent::ZERO);
         }

@@ -77,7 +77,7 @@ rule 単位で次の 1 行を適用する。
 | 層 | 成果物 | 完全性の基準 | 規模 |
 |---|---|---|---|
 | **native モデル** | `jals_fmt::import::{eclipse, intellij, gjf, palantir, spotless}` | **全数**。ベンダー option は 1 つも落とさない。jals に写像先が無い option も**型付きで保持**する | Eclipse 416 / IntelliJ 297 |
-| **共通語彙** | `jals_config::fmt::Config` | **選別**。§2 の基準を満たすものだけ。union ではない | 8 節・181 |
+| **共通語彙** | `jals_config::fmt::Config` | **選別**。§2 の基準を満たすものだけ。union ではない | 8 節・185 |
 
 「jals-config でキャプチャされない rule が構造化されていない」という問題への答えがこの表である。
 **捨てるのではなく、native モデル側に型付きで残す。** 未写像の option は
@@ -167,6 +167,7 @@ rule 単位で次の 1 行を適用する。
 | `max-in-code` | `number_of_empty_lines_to_preserve` | `KEEP_BLANK_LINES_IN_CODE` |
 | `max-in-declarations` | 同上 | `KEEP_BLANK_LINES_IN_DECLARATIONS` |
 | `max-before-closing-brace` | `number_of_blank_lines_at_end_of_code_block` | `KEEP_BLANK_LINES_BEFORE_RBRACE` |
+| `max-after-doc-comment` | `number_of_empty_lines_to_preserve`（JDT に専用規則なし） | — |
 | `before-package` / `after-package` | `blank_lines_before_package` / `_after_package` | `BLANK_LINES_BEFORE_PACKAGE` / `_AFTER_PACKAGE` |
 | `before-imports` / `after-imports` | `blank_lines_before_imports` / `_after_imports` | `BLANK_LINES_BEFORE_IMPORTS` / `_AFTER_IMPORTS` |
 | `between-import-groups` | `blank_lines_between_import_groups` | （`IMPORT_LAYOUT_TABLE` の `<emptyLine/>`） |
@@ -314,10 +315,13 @@ IntelliJ の `SPACE_*` 45 とはほぼ 1:1。代表例（全数は importer の 
 | `comments.count-width-from-start` | `comment.count_line_length_from_starting_position` | — | — |
 | `comments.format-header` | `comment.format_header` | — | — |
 | `comments.format-html` | `comment.format_html` | — | true |
+| `comments.paragraph-tags` (`leading`/`own-line`/`authored`) | —（`CommentsPreparator` は `<p>` を block 要素として単独行にし、補わない → `authored`） | `JD_P_AT_EMPTY_LINES` → `own-line` / `authored` | `inferParagraphTags` → `leading` |
+| `comments.break-inside-inline-tags` | —（`{@… }` は 1 トークン → false） | — | `JavadocLexer` は分割する → true |
 | `comments.format-source-in-comments` | `comment.format_source_code` | — | — |
 | `comments.preserve-blank-lines` | `comment.clear_blank_lines_in_javadoc_comment`（反転） | `JD_KEEP_EMPTY_LINES` | true |
+| `comments.blank-lines-between-tags` | `comment.clear_blank_lines_in_javadoc_comment`（反転） | `JD_KEEP_EMPTY_LINES` | false（footer は 1 続きの run） |
 | `comments.blank-line-before-tags` | `comment.insert_new_line_before_root_tags` | `JD_ADD_BLANK_AFTER_DESCRIPTION` | true |
-| `comments.align-tag-descriptions` | `comment.align_tags_names_descriptions` | `JD_ALIGN_PARAM_COMMENTS` | false |
+| `comments.tag-alignment` (`none`/`grouped`/`all`) | `comment.align_tags_names_descriptions` → `all`、`comment.align_tags_descriptions_grouped` → `grouped`（JDT は前者を優先） | `JD_ALIGN_PARAM_COMMENTS` → `all` | `none` |
 | `comments.indent-tag-description` | `comment.indent_tag_description` | `JD_INDENT_ON_CONTINUATION` | true |
 | `comments.leading-asterisks` | — | `JD_LEADING_ASTERISKS_ARE_ENABLED` | true |
 | `comments.normalize-parameter-comments` | — | — | `CommentsHelper.reformatParameterComment`（固定） |

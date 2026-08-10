@@ -32,6 +32,14 @@ pub struct BlankLines {
     /// Longest run of source blank lines kept immediately before a closing `}`. Eclipse
     /// `number_of_blank_lines_at_end_of_code_block` / IntelliJ `KEEP_BLANK_LINES_BEFORE_RBRACE`.
     pub max_before_closing_brace: usize,
+    /// Longest run of source blank lines kept between a Javadoc comment and the declaration it
+    /// documents.
+    ///
+    /// Zero is google-java-format's `allowBlankAfterLastComment`, which returns false for a doc
+    /// comment: the comment documents what follows, so whatever the author left between the two
+    /// is not a separation. Eclipse has no rule of its own here and simply preserves up to
+    /// `number_of_empty_lines_to_preserve`.
+    pub max_after_doc_comment: usize,
     /// Blank lines before the `package` declaration. Eclipse `blank_lines_before_package` /
     /// IntelliJ `BLANK_LINES_BEFORE_PACKAGE`.
     pub before_package: usize,
@@ -96,6 +104,7 @@ impl Default for BlankLines {
             max_in_code: 1,
             max_in_declarations: 1,
             max_before_closing_brace: 0,
+            max_after_doc_comment: 0,
             before_package: 0,
             after_package: 1,
             before_imports: 0,

@@ -220,6 +220,20 @@ impl Style {
         }
     }
 
+    /// Columns in one block indent level.
+    pub(crate) const fn indent_cols(&self) -> usize {
+        self.indent_cols
+    }
+
+    /// Columns a tab advances to the next stop.
+    pub(crate) const fn tab_width(&self) -> usize {
+        if self.cfg.layout.tab_width == 0 {
+            1
+        } else {
+            self.cfg.layout.tab_width
+        }
+    }
+
     /// The comment reflow settings.
     pub(crate) const fn comments(&self) -> &Comments {
         &self.cfg.comments

@@ -50,7 +50,7 @@ pub use crate::loader::ConfigError;
 
 pub use blank_lines::BlankLines;
 pub use braces::{BraceStyle, Braces, ForceBraces, KeepOnOneLine};
-pub use comments::Comments;
+pub use comments::{Comments, ParagraphTags, TagAlignment};
 pub use imports::{ImportOrder, Imports};
 pub use layout::{IndentStyle, Layout, LineEnding};
 pub use literals::{FloatLiteralTrailingZero, HexLiteralCase, LiteralSuffixCase, Literals};
