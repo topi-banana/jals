@@ -108,6 +108,12 @@ impl Corpus {
         // profile below actually disables. L4 runs after the lowering walk and over re-parsed text,
         // so it is the one stage that can still write into a region every earlier stage left alone.
         "class D {\n  // @formatter:off\n  String k = \"a single very long literal that runs well past the hundred column limit\";\n  // @formatter:on\n  int  y  =  1;\n}\n",
+        // Javadoc carrying every shape that *asks* for a blank line — a preformatted region, a
+        // list, a heading, a paragraph tag — with block tags behind them. A requested blank line
+        // arrives on the next run as a blank line the author wrote, so a rule that only refuses to
+        // ask twice loses the line on run 2 and grows it back on run 3. Nothing else in this
+        // corpus reaches the comment reflow at all: `/** doc */` is one paragraph of one word.
+        "class J {\n  /**\n   * Intro.\n   * <pre>\n   * code();\n   * </pre>\n   * <ul>\n   * <li>one\n   * <li>two\n   * </ul>\n   * <h2>Note</h2>\n   * Outro. <p> More.\n   *\n   * @param x the first\n   * @throws E never\n   */\n  void m(int x) {}\n}\n",
         // Malformed on purpose: the parser is error-resilient and the formatter must survive it.
         "class Broken { void m( { int x = ; } }",
         "class Unterminated { /* never closed",
@@ -135,8 +141,21 @@ impl Corpus {
         tagged.layout.formatter_tags = true;
         tagged.wrapping.reflow_long_strings = true;
 
+        // The comment reflow, with the description's blank lines cleared — which is exactly what
+        // `import::EclipseConfig` produces from `comment.clear_blank_lines_in_javadoc_comment`,
+        // and the pair under which a blank line a region *requested* is the only one that
+        // survives. Every other configuration here leaves `format-javadoc` off, so the reflow was
+        // walked by no property at all.
+        let mut javadoc = Config::default();
+        javadoc.comments.format_javadoc = true;
+        javadoc.comments.format_block = true;
+        javadoc.comments.format_line = true;
+        javadoc.comments.preserve_blank_lines = false;
+        javadoc.comments.blank_line_before_tags = true;
+
         alloc::vec![
             ("default", Config::default()),
+            ("javadoc", javadoc),
             (
                 "gjf",
                 crate::import::GoogleJavaFormatConfig::default().into(),
@@ -222,8 +241,16 @@ impl Corpus {
         out
     }
 
-    /// The comment texts of `src`, optionally excluding the import block.
-    fn comments(src: &str, imports: bool) -> Vec<String> {
+    /// The comments of `src`, as strongly as the configuration lets them be compared.
+    ///
+    /// `imports` excludes the import block. `reflow` says a `[comments]` rule may rewrite a
+    /// comment's *interior* — where the lines fall, which blank lines survive, whether a `<p>` is
+    /// inferred — so under one the property is that the comment is still **there**, and its text
+    /// is not the thing to compare. With every reflow rule off, the text is compared with each
+    /// line's own indentation normalized away: moving a comment to its new column is precisely
+    /// what [`CommentFormatter::shift`](crate::javadoc) is for, and a multi-line comment on a
+    /// member that changed indent width would otherwise read as a comment that went missing.
+    fn comments(src: &str, imports: bool, reflow: bool) -> Vec<String> {
         let parse = jals_exec::block_on_inline(jals_syntax::Parse::parse(src));
         parse
             .syntax()
@@ -233,7 +260,14 @@ impl Corpus {
             // comment kind would otherwise be one this property silently stopped checking.
             .filter(|tok| CommentMap::is_comment(tok.kind()))
             .filter(|tok| imports || !Self::within(tok, &[SyntaxKind::IMPORT_DECL]))
-            .map(|tok| tok.text().trim().to_owned())
+            .map(|tok| {
+                if reflow {
+                    alloc::format!("{:?}", tok.kind())
+                } else {
+                    let lines: Vec<&str> = tok.text().trim().lines().map(str::trim).collect();
+                    lines.join("\n")
+                }
+            })
             .collect()
     }
 }
@@ -332,11 +366,15 @@ fn no_comment_is_ever_dropped() {
         // import block is excluded rather than the whole profile being skipped — the rest of the
         // file is still held to exact comment preservation.
         let scope = !config.imports.remove_unused;
+        // A reflow rewrites the comment's interior by design, so under one this asks only that
+        // the comment survived. Which rule is on is read off the config, not assumed per profile.
+        let comments = &config.comments;
+        let reflow = comments.format_line || comments.format_block || comments.format_javadoc;
         for src in Corpus::SOURCES {
             let formatted = Corpus::format(src, &config);
             assert_eq!(
-                Corpus::comments(src, scope),
-                Corpus::comments(&formatted, scope),
+                Corpus::comments(src, scope, reflow),
+                Corpus::comments(&formatted, scope, reflow),
                 "{name}: a comment was dropped or duplicated for {src:?}\n--- output ---\n{formatted}",
             );
         }
