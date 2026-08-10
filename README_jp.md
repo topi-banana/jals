@@ -648,7 +648,7 @@ free function はできる限り避けます。associated function は親とな�
 範囲をカバーしていますが、API は変更される可能性があります。セマンティック解析（`jals-hir`）は
 名前解決・ファイル横断の型インデックス・型推論/型検査をカバーしており、プロジェクトの classpath
 や `[dependencies]` から解決した型も扱えますが、ジェネリックメソッドの型推論・より高度な
-バイトコード逆コンパイル（`switch`/`try`-`catch`/`break`/`continue`）・Maven 座標
+バイトコード逆コンパイル（ループの `break`/`continue`、try-with-resources）・Maven 座標
 （`group:artifact:version`）の POM/version 解決と lockfile はまだ未対応です。transitive な JALS
 `path`/`git` source-project graph は実装済みで、より広い Maven dependency management・テスト・
 パッケージングは build [ロードマップ](jals-build/README.md#roadmap)上にあります。

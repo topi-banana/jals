@@ -569,6 +569,39 @@ impl ExceptionTableEntry {
         }
     }
 
+    /// Inclusive start of the covered range.
+    ///
+    /// Read verbatim, exactly as it was written: what a reader may conclude from the four offsets is
+    /// the reader's own business, since a `Code` attribute records where a handler *is*, never what
+    /// source construct put it there.
+    #[must_use]
+    pub const fn start_pc(&self) -> u16 {
+        self.start_pc
+    }
+
+    /// Exclusive end of the covered range. Not necessarily an instruction boundary a structurer can
+    /// use — for a typed handler it commonly falls mid-expression, before the `return` that leaves
+    /// the protected block.
+    #[must_use]
+    pub const fn end_pc(&self) -> u16 {
+        self.end_pc
+    }
+
+    /// Offset of the handler. Several entries sharing one `handler_pc` are one source clause: that
+    /// is how a multi-catch (`catch (A | B e)`) is spelled.
+    #[must_use]
+    pub const fn handler_pc(&self) -> u16 {
+        self.handler_pc
+    }
+
+    /// `Class` index of the caught type, or `0` for the catch-all. A `0` says only that anything is
+    /// caught here — a `finally` clause and a `synchronized` block's unlock path are indistinguishable
+    /// at this level, and telling them apart needs the handler's instructions.
+    #[must_use]
+    pub const fn catch_type(&self) -> u16 {
+        self.catch_type
+    }
+
     async fn read<R: Input>(r: &mut Reader<R>) -> Result<Self> {
         Ok(Self {
             start_pc: r.u16().await?,

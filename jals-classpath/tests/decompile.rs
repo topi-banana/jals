@@ -146,6 +146,7 @@ fn preserves_rich_members_and_recovered_control_flow() {
         class(include_bytes!("fixtures/Locals.class")),
         class(include_bytes!("fixtures/Loops.class")),
         class(include_bytes!("fixtures/Fors.class")),
+        class(include_bytes!("fixtures/Tries.class")),
     ];
     let (sources, warnings) = synthesize(&classes);
     assert!(warnings.is_empty(), "{warnings:?}");
@@ -161,6 +162,13 @@ fn preserves_rich_members_and_recovered_control_flow() {
     assert!(joined.contains("do {"));
     // A `for` recovered from the line table, counter declared in the header.
     assert!(joined.contains("for (int i = 0; i < n; i++) {"));
+    // A `try` structured from the exception table, with a multi-catch spelled from the caught
+    // types and a `finally` folded back out of its duplicates.
+    assert!(joined.contains("} catch (java.io.IOException e) {"));
+    assert!(joined.contains(
+        "} catch (java.lang.NumberFormatException | java.lang.NullPointerException e) {"
+    ));
+    assert!(joined.contains("} finally {"));
 }
 
 #[test]
@@ -306,6 +314,7 @@ fn every_generated_fixture_is_valid_java() {
         include_bytes!("fixtures/Cmp.class"),
         include_bytes!("fixtures/Switches.class"),
         include_bytes!("fixtures/Switches$Color.class"),
+        include_bytes!("fixtures/Tries.class"),
         include_bytes!("fixtures/IntCarried.class"),
         include_bytes!("fixtures/InvokeSpecialCalls.class"),
         include_bytes!("fixtures/InvokeSpecialBase.class"),
@@ -366,6 +375,50 @@ fn javac_accepts_recovered_for_loops() {
     assert!(
         output.status.success(),
         "javac rejected the recovered `for` loops\nstdout:\n{}\nstderr:\n{}\nsource:\n{source}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
+fn javac_accepts_recovered_try_statements() {
+    // `try` recovery risks three failures that `jals_syntax::Parse` accepts and only a compiler
+    // rejects, so the property test above cannot stand in for this one:
+    //
+    // - a catch parameter that collides with a hoisted local (`Exception e; … catch (Exception e)`)
+    //   is a *scope* error;
+    // - attaching a clause to the wrong protected range catches a checked exception the body cannot
+    //   throw, which is a *typing* error;
+    // - folding a `finally` wrongly can leave statements after it unreachable.
+    //
+    // Skipped when `javac` is not installed.
+    let classes = [class(include_bytes!("fixtures/Tries.class"))];
+    let (sources, warnings) = synthesize(&classes);
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let source = generated_source(&sources, "demo/Tries.java");
+
+    let temp = tempfile::tempdir().expect("temp dir");
+    let package = temp.path().join("demo");
+    let output = temp.path().join("output");
+    fs::create_dir_all(&package).expect("package dir");
+    fs::create_dir_all(&output).expect("javac output dir");
+    let source_path = package.join("Tries.java");
+    fs::write(&source_path, source).expect("write generated source");
+
+    let javac = std::env::var_os("JAVAC").unwrap_or_else(|| OsString::from("javac"));
+    let result = Command::new(javac)
+        .arg("-d")
+        .arg(&output)
+        .arg(&source_path)
+        .output();
+    let output = match result {
+        Ok(output) => output,
+        Err(error) if error.kind() == ErrorKind::NotFound => return,
+        Err(error) => panic!("failed to run javac: {error}"),
+    };
+    assert!(
+        output.status.success(),
+        "javac rejected the recovered `try` statements\nstdout:\n{}\nstderr:\n{}\nsource:\n{source}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
