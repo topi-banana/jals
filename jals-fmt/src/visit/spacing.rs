@@ -427,7 +427,8 @@ impl Spacing {
             // wrote. A list that follows the declared name (`class Foo<T>`) hugs unless
             // `before-type-parameter-list` says otherwise.
             (false, true)
-                if np == S::TYPE_PARAMS && (Self::is_keyword(pk) || Self::ends_annotation(prev)) =>
+                if np == S::TYPE_PARAMS
+                    && (Self::is_keyword(pk) || Self::ends_annotation(prev)) =>
             {
                 Some(true)
             }

@@ -77,8 +77,14 @@ enum Block {
         /// The description, as tokens to refill.
         words: Vec<Word>,
     },
-    /// A blank line the author wrote.
-    Blank,
+    /// A blank line: one the author wrote, or one a tag asked for.
+    ///
+    /// `requested` is `JavadocWriter.requestBlankLine` — a gap a `<p>`, a heading, a blockquote,
+    /// a list close, or a preformatted region asked for on its own account. The distinction
+    /// survives into the footer, where a blank line *between* two tags is dropped
+    /// (`writeFooterJavadocTagStart` asks only for a newline) while one a region requested is
+    /// still written.
+    Blank { requested: bool },
 }
 
 /// Reflows comment bodies.
@@ -110,7 +116,7 @@ impl CommentFormatter {
         }
         match kind {
             SyntaxKind::LINE_COMMENT => Self::render_line(text, indent, style),
-            _ => Self::render_block(text, kind, indent, own_line, style),
+            _ => Self::render_block(text, kind, indent, column, own_line, style),
         }
     }
 
@@ -229,6 +235,7 @@ impl CommentFormatter {
         text: &str,
         kind: SyntaxKind,
         indent: usize,
+        column: usize,
         own_line: bool,
         style: &Style,
     ) -> String {
@@ -239,6 +246,9 @@ impl CommentFormatter {
         let Some(body) = Self::body(text, doc) else {
             return text.into();
         };
+        if doc && !cfg.reflow_unclosed_html && !Self::lexes_cleanly(&body) {
+            return Self::shift(text, indent, column);
+        }
         let mut blocks = Self::parse(&body, style);
         if blocks.is_empty() {
             return if doc { "/** */".into() } else { "/* */".into() };
@@ -283,7 +293,7 @@ impl CommentFormatter {
                     Block::Prose { words, .. } | Block::Tag { words, .. } => {
                         Self::join_inline_tags(words, budget);
                     }
-                    Block::Blank | Block::Verbatim { .. } => {}
+                    Block::Blank { .. } | Block::Verbatim { .. } => {}
                 }
             }
         }
@@ -304,19 +314,24 @@ impl CommentFormatter {
                 // Once the block tags start there are no more blank lines: only the *first* one
                 // is separated from the description, and `JavadocWriter` requests a plain newline
                 // between the rest — unless `blank-lines-between-tags` keeps the author's.
-                Block::Blank => {
+                Block::Blank { requested } => {
                     // The exception is the blank a preformatted region asks for *after* itself:
                     // it is the region's request, not a gap between two tags, so it survives the
                     // footer's solid run. Reading it off the preceding block rather than off the
                     // author's line is also what keeps the comment a fixed point — on the second
                     // run the same blank arrives as a `Blank` here instead of being inserted
                     // below, and dropping it then would shorten the comment by a line per run.
+                    // Inside the footer `flushWhitespace` downgrades a requested blank line to a
+                    // newline while `continuingFooterTag` holds — which is every position but one.
+                    // `writeFooterJavadocTagStart` clears the flag *before* writing its token, so
+                    // a blank the previous token requested survives exactly when the next thing is
+                    // another tag: `</pre>` then `@throws` is separated, `<p>` in the middle of a
+                    // tag's description is not.
+                    let before_tag = matches!(blocks.get(at + 1), Some(Block::Tag { .. }));
                     let keep = if seen_tag {
-                        cfg.blank_lines_between_tags
-                            || (cfg.blank_line_before_tags
-                                && matches!(previous, Some(Block::Verbatim { .. })))
+                        cfg.blank_lines_between_tags || (*requested && before_tag)
                     } else {
-                        cfg.preserve_blank_lines
+                        cfg.preserve_blank_lines || *requested
                     };
                     if keep {
                         Self::push_line(&mut out, "", cfg.leading_asterisks);
@@ -351,17 +366,13 @@ impl CommentFormatter {
                     // nothing but tags opens with none. And a blank line the author already
                     // wrote satisfies the rule, so asking for a second would open with two.
                     //
-                    // A preformatted region asks for one on its own account — `writePreClose`
-                    // and `writeSnippetEnd` request a blank line *after* the region, and a
-                    // request outlives the token that made it — so a tag that follows one is
-                    // separated whether or not it is the first tag. That is the only way a blank
-                    // line reaches the middle of a footer: between two ordinary tags,
-                    // `writeFooterJavadocTagStart` asks for a newline.
-                    let after_region = matches!(previous, Some(Block::Verbatim { .. }));
-                    if (!seen_tag || after_region)
+                    // A tag that follows a *requested* blank is already separated: the region
+                    // or the `<p>` before it asked for the gap, and that request outlives the
+                    // token that made it. Only the first tag's own separator is added here.
+                    if !seen_tag
                         && cfg.blank_line_before_tags
                         && previous.is_some()
-                        && !matches!(previous, Some(Block::Blank))
+                        && !matches!(previous, Some(Block::Blank { .. }))
                     {
                         Self::push_line(&mut out, "", cfg.leading_asterisks);
                     }
@@ -763,14 +774,14 @@ impl CommentFormatter {
                 };
                 // What follows the closing tag is outside the region: `</pre></blockquote>` ends
                 // the preformatted text at `</pre>` and the `</blockquote>` is a token of its own.
-                let mut tail = "";
-                if closed
-                    && !*snippet
-                    && let Some((head, rest)) = Self::split_after_fence_close(verbatim, tables)
-                {
-                    verbatim = head;
-                    tail = rest;
-                }
+                let tail = if closed && !*snippet {
+                    Self::split_after_fence_close(verbatim, tables).map_or("", |(head, rest)| {
+                        verbatim = head;
+                        rest
+                    })
+                } else {
+                    ""
+                };
                 lines.push(verbatim.into());
                 if closed {
                     let mut region = core::mem::take(lines);
@@ -787,7 +798,7 @@ impl CommentFormatter {
                     // and the same list rule silences it, since `flushWhitespace` writes no blank
                     // line while a list is open.
                     if depth == 0 {
-                        blocks.push(Block::Blank);
+                        blocks.push(Block::Blank { requested: true });
                     }
                     fence = None;
                     if !tail.is_empty() {
@@ -833,8 +844,8 @@ impl CommentFormatter {
                 Self::flush(&mut prose, &mut blocks, first, rest);
                 // `writeSnippetBegin` and `writePreOpen` each request a blank line before the
                 // region they open — but not inside a list, which holds none.
-                if depth == 0 && !matches!(blocks.last(), Some(Block::Blank) | None) {
-                    blocks.push(Block::Blank);
+                if depth == 0 && !matches!(blocks.last(), Some(Block::Blank { .. }) | None) {
+                    blocks.push(Block::Blank { requested: true });
                 }
                 // The opening tag belongs to whatever paragraph it interrupts: a tag's
                 // description continues at its continuation indent, a list item at the item's.
@@ -852,7 +863,7 @@ impl CommentFormatter {
                     // `writePreClose` asks for a blank line after the region too, and whatever
                     // followed it on the line goes on reflowing after that.
                     if depth == 0 && split {
-                        blocks.push(Block::Blank);
+                        blocks.push(Block::Blank { requested: true });
                     }
                     if !trailing.is_empty() {
                         Self::tokens_of(trailing, &mut prose);
@@ -906,14 +917,20 @@ impl CommentFormatter {
                 // a tag's description continuing across a blank line the author left in it.
                 let footer = matches!(blocks.last(), Some(Block::Tag { .. }));
                 if depth == 0
-                    && !matches!(blocks.last(), Some(Block::Blank))
+                    && !matches!(blocks.last(), Some(Block::Blank { .. }))
                     && (!footer || cfg.blank_lines_between_tags)
                 {
-                    blocks.push(Block::Blank);
+                    blocks.push(Block::Blank { requested: false });
                 }
                 continue;
             }
             if let Some(tag) = Self::block_tag(line) {
+                // A `<p>` waiting for the word it introduces, with a footer tag arriving instead:
+                // `writeParagraphOpen` already wrote the token, so it keeps a line of its own
+                // rather than travelling into the tag's description.
+                if let Some(glued) = pending.take() {
+                    Self::tokenize(&glued, true, &mut prose);
+                }
                 Self::flush(&mut prose, &mut blocks, first, rest);
                 blocks.push(tag);
                 if cfg.indent_tag_description {
@@ -935,13 +952,16 @@ impl CommentFormatter {
                 Self::flush(&mut prose, &mut blocks, first, rest);
                 // "Nothing significant written yet" is what makes an opening `<p>` disappear,
                 // and a run of blank lines is not significant.
-                if blocks.iter().any(|block| !matches!(block, Block::Blank)) {
+                if blocks
+                    .iter()
+                    .any(|block| !matches!(block, Block::Blank { .. }))
+                {
                     // A blank line the author already wrote *is* the paragraph break — and
                     // inside a list there is none at all, because `flushWhitespace` downgrades
                     // the request to a newline while one is open. A `<p>` continuing an `<li>`
                     // therefore opens the next line, not the line after a gap.
-                    if depth == 0 && !matches!(blocks.last(), Some(Block::Blank)) {
-                        blocks.push(Block::Blank);
+                    if depth == 0 && !matches!(blocks.last(), Some(Block::Blank { .. })) {
+                        blocks.push(Block::Blank { requested: true });
                     }
                     pending = Some("<p>".into());
                 }
@@ -956,8 +976,8 @@ impl CommentFormatter {
             // (`writeBlockquoteOpenOrClose`).
             if cfg.format_html && Self::is_blockquote(line) {
                 Self::flush(&mut prose, &mut blocks, first, rest);
-                if !matches!(blocks.last(), Some(Block::Blank) | None) {
-                    blocks.push(Block::Blank);
+                if !matches!(blocks.last(), Some(Block::Blank { .. }) | None) {
+                    blocks.push(Block::Blank { requested: true });
                 }
                 blocks.push(Block::Prose {
                     words: {
@@ -968,7 +988,7 @@ impl CommentFormatter {
                     first: tag_indent,
                     rest: tag_indent,
                 });
-                blocks.push(Block::Blank);
+                blocks.push(Block::Blank { requested: true });
                 continue;
             }
             // `writeListClose` asks for a newline before the tag and a blank line *after* it, so
@@ -991,7 +1011,7 @@ impl CommentFormatter {
                 // one to a newline while a list is still open — so only the outermost close sets
                 // the paragraph off.
                 if depth == 0 {
-                    blocks.push(Block::Blank);
+                    blocks.push(Block::Blank { requested: true });
                 }
                 first = tag_indent;
                 rest = tag_indent;
@@ -1005,16 +1025,16 @@ impl CommentFormatter {
                 if cfg.set_off_html_lists
                     && depth == 0
                     && Self::opens_list(line)
-                    && !matches!(blocks.last(), Some(Block::Blank) | None)
+                    && !matches!(blocks.last(), Some(Block::Blank { .. }) | None)
                 {
-                    blocks.push(Block::Blank);
+                    blocks.push(Block::Blank { requested: true });
                 }
             }
             // A heading stands alone between blank lines, and what follows it starts a paragraph
             // of its own rather than continuing the heading's line.
             if cfg.format_html && Self::is_heading(line) {
-                if !matches!(blocks.last(), Some(Block::Blank) | None) {
-                    blocks.push(Block::Blank);
+                if !matches!(blocks.last(), Some(Block::Blank { .. }) | None) {
+                    blocks.push(Block::Blank { requested: true });
                 }
                 blocks.push(Block::Prose {
                     words: {
@@ -1025,7 +1045,7 @@ impl CommentFormatter {
                     first: tag_indent,
                     rest: tag_indent,
                 });
-                blocks.push(Block::Blank);
+                blocks.push(Block::Blank { requested: true });
                 continue;
             }
             if cfg.format_html {
@@ -1083,10 +1103,10 @@ impl CommentFormatter {
         Self::flush(&mut prose, &mut blocks, first, rest);
 
         // Trailing blank lines are layout, not content.
-        while matches!(blocks.last(), Some(Block::Blank)) {
+        while matches!(blocks.last(), Some(Block::Blank { .. })) {
             blocks.pop();
         }
-        while matches!(blocks.first(), Some(Block::Blank)) {
+        while matches!(blocks.first(), Some(Block::Blank { .. })) {
             blocks.remove(0);
         }
         if cfg.format_html && cfg.paragraph_tags != ParagraphTags::Leading {
@@ -1106,7 +1126,16 @@ impl CommentFormatter {
     /// the quote's own first paragraph, not a new one.
     fn ends_block_tag(block: &Block) -> bool {
         const NAMES: [&str; 10] = [
-            "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "pre", "table", "p",
+            "h1",
+            "h2",
+            "h3",
+            "h4",
+            "h5",
+            "h6",
+            "blockquote",
+            "pre",
+            "table",
+            "p",
         ];
         let Block::Prose { words, .. } = block else {
             return false;
@@ -1227,7 +1256,7 @@ impl CommentFormatter {
         // Right to left: an insertion shifts every later index, and going backwards keeps the
         // ones still to be examined where they were.
         for at in (2..blocks.len()).rev() {
-            if !matches!(blocks[at - 1], Block::Blank)
+            if !matches!(blocks[at - 1], Block::Blank { .. })
                 || !matches!(blocks[at - 2], Block::Prose { .. })
                 || Self::ends_block_tag(&blocks[at - 2])
             {
@@ -1590,6 +1619,113 @@ impl CommentFormatter {
             || (!tables && TABLE_TAGS.iter().any(|tag| lower.starts_with(tag)))
     }
 
+    /// Whether google-java-format's Javadoc lexer would get through this body.
+    ///
+    /// `JavadocLexer.checkMatchingTags` throws when a nesting context is still open — at a footer
+    /// tag, and again at the end of the comment — and `formatJavadoc` answers a `LexException` by
+    /// returning the comment **exactly as written**. An unclosed `<pre>`, `<code>` or `<table>`,
+    /// or an unbalanced `{@…}`, is therefore a Javadoc the reference does not reflow at all, and
+    /// reflowing it here is a difference in every such comment rather than a better one.
+    ///
+    /// The contexts are the lexer's own: `<pre>`, `<code>` and `<table>` nest, a `{@…}` opens a
+    /// brace context and a bare `{` nests only inside one, and inside a brace context there is no
+    /// HTML to interpret. `popUntil` is a no-op when its context is not open, so a stray `</code>`
+    /// closes nothing.
+    fn lexes_cleanly(body: &str) -> bool {
+        #[derive(Clone, Copy, PartialEq)]
+        enum Ctx {
+            Pre,
+            Code,
+            Table,
+            Brace,
+        }
+        const TAGS: [(&str, Ctx); 3] = [
+            ("pre", Ctx::Pre),
+            ("code", Ctx::Code),
+            ("table", Ctx::Table),
+        ];
+
+        let mut stack: Vec<Ctx> = Vec::new();
+        for line in body.split('\n') {
+            let line = line.trim_start();
+            // `somethingSinceNewline` is still false after the `*` and the spaces behind it, so a
+            // footer tag is one written at the head of a line.
+            if !stack.is_empty() && Self::opens_footer_tag(line) {
+                return false;
+            }
+            let lower = line.to_ascii_lowercase();
+            let mut at = 0usize;
+            while at < lower.len() {
+                // Every tag this looks for is ASCII, so stepping a byte at a time is fine as long
+                // as a multi-byte character is stepped over rather than into.
+                if !lower.is_char_boundary(at) {
+                    at += 1;
+                    continue;
+                }
+                let rest = &lower[at..];
+                if let Some(after) = rest.strip_prefix('{') {
+                    // `{@…` opens a tag context; a bare `{` nests only inside one.
+                    if after.starts_with('@') || stack.contains(&Ctx::Brace) {
+                        stack.push(Ctx::Brace);
+                    }
+                    at += 1;
+                    continue;
+                }
+                if rest.starts_with('}') {
+                    if stack.last() == Some(&Ctx::Brace) {
+                        stack.pop();
+                    }
+                    at += 1;
+                    continue;
+                }
+                // Inside an inline tag the rest of the line is literal text.
+                if stack.contains(&Ctx::Brace) {
+                    at += 1;
+                    continue;
+                }
+                let mut matched = 0usize;
+                for (name, ctx) in TAGS {
+                    if let Some(end) = Self::html_tag(rest, name, false) {
+                        stack.push(ctx);
+                        matched = end;
+                        break;
+                    }
+                    if let Some(end) = Self::html_tag(rest, name, true) {
+                        if let Some(open) = stack.iter().rposition(|held| *held == ctx) {
+                            stack.truncate(open);
+                        }
+                        matched = end;
+                        break;
+                    }
+                }
+                at += matched.max(1);
+            }
+        }
+        stack.is_empty()
+    }
+
+    /// The length of the `<name …>` (or `</name …>`) tag `rest` opens with, if it opens one.
+    ///
+    /// `openTagPattern` is `<(?:name)\b[^>]*>`, so the name has to end at a non-word character
+    /// and the tag at the first `>`.
+    fn html_tag(rest: &str, name: &str, closing: bool) -> Option<usize> {
+        let after = rest
+            .strip_prefix('<')?
+            .strip_prefix(if closing { "/" } else { "" })?
+            .strip_prefix(name)?;
+        if after.starts_with(|c: char| c.is_alphanumeric() || c == '_') {
+            return None;
+        }
+        let end = after.find('>')? + 1;
+        Some(rest.len() - after.len() + end)
+    }
+
+    /// Whether a line opens a footer tag — `FOOTER_TAG_PATTERN`, `@` and a lowercase word.
+    fn opens_footer_tag(line: &str) -> bool {
+        line.strip_prefix('@')
+            .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_lowercase()))
+    }
+
     /// Split a line at the first HTML comment: what precedes it, the comment, and what follows.
     ///
     /// `None` when the line holds none, or holds one that does not close on it — a comment
@@ -1647,7 +1783,14 @@ impl CommentFormatter {
     /// `<h2>1.0 Background</h2>` is one line and splitting it strands the heading's own words.
     fn split_block_tag(line: &str) -> Option<(&str, &str)> {
         const TAGS: [&str; 8] = [
-            "<ul", "<ol", "<dl", "</ul", "</ol", "</dl", "<blockquote", "</blockquote",
+            "<ul",
+            "<ol",
+            "<dl",
+            "</ul",
+            "</ol",
+            "</dl",
+            "<blockquote",
+            "</blockquote",
         ];
         let lower = line.to_ascii_lowercase();
         let at = (0..lower.len())
@@ -1734,17 +1877,15 @@ impl CommentFormatter {
         for word in words {
             let budget = if lines.is_empty() { first } else { rest };
             let width = Width::utf16(&word.text);
-            if current.is_empty() {
-                current.push_str(&word.text);
-            } else {
+            if !current.is_empty() {
                 let gap = usize::from(word.space);
                 if Width::utf16(&current) + gap + width > budget && !word.text.starts_with('@') {
                     lines.push(core::mem::take(&mut current));
                 } else if word.space {
                     current.push(' ');
                 }
-                current.push_str(&word.text);
             }
+            current.push_str(&word.text);
             // `writeBr` requests a newline after the tag, so `<br>` always ends its line — the
             // one it wrapped onto included. Asking only when it landed mid-line let a `<br>` that
             // opened a line swallow the word after it: `<br>For example` is one token to the next

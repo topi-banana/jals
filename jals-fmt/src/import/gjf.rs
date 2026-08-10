@@ -217,6 +217,10 @@ impl GoogleJavaFormatConfig {
                 format_html: true,
                 width: max_width,
                 blank_line_before_tags: true,
+                // `JavadocFormatter.formatJavadoc` catches the lexer's `LexException` and hands
+                // the comment back unchanged, so an unclosed `<code>` is a Javadoc GJF does not
+                // touch at all.
+                reflow_unclosed_html: false,
                 normalize_parameter_comments: true,
                 inline_block_comments: true,
                 ..Comments::default()

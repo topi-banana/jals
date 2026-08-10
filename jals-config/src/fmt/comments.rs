@@ -124,6 +124,14 @@ pub struct Comments {
     /// line, `continuingListStack` and `continuingListItemStack` the two indents. Eclipse writes a
     /// list flush with the rest of the comment and asks for no gap. No native option either way.
     pub set_off_html_lists: bool,
+    /// Reflow a Javadoc whose HTML or inline-tag nesting never closes.
+    ///
+    /// google-java-format's lexer refuses one: `checkMatchingTags` throws while a `<pre>`,
+    /// `<code>`, `<table>` or `{@…}` context is still open — at a footer tag, and again at the
+    /// end of the comment — and `formatJavadoc` answers by returning the comment exactly as
+    /// written. Eclipse and IntelliJ reflow it anyway, which is the default here; no native
+    /// option either way.
+    pub reflow_unclosed_html: bool,
     /// Treat an HTML `<table>` in Javadoc as preformatted, emitting it byte-for-byte.
     ///
     /// google-java-format's `JavadocLexer` has a `TABLE_OPEN` / `TABLE_CLOSE` pair that switches
@@ -163,6 +171,7 @@ impl Default for Comments {
             leading_asterisks: true,
             javadoc_boundaries_on_own_lines: false,
             block_boundaries_on_own_lines: false,
+            reflow_unclosed_html: true,
             set_off_html_lists: true,
             tables_are_preformatted: true,
             normalize_parameter_comments: false,

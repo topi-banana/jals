@@ -239,6 +239,12 @@ class Documented {
   int a = 1;
 
   /**
+   * A description whose <code>tag never closes, so a reference that refuses to lex it leaves
+   * every word of this comment exactly where it was written.
+   */
+  void unbalanced() {}
+
+  /**
    * A fenced snippet whose own indentation is not the configured one.
    *
    * <pre>{@code
@@ -503,7 +509,7 @@ fn the_schema_is_the_documented_size() {
         .map(|section| section.as_object().map_or(0, Map::len))
         .sum();
     assert_eq!(
-        total, 189,
-        "the rule set is documented as 189 keys in jals-fmt/MAPPING.md",
+        total, 190,
+        "the rule set is documented as 190 keys in jals-fmt/MAPPING.md",
     );
 }

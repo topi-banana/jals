@@ -307,6 +307,7 @@ fn the_gjf_family_profile_is_the_google_preset() {
             format_header: true,
             width: 100,
             blank_line_before_tags: true,
+            reflow_unclosed_html: false,
             normalize_parameter_comments: true,
             inline_block_comments: true,
             ..Comments::default()
