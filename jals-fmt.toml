@@ -84,6 +84,10 @@ format-javadoc = true
 format-header = true
 width = 100
 blank-line-before-tags = true
+# `JavadocFormatter.formatJavadoc` catches its own lexer's `LexException` and hands the comment
+# back unchanged, so a Javadoc whose `<pre>`, `<code>`, `<table>` or `{@…}` never closes is one
+# google-java-format does not touch at all.
+reflow-unclosed-html = false
 # Normalize a parameter-name block comment (`/*a=*/` -> `/* a= */`) and keep a block comment
 # written before a token on the same line hugging that token.
 normalize-parameter-comments = true

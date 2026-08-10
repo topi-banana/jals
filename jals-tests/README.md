@@ -61,7 +61,16 @@ cargo run -p jals-tests --bin jals-golden -- gjf-testdata --worst 20
 cargo run -p jals-tests --bin jals-golden -- --allow-missing --markdown
 # point it at your own formatted project (a tree of .input/.output):
 cargo run -p jals-tests --bin jals-golden -- --dir /path/to/pairs --style palantir
+# add DESIGN.md §18.2.1's two extra columns — what each corpus would score with perfect
+# comment formatting, so what is left is the layout algorithms alone:
+cargo run -p jals-tests --bin jals-golden -- --allow-missing --worst 0 --ceiling
 ```
+
+`--ceiling` formats the corpus a second time, so it is off by default. It is what keeps
+`jals-fmt/DESIGN.md` §18.2.1's table a measurement rather than a remembered number: drop every
+comment line from both sides and the residue is the permanent differences D1–D4, and add the
+expected side's comment lines back as matches and the result is the score a perfect comment
+formatter would reach.
 
 ### Where the style config comes from
 

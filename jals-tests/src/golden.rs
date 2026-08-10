@@ -325,6 +325,96 @@ impl PairResult {
     }
 }
 
+/// How close a target could come if its **comment** formatting were perfect.
+///
+/// `DESIGN.md` §18.2.1 asks what the enumerated permanent differences cost, and the answer only
+/// means something if it can be recomputed after the formatter moves. Dropping every comment line
+/// from both sides leaves the layout algorithms alone as the residue ([`code`](Self::code)), and
+/// adding the expected side's comment lines back as *matches* answers the other half: what the
+/// score would be if the comment formatter agreed line for line
+/// ([`comments_perfect`](Self::comments_perfect)).
+///
+/// The arithmetic is the Ratcliff/Obershelp ratio's own. It is `2M/(a+b)`, so the comment-stripped
+/// comparison gives back `M`, and `C` matching lines added to both sides make it
+/// `2(M+C)/(a+C+b+C)`.
+#[derive(Debug, Clone, Copy)]
+pub struct Ceiling {
+    /// Pairs measured.
+    pub pairs: usize,
+    /// Mean similarity with every comment line dropped from both sides.
+    pub code: f64,
+    /// Mean similarity the corpus would show if every comment line matched.
+    pub comments_perfect: f64,
+}
+
+impl Ceiling {
+    /// Measure the ceiling of `target`'s style over the corpus rooted at `root`.
+    ///
+    /// Separate from [`GoldenReport::run`] rather than a column of it: it formats the corpus a
+    /// second time and diffs it twice more, which is a cost every ordinary run would pay for a
+    /// number only `DESIGN.md` §18.2.1 reads.
+    #[must_use]
+    pub fn measure(root: &Path, target: &Target) -> Self {
+        let cfg = &target.config();
+        let rows: Vec<(f64, f64)> = GoldenReport::collect_pairs(root)
+            .into_par_iter()
+            .filter_map(|(input_path, output_path)| {
+                let input = std::fs::read_to_string(&input_path).ok()?;
+                let expected = std::fs::read_to_string(&output_path).ok()?;
+                let formatted =
+                    jals_exec::block_on_inline(jals_fmt::FormatOutput::format_source(&input, cfg))
+                        .formatted;
+                let (expected_code, comments) = Self::without_comments(&expected);
+                let (formatted_code, _) = Self::without_comments(&formatted);
+                let a = expected_code.lines().count() as f64;
+                let b = formatted_code.lines().count() as f64;
+                let code = f64::from(TextDiff::from_lines(&expected_code, &formatted_code).ratio());
+                let matched = code * (a + b) / 2.0;
+                let c = comments as f64;
+                let total = a + b + 2.0 * c;
+                let perfect = if total > 0.0 {
+                    2.0f64.mul_add(matched + c, 0.0) / total
+                } else {
+                    1.0
+                };
+                Some((code, perfect))
+            })
+            .collect();
+        let pairs = rows.len();
+        let mean = |pick: fn(&(f64, f64)) -> f64| {
+            if pairs == 0 {
+                0.0
+            } else {
+                rows.iter().map(pick).sum::<f64>() / pairs as f64
+            }
+        };
+        Self {
+            pairs,
+            code: mean(|row| row.0),
+            comments_perfect: mean(|row| row.1),
+        }
+    }
+
+    /// `text` without its comment lines, and how many were dropped.
+    ///
+    /// A line is a comment when it *starts* as one — `//`, `/*`, or the `*` continuing a block.
+    /// A trailing comment after code is not one: the line is code that also says something, and
+    /// dropping it would take the code with it.
+    fn without_comments(text: &str) -> (String, usize) {
+        let mut kept: Vec<&str> = Vec::new();
+        let mut dropped = 0usize;
+        for line in text.lines() {
+            let head = line.trim_start();
+            if head.starts_with("//") || head.starts_with("/*") || head.starts_with('*') {
+                dropped += 1;
+            } else {
+                kept.push(line);
+            }
+        }
+        (kept.join("\n"), dropped)
+    }
+}
+
 /// Aggregated golden outcomes for one corpus.
 #[derive(Debug, Clone)]
 pub struct GoldenReport {

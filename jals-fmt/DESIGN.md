@@ -971,23 +971,35 @@ D8 は共通語彙の粒度の問題（native モデルには両 bool が残る�
 「rule では埋まらない」は列挙だけでは検証できない。**コメント行が完全一致したと仮定したときの
 similarity** を計算すれば、残りは D1–D4（レイアウト解決アルゴリズムの違い）だけになり、恒久差分の
 値段が数字で出る。Ratcliff/Obershelp 比 `2M/(a+b)` は、コメント行を両側から落とした比較から
-`M` を取り、期待側のコメント行数を `M` と両辺の長さに足し戻せば求まる（OpenJDK
-`src/java.base/share/classes/java/util` の同一サンプル）:
+`M` を取り、期待側のコメント行数 `C` を `M` と両辺の長さに足し戻せば `2(M+C)/(a+C+b+C)` として
+求まる。**この計算は harness が持っている**ので、formatter が動いたあとに引き直せる:
 
-| target | 実測 mean similarity | code のみ | **コメント完全一致なら** | 上限を決めている恒久差分 |
-|---|--:|--:|--:|---|
-| `gjf` | 99.00% | 99.20% | **99.59%** | —（T1。残りは D10 と細部） |
-| `palantir` | 98.96% | 98.10% | **98.98%** | **D3**（`PartialInlineability` の仮説探索） |
-| `eclipse` | 93.62% | 97.01% | **98.61%** | **D2**（`WrapExecutor.findWraps` の penalty 最小化） |
-| `intellij` | 92.09% | 96.17% | **98.14%** | **D4**（`WrapProcessor` の rewind） |
+```sh
+cargo run -p jals-tests --bin jals-golden -- --allow-missing --worst 0 --ceiling
+```
 
-読み方は 2 つ。**(1) コメント整形は rule で埋まる** — eclipse はコメント側の rule を足すだけで
-86.06% → 94.40% まで動いた（`comments.paragraph-tags` / `tag-alignment` /
+生成 corpus 全体（`jals-tests/README.md` の 4 つ、pin されたツール版）での実測:
+
+| target | pairs | exact | 実測 mean similarity | code のみ | **コメント完全一致なら** | 上限を決めている恒久差分 |
+|---|--:|--:|--:|--:|--:|---|
+| `gjf` | 13920 | 81.62% | 99.61% | 99.70% | **99.82%** | —（T1。残りは D10 と細部） |
+| `palantir` | 12180 | 59.90% | 97.66% | 96.79% | **97.90%** | **D3**（`PartialInlineability` の仮説探索） |
+| `eclipse` | 13866 | 23.34% | 94.42% | 96.08% | **97.58%** | **D2**（`WrapExecutor.findWraps` の penalty 最小化） |
+| `intellij` | 3103 | 4.87% | 92.61% | 94.99% | **97.39%** | **D4**（`WrapProcessor` の rewind） |
+
+読み方は 3 つ。**(1) コメント整形は rule で埋まる** — eclipse はコメント側の rule を足すだけで
+86.06% → 94.42% まで動いた（`comments.paragraph-tags` / `tag-alignment` /
 `javadoc-boundaries-on-own-lines` / `tables-are-preformatted` ほか）。**(2) レイアウトは埋まらない** —
-コメントが 1 行残らず一致したとしても T2 の 3 者は 98.1〜99.0% で頭打ちで、**99% には届かない**。
+コメントが 1 行残らず一致したとしても T2 の 3 者は 97.4〜97.9% で頭打ちで、**99% には届かない**。
 これは努力量ではなく §11 結論 1 の帰結であり、数字を上げるために engine を増やす選択は §8.3 の
 優先順位が禁じている。そのうえコメント側にも独自の上限がある: **D5**（元が 1 行で書かれた Javadoc を
 JDT はそのまま残す）と **D7**（JDT のコメント折り返しも penalty 最小化）。
+
+**(3) exact rate は similarity より遥かに遅れて動く。** 1 ファイル中の 1 か所の差分でも byte 一致は
+落ちるので、`gjf` の 99.61% mean は 81.62% exact にしかならない。この列を並べているのは、
+similarity が上限に貼りついたあとも改善が測れる指標が要るからであり、**T2 の exact は約束ではない**
+（`jals-tests/README.md`）。T1 の exact に残っている距離のうち、`blank-line` 分類の大半は D10 —
+GJF が unused import を消した跡に残す 2 本の空行 — で、これは冪等性と引き換えでしか埋まらない。
 
 intellij はさらに **D5** が効く: 委譲先の `WRAP_COMMENTS` は stock IDEA で off なので、`.output` の
 Javadoc は OpenJDK の手折りをそのまま保存している。単一エンジンは入力の改行を読まないので、ここは
