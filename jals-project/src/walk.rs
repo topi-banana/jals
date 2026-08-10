@@ -269,8 +269,14 @@ impl<H: GraphHost> GraphWalk<'_, H> {
                 match acquired {
                     Ok(acquired) => {
                         let declared = DeclaredEdgeFeatures::of(dependency);
-                        self.visit_source(parent.clone(), name, declared, acquired)
-                            .await?;
+                        self.visit_source(
+                            parent.clone(),
+                            name,
+                            declared,
+                            dependency.is_optional(),
+                            acquired,
+                        )
+                        .await?;
                     }
                     Err(message) => self.warn_declared(parent.as_ref(), name, message),
                 }
@@ -299,7 +305,8 @@ impl<H: GraphHost> GraphWalk<'_, H> {
                 None
             }
         };
-        let classes = DeclaredBinaryEdge::classes(jar.recursive.unwrap_or(false), remap);
+        let optional = dependency.is_optional();
+        let classes = DeclaredBinaryEdge::classes(jar.recursive.unwrap_or(false), remap, optional);
         if let Err(message) = self
             .visit_binary(parent.cloned(), declaring, name, &jar.jar, classes)
             .await
@@ -313,7 +320,7 @@ impl<H: GraphHost> GraphWalk<'_, H> {
                     declaring,
                     name,
                     sources,
-                    DeclaredBinaryEdge::sources(),
+                    DeclaredBinaryEdge::sources(optional),
                 )
                 .await
         {
@@ -326,6 +333,7 @@ impl<H: GraphHost> GraphWalk<'_, H> {
         parent: Option<NodeId>,
         dependency: &str,
         declared: DeclaredEdgeFeatures,
+        optional: bool,
         acquired: Acquired<H>,
     ) -> Result<(), GraphError> {
         let id = Self::node_id(&acquired.identity);
@@ -338,6 +346,7 @@ impl<H: GraphHost> GraphWalk<'_, H> {
             default_features: declared.default_features,
             // Only a `jar` entry can carry one, and this is the source-form edge.
             remap: None,
+            optional,
         };
         self.edges.push(incoming.clone());
         match self.states.get(&id) {
@@ -445,6 +454,7 @@ impl<H: GraphHost> GraphWalk<'_, H> {
             recursive,
             source_archive,
             remap,
+            optional,
         } = declared;
         let role = if source_archive { "source" } else { "binary" };
         let (id, input) = if jals_classpath::ExternalLocator::is_remote(locator) {
@@ -484,6 +494,7 @@ impl<H: GraphHost> GraphWalk<'_, H> {
             features: binary.features,
             default_features: binary.default_features,
             remap,
+            optional,
         });
         if !self.seen_nodes.insert(id.clone()) {
             return Ok(());

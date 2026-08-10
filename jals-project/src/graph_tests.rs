@@ -483,6 +483,81 @@ fn binary_diamond_emits_one_first_edge_spec_and_ors_recursive() {
 }
 
 #[test]
+fn an_unactivated_optional_jar_is_projected_by_neither_half_and_an_activated_one_by_both() {
+    jals_exec::tokio_rt::run(|exec| async move {
+        let project = tempfile::tempdir().unwrap();
+        write(project.path(), "lib/required.jar", b"required");
+        write(project.path(), "lib/on.jar", b"on");
+        write(project.path(), "lib/on-sources.jar", b"on-sources");
+        write(project.path(), "lib/off.jar", b"off");
+        // Discovery walks every `[dependencies]` entry, optional or not — a node's own selection is
+        // settled by preprocessing, after the edges exist — so the gate has to hold at projection
+        // or an unselected alternative reaches the classpath.
+        let root = manifest(
+            r#"
+[features]
+pick-on = ["dep:on"]
+pick-off = ["dep:off"]
+
+[dependencies]
+required = { jar = "lib/required.jar" }
+on = { jar = "lib/on.jar", sources = "lib/on-sources.jar", optional = true }
+off = { jar = "lib/off.jar", optional = true }
+"#,
+        );
+        let selected = root
+            .resolve_build_features(&["pick-on".to_owned()], false, false)
+            .unwrap();
+
+        let mut cache = MemoryStorage::memory(CodeTree::default());
+        let graph = NativeProjectGraph::discover(
+            &root,
+            project.path(),
+            &exec,
+            jals_classpath::NetworkPolicy::Online,
+        )
+        .await
+        .unwrap()
+        .preprocess(
+            cache.artifacts_mut(),
+            inert!(
+                &BuildScriptEnvironment::new(),
+                &selected,
+                &BuildScriptLimits::default()
+            ),
+        )
+        .await
+        .unwrap();
+        let assembly = graph.assemble(cache.artifacts_mut()).await;
+
+        // `required` is present whatever the selection says; `on` was activated; `off` was not, and
+        // an entry that never reaches the plan is also never fetched. The order is edge order,
+        // which is `[dependencies]` key order with `off` removed.
+        assert_eq!(
+            assembly
+                .plan
+                .dependencies
+                .iter()
+                .map(|dependency| dependency.name.as_str())
+                .collect::<Vec<_>>(),
+            ["on", "required"]
+        );
+        // Both edges of one entry are gated together: the companion sources archive of an
+        // activated entry is projected, and an unactivated entry contributes neither half.
+        assert_eq!(
+            assembly
+                .plan
+                .source_archives
+                .iter()
+                .map(|dependency| dependency.name.as_str())
+                .collect::<Vec<_>>(),
+            ["on"]
+        );
+    })
+    .unwrap();
+}
+
+#[test]
 fn mixed_local_and_remote_binary_specs_keep_first_edge_order() {
     jals_exec::tokio_rt::run(|exec| async move {
         let project = tempfile::tempdir().unwrap();

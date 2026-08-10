@@ -1097,6 +1097,18 @@ impl ResolvedBuildFeatures {
     fn activates(&self, dependency: &str) -> bool {
         self.activated.contains(dependency)
     }
+
+    /// The `optional` `[dependencies]` entries this resolution activated, in name order.
+    ///
+    /// The whole set rather than the one-name question above, because a consumer that cannot
+    /// iterate `[dependencies]` needs to *carry* the answer rather than ask it: `jals-project`
+    /// resolves a node's selection in one pass and gates that node's edges much later, by which
+    /// point the manifest that declared them is a graph node rather than something in hand. Pairing
+    /// this with the edge's own `optional` flag is the same rule
+    /// [`Manifest::active_dependencies`] applies, moved to where the edges are.
+    pub const fn activated(&self) -> &BTreeSet<String> {
+        &self.activated
+    }
 }
 
 /// Project metadata (`[package]`).
@@ -1918,12 +1930,14 @@ impl Dependency {
     /// non-optional entry is always present, so the whole question is settled here rather than
     /// wherever presence is asked about.
     ///
-    /// Not exposed, because [`Manifest::active_dependencies`] is the answer a consumer wants: this
-    /// half is only meaningful beside a resolution that says what was activated, and pairing the
-    /// two at each call site is what would let them drift. Project-graph discovery does not consult
-    /// either yet — an unactivated entry is still discovered as a node — because a dependency's own
-    /// selection is settled by preprocessing, after the edges that carry it exist.
-    fn is_optional(&self) -> bool {
+    /// [`Manifest::active_dependencies`] is the answer a consumer that can iterate
+    /// `[dependencies]` wants: this half is only meaningful beside a resolution that says what was
+    /// activated. A consumer that *cannot* iterate reads it here — project-graph discovery records
+    /// it on each edge, because by the time a node's selection is known (preprocessing settles it,
+    /// after the edges that carry it exist) the declaring manifest is no longer in hand. Discovery
+    /// still visits an unactivated entry as a node; what the flag gates is what the graph projects
+    /// onto a classpath.
+    pub fn is_optional(&self) -> bool {
         match self {
             Self::Jar(jar) => jar.optional.unwrap_or(false),
             Self::Git(git) => git.optional.unwrap_or(false),
