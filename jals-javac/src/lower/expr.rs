@@ -387,10 +387,7 @@ impl Expr {
             CHAR_LITERAL, FALSE_KW, FLOAT_LITERAL, INT_LITERAL, NULL_KW, STRING_LITERAL, TRUE_KW,
         };
         let token = literal
-            .syntax()
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .find(|token| !token.kind().is_trivia())
+            .token()
             .ok_or(LowerError::Unsupported("an empty literal"))?;
         let text = token.text();
         match token.kind() {

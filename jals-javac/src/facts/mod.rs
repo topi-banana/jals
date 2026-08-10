@@ -177,6 +177,15 @@ impl<'a> Facts<'a> {
         Self::has_keyword(node, SyntaxKind::THIS_KW)
     }
 
+    /// Whether a method reference names `new` rather than a method.
+    ///
+    /// `T::new` constructs; every other spelling selects an existing member. The wasm backend asked
+    /// this of a collected declaration while [`method_ref`](Self::method_ref) asked it of the
+    /// reference node, so the same keyword test was written in two places for one question.
+    pub(crate) fn constructs(node: &SyntaxNode) -> bool {
+        Self::has_keyword(node, SyntaxKind::NEW_KW)
+    }
+
     /// Whether a declaration's modifiers carry `keyword`.
     ///
     /// Distinct from [`has_keyword`](Self::has_keyword), which reads the node's *own* tokens: a

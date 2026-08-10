@@ -1454,7 +1454,7 @@ impl Body {
             // name — they are forwarded by position.
             let mut insn = Insn::new();
             // `T::new` allocates rather than delegating: the object *is* what the interface method returns.
-            if Lowering::constructs(&method.node) {
+            if Facts::constructs(&method.node) {
                 let created = Lowering::constructed_item(&method.node, input, index)?;
                 let struct_type = layout.structs[&created];
                 insn.struct_new_default(struct_type);
@@ -3279,10 +3279,7 @@ impl Lowering<'_> {
             CHAR_LITERAL, FALSE_KW, FLOAT_LITERAL, INT_LITERAL, NULL_KW, TRUE_KW,
         };
         let token = literal
-            .syntax()
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .find(|token| !token.kind().is_trivia())
+            .token()
             .ok_or(WasmError::Unsupported("an empty literal"))?;
         // `null` has no type of its own, so it is answered before `ty_of` is asked for one.
         if token.kind() == NULL_KW {
@@ -4673,13 +4670,6 @@ impl Lowering<'_> {
             }
         }
         Ok(())
-    }
-
-    /// Whether a reference names `new` rather than a method.
-    fn constructs(node: &SyntaxNode) -> bool {
-        node.children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .any(|token| token.kind() == jals_syntax::SyntaxKind::NEW_KW)
     }
 
     /// The type a `T::new` reference constructs.

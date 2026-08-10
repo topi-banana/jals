@@ -139,10 +139,7 @@ impl Const<'_> {
 
     fn literal(node: &ast::Literal) -> Result<ConstValue> {
         let token = node
-            .syntax()
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .find(|token| !token.kind().is_trivia())
+            .token()
             .ok_or(FactError::Unsupported("a literal with no value"))?;
         let raw = token.text();
         match token.kind() {

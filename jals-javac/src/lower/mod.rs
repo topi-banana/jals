@@ -1393,7 +1393,6 @@ impl Compile {
         })
     }
 
-    /// Whether a declaration's `MODIFIERS` child carries `keyword`.
     /// A method's or constructor's access flags.
     ///
     /// `in_interface` supplies the level JLS §9.4 leaves unwritten: an interface method with no
