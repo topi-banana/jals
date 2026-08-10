@@ -608,7 +608,7 @@ impl<'a> Ctx<'a> {
     /// expression does not, and the rule that gives a block comment's delimiters lines of their
     /// own would tear the expression across three lines if it applied there.
     fn emit_comment(&mut self, comment: &Comment, own_line: bool) {
-        let is_header = !self.header_seen;
+        let is_header = !self.header_seen && !Self::documents_a_declaration(comment);
         let text = CommentFormatter::render(
             &comment.text,
             comment.kind,
@@ -622,6 +622,22 @@ impl<'a> Ctx<'a> {
         self.emitted_comments += 1;
         self.spaced = false;
         self.previous = None;
+    }
+
+    /// Whether `comment` is the Javadoc of the declaration it precedes rather than a comment
+    /// standing above one.
+    ///
+    /// The header region ends at the first *declaration*, and a declaration's own doc comment is
+    /// part of that declaration — JDT reads it the same way, since a `BodyDeclaration`'s start
+    /// offset already includes its Javadoc. Without the distinction the region ends at the first
+    /// significant token instead, and a file with no `package` made its own type's Javadoc the
+    /// header comment: `format-header = false` then stopped formatting it, in every
+    /// default-package file and every file whose licence block is followed straight by a type.
+    ///
+    /// A licence written as `/** … */` is therefore formatted by the Javadoc rule rather than
+    /// held by `format-header`, which is the same answer the references give it.
+    const fn documents_a_declaration(comment: &Comment) -> bool {
+        matches!(comment.kind, S::DOC_COMMENT)
     }
 
     // ===== Formatter-disabled regions =====

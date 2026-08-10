@@ -248,7 +248,12 @@ impl Ctx<'_> {
                 .as_token()
                 .is_some_and(|tok| Self::is_assignment_operator(tok.kind()));
             if is_operator {
-                if before {
+                // `>>=` is spelled `GT GT EQ`, and only its `EQ` is an assignment operator — so
+                // a `before` break placed in front of the token that matched lands *inside* the
+                // operator, which re-lexes it and costs the whole file its formatting. The same
+                // guard [`Self::emit_operator_run`] carries, and the same consequence: the run
+                // takes no break here, since its first token is not one this method sees.
+                if before && !Self::fuses_with_previous(&children, nth) {
                     let flat = self.operator_flat(child);
                     self.list_break_flat(policy, flat, Indent::ZERO);
                 }
@@ -434,6 +439,46 @@ mod tests {
         assert!(!out.fell_back(), "the fail-safe refused the output");
         assert!(out.formatted.contains("x >>= 2;"), "{}", out.formatted);
         assert!(out.formatted.contains("x >>>= 3;"), "{}", out.formatted);
+    }
+
+    #[test]
+    fn a_compound_shift_assignment_survives_a_break_placed_before_it() {
+        // The other side of the same method, under `before-assignment-operator` — what Eclipse's
+        // `wrap_before_assignment_operator` lowers to. `>>=` is `GT GT EQ` and only its `EQ` is an
+        // assignment operator, so a break in front of *that* token falls inside the operator: the
+        // file came back unformatted, and one `>>=` cost every Eclipse-derived profile the whole
+        // file. The run therefore takes **no** break here — its first token is not one
+        // `visit_assignment` sees — which is why the `+=` control below is what proves the rule
+        // is still doing something.
+        let mut cfg = Config::default();
+        cfg.wrapping.before_assignment_operator = true;
+        cfg.layout.max_width = 24;
+        let format =
+            |src: &str| jals_exec::block_on_inline(crate::FormatOutput::format_source(src, &cfg));
+
+        let shifted = format(
+            "class Z { void m() { int xxxxxxxxxxxxxxxx = 1; xxxxxxxxxxxxxxxx >>= 22222222222; } }\n",
+        );
+        assert!(
+            !shifted.fell_back(),
+            "the fail-safe refused the file, so nothing in it was formatted:\n{}",
+            shifted.formatted,
+        );
+        assert!(
+            shifted.formatted.contains(">>= 22222222222"),
+            "the operator was split apart:\n{}",
+            shifted.formatted,
+        );
+
+        let plain = format(
+            "class Z { void m() { int xxxxxxxxxxxxxxxx = 1; xxxxxxxxxxxxxxxx += 22222222222; } }\n",
+        );
+        assert!(!plain.fell_back());
+        assert!(
+            plain.formatted.contains('\n') && plain.formatted.contains("+="),
+            "{}",
+            plain.formatted,
+        );
     }
 
     #[test]

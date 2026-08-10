@@ -210,7 +210,7 @@ class Second {}
 /// The Javadoc shapes whose rules are about *gaps and units* rather than about width: a blank
 /// line between two block tags, a blank line between a doc comment and what it documents, and an
 /// inline `{@code …}` sitting exactly where a refill wants to break.
-const JAVADOC: &str = r"/** A header comment, so the type's own Javadoc is not the header one. */
+const JAVADOC: &str = r"/* A header comment, long enough that the width it is reflowed against is visible in the output at all, so `format-header` has something to decide. Written as a block comment on purpose: a `/**` before a declaration is that declaration's Javadoc, never the file's header. */
 package p;
 
 /**
@@ -233,6 +233,14 @@ package p;
  * @since 1.0
  */
 class Documented {
+
+  /**
+   * Two paragraphs of plain prose, separated by a blank line no region asked for — the one
+   * blank line in this file that `preserve-blank-lines` alone decides.
+   *
+   * The second paragraph, so the blank line above has something on both sides of it.
+   */
+  int documented = 0;
 
   /** Documented, with a blank line before the field it documents. */
 
@@ -389,6 +397,11 @@ fn candidates(section: &str, key: &str, current: &Value) -> Vec<Value> {
             Value::from("javax."),
             Value::from("*"),
         ])],
+        // The one leaf spelled either way: `around-documented-member` is a keyword or a count,
+        // because the three references separate a documented member more, less, and not at all.
+        Value::String(_) if (section, key) == ("blank-lines", "around-documented-member") => {
+            vec![Value::from(1), Value::from("preserve")]
+        }
         Value::String(_) => variants(section, key)
             .into_iter()
             .map(Value::from)
