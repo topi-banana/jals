@@ -1,0 +1,32 @@
+id: no-wasm-into-jvm-lowering
+language: Rust
+severity: error
+message: The wasm backend must not name `crate::lower`. A fact both backends need lives in `crate::facts`.
+note: |
+  The two lowerings are separate because the JVM's control flow is a `goto` stream and wasm's is
+  structured — not because one is the other's library. But the wasm backend read its literals
+  through `crate::lower::expr::Expr::literal_text` and `integer_literal`, and the comments at those
+  call sites said the sharing was deliberate. It was, at the wrong layer: a fact reached through the
+  other backend's private module moves when that backend is refactored, and nothing in `lower/expr.rs`
+  said a second caller depended on it.
+
+  A fact both backends read goes in `crate::facts`, which reads `TypedFile` and names no instruction.
+  One that names an instruction stays with the backend that owns it.
+
+  What this cannot catch: a backend re-implementing a fact *inline*. That is how every duplication
+  this seam was built to remove got there — none of it named `crate::lower`, so this rule would have
+  been green the whole time the copies drifted. It is a ratchet against one regression class, not a
+  proof that a fact is single-sourced. Only a test at the fact's own interface is that.
+
+files:
+  - 'jals-javac/src/wasm/**/*.rs'
+
+rule:
+  kind: scoped_identifier
+  all:
+    - has:
+        field: path
+        regex: '^crate$'
+    - has:
+        field: name
+        regex: '^lower$'

@@ -21,6 +21,23 @@
 //! One fact, one answer, one place to test it. What stays behind in each backend is what actually
 //! differs: control flow, the wasm `Layout`, the JVM's `Slots`, and erasure.
 //!
+//! # Being the only entry is the point
+//!
+//! For a while it was one entry among several. The `case`-label evaluator read its literals here
+//! while both *expression* paths read theirs from the JVM backend's own module — which wasm reached
+//! across the backend seam to call. `Facts::declarator_initialiser` existed to stop names and
+//! initialisers being paired by index, and four of the five sites that pair them went on doing it,
+//! which is a wrong `static` field on wasm and a class the JVM rejects at load. The modifier scan
+//! answered two different questions in the two backends, and "the superclass" had three rules.
+//!
+//! None of that named the other backend, so a rule against reaching across the seam
+//! (`no-wasm-into-jvm-lowering`) would have stayed green throughout. What makes a fact single-sourced
+//! is that there is one place to ask and it has a test; the rules only stop the cheapest way to get
+//! a second one.
+//!
+//! A fact both backends need goes here. One that names an instruction does not — and
+//! `facts-names-no-instruction` is what keeps that sentence from going back to being prose.
+//!
 //! # What it deliberately does not do
 //!
 //! It does not check. A fact this layer cannot establish is *reported* ([`FactError`]) rather than
@@ -34,10 +51,13 @@ mod constant;
 mod inherit;
 mod literal;
 mod method_ref;
+mod switch;
 
 pub(crate) use constant::CaseKey;
 pub(crate) use inherit::{Hierarchy, Overrides};
+pub(crate) use literal::Literal;
 pub(crate) use method_ref::RefReceiver;
+pub(crate) use switch::ArmLabels;
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -158,6 +178,55 @@ impl<'a> Facts<'a> {
         Self::has_keyword(node, SyntaxKind::THIS_KW)
     }
 
+    /// Whether a method reference names `new` rather than a method.
+    ///
+    /// `T::new` constructs; every other spelling selects an existing member. The wasm backend asked
+    /// this of a collected declaration while [`method_ref`](Self::method_ref) asked it of the
+    /// reference node, so the same keyword test was written in two places for one question.
+    pub(crate) fn constructs(node: &SyntaxNode) -> bool {
+        Self::has_keyword(node, SyntaxKind::NEW_KW)
+    }
+
+    /// Whether a declaration's modifiers carry `keyword`.
+    ///
+    /// Distinct from [`has_keyword`](Self::has_keyword), which reads the node's *own* tokens: a
+    /// declaration's modifiers live in a `MODIFIERS` child, so `static` on an initialiser block is
+    /// inside one rather than on the block.
+    ///
+    /// Every `MODIFIERS` child is read, not the first. The JVM backend used `.find` and the wasm one
+    /// `.filter(…).flat_map(…)`, so the two answered differently for a declaration the parser gave
+    /// more than one — and reading all of them can only ever be the superset.
+    pub(crate) fn has_modifier(node: &SyntaxNode, keyword: SyntaxKind) -> bool {
+        node.children()
+            .filter(|child| child.kind() == SyntaxKind::MODIFIERS)
+            .flat_map(|modifiers| modifiers.children_with_tokens())
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .any(|token| token.kind() == keyword)
+    }
+
+    /// Whether a type declaration sits directly inside another type's body.
+    pub(crate) fn is_nested(node: &SyntaxNode) -> bool {
+        node.parent()
+            .is_some_and(|parent| parent.kind() == SyntaxKind::CLASS_BODY)
+    }
+
+    /// Whether a class declaration is a non-`static` nested one — an *inner* class.
+    ///
+    /// A nested interface, `@interface`, `enum`, and `record` are implicitly `static` and hold no
+    /// enclosing instance, so only a nested *class* can be one. An inner class holds its enclosing
+    /// instance in a synthetic field and every constructor takes it as an extra first parameter, so
+    /// a backend that answers this differently from the other emits constructors one parameter
+    /// short — a `NoSuchMethodError` at the first `new`, not a missing convenience.
+    ///
+    /// Pure CST, deliberately: the JVM backend additionally asks the index whether the item is a
+    /// `DefKind::Class`, and folding an index lookup in here would make one caller's extra
+    /// precondition part of the shared answer.
+    pub(crate) fn is_inner_class(node: &SyntaxNode) -> bool {
+        node.kind() == SyntaxKind::CLASS_DECL
+            && Self::is_nested(node)
+            && !Self::has_modifier(node, SyntaxKind::STATIC_KW)
+    }
+
     /// A body's explicit constructor invocation — a bare `this(…)` or `super(…)`.
     ///
     /// JLS §8.8.7 puts it first or nowhere, so only the first statement is examined. Only the bare
@@ -192,7 +261,10 @@ impl<'a> Facts<'a> {
     }
 
     /// The primitive a `TYPE` node's keyword names.
-    fn primitive_of(node: &ast::Type) -> Option<jals_hir::Primitive> {
+    ///
+    /// The JVM backend carried a verbatim second copy of this, down to the keyword list, because the
+    /// one here was private and the erasure path needed it.
+    pub(crate) fn primitive_of(node: &ast::Type) -> Option<jals_hir::Primitive> {
         use jals_hir::Primitive;
         use jals_syntax::SyntaxKind::{
             BOOLEAN_KW, BYTE_KW, CHAR_KW, DOUBLE_KW, FLOAT_KW, INT_KW, LONG_KW, SHORT_KW,
@@ -215,30 +287,46 @@ impl<'a> Facts<'a> {
             })
     }
 
-    /// The initialiser the declarator naming `name_start` was given, in a declaration that may hold
-    /// several.
+    /// Each declarator of a flat declaration, paired with the initialiser written after its own `=`.
     ///
-    /// The CST is flat: `int a = 1, b = 2;` is one declaration whose names and expressions are
-    /// siblings. Pairing them *by index* — which is what the field lowering did — is right only
-    /// when every declarator has an initialiser; `int a, b = 2;` has one expression and two names,
-    /// and index pairing hands `2` to `a` and leaves `b` unset. So the tokens are walked in order
-    /// instead: the most recent `IDENT` owns the next expression, and a `COMMA` closes it.
-    pub(crate) fn declarator_initialiser(
-        decl: &SyntaxNode,
-        name_start: usize,
-    ) -> Option<ast::Expr> {
-        let mut current: Option<usize> = None;
+    /// The CST is flat: `int a = 1, b = 2;` is **one** declaration whose names and expressions are
+    /// siblings. Pairing them *by index* is right only when every declarator has an initialiser —
+    /// and four of the five lowering sites did exactly that. `int a, b = 2;` has one expression and
+    /// two names, so index pairing handed `2` to `a` and left `b` unset: as a field that printed
+    /// `2 0` where Java prints `0 2`, as a JVM local it read a slot the frame never defined, and as
+    /// a wasm local it read that local's zero default.
+    ///
+    /// So the tokens are walked in order instead: the most recent name owns the next expression, and
+    /// a `COMMA` closes it. The names are the declaration's *direct* `IDENT` token children — the
+    /// same tokens [`ast::LocalVarDecl::names`] and [`ast::FieldDecl::names`] read, because a
+    /// declaration's type is a nested `TYPE` node whose identifiers are not direct children. That
+    /// agreement is what lets a caller walk one and index the other without going out of step.
+    ///
+    /// An unnamed `_` binding is an `UNDERSCORE` token, which neither this nor `names` reports. Its
+    /// initialiser is *dropped* rather than handed to the declarator before it — the value is
+    /// evaluated for its effect and bound to nothing, and giving it to the previous name would be
+    /// the same misalignment one declarator further along.
+    pub(crate) fn declarators(decl: &SyntaxNode) -> Vec<(SyntaxToken, Option<ast::Expr>)> {
+        let mut out: Vec<(SyntaxToken, Option<ast::Expr>)> = Vec::new();
+        // Whether the declarator now open is one this reports — false before the first name, after
+        // a `COMMA`, and for an unnamed `_`.
+        let mut named = false;
         let mut assigned = false;
         for element in decl.children_with_tokens() {
             match element {
                 jals_syntax::SyntaxElement::Token(token) => match token.kind() {
                     SyntaxKind::IDENT => {
-                        current = Some(usize::from(token.text_range().start()));
+                        out.push((token, None));
+                        named = true;
                         assigned = false;
                     }
                     SyntaxKind::EQ => assigned = true,
-                    SyntaxKind::COMMA => {
-                        current = None;
+                    // Both close whatever declarator was open without opening a reportable one: a
+                    // `COMMA` because the declarator ended, an `UNDERSCORE` because the one it
+                    // opens has no name. Either way the next expression belongs to neither, and it
+                    // is dropped rather than handed backwards.
+                    SyntaxKind::UNDERSCORE | SyntaxKind::COMMA => {
+                        named = false;
                         assigned = false;
                     }
                     _ => {}
@@ -247,16 +335,29 @@ impl<'a> Facts<'a> {
                     let Some(expr) = ast::Expr::cast(node) else {
                         continue;
                     };
-                    if assigned {
-                        if current == Some(name_start) {
-                            return Some(expr);
-                        }
-                        assigned = false;
+                    if !assigned {
+                        continue;
+                    }
+                    assigned = false;
+                    // `named` is set only where a pair was just pushed, so there is one to fill.
+                    if named && let Some(last) = out.last_mut() {
+                        last.1 = Some(expr);
                     }
                 }
             }
         }
-        None
+        out
+    }
+
+    /// The initialiser the declarator naming `name_start` was given.
+    ///
+    /// The by-offset shape of [`declarators`](Self::declarators), for the constant evaluator, which
+    /// starts from a definition's name range rather than from the declaration.
+    fn declarator_initialiser(decl: &SyntaxNode, name_start: usize) -> Option<ast::Expr> {
+        Self::declarators(decl)
+            .into_iter()
+            .find(|(name, _)| usize::from(name.text_range().start()) == name_start)
+            .and_then(|(_, value)| value)
     }
 
     /// Whether a `switch` group's statements leave the arm — a `yield`, a `throw`, or a `return`.
@@ -298,12 +399,33 @@ impl<'a> Facts<'a> {
             .or_else(|| self.typed.analysis().symbol_at(start))
     }
 
-    /// Where a node's own first identifier token starts. Direct children only.
-    fn first_name(node: &SyntaxNode) -> Option<usize> {
+    /// A node's own first identifier token. Direct children only.
+    ///
+    /// The token, not the node's text: a `NAME_REF`'s text runs from the start of its leading
+    /// trivia, so a comment on the line above is part of it. The token is the name and everything
+    /// else is layout — which is why a lookup keyed on the text of the node found nothing whenever
+    /// the name happened to be commented.
+    pub(crate) fn name_token(node: &SyntaxNode) -> Option<SyntaxToken> {
         node.children_with_tokens()
             .filter_map(jals_syntax::SyntaxElement::into_token)
             .find(|token| token.kind() == SyntaxKind::IDENT)
-            .map(|token| usize::from(token.text_range().start()))
+    }
+
+    /// Where a node's own first identifier token starts. Direct children only.
+    fn first_name(node: &SyntaxNode) -> Option<usize> {
+        Self::name_token(node).map(|token| usize::from(token.text_range().start()))
+    }
+
+    /// The indexed member a file-local definition declares.
+    ///
+    /// A name that resolved to a definition but to no *local* is one of the enclosing type's own
+    /// fields, written without the `this.` the JVM still requires. Reached by the **declaration's**
+    /// offset rather than the reference's — which is the one thing the three hand-written copies
+    /// each had to remember.
+    pub(crate) fn member_of_def(self, id: DefId) -> Option<MemberId> {
+        let declaration = self.typed.analysis().def(id);
+        self.index()
+            .member_by_decl(self.file(), declaration.name_range.start)
     }
 
     /// The indexed member the name token `token` declares.
@@ -358,5 +480,128 @@ impl<'a> Facts<'a> {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::borrow::ToOwned as _;
+    use alloc::string::{String, ToString as _};
+    use alloc::vec::Vec;
+
+    use jals_exec::block_on_inline;
+    use jals_syntax::ast::{self, AstNode as _};
+    use jals_syntax::{SyntaxKind, SyntaxNode};
+
+    use super::Facts;
+
+    /// The first declaration of `kind` in `source`.
+    fn decl(source: &str, kind: SyntaxKind) -> SyntaxNode {
+        block_on_inline(jals_syntax::Parse::parse(source))
+            .syntax()
+            .descendants()
+            .find(|node| node.kind() == kind)
+            .expect("the declaration is present")
+    }
+
+    /// Each declarator's name, with the initialiser's text.
+    fn paired(node: &SyntaxNode) -> Vec<(String, Option<String>)> {
+        Facts::declarators(node)
+            .into_iter()
+            .map(|(name, value)| {
+                let written = value.map(|expr| expr.syntax().text().to_string().trim().to_owned());
+                (name.text().to_owned(), written)
+            })
+            .collect()
+    }
+
+    /// `int a, b = 2;` gives `2` to **`b`**, and gives `a` nothing.
+    ///
+    /// The CST is flat — one declaration whose names and expressions are siblings — so pairing them
+    /// *by index* is right only when every declarator has an initialiser. Four of the five lowering
+    /// sites did exactly that: with one expression and two names the value landed on `a` and `b` was
+    /// left unset. As a field that printed `2 0` where Java prints `0 2`; as a JVM local it left a
+    /// slot the verifier refuses to read; as a wasm local it left the local's zero default, which is
+    /// silent.
+    ///
+    /// A local and a field are asserted together because they share one grammar rule (`field_tail`),
+    /// and the bug lived on the local half for as long as it did *because* the field half was fixed
+    /// on its own.
+    #[test]
+    fn a_declarator_takes_the_value_written_after_its_own_equals() {
+        let expected = [
+            ("a".to_owned(), None),
+            ("b".to_owned(), Some("2".to_owned())),
+            ("c".to_owned(), Some("3".to_owned())),
+            ("d".to_owned(), None),
+        ];
+        let local = decl(
+            "class C { void m() { int a, b = 2, c = 3, d; } }",
+            SyntaxKind::LOCAL_VAR_DECL,
+        );
+        assert_eq!(paired(&local), expected);
+
+        let field = decl(
+            "class C { int a, b = 2, c = 3, d; }",
+            SyntaxKind::FIELD_DECL,
+        );
+        assert_eq!(paired(&field), expected);
+    }
+
+    /// The pairing and the `names` accessor read the same tokens, so a lowering that walks one and
+    /// indexes the other cannot go out of step.
+    ///
+    /// Both take the declaration's *direct* `IDENT` children, which is why a declaration's type
+    /// contributes no name: `var` and `String` live in a nested `TYPE` node.
+    #[test]
+    fn the_pairing_lines_up_with_the_names_accessor() {
+        let node = decl(
+            "class C { void m() { String a = x, b, c = y; } }",
+            SyntaxKind::LOCAL_VAR_DECL,
+        );
+        let declared = ast::LocalVarDecl::cast(node.clone()).expect("a local declaration");
+        let names: Vec<String> = declared.names().map(|t| t.text().to_owned()).collect();
+        let walked: Vec<String> = paired(&node).into_iter().map(|(name, _)| name).collect();
+
+        assert_eq!(names, ["a", "b", "c"]);
+        assert_eq!(walked, names);
+    }
+
+    /// An unnamed `_` binding is a declarator neither this nor `names` reports, and its initialiser
+    /// is dropped rather than handed to the declarator before it.
+    ///
+    /// Giving it to the previous name would be the same misalignment one declarator further along —
+    /// `a` would take `f()`'s value and the `1` it was written with would be lost.
+    #[test]
+    fn an_unnamed_binding_takes_its_value_with_it() {
+        let node = decl(
+            "class C { void m() { var a = 1, _ = f(), b = 2; } }",
+            SyntaxKind::LOCAL_VAR_DECL,
+        );
+        assert_eq!(
+            paired(&node),
+            [
+                ("a".to_owned(), Some("1".to_owned())),
+                ("b".to_owned(), Some("2".to_owned())),
+            ]
+        );
+    }
+
+    /// An array initialiser is the declarator's value like any other expression, and a declarator
+    /// whose dimensions are written after the name still owns what follows its `=`.
+    #[test]
+    fn a_declarator_owns_whatever_its_equals_introduces() {
+        let node = decl(
+            "class C { void m() { int[] a = {1, 2}, b[] = null, c; } }",
+            SyntaxKind::LOCAL_VAR_DECL,
+        );
+        assert_eq!(
+            paired(&node),
+            [
+                ("a".to_owned(), Some("{1, 2}".to_owned())),
+                ("b".to_owned(), Some("null".to_owned())),
+                ("c".to_owned(), None),
+            ]
+        );
     }
 }

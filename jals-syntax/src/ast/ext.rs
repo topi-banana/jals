@@ -13,9 +13,9 @@ use rowan::WalkEvent;
 use rowan::ast::support;
 
 use super::{
-    AssignmentExpr, AstNode, AstSupport, AttrMeta, Attribute, BinaryExpr, CatchClause, Decl, Expr,
-    FieldAccess, FieldDecl, ForStmt, Literal, LocalVarDecl, Modifiers, QualifiedName, Resource,
-    Stmt, SwitchExpr, Type, YieldStmt,
+    AssignmentExpr, AstNode, AstSupport, AttrMeta, Attribute, BinaryExpr, BreakStmt, CatchClause,
+    ContinueStmt, Decl, Expr, FieldAccess, FieldDecl, ForStmt, Literal, LocalVarDecl, Modifiers,
+    QualifiedName, Resource, Stmt, SwitchExpr, Type, YieldStmt,
 };
 use crate::language::{SyntaxNode, SyntaxToken};
 use crate::syntax_kind::SyntaxKind::{
@@ -268,6 +268,23 @@ impl CatchClause {
     }
 }
 
+impl BreakStmt {
+    /// The label this `break` names, if any.
+    ///
+    /// The grammar has no slot for it — there is nothing else a bare `IDENT` on a `break` could be —
+    /// so it is the statement's own first identifier token, exactly as a `catch` binding is.
+    pub fn label(&self) -> Option<SyntaxToken> {
+        AstSupport::ident_tokens(&self.syntax).next()
+    }
+}
+
+impl ContinueStmt {
+    /// The label this `continue` names, if any. See [`BreakStmt::label`].
+    pub fn label(&self) -> Option<SyntaxToken> {
+        AstSupport::ident_tokens(&self.syntax).next()
+    }
+}
+
 impl Resource {
     /// The resource variable's binding name token (the `IDENT` after the type), if this resource
     /// declares a new variable.
@@ -437,8 +454,9 @@ impl SwitchExpr {
 mod tests {
     use super::{AstNode, SyntaxNode};
     use crate::ast::{
-        AttrArg, Attribute, CatchClause, ClassDecl, Decl, ExprStmt, FieldDecl, ForStmt, ImportDecl,
-        ImportGroup, LocalVarDecl, MethodDecl, QualifiedName, Resource, Stmt, SwitchExpr, Type,
+        AttrArg, Attribute, BreakStmt, CatchClause, ClassDecl, ContinueStmt, Decl, ExprStmt,
+        FieldDecl, ForStmt, ImportDecl, ImportGroup, LocalVarDecl, MethodDecl, QualifiedName,
+        Resource, Stmt, SwitchExpr, Type,
     };
     use crate::parser::Parse;
 
@@ -472,6 +490,27 @@ mod tests {
         // `var _ = ...` binds nothing referenceable.
         let local: LocalVarDecl = first("class C { void m() { var _ = f(); } }");
         assert_eq!(names_of(local.names()), Vec::<String>::new());
+    }
+
+    /// `break l;` names a label and `break;` names none. The grammar has no slot for it, so both
+    /// compiler backends walked the statement's tokens themselves and wrote the same rule twice.
+    #[test]
+    fn break_and_continue_name_their_label() {
+        let with: BreakStmt = first("class C { void m() { l: while (true) { break l; } } }");
+        assert_eq!(
+            with.label().map(|t| t.text().to_owned()).as_deref(),
+            Some("l")
+        );
+
+        let without: BreakStmt = first("class C { void m() { while (true) { break; } } }");
+        assert_eq!(without.label(), None);
+
+        let carry_on: ContinueStmt =
+            first("class C { void m() { l: while (true) { continue l; } } }");
+        assert_eq!(
+            carry_on.label().map(|t| t.text().to_owned()).as_deref(),
+            Some("l")
+        );
     }
 
     #[test]

@@ -139,10 +139,7 @@ impl Const<'_> {
 
     fn literal(node: &ast::Literal) -> Result<ConstValue> {
         let token = node
-            .syntax()
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .find(|token| !token.kind().is_trivia())
+            .token()
             .ok_or(FactError::Unsupported("a literal with no value"))?;
         let raw = token.text();
         match token.kind() {
@@ -717,5 +714,176 @@ impl Facts<'_> {
             return modifiers.contains(&FINAL_KW) && modifiers.contains(&STATIC_KW);
         }
         in_interface || modifiers.contains(&FINAL_KW)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::borrow::ToOwned as _;
+    use alloc::format;
+    use alloc::vec::Vec;
+
+    use jals_exec::block_on_inline;
+    use jals_hir::{FileAnalysis, FileId, ProjectIndex};
+    use jals_syntax::ast::{self, AstNode as _};
+
+    use super::CaseKey;
+    use crate::facts::{FactError, Facts, Result};
+
+    /// Every `case` label expression in `source`, folded, in source order.
+    ///
+    /// The chain is spelled out rather than hidden behind a helper returning a [`Facts`]: a
+    /// `TypedFile` borrows the binding, which borrows the analysis *and* the index, so nothing
+    /// shorter than the whole chain can be handed back. The stdlib stubs are folded in for the same
+    /// reason `jals-javac/tests/compile.rs` does it — a `String` label needs `java.lang.String` to
+    /// resolve, and they are compile-time constants parsed in memory, not a host read.
+    fn keys(source: &str) -> Vec<Result<CaseKey>> {
+        let root = block_on_inline(jals_syntax::Parse::parse(source)).syntax();
+        let analysis = block_on_inline(FileAnalysis::of(&root));
+        let index = block_on_inline(
+            ProjectIndex::builder(&[(FileId(0), root.clone())])
+                .with_stdlib()
+                .build(),
+        );
+        let semantics = analysis.in_project(&index, FileId(0));
+        let facts = Facts::of(block_on_inline(semantics.typed()));
+        root.descendants()
+            .filter_map(ast::SwitchLabel::cast)
+            .flat_map(|label| {
+                label
+                    .syntax()
+                    .children()
+                    .filter_map(ast::Expr::cast)
+                    .collect::<Vec<_>>()
+            })
+            .map(|value| facts.case_key(&value))
+            .collect()
+    }
+
+    /// `source` wrapped in a class whose `main` can hold statements.
+    fn program(members: &str, body: &str) -> alloc::string::String {
+        format!(
+            "public class C {{ {members} public static void main(String[] args) {{ {body} }} }}"
+        )
+    }
+
+    /// The whole of JLS §15.29, checked without a JVM.
+    ///
+    /// This is the module's founding incident: `case ~5:` is a legal constant expression whose
+    /// value is `-6`, and the JVM lowering rejected it while the wasm one silently compiled it as
+    /// `5`. It has an end-to-end test, but that one stands down without a `java` binary — and CI
+    /// runs this crate's tests as `wasm32-wasip1`, where there is never one. So the evaluator's
+    /// *values* were unchecked exactly where the two backends were most likely to drift again.
+    ///
+    /// Java's arithmetic, not Rust's: `char` and a narrowing cast promote to `int` keeping the low
+    /// bits, and `>>>` is logical with its distance masked to `0x1f`.
+    #[test]
+    fn a_case_label_folds_the_whole_of_jls_15_29() {
+        let source = program(
+            "",
+            "switch (args.length) { \
+             case ~5: case 2 + 3: case (byte) 200: case -1 >>> 28: case 1 << 3: case 7 & 3: \
+             case (1 > 0) ? 9 : 8: case 'a': default: break; }",
+        );
+        assert_eq!(
+            keys(&source),
+            [
+                Ok(CaseKey::Int(-6)),
+                Ok(CaseKey::Int(5)),
+                Ok(CaseKey::Int(-56)),
+                Ok(CaseKey::Int(15)),
+                Ok(CaseKey::Int(8)),
+                Ok(CaseKey::Int(3)),
+                Ok(CaseKey::Int(9)),
+                Ok(CaseKey::Int(97)),
+            ]
+        );
+    }
+
+    /// A `String` label folds a concatenation, and a `char` operand survives as what the source
+    /// wrote: `'a' + "b"` is `"ab"` and not `"97b"`, even though a `char` is numerically an `int`.
+    #[test]
+    fn a_string_case_label_folds_a_concatenation() {
+        let source = program(
+            "",
+            r#"String s = ""; switch (s) { case "a" + "b": case 'a' + "b": case 1 + "x": break; }"#,
+        );
+        assert_eq!(
+            keys(&source),
+            [
+                Ok(CaseKey::Text("ab".to_owned())),
+                Ok(CaseKey::Text("ab".to_owned())),
+                Ok(CaseKey::Text("1x".to_owned())),
+            ]
+        );
+    }
+
+    /// A named constant is followed to the initialiser written after **its own** `=`.
+    ///
+    /// The declaration is flat — `static final int A = 1, B = 2;` is one node whose names and
+    /// expressions are siblings — so reaching the right one is the declarator walk's job, and this
+    /// is the path that already used it when four other lowering sites did not.
+    #[test]
+    fn a_named_constant_is_followed_to_its_own_initialiser() {
+        let source = program(
+            "static final int A = 1 << 4, B = 3; interface F { int C = 9; }",
+            "switch (args.length) { case A: case B: case F.C: break; }",
+        );
+        assert_eq!(
+            keys(&source),
+            [
+                Ok(CaseKey::Int(16)),
+                Ok(CaseKey::Int(3)),
+                Ok(CaseKey::Int(9)),
+            ]
+        );
+    }
+
+    /// Three wordings the integration tests match by exact text.
+    ///
+    /// They travel verbatim through `From<FactError>` into both backends' error types, so changing
+    /// one silently breaks a test that only runs where a JDK is installed. `--` is its own token,
+    /// so `case --5:` is a prefix decrement and not a double negation — a rule that merely asked
+    /// whether a `MINUS` was present compiled it as `5`.
+    #[test]
+    fn a_label_that_is_no_constant_is_reported_in_the_pinned_words() {
+        for (body, expected) in [
+            // Not `final`, so its value may change before the switch runs.
+            (
+                "int k = 1; switch (args.length) { case k: break; }",
+                "a non-literal `case`",
+            ),
+            (
+                "switch (args.length) { case --5: break; }",
+                "a `case` this cannot evaluate",
+            ),
+            (
+                "switch (args.length) { case 1 / 0: break; }",
+                "a constant division by zero",
+            ),
+        ] {
+            let source = program("", body);
+            assert_eq!(
+                keys(&source),
+                [Err(FactError::Unsupported(expected))],
+                "`{body}` should report {expected:?}"
+            );
+        }
+    }
+
+    /// A constant that refers to itself, directly or through another, terminates rather than
+    /// recursing until the stack runs out.
+    #[test]
+    fn a_cyclic_constant_terminates() {
+        let source = program(
+            "static final int A = B; static final int B = A;",
+            "switch (args.length) { case A: break; }",
+        );
+        assert_eq!(
+            keys(&source),
+            [Err(FactError::Unsupported(
+                "a constant that refers to itself"
+            ))]
+        );
     }
 }

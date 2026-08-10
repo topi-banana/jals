@@ -1,0 +1,27 @@
+id: no-jvm-into-wasm-lowering
+language: Rust
+severity: error
+message: The JVM backend must not name `crate::wasm`. A fact both backends need lives in `crate::facts`.
+note: |
+  The mirror of `no-wasm-into-jvm-lowering`, and green when it was written — the reach across the
+  seam has only ever gone one way. It exists because "the JVM side never did it" is a fact about
+  yesterday: the pressure that produced the other direction (a routine already written, one module
+  over, doing exactly what you need) is symmetric, and `ValType`, `Insn`, and the wasm `Layout` are
+  as tempting from `lower/` as `literal_text` was from `wasm/`.
+
+  Separate from its mirror rather than one rule over both directories, because `lower/` names
+  `crate::lower` legitimately — its own submodules — and a combined rule would reject that.
+
+files:
+  - 'jals-javac/src/lower/**/*.rs'
+  - 'jals-javac/src/jvm/**/*.rs'
+
+rule:
+  kind: scoped_identifier
+  all:
+    - has:
+        field: path
+        regex: '^crate$'
+    - has:
+        field: name
+        regex: '^wasm$'

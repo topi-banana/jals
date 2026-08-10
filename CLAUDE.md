@@ -231,7 +231,22 @@ filesystem reads into portable interfaces.
   layer was written twice and the copies drifted into wrong *output*, not merely duplication: `case
   ~5` (a constant expression whose value is -6) was rejected by the JVM lowering and silently
   compiled as `5` by the wasm one. A fact both backends need goes here; one that names an
-  instruction does not. Portable and featureless; no host filesystem APIs.
+  instruction does not.
+  Being the **only** entry is the point, and for a while it was one entry among several: the
+  `case`-label evaluator read its literals through `facts` while both expression paths read theirs
+  from the JVM backend's own module — which the wasm side reached across the backend seam to call —
+  and `declarator_initialiser` existed to stop names and initialisers being paired by index while
+  four of the five sites that pair them went on doing it, which is a wrong `static` field on wasm
+  and a class the JVM rejects at load. Three ast-grep rules now hold the shape:
+  `no-wasm-into-jvm-lowering` and its mirror `no-jvm-into-wasm-lowering` (separate rules, because
+  `lower/` names `crate::lower` legitimately) reject one backend naming the other, and
+  `facts-names-no-instruction` rejects `Descriptor`/`ValType`/`Slots`/`Label` inside `facts`. None
+  of them catches a backend re-implementing a fact *inline*, which is how every one of those
+  duplications got there — so the rules are a ratchet, and what makes a fact single-sourced is that
+  there is one place to ask and it has a test. `facts` therefore carries its own `#[cfg(test)]`
+  suites: the JLS §15.29 evaluator is verified with no JDK in reach, which matters because the
+  end-to-end tests stand down without one and CI's wasm cell never has one.
+  Portable and featureless; no host filesystem APIs.
 - `jals-hir`: the semantic analysis. Its three layers have one order — resolve a file, index the
   project, infer types against both — and that order lives in `FileAnalysis` / `FileSemantics` /
   `TypedFile` rather than in each consumer. `FileAnalysis` is index-independent, so it is the half a
