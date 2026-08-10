@@ -966,6 +966,35 @@ D8 は共通語彙の粒度の問題（native モデルには両 bool が残る�
 レイアウトが原因で、`jals-fmt/tests/coverage.rs` の `UNREACHABLE` に理由つきで列挙されている
 （そこに載る rule だけが「出力が動かなくてよい」唯一の例外である）。
 
+### 18.2.1 恒久差分の実測上限（T2 が到達できる数字）
+
+「rule では埋まらない」は列挙だけでは検証できない。**コメント行が完全一致したと仮定したときの
+similarity** を計算すれば、残りは D1–D4（レイアウト解決アルゴリズムの違い）だけになり、恒久差分の
+値段が数字で出る。Ratcliff/Obershelp 比 `2M/(a+b)` は、コメント行を両側から落とした比較から
+`M` を取り、期待側のコメント行数を `M` と両辺の長さに足し戻せば求まる（OpenJDK
+`src/java.base/share/classes/java/util` の同一サンプル）:
+
+| target | 実測 mean similarity | code のみ | **コメント完全一致なら** | 上限を決めている恒久差分 |
+|---|--:|--:|--:|---|
+| `gjf` | 98.98% | 99.15% | **99.57%** | —（T1。残りは D10 と細部） |
+| `palantir` | 98.94% | 98.06% | **98.96%** | **D3**（`PartialInlineability` の仮説探索） |
+| `eclipse` | 93.60% | 96.97% | **98.59%** | **D2**（`WrapExecutor.findWraps` の penalty 最小化） |
+| `intellij` | 92.07% | 96.13% | **98.12%** | **D4**（`WrapProcessor` の rewind） |
+
+読み方は 2 つ。**(1) コメント整形は rule で埋まる** — eclipse はコメント側の rule を足すだけで
+86.06% → 94.38% まで動いた（`comments.paragraph-tags` / `tag-alignment` /
+`javadoc-boundaries-on-own-lines` / `tables-are-preformatted` ほか）。**(2) レイアウトは埋まらない** —
+コメントが 1 行残らず一致したとしても T2 の 3 者は 98.1〜99.0% で頭打ちで、**99% には届かない**。
+これは努力量ではなく §11 結論 1 の帰結であり、数字を上げるために engine を増やす選択は §8.3 の
+優先順位が禁じている。そのうえコメント側にも独自の上限がある: **D5**（元が 1 行で書かれた Javadoc を
+JDT はそのまま残す）と **D7**（JDT のコメント折り返しも penalty 最小化）。
+
+intellij はさらに **D5** が効く: 委譲先の `WRAP_COMMENTS` は stock IDEA で off なので、`.output` の
+Javadoc は OpenJDK の手折りをそのまま保存している。単一エンジンは入力の改行を読まないので、ここは
+**近づけるほど数字が下がる**（実測: `format-javadoc` を on にすると 92.07% → 76.52%）。
+`jals-tests/config/intellij-jals.xml` が `KEEP_*` を off にして D5 を封じたのはコード側だけで、
+コメント側は封じられていない、というのがこの行の正体である。
+
 ### 18.3 byte 一致が本当に必要な場合
 
 その実ツールを走らせる以外に方法は無い（Spotless が互換性を委譲で達成しているのはこの理由）。
