@@ -21,6 +21,23 @@
 //! One fact, one answer, one place to test it. What stays behind in each backend is what actually
 //! differs: control flow, the wasm `Layout`, the JVM's `Slots`, and erasure.
 //!
+//! # Being the only entry is the point
+//!
+//! For a while it was one entry among several. The `case`-label evaluator read its literals here
+//! while both *expression* paths read theirs from the JVM backend's own module — which wasm reached
+//! across the backend seam to call. `Facts::declarator_initialiser` existed to stop names and
+//! initialisers being paired by index, and four of the five sites that pair them went on doing it,
+//! which is a wrong `static` field on wasm and a class the JVM rejects at load. The modifier scan
+//! answered two different questions in the two backends, and "the superclass" had three rules.
+//!
+//! None of that named the other backend, so a rule against reaching across the seam
+//! (`no-wasm-into-jvm-lowering`) would have stayed green throughout. What makes a fact single-sourced
+//! is that there is one place to ask and it has a test; the rules only stop the cheapest way to get
+//! a second one.
+//!
+//! A fact both backends need goes here. One that names an instruction does not — and
+//! `facts-names-no-instruction` is what keeps that sentence from going back to being prose.
+//!
 //! # What it deliberately does not do
 //!
 //! It does not check. A fact this layer cannot establish is *reported* ([`FactError`]) rather than
@@ -34,6 +51,7 @@ mod constant;
 mod inherit;
 mod literal;
 mod method_ref;
+mod switch;
 
 pub(crate) use constant::CaseKey;
 pub(crate) use inherit::{Hierarchy, Overrides};

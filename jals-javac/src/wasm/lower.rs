@@ -2027,8 +2027,8 @@ impl Lowering<'_> {
             ast::Stmt::DoWhile(statement) => self.do_while(statement, insn),
             ast::Stmt::For(statement) => self.for_loop(statement, insn),
             ast::Stmt::ForEach(statement) => self.for_each(statement, insn),
-            ast::Stmt::Break(statement) => self.leave(statement.syntax(), false, insn),
-            ast::Stmt::Continue(statement) => self.leave(statement.syntax(), true, insn),
+            ast::Stmt::Break(statement) => self.leave(statement.label(), false, insn),
+            ast::Stmt::Continue(statement) => self.leave(statement.label(), true, insn),
             ast::Stmt::Labeled(statement) => self.labelled(statement, insn),
             // Each of these names itself rather than going through a catch-all, so a report says which
             // construct is missing. All four wait on the same thing: the exception-handling proposal's
@@ -2783,44 +2783,24 @@ impl Lowering<'_> {
 
     /// One arm's `case` keys and patterns. `default` contributes neither.
     fn arm(&self, labels: impl Iterator<Item = ast::SwitchLabel>) -> Result<Arm> {
-        use jals_syntax::SyntaxKind::{RECORD_PATTERN, TYPE_PATTERN, UNNAMED_PATTERN};
-        let mut keys = Vec::new();
-        let mut patterns = Vec::new();
-        let mut guard = None;
-        let mut is_default = false;
-        for label in labels {
-            if label.is_default() {
-                is_default = true;
-            }
-            patterns.extend(label.syntax().children().filter(|child| {
-                matches!(
-                    child.kind(),
-                    TYPE_PATTERN | RECORD_PATTERN | UNNAMED_PATTERN
-                )
-            }));
-            if let Some(clause) = label.syntax().children().find_map(ast::Guard::cast) {
-                guard = clause.condition();
-                if guard.is_none() {
-                    return Err(WasmError::Unsupported("a guarded `case`"));
-                }
-            }
-            // A `Guard`'s condition is an expression child of the label too, so the keys are read only
-            // when there is no guard to have contributed one.
-            if guard.is_none() {
-                for value in label.syntax().children().filter_map(ast::Expr::cast) {
-                    // A `String` key has no wasm representation — this backend compiles primitives and
-                    // project classes, and a host with no `java.base` has no `String` to hash.
-                    keys.push(self.facts().case_key(&value)?.as_int().ok_or_else(|| {
-                        WasmError::NoRepresentation("a `String` `case` label".to_owned())
-                    })?);
-                }
-            }
-        }
+        let read = self.facts().switch_arm(labels)?;
+        // A `String` key is a fact the source states and a value this target cannot hold — this
+        // backend compiles primitives and project classes, and a host with no `java.base` has no
+        // `String` to hash. So it is read there and refused here.
+        let keys = read
+            .keys
+            .iter()
+            .map(|key| {
+                key.as_int().ok_or_else(|| {
+                    WasmError::NoRepresentation("a `String` `case` label".to_owned())
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
         Ok(Arm {
             keys,
-            patterns,
-            guard,
-            is_default,
+            patterns: read.patterns,
+            guard: read.guard,
+            is_default: read.is_default,
         })
     }
 
@@ -3033,12 +3013,13 @@ impl Lowering<'_> {
     ///
     /// The branch depth comes from the emitter, not from the source: an `if` between a loop header and
     /// the branch shifts every target, and only the emitter knows how many structures are open.
-    fn leave(&mut self, node: &SyntaxNode, continuing: bool, insn: &mut Insn) -> Result<()> {
-        let label = node
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .find(|token| token.kind() == jals_syntax::SyntaxKind::IDENT)
-            .map(|token| token.text().to_owned());
+    fn leave(
+        &mut self,
+        label: Option<jals_syntax::SyntaxToken>,
+        continuing: bool,
+        insn: &mut Insn,
+    ) -> Result<()> {
+        let label = label.map(|token| token.text().to_owned());
         let target = self
             .loops
             .iter()

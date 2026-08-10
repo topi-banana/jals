@@ -23,7 +23,6 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use jals_hir::{Primitive, Ty};
-use jals_syntax::SyntaxKind::{RECORD_PATTERN, TYPE_PATTERN, UNNAMED_PATTERN};
 use jals_syntax::ast::{self, AstNode as _};
 
 use crate::facts::CaseKey;
@@ -155,39 +154,14 @@ impl Switch {
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
     ) -> Result<Arm> {
-        let mut keys = Vec::new();
-        let mut patterns = Vec::new();
-        let mut guard = None;
-        let mut is_default = false;
-        for label in labels {
-            if label.is_default() {
-                is_default = true;
-            }
-            patterns.extend(label.syntax().children().filter(|child| {
-                matches!(
-                    child.kind(),
-                    TYPE_PATTERN | RECORD_PATTERN | UNNAMED_PATTERN
-                )
-            }));
-            if let Some(clause) = label.syntax().children().find_map(ast::Guard::cast) {
-                guard = clause.condition();
-                if guard.is_none() {
-                    return Err(LowerError::Unsupported("a guarded `case`"));
-                }
-            }
-            // A `Guard`'s condition is an expression child of the label too, so the keys are read only
-            // when there is no guard to have contributed one.
-            if guard.is_none() {
-                for value in label.syntax().children().filter_map(ast::Expr::cast) {
-                    keys.push(context.facts().case_key(&value)?);
-                }
-            }
-        }
+        let read = context.facts().switch_arm(labels)?;
+        // The entry label is allocated *after* the labels are read, and one per arm: a `Label` id is
+        // positional, so the dispatch below indexes the arms by the order they were created in.
         Ok(Arm {
-            keys,
-            patterns,
-            guard,
-            is_default,
+            keys: read.keys,
+            patterns: read.patterns,
+            guard: read.guard,
+            is_default: read.is_default,
             entry: emit.asm.label(),
         })
     }

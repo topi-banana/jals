@@ -19,7 +19,6 @@ use alloc::string::{String, ToString as _};
 use alloc::vec::Vec;
 
 use jals_hir::Ty;
-use jals_syntax::SyntaxKind::IDENT;
 use jals_syntax::ast::{self, AstNode as _};
 use jals_syntax::{SyntaxNode, SyntaxToken};
 
@@ -109,8 +108,8 @@ impl Stmt {
             ast::Stmt::Expr(expression) => Self::expression(expression, context, emit),
             ast::Stmt::Return(statement) => Self::ret(statement, context, emit),
             ast::Stmt::If(statement) => Self::conditional(statement, context, emit),
-            ast::Stmt::Break(statement) => Self::leave(statement.syntax(), true, context, emit),
-            ast::Stmt::Continue(statement) => Self::leave(statement.syntax(), false, context, emit),
+            ast::Stmt::Break(statement) => Self::leave(statement.label(), true, context, emit),
+            ast::Stmt::Continue(statement) => Self::leave(statement.label(), false, context, emit),
             ast::Stmt::Throw(statement) => Self::throw(statement, context, emit),
             ast::Stmt::Synchronized(statement) => Self::synchronized(statement, context, emit),
             ast::Stmt::Try(statement) => Self::try_catch(statement, context, emit),
@@ -777,19 +776,15 @@ impl Stmt {
 
     /// `break;` / `break l;` / `continue;` / `continue l;`.
     ///
-    /// The optional label is a bare `IDENT` token on the statement — the grammar has no slot for it,
-    /// because there is nothing else it could be.
+    /// The label comes in already read: where it lives on the statement is a grammar fact, and both
+    /// lowerings used to walk for it themselves.
     fn leave(
-        node: &SyntaxNode,
+        label: Option<SyntaxToken>,
         exit: bool,
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
     ) -> Result<()> {
-        let label = node
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .find(|token| token.kind() == IDENT)
-            .map(|token| String::from(token.text()));
+        let label = label.map(|token| String::from(token.text()));
         let (target, depth) = if exit {
             emit.exit_of(label.as_deref())?
         } else {
