@@ -202,21 +202,42 @@ build_from_source() {
   command -v cargo >/dev/null 2>&1 ||
     fail "cargo is not on PATH; add a Rust toolchain step (dtolnay/rust-toolchain@stable) before this action, or pin a released 'version'"
 
-  local args=(install --locked --force --git "${REPO_URL}" --root "${INSTALL_DIR}")
-  if [[ "${KIND}" == "release" ]]; then
-    args+=(--tag "v${VERSION}")
-  elif [[ "${VERSION}" != "HEAD" ]]; then
-    # A ref is a branch, a tag or a commit and the caller does not say which. `--rev` accepts any
-    # of the three (git resolves it), so one flag covers all of them.
-    args+=(--rev "${VERSION}")
-  fi
   # `jals-cli` is required, not optional: this is a workspace shipping several binaries, so
   # `cargo install --git` cannot pick one on its own.
-  args+=(jals-cli)
+  local base=(install --locked --force --git "${REPO_URL}" --root "${INSTALL_DIR}")
 
-  log "cargo ${args[*]}"
-  cargo "${args[@]}" ||
-    fail "cargo install failed for ${REPOSITORY} at ${VERSION}"
+  if [[ "${KIND}" == "release" ]]; then
+    log "cargo ${base[*]} --tag v${VERSION} jals-cli"
+    cargo "${base[@]}" --tag "v${VERSION}" jals-cli ||
+      fail "cargo install failed for ${REPOSITORY} at v${VERSION}"
+    return
+  fi
+  if [[ "${VERSION}" == "HEAD" ]]; then
+    log "cargo ${base[*]} jals-cli"
+    cargo "${base[@]}" jals-cli ||
+      fail "cargo install failed for ${REPOSITORY}"
+    return
+  fi
+
+  # A ref is a branch, a tag or a commit and the caller does not say which — nor should it have to,
+  # since the three are one input as far as a consumer is concerned. cargo does not take them as
+  # one: each has its own flag, and handing a branch name to `--rev` fetches a refspec that does
+  # not resolve. So the candidates are tried in turn. Commit-shaped first, because a 40-hex name
+  # can only be a revision; otherwise branch before tag, which is the order a moving ref is more
+  # likely to be. The last failure is the one reported.
+  local candidates=(--branch --tag --rev)
+  if [[ "${VERSION}" =~ ^[0-9a-f]{7,40}$ ]]; then
+    candidates=(--rev)
+  fi
+  local flag
+  for flag in "${candidates[@]}"; do
+    log "cargo ${base[*]} ${flag} ${VERSION} jals-cli"
+    if cargo "${base[@]}" "${flag}" "${VERSION}" jals-cli; then
+      return
+    fi
+    log "${flag} ${VERSION} did not resolve"
+  done
+  fail "cargo install failed for ${REPOSITORY} at ${VERSION}: not a branch, tag or revision of ${REPO_URL}"
 }
 
 if [[ "${CACHE_HIT}" != "true" ]]; then
