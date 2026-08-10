@@ -463,7 +463,7 @@ impl Expr {
             }
             // Nothing in the file declared it, which an *inherited* field never is.
             None => Facts::name_token(name.syntax())
-                .and_then(|written| Self::inherited_field(written.text(), context)),
+                .and_then(|token| Self::inherited_field(token.text(), context)),
         };
         let member = member.ok_or_else(unresolved)?;
         let (owner, field, descriptor) = Self::field_ref(member, context)?;

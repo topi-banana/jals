@@ -51,7 +51,7 @@ use jals_syntax::SyntaxKind::{
 use jals_syntax::ast::{self, AstNode as _};
 use jals_syntax::{SyntaxNode, SyntaxToken};
 
-use crate::facts::{Facts, Hierarchy, Literal, Overrides};
+use crate::facts::{ArmLabels, Facts, Hierarchy, Literal, Overrides};
 use crate::wasm::encode::{
     CompType, ExportKind, FieldType, Func, Global, HeapType, Module, RefType, StorageType, SubType,
     ValType,
@@ -2783,13 +2783,17 @@ impl Lowering<'_> {
 
     /// One arm's `case` keys and patterns. `default` contributes neither.
     fn arm(&self, labels: impl Iterator<Item = ast::SwitchLabel>) -> Result<Arm> {
-        let read = self.facts().switch_arm(labels)?;
+        let ArmLabels {
+            keys,
+            patterns,
+            guard,
+            is_default,
+        } = self.facts().switch_arm(labels)?;
         // A `String` key is a fact the source states and a value this target cannot hold — this
         // backend compiles primitives and project classes, and a host with no `java.base` has no
         // `String` to hash. So it is read there and refused here.
-        let keys = read
-            .keys
-            .iter()
+        let keys = keys
+            .into_iter()
             .map(|key| {
                 key.as_int().ok_or_else(|| {
                     WasmError::NoRepresentation("a `String` `case` label".to_owned())
@@ -2798,9 +2802,9 @@ impl Lowering<'_> {
             .collect::<Result<Vec<_>>>()?;
         Ok(Arm {
             keys,
-            patterns: read.patterns,
-            guard: read.guard,
-            is_default: read.is_default,
+            patterns,
+            guard,
+            is_default,
         })
     }
 

@@ -105,9 +105,8 @@ impl<'a> Hierarchy<'a> {
     /// Bounded by [`DEPTH`], which neither hand-written copy was: a malformed index whose supertype
     /// chain cycles hung the compiler rather than reporting anything.
     pub(crate) fn inherited_field(self, from: ItemId, name: &str) -> Option<MemberId> {
-        let mut candidate = Some(from);
+        let mut item = from;
         for _ in 0..DEPTH {
-            let item = candidate?;
             if let Some(member) = self
                 .index
                 .own_members(item)
@@ -120,7 +119,8 @@ impl<'a> Hierarchy<'a> {
             {
                 return Some(member);
             }
-            candidate = self.superclass(item);
+            // No superclass left is the end of the search, not an error.
+            item = self.superclass(item)?;
         }
         None
     }

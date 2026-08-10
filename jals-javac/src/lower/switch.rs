@@ -25,7 +25,7 @@ use alloc::vec::Vec;
 use jals_hir::{Primitive, Ty};
 use jals_syntax::ast::{self, AstNode as _};
 
-use crate::facts::CaseKey;
+use crate::facts::{ArmLabels, CaseKey};
 use crate::jvm::{Branch, Compare, Label};
 use crate::lower::expr::Expr;
 use crate::lower::stmt::Stmt;
@@ -154,14 +154,19 @@ impl Switch {
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
     ) -> Result<Arm> {
-        let read = context.facts().switch_arm(labels)?;
+        let ArmLabels {
+            keys,
+            patterns,
+            guard,
+            is_default,
+        } = context.facts().switch_arm(labels)?;
         // The entry label is allocated *after* the labels are read, and one per arm: a `Label` id is
         // positional, so the dispatch below indexes the arms by the order they were created in.
         Ok(Arm {
-            keys: read.keys,
-            patterns: read.patterns,
-            guard: read.guard,
-            is_default: read.is_default,
+            keys,
+            patterns,
+            guard,
+            is_default,
             entry: emit.asm.label(),
         })
     }

@@ -40,38 +40,40 @@ impl Facts<'_> {
         labels: impl Iterator<Item = ast::SwitchLabel>,
     ) -> Result<ArmLabels> {
         use jals_syntax::SyntaxKind::{RECORD_PATTERN, TYPE_PATTERN, UNNAMED_PATTERN};
-        let mut out = ArmLabels {
-            keys: Vec::new(),
-            patterns: Vec::new(),
-            guard: None,
-            is_default: false,
-        };
+        let mut keys = Vec::new();
+        let mut patterns = Vec::new();
+        let mut guard = None;
+        let mut is_default = false;
         for label in labels {
             if label.is_default() {
-                out.is_default = true;
+                is_default = true;
             }
-            out.patterns
-                .extend(label.syntax().children().filter(|child| {
-                    matches!(
-                        child.kind(),
-                        TYPE_PATTERN | RECORD_PATTERN | UNNAMED_PATTERN
-                    )
-                }));
+            patterns.extend(label.syntax().children().filter(|child| {
+                matches!(
+                    child.kind(),
+                    TYPE_PATTERN | RECORD_PATTERN | UNNAMED_PATTERN
+                )
+            }));
             if let Some(clause) = label.syntax().children().find_map(ast::Guard::cast) {
-                out.guard = clause.condition();
-                if out.guard.is_none() {
+                guard = clause.condition();
+                if guard.is_none() {
                     return Err(FactError::Unsupported("a guarded `case`"));
                 }
             }
             // A `Guard`'s condition is an expression child of the label too, so the keys are read
             // only when there is no guard to have contributed one.
-            if out.guard.is_none() {
+            if guard.is_none() {
                 for value in label.syntax().children().filter_map(ast::Expr::cast) {
-                    out.keys.push(self.case_key(&value)?);
+                    keys.push(self.case_key(&value)?);
                 }
             }
         }
-        Ok(out)
+        Ok(ArmLabels {
+            keys,
+            patterns,
+            guard,
+            is_default,
+        })
     }
 }
 
@@ -116,28 +118,25 @@ mod tests {
     /// the two copies of this reader each carried.
     #[test]
     fn a_guards_condition_is_not_a_key() {
-        let source = "class C { void m(Object o) { switch (o) { \
-                      case Integer i when i > 0: break; case String s: break; default: break; } } }";
-        let read = arms(source);
-        let shapes: Vec<(usize, usize, bool, bool)> = read
-            .iter()
-            .map(|arm| {
-                (
-                    arm.keys.len(),
-                    arm.patterns.len(),
-                    arm.guard.is_some(),
-                    arm.is_default,
-                )
-            })
-            .collect();
-        assert_eq!(
-            shapes,
-            [
-                (0, 1, true, false),
-                (0, 1, false, false),
-                (0, 0, false, true)
-            ]
+        let read = arms(
+            "class C { void m(Object o) { switch (o) { \
+             case Integer i when i > 0: break; case String s: break; default: break; } } }",
         );
+        assert_eq!(read.len(), 3);
+
+        let guarded = &read[0];
+        assert!(guarded.guard.is_some(), "the `when` clause is the guard");
+        assert!(guarded.keys.is_empty(), "and not one of the keys");
+        assert_eq!(guarded.patterns.len(), 1);
+
+        let unguarded = &read[1];
+        assert!(unguarded.guard.is_none());
+        assert_eq!(unguarded.patterns.len(), 1);
+
+        let fallback = &read[2];
+        assert!(fallback.is_default);
+        assert!(fallback.patterns.is_empty());
+        assert!(fallback.keys.is_empty());
     }
 
     /// Several `case` labels on one arm are that arm's keys, in written order, and a `default`

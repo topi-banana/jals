@@ -98,7 +98,7 @@ impl Place {
             }
             // Nothing in the file declared it, which an *inherited* field never is.
             None => Facts::name_token(name.syntax())
-                .and_then(|written| Expr::inherited_field(written.text(), context)),
+                .and_then(|token| Expr::inherited_field(token.text(), context)),
         };
         let member = member.ok_or_else(text)?;
         let (owner, field, descriptor) = Expr::field_ref(member, context)?;

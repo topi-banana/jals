@@ -57,6 +57,7 @@ pub(crate) use constant::CaseKey;
 pub(crate) use inherit::{Hierarchy, Overrides};
 pub(crate) use literal::Literal;
 pub(crate) use method_ref::RefReceiver;
+pub(crate) use switch::ArmLabels;
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -334,11 +335,13 @@ impl<'a> Facts<'a> {
                     let Some(expr) = ast::Expr::cast(node) else {
                         continue;
                     };
-                    if assigned {
-                        if named && let Some(last) = out.last_mut() {
-                            last.1 = Some(expr);
-                        }
-                        assigned = false;
+                    if !assigned {
+                        continue;
+                    }
+                    assigned = false;
+                    // `named` is set only where a pair was just pushed, so there is one to fill.
+                    if named && let Some(last) = out.last_mut() {
+                        last.1 = Some(expr);
                     }
                 }
             }

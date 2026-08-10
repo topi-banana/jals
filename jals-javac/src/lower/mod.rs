@@ -1220,9 +1220,7 @@ impl Compile {
             return out;
         };
         for declaration in root.descendants().filter(|n| n.kind() == CLASS_DECL) {
-            if !Facts::is_nested(&declaration)
-                || Facts::has_modifier(&declaration, jals_syntax::SyntaxKind::STATIC_KW)
-            {
+            if !Facts::is_inner_class(&declaration) {
                 continue;
             }
             let Some(name) = ast::Decl::name_token_of(&declaration) else {
@@ -3074,7 +3072,6 @@ impl Compile {
                 let Some(value) = value else {
                     continue;
                 };
-                let value = &value;
                 let field = context.facts().member_at(&name)?;
                 let ty = context.index.resolved_member_ty(field);
                 let descriptor = Descriptor::descriptor_of(&ty, context.index)?.to_string();
@@ -3083,7 +3080,7 @@ impl Compile {
                 }
                 // Converted to the field's declared type, which is where `long total = 0;` gets its
                 // `i2l`.
-                expr::Expr::lower_as(value, &ty, context, emit)?;
+                expr::Expr::lower_as(&value, &ty, context, emit)?;
                 if statics {
                     emit.asm
                         .put_static(&context.this_class, name.text(), &descriptor)?;
