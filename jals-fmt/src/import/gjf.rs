@@ -23,8 +23,8 @@ use alloc::borrow::ToOwned;
 use alloc::vec;
 
 use jals_config::fmt::{
-    BlankLines, Comments, Config, ImportOrder, Imports, IndentStyle, InlineAnnotations,
-    KeepOnOneLine, Layout, ParenPositions, Spacing, WrapPolicy, Wrapping,
+    BlankLines, Comments, Config, DocumentedMember, ImportOrder, Imports, IndentStyle,
+    InlineAnnotations, KeepOnOneLine, Layout, ParenPositions, Spacing, WrapPolicy, Wrapping,
 };
 use serde::Deserialize;
 
@@ -195,7 +195,7 @@ impl GoogleJavaFormatConfig {
             // `thisOneGetsBlankLineBefore`: a member with Javadoc, and a field whose annotations
             // went vertical, is separated from its neighbours whatever its kind says.
             blank_lines: BlankLines {
-                around_documented_member: 1,
+                around_documented_member: DocumentedMember::AtLeast(1),
                 ..BlankLines::default()
             },
             // `new String[] {…}` and `{{1}, {2}}` both take a space before the initializer's

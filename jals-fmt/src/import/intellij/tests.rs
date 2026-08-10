@@ -388,8 +388,13 @@ fn naming_and_codegen_settings_are_modeled_but_not_projected() {
     assert_eq!(native.codegen.insert_override_annotation, Some(false));
     assert_eq!(native.imports.class_count_to_use_import_on_demand, Some(99));
 
+    // Against the *IntelliJ baseline*, not `Config::default()`: importing an IDEA scheme carries
+    // IDEA's own fixed readings — it writes an HTML list flush, reads a `<table>` as HTML, and
+    // treats an inline `{@… }` as one token — whatever the scheme happens to declare, exactly as
+    // the Eclipse importer carries JDT's. What this test asks is that these four keys move
+    // nothing, which is a claim about them rather than about the vendor.
     let config: Config = native.into();
-    assert_eq!(config, Config::default());
+    assert_eq!(config, IntellijConfig::default().into());
 }
 
 #[test]

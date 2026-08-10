@@ -13,7 +13,7 @@
 //! `PartialInlineability` / `Obs` backtracking), which a config cannot express at all — see
 //! `DESIGN.md` §12.4.
 
-use jals_config::fmt::{Config, InlineAnnotations};
+use jals_config::fmt::{Config, DocumentedMember, InlineAnnotations};
 use serde::Deserialize;
 
 use super::gjf::GoogleJavaFormatConfig;
@@ -75,7 +75,7 @@ impl From<PalantirJavaFormatConfig> for Config {
         //
         // Neither is a break-engine difference, so neither is `DESIGN.md` §18.2's D3.
         config.wrapping.inline_argumentless_annotations = InlineAnnotations::Locals;
-        config.blank_lines.around_documented_member = 0;
+        config.blank_lines.around_documented_member = DocumentedMember::Preserve;
         config
     }
 }

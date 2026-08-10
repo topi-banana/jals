@@ -40,7 +40,13 @@ pub enum WrapPolicy {
 /// field, which is why the rule names a set of declarations rather than being a bool. Neither
 /// Eclipse nor IntelliJ has an equivalent: both decide the direction from the declaration kind
 /// alone.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+///
+/// The `true` / `false` this key was spelled with before it named a set still reads, so a
+/// `jalsfmt.toml` this crate itself generated goes on loading — `true` was google-java-format's
+/// reading, which is [`Declarations`](Self::Declarations). A key whose *value type* changed is
+/// the one migration `#[serde(alias)]` cannot perform, and the failure is not this key going
+/// unread: it is a parse error for the **whole** file, so every other rule in it stops loading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum InlineAnnotations {
     /// None: every leading annotation takes the direction its per-kind `[wrapping]` rule gives it.
@@ -52,6 +58,16 @@ pub enum InlineAnnotations {
     /// Every variable declaration, a field included. google-java-format.
     Declarations,
 }
+
+bool_or_named!(
+    InlineAnnotations,
+    "\"never\", \"locals\", \"declarations\", or the boolean this key was spelled with",
+    InlineAnnotations::Declarations,
+    InlineAnnotations::Never,
+    "never" => InlineAnnotations::Never,
+    "locals" => InlineAnnotations::Locals,
+    "declarations" => InlineAnnotations::Declarations,
+);
 
 /// Where the delimiters of a wrapped, paren- or brace-delimited list are placed.
 ///

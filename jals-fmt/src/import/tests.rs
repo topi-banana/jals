@@ -9,8 +9,8 @@ use alloc::string::String;
 use alloc::vec;
 
 use jals_config::fmt::{
-    BlankLines, Comments, Config, ImportOrder, IndentStyle, InlineAnnotations, Layout, WrapPolicy,
-    Wrapping,
+    BlankLines, Comments, Config, DocumentedMember, ImportOrder, IndentStyle, InlineAnnotations,
+    Layout, WrapPolicy, Wrapping,
 };
 
 use super::eclipse::EclipsePrefs;
@@ -111,7 +111,10 @@ fn palantirs_borrowed_styles_take_google_java_formats_metrics() {
         palantir_google.wrapping.inline_argumentless_annotations,
         InlineAnnotations::Locals,
     );
-    assert_eq!(palantir_google.blank_lines.around_documented_member, 0);
+    assert_eq!(
+        palantir_google.blank_lines.around_documented_member,
+        DocumentedMember::Preserve,
+    );
     assert_eq!(
         Config {
             wrapping: gjf.wrapping,
@@ -124,7 +127,7 @@ fn palantirs_borrowed_styles_take_google_java_formats_metrics() {
                 ..palantir_google.wrapping
             },
             blank_lines: BlankLines {
-                around_documented_member: 1,
+                around_documented_member: DocumentedMember::AtLeast(1),
                 ..palantir_google.blank_lines
             },
             ..gjf

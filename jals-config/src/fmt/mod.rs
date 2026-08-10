@@ -34,6 +34,52 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Deserialize an enum that used to be a `bool`, accepting either spelling.
+///
+/// A rule that grew a third state is a rule whose old spelling is still in every `jalsfmt.toml`
+/// `jals_fmt::generate` has written — and a key whose *type* changed cannot be recovered by
+/// `#[serde(alias)]`, which renames a key and not its value. Without this the whole config file
+/// fails to parse, so every other rule in it stops loading too.
+macro_rules! bool_or_named {
+    ($ty:ident, $expecting:literal, $on:expr, $off:expr, $($name:literal => $variant:expr),+ $(,)?) => {
+        impl<'de> serde::Deserialize<'de> for $ty {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                struct Either;
+
+                impl serde::de::Visitor<'_> for Either {
+                    type Value = $ty;
+
+                    fn expecting(
+                        &self,
+                        f: &mut core::fmt::Formatter<'_>,
+                    ) -> core::fmt::Result {
+                        f.write_str($expecting)
+                    }
+
+                    fn visit_bool<E: serde::de::Error>(self, on: bool) -> Result<Self::Value, E> {
+                        Ok(if on { $on } else { $off })
+                    }
+
+                    fn visit_str<E: serde::de::Error>(self, name: &str) -> Result<Self::Value, E> {
+                        match name {
+                            $($name => Ok($variant),)+
+                            other => Err(<E as serde::de::Error>::invalid_value(
+                                serde::de::Unexpected::Str(other),
+                                &self,
+                            )),
+                        }
+                    }
+                }
+
+                deserializer.deserialize_any(Either)
+            }
+        }
+    };
+}
+
 mod blank_lines;
 mod braces;
 mod comments;
@@ -48,7 +94,7 @@ mod tests;
 
 pub use crate::loader::ConfigError;
 
-pub use blank_lines::BlankLines;
+pub use blank_lines::{BlankLines, DocumentedMember};
 pub use braces::{BraceStyle, Braces, ForceBraces, KeepOnOneLine};
 pub use comments::{Comments, ParagraphTags, TagAlignment};
 pub use imports::{ImportOrder, Imports};

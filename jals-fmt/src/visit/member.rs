@@ -212,15 +212,7 @@ impl Ctx<'_> {
         let in_interface = body
             .parent()
             .is_some_and(|parent| parent.kind() == S::INTERFACE_DECL);
-        // A documented member is separated whatever its kind says — and so is one whose
-        // annotations take lines of their own, which is the other half of google-java-format's
-        // `thisOneGetsBlankLineBefore`: a field under a vertical `@SuppressWarnings("serial")`
-        // reads as its own unit exactly as a documented one does. See
-        // `[blank-lines] around-documented-member`.
-        if self.has_javadoc(member) || self.has_vertical_annotations(member) {
-            return blank.around_documented_member;
-        }
-        match member.kind() {
+        let kind = match member.kind() {
             S::FIELD_DECL => {
                 if in_interface {
                     blank.around_field_in_interface
@@ -242,7 +234,17 @@ impl Ctx<'_> {
             | S::RECORD_DECL
             | S::ANNOTATION_TYPE_DECL => blank.around_type,
             _ => 0,
+        };
+        // A member reading as its own unit — documented, or a field whose annotations took lines
+        // of their own, the two halves of google-java-format's `thisOneGetsBlankLineBefore` —
+        // answers to `around-documented-member` *and* to its kind. Which of the two wins is the
+        // rule's own business: `Inherit` is the kind's, `AtLeast` the wider of the two, and
+        // `Preserve` neither. Returning the value outright instead let the default make
+        // *documenting* a member separate it by **less** than its undocumented neighbour.
+        if self.has_javadoc(member) || self.has_vertical_annotations(member) {
+            return blank.around_documented_member.resolve(kind);
         }
+        kind
     }
 
     /// Whether `node` carries any own-line comment above it.

@@ -34,7 +34,11 @@ pub enum ParagraphTags {
 /// Eclipse spells this as two independent booleans (`align_tags_names_descriptions` and
 /// `align_tags_descriptions_grouped`) whose "both on" combination it resolves in favour of the
 /// first, so the three states it really has are named here as three.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, Default)]
+///
+/// The `true` / `false` the key was spelled with before it named three states still reads, so a
+/// `jalsfmt.toml` this crate itself generated goes on loading: `align-tag-descriptions = true`
+/// was Eclipse's `align_tags_names_descriptions`, which is [`All`](Self::All).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum TagAlignment {
     /// One space between a tag's name — and its argument, where it takes one — and its
@@ -49,6 +53,16 @@ pub enum TagAlignment {
     /// `comment.align_tags_names_descriptions` / IntelliJ `JD_ALIGN_PARAM_COMMENTS`.
     All,
 }
+
+bool_or_named!(
+    TagAlignment,
+    "\"none\", \"grouped\", \"all\", or the boolean `align-tag-descriptions` was spelled with",
+    TagAlignment::All,
+    TagAlignment::None,
+    "none" => TagAlignment::None,
+    "grouped" => TagAlignment::Grouped,
+    "all" => TagAlignment::All,
+);
 
 /// Comment and Javadoc formatting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -102,6 +116,11 @@ pub struct Comments {
     /// `comment.insert_new_line_before_root_tags` / IntelliJ `JD_ADD_BLANK_AFTER_DESCRIPTION`.
     pub blank_line_before_tags: bool,
     /// Align the descriptions of block tags into a column.
+    ///
+    /// `align-tag-descriptions` is the boolean this replaced, kept as an alias: the key was
+    /// deleted rather than renamed, and with no `deny_unknown_fields` a config still spelling it
+    /// would have parsed cleanly and silently switched tag alignment off.
+    #[serde(alias = "align-tag-descriptions")]
     pub tag_alignment: TagAlignment,
     /// Indent a tag description's continuation lines. Eclipse `comment.indent_tag_description` /
     /// IntelliJ `JD_INDENT_ON_CONTINUATION`.
