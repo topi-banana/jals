@@ -7,6 +7,12 @@ use serde::Deserialize;
 
 use super::super::serde_kv::Kv;
 
+/// IDEA's own default for `ENABLE_JAVADOC_FORMATTING`: the Javadoc pass is on in a stock IDE.
+///
+/// Recorded here rather than at the lowering, because what a scheme *omits* is a fact about the
+/// product and belongs beside the field that models it.
+pub(crate) const ENABLE_JAVADOC_FORMATTING_DEFAULT: bool = true;
+
 /// The Javadoc settings of a Java code style.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]

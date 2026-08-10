@@ -13,7 +13,7 @@
 //! `PartialInlineability` / `Obs` backtracking), which a config cannot express at all — see
 //! `DESIGN.md` §12.4.
 
-use jals_config::fmt::Config;
+use jals_config::fmt::{Config, DocumentedMember, InlineAnnotations};
 use serde::Deserialize;
 
 use super::gjf::GoogleJavaFormatConfig;
@@ -55,7 +55,7 @@ pub struct PalantirJavaFormatConfig {
 impl From<PalantirJavaFormatConfig> for Config {
     fn from(native: PalantirJavaFormatConfig) -> Self {
         let (indent_width, continuation_indent, max_width) = native.style.metrics();
-        GoogleJavaFormatConfig::family(
+        let mut config = GoogleJavaFormatConfig::family(
             indent_width,
             continuation_indent,
             max_width,
@@ -63,6 +63,19 @@ impl From<PalantirJavaFormatConfig> for Config {
                 format_javadoc: native.format_javadoc,
                 ..GoogleJavaFormatConfig::default()
             },
-        )
+        );
+        // The two places the fork's *emission* departs from GJF, both visible in its own
+        // regression corpus and in every OpenJDK file:
+        //
+        // - a **field**'s annotations always take their own line, argumentless or not
+        //   (`@java.io.Serial` above `private static final long serialVersionUID`), while a local
+        //   declaration keeps GJF's shape (`@Foo final Object x;`);
+        // - a member carrying Javadoc gets no blank line of its own, so two documented fields
+        //   written adjacent stay adjacent where GJF separates them.
+        //
+        // Neither is a break-engine difference, so neither is `DESIGN.md` §18.2's D3.
+        config.wrapping.inline_argumentless_annotations = InlineAnnotations::Locals;
+        config.blank_lines.around_documented_member = DocumentedMember::Preserve;
+        config
     }
 }

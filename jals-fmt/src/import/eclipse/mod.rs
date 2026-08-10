@@ -32,7 +32,8 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 
 use jals_config::fmt::{
-    BraceStyle, Config, IndentStyle, KeepOnOneLine, ParenPositions, WrapPolicy,
+    BraceStyle, Config, IndentStyle, KeepOnOneLine, ParagraphTags, ParenPositions, TagAlignment,
+    WrapPolicy,
 };
 
 use serde::{Deserialize, Deserializer};
@@ -314,6 +315,13 @@ impl From<EclipseConfig> for Config {
         );
         Lower::set(
             &mut blanks.max_in_declarations,
+            blank_lines.number_of_empty_lines_to_preserve,
+            |n| n,
+        );
+        // JDT has no rule that singles out the gap after a doc comment, so the one preserve count
+        // covers it too.
+        Lower::set(
+            &mut blanks.max_after_doc_comment,
             blank_lines.number_of_empty_lines_to_preserve,
             |n| n,
         );
@@ -959,8 +967,18 @@ impl From<EclipseConfig> for Config {
             comments.comment_count_line_length_from_starting_position,
             |b| b,
         );
+        // One JDT setting, two jals rules: `clear_blank_lines_in_javadoc_comment` governs the
+        // whole comment, and jals splits the description from the footer because
+        // google-java-format keeps one and not the other.
         Lower::set(
             &mut jcomments.preserve_blank_lines,
+            comments
+                .comment_clear_blank_lines_in_javadoc_comment
+                .or(comments.comment_clear_blank_lines),
+            |clear| !clear,
+        );
+        Lower::set(
+            &mut jcomments.blank_lines_between_tags,
             comments
                 .comment_clear_blank_lines_in_javadoc_comment
                 .or(comments.comment_clear_blank_lines),
@@ -971,16 +989,43 @@ impl From<EclipseConfig> for Config {
             comments.comment_insert_new_line_before_root_tags,
             Insert::is_insert,
         );
-        Lower::set(
-            &mut jcomments.align_tag_descriptions,
+        // JDT resolves the two alignment booleans in this order: naming *and* description
+        // alignment wins where it is on, and the grouped one applies otherwise.
+        jcomments.tag_alignment = match (
             comments.comment_align_tags_names_descriptions,
-            |b| b,
-        );
+            comments.comment_align_tags_descriptions_grouped,
+        ) {
+            (Some(true), _) => TagAlignment::All,
+            (_, Some(true)) => TagAlignment::Grouped,
+            (Some(false), _) | (_, Some(false)) => TagAlignment::None,
+            (None, None) => jcomments.tag_alignment,
+        };
         Lower::set(
             &mut jcomments.indent_tag_description,
             comments.comment_indent_tag_description,
             |b| b,
         );
+        Lower::set(
+            &mut jcomments.javadoc_boundaries_on_own_lines,
+            comments.comment_new_lines_at_javadoc_boundaries,
+            |b| b,
+        );
+        Lower::set(
+            &mut jcomments.block_boundaries_on_own_lines,
+            comments.comment_new_lines_at_block_boundaries,
+            |b| b,
+        );
+        // JDT has no option for either of these — both are `CommentsPreparator`'s own reading of
+        // Javadoc. `<p>` is a block-level HTML element, so it always takes a line of its own and
+        // is never invented at a blank line; an inline `{@… }` is one token, so a break falls
+        // inside one only where the tag cannot fit a line at all.
+        jcomments.paragraph_tags = ParagraphTags::Authored;
+        jcomments.break_inside_inline_tags = false;
+        // JDT writes an HTML list flush with the rest of the comment and asks for no blank line
+        // above it; the gap and the two columns per level are `JavadocWriter`'s alone.
+        jcomments.set_off_html_lists = false;
+        // A `<table>` is HTML to JDT, not a preformatted region.
+        jcomments.tables_are_preformatted = false;
 
         config
     }

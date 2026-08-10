@@ -54,9 +54,14 @@ tabular-array-initializers = true
 # annotation with arguments puts the whole run onto its own lines.
 parameter-annotations = "always-per-item"
 variable-annotations = "always-per-item"
-inline-argumentless-annotations = true
+inline-argumentless-annotations = "declarations"
 # `StringWrapper`: re-wrap a string concatenation that overflows the column limit.
 reflow-long-strings = true
+
+[blank-lines]
+# `thisOneGetsBlankLineBefore`: a member carrying Javadoc — and a field whose annotations went
+# vertical — is separated from its neighbours whatever its kind says.
+around-documented-member = 1
 
 [braces]
 # GJF collapses an empty body to `{}` and never joins a non-empty one, and `visitStatement`
@@ -79,6 +84,10 @@ format-javadoc = true
 format-header = true
 width = 100
 blank-line-before-tags = true
+# `JavadocFormatter.formatJavadoc` catches its own lexer's `LexException` and hands the comment
+# back unchanged, so a Javadoc whose `<pre>`, `<code>`, `<table>` or `{@…}` never closes is one
+# google-java-format does not touch at all.
+reflow-unclosed-html = false
 # Normalize a parameter-name block comment (`/*a=*/` -> `/* a= */`) and keep a block comment
 # written before a token on the same line hugging that token.
 normalize-parameter-comments = true

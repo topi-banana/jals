@@ -25,6 +25,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use jals_config::fmt::{ParagraphTags, TagAlignment};
 use jals_syntax::SyntaxKind;
 
 use crate::ir::Width;
@@ -76,8 +77,14 @@ enum Block {
         /// The description, as tokens to refill.
         words: Vec<Word>,
     },
-    /// A blank line the author wrote.
-    Blank,
+    /// A blank line: one the author wrote, or one a tag asked for.
+    ///
+    /// `requested` is `JavadocWriter.requestBlankLine` — a gap a `<p>`, a heading, a blockquote,
+    /// a list close, or a preformatted region asked for on its own account. The distinction
+    /// survives into the footer, where a blank line *between* two tags is dropped
+    /// (`writeFooterJavadocTagStart` asks only for a newline) while one a region requested is
+    /// still written.
+    Blank { requested: bool },
 }
 
 /// Reflows comment bodies.
@@ -94,6 +101,7 @@ impl CommentFormatter {
         indent: usize,
         column: usize,
         is_header: bool,
+        own_line: bool,
         style: &Style,
     ) -> String {
         let cfg = style.comments();
@@ -108,7 +116,7 @@ impl CommentFormatter {
         }
         match kind {
             SyntaxKind::LINE_COMMENT => Self::render_line(text, indent, style),
-            _ => Self::render_block(text, kind, indent, style),
+            _ => Self::render_block(text, kind, indent, column, own_line, style),
         }
     }
 
@@ -223,7 +231,14 @@ impl CommentFormatter {
     }
 
     /// Reflow a `/* … */` or `/** … */` comment.
-    fn render_block(text: &str, kind: SyntaxKind, indent: usize, style: &Style) -> String {
+    fn render_block(
+        text: &str,
+        kind: SyntaxKind,
+        indent: usize,
+        column: usize,
+        own_line: bool,
+        style: &Style,
+    ) -> String {
         let cfg = style.comments();
         let doc = kind == SyntaxKind::DOC_COMMENT;
         let opener = if doc { "/**" } else { "/*" };
@@ -231,18 +246,28 @@ impl CommentFormatter {
         let Some(body) = Self::body(text, doc) else {
             return text.into();
         };
-        let blocks = Self::parse(&body, style);
+        if doc && !cfg.reflow_unclosed_html && !Self::lexes_cleanly(&body) {
+            return Self::shift(text, indent, column);
+        }
+        let mut blocks = Self::parse(&body, style);
         if blocks.is_empty() {
             return if doc { "/** */".into() } else { "/* */".into() };
         }
 
         // A comment that is one short paragraph collapses to a single line, which is what
-        // google-java-format does and what most one-line Javadoc already looks like.
-        if let [
-            Block::Prose {
-                words, first: 0, ..
-            },
-        ] = blocks.as_slice()
+        // google-java-format does and what most one-line Javadoc already looks like. Eclipse's
+        // `new_lines_at_*_boundaries` asks for the delimiters to keep lines of their own instead.
+        let collapses = if doc {
+            !cfg.javadoc_boundaries_on_own_lines
+        } else {
+            !cfg.block_boundaries_on_own_lines || !own_line
+        };
+        if collapses
+            && let [
+                Block::Prose {
+                    words, first: 0, ..
+                },
+            ] = blocks.as_slice()
         {
             // `makeSingleLineIfPossible` collapses a comment that renders as *one* content line.
             // A `<br>` ends its line however wide the comment is, so a paragraph holding one is
@@ -262,48 +287,90 @@ impl CommentFormatter {
             .saturating_sub(indent + prefix_width)
             .max(16);
 
-        // `align-tag-descriptions` lines every description up under one column, so the width is
-        // a property of the whole comment rather than of each tag.
-        let aligned = cfg.align_tag_descriptions.then(|| {
-            blocks
-                .iter()
-                .filter_map(|block| match block {
-                    Block::Tag { name, argument, .. } => Some(
-                        Width::utf16(name) + argument.as_deref().map_or(0, |a| Width::utf16(a) + 1),
-                    ),
-                    _ => None,
-                })
-                .max()
-                .unwrap_or(0)
-        });
+        if !cfg.break_inside_inline_tags {
+            for block in &mut blocks {
+                match block {
+                    Block::Prose { words, .. } | Block::Tag { words, .. } => {
+                        Self::join_inline_tags(words, budget);
+                    }
+                    Block::Blank { .. } | Block::Verbatim { .. } => {}
+                }
+            }
+        }
+
+        // `tag-alignment` lines descriptions up under a shared column, so the width belongs to a
+        // run of tags rather than to any one of them: `all` measures the whole comment, `grouped`
+        // each run of same-named tags. Resolved once per block so `push_tag` stays local.
+        let aligned = Self::tag_columns(&blocks, cfg.tag_alignment);
 
         let mut out = String::from(opener);
         let mut seen_tag = false;
         let mut previous: Option<&Block> = None;
-        for block in &blocks {
+        // Whether the line just written is a blank one. Read rather than `previous` being a
+        // `Blank`, because a `Blank` this run **drops** separates nothing: the first tag then
+        // withheld its own separator on the strength of a line that was never emitted, and the
+        // next run — where the block is gone too — added it, which is a two-run cycle.
+        let mut blank_written = false;
+        // The column the description of the tag currently open is written at, so the blocks that
+        // continue it line up under it.
+        let mut tag_pad = 0usize;
+        for (at, block) in blocks.iter().enumerate() {
             match block {
                 // Once the block tags start there are no more blank lines: only the *first* one
                 // is separated from the description, and `JavadocWriter` requests a plain newline
-                // between the rest.
-                Block::Blank => {
-                    if cfg.preserve_blank_lines && !seen_tag {
+                // between the rest — unless `blank-lines-between-tags` keeps the author's.
+                Block::Blank { requested } => {
+                    // The exception is the blank a preformatted region asks for *after* itself:
+                    // it is the region's request, not a gap between two tags, so it survives the
+                    // footer's solid run. Reading it off the preceding block rather than off the
+                    // author's line is also what keeps the comment a fixed point — on the second
+                    // run the same blank arrives as a `Blank` here instead of being inserted
+                    // below, and dropping it then would shorten the comment by a line per run.
+                    // Inside the footer `flushWhitespace` downgrades a requested blank line to a
+                    // newline while `continuingFooterTag` holds — which is every position but one.
+                    // `writeFooterJavadocTagStart` clears the flag *before* writing its token, so
+                    // a blank the previous token requested survives exactly when the next thing is
+                    // another tag: `</pre>` then `@throws` is separated, `<p>` in the middle of a
+                    // tag's description is not.
+                    let before_tag = matches!(blocks.get(at + 1), Some(Block::Tag { .. }));
+                    let keep = if seen_tag {
+                        cfg.blank_lines_between_tags || (*requested && before_tag)
+                    } else {
+                        cfg.preserve_blank_lines || *requested
+                    };
+                    if keep {
                         Self::push_line(&mut out, "", cfg.leading_asterisks);
                     }
+                    blank_written = keep;
                 }
+                // A block after a tag continues that tag's description, so under alignment it
+                // starts at the description's column rather than at the comment's margin.
                 Block::Prose { words, first, rest } => {
+                    // `tag_pad` is the whole continuation column, not an addition to one: `parse`
+                    // deliberately folds none of it into a block, so the description's own
+                    // continuation and the blocks that continue it read the column from
+                    // [`Self::tag_continuation`] and cannot come apart.
+                    blank_written = false;
+                    let (first, rest) = (*first + tag_pad, *rest + tag_pad);
                     let lines = Self::fill_two(
                         words,
-                        budget.saturating_sub(*first).max(16),
-                        budget.saturating_sub(*rest).max(16),
+                        budget.saturating_sub(first).max(16),
+                        budget.saturating_sub(rest).max(16),
                     );
                     for (nth, line) in lines.iter().enumerate() {
-                        let pad = if nth == 0 { *first } else { *rest };
+                        let pad = if nth == 0 { first } else { rest };
                         Self::push_indented(&mut out, line, pad, cfg.leading_asterisks);
                     }
                 }
                 Block::Verbatim { lines, first } => {
+                    blank_written = false;
+                    // The paragraph indent belongs to the opening tag alone — the region's
+                    // content keeps its own — but `tag_pad` is a *margin*: every line of a tag's
+                    // description is written against it, so the region moves as a unit and its
+                    // internal shape survives. Padding only the opening line threw a `<pre>` a
+                    // whole description column away from its own body.
                     for (nth, line) in lines.iter().enumerate() {
-                        let pad = if nth == 0 { *first } else { 0 };
+                        let pad = if nth == 0 { *first + tag_pad } else { 0 };
                         Self::push_indented(&mut out, line, pad, cfg.leading_asterisks);
                     }
                 }
@@ -315,21 +382,28 @@ impl CommentFormatter {
                     // The blank line separates the tags from a *description*: a comment that is
                     // nothing but tags opens with none. And a blank line the author already
                     // wrote satisfies the rule, so asking for a second would open with two.
+                    //
+                    // A tag that follows a *requested* blank is already separated: the region
+                    // or the `<p>` before it asked for the gap, and that request outlives the
+                    // token that made it. Only the first tag's own separator is added here.
                     if !seen_tag
                         && cfg.blank_line_before_tags
                         && previous.is_some()
-                        && !matches!(previous, Some(Block::Blank))
+                        && !blank_written
                     {
                         Self::push_line(&mut out, "", cfg.leading_asterisks);
                     }
+                    blank_written = false;
                     seen_tag = true;
+                    let column = aligned.get(at).copied().flatten();
+                    tag_pad = Self::tag_continuation(column, style);
                     Self::push_tag(
                         &mut out,
                         name,
                         argument.as_deref(),
                         words,
                         budget,
-                        aligned,
+                        column,
                         style,
                     );
                 }
@@ -491,6 +565,12 @@ impl CommentFormatter {
         if lower.contains("href=") {
             return true;
         }
+        // A heading opens one too: `HeaderOpenTag`, `ListItemOpenTag` and `ParagraphOpenTag` are
+        // the three `StartOfLineToken`s, and the writer withholds a space after one of those
+        // however the author spaced it — `<h2> Thread safety` is written `<h2>Thread safety`.
+        if lower.starts_with("<h") && lower[2..].starts_with(|c: char| ('1'..='6').contains(&c)) {
+            return true;
+        }
         ["<li", "<dt", "<dd", "<a "]
             .iter()
             .any(|tag| lower.starts_with(tag))
@@ -508,6 +588,80 @@ impl CommentFormatter {
         }
         padded.push_str(text);
         Self::push_line(out, &padded, asterisks);
+    }
+
+    /// The description column each block in `blocks` writes its description at, by index.
+    ///
+    /// `None` at an index means "no alignment here" — either the block is not a tag, or the mode
+    /// asks for none. A tag's own head width is `@name` plus the argument it takes, so a run whose
+    /// widest member is `@throws IllegalArgumentException` pads every sibling out to that.
+    fn tag_columns(blocks: &[Block], mode: TagAlignment) -> Vec<Option<usize>> {
+        let mut columns = alloc::vec![None; blocks.len()];
+        if mode == TagAlignment::None {
+            return columns;
+        }
+        let head_of = |block: &Block| match block {
+            Block::Tag { name, argument, .. } => Some((
+                name.clone(),
+                Width::utf16(name) + argument.as_deref().map_or(0, |a| Width::utf16(a) + 1),
+            )),
+            _ => None,
+        };
+        if mode == TagAlignment::All {
+            let widest = blocks.iter().filter_map(&head_of).map(|(_, w)| w).max();
+            for (slot, block) in columns.iter_mut().zip(blocks) {
+                if matches!(block, Block::Tag { .. }) {
+                    *slot = widest;
+                }
+            }
+            return columns;
+        }
+        // Grouped: a run is the consecutive tags sharing one name. A blank line does not end one —
+        // JDT groups by the tag name, and `blank-lines-between-tags` may well be keeping blanks
+        // inside the footer.
+        let mut run: Vec<usize> = Vec::new();
+        let mut run_name: Option<String> = None;
+        let mut widest = 0usize;
+        let close = |run: &mut Vec<usize>, widest: &mut usize, columns: &mut Vec<Option<usize>>| {
+            for at in run.drain(..) {
+                columns[at] = Some(*widest);
+            }
+            *widest = 0;
+        };
+        for (at, block) in blocks.iter().enumerate() {
+            let Some((name, width)) = head_of(block) else {
+                continue;
+            };
+            if run_name.as_deref() != Some(name.as_str()) {
+                close(&mut run, &mut widest, &mut columns);
+                run_name = Some(name);
+            }
+            widest = widest.max(width);
+            run.push(at);
+        }
+        close(&mut run, &mut widest, &mut columns);
+        columns
+    }
+
+    /// The column a block tag's description continues at.
+    ///
+    /// A continuation line is indented by one continuation step, not aligned under the
+    /// description: google-java-format's `innerIndent()` adds a flat `+4` while a footer tag is
+    /// being continued. Under `tag-alignment` the description has a column of its own and the
+    /// continuation starts there instead — a column the description is *not* written at would not
+    /// be an alignment.
+    ///
+    /// One function because it answers for two writers: [`Self::push_tag`]'s own wrapped lines,
+    /// and the `<p>`, heading or `<pre>` that continues the same description from
+    /// [`Self::render_block`]. Computed twice, they disagreed — the description sat at the
+    /// aligned column while everything continuing it sat a continuation step beyond, because the
+    /// second copy *added* what the first had chosen.
+    const fn tag_continuation(aligned: Option<usize>, style: &Style) -> usize {
+        match aligned {
+            Some(column) => column + 1,
+            None if style.comments().indent_tag_description => style.continuation_cols,
+            None => 0,
+        }
     }
 
     /// Emit a block tag and its refilled description.
@@ -533,15 +687,7 @@ impl CommentFormatter {
             }
         }
 
-        // A continuation line is indented by one continuation step, not aligned under the
-        // description: google-java-format's `innerIndent()` adds a flat `+4` while a footer tag
-        // is being continued. Lining descriptions up under a shared column is
-        // `align-tag-descriptions`, which is a separate rule.
-        let continuation = if cfg.indent_tag_description {
-            style.continuation_cols
-        } else {
-            0
-        };
+        let continuation = Self::tag_continuation(aligned, style);
         let first_budget = budget.saturating_sub(Width::utf16(&head) + 1).max(8);
         let rest_budget = budget.saturating_sub(continuation).max(8);
 
@@ -597,8 +743,8 @@ impl CommentFormatter {
         let cfg = style.comments();
         let mut blocks: Vec<Block> = Vec::new();
         let mut prose: Vec<Word> = Vec::new();
-        // `Some((lines, snippet))` — the region being collected verbatim, and whether it is a
-        // `{@snippet …}` (which ends at a `}` rather than at a closing HTML tag).
+        // `Some((lines, braced))` — the region being collected verbatim, and whether it ends at
+        // the `}` that balances its `{` rather than at a closing HTML tag.
         let mut fence: Option<(Vec<String>, bool)> = None;
         // A `<p>` waiting for the word it introduces, so the two are refilled as one unit.
         let mut pending: Option<String> = None;
@@ -609,16 +755,82 @@ impl CommentFormatter {
         let (mut first, mut rest) = (0usize, 0usize);
         // The indent the region currently being collected opens at.
         let mut fence_indent = 0usize;
-        // The brace depth of the `{@snippet …}` being collected.
-        let mut snippet_depth = 0i32;
-        // Everything after a block tag belongs to that tag's description, so it sits at the
-        // description's continuation indent — headings, paragraphs and lists included.
-        let mut tag_indent = 0usize;
+        // The brace depth of the brace-terminated region being collected.
+        let mut brace_depth = 0i32;
+        // Whether a `<table>` is a preformatted region rather than ordinary HTML.
+        let tables = cfg.tables_are_preformatted;
 
-        for raw in body.split('\n') {
+        // A worklist rather than an iterator over the lines. A line that glues two block-level
+        // tags together — `<blockquote><pre>`, `</pre></blockquote>` — is two tokens to
+        // `JavadocLexer` and two lines to its writer, and the tail has to re-enter the same
+        // decisions its head just went through, fence state included.
+        let mut queue: Vec<String> = body.split('\n').map(Into::into).collect();
+        let mut at = 0usize;
+        while at < queue.len() {
+            let raw = queue[at].clone();
+            let raw = raw.as_str();
+            at += 1;
             let mut line = raw.trim();
             let stripped;
-            if cfg.format_html && Self::has_paragraph_close(line) {
+
+            if let Some((lines, braced)) = &mut fence {
+                // A brace-terminated region ends at the `}` that balances its `{`, wherever on
+                // the line that falls — `SnippetEnd` is a token, not a line.
+                if *braced {
+                    brace_depth += Self::brace_delta(line);
+                }
+                // Preformatted content keeps its own indentation — that is what makes it
+                // preformatted. Only the single space that conventionally follows the `*` is
+                // dropped, and `JavadocWriter` writes these lines with no auto-indent at all.
+                let mut verbatim = raw.strip_prefix(' ').unwrap_or(raw).trim_end();
+                let closed = if *braced {
+                    brace_depth <= 0
+                } else {
+                    Self::closes_fence(line, tables)
+                };
+                // What follows the closing tag is outside the region: `</pre></blockquote>` ends
+                // the preformatted text at `</pre>` and the `</blockquote>` is a token of its own.
+                let tail = if closed && !*braced {
+                    Self::split_after_fence_close(verbatim, tables).map_or("", |(head, rest)| {
+                        verbatim = head;
+                        rest
+                    })
+                } else {
+                    ""
+                };
+                lines.push(verbatim.into());
+                if closed {
+                    let mut region = core::mem::take(lines);
+                    Self::normalize_pre_code_block(&mut region);
+                    if cfg.format_source_in_comments {
+                        Self::reindent_code_region(&mut region, style);
+                    }
+                    blocks.push(Block::Verbatim {
+                        lines: region,
+                        first: fence_indent,
+                    });
+                    // `writePreClose` and `writeSnippetEnd` ask for a blank line after the region
+                    // they close, the mirror of the one `writePreOpen` asks for in front of it —
+                    // and the same list rule silences it, since `flushWhitespace` writes no blank
+                    // line while a list is open.
+                    if depth == 0 {
+                        Self::request_blank(&mut blocks);
+                    }
+                    fence = None;
+                    if !tail.is_empty() {
+                        queue.insert(at, tail.into());
+                    }
+                }
+                continue;
+            }
+            // Asked *after* the fence: inside a preformatted region a `</p>` on a line of its own
+            // is content, and dropping it emptied the line and skipped it out of the region
+            // entirely — a deletion the token fail-safe cannot see, since a comment's interior
+            // holds no significant tokens.
+            if cfg.format_html
+                && cfg.paragraph_tags == ParagraphTags::Leading
+                && Self::has_paragraph_close(line)
+            {
                 // google-java-format drops `</p>` outright (`case ParagraphCloseTag -> {}`).
                 stripped = Self::drop_paragraph_close(line);
                 line = stripped.trim();
@@ -626,41 +838,27 @@ impl CommentFormatter {
                     continue;
                 }
             }
-
-            if let Some((lines, snippet)) = &mut fence {
-                // A `{@snippet …}` ends at the `}` that balances its `{`, wherever on the line
-                // that falls — `SnippetEnd` is a token, not a line.
-                if *snippet {
-                    snippet_depth += Self::brace_delta(line);
-                }
-                // Preformatted content keeps its own indentation — that is what makes it
-                // preformatted. Only the single space that conventionally follows the `*` is
-                // dropped, and `JavadocWriter` writes these lines with no auto-indent at all.
-                let verbatim = raw.strip_prefix(' ').unwrap_or(raw).trim_end();
-                lines.push(verbatim.into());
-                let closed = if *snippet {
-                    snippet_depth <= 0
-                } else {
-                    Self::closes_fence(line)
-                };
-                if closed {
-                    let mut region = core::mem::take(lines);
-                    Self::dedent_code_region(&mut region);
-                    blocks.push(Block::Verbatim {
-                        lines: region,
-                        first: fence_indent,
-                    });
-                    fence = None;
-                }
-                continue;
+            // Each of these tags asks for whitespace on both sides, so a line that glues one to
+            // what follows it is two lines: `<blockquote><pre>` opens a quote *and* a
+            // preformatted region. The tail re-enters the loop rather than being handled here —
+            // it may open a fence, be a heading, or itself glue another tag on.
+            if cfg.format_html
+                && let Some((tag, tail)) = Self::split_block_tag(line)
+            {
+                queue.insert(at, tail.into());
+                line = tag;
             }
-            if !cfg.format_source_in_comments && Self::opens_fence(line) {
+            if Self::opens_fence(line, tables) {
+                // The `<p>` waiting for a word will not get one: a preformatted region is a
+                // token to the lexer, not a literal, so the tag stays where the author put it
+                // rather than travelling past the region to the prose after it.
+                Self::release_pending(&mut pending, &mut prose);
                 // A `<pre>…</pre>` written inside a sentence is an *element* of that sentence,
                 // not a line of its own: `writePreOpen` asks for a blank line around the region
                 // and leaves the prose on either side to reflow.
                 let lower = line.to_ascii_lowercase();
                 let mut trailing = "";
-                let split = Self::self_closing_fence(line)
+                let split = Self::self_closing_fence(line, tables)
                     && lower
                         .find("<pre>")
                         .zip(lower.rfind("</pre>"))
@@ -681,18 +879,16 @@ impl CommentFormatter {
                 Self::flush(&mut prose, &mut blocks, first, rest);
                 // `writeSnippetBegin` and `writePreOpen` each request a blank line before the
                 // region they open — but not inside a list, which holds none.
-                if depth == 0 && !matches!(blocks.last(), Some(Block::Blank) | None) {
-                    blocks.push(Block::Blank);
+                if depth == 0 {
+                    Self::request_blank(&mut blocks);
                 }
-                // The opening tag belongs to whatever paragraph it interrupts: a tag's
-                // description continues at its continuation indent, a list item at the item's.
-                fence_indent = if matches!(blocks.last(), Some(Block::Tag { .. })) {
-                    style.continuation_cols
-                } else {
-                    rest
-                };
+                // The opening tag belongs to whatever paragraph it interrupts — a list item's
+                // continuation, say. A tag's description is *not* a case of that: its column is
+                // the whole region's margin, which `render_block` adds from
+                // [`Self::tag_continuation`].
+                fence_indent = rest;
                 let lines = alloc::vec![String::from(line)];
-                if Self::self_closing_fence(line) {
+                if Self::self_closing_fence(line, tables) {
                     blocks.push(Block::Verbatim {
                         lines,
                         first: fence_indent,
@@ -700,58 +896,111 @@ impl CommentFormatter {
                     // `writePreClose` asks for a blank line after the region too, and whatever
                     // followed it on the line goes on reflowing after that.
                     if depth == 0 && split {
-                        blocks.push(Block::Blank);
+                        Self::request_blank(&mut blocks);
                     }
                     if !trailing.is_empty() {
                         Self::tokens_of(trailing, &mut prose);
                     }
                 } else {
-                    let snippet = line.contains("{@snippet");
-                    if snippet {
-                        snippet_depth = Self::brace_delta(line);
+                    let braced = Self::brace_fence(line);
+                    if braced {
+                        brace_depth = Self::brace_delta(line);
                     }
-                    fence = Some((lines, snippet));
+                    fence = Some((lines, braced));
                 }
                 continue;
+            }
+            // `writeHtmlComment` asks for a newline on either side, so an HTML comment stands on
+            // a line of its own however the author wove it into a sentence. It is asked after
+            // the fence, because inside `<pre>` the lexer reads one as literal text.
+            //
+            // The line it takes is also what keeps `/** {@inheritDoc} <!--workaround--> */` a
+            // three-line comment: `makeSingleLineIfPossible` collapses a Javadoc that renders as
+            // *one* content line, and this one renders as two.
+            let after_comment;
+            if cfg.format_html
+                && let Some((before, comment, after)) = Self::split_html_comment(line)
+            {
+                if !before.is_empty() {
+                    Self::tokens_of(before, &mut prose);
+                }
+                Self::flush(&mut prose, &mut blocks, first, rest);
+                blocks.push(Block::Prose {
+                    // One token, not a refillable run: the comment's own spaces are inside it.
+                    words: alloc::vec![Word {
+                        text: comment.into(),
+                        space: false,
+                    }],
+                    first,
+                    rest,
+                });
+                after_comment = String::from(after);
+                line = &after_comment;
+                if line.is_empty() {
+                    continue;
+                }
             }
             if line.is_empty() {
                 Self::flush(&mut prose, &mut blocks, first, rest);
                 // A run of blank lines is one paragraph break: `JavadocWriter.requestBlankLine`
-                // sets a flag, so asking twice still yields one. And the footer section has no
-                // blank lines at all, so one written inside it is not a break in the text either
-                // — dropping it here is what keeps a tag's description continuing across it.
-                // A list has no blank lines in it: `writeListItemOpen` requests a newline, not a
-                // blank one, and the footer section has none either.
-                if depth == 0 && !matches!(blocks.last(), Some(Block::Blank | Block::Tag { .. })) {
-                    blocks.push(Block::Blank);
+                // sets a flag, so asking twice still yields one. A list has no blank lines in it
+                // either: `writeListItemOpen` requests a newline, not a blank one.
+                // Inside the footer the blank is kept only under `blank-lines-between-tags`;
+                // google-java-format writes the footer as a solid run, which is also what keeps
+                // a tag's description continuing across a blank line the author left in it.
+                let footer = matches!(blocks.last(), Some(Block::Tag { .. }));
+                if depth == 0
+                    && !matches!(blocks.last(), Some(Block::Blank { .. }))
+                    && (!footer || cfg.blank_lines_between_tags)
+                {
+                    blocks.push(Block::Blank { requested: false });
                 }
                 continue;
             }
             if let Some(tag) = Self::block_tag(line) {
+                // A `<p>` waiting for the word it introduces, with a footer tag arriving instead:
+                // `writeParagraphOpen` already wrote the token, so it keeps a line of its own
+                // rather than travelling into the tag's description.
+                Self::release_pending(&mut pending, &mut prose);
                 Self::flush(&mut prose, &mut blocks, first, rest);
                 blocks.push(tag);
-                if cfg.indent_tag_description {
-                    tag_indent = style.continuation_cols;
-                }
-                first = tag_indent;
-                rest = tag_indent;
+                // Everything after a block tag belongs to that tag's description and is written
+                // at the description's own continuation column — which `render_block` supplies
+                // from [`Self::tag_continuation`], so it is not folded in here as well.
+                first = 0;
+                rest = 0;
                 continue;
             }
             // `<p>` opens a paragraph: a blank line before it, and the tag glued to the word it
             // introduces (`<p>This method …`). An opening `<p>` before any prose is dropped, as
             // `JavadocWriter.writeParagraphOpen` does when nothing significant has been written.
+            // The other two modes leave the tag in the prose for [`Self::split_paragraph_tags`],
+            // which gives it a line of its own wherever on a line the author wrote it.
             if cfg.format_html
+                && cfg.paragraph_tags == ParagraphTags::Leading
                 && let Some(after) = Self::paragraph_open(line)
             {
                 Self::flush(&mut prose, &mut blocks, first, rest);
-                // "Nothing significant written yet" is what makes an opening `<p>` disappear, and
-                // a run of blank lines is not significant.
-                if blocks.iter().any(|block| !matches!(block, Block::Blank)) {
-                    // A blank line the author already wrote *is* the paragraph break.
-                    if !matches!(blocks.last(), Some(Block::Blank)) {
-                        blocks.push(Block::Blank);
+                // "Nothing significant written yet" is what makes an opening `<p>` disappear,
+                // and a run of blank lines is not significant.
+                if blocks
+                    .iter()
+                    .any(|block| !matches!(block, Block::Blank { .. }))
+                {
+                    // A blank line the author already wrote *is* the paragraph break — and
+                    // inside a list there is none at all, because `flushWhitespace` downgrades
+                    // the request to a newline while one is open. A `<p>` continuing an `<li>`
+                    // therefore opens the next line, not the line after a gap.
+                    if depth == 0 {
+                        Self::request_blank(&mut blocks);
                     }
-                    pending = Some("<p>".into());
+                    // Two `<p>` tags in a row: `writeParagraphOpen` writes every token it is
+                    // handed, so the one already waiting takes a line of its own rather than
+                    // being overwritten by the one that arrived — an assignment here deleted a
+                    // tag the author wrote.
+                    if pending.replace("<p>".into()).is_some() {
+                        blocks.push(Self::paragraph_line(first));
+                    }
                 }
                 line = after;
                 if line.is_empty() {
@@ -763,50 +1012,73 @@ impl CommentFormatter {
             // A blockquote tag stands alone between blank lines
             // (`writeBlockquoteOpenOrClose`).
             if cfg.format_html && Self::is_blockquote(line) {
+                Self::release_pending(&mut pending, &mut prose);
                 Self::flush(&mut prose, &mut blocks, first, rest);
-                if !matches!(blocks.last(), Some(Block::Blank) | None) {
-                    blocks.push(Block::Blank);
-                }
+                Self::request_blank(&mut blocks);
                 blocks.push(Block::Prose {
                     words: {
                         let mut tag = Vec::new();
                         Self::tokens_of(line, &mut tag);
                         tag
                     },
-                    first: tag_indent,
-                    rest: tag_indent,
+                    first: 0,
+                    rest: 0,
                 });
-                blocks.push(Block::Blank);
+                Self::request_blank(&mut blocks);
                 continue;
             }
-            if cfg.format_html && Self::is_html_block(line) {
+            // `writeListClose` asks for a newline before the tag and a blank line *after* it, so
+            // the prose that follows a list opens a paragraph rather than continuing the line the
+            // list closed on: `</OL> Note that …` is two paragraphs, not one sentence.
+            if cfg.format_html && cfg.set_off_html_lists && Self::closes_list(line) {
+                Self::release_pending(&mut pending, &mut prose);
+                Self::flush(&mut prose, &mut blocks, first, rest);
+                let (list_first, list_rest) = Self::list_indents(depth, line);
+                depth = Self::list_depth(depth, line);
+                blocks.push(Block::Prose {
+                    words: {
+                        let mut tag = Vec::new();
+                        Self::tokens_of(line, &mut tag);
+                        tag
+                    },
+                    first: list_first,
+                    rest: list_rest,
+                });
+                // Inside an outer list the blank is dropped again — `flushWhitespace` downgrades
+                // one to a newline while a list is still open — so only the outermost close sets
+                // the paragraph off.
+                if depth == 0 {
+                    Self::request_blank(&mut blocks);
+                }
+                first = 0;
+                rest = 0;
+                continue;
+            }
+            if cfg.format_html && Self::is_html_block(line, tables) {
                 Self::flush(&mut prose, &mut blocks, first, rest);
                 // `writeListOpen` requests a blank line before a classic-Javadoc list — but a
                 // list is a *block*, and `requestBlankLine` is ignored inside one, so a nested
                 // list continues its item rather than starting a paragraph.
-                if depth == 0
-                    && Self::opens_list(line)
-                    && !matches!(blocks.last(), Some(Block::Blank) | None)
-                {
-                    blocks.push(Block::Blank);
+                if cfg.set_off_html_lists && depth == 0 && Self::opens_list(line) {
+                    Self::request_blank(&mut blocks);
                 }
             }
             // A heading stands alone between blank lines, and what follows it starts a paragraph
             // of its own rather than continuing the heading's line.
             if cfg.format_html && Self::is_heading(line) {
-                if !matches!(blocks.last(), Some(Block::Blank) | None) {
-                    blocks.push(Block::Blank);
-                }
+                Self::release_pending(&mut pending, &mut prose);
+                Self::flush(&mut prose, &mut blocks, first, rest);
+                Self::request_blank(&mut blocks);
                 blocks.push(Block::Prose {
                     words: {
                         let mut heading = Vec::new();
                         Self::tokens_of(line, &mut heading);
                         heading
                     },
-                    first: tag_indent,
-                    rest: tag_indent,
+                    first: 0,
+                    rest: 0,
                 });
-                blocks.push(Block::Blank);
+                Self::request_blank(&mut blocks);
                 continue;
             }
             if cfg.format_html {
@@ -816,9 +1088,13 @@ impl CommentFormatter {
                 // They are read *before* this line's own tags, so a line that opens a list is
                 // still at the enclosing level.
                 if prose.is_empty() {
-                    let (list_first, list_rest) = Self::list_indents(depth, line);
-                    first = list_first + tag_indent;
-                    rest = list_rest + tag_indent;
+                    let (list_first, list_rest) = if cfg.set_off_html_lists {
+                        Self::list_indents(depth, line)
+                    } else {
+                        (0, 0)
+                    };
+                    first = list_first;
+                    rest = list_rest;
                 }
                 depth = Self::list_depth(depth, line);
             }
@@ -842,9 +1118,7 @@ impl CommentFormatter {
                 Self::tokenize(run, space, &mut prose);
             }
         }
-        if let Some(glued) = pending.take() {
-            Self::tokenize(&glued, true, &mut prose);
-        }
+        Self::release_pending(&mut pending, &mut prose);
         if let Some((mut lines, _)) = fence {
             // The region never closed — an unbalanced `{@code`, a `<pre>` with no `</pre>`. Its
             // trailing blank lines are the gap above `*/`, not content, and keeping them would
@@ -860,45 +1134,170 @@ impl CommentFormatter {
         Self::flush(&mut prose, &mut blocks, first, rest);
 
         // Trailing blank lines are layout, not content.
-        while matches!(blocks.last(), Some(Block::Blank)) {
+        while matches!(blocks.last(), Some(Block::Blank { .. })) {
             blocks.pop();
         }
-        while matches!(blocks.first(), Some(Block::Blank)) {
+        while matches!(blocks.first(), Some(Block::Blank { .. })) {
             blocks.remove(0);
         }
-        if cfg.format_html {
-            Self::infer_paragraph_tags(&mut blocks);
+        if cfg.format_html && cfg.paragraph_tags != ParagraphTags::Leading {
+            Self::split_paragraph_tags(&mut blocks);
+        }
+        if cfg.format_html && cfg.paragraph_tags != ParagraphTags::Authored {
+            Self::infer_paragraph_tags(&mut blocks, cfg.paragraph_tags == ParagraphTags::OwnLine);
         }
         blocks
     }
 
     /// Whether a block ends with a tag that is not a literal to google-java-format's lexer.
     ///
-    /// `inferParagraphTags` inserts a `<p>` only *between two literals*. A heading's, a
-    /// blockquote's or a list's close tag is its own token, so the paragraph after one opens
-    /// without a `<p>`.
+    /// `inferParagraphTags` inserts a `<p>` only *between two literals*. A heading, a blockquote,
+    /// a list or a preformatted region is its own token at **either** end, so the paragraph after
+    /// one opens without a `<p>` — `<blockquote>` followed by a blank line and a `{@code …}` is
+    /// the quote's own first paragraph, not a new one.
     fn ends_block_tag(block: &Block) -> bool {
-        const TAGS: [&str; 9] = [
-            "</h1>",
-            "</h2>",
-            "</h3>",
-            "</h4>",
-            "</h5>",
-            "</h6>",
-            "</blockquote>",
-            "</pre>",
-            "</table>",
+        const NAMES: [&str; 16] = [
+            "h1",
+            "h2",
+            "h3",
+            "h4",
+            "h5",
+            "h6",
+            "blockquote",
+            "pre",
+            "table",
+            "p",
+            "ul",
+            "ol",
+            "dl",
+            "li",
+            "dt",
+            "dd",
         ];
         let Block::Prose { words, .. } = block else {
             return false;
         };
         words.last().is_some_and(|word| {
             let lower = word.text.to_ascii_lowercase();
-            TAGS.iter().any(|tag| lower.ends_with(tag))
-                || ["</ul>", "</ol>", "</dl>"]
-                    .iter()
-                    .any(|tag| lower.ends_with(tag))
+            let Some(open) = lower.rfind('<') else {
+                return false;
+            };
+            // The name has to end where the tag does. Asking `starts_with` alone made a word
+            // ending in `<param>` or `<picture>` a block, so the paragraph after it lost the `<p>`
+            // `inferParagraphTags` owes it — the same `\b` the sibling [`Self::html_tag`] carries.
+            let rest = &lower[open..];
+            NAMES.iter().any(|name| {
+                [false, true].into_iter().any(|closing| {
+                    Self::html_tag(rest, name, closing).is_some_and(|end| end == rest.len())
+                })
+            })
         })
+    }
+
+    /// Fuse each `{@… }` and everything up to its closing brace into one word, while it fits.
+    ///
+    /// The refill never breaks a word, so a fused tag stays on one line — Eclipse's shape. Two
+    /// tags are left alone: one whose brace never closes inside this block, because swallowing
+    /// the rest of the paragraph is a worse answer than the break it avoids, and one wider than
+    /// `budget`, because Eclipse splits a tag that cannot fit a line either.
+    fn join_inline_tags(words: &mut Vec<Word>, budget: usize) {
+        let mut at = 0usize;
+        while at < words.len() {
+            if !words[at].text.starts_with("{@") || Self::brace_delta(&words[at].text) <= 0 {
+                at += 1;
+                continue;
+            }
+            let mut depth = Self::brace_delta(&words[at].text);
+            let mut end = at + 1;
+            while end < words.len() && depth > 0 {
+                depth += Self::brace_delta(&words[end].text);
+                end += 1;
+            }
+            if depth > 0 {
+                at += 1;
+                continue;
+            }
+            // Each word's own `space` flag, not a blanket separator: `tokenize` splits `<br>` out
+            // of `{@code a<br>b}` with `space: false`, and joining on `" "` wrote spaces that were
+            // never in the source — which rewrites what a `{@code}` renders, the one thing it
+            // exists to say verbatim.
+            let mut joined = String::new();
+            for (nth, word) in words[at..end].iter().enumerate() {
+                if nth > 0 && word.space {
+                    joined.push(' ');
+                }
+                joined.push_str(&word.text);
+            }
+            if Width::utf16(&joined) > budget {
+                at += 1;
+                continue;
+            }
+            words[at].text = joined;
+            words.drain(at + 1..end);
+            at += 1;
+        }
+    }
+
+    /// Give every `<p>` a content line of its own, wherever in a paragraph it was written.
+    ///
+    /// `<p>` is a block-level HTML element, and Eclipse's `CommentsPreparator` treats it as one:
+    /// a `<p>` ending a sentence (`…implement this interface. <p>`) breaks the line before it and
+    /// after it. Only google-java-format hoists it into the next paragraph's first word instead.
+    fn split_paragraph_tags(blocks: &mut Vec<Block>) {
+        let mut at = 0usize;
+        while at < blocks.len() {
+            let Block::Prose { words, rest, .. } = &mut blocks[at] else {
+                at += 1;
+                continue;
+            };
+            // Inside an inline `{@… }` there is no HTML to interpret: `{@code <p>}` is one token
+            // to the lexer, and splitting it strands the tag's opening brace on a line of its own.
+            // The sibling [`Self::split_block_tag`] carries the same counter for the same reason;
+            // `break-inside-inline-tags` cannot stand in for it, since the join that rule performs
+            // runs in `render_block`, after this.
+            let mut brace = 0i32;
+            let found = words.iter().position(|word| {
+                let outside = brace <= 0;
+                brace += Self::brace_delta(&word.text);
+                outside && word.text == "<p>"
+            });
+            let Some(found) = found else {
+                at += 1;
+                continue;
+            };
+            // A `<p>` already at the head of the block splits *after* itself, so the tag keeps
+            // its line and the paragraph it opens starts on the next one.
+            let cut = if found == 0 { 1 } else { found };
+            if cut >= words.len() {
+                at += 1;
+                continue;
+            }
+            let rest = *rest;
+            let tail: Vec<Word> = words.drain(cut..).collect();
+            // The tail is no longer the paragraph's opening line, so it takes the continuation
+            // indent for both — inside a list item that is the item's, not the item tag's.
+            blocks.insert(
+                at + 1,
+                Block::Prose {
+                    words: tail,
+                    first: rest,
+                    rest,
+                },
+            );
+            at += 1;
+        }
+    }
+
+    /// A `<p>` occupying a content line of its own.
+    fn paragraph_line(indent: usize) -> Block {
+        Block::Prose {
+            words: alloc::vec![Word {
+                text: "<p>".into(),
+                space: false,
+            }],
+            first: indent,
+            rest: indent,
+        }
     }
 
     /// Insert a `<p>` wherever a blank line separates two runs of prose.
@@ -907,9 +1306,14 @@ impl CommentFormatter {
     /// rendered Javadoc only sees it if an HTML tag says so. google-java-format's
     /// `inferParagraphTags` does the same, and only between two literals — a blank line before a
     /// block tag or a `<pre>` region opens nothing.
-    fn infer_paragraph_tags(blocks: &mut [Block]) {
-        for at in 2..blocks.len() {
-            if !matches!(blocks[at - 1], Block::Blank)
+    ///
+    /// `own_line` writes the inferred tag on its own line instead of gluing it to the first word,
+    /// which is the shape IntelliJ's `JD_P_AT_EMPTY_LINES` produces.
+    fn infer_paragraph_tags(blocks: &mut Vec<Block>, own_line: bool) {
+        // Right to left: an insertion shifts every later index, and going backwards keeps the
+        // ones still to be examined where they were.
+        for at in (2..blocks.len()).rev() {
+            if !matches!(blocks[at - 1], Block::Blank { .. })
                 || !matches!(blocks[at - 2], Block::Prose { .. })
                 || Self::ends_block_tag(&blocks[at - 2])
             {
@@ -924,9 +1328,46 @@ impl CommentFormatter {
             let Some(first) = words.first_mut() else {
                 continue;
             };
-            if !first.text.starts_with('<') {
+            if first.text.starts_with('<') {
+                continue;
+            }
+            if own_line {
+                blocks.insert(at, Self::paragraph_line(0));
+            } else {
                 first.text.insert_str(0, "<p>");
             }
+        }
+    }
+
+    /// Ask for a blank line above whatever comes next.
+    ///
+    /// `JavadocWriter.requestBlankLine` sets a **flag**, so asking twice still yields one line —
+    /// and asking where a blank line already stands marks *that* line as requested rather than
+    /// leaving it as the author's. The upgrade is what makes the comment a fixed point: on the
+    /// second run the blank this request emitted arrives as an authored one, and a rule that
+    /// merely skipped would then drop it under `clear_blank_lines_in_javadoc_comment` — the
+    /// comment would lose the line on run 2 and grow it back on run 3, forever.
+    ///
+    /// Nothing written yet is nothing to separate, which is `flushWhitespace` with no output
+    /// behind it.
+    fn request_blank(blocks: &mut Vec<Block>) {
+        match blocks.last_mut() {
+            Some(Block::Blank { requested }) => *requested = true,
+            None => {}
+            _ => blocks.push(Block::Blank { requested: true }),
+        }
+    }
+
+    /// Hand a deferred `<p>` back to the prose, for a line that gives it no word to introduce.
+    ///
+    /// A `<p>` is held back so the tag and the word after it are refilled as one unit. Every
+    /// line that is a *token* rather than a literal — a block tag, a heading, a blockquote, a
+    /// list close, a preformatted region — ends that wait: `writeParagraphOpen` has already
+    /// written the tag, so it keeps the place the author gave it instead of being carried past
+    /// the block and glued to the first word on the other side.
+    fn release_pending(pending: &mut Option<String>, prose: &mut Vec<Word>) {
+        if let Some(glued) = pending.take() {
+            Self::tokenize(&glued, true, prose);
         }
     }
 
@@ -949,13 +1390,23 @@ impl CommentFormatter {
     /// HTML tag names are case-insensitive, and hand-written Javadoc really does close a `<pre>`
     /// with `</PRE>`. Matching only the lower-case spelling leaves the fence open to the end of
     /// the comment, which grows a blank line on every run.
-    fn opens_fence(line: &str) -> bool {
+    fn opens_fence(line: &str, tables: bool) -> bool {
         let lower = line.to_ascii_lowercase();
         lower.starts_with("```")
             || lower.contains("<pre>")
-            || lower.contains("<table")
+            || (tables && lower.contains("<table"))
             || (line.contains("{@snippet") && !line.contains('}'))
             || (lower.starts_with("{@code") && !lower.contains('}'))
+    }
+
+    /// Whether the region `line` opens ends at the `}` balancing its `{`, not at a closing tag.
+    ///
+    /// Both `{@snippet …}` and a bare multi-line `{@code …}` do. [`Self::opens_fence`] admits the
+    /// second, and arming only the first left it with no reachable exit — [`Self::closes_fence`]
+    /// knows ```` ``` ````, `</pre>` and `</table>`, none of which ever arrives — so the rest of
+    /// the comment was swallowed into one verbatim region, footer tags included.
+    fn brace_fence(line: &str) -> bool {
+        line.contains("{@snippet") || line.to_ascii_lowercase().starts_with("{@code")
     }
 
     /// A line's net brace count, ignoring the braces inside a string or a character literal.
@@ -969,6 +1420,78 @@ impl CommentFormatter {
             }
         }
         delta
+    }
+
+    /// Rewrite a `<pre>{@code …}</pre>` region into the shape
+    /// `JavadocLexer.deindentPreCodeBlocks` gives it.
+    ///
+    /// Three edits, and all three are on the *delimiter* lines rather than on the code:
+    ///
+    /// - the opening `{@code` is written against the `<pre>` that fences it, whatever the author
+    ///   spaced them with (`Literal(value.trim())`, and the space between the two is a literal
+    ///   inside `<pre>`, not a whitespace token);
+    /// - the region's blank first and last lines go — they are the gap around the snippet, not
+    ///   part of it;
+    /// - the `}` that closes the `{@code` moves onto the `</pre>` line, and whatever shared the
+    ///   line with it stays behind on one of its own.
+    ///
+    /// The last is the one that reads like a quirk: `deindentPreCodeBlock` pops the trailing `}`
+    /// off the saved tokens and re-emits it *after* the region, so `}}</pre>` comes out as `}`
+    /// then `}</pre>` — the inner brace closes the code, the outer one closes the tag.
+    ///
+    /// A region that says something else on its `<pre>` line — `<pre>{@code foo}` — is ordinary
+    /// preformatted text: the lexer matches `[ \t]*[{]@code` against the whole joined literal, so
+    /// one word after it is enough to leave every space where the author put it.
+    fn normalize_pre_code_block(lines: &mut Vec<String>) {
+        let Some(first) = lines.first() else {
+            return;
+        };
+        let lower = first.to_ascii_lowercase();
+        let Some(at) = lower.rfind("<pre>") else {
+            return;
+        };
+        let open = at + "<pre>".len();
+        if first[open..].trim() != "{@code" {
+            return;
+        }
+        let mut head = String::from(&first[..open]);
+        head.push_str("{@code");
+        // The region has to close on its last line; a `<pre>` that never closed is left alone.
+        let Some(close) = lines.last().and_then(|last| {
+            last.to_ascii_lowercase()
+                .find("</pre>")
+                .map(|at| (at, last.clone()))
+        }) else {
+            return;
+        };
+        let (close_at, last) = close;
+        let mut tail = String::from(&last[close_at..]);
+        let mut body: Vec<String> = lines.drain(1..).collect();
+        body.pop();
+        let before = last[..close_at].trim_end();
+        if !before.is_empty() {
+            body.push(before.into());
+        }
+        while body.first().is_some_and(|line| line.trim().is_empty()) {
+            body.remove(0);
+        }
+        while body.last().is_some_and(|line| line.trim().is_empty()) {
+            body.pop();
+        }
+        if let Some(end) = body.last_mut()
+            && end.ends_with('}')
+        {
+            end.pop();
+            tail.insert(0, '}');
+            if end.trim().is_empty() {
+                body.pop();
+            }
+        }
+        lines.clear();
+        lines.push(head);
+        lines.append(&mut body);
+        lines.push(tail);
+        Self::dedent_code_region(lines);
     }
 
     /// Strip the common indentation from the body of a `{@code …}` region.
@@ -1006,17 +1529,80 @@ impl CommentFormatter {
         }
     }
 
+    /// Re-indent a fenced code region to the configured indentation.
+    ///
+    /// This is the reachable half of Eclipse's `comment.format_source_code`, which runs the Java
+    /// formatter over the snippet: what a reader sees of that on already-formatted code is the
+    /// indentation changing to the surrounding style — four spaces becoming a tab. jals does not
+    /// re-run itself inside a comment (the region is a fragment, often not parseable on its own),
+    /// so it re-indents and leaves the rest of the snippet as written; `DESIGN.md` §18.2's **D7**
+    /// records the residue.
+    ///
+    /// The snippet's own unit is its smallest positive indent — nothing else in a fragment says
+    /// what one level is. A region indented by nothing keeps its shape.
+    ///
+    /// Every fence but a `<table>`: `format_source_code` reads what a `<pre>` region holds as
+    /// Java, and a bare `<pre>` is the commoner Javadoc shape by far — gating on `{@code` left
+    /// the rule a no-op for it, and for exactly the regions MAPPING.md says it covers. A table
+    /// kept preformatted is markup rather than code, so it is the one region left alone.
+    ///
+    /// A `<pre>` fences ASCII art at least as often as it fences Java, which is why the rule is
+    /// **off by default** — not why it is narrow. Turning it on is opting into this reading.
+    fn reindent_code_region(lines: &mut [String], style: &Style) {
+        let code = lines.first().is_some_and(|line| {
+            let lower = line.to_ascii_lowercase();
+            lower.starts_with("```")
+                || lower.contains("<pre")
+                || lower.contains("{@code")
+                || lower.contains("{@snippet")
+        });
+        if !code {
+            return;
+        }
+        let tab = style.tab_width();
+        let columns = |line: &str| -> Option<usize> {
+            let body = line.trim_start_matches([' ', '\t']);
+            if body.is_empty() || body.len() == line.len() {
+                return None;
+            }
+            let mut column = 0usize;
+            for ch in line[..line.len() - body.len()].chars() {
+                column = if ch == '\t' {
+                    (column / tab + 1) * tab
+                } else {
+                    column + 1
+                };
+            }
+            Some(column)
+        };
+        let Some(unit) = lines.iter().filter_map(|line| columns(line)).min() else {
+            return;
+        };
+        for line in lines {
+            let Some(cols) = columns(line) else {
+                continue;
+            };
+            let body: String = line.trim_start_matches([' ', '\t']).into();
+            let mut out = String::with_capacity(line.len());
+            style.write_indent(cols / unit * style.indent_cols(), &mut out);
+            out.push_str(&body);
+            *line = out;
+        }
+    }
+
     /// Whether a line closes such a region.
-    fn closes_fence(line: &str) -> bool {
+    fn closes_fence(line: &str, tables: bool) -> bool {
         let lower = line.to_ascii_lowercase();
-        lower.starts_with("```") || lower.contains("</pre>") || lower.contains("</table>")
+        lower.starts_with("```")
+            || lower.contains("</pre>")
+            || (tables && lower.contains("</table>"))
     }
 
     /// Whether a line both opens and closes a region, so it is verbatim on its own.
-    fn self_closing_fence(line: &str) -> bool {
+    fn self_closing_fence(line: &str, tables: bool) -> bool {
         let lower = line.to_ascii_lowercase();
         (lower.contains("<pre>") && lower.contains("</pre>"))
-            || (lower.contains("<table") && lower.contains("</table>"))
+            || (tables && lower.contains("<table") && lower.contains("</table>"))
             || (lower.contains("{@code") && lower.contains('}'))
             || (line.contains("{@snippet") && line.contains('}'))
     }
@@ -1027,14 +1613,27 @@ impl CommentFormatter {
     /// of a prose line, and a depth that only saw line-initial tags would then forget the list
     /// exists on the next run.
     fn list_depth(depth: usize, line: &str) -> usize {
-        const OPEN: [&str; 3] = ["<ul", "<ol", "<dl"];
-        const CLOSE: [&str; 3] = ["</ul", "</ol", "</dl"];
+        const NAMES: [&str; 3] = ["ul", "ol", "dl"];
         let lower = line.to_ascii_lowercase();
-        let count =
-            |tags: [&str; 3]| -> usize { tags.iter().map(|tag| lower.matches(tag).count()).sum() };
-        // `</ul` also matches `<ul`, so the opens have to have the closes taken back out of them.
-        let closes = count(CLOSE);
-        let opens = count(OPEN).saturating_sub(closes);
+        // Each `<` decides for itself which of the two it is. Counting `"<ul"` over the whole line
+        // and subtracting the closes rested on `"</ul"` also matching `"<ul"` — it does not — so a
+        // line holding a balanced pair (`{@code <ul>x</ul>}`) lost its open and drove the depth
+        // one level below where the list actually is.
+        let (mut opens, mut closes) = (0usize, 0usize);
+        for (at, _) in lower.match_indices('<') {
+            let rest = &lower[at..];
+            if NAMES
+                .iter()
+                .any(|name| Self::html_tag(rest, name, false).is_some())
+            {
+                opens += 1;
+            } else if NAMES
+                .iter()
+                .any(|name| Self::html_tag(rest, name, true).is_some())
+            {
+                closes += 1;
+            }
+        }
         depth.saturating_add(opens).saturating_sub(closes)
     }
 
@@ -1092,8 +1691,25 @@ impl CommentFormatter {
     const IGNORED_CLOSE: [&'static str; 4] = ["p", "li", "dt", "dd"];
 
     /// Whether `line` holds one of them.
+    ///
+    /// Only those four. The guard used to ask `line.contains("</")` — twice, of two byte-identical
+    /// operands — so it fired on *any* closing tag, which is what made the strip below reachable
+    /// from lines it has nothing to remove from.
     fn has_paragraph_close(line: &str) -> bool {
-        line.contains("</") || line.contains("</")
+        Self::IGNORED_CLOSE
+            .iter()
+            .any(|tag| Self::closing_tag_at(line, tag))
+    }
+
+    /// Whether `line` holds a `</name>` tag anywhere, with the name ending at the tag's boundary.
+    ///
+    /// `openTagPattern`'s `\b`: `</p>` is a paragraph close and `</param>` is not, so the name has
+    /// to end at a non-word character rather than merely start the rest of the tag.
+    fn closing_tag_at(line: &str, name: &str) -> bool {
+        let lower = line.to_ascii_lowercase();
+        lower
+            .match_indices("</")
+            .any(|(at, _)| Self::html_tag(&lower[at..], name, true).is_some())
     }
 
     /// `line` with every `</p>` removed.
@@ -1124,13 +1740,146 @@ impl CommentFormatter {
     ///
     /// Matched case-insensitively: HTML tag names are, and hand-written Javadoc really does say
     /// `<UL>`.
-    fn is_html_block(line: &str) -> bool {
-        const BLOCK_TAGS: [&str; 13] = [
-            "<p>", "<p ", "<br>", "<ul", "<ol", "<li", "<dl", "<dt", "<dd", "<h", "</ul", "</ol",
-            "</dl",
+    fn is_html_block(line: &str, tables: bool) -> bool {
+        // `<br>` is deliberately absent. It ends a line — `writeBr` requests a newline after
+        // it — but it does not start a *block*: the prose on either side of one is the same
+        // paragraph, and flushing at it turned `… interfered with. <br>For example …` into two
+        // paragraphs, which put the `<br>` at the head of the second instead of the tail of the
+        // first. [`Self::is_break_tag`] is where a `<br>` ends its line.
+        const BLOCK_TAGS: [&str; 12] = [
+            "<p>", "<p ", "<ul", "<ol", "<li", "<dl", "<dt", "<dd", "<h", "</ul", "</ol", "</dl",
+        ];
+        // A table read as HTML rather than as a preformatted region: its rows and cells are the
+        // block elements, and `<caption>` / `<thead>` / `<tbody>` are not — which is JDT's own
+        // classification, not a simplification of it.
+        const TABLE_TAGS: [&str; 8] = [
+            "<table", "</table", "<tr", "</tr", "<td", "</td", "<th", "</th",
         ];
         let lower = line.trim_start().to_ascii_lowercase();
         BLOCK_TAGS.iter().any(|tag| lower.starts_with(tag))
+            || (!tables && TABLE_TAGS.iter().any(|tag| lower.starts_with(tag)))
+    }
+
+    /// Whether google-java-format's Javadoc lexer would get through this body.
+    ///
+    /// `JavadocLexer.checkMatchingTags` throws when a nesting context is still open — at a footer
+    /// tag, and again at the end of the comment — and `formatJavadoc` answers a `LexException` by
+    /// returning the comment **exactly as written**. An unclosed `<pre>`, `<code>` or `<table>`,
+    /// or an unbalanced `{@…}`, is therefore a Javadoc the reference does not reflow at all, and
+    /// reflowing it here is a difference in every such comment rather than a better one.
+    ///
+    /// The contexts are the lexer's own: `<pre>`, `<code>` and `<table>` nest, a `{@…}` opens a
+    /// brace context and a bare `{` nests only inside one, and inside a brace context there is no
+    /// HTML to interpret. `popUntil` is a no-op when its context is not open, so a stray `</code>`
+    /// closes nothing.
+    fn lexes_cleanly(body: &str) -> bool {
+        #[derive(Clone, Copy, PartialEq)]
+        enum Ctx {
+            Pre,
+            Code,
+            Table,
+            Brace,
+        }
+        const TAGS: [(&str, Ctx); 3] = [
+            ("pre", Ctx::Pre),
+            ("code", Ctx::Code),
+            ("table", Ctx::Table),
+        ];
+
+        let mut stack: Vec<Ctx> = Vec::new();
+        for line in body.split('\n') {
+            let line = line.trim_start();
+            // `somethingSinceNewline` is still false after the `*` and the spaces behind it, so a
+            // footer tag is one written at the head of a line.
+            if !stack.is_empty() && Self::opens_footer_tag(line) {
+                return false;
+            }
+            let lower = line.to_ascii_lowercase();
+            let mut at = 0usize;
+            while at < lower.len() {
+                // Every tag this looks for is ASCII, so stepping a byte at a time is fine as long
+                // as a multi-byte character is stepped over rather than into.
+                if !lower.is_char_boundary(at) {
+                    at += 1;
+                    continue;
+                }
+                let rest = &lower[at..];
+                if let Some(after) = rest.strip_prefix('{') {
+                    // `{@…` opens a tag context; a bare `{` nests only inside one.
+                    if after.starts_with('@') || stack.contains(&Ctx::Brace) {
+                        stack.push(Ctx::Brace);
+                    }
+                    at += 1;
+                    continue;
+                }
+                if rest.starts_with('}') {
+                    if stack.last() == Some(&Ctx::Brace) {
+                        stack.pop();
+                    }
+                    at += 1;
+                    continue;
+                }
+                // Inside an inline tag the rest of the line is literal text.
+                if stack.contains(&Ctx::Brace) {
+                    at += 1;
+                    continue;
+                }
+                let mut matched = 0usize;
+                for (name, ctx) in TAGS {
+                    if let Some(end) = Self::html_tag(rest, name, false) {
+                        stack.push(ctx);
+                        matched = end;
+                        break;
+                    }
+                    if let Some(end) = Self::html_tag(rest, name, true) {
+                        if let Some(open) = stack.iter().rposition(|held| *held == ctx) {
+                            stack.truncate(open);
+                        }
+                        matched = end;
+                        break;
+                    }
+                }
+                at += matched.max(1);
+            }
+        }
+        stack.is_empty()
+    }
+
+    /// The length of the `<name …>` (or `</name …>`) tag `rest` opens with, if it opens one.
+    ///
+    /// `openTagPattern` is `<(?:name)\b[^>]*>`, so the name has to end at a non-word character
+    /// and the tag at the first `>`.
+    fn html_tag(rest: &str, name: &str, closing: bool) -> Option<usize> {
+        let after = rest
+            .strip_prefix('<')?
+            .strip_prefix(if closing { "/" } else { "" })?
+            .strip_prefix(name)?;
+        if after.starts_with(|c: char| c.is_alphanumeric() || c == '_') {
+            return None;
+        }
+        let end = after.find('>')? + 1;
+        Some(rest.len() - after.len() + end)
+    }
+
+    /// Whether a line opens a footer tag — `FOOTER_TAG_PATTERN`, `@` and a lowercase word.
+    fn opens_footer_tag(line: &str) -> bool {
+        line.strip_prefix('@')
+            .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_lowercase()))
+    }
+
+    /// Split a line at the first HTML comment: what precedes it, the comment, and what follows.
+    ///
+    /// `None` when the line holds none, or holds one that does not close on it — a comment
+    /// spanning lines is `HTML_COMMENT_PATTERN`'s `DOTALL` case, and giving its opening half a
+    /// line of its own would split the comment rather than set it off.
+    fn split_html_comment(line: &str) -> Option<(&str, &str, &str)> {
+        let open = line.find("<!--")?;
+        let close = line[open..].find("-->")? + open + "-->".len();
+        Some((
+            line[..open].trim_end(),
+            &line[open..close],
+            line[close..].trim_start(),
+        ))
     }
 
     /// Whether a line is a `<blockquote>` tag.
@@ -1145,6 +1894,86 @@ impl CommentFormatter {
         ["<ul", "<ol", "<dl"]
             .iter()
             .any(|tag| lower.starts_with(tag))
+    }
+
+    /// Whether a line is nothing but an HTML list's closing tag.
+    fn closes_list(line: &str) -> bool {
+        let lower = line.trim().to_ascii_lowercase();
+        ["</ul", "</ol", "</dl"]
+            .iter()
+            .any(|tag| lower.starts_with(tag))
+            && lower.ends_with('>')
+            && !lower[..lower.len() - 1].contains('>')
+    }
+
+    /// Split a line at the first block-level tag that has to stand on a line of its own.
+    ///
+    /// Returns the part before the split and the part from the split on, or `None` when the line
+    /// is already one piece. A tag *opening* the line is split from what follows it; a tag
+    /// further along is split from what precedes it — `</code></blockquote>` is `</code>` and then
+    /// `</blockquote>`, and running the tail back through the loop separates any further tag on
+    /// it.
+    ///
+    /// The tags are the ones the writer surrounds with a line break of its own: a list's open and
+    /// close (`writeListOpen` / `writeListClose`) and a blockquote's
+    /// (`writeBlockquoteOpenOrClose`).
+    ///
+    /// Three are deliberately absent. `<li>`'s text starts right after it; `<p>` is glued to the
+    /// word it introduces by [`Self::paragraph_open`]; and a heading *contains* its text —
+    /// `writeHeaderOpen` asks for a blank line before `<h2>` and none after it, so
+    /// `<h2>1.0 Background</h2>` is one line and splitting it strands the heading's own words.
+    fn split_block_tag(line: &str) -> Option<(&str, &str)> {
+        const TAGS: [&str; 8] = [
+            "<ul",
+            "<ol",
+            "<dl",
+            "</ul",
+            "</ol",
+            "</dl",
+            "<blockquote",
+            "</blockquote",
+        ];
+        let lower = line.to_ascii_lowercase();
+        // One pass, carrying the brace depth: inside an inline tag there is no HTML to interpret
+        // — `{@code <ul>}` is one token to the lexer, and splitting it would break the tag rather
+        // than set off a list. Re-counting the braces in front of each position instead would be
+        // quadratic in the line, which is a cliff a line of encoded data would fall off.
+        let mut depth = 0i32;
+        let mut found = None;
+        for (at, ch) in lower.char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => depth -= 1,
+                '<' if depth <= 0 && TAGS.iter().any(|tag| lower[at..].starts_with(tag)) => {
+                    found = Some(at);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let at = found?;
+        if at > 0 {
+            return Some((line[..at].trim_end(), line[at..].trim_start()));
+        }
+        let end = lower.find('>')? + 1;
+        let tail = line[end..].trim_start();
+        (!tail.is_empty()).then(|| (line[..end].trim_end(), tail))
+    }
+
+    /// Split a preformatted region's closing line at the end of the tag that closes it.
+    ///
+    /// `</pre></blockquote>` ends the region at `</pre>`; the `</blockquote>` after it is a token
+    /// of the enclosing prose, and keeping it inside the region emits it verbatim — which is how
+    /// two tags that each want a line of their own ended up sharing one.
+    fn split_after_fence_close(line: &str, tables: bool) -> Option<(&str, &str)> {
+        let lower = line.to_ascii_lowercase();
+        let end = ["</pre>", "</table>"]
+            .iter()
+            .filter(|tag| tables || **tag != "</table>")
+            .filter_map(|tag| lower.rfind(tag).map(|at| at + tag.len()))
+            .max()?;
+        let tail = line[end..].trim_start();
+        (!tail.is_empty()).then(|| (line[..end].trim_end(), tail))
     }
 
     /// Whether a line is a section heading, which stands alone between blank lines.
@@ -1201,18 +2030,19 @@ impl CommentFormatter {
         for word in words {
             let budget = if lines.is_empty() { first } else { rest };
             let width = Width::utf16(&word.text);
-            if current.is_empty() {
-                current.push_str(&word.text);
-                continue;
-            }
-            let gap = usize::from(word.space);
-            if Width::utf16(&current) + gap + width > budget && !word.text.starts_with('@') {
-                lines.push(core::mem::take(&mut current));
-            } else if word.space {
-                current.push(' ');
+            if !current.is_empty() {
+                let gap = usize::from(word.space);
+                if Width::utf16(&current) + gap + width > budget && !word.text.starts_with('@') {
+                    lines.push(core::mem::take(&mut current));
+                } else if word.space {
+                    current.push(' ');
+                }
             }
             current.push_str(&word.text);
-            // `writeBr` requests a newline after the tag, so `<br>` always ends its line.
+            // `writeBr` requests a newline after the tag, so `<br>` always ends its line — the
+            // one it wrapped onto included. Asking only when it landed mid-line let a `<br>` that
+            // opened a line swallow the word after it: `<br>For example` is one token to the next
+            // run, and the space its own `requestWhitespace` stood for is gone.
             if Self::is_break_tag(&word.text) {
                 lines.push(core::mem::take(&mut current));
             }
@@ -1221,5 +2051,268 @@ impl CommentFormatter {
             lines.push(current);
         }
         lines
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::string::String;
+
+    use jals_config::fmt::{Config, ParagraphTags, TagAlignment};
+
+    /// Format `src` under `config`, refusing a run the fail-safe could not vouch for.
+    fn format(src: &str, config: &Config) -> String {
+        let out = jals_exec::block_on_inline(crate::FormatOutput::format_source(src, config));
+        assert!(!out.fell_back(), "the fail-safe refused:\n{src}");
+        out.formatted
+    }
+
+    /// A config that reflows Javadoc, with `edit` applied on top.
+    fn reflowing(edit: impl FnOnce(&mut Config)) -> Config {
+        let mut config = Config::default();
+        config.comments.format_javadoc = true;
+        edit(&mut config);
+        config
+    }
+
+    /// Wrap a comment body as the Javadoc of a method, which is where every rule here applies.
+    fn documented(body: &str) -> String {
+        alloc::format!("class A {{\n{body}\n  void m() {{}}\n}}\n")
+    }
+
+    #[test]
+    fn a_requested_blank_line_is_a_fixed_point() {
+        // The blank a `<pre>`, a heading or a `<p>` asks for arrives on the *next* run as a blank
+        // line the author wrote. Skipping the request there — rather than marking that line as
+        // requested — dropped it under `clear_blank_lines_in_javadoc_comment`, so the comment lost
+        // a line on run 2 and grew it back on run 3, forever.
+        let config = reflowing(|config| config.comments.preserve_blank_lines = false);
+        for body in [
+            "  /**\n   * Intro.\n   * <pre>\n   * code\n   * </pre>\n   * Outro.\n   */",
+            "  /**\n   * Intro.\n   * <ul>\n   * <li>one\n   * </ul>\n   * Outro.\n   */",
+            "  /**\n   * Intro.\n   * <h2>Title</h2>\n   * Outro.\n   */",
+            "  /**\n   * Intro.\n   *\n   * <p>Outro.\n   */",
+        ] {
+            let once = format(&documented(body), &config);
+            let twice = format(&once, &config);
+            assert_eq!(
+                once, twice,
+                "not a fixed point:\n{once}\n--- became ---\n{twice}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_paragraph_tag_is_never_deleted_or_moved_past_a_block() {
+        // `writeParagraphOpen` writes every token it is handed. Two `<p>` reaching the deferral in
+        // a row used to overwrite one another, and one waiting when a heading or a blockquote
+        // arrived travelled past the block and glued itself to the first word on the far side.
+        let config = reflowing(|_| {});
+
+        let two = format(
+            &documented("  /**\n   * A.\n   *\n   * <p>\n   *\n   * <p>B follows.\n   */"),
+            &config,
+        );
+        assert_eq!(two.matches("<p>").count(), 2, "a `<p>` was dropped:\n{two}");
+
+        let heading = format(
+            &documented(
+                "  /**\n   * Intro text.\n   *\n   * <p>\n   * <h2>Title</h2>\n   * More text.\n   */",
+            ),
+            &config,
+        );
+        let at_p = heading.find("<p>").expect("the tag survives");
+        let at_h2 = heading.find("<h2>").expect("the heading survives");
+        assert!(at_p < at_h2, "the `<p>` moved past the heading:\n{heading}");
+
+        let quote = format(
+            &documented(
+                "  /**\n   * Intro text.\n   *\n   * <p>\n   * <blockquote>quoted</blockquote>\n   */",
+            ),
+            &config,
+        );
+        assert!(
+            !quote.contains("<p>quoted"),
+            "the `<p>` moved inside the quote:\n{quote}",
+        );
+    }
+
+    #[test]
+    fn a_preformatted_region_keeps_the_lines_it_holds() {
+        // The `</p>` strip is asked *after* the fence: inside `<pre>` a lone closing tag is
+        // content, and dropping it emptied the line and skipped it out of the region entirely.
+        let out = format(
+            &documented(
+                "  /**\n   * <pre>\n   * before\n   * </p>\n   * </li>\n   * after\n   * </pre>\n   */",
+            ),
+            &reflowing(|_| {}),
+        );
+        assert!(
+            out.contains("</p>"),
+            "a `</p>` inside `<pre>` was deleted:\n{out}"
+        );
+        assert!(
+            out.contains("</li>"),
+            "a `</li>` inside `<pre>` was deleted:\n{out}"
+        );
+    }
+
+    #[test]
+    fn a_bare_multi_line_inline_code_tag_closes_itself() {
+        // `opens_fence` admits a line-initial `{@code` with no `}`, so `closes_fence` has to know
+        // the brace that ends it: without that the region ran to the end of the comment and
+        // swallowed every footer tag behind it.
+        let out = format(
+            &documented(
+                "  /**\n   * Example:\n   *\n   * {@code\n   * int x = 1;\n   * }\n   *\n   * @param x the first\n   */",
+            ),
+            &reflowing(|config| config.comments.blank_line_before_tags = true),
+        );
+        assert!(
+            out.contains("@param x the first"),
+            "the footer tag was swallowed by the region:\n{out}",
+        );
+    }
+
+    #[test]
+    fn an_inline_tag_keeps_the_spacing_it_was_written_with() {
+        // `Word::space` is the whole point of the token stream: joining a fused `{@code …}` on a
+        // blanket `" "` inserted spaces the source never had, rewriting what the tag renders.
+        let out = format(
+            &documented("  /**\n   * See {@code a<br>b} for details.\n   */"),
+            &reflowing(|config| config.comments.break_inside_inline_tags = false),
+        );
+        assert!(
+            out.contains("{@code a<br>b}"),
+            "the inline tag's content was respaced:\n{out}",
+        );
+    }
+
+    #[test]
+    fn a_paragraph_tag_inside_an_inline_tag_is_not_a_paragraph() {
+        // `{@code <p>}` is one token to the lexer. Splitting at the bare word tore the tag across
+        // three lines under both of the modes that split, and `break-inside-inline-tags` cannot
+        // prevent it: that join runs later, in `render_block`.
+        for mode in [ParagraphTags::Authored, ParagraphTags::OwnLine] {
+            let out = format(
+                &documented("  /** Use {@code <p>} to open a paragraph in this doc comment. */"),
+                &reflowing(|config| config.comments.paragraph_tags = mode),
+            );
+            assert!(
+                out.contains("{@code <p>}"),
+                "the inline tag was split under {mode:?}:\n{out}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_word_ending_in_a_tag_that_is_not_a_block_still_opens_a_paragraph() {
+        // `inferParagraphTags` skips a genuine block token. A prefix match made `<param>` one, so
+        // the paragraph after it silently lost the `<p>` the rule owes it.
+        let out = format(
+            &documented(
+                "  /**\n   * A sentence ending in <param>\n   *\n   * Another paragraph.\n   */",
+            ),
+            &reflowing(|_| {}),
+        );
+        assert!(
+            out.contains("<p>Another paragraph."),
+            "the paragraph break was lost:\n{out}",
+        );
+    }
+
+    #[test]
+    fn a_balanced_list_pair_on_one_line_leaves_the_depth_alone() {
+        // `</ul` does not contain `<ul`, so subtracting the closes from the opens drove a line
+        // holding a balanced pair one level below the list it is actually in — and with
+        // `set-off-html-lists` on, that is the item's indentation.
+        let out = format(
+            &documented(
+                "  /**\n   * <ul>\n   * <li>see {@code <ul>x</ul>} for details\n   * <li>second item\n   * </ul>\n   */",
+            ),
+            &reflowing(|_| {}),
+        );
+        let indent = |needle: &str| {
+            let at = out.find(needle).expect("the item is written");
+            let head = out[..at].rsplit('\n').next().expect("a line");
+            head.len() - head.trim_start().len()
+        };
+        assert_eq!(
+            indent("<li>see"),
+            indent("<li>second"),
+            "two items of one list took different indents:\n{out}",
+        );
+    }
+
+    #[test]
+    fn a_tag_description_and_what_continues_it_share_one_column() {
+        // Under `tag-alignment` the description has a column of its own. Computing it twice — once
+        // folded into the block by `parse`, once added by `render_block` — put a `<p>` continuing
+        // an `@param` description a continuation step beyond the description itself.
+        let config = reflowing(|config| {
+            config.comments.tag_alignment = TagAlignment::All;
+            config.comments.indent_tag_description = true;
+        });
+        let out = format(
+            &documented(
+                "  /**\n   * @param first a description\n   * <h2>Note</h2>\n   * @throws IllegalArgumentException never\n   */",
+            ),
+            &config,
+        );
+        let column = |needle: &str| {
+            let at = out.find(needle).expect("written");
+            let head = out[..at].rsplit('\n').next().expect("a line");
+            head.chars().count()
+        };
+        assert_eq!(
+            column("a description"),
+            column("<h2>"),
+            "the continuation and the description took different columns:\n{out}",
+        );
+    }
+
+    #[test]
+    fn a_type_javadoc_is_never_the_files_header_comment() {
+        // The header region ends at the first *declaration*, and a declaration's own doc comment
+        // belongs to it. Ending the region at the first significant *token* instead made a
+        // default-package file's type Javadoc the header, so `format-header = false` silently
+        // stopped formatting it — in every such file, and in every file whose licence block is
+        // followed straight by a type.
+        let config = reflowing(|config| {
+            config.comments.format_line = true;
+            config.comments.format_header = false;
+            config.layout.max_width = 60;
+            config.comments.width = 60;
+        });
+        let src = "// Copyright 2020 someone.\n/** A type comment long enough that reflowing it against sixty columns has to move a word. */\nclass Foo {}\n";
+        let out = format(src, &config);
+        assert!(
+            out.lines().all(|line| line.chars().count() <= 60),
+            "the type's Javadoc was held by `format-header`:\n{out}",
+        );
+        // The control: the licence line is what `format-header = false` still holds.
+        assert!(
+            out.contains("// Copyright 2020 someone."),
+            "the header comment was reflowed after all:\n{out}",
+        );
+    }
+
+    #[test]
+    fn formatting_source_in_comments_reaches_a_bare_pre() {
+        // `comment.format_source_code` covers any `<pre>` region, which is the commoner Javadoc
+        // shape; gating the re-indent on `{@code` left the rule inert for it.
+        let out = format(
+            &documented(
+                "  /**\n   * <pre>\n   * if (a) {\n   *   b();\n   * }\n   * </pre>\n   */",
+            ),
+            &reflowing(|config| {
+                config.comments.format_source_in_comments = true;
+                config.layout.indent_width = 4;
+            }),
+        );
+        assert!(
+            out.contains("*     b();"),
+            "the snippet was not re-indented:\n{out}",
+        );
     }
 }

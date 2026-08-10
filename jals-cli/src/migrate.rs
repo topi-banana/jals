@@ -392,10 +392,17 @@ mod tests {
     #[test]
     fn an_editorconfig_naming_another_language_is_not_java() {
         // A `[*.javascript]` section must not be read as the Java one (DESIGN.md A.2 / A.8).
+        //
+        // Compared against an IntelliJ import that read *nothing*, not against `Config::default()`:
+        // importing an IDEA config carries IDEA's own fixed Javadoc readings whatever the file
+        // declares, so the claim here is that this section moved nothing — which is a statement
+        // about the section, not about the vendor.
         let config =
             IntellijEditorConfig::import("[*.javascript]\nindent_size = 7\nmax_line_length = 77\n")
                 .expect("the fixture should import");
-        assert_eq!(config, Config::default());
+        let untouched =
+            IntellijEditorConfig::import("[*.java]\n").expect("the empty section should import");
+        assert_eq!(config, untouched);
     }
 
     #[test]

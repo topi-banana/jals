@@ -77,7 +77,7 @@ rule 単位で次の 1 行を適用する。
 | 層 | 成果物 | 完全性の基準 | 規模 |
 |---|---|---|---|
 | **native モデル** | `jals_fmt::import::{eclipse, intellij, gjf, palantir, spotless}` | **全数**。ベンダー option は 1 つも落とさない。jals に写像先が無い option も**型付きで保持**する | Eclipse 416 / IntelliJ 297 |
-| **共通語彙** | `jals_config::fmt::Config` | **選別**。§2 の基準を満たすものだけ。union ではない | 8 節・181 |
+| **共通語彙** | `jals_config::fmt::Config` | **選別**。§2 の基準を満たすものだけ。union ではない | 8 節・190 |
 
 「jals-config でキャプチャされない rule が構造化されていない」という問題への答えがこの表である。
 **捨てるのではなく、native モデル側に型付きで残す。** 未写像の option は
@@ -167,12 +167,13 @@ rule 単位で次の 1 行を適用する。
 | `max-in-code` | `number_of_empty_lines_to_preserve` | `KEEP_BLANK_LINES_IN_CODE` |
 | `max-in-declarations` | 同上 | `KEEP_BLANK_LINES_IN_DECLARATIONS` |
 | `max-before-closing-brace` | `number_of_blank_lines_at_end_of_code_block` | `KEEP_BLANK_LINES_BEFORE_RBRACE` |
+| `max-after-doc-comment` | `number_of_empty_lines_to_preserve`（JDT に専用規則なし） | `KEEP_BLANK_LINES_IN_DECLARATIONS`（IDEA にも専用規則なし） |
 | `before-package` / `after-package` | `blank_lines_before_package` / `_after_package` | `BLANK_LINES_BEFORE_PACKAGE` / `_AFTER_PACKAGE` |
 | `before-imports` / `after-imports` | `blank_lines_before_imports` / `_after_imports` | `BLANK_LINES_BEFORE_IMPORTS` / `_AFTER_IMPORTS` |
 | `between-import-groups` | `blank_lines_between_import_groups` | （`IMPORT_LAYOUT_TABLE` の `<emptyLine/>`） |
 | `around-type` | `blank_lines_between_type_declarations` | `BLANK_LINES_AROUND_CLASS` |
 | `at-type-body-start` / `-end` | `blank_lines_before_first_class_body_declaration` / `_after_last_class_body_declaration` | `BLANK_LINES_AFTER_CLASS_HEADER` / `BLANK_LINES_BEFORE_CLASS_END` |
-| `around-documented-member` | —（宣言の種別だけで決める） | —（同左） |
+| `around-documented-member` | —（宣言の種別だけで決める。既定の `inherit` がその意味） | —（同左） |
 | `around-field` | `blank_lines_before_field` | `BLANK_LINES_AROUND_FIELD` |
 | `around-method` | `blank_lines_before_method` | `BLANK_LINES_AROUND_METHOD` |
 | `around-initializer` | `blank_lines_before_new_chunk` | `BLANK_LINES_AROUND_INITIALIZER` |
@@ -309,17 +310,25 @@ IntelliJ の `SPACE_*` 45 とはほぼ 1:1。代表例（全数は importer の 
 |---|---|---|---|
 | `comments.format-line` | `comment.format_line_comments` | — | 常に true |
 | `comments.format-block` | `comment.format_block_comments` | — | 常に true |
-| `comments.format-javadoc` | `comment.format_javadoc_comments` | `ENABLE_JAVADOC_FORMATTING` | `--skip-javadoc-formatting` の否定 / Palantir `formatJavadoc`（既定 false） |
+| `comments.format-javadoc` | `comment.format_javadoc_comments` | `ENABLE_JAVADOC_FORMATTING && WRAP_COMMENTS`（既定は true と **false**。どちらか一方でも書かれていれば、欠けている側は IDEA の既定で補って積を取る） | `--skip-javadoc-formatting` の否定 / Palantir `formatJavadoc`（既定 false） |
 | `comments.width` | `comment.line_length` | （`RIGHT_MARGIN` 共用） | 100 |
 | `comments.count-width-from-start` | `comment.count_line_length_from_starting_position` | — | — |
 | `comments.format-header` | `comment.format_header` | — | — |
 | `comments.format-html` | `comment.format_html` | — | true |
+| `comments.paragraph-tags` (`leading`/`own-line`/`authored`) | —（`CommentsPreparator` は `<p>` を block 要素として単独行にし、補わない → `authored`） | `JD_P_AT_EMPTY_LINES` → `own-line` / `authored` | `inferParagraphTags` → `leading` |
+| `comments.break-inside-inline-tags` | —（`{@… }` は 1 トークン → false） | —（同左 → false） | `JavadocLexer` は分割する → true |
 | `comments.format-source-in-comments` | `comment.format_source_code` | — | — |
 | `comments.preserve-blank-lines` | `comment.clear_blank_lines_in_javadoc_comment`（反転） | `JD_KEEP_EMPTY_LINES` | true |
+| `comments.blank-lines-between-tags` | `comment.clear_blank_lines_in_javadoc_comment`（反転） | `JD_KEEP_EMPTY_LINES` | false（footer は 1 続きの run） |
 | `comments.blank-line-before-tags` | `comment.insert_new_line_before_root_tags` | `JD_ADD_BLANK_AFTER_DESCRIPTION` | true |
-| `comments.align-tag-descriptions` | `comment.align_tags_names_descriptions` | `JD_ALIGN_PARAM_COMMENTS` | false |
+| `comments.tag-alignment` (`none`/`grouped`/`all`) | `comment.align_tags_names_descriptions` → `all`、`comment.align_tags_descriptions_grouped` → `grouped`（JDT は前者を優先） | `JD_ALIGN_PARAM_COMMENTS` → `all` | `none` |
 | `comments.indent-tag-description` | `comment.indent_tag_description` | `JD_INDENT_ON_CONTINUATION` | true |
 | `comments.leading-asterisks` | — | `JD_LEADING_ASTERISKS_ARE_ENABLED` | true |
+| `comments.javadoc-boundaries-on-own-lines` | `comment.new_lines_at_javadoc_boundaries` | — | false（`makeSingleLineIfPossible`） |
+| `comments.block-boundaries-on-own-lines` | `comment.new_lines_at_block_boundaries` | — | false |
+| `comments.reflow-unclosed-html` | —（閉じない `<code>` も整形する → true） | — | `JavadocLexer.checkMatchingTags` が投げ、`formatJavadoc` が原文を返す → false |
+| `comments.tables-are-preformatted` | —（`<table>` は通常の HTML。`<tr>`/`<td>`/`<th>` が block 要素 → false） | —（同左 → false） | `JavadocLexer` の `TABLE_OPEN`/`TABLE_CLOSE` → true |
+| `comments.set-off-html-lists` | —（list を字下げも空行分離もしない → false） | —（同左 → false） | `JavadocWriter` の `writeListOpen` / `continuingListStack` → true |
 | `comments.normalize-parameter-comments` | — | — | `CommentsHelper.reformatParameterComment`（固定） |
 | `comments.inline-block-comments` | — | — | 固定 |
 | `imports.order` (`preserve`/`sort`/`group`) | —（JDT formatter は import を触らない） | `IMPORT_LAYOUT_TABLE` の有無 | `ImportOrderer`（常に group） |
@@ -328,8 +337,8 @@ IntelliJ の `SPACE_*` 45 とはほぼ 1:1。代表例（全数は importer の 
 | `imports.reorder-modifiers` | — | — | `ModifierOrderer`（固定 true） |
 | `imports.remove-unused` | — | —（`CLASS_COUNT_TO_USE_IMPORT_ON_DEMAND` 等は classpath 依存で §7） | `RemoveUnusedImports`（`--skip-removing-unused-imports` の否定、既定 true） |
 | `wrapping.reflow-long-strings` | — | — | `JavaFormatterOptions.reflowLongStrings` → `StringWrapper`（既定 true） |
-| `wrapping.inline-argumentless-annotations` | — | — | `fieldAnnotationDirection`（引数付き注釈が 1 つでもあれば縦、なければ横。固定 true） |
-| `blank-lines.around-documented-member` | — | — | `hasJavaDoc(bodyDeclaration)` → `thisOneGetsBlankLineBefore`（固定 1） |
+| `wrapping.inline-argumentless-annotations` (`never`/`locals`/`declarations`) | — | — | `fieldAnnotationDirection`（引数付き注釈が 1 つでもあれば縦、なければ横）→ `declarations`。Palantir は field を常に縦にするので `locals` |
+| `blank-lines.around-documented-member` (`inherit`/行数/`preserve`) | — | — | `thisOneGetsBlankLineBefore`（Javadoc 付きメンバ、および注釈が縦に並ぶ field。固定 1）→ `1`。Palantir はこの位置で何も強制せず元の空行に委ねるので `preserve`。Eclipse / IntelliJ は種別の rule だけで決めるので既定の `inherit` |
 | `wrapping.fill-item-width` | —（構文ごとの split bit で表す） | — | `hasOnlyShortItems` / `MAX_ITEM_LENGTH_FOR_FILLING`（固定 10） |
 | `wrapping.format-string-arguments` | — | — | `isFormatMethod`（先頭引数が `%` / `{0}` を含む文字列リテラル連結なら、それだけを 1 行に。固定 true） |
 | `wrapping.tabular-array-initializers` | — | — | `argumentsAreTabular` / 配列初期化子の table 判定（引数リストにも効く。固定 true） |
@@ -374,7 +383,7 @@ native モデルには載せるが、`Config` へは写さない。理由を型�
 | IntelliJ エディタ挙動 | `WRAP_ON_TYPING`, `FORCE_REARRANGE_MODE`, `KEEP_BUILDER_METHODS_INDENTS` | 入力中の挙動・rearrange ダイアログ設定でバッチ整形の出力に効かない |
 | IntelliJ 整列 | `ALIGN_MULTILINE_*` 18 個, `ALIGN_CONSECUTIVE_*` | **列揃え**は幅計算が入力に依存し、jals の canonical レイアウトモデルに乗らない。単一エンジンでは**再現しないと確定**している（`DESIGN.md` §18.2 の D1）。native モデルには全数保持し、差分の根拠として残す |
 | Eclipse 整列 | `align_type_members_on_columns`, `align_variable_declarations_on_columns`, `align_assignment_statements_on_columns`, `alignment_for_*` の `M_INDENT_ON_COLUMN` ビット | 同上 |
-| Eclipse コメント微細 | `comment.javadoc_paragraphs_tags_with_content`, `comment.new_lines_at_javadoc_boundaries` ほか | Javadoc 整形器の忠実度の問題で写像先が無い（`DESIGN.md` §18.2 の D7）。native 側に保持 |
+| Eclipse コメント微細 | `comment.javadoc_paragraphs_tags_with_content` ほか | Javadoc 整形器の忠実度の問題で写像先が無い（`DESIGN.md` §18.2 の D7）。native 側に保持。`comment.new_lines_at_javadoc_boundaries` はこの行から抜けて `comments.javadoc-boundaries-on-own-lines` になった |
 
 **この表に載っていることが「構造化された」の意味**である。写像表（§5）に現れない native option も、
 モデル上は型を持ち、名前を持ち、テスト 1 が存在を保証している。

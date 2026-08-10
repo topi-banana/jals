@@ -79,7 +79,11 @@ pub(crate) struct Ctx<'a> {
     /// The branch just emitted got its braces from `[braces] force-*`, so the continuation
     /// keyword after it cuddles a `}` the source never had.
     braced_branch: bool,
-    /// The file's leading comment has been seen (`comments.format-header` gates only the first).
+    /// A significant token has been emitted, so the file's header region is over.
+    ///
+    /// The header is not "the first comment": it is every comment before the first declaration —
+    /// JDT's `comment.format_header` covers the whole run, and an OpenJDK file routinely opens
+    /// with a licence block, a blank line and a second attribution block.
     header_seen: bool,
     /// Token offsets whose own-line leading comments were already hoisted by an enclosing node.
     hoisted: BTreeSet<usize>,
@@ -324,6 +328,7 @@ impl<'a> Ctx<'a> {
         }
         let text = LiteralRewrite::apply(tok.text(), tok.kind(), self.style.cfg.literals);
         self.ops.token(&text);
+        self.header_seen = true;
         self.spaced = false;
         self.previous = Some(tok.clone());
         self.emit_trailing(tok);
@@ -481,7 +486,7 @@ impl<'a> Ctx<'a> {
                     None,
                 );
             }
-            self.emit_comment(comment);
+            self.emit_comment(comment, false);
             self.space();
         }
     }
@@ -509,14 +514,21 @@ impl<'a> Ctx<'a> {
             self.emit_comment_line(comment);
             self.forced_break(Indent::ZERO);
         }
-        // Only a `//` or a plain `/* … */` may leave a blank line behind it. A Javadoc documents
-        // the declaration that follows, so a blank line between the two is dropped however the
-        // author wrote it — google-java-format's `allowBlankAfterLastComment`.
-        let separable = comments
+        // A Javadoc documents the declaration that follows, so how much of the gap between the
+        // two survives is its own rule — zero is google-java-format's `allowBlankAfterLastComment`
+        // returning false for a doc comment. Behind a `//` or a plain `/* … */` the ordinary
+        // in-code cap applies, and a gap the caller is owed cannot be lost.
+        let blanks = &self.style.cfg.blank_lines;
+        let documenting = comments
             .last()
-            .is_some_and(|comment| comment.kind != S::DOC_COMMENT);
-        let after = Self::source_blank_lines(tok).min(self.style.cfg.blank_lines.max_in_code);
-        let after = if separable { after.max(owed) } else { 0 };
+            .is_some_and(|comment| comment.kind == S::DOC_COMMENT);
+        let after = if documenting {
+            Self::source_blank_lines(tok).min(blanks.max_after_doc_comment)
+        } else {
+            Self::source_blank_lines(tok)
+                .min(blanks.max_in_code)
+                .max(owed)
+        };
         if after > 0 {
             self.ops.ensure_blank_lines(after, Indent::ZERO);
         }
@@ -557,12 +569,12 @@ impl<'a> Ctx<'a> {
             if tok.kind() == S::LBRACE && !comment.is_line() && comment.text.ends_with("*/") {
                 let indent = self.style.indent();
                 self.forced_break(indent);
-                self.emit_comment(&comment);
+                self.emit_comment(&comment, true);
                 self.ops.force_next_break();
                 continue;
             }
             self.space();
-            self.emit_comment(&comment);
+            self.emit_comment(&comment, false);
             if comment.is_line() {
                 // A `//` swallows the rest of the line, so whatever follows must start a new one.
                 self.ops.force_next_break();
@@ -584,28 +596,48 @@ impl<'a> Ctx<'a> {
                 self.ops.ensure_blank_lines(kept, Indent::ZERO);
             }
         }
-        self.emit_comment(comment);
+        self.emit_comment(comment, true);
         if comment.is_line() {
             self.ops.force_next_break();
         }
     }
 
     /// Emit a comment's text, reflowed when its `[comments]` rule is on.
-    fn emit_comment(&mut self, comment: &Comment) {
-        let is_header = !self.header_seen;
-        self.header_seen = true;
+    ///
+    /// `own_line` says the comment starts a line of its own. A `/* … */` written inside an
+    /// expression does not, and the rule that gives a block comment's delimiters lines of their
+    /// own would tear the expression across three lines if it applied there.
+    fn emit_comment(&mut self, comment: &Comment, own_line: bool) {
+        let is_header = !self.header_seen && !Self::documents_a_declaration(comment);
         let text = CommentFormatter::render(
             &comment.text,
             comment.kind,
             self.indent,
             comment.column,
             is_header,
+            own_line,
             self.style,
         );
         self.ops.comment(&text);
         self.emitted_comments += 1;
         self.spaced = false;
         self.previous = None;
+    }
+
+    /// Whether `comment` is the Javadoc of the declaration it precedes rather than a comment
+    /// standing above one.
+    ///
+    /// The header region ends at the first *declaration*, and a declaration's own doc comment is
+    /// part of that declaration — JDT reads it the same way, since a `BodyDeclaration`'s start
+    /// offset already includes its Javadoc. Without the distinction the region ends at the first
+    /// significant token instead, and a file with no `package` made its own type's Javadoc the
+    /// header comment: `format-header = false` then stopped formatting it, in every
+    /// default-package file and every file whose licence block is followed straight by a type.
+    ///
+    /// A licence written as `/** … */` is therefore formatted by the Javadoc rule rather than
+    /// held by `format-header`, which is the same answer the references give it.
+    const fn documents_a_declaration(comment: &Comment) -> bool {
+        matches!(comment.kind, S::DOC_COMMENT)
     }
 
     // ===== Formatter-disabled regions =====

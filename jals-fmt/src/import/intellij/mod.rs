@@ -31,7 +31,7 @@ use alloc::string::String;
 
 use jals_config::fmt::{
     BraceStyle, Config, ForceBraces, ImportOrder, IndentStyle, KeepOnOneLine, LineEnding,
-    ParenPositions, WrapPolicy,
+    ParagraphTags, ParenPositions, TagAlignment, WrapPolicy,
 };
 use serde::{Deserialize, Deserializer};
 
@@ -392,6 +392,14 @@ impl From<IntellijConfig> for Config {
         count(
             &mut blanks.max_before_closing_brace,
             blank_lines.keep_blank_lines_before_rbrace,
+        );
+        // IDEA has no rule that singles out the gap after a doc comment — exactly as JDT has
+        // none — so the declarations cap is what decides it. Without this the key kept
+        // google-java-format's 0, which deletes a blank line an author left between `/** … */`
+        // and what it documents; IDEA keeps it.
+        count(
+            &mut blanks.max_after_doc_comment,
+            blank_lines.keep_blank_lines_in_declarations,
         );
         count(
             &mut blanks.before_package,
@@ -826,11 +834,30 @@ impl From<IntellijConfig> for Config {
 
         // --- [comments] -----------------------------------------------------------------
         let comments = &mut config.comments;
-        Lower::set(
-            &mut comments.format_javadoc,
-            javadoc.enable_javadoc_formatting,
-            |b| b,
-        );
+        // jals's rule is *reflow*, and IDEA reflows a Javadoc only when both of its switches are
+        // on: `ENABLE_JAVADOC_FORMATTING` turns the Javadoc pass on at all, and `WRAP_COMMENTS`
+        // (off in a stock IDEA) is what lets that pass move a line break. With the pass on and
+        // wrapping off it still aligns tags and adds a `<p>` at a blank line, but every line of
+        // prose stays where the author put it — which is `DESIGN.md` §18.2's **D5**, so jals
+        // approximates the pair with "do not reflow" rather than reflowing against a margin IDEA
+        // is not using.
+        // `Lower::set` writes whenever its `Option` is `Some`, so the conjunction has to be
+        // formed from the pair rather than from one of them: mapping over
+        // `enable_javadoc_formatting` alone made an **absent** `WRAP_COMMENTS` write `false`,
+        // which turned the Javadoc pass off for a scheme that had asked for it — and with it
+        // every Javadoc rule below, since `CommentFormatter::render` short-circuits there.
+        // Each operand falls back to IDEA's own default, recorded beside the native field.
+        let reflows_javadoc = (javadoc.enable_javadoc_formatting.is_some()
+            || wrapping.wrap_comments.is_some())
+        .then(|| {
+            javadoc
+                .enable_javadoc_formatting
+                .unwrap_or(javadoc::ENABLE_JAVADOC_FORMATTING_DEFAULT)
+                && wrapping
+                    .wrap_comments
+                    .unwrap_or(wrapping::WRAP_COMMENTS_DEFAULT)
+        });
+        Lower::set(&mut comments.format_javadoc, reflows_javadoc, |b| b);
         Lower::set(&mut comments.format_line, wrapping.wrap_comments, |b| b);
         Lower::set(&mut comments.format_block, wrapping.wrap_comments, |b| b);
         // IntelliJ has no comment-specific width: it reflows against the shared right margin.
@@ -854,20 +881,48 @@ impl From<IntellijConfig> for Config {
             |b| b,
         );
         Lower::set(
-            &mut comments.align_tag_descriptions,
+            &mut comments.tag_alignment,
             javadoc.jd_align_param_comments,
-            |b| b,
+            |on| {
+                if on {
+                    TagAlignment::All
+                } else {
+                    TagAlignment::None
+                }
+            },
         );
         Lower::set(
             &mut comments.indent_tag_description,
             javadoc.jd_indent_on_continuation,
             |b| b,
         );
+        // IDEA writes the `<p>` it adds at a blank line on a line of its own, and with the option
+        // off it adds none — either way it never glues one to the paragraph's first word.
+        Lower::set(
+            &mut comments.paragraph_tags,
+            javadoc.jd_p_at_empty_lines,
+            |add| {
+                if add {
+                    ParagraphTags::OwnLine
+                } else {
+                    ParagraphTags::Authored
+                }
+            },
+        );
         Lower::set(
             &mut comments.leading_asterisks,
             javadoc.jd_leading_asterisks_are_enabled,
             |b| b,
         );
+        // Three shapes google-java-format's `JavadocWriter` invents and IDEA does not: it writes
+        // an HTML list flush with the rest of the comment and asks for no gap above it, reads a
+        // `<table>` as ordinary HTML rather than as a preformatted region, and builds one token
+        // out of an inline `{@… }` so a break falls inside one only where the tag cannot fit a
+        // line at all. MAPPING.md's `—` in the IntelliJ column means IDEA has no *option* here,
+        // which is not the claim that GJF's reading is the right one for it.
+        comments.set_off_html_lists = false;
+        comments.tables_are_preformatted = false;
+        comments.break_inside_inline_tags = false;
 
         // --- [imports] ------------------------------------------------------------------
         if let Some(table) = imports.import_layout_table.as_ref() {

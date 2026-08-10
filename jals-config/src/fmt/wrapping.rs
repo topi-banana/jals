@@ -32,6 +32,43 @@ pub enum WrapPolicy {
     AlwaysPerItem,
 }
 
+/// Which declarations keep an all-argumentless run of leading annotations on their own line.
+///
+/// google-java-format's `fieldAnnotationDirection` reads an annotation's *shape* rather than the
+/// available width: `@Deprecated int x;` stays on one line while `@SuppressWarnings("x") int y;`
+/// breaks. palantir-java-format keeps that reading for a local declaration and drops it for a
+/// field, which is why the rule names a set of declarations rather than being a bool. Neither
+/// Eclipse nor IntelliJ has an equivalent: both decide the direction from the declaration kind
+/// alone.
+///
+/// The `true` / `false` this key was spelled with before it named a set still reads, so a
+/// `jalsfmt.toml` this crate itself generated goes on loading — `true` was google-java-format's
+/// reading, which is [`Declarations`](Self::Declarations). A key whose *value type* changed is
+/// the one migration `#[serde(alias)]` cannot perform, and the failure is not this key going
+/// unread: it is a parse error for the **whole** file, so every other rule in it stops loading.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum InlineAnnotations {
+    /// None: every leading annotation takes the direction its per-kind `[wrapping]` rule gives it.
+    #[default]
+    Never,
+    /// A local variable, a `try` resource, a parameter, or a record component — but not a field.
+    /// palantir-java-format.
+    Locals,
+    /// Every variable declaration, a field included. google-java-format.
+    Declarations,
+}
+
+bool_or_named!(
+    InlineAnnotations,
+    "\"never\", \"locals\", \"declarations\", or the boolean this key was spelled with",
+    InlineAnnotations::Declarations,
+    InlineAnnotations::Never,
+    "never" => InlineAnnotations::Never,
+    "locals" => InlineAnnotations::Locals,
+    "declarations" => InlineAnnotations::Declarations,
+);
+
 /// Where the delimiters of a wrapped, paren- or brace-delimited list are placed.
 ///
 /// Eclipse's `parentheses_positions_in_*` vocabulary. IntelliJ spells the same decision as two
@@ -163,16 +200,10 @@ pub struct Wrapping {
     pub parameter_annotations: WrapPolicy,
     /// A local-variable declaration's annotations. IntelliJ `VARIABLE_ANNOTATION_WRAP`.
     pub variable_annotations: WrapPolicy,
-    /// Keep a variable declaration's leading annotations on the declaration's own line when
-    /// *none* of them takes arguments, overriding
-    /// [`field_annotations`](Self::field_annotations) and
+    /// Which declarations keep an all-argumentless run of leading annotations on their own line,
+    /// overriding [`field_annotations`](Self::field_annotations) and
     /// [`variable_annotations`](Self::variable_annotations).
-    ///
-    /// `@Deprecated int x;` stays on one line while `@SuppressWarnings("x") int y;` breaks —
-    /// google-java-format's `fieldAnnotationDirection`, which reads an annotation's *shape*
-    /// rather than the available width. No Eclipse or IntelliJ equivalent: both decide the
-    /// direction from the declaration kind alone.
-    pub inline_argumentless_annotations: bool,
+    pub inline_argumentless_annotations: InlineAnnotations,
     /// Put a wrapped binary operator at the start of the continuation line rather than at the
     /// end of the broken line. Eclipse `wrap_before_additive_operator` and its six siblings /
     /// IntelliJ `BINARY_OPERATION_SIGN_ON_NEXT_LINE`.
@@ -277,7 +308,7 @@ impl Default for Wrapping {
             field_annotations: WrapPolicy::AlwaysPerItem,
             parameter_annotations: WrapPolicy::Never,
             variable_annotations: WrapPolicy::Never,
-            inline_argumentless_annotations: false,
+            inline_argumentless_annotations: InlineAnnotations::Never,
             before_binary_operator: true,
             before_ternary_operator: true,
             before_assignment_operator: false,

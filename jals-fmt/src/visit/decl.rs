@@ -7,7 +7,7 @@
 
 use alloc::vec::Vec;
 
-use jals_config::fmt::{BraceStyle, WrapPolicy};
+use jals_config::fmt::{BraceStyle, InlineAnnotations, WrapPolicy};
 use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::ir::{FillMode, Indent};
@@ -55,6 +55,16 @@ impl Ctx<'_> {
                 self.brace_before(self.style.cfg.braces.type_declaration);
                 self.visit_element(child).await;
                 return;
+            }
+            // A record's component list breaks from the header level, which the declared name
+            // already opened — the same reason a method's parameter list takes no indent of its
+            // own (`Ctx::visit_method`). Letting it open a second one wrapped the components
+            // eight columns in where `visitRecordDeclaration` puts them at four.
+            if child
+                .as_node()
+                .is_some_and(|node| node.kind() == S::RECORD_HEADER)
+            {
+                self.list_indent = Some(Indent::ZERO);
             }
             self.visit_element(child).await;
             if !opened && name == Some(nth) {
@@ -192,13 +202,18 @@ impl Ctx<'_> {
     }
 
     /// Which `[wrapping]` rule governs this `MODIFIERS` node's leading annotations.
-    fn annotation_policy(&self, node: &SyntaxNode) -> WrapPolicy {
+    pub(super) fn annotation_policy(&self, node: &SyntaxNode) -> WrapPolicy {
         let wrapping = &self.style.cfg.wrapping;
         let parent = node.parent().map(|parent| parent.kind());
         // `inline-argumentless-annotations` decides from the annotations themselves, so it is
         // answered before the per-kind rule it overrides.
-        if wrapping.inline_argumentless_annotations
-            && matches!(
+        let inlined = match wrapping.inline_argumentless_annotations {
+            InlineAnnotations::Never => false,
+            InlineAnnotations::Locals => matches!(
+                parent,
+                Some(S::LOCAL_VAR_DECL | S::RESOURCE | S::PARAM | S::RECORD_COMPONENT)
+            ),
+            InlineAnnotations::Declarations => matches!(
                 parent,
                 Some(
                     S::FIELD_DECL
@@ -207,9 +222,9 @@ impl Ctx<'_> {
                         | S::PARAM
                         | S::RECORD_COMPONENT
                 )
-            )
-            && !Self::any_annotation_has_arguments(node)
-        {
+            ),
+        };
+        if inlined && !Self::any_annotation_has_arguments(node) {
             // Horizontal is not *pinned* horizontal for a declaration: `fieldAnnotationDirection`'s
             // `breakList` is a UNIFIED break, so an argumentless run shares the declaration's line
             // while it fits and moves above it when it does not. A parameter has no line of its

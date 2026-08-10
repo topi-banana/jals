@@ -11,7 +11,9 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use jals_tests::Harness;
-use jals_tests::golden::{GOLDEN_SOURCES, GoldenReport, GoldenSource, Pin, TARGETS, Target};
+use jals_tests::golden::{
+    Ceiling, GOLDEN_SOURCES, GoldenReport, GoldenSource, Pin, TARGETS, Target,
+};
 
 #[derive(Parser)]
 #[command(
@@ -56,6 +58,15 @@ struct Cli {
     /// Emit a GitHub-flavored Markdown summary instead of plain text.
     #[arg(long)]
     markdown: bool,
+
+    /// Also report what each corpus would score if its comment formatting were perfect.
+    ///
+    /// `jals-fmt/DESIGN.md` §18.2.1's table: the similarity with comment lines dropped from both
+    /// sides, which leaves the layout algorithms as the only residue, and the similarity the
+    /// corpus would show if every comment line matched. Off by default because it formats the
+    /// corpus a second time.
+    #[arg(long)]
+    ceiling: bool,
 }
 
 fn main() -> ExitCode {
@@ -93,6 +104,9 @@ impl Cli {
             }
             let report = GoldenReport::run("dir", dir, style, Pin::Unpinned);
             cli.emit(&[report]);
+            if cli.ceiling {
+                Self::print_ceiling("dir", &Ceiling::measure(dir, style));
+            }
             return ExitCode::SUCCESS;
         }
 
@@ -109,6 +123,7 @@ impl Cli {
 
         let mut any_missing = false;
         let mut reports = Vec::new();
+        let mut ceilings: Vec<(&str, Ceiling)> = Vec::new();
 
         for name in selected {
             let Some(source) = GoldenSource::by_name(name) else {
@@ -141,15 +156,31 @@ impl Cli {
                 source.target,
                 source.pin,
             ));
+            if cli.ceiling {
+                ceilings.push((source.name, Ceiling::measure(&root, source.target)));
+            }
         }
 
         cli.emit(&reports);
+        for (name, ceiling) in &ceilings {
+            Self::print_ceiling(name, ceiling);
+        }
 
         if any_missing {
             ExitCode::from(2)
         } else {
             ExitCode::SUCCESS
         }
+    }
+
+    /// Print one corpus's `DESIGN.md` §18.2.1 row.
+    fn print_ceiling(name: &str, ceiling: &Ceiling) {
+        println!(
+            "Ceiling: {name}  pairs {}  code only {:.2}%  comments perfect {:.2}%",
+            ceiling.pairs,
+            ceiling.code * 100.0,
+            ceiling.comments_perfect * 100.0,
+        );
     }
 
     /// Print the reports as plain text or, with `--markdown`, a Markdown table.

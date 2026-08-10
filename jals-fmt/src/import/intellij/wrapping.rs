@@ -11,6 +11,10 @@ use serde::Deserialize;
 use super::super::serde_kv::Kv;
 use super::values::{IjBraceStyle, IjForceBraces, IjWrap};
 
+/// IDEA's own default for `WRAP_COMMENTS`: **off**, so a stock IDEA moves no line break inside a
+/// comment however much of the Javadoc pass is on. `DESIGN.md` §18.2's **D5**.
+pub(crate) const WRAP_COMMENTS_DEFAULT: bool = false;
+
 /// The wrapping, alignment, and brace settings of a Java code style.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]

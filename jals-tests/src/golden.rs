@@ -40,6 +40,7 @@
 //! `.github/workflows/ci.yml` must agree with; vendored corpora are pinned by
 //! their submodule commit.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use jals_config::fmt::Config;
@@ -322,6 +323,147 @@ impl PairResult {
         let exact = formatted == expected;
         let ratio = TextDiff::from_lines(expected, &formatted).ratio() as f64;
         (ratio, exact)
+    }
+}
+
+/// How close a target could come if its **comment** formatting were perfect.
+///
+/// `DESIGN.md` §18.2.1 asks what the enumerated permanent differences cost, and the answer only
+/// means something if it can be recomputed after the formatter moves. Dropping every comment line
+/// from both sides leaves the layout algorithms alone as the residue ([`code`](Self::code)), and
+/// adding the expected side's comment lines back as *matches* answers the other half: what the
+/// score would be if the comment formatter agreed line for line
+/// ([`comments_perfect`](Self::comments_perfect)).
+///
+/// The arithmetic is the Ratcliff/Obershelp ratio's own. It is `2M/(a+b)`, so the comment-stripped
+/// comparison gives back `M`, and `C` matching lines added to both sides make it
+/// `2(M+C)/(a+C+b+C)`.
+#[derive(Debug, Clone, Copy)]
+pub struct Ceiling {
+    /// Pairs measured.
+    pub pairs: usize,
+    /// Mean similarity with every comment line dropped from both sides.
+    pub code: f64,
+    /// Mean similarity the corpus would show if every comment line matched.
+    pub comments_perfect: f64,
+}
+
+impl Ceiling {
+    /// Measure the ceiling of `target`'s style over the corpus rooted at `root`.
+    ///
+    /// Separate from [`GoldenReport::run`] rather than a column of it: it formats the corpus a
+    /// second time and diffs it twice more, which is a cost every ordinary run would pay for a
+    /// number only `DESIGN.md` §18.2.1 reads.
+    #[must_use]
+    pub fn measure(root: &Path, target: &Target) -> Self {
+        let cfg = &target.config();
+        let rows: Vec<(f64, f64)> = GoldenReport::collect_pairs(root)
+            .into_par_iter()
+            .filter_map(|(input_path, output_path)| {
+                let input = std::fs::read_to_string(&input_path).ok()?;
+                let expected = std::fs::read_to_string(&output_path).ok()?;
+                let formatted =
+                    jals_exec::block_on_inline(jals_fmt::FormatOutput::format_source(&input, cfg))
+                        .formatted;
+                let (expected_code, comments) = Self::without_comments(&expected);
+                let (formatted_code, _) = Self::without_comments(&formatted);
+                let a = expected_code.lines().count() as f64;
+                let b = formatted_code.lines().count() as f64;
+                let code = f64::from(TextDiff::from_lines(&expected_code, &formatted_code).ratio());
+                let matched = code * (a + b) / 2.0;
+                let c = comments as f64;
+                let total = a + b + 2.0 * c;
+                let perfect = if total > 0.0 {
+                    2.0f64.mul_add(matched + c, 0.0) / total
+                } else {
+                    1.0
+                };
+                Some((code, perfect))
+            })
+            .collect();
+        let pairs = rows.len();
+        let mean = |pick: fn(&(f64, f64)) -> f64| {
+            if pairs == 0 {
+                0.0
+            } else {
+                rows.iter().map(pick).sum::<f64>() / pairs as f64
+            }
+        };
+        Self {
+            pairs,
+            code: mean(|row| row.0),
+            comments_perfect: mean(|row| row.1),
+        }
+    }
+
+    /// `text` without its comment lines, and how many were dropped.
+    ///
+    /// A line is a comment when everything on it belongs to a comment **token**, which is a
+    /// question for the lexer rather than for the line's first two characters. Under
+    /// `before-binary-operator` — what google-java-format, Palantir and Eclipse all do — a wrapped
+    /// multiplication puts a `*` at the head of its continuation line, and a `starts_with('*')`
+    /// test ate it: the line vanished from the code-only comparison *and* was counted as a comment
+    /// line that would match perfectly, so it biased **both** published columns upward. Worse, the
+    /// error moves with how often the layout engine wraps a binary operator, which is exactly the
+    /// property `DESIGN.md` §18.2.1 needs in order to be a measurement the harness can retake.
+    ///
+    /// A trailing comment after code is not a comment line: the line is code that also says
+    /// something, and dropping it would take the code with it.
+    fn without_comments(text: &str) -> (String, usize) {
+        let comment = Self::comment_lines(text);
+        let mut kept: Vec<&str> = Vec::new();
+        let mut dropped = 0usize;
+        for (nth, line) in text.lines().enumerate() {
+            if comment.contains(&nth) {
+                dropped += 1;
+            } else {
+                kept.push(line);
+            }
+        }
+        (kept.join("\n"), dropped)
+    }
+
+    /// The zero-based lines of `text` that hold nothing but comment.
+    ///
+    /// Read off the **tokens** the parser found: a line is one when every non-whitespace byte on
+    /// it lies inside trivia, and trivia that is not whitespace is a comment. So a `*` opening a
+    /// continuation line is an operator, a `*` inside a block comment is not, and a line inside an
+    /// unterminated comment still counts — the parser is lossless on malformed input. A line that
+    /// is wholly blank is neither, on either side, exactly as a blank line between statements is.
+    fn comment_lines(text: &str) -> BTreeSet<usize> {
+        let parse = jals_exec::block_on_inline(jals_syntax::Parse::parse(text));
+        let mut trivia = vec![false; text.len()];
+        for token in parse
+            .syntax()
+            .descendants_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .filter(|token| token.kind().is_trivia())
+        {
+            let start = usize::from(token.text_range().start());
+            let end = usize::from(token.text_range().end()).min(trivia.len());
+            for byte in &mut trivia[start.min(end)..end] {
+                *byte = true;
+            }
+        }
+
+        let mut out = BTreeSet::new();
+        let mut at = 0usize;
+        for (nth, line) in text.split('\n').enumerate() {
+            let mut content = false;
+            let mut all_trivia = true;
+            for (offset, ch) in line.char_indices() {
+                if ch.is_whitespace() {
+                    continue;
+                }
+                content = true;
+                all_trivia &= trivia.get(at + offset).copied().unwrap_or(false);
+            }
+            if content && all_trivia {
+                out.insert(nth);
+            }
+            at += line.len() + 1;
+        }
+        out
     }
 }
 

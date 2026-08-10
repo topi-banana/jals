@@ -102,8 +102,12 @@ pub struct Layout {
     pub max_width: usize,
     /// Line terminator to emit. IntelliJ `LINE_SEPARATOR` / EditorConfig `end_of_line`.
     pub line_ending: LineEnding,
-    /// Ensure the output ends with exactly one newline. Eclipse
+    /// Add a final newline to a file that has none. Eclipse
     /// `insert_new_line_at_end_of_file_if_missing` / Spotless `endWithNewline()`.
+    ///
+    /// Off does **not** mean "remove the one that is there": both native options only ever
+    /// append, and a formatter that silently drops a file's terminator is a diff on every line
+    /// of every tool downstream. A source that already ends with a newline keeps it either way.
     pub insert_final_newline: bool,
     /// Strip trailing spaces and tabs from every line. Spotless `trimTrailingWhitespace()` /
     /// EditorConfig `trim_trailing_whitespace`.

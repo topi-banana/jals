@@ -14,7 +14,14 @@ pub(crate) struct Finalize;
 
 impl Finalize {
     /// Trim, normalize terminators, and settle the final newline.
-    pub(crate) fn apply(text: &str, style: &Style) -> String {
+    ///
+    /// `src` is the text this run started from, and the only thing read off it is whether it
+    /// ended with a newline. `insert-final-newline` **adds** one that is missing; it is not a
+    /// licence to take away one that is there — Eclipse spells the very same option
+    /// `insert_new_line_at_end_of_file_if_missing`, and Spotless's `endWithNewline()` likewise
+    /// only appends. Treating the `false` side as "strip" made every file of a corpus formatted
+    /// with a stock Eclipse profile differ on its last line.
+    pub(crate) fn apply(text: &str, src: &str, style: &Style) -> String {
         let layout = &style.cfg.layout;
         let newline = style.newline;
 
@@ -40,7 +47,7 @@ impl Finalize {
             out.push_str(kept);
         }
 
-        if layout.insert_final_newline && !out.is_empty() {
+        if (layout.insert_final_newline || src.ends_with('\n')) && !out.is_empty() {
             out.push_str(newline);
         }
         out

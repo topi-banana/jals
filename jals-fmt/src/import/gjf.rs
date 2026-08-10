@@ -23,8 +23,8 @@ use alloc::borrow::ToOwned;
 use alloc::vec;
 
 use jals_config::fmt::{
-    Comments, Config, ImportOrder, Imports, IndentStyle, KeepOnOneLine, Layout, ParenPositions,
-    Spacing, WrapPolicy, Wrapping,
+    BlankLines, Comments, Config, DocumentedMember, ImportOrder, Imports, IndentStyle,
+    InlineAnnotations, KeepOnOneLine, Layout, ParenPositions, Spacing, WrapPolicy, Wrapping,
 };
 use serde::Deserialize;
 
@@ -188,9 +188,15 @@ impl GoogleJavaFormatConfig {
                 // own lines, unless none of them takes arguments.
                 parameter_annotations: WrapPolicy::AlwaysPerItem,
                 variable_annotations: WrapPolicy::AlwaysPerItem,
-                inline_argumentless_annotations: true,
+                inline_argumentless_annotations: InlineAnnotations::Declarations,
                 reflow_long_strings: native.reflow_long_strings,
                 ..Wrapping::default()
+            },
+            // `thisOneGetsBlankLineBefore`: a member with Javadoc, and a field whose annotations
+            // went vertical, is separated from its neighbours whatever its kind says.
+            blank_lines: BlankLines {
+                around_documented_member: DocumentedMember::AtLeast(1),
+                ..BlankLines::default()
             },
             // `new String[] {…}` and `{{1}, {2}}` both take a space before the initializer's
             // brace; every other spacing decision is already the jals default.
@@ -211,6 +217,10 @@ impl GoogleJavaFormatConfig {
                 format_html: true,
                 width: max_width,
                 blank_line_before_tags: true,
+                // `JavadocFormatter.formatJavadoc` catches the lexer's `LexException` and hands
+                // the comment back unchanged, so an unclosed `<code>` is a Javadoc GJF does not
+                // touch at all.
+                reflow_unclosed_html: false,
                 normalize_parameter_comments: true,
                 inline_block_comments: true,
                 ..Comments::default()

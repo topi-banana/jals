@@ -1,6 +1,6 @@
 //! Every rule in `jals_config::fmt::Config` must actually reach the formatter.
 //!
-//! "All 176 rules are implemented" is not a claim to make in prose. This walks the **schema** — so
+//! "All 190 rules are implemented" is not a claim to make in prose. This walks the **schema** — so
 //! a rule added later is covered the moment it exists — moves each leaf away from its default one
 //! at a time, and requires the formatter to notice.
 //!
@@ -207,8 +207,70 @@ class Packed {
 class Second {}
 "#;
 
+/// The Javadoc shapes whose rules are about *gaps and units* rather than about width: a blank
+/// line between two block tags, a blank line between a doc comment and what it documents, and an
+/// inline `{@code …}` sitting exactly where a refill wants to break.
+const JAVADOC: &str = r"/* A header comment, long enough that the width it is reflowed against is visible in the output at all, so `format-header` has something to decide. Written as a block comment on purpose: a `/**` before a declaration is that declaration's Javadoc, never the file's header. */
+package p;
+
+/**
+ * A description whose last sentence runs long enough that the inline tag near the column limit
+ * has to move, which is the only place {@code breakInsideInlineTags} can be seen deciding.
+ * <ul>
+ * <li>a list item, so the list indent and the gap above the list have somewhere to appear
+ * <li>a second one
+ * </ul>
+ *
+ * <table>
+ * <tr>
+ * <td>a cell, so a table has a row to be read as HTML rather than as a preformatted region
+ * </tr>
+ * </table>
+ *
+ * @param x the first
+ *
+ * @throws IllegalStateException when the description is long enough to wrap onto a second line
+ * @since 1.0
+ */
+class Documented {
+
+  /**
+   * Two paragraphs of plain prose, separated by a blank line no region asked for — the one
+   * blank line in this file that `preserve-blank-lines` alone decides.
+   *
+   * The second paragraph, so the blank line above has something on both sides of it.
+   */
+  int documented = 0;
+
+  /** Documented, with a blank line before the field it documents. */
+
+  int a = 1;
+
+  /**
+   * A description whose <code>tag never closes, so a reference that refuses to lex it leaves
+   * every word of this comment exactly where it was written.
+   */
+  void unbalanced() {}
+
+  /**
+   * A fenced snippet whose own indentation is not the configured one.
+   *
+   * <pre>{@code
+   * if (a > 0) {
+   *   report();
+   * }
+   * }</pre>
+   */
+  void m() {}
+}
+";
+
+/// A file that does not end with a newline, so `insert-final-newline` has one to add. Every other
+/// fixture already ends with one, and adding a newline that is there changes nothing.
+const NO_FINAL_NEWLINE: &str = "class Bare {}";
+
 /// Every fixture; a rule may be noticed on any of them.
-const FIXTURES: [&str; 7] = [
+const FIXTURES: [&str; 9] = [
     KITCHEN_SINK,
     WRAPPING,
     TAGGED,
@@ -216,6 +278,8 @@ const FIXTURES: [&str; 7] = [
     LONG_STRING,
     ONE_LINERS,
     PACKED,
+    JAVADOC,
+    NO_FINAL_NEWLINE,
 ];
 
 /// An import-group list that leaves the static block's position to `static-first`.
@@ -248,7 +312,7 @@ fn format(src: &str, config: &Config) -> jals_fmt::FormatOutput {
 /// The `section.key = value` pairs where `config` differs from [`Config::default`].
 ///
 /// The sweep moves one leaf at a time, so this is normally one entry — plus whatever
-/// [`base_for`] had to turn on first. Enough to reproduce a failure without printing all 176 rules.
+/// [`base_for`] had to turn on first. Enough to reproduce a failure without printing all 190 rules.
 fn off_default(config: &Config) -> Vec<String> {
     let Value::Object(current) = serde_json::to_value(config).expect("serializable") else {
         panic!("the config is a table of tables");
@@ -333,6 +397,11 @@ fn candidates(section: &str, key: &str, current: &Value) -> Vec<Value> {
             Value::from("javax."),
             Value::from("*"),
         ])],
+        // The one leaf spelled either way: `around-documented-member` is a keyword or a count,
+        // because the three references separate a documented member more, less, and not at all.
+        Value::String(_) if (section, key) == ("blank-lines", "around-documented-member") => {
+            vec![Value::from(1), Value::from("preserve")]
+        }
         Value::String(_) => variants(section, key)
             .into_iter()
             .map(Value::from)
@@ -349,6 +418,8 @@ fn variants(section: &str, key: &str) -> Vec<&'static str> {
         ("layout", "formatter-off-tag") => vec!["@fmt:off"],
         ("layout", "formatter-on-tag") => vec!["@fmt:on"],
         ("imports", "order") => vec!["group", "sort"],
+        ("comments", "paragraph-tags") => vec!["own-line", "authored"],
+        ("comments", "tag-alignment") => vec!["grouped", "all"],
         ("literals", "hex-case" | "suffix-case") => vec!["upper", "lower"],
         ("literals", "float-trailing-zero") => vec!["always", "never"],
         ("braces", key) if key.starts_with("force-") => vec!["always", "if-multiline"],
@@ -356,6 +427,7 @@ fn variants(section: &str, key: &str) -> Vec<&'static str> {
             vec!["never", "always", "if-single-item", "preserve"]
         }
         ("braces", _) => vec!["next-line", "next-line-shifted", "next-line-on-wrap"],
+        ("wrapping", "inline-argumentless-annotations") => vec!["locals", "declarations"],
         ("wrapping", key) if key.starts_with("paren-") => {
             vec!["separate-lines", "separate-lines-if-wrapped", "preserve"]
         }
@@ -450,7 +522,7 @@ fn the_schema_is_the_documented_size() {
         .map(|section| section.as_object().map_or(0, Map::len))
         .sum();
     assert_eq!(
-        total, 181,
-        "the rule set is documented as 181 keys in jals-fmt/MAPPING.md",
+        total, 190,
+        "the rule set is documented as 190 keys in jals-fmt/MAPPING.md",
     );
 }

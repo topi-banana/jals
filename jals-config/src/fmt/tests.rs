@@ -214,6 +214,69 @@ fn an_unknown_key_is_ignored_rather_than_rejected() {
 }
 
 #[test]
+fn a_rule_that_grew_states_still_reads_the_spelling_it_replaced() {
+    // A key whose *value type* changed is the one migration `#[serde(alias)]` cannot perform, and
+    // the failure is not that the key goes unread — TOML rejects the file, so every other rule in
+    // it stops loading too. Both of these were emitted by `jals_fmt::generate` for every
+    // google-java-format and palantir import, and one of them is what this repo's own
+    // `jals-fmt.toml` said.
+    let old = Fixture::parse(concat!(
+        "[wrapping]\ninline-argumentless-annotations = true\n",
+        "[comments]\nalign-tag-descriptions = true\n",
+    ));
+    assert_eq!(
+        old.wrapping.inline_argumentless_annotations,
+        InlineAnnotations::Declarations,
+    );
+    assert_eq!(old.comments.tag_alignment, TagAlignment::All);
+
+    let off = Fixture::parse(concat!(
+        "[wrapping]\ninline-argumentless-annotations = false\n",
+        "[comments]\nalign-tag-descriptions = false\n",
+    ));
+    assert_eq!(
+        off.wrapping.inline_argumentless_annotations,
+        InlineAnnotations::Never,
+    );
+    assert_eq!(off.comments.tag_alignment, TagAlignment::None);
+
+    // The new spelling is what the same keys are written back as, so a migrated file is stable.
+    let new = Fixture::parse(concat!(
+        "[wrapping]\ninline-argumentless-annotations = \"locals\"\n",
+        "[comments]\ntag-alignment = \"grouped\"\n",
+    ));
+    assert_eq!(
+        new.wrapping.inline_argumentless_annotations,
+        InlineAnnotations::Locals,
+    );
+    assert_eq!(new.comments.tag_alignment, TagAlignment::Grouped);
+}
+
+#[test]
+fn a_documented_member_is_separated_more_less_or_by_its_kind() {
+    // Three references, three answers, so the key is a keyword *or* a count — and `0` is not a
+    // fourth: it is `AtLeast(0)`, which the kind rule wins over.
+    assert_eq!(
+        Config::default().blank_lines.around_documented_member,
+        DocumentedMember::Inherit,
+    );
+    let raised = Fixture::parse("[blank-lines]\naround-documented-member = 1\n");
+    assert_eq!(
+        raised.blank_lines.around_documented_member,
+        DocumentedMember::AtLeast(1),
+    );
+    let kept = Fixture::parse("[blank-lines]\naround-documented-member = \"preserve\"\n");
+    assert_eq!(
+        kept.blank_lines.around_documented_member,
+        DocumentedMember::Preserve,
+    );
+    assert_eq!(DocumentedMember::Inherit.resolve(1), 1);
+    assert_eq!(DocumentedMember::AtLeast(1).resolve(0), 1);
+    assert_eq!(DocumentedMember::AtLeast(0).resolve(1), 1);
+    assert_eq!(DocumentedMember::Preserve.resolve(1), 0);
+}
+
+#[test]
 fn a_malformed_value_is_reported() {
     let err = toml::from_str::<Config>("[braces]\ntype-declaration = \"sideways\"\n")
         .expect_err("an unknown enum variant should fail");
