@@ -318,6 +318,45 @@ impl Attrs {
         resolved
     }
 
+    /// Resolve the local that *begins* at `start_pc` in `slot` to its `(name, descriptor type)`.
+    ///
+    /// A catch parameter is the one local whose birth offset is known exactly — a handler's entry
+    /// `astore` is its first instruction, so the entry starts right after it — and that anchor is
+    /// what tells sibling clauses apart. `catch (IOException e)` and `catch (RuntimeException e)`
+    /// routinely share one slot with one entry each, which [`Attrs::local_variable`] reports as an
+    /// ambiguous reuse; keying on the start offset picks the right one without loosening that rule
+    /// for ordinary locals.
+    ///
+    /// The type resolved here is what the *body* sees — for a multi-catch it is the least upper
+    /// bound `javac` computed, which is exactly the type whose members the parameter can be used
+    /// with. The type the `catch` clause is *written* with is a separate question, answered by the
+    /// exception table, since the source named the alternatives rather than their bound.
+    pub(crate) fn local_variable_at(
+        table: &[LocalVariableEntry],
+        pool: &ConstantPool,
+        slot: u16,
+        start_pc: usize,
+    ) -> Option<(String, FieldType)> {
+        let mut found: Option<(String, FieldType)> = None;
+        for entry in table
+            .iter()
+            .filter(|e| e.index == slot && usize::from(e.start_pc) == start_pc)
+        {
+            let name = pool.utf8(entry.name_index)?.into_owned();
+            if !Self::is_java_identifier(&name) {
+                return None;
+            }
+            let descriptor = pool.utf8(entry.descriptor_index)?;
+            let pair = (name, FieldType::parse(&descriptor).ok()?);
+            match &found {
+                // Two variables born at one offset in one slot is not a shape to guess at.
+                Some(prev) if *prev != pair => return None,
+                _ => found = Some(pair),
+            }
+        }
+        found
+    }
+
     /// Whether every `LocalVariableTable` entry for `slot` lies inside `range` (and there is at
     /// least one) — that is, the variable is both born and dead within that byte range.
     ///

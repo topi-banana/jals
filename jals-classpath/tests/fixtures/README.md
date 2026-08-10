@@ -36,6 +36,10 @@ javac -parameters -g -d out jals-classpath/tests/fixtures/src/Switches.java
 cp out/demo/Switches.class 'out/demo/Switches$Color.class' jals-classpath/tests/fixtures/
 javac -parameters -g -d out jals-classpath/tests/fixtures/src/IntCarried.java
 cp out/demo/IntCarried.class jals-classpath/tests/fixtures/
+# Tries (`try`/`catch`/`finally` structuring) — needs -g, since a catch parameter is named from the
+# LocalVariableTable entry that starts right after the handler's entry `astore`:
+javac -parameters -g -d out jals-classpath/tests/fixtures/src/Tries.java
+cp out/demo/Tries.class jals-classpath/tests/fixtures/
 javac -parameters -g -d out jals-classpath/tests/fixtures/src/InvokeSpecialCalls.java
 cp out/demo/InvokeSpecialCalls.class jals-classpath/tests/fixtures/
 cp out/demo/InvokeSpecialBase.class jals-classpath/tests/fixtures/
@@ -86,6 +90,7 @@ package, no debug info) and its source is not committed.
 | `Cmp.class` | `src/Cmp.java` | M7 numeric comparison conditions: a `lcmp`/`fcmpl`/`fcmpg`/`dcmpl`/`dcmpg` fused into the following `if<cond>` across all six operators and both NaN flavors, in `if`/`while`/`do`-`while`, plus the two bails — a NaN-inexact rendering (`!(f < g)`, `fcmpg` + `iflt`) and a `*cmp` feeding a ternary's value merge |
 | `Switches.class` | `src/Switches.java` | M8 `switch` structuring: both table encodings, stacked labels sharing one arm, a `tableswitch` gap key, deliberate fall-through, every join shape (break-derived, a `default`-less fall-out, all-arms-`return`), `default` written in the middle, an `if` and an `if`/`else` inside an arm, an arm whose inner `if` breaks while its tail `return`s (no unreachable trailing `break;`), `char` labels, an `enum` switch recovered to constant names, and a `String` switch that still falls back |
 | `Switches$Color.class` | `src/Switches.java` | The enum `Switches.onEnum` switches on — its `<clinit>` is where the `ordinal -> constant name` map comes from |
+| `Tries.class` | `src/Tries.java` | `try` / `catch` / `finally` structuring: every join shape (a body and handler that both `return`, a handler falling into the join, statements following the statement), sibling clauses sharing one slot, a multi-catch spelled from the caught types rather than their least upper bound, an unused parameter with no table entry, a nested `try`, a loop whose header is the try's entry block, a `for` under a `finally` whose absorbed declaration must not stay hoisted, and a `finally` folded back out of two and three duplicates — plus the bails: a branching finalizer whose copies differ, a `return` under a `finally`, a catch parameter sharing a slot with a local, a `synchronized` block, a finalizer that `return`s or holds a `try`, a range split by two `return`s, and try-with-resources |
 | `IntCarried.class` | `src/IntCarried.java` | Type-directed recovery of JVM int-carried `boolean`/`char` values in returns, locals, fields, ordinary call arguments/results, and arrays; integer-zero tests versus boolean negation; explicit `i2c` and literal char casts, including a lone surrogate code unit |
 | `InvokeSpecialCalls.class`, `InvokeSpecialBase.class`, `InvokeSpecialDefault.class` | `src/InvokeSpecialCalls.java` | Non-constructor `invokespecial` dispatch to a direct superclass (`super.m()`) and direct interface default (`Interface.super.m()`), plus the complete hierarchy needed to prove the qualified call and explicit argument-bearing `super(...)` constructor delegation |
 | `hierarchy-evolution/v1/evolution/*.class` | `src/hierarchy-evolution/v1/HierarchyEvolution.java` | An old client with two legal interface-super calls, a shared-default diamond, and its complete original hierarchy |

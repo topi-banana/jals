@@ -16,6 +16,7 @@ extern crate alloc;
 mod attrs;
 mod body;
 mod cfg;
+mod exceptions;
 mod expr;
 mod hierarchy;
 mod lines;

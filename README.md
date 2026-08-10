@@ -660,7 +660,7 @@ Early stage (`0.1.0`). The formatter, linter, and language server are functional
 syntax layer covers a broad slice of Java, but APIs may change. Semantic analysis
 (`jals-hir`) covers name resolution, cross-file type indexing, and type inference/checking,
 including types resolved from a project's classpath and `[dependencies]`; generic-method
-inference, richer bytecode decompilation (`switch`/`try`-`catch`/`break`/`continue`), and
+inference, richer bytecode decompilation (loop `break`/`continue`, try-with-resources), and
 Maven-coordinate (`group:artifact:version`) POM/version resolution and a lockfile are still open.
 The transitive JALS `path`/`git` source-project graph is implemented; broader Maven dependency
 management, testing, and packaging remain on the build

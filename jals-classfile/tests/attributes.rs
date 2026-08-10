@@ -144,6 +144,42 @@ fn line_number_entries_carry_offsets_and_lines() {
 }
 
 #[test]
+fn exception_table_entries_carry_offsets_and_catch_types() {
+    // `jals-decompile` structures `try`/`catch`/`finally` out of these four fields, so it is not
+    // enough that the table decodes — a `catch_type` of 0 has to survive as 0 (it is the catch-all
+    // a `finally` compiles to), and the covered range has to come back the way it was written.
+    // The fixture lives in `jals-classpath`, whose fixtures are the ones compiled with try/catch.
+    let bytes = include_bytes!("../../jals-classpath/tests/fixtures/Tries.class");
+    let cf = jals_exec::block_on_inline(ClassFile::read(bytes.as_slice())).expect("parse fixture");
+    let tables: Vec<_> = cf
+        .methods
+        .iter()
+        .flat_map(|m| &m.attributes)
+        .filter_map(|a| match &a.body {
+            AttributeBody::Code(c) => Some(&c.exception_table),
+            _ => None,
+        })
+        .filter(|table| !table.is_empty())
+        .collect();
+    assert!(!tables.is_empty(), "the fixture should protect some ranges");
+    for entry in tables.iter().copied().flatten() {
+        assert!(
+            entry.start_pc() < entry.end_pc(),
+            "a covered range is half-open and non-empty: {entry:?}"
+        );
+    }
+    let all: Vec<_> = tables.iter().copied().flatten().collect();
+    assert!(
+        all.iter().any(|e| e.catch_type() == 0),
+        "the fixture's `finally` clauses compile to catch-all handlers"
+    );
+    assert!(
+        all.iter().any(|e| e.catch_type() != 0),
+        "the fixture's `catch` clauses name a type"
+    );
+}
+
+#[test]
 fn class_signature_is_decoded() {
     let cf = load("Iface.class");
     assert!(

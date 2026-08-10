@@ -90,24 +90,30 @@ impl JavaType {
 | `attrs.rs` | Read the attributes a signature skeleton needs: `ConstantValue` (→ field initializer, a boolean's `1`→`true`), `Exceptions` (→ non-generic `throws`), `MethodParameters` / `LocalVariableTable` (→ real, slot-aware parameter names). |
 | `expr.rs` | The expression / statement IR (`Expr`, `Stmt`) and its rendering to indented Java, with conservative parenthesization so the grouping the bytecode evaluated is preserved. |
 | `hierarchy.rs` | A deterministic immutable index over loaded class files. It validates complete, cycle-free supertype closures and the JLS 15.12.1/15.12.3 conditions before permitting `Interface.super.m()`. |
-| `cfg.rs` | Control-flow graph construction: reconstruct instruction offsets with `Instruction::encoded_len`, find leaders, and cut the code into basic blocks with typed terminators (including the multi-way `switch`, with both table encodings normalized to `(key, target)` pairs). Bails on `jsr` / a malformed or implausibly large switch table / a branch to a non-instruction offset. |
+| `cfg.rs` | Control-flow graph construction: reconstruct instruction offsets with `Instruction::encoded_len`, find leaders, and cut the code into basic blocks with typed terminators (including the multi-way `switch`, with both table encodings normalized to `(key, target)` pairs). Bails on `jsr` / a malformed or implausibly large switch table / a branch to a non-instruction offset. The exception table contributes leaders and a resolved side table, but no terminator: an exception leaves from *any* instruction in a protected range, so it has no place in a vocabulary built on what a block's last instruction does. |
+| `exceptions.rs` | Reading the exception table back as `try` statements: rows sharing a handler are one clause (a multi-catch), clauses sharing a protected range are one statement, and a `catch_type` of 0 is the `finally` whose body `javac` duplicated onto each exit — located, compared, and folded here. |
 | `switch.rs` | What a `switch` was written *on*: reads `javac`'s selector lowerings back, so `case` labels render as `'a'` / `RED` rather than the code units and ordinals the bytecode carries. |
 | `lines.rs` | The `LineNumberTable` reader — the one piece of *advisory* metadata the structurer consults, used only to tell a source `for` from the byte-identical `while` (M9). Never decides a structure on its own. |
-| `body.rs` | The decompiler proper: a per-block stack machine (`Sim`) that folds bytecode into the IR, and a `Structurer` that recovers structured Java (`if` / `if`-`else`, `while` / `do`-`while`, `switch`) from the CFG. `MethodBody::decompile` is the entry point. |
+| `body.rs` | The decompiler proper: a per-block stack machine (`Sim`) that folds bytecode into the IR, and a `Structurer` that recovers structured Java (`if` / `if`-`else`, `while` / `do`-`while`, `switch`, `try` / `catch` / `finally`) from the CFG. `MethodBody::decompile` is the entry point. |
 
 ## How a method body is reconstructed
 
-1. **Locate the `Code` attribute.** Bail if there is an exception table (`try`/`catch` is not yet
-   structured).
-2. **Map parameter slots to names** from the signature's parameter names, bailing on a count mismatch
-   so the body never references a parameter the signature does not declare.
-3. **Build the CFG** (`cfg::build`): per-instruction offsets via `Instruction::encoded_len`, leaders
-   at the entry / every branch or switch target / after every branch or exit, then basic blocks with
-   `Fall` / `Goto` / `Branch` / `Switch` / `Ret` / `Throw` terminators.
+1. **Locate the `Code` attribute.**
+2. **Build the CFG** (`cfg::build`): per-instruction offsets via `Instruction::encoded_len`, leaders
+   at the entry / every branch or switch target / after every branch or exit / every protected range
+   and handler, then basic blocks with `Fall` / `Goto` / `Branch` / `Switch` / `Ret` / `Throw`
+   terminators.
+3. **Read the exception table back as `try` statements** (`exceptions.rs`). Done before the locals,
+   because which slots belong to a handler decides which ones may be hoisted — a `finally`'s pending
+   exception lives in a slot no `LocalVariableTable` names, and hoisting it would bail every method
+   with a `finally` before any structuring began. **Map parameter slots to names** from the
+   signature's parameter names, bailing on a count mismatch so the body never references a parameter
+   the signature does not declare.
 4. **Structure the CFG** (`Structurer`): walk the blocks as a single-entry region, running each block
    through the stack machine and folding forward conditional branches into `if` / `if`-`else`,
    natural loops (a block targeted by a back-edge) into `while` / `do`-`while`, and multi-way
-   branches into `switch` (see M8). A forward `if`
+   branches into `switch` (see M8) and a protected range with its handlers into `try` (see M10). A
+   forward `if`
    condition is the *negation* of the branch's jump test (the branch skips the `then` body); a
    top-test `while` condition is likewise the negation of its exit branch, while a `do`-`while`
    condition is the branch's own (positive) test (it jumps back to repeat). A
@@ -115,7 +121,9 @@ impl JavaType {
    that branch as one source `long`/`float`/`double` comparison (see M7). A block reached more than
    once, a `break`/`continue` edge, or any other non-tree/irreducible shape bails. A final check
    requires **every block to be emitted exactly once** — a strong guard that the recovered tree
-   matches the real control flow.
+   matches the real control flow. The one place a block is visited without being emitted is a
+   discarded `finally` duplicate, which is why those are proved identical to the copy that *is*
+   emitted before any of them is dropped (see M10).
 5. **Fold a `for`** (see M9): a top-test `while` whose latch's last instruction shares the header's
    source line was written as a `for`, so its update — and, when the counter's live range proves it
    safe, its declaration — move into the header. This is the only advisory step; it re-renders an
@@ -406,7 +414,6 @@ whose enum class is not in the index, the older `$SwitchMap$` enum lowering (its
 synthetic class a skeleton never renders), a switch reached by a back-edge, and any arm whose shape
 is not a clean region.
 
-Still falling back to the M0 placeholder (see roadmap): `try`/`catch`.
 
 ### M9 — `for` loops &nbsp;✅ done
 
@@ -472,12 +479,113 @@ Verified against `javac`'s top-test layout. ECJ emits the same line-table patter
 bottom-test (a `goto` to the condition, which sits at the end), so those reach the `do`-`while` arm
 and are left alone.
 
+### M10 — `try` / `catch` / `finally` &nbsp;✅ done
+
+Structures the exception table into `try` statements. The table is a flat list of
+`(range, handler, caught type)` rows that records where a handler *is* and never what source
+construct put it there, so the statement is recovered from how the rows group:
+
+- Rows sharing a `handler_pc` are **one clause** — several caught types aimed at one handler is how
+  `javac` spells a multi-catch.
+- Clauses sharing a protected range are **one `try` statement**, in table order, which is source
+  order.
+- A `catch_type` of 0 is the catch-all a `finally` compiles to.
+
+Nothing is added to the CFG's terminator vocabulary. An exception leaves from *any* instruction in
+the protected range rather than from a block's last one, so an exception edge is not a terminator;
+and adding the edges would reach `loop_latch`, which counts back-edges to find a loop's single latch,
+as edges that are not source control flow at all. The handlers become a side table instead, and a
+`try` is structured as what it is in the layout — a run of consecutive blocks.
+
+```java
+public int catchAndReturn(java.lang.String s) {
+    try {
+        return this.parse(s);
+    } catch (java.io.IOException e) {
+        return -1;
+    }
+}
+public void multiCatch(java.lang.String s) {
+    try {
+        this.value = java.lang.Integer.parseInt(s);
+    } catch (java.lang.NumberFormatException | java.lang.NullPointerException e) {
+        this.value = -1;
+    }
+}
+```
+
+**`finally` is a fold, not a clause.** `javac` compiles it by *copying* the body onto every exit,
+and the exception table says where each copy is: a catch-all row covers one range that can complete
+normally, and its `end_pc` is where that range's copy begins. `try { … } catch (…) { … } finally { … }`:
+
+| from | to | target | type | what the row says |
+| --- | --- | --- | --- | --- |
+| 0 | 4 | 13 | `java/io/IOException` | the clause |
+| 0 | 4 | 28 | any | the try body's copy starts at 4 |
+| 13 | 19 | 28 | any | the clause's copy starts at 19 |
+
+Three copies — one per row, plus the handler's own, which rethrows — and the recovered statement
+keeps exactly one.
+
+```java
+public void tryCatchFinally() {
+    try {
+        this.mayThrow();
+    } catch (java.io.IOException e) {
+        this.value = -1;
+    } finally {
+        this.value = 9;
+    }
+}
+```
+
+Faithfulness guards. Discarding a copy is safe only because every copy is first compared
+**instruction for instruction** against the handler's, and this check is load-bearing rather than a
+formality: the "every block emitted exactly once" guard that proves the rest of the structurer right
+cannot see a discarded copy, so the comparison is what replaces it. It is also what keeps a
+finalizer honest about what *follows* it, because what follows differs by copy — the normal exit
+continues past the statement, the handler rethrows — so a jump out of the finalizer aims somewhere
+different in each copy and the comparison fails. That is why a branching `finally` falls back:
+`finally { if (n > 0) … else … }` compiles to arms that jump to the join in one copy and to the
+rethrow in another. A `switch` inside a finalizer is refused outright rather than compared, since
+its operands are padded to a 4-byte boundary and two equal instruction runs can still occupy
+unequal numbers of bytes.
+
+A clause's parameter is resolved by the offset it is *born* at, not by its slot: sibling clauses
+share one slot as a matter of course (`catch (IOException e)` then `catch (RuntimeException e)` is
+two variables in slot 2), and a handler's entry `astore` is its first instruction, so the parameter's
+`LocalVariableTable` entry starts exactly one instruction later. The clause's *types* come from the
+exception table even though the table records a type too, because `javac` records a multi-catch
+parameter as the least upper bound of the alternatives — a type the source never wrote. That entry
+`astore` is required, not assumed, and consumed rather than replayed: it *is* the `catch (T e)`
+declaration, so emitting it would produce an assignment nobody wrote.
+
+Not every catch-all row marks an exit. `javac` routinely emits one covering the handler's own entry
+`astore` — an exception there would arrive at the very handler already being entered — so that row
+is discarded rather than read as a duplicate, but only when it covers the entry and nothing more; a
+range reaching further is a handler protecting real work.
+
+A `synchronized` block compiles to a catch-all handler with the same shape as a `finally`, and the
+exception table cannot tell them apart: its unlock path is a catch-all covering its own handler too,
+just a wider one. The `monitorenter` / `monitorexit` pair is what actually separates them, and `Sim`
+models neither, so a `synchronized` block bails on its instructions.
+
+A `try` is looked for **before** a loop header is, because `try { while (…) {…} }` puts the loop
+header at the try's entry block and the other order would let the loop swallow the statement. The
+reverse nesting cannot collide — a `try` inside a loop does not begin at the header.
+
+Falling back still: a branching finalizer (its copies differ), a `return` inside a `try` that has a
+`finally` (the return value is spilled to a slot the `LocalVariableTable` never names), a finalizer
+that `return`s or `throw`s or holds a `try` of its own, a catch parameter sharing its slot with an
+ordinary local, a protected range split in two by a `return`, `synchronized`, and
+try-with-resources.
+
 ## Supported vs. not (yet)
 
 | Area | Supported | Falls back |
 | --- | --- | --- |
 | Values / expressions | `this` & parameter/local loads and stores (`istore`/`astore`/… + hoisted declarations), `iinc`, constants (`ldc` int/long/float/double/String/Class), field get/put (instance & static), method calls (virtual/interface/static, same-owner private `invokespecial`, direct `super.m()`, hierarchy-proven direct `Interface.super.m()`), `new X(...)`, arithmetic / bitwise / shifts, numeric conversions (casts), `checkcast` (incl. array types), `arraylength`, array element load/store (`arr[i]`), array creation (`newarray`/`anewarray`/`multianewarray`) with folded `new T[]{…}` initializers, string concatenation (`invokedynamic` `makeConcatWithConstants`/`makeConcat` recipes and concat-safe `StringBuilder` append chains → `a + b + …`, with a `""` seed when no `String` operand anchors the chain), `super(...)` / `this(...)` | a partial / non-sequential array-initializer store run (a default-skipping compiler, e.g. ECJ), compound element assignment (`arr[i]++` / `arr[i] += v` — `dup2`), a non-concat `invokedynamic` (lambdas, method refs), a non-`String` concat bootstrap constant, `monitor*` (`synchronized`), a `*cmp` whose result is not consumed by its block's conditional branch (a ternary's value merge, a stored comparison), `instanceof`, `dup` (except in `new` and array initializers), `swap`, `wide` loads, a non-constructor `invokespecial` outside the current/direct hierarchy or with a non-`this` super receiver, an interface-super call with missing/duplicate/cyclic/evolved/conflicting hierarchy facts or generic method-selection uncertainty, a local with no usable `LocalVariableTable` entry (no `-g`, synthetic, or reused slot) |
-| Control flow | straight-line, forward `if` / `if`-`else`, `while` / `do`-`while` loops (int/ref comparisons, long/float/double comparisons via a `lcmp`/`fcmp*`/`dcmp*` fused into the following `if<cond>`, null checks, `< 0` vs zero, boolean), `for` (a top-test `while` whose `LineNumberTable` puts the update on the header's line, with the counter's declaration absorbed when its live range proves it dies with the loop), `switch` (`tableswitch` / `lookupswitch` → colon-form arms with stacked labels, fall-through, and `char` / `enum` label recovery) | loop `break` / `continue`, nested / irreducible loops, a side-effecting loop header, a `for` whose header spans several source lines or whose update is not a *StatementExpression* (both render as `while`), a NaN-inexact fused `*cmp` (`!(a < b)`), a `String` switch or an `enum` switch whose enum class is absent or uses the `$SwitchMap$` lowering, a switch whose join no arm names or that is reached by a back-edge, `try`/`catch`/`finally`, any other non-tree shape |
+| Control flow | straight-line, forward `if` / `if`-`else`, `while` / `do`-`while` loops (int/ref comparisons, long/float/double comparisons via a `lcmp`/`fcmp*`/`dcmp*` fused into the following `if<cond>`, null checks, `< 0` vs zero, boolean), `for` (a top-test `while` whose `LineNumberTable` puts the update on the header's line, with the counter's declaration absorbed when its live range proves it dies with the loop), `switch` (`tableswitch` / `lookupswitch` → colon-form arms with stacked labels, fall-through, and `char` / `enum` label recovery), `try` / `catch` / `finally` (clauses grouped from the exception table, multi-catch spelled from the caught types, nesting read from the ranges, and a finalizer folded back out of the copies `javac` left on each exit) | loop `break` / `continue`, nested / irreducible loops, a side-effecting loop header, a `for` whose header spans several source lines or whose update is not a *StatementExpression* (both render as `while`), a NaN-inexact fused `*cmp` (`!(a < b)`), a `String` switch or an `enum` switch whose enum class is absent or uses the `$SwitchMap$` lowering, a switch whose join no arm names or that is reached by a back-edge, a branching finalizer (its copies differ), a `return` inside a `try` with a `finally`, a finalizer that `return`s / `throw`s / holds its own `try`, a catch parameter sharing a slot with an ordinary local, a protected range split by a `return`, `synchronized`, try-with-resources, any other non-tree shape |
 
 Everything in the "falls back" columns makes the method fall back to the M0 safe body — always valid
 Java, just not (yet) a real body.
@@ -488,7 +596,9 @@ Remaining milestones, roughly in priority order. Each is an independent incremen
 safe-fallback invariant. (Local variables — the old first roadmap entry — shipped as M3, and loops as
 M4 on top of it, since a loop's induction variable is itself a local.)
 
-- **`try` / `catch` / `finally`** — structure the exception table.
+- **Richer `try`** — try-with-resources (the synthetic `close` / `addSuppressed` sequence), a
+  branching finalizer, and a `return` under a `finally` (exception-table structuring shipped as
+  M10).
 - **Richer loops** — `break` / `continue` (labeled) and nested loops (`for`-loop recovery shipped as
   M9).
 - **Richer `switch`** — the `String` two-stage lowering and the older `$SwitchMap$` enum lowering
@@ -504,7 +614,7 @@ M4 on top of it, since a loop's induction variable is itself a local.)
   `decompile_method_body` over real compiled fixtures (`Consts.class`, `Branchy.class`, `Locals.class`,
   `Loops.class`, `Fors.class`, `Arrays.class`, `Concat.class`, `Sb.class`, `Cmp.class`,
   `Switches.class` +
-  `Switches$Color.class`, `IntCarried.class`,
+  `Switches$Color.class`, `Tries.class`, `IntCarried.class`,
   `InvokeSpecialCalls.class`, hierarchy-evolution fixtures) and assert the recovered statements.
 - The end-to-end skeleton rendering and the **valid-Java property test** live in
   `jals-classpath/tests/decompile.rs`, which parses every rendered skeleton from the fixture corpus
@@ -514,5 +624,9 @@ M4 on top of it, since a loop's induction variable is itself a local.)
 - `Fors.class` gets its own `javac` check there, because parsing is not a strong enough oracle for
   M9: leaving a hoisted `int i;` in front of a `for (int i = …)` that absorbed the same declaration
   is a *scope* error, which parses cleanly. Only a real compiler rejects it.
+- `Tries.class` gets one for the same reason, against three failures M10 risks that all parse: a
+  catch parameter colliding with a hoisted local (a scope error), a clause attached to the wrong
+  protected range — which catches a checked exception the body cannot throw (a typing error) — and a
+  mis-folded `finally` leaving the statements after it unreachable.
 - Fixtures are pre-compiled `.class` files committed under `jals-classpath/tests/fixtures/` (see its
   `README.md` for provenance / how to regenerate with `javac`).

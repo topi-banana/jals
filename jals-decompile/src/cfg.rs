@@ -10,7 +10,7 @@
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
-use jals_classfile::{Instruction, WideInstruction};
+use jals_classfile::{ExceptionTableEntry, Instruction, WideInstruction};
 use jals_exec::Yielder;
 
 /// The most `case` labels a switch may carry before the CFG declines to model it. `tableswitch`
@@ -26,6 +26,33 @@ pub(crate) struct Cfg {
     /// increasing. Built here to resolve branch targets; kept so the structurer can look an
     /// instruction up in the `LineNumberTable`, which is keyed by pc rather than by index.
     pub pcs: Vec<usize>,
+    /// The exception table resolved into block space, in table order.
+    ///
+    /// Deliberately a side table rather than [`Term`] variants. An exception leaves from *any*
+    /// instruction in the protected range, not from the block's terminator, so it has no place in a
+    /// vocabulary built on "what the last instruction does"; and adding the edges would show up in
+    /// [`Structurer::loop_latch`](crate::body), which counts back-edges to find a loop's single
+    /// latch, as extra edges that are not source control flow at all.
+    pub handlers: Vec<Handler>,
+}
+
+/// One exception-table entry, resolved into block space.
+pub(crate) struct Handler {
+    /// First block of the protected range.
+    pub try_lo: usize,
+    /// One past the block holding the last protected instruction.
+    ///
+    /// Not `block_of(end_pc)`: for a typed handler `end_pc` commonly falls mid-expression (before
+    /// the `return` that leaves the block), which is no block boundary at all.
+    pub try_hi: usize,
+    /// The handler's entry block.
+    pub entry: usize,
+    /// `Class` index of the caught type, or 0 for the catch-all a `finally` compiles to.
+    pub catch_type: u16,
+    /// The protected range in pc space, kept verbatim. Clause grouping and `finally` duplicate
+    /// detection are decided here, where two entries are comparable even when they land in the same
+    /// block.
+    pub range: core::ops::Range<usize>,
 }
 
 /// A basic block: a maximal run of instructions `code[start..end]` with a single entry, ending in a
@@ -103,7 +130,20 @@ enum Flow {
 
 impl Cfg {
     /// Build the CFG for a method's instructions, or `None` if it uses a construct not modelled.
-    pub(crate) async fn build(code: &[Instruction]) -> Option<Self> {
+    ///
+    /// The exception table contributes leaders but no edges (see [`Cfg::handlers`]). Which of its
+    /// offsets may be cut at is not uniform:
+    ///
+    /// - `start_pc` and `handler_pc` are always statement boundaries, so both are leaders.
+    /// - `end_pc` is a leader only for the **catch-all**, where it is where `javac` starts the
+    ///   duplicated finalizer — a boundary the source itself has. A typed handler's `end_pc` marks
+    ///   only where protection stops, which is routinely mid-expression: `try { return f(); }`
+    ///   ends its range on the `return`, with `f()`'s result already on the stack. Cutting there
+    ///   would leave a block that falls through with a live operand, which the structurer rejects.
+    pub(crate) async fn build(
+        code: &[Instruction],
+        exception_table: &[ExceptionTableEntry],
+    ) -> Option<Self> {
         /// How an instruction affects control flow.
         fn flow(ins: &Instruction) -> Flow {
             use Instruction as I;
@@ -186,10 +226,13 @@ impl Cfg {
             pcs.push(pc);
             pc += ins.encoded_len(pc);
         }
+        let code_len = pc;
         let target = |i: usize, offset: i32| -> Option<usize> {
             let dest = i64::try_from(pcs[i]).ok()? + i64::from(offset);
             pcs.binary_search(&usize::try_from(dest).ok()?).ok()
         };
+        // The instruction starting exactly at `pc`, or `None` if `pc` is not a boundary.
+        let at_pc = |pc: usize| -> Option<usize> { pcs.binary_search(&pc).ok() };
 
         // Leaders: the entry, every branch target, and the instruction after a branch / exit.
         let mut leaders = BTreeSet::new();
@@ -219,6 +262,20 @@ impl Cfg {
                 }
                 Flow::Unsupported => return None,
                 Flow::Normal => {}
+            }
+        }
+
+        // Exception-table leaders (see the doc comment for why `end_pc` is conditional).
+        for entry in exception_table {
+            yielder.tick().await;
+            let (start, end) = (usize::from(entry.start_pc()), usize::from(entry.end_pc()));
+            if start >= end || end > code_len {
+                return None;
+            }
+            leaders.insert(at_pc(start)?);
+            leaders.insert(at_pc(usize::from(entry.handler_pc()))?);
+            if entry.catch_type() == 0 && end < code_len {
+                leaders.insert(at_pc(end)?);
             }
         }
 
@@ -252,6 +309,28 @@ impl Cfg {
             };
             blocks.push(Block { start, end, term });
         }
-        Some(Self { blocks, pcs })
+
+        // Resolve the exception table into block space. `try_hi` is derived from the last *protected
+        // instruction* rather than from `end_pc` itself, since a typed handler's `end_pc` need not be
+        // an instruction boundary — and `end_pc == code_len` is never one.
+        let containing = |i: usize| -> usize { leaders.partition_point(|&l| l <= i) - 1 };
+        let mut handlers = Vec::with_capacity(exception_table.len());
+        for entry in exception_table {
+            yielder.tick().await;
+            let (start, end) = (usize::from(entry.start_pc()), usize::from(entry.end_pc()));
+            let last = pcs.partition_point(|&pc| pc < end).checked_sub(1)?;
+            handlers.push(Handler {
+                try_lo: block_of(at_pc(start)?)?,
+                try_hi: containing(last) + 1,
+                entry: block_of(at_pc(usize::from(entry.handler_pc()))?)?,
+                catch_type: entry.catch_type(),
+                range: start..end,
+            });
+        }
+        Some(Self {
+            blocks,
+            pcs,
+            handlers,
+        })
     }
 }

@@ -29,7 +29,8 @@ use jals_exec::{LocalBoxFuture, Yielder};
 
 use crate::attrs::Attrs;
 use crate::cfg::{Cfg, Term};
-use crate::expr::{ArrayForm, ConcatPart, Expr, ForInit, ForUpdate, Stmt, SwitchArm};
+use crate::exceptions::{Clause, Exceptions, Finally, TryRegion};
+use crate::expr::{ArrayForm, CatchClause, ConcatPart, Expr, ForInit, ForUpdate, Stmt, SwitchArm};
 use crate::hierarchy::ClassHierarchy;
 use crate::lines::Lines;
 use crate::literal::Literal;
@@ -65,10 +66,6 @@ impl MethodBody {
             AttributeBody::Code(code) => Some(code),
             _ => None,
         })?;
-        // A non-empty exception table means try/catch/finally — not yet structured.
-        if !code.exception_table.is_empty() {
-            return None;
-        }
         let owner = pool.class_name(cf.this_class)?.into_owned();
         let owner_is_interface = cf.access_flags.is_interface();
         let direct_superclass = if cf.super_class == 0 {
@@ -89,12 +86,15 @@ impl MethodBody {
                 _ => None,
             })
             .unwrap_or(&[]);
+        let cfg = Cfg::build(&code.code, &code.exception_table).await?;
+        // The `try` statements the exception table records. Read before the locals, because which
+        // slots belong to a handler decides which ones may be hoisted.
+        let tries = Exceptions::regions(&cfg, &code.code)?;
         let mut locals = Self::local_slots(&method_descriptor.params, is_static, param_names)?;
         // Hoist a typed declaration for every non-parameter local the method stores into, registering
         // each in `locals` so the body can name it — bailing if any local cannot be resolved from the
         // `LocalVariableTable` (no `-g`, a synthetic temporary, a reused slot, or a name collision).
-        let decls = Self::local_declarations(code, pool, is_static, &mut locals)?;
-        let cfg = Cfg::build(&code.code).await?;
+        let decls = Self::local_declarations(code, pool, is_static, &mut locals, &tries)?;
         let structurer = Structurer {
             code: &code.code,
             cfg: &cfg,
@@ -110,6 +110,7 @@ impl MethodBody {
             return_type: method_descriptor.return_type,
             lines: Lines::table(code).unwrap_or_default(),
             lvt: Attrs::local_variable_table(code).unwrap_or_default(),
+            tries: &tries,
         };
         let body = structurer.structure().await?;
         // A `for` that absorbed its counter's declaration now declares it itself, so the hoisted one
@@ -163,12 +164,25 @@ impl MethodBody {
         pool: &ConstantPool,
         is_static: bool,
         locals: &mut BTreeMap<u16, Local>,
+        tries: &[TryRegion],
     ) -> Option<Vec<Stmt>> {
         // Slots written by a store / `iinc`, minus `this` (slot 0, instance) and the parameters —
         // `locals` holds exactly those slots here, before any hoisted local is registered.
         let mut stored: BTreeSet<u16> = code.code.iter().filter_map(Self::stored_slot).collect();
         if !is_static {
             stored.remove(&0);
+        }
+        Self::register_catch_parameters(code, pool, locals, tries)?;
+        // Every slot a handler owns is declared by the handler, not hoisted: a `catch` parameter by
+        // its own clause, and a `finally`'s pending exception by nothing at all — it is a compiler
+        // temporary that the entry `astore` and the trailing `aload`/`athrow` fold away with it.
+        for region in tries {
+            for clause in &region.clauses {
+                stored.remove(&clause.slot);
+            }
+            if let Some(finally) = &region.finally {
+                stored.remove(&finally.slot);
+            }
         }
         stored.retain(|slot| !locals.contains_key(slot));
         if stored.is_empty() {
@@ -199,12 +213,67 @@ impl MethodBody {
         Some(decls)
     }
 
+    /// Register each `catch` clause's parameter in `locals` so the handler body can name it. A catch
+    /// parameter is declared by its own clause, so it gets no hoisted [`Stmt::Declare`]; registering
+    /// it here is also what keeps it out of the hoisting scan, which skips slots `locals` already
+    /// holds.
+    ///
+    /// The parameter is resolved by the offset it is *born* at rather than by its slot, because
+    /// sibling clauses share one slot as a matter of course — `catch (IOException e)` followed by
+    /// `catch (RuntimeException e)` is two entries in slot 2. Bails when:
+    ///
+    /// - the slot carries a `LocalVariableTable` entry that is *not* a catch parameter, i.e. some
+    ///   other variable's live range was fitted into the same slot. Reading the handler correctly
+    ///   would then need that other variable resolved per-range too, which is the `(slot, pc)`
+    ///   keying M3 deliberately left for later;
+    /// - the name is missing (no `-g`), or
+    /// - it collides with a parameter or another clause's live parameter.
+    fn register_catch_parameters(
+        code: &CodeAttribute,
+        pool: &ConstantPool,
+        locals: &mut BTreeMap<u16, Local>,
+        tries: &[TryRegion],
+    ) -> Option<()> {
+        let clauses: Vec<&Clause> = tries.iter().flat_map(|r| &r.clauses).collect();
+        if clauses.is_empty() {
+            return Some(());
+        }
+        let table = Attrs::local_variable_table(code)?;
+        let births: BTreeSet<usize> = clauses.iter().map(|c| c.param_pc).collect();
+        for clause in clauses {
+            // Every entry in this slot must be a catch parameter's. One that is not means the slot
+            // is shared with an ordinary local, which this crate does not split.
+            if table
+                .iter()
+                .filter(|e| e.index == clause.slot)
+                .any(|e| !births.contains(&usize::from(e.start_pc)))
+            {
+                return None;
+            }
+            // An unused parameter has no entry at all. Nothing loads the slot, so there is nothing
+            // to register; the clause still names itself, from a synthesised identifier.
+            let Some((name, ty)) =
+                Attrs::local_variable_at(table, pool, clause.slot, clause.param_pc)
+            else {
+                continue;
+            };
+            if locals
+                .iter()
+                .any(|(slot, local)| *slot != clause.slot && local.name == name)
+            {
+                return None;
+            }
+            locals.insert(clause.slot, Local { name, ty });
+        }
+        Some(())
+    }
+
     /// The local slot and JVM kind a *store* instruction writes (a store form, its numbered
     /// shorthand, or the `wide` form), or `None` for a non-store. Shared by declaration discovery
     /// ([`MethodBody::stored_slot`]) and the simulator ([`Sim::step`]) so the two never drift.
     /// `iinc` is deliberately excluded — it read-modify-writes and carries a delta, handled
     /// separately.
-    fn store_info(ins: &Instruction) -> Option<(u16, JvmKind)> {
+    pub(crate) fn store_info(ins: &Instruction) -> Option<(u16, JvmKind)> {
         use Instruction as I;
         Some(match ins {
             I::Istore(slot) => (u16::from(*slot), JvmKind::Int),
@@ -237,6 +306,21 @@ impl MethodBody {
             I::Wide(WideInstruction::Fstore(slot)) => (*slot, JvmKind::Float),
             I::Wide(WideInstruction::Dstore(slot)) => (*slot, JvmKind::Double),
             I::Wide(WideInstruction::Astore(slot)) => (*slot, JvmKind::Reference),
+            _ => return None,
+        })
+    }
+
+    /// The local slot an `aload` reads, or `None` for anything else. Used to check that a catch-all
+    /// handler ends by rethrowing the very reference its entry stored.
+    pub(crate) fn load_slot(ins: &Instruction) -> Option<u16> {
+        use Instruction as I;
+        Some(match ins {
+            I::Aload(slot) => u16::from(*slot),
+            I::Aload0 => 0,
+            I::Aload1 => 1,
+            I::Aload2 => 2,
+            I::Aload3 => 3,
+            I::Wide(WideInstruction::Aload(slot)) => *slot,
             _ => return None,
         })
     }
@@ -335,7 +419,7 @@ enum ArrayKind {
 }
 
 #[derive(Clone, Copy)]
-enum JvmKind {
+pub(crate) enum JvmKind {
     Int,
     Long,
     Float,
@@ -400,6 +484,9 @@ struct Sim<'a, 'classes> {
     direct_superclass: Option<&'a str>,
     is_static: bool,
     locals: &'a BTreeMap<u16, Local>,
+    /// The `catch` parameter in scope for this block, when its slot is one `locals` cannot answer
+    /// for on its own.
+    catch_param: Option<(u16, &'a Local)>,
     return_type: &'a ReturnType,
     stack: Vec<StackValue>,
     stmts: Vec<Stmt>,
@@ -576,6 +663,19 @@ impl Sim<'_, '_> {
             .then_some(value.expr)
     }
 
+    /// The variable occupying `slot` here, with the enclosing `catch` clause's parameter taking
+    /// precedence over the method-wide map.
+    ///
+    /// Sibling clauses share one slot as a matter of course — `catch (IOException e)` followed by
+    /// `catch (RuntimeException e)` is two variables in slot 2 — so which of them a slot names is a
+    /// property of *where* the block sits, which only the structurer knows.
+    fn local(&self, slot: u16) -> Option<&Local> {
+        match self.catch_param {
+            Some((param_slot, local)) if param_slot == slot => Some(local),
+            _ => self.locals.get(&slot),
+        }
+    }
+
     /// Push the value of a local slot (`this` for slot 0 of an instance method).
     fn load(&mut self, slot: u16, kind: JvmKind) -> Option<()> {
         if !self.is_static && slot == 0 {
@@ -584,7 +684,7 @@ impl Sim<'_, '_> {
             }
             self.stack.push(StackValue::object(Expr::This, self.owner));
         } else {
-            let local = self.locals.get(&slot)?;
+            let local = self.local(slot)?;
             if !kind.accepts(&local.ty) {
                 return None;
             }
@@ -599,7 +699,7 @@ impl Sim<'_, '_> {
     /// Store the top of stack into a local: `name = value;`. The slot's name comes from the map
     /// built by [`local_declarations`] (parameters plus hoisted locals), so an unmapped slot bails.
     fn store(&mut self, slot: u16, kind: JvmKind) -> Option<()> {
-        let local = self.locals.get(&slot)?.clone();
+        let local = self.local(slot)?.clone();
         if !kind.accepts(&local.ty) {
             return None;
         }
@@ -614,7 +714,7 @@ impl Sim<'_, '_> {
     /// `iinc`: `name = name + by;` (or `name - |by|;` when negative). Reads and writes the local in
     /// place — the operand stack is untouched.
     fn iinc(&mut self, slot: u16, by: i32) -> Option<()> {
-        let local = self.locals.get(&slot)?;
+        let local = self.local(slot)?;
         if local.ty != FieldType::Base(BaseType::Int) {
             return None;
         }
@@ -1737,6 +1837,9 @@ struct Structurer<'a, 'classes> {
     /// The method's `LocalVariableTable`, empty when the class carries none. Used to prove a loop
     /// counter dies with its loop before letting the `for` declare it.
     lvt: &'a [LocalVariableEntry],
+    /// The `try` statements the exception table records, entry block ascending and widest first, so
+    /// a region that starts at a block finds the outermost `try` beginning there.
+    tries: &'a [TryRegion],
 }
 
 impl Structurer<'_, '_> {
@@ -1745,7 +1848,7 @@ impl Structurer<'_, '_> {
     async fn structure(&self) -> Option<Vec<Stmt>> {
         let n = self.cfg.blocks.len();
         let mut visited = vec![false; n];
-        let stmts = self.emit_region(0, n, n, None, &mut visited).await?;
+        let stmts = self.emit_region(0, n, n, None, None, &mut visited).await?;
         if visited.iter().any(|&seen| !seen) {
             return None;
         }
@@ -1760,9 +1863,10 @@ impl Structurer<'_, '_> {
         hi: usize,
         exit: usize,
         break_target: Option<usize>,
+        catch_param: Option<(u16, &'a Local)>,
         visited: &'a mut [bool],
     ) -> LocalBoxFuture<'a, Option<Vec<Stmt>>> {
-        Box::pin(self.emit_region(lo, hi, exit, break_target, visited))
+        Box::pin(self.emit_region(lo, hi, exit, break_target, catch_param, visited))
     }
 
     /// Structure the single-entry region of blocks `[lo, hi)` (entered at `lo`), whose normal exit is
@@ -1780,6 +1884,7 @@ impl Structurer<'_, '_> {
         hi: usize,
         exit: usize,
         break_target: Option<usize>,
+        catch_param: Option<(u16, &Local)>,
         visited: &mut [bool],
     ) -> Option<Vec<Stmt>> {
         let mut out = Vec::new();
@@ -1788,18 +1893,31 @@ impl Structurer<'_, '_> {
             if visited[b] {
                 return None;
             }
+            // A block that begins a protected range starts a `try`. Checked before the loop test,
+            // because `try { while (…) {…} }` puts the loop header *at* the try's entry block, and
+            // testing the other way round would let the loop swallow the `try`. The reverse nesting
+            // cannot collide: a `try` inside a loop does not begin at the header.
+            if let Some(region) = self.try_at(b, hi) {
+                let (stmt, cont) = self
+                    .structure_try(region, hi, exit, catch_param, visited)
+                    .await?;
+                out.push(stmt);
+                b = cont;
+                continue;
+            }
             // A block that is the target of a back-edge is a loop header — structure the loop and
             // resume past its exit. (Checked before marking `b` visited; the loop's blocks are
             // visited inside `structure_loop`.)
             if let Some(latch) = self.loop_latch(b) {
-                let (loop_stmt, cont) =
-                    self.structure_loop(b, latch, hi, &mut out, visited).await?;
+                let (loop_stmt, cont) = self
+                    .structure_loop(b, latch, hi, &mut out, catch_param, visited)
+                    .await?;
                 out.push(loop_stmt);
                 b = cont;
                 continue;
             }
             visited[b] = true;
-            let (mut stmts, cond_stack, cmp) = self.run_block(b).await?;
+            let (mut stmts, cond_stack, cmp) = self.run_block(b, catch_param).await?;
             out.append(&mut stmts);
             // Only a conditional-branch block (its condition) or a switch block (its selector) may
             // leave operands on the stack; a leftover on any other terminator means we mis-read the
@@ -1827,7 +1945,9 @@ impl Structurer<'_, '_> {
                     b += 1;
                 }
                 Term::Switch { .. } => {
-                    let (stmt, join) = self.structure_switch(b, hi, cond_stack, visited).await?;
+                    let (stmt, join) = self
+                        .structure_switch(b, hi, cond_stack, catch_param, visited)
+                        .await?;
                     out.push(stmt);
                     b = join;
                 }
@@ -1866,7 +1986,14 @@ impl Structurer<'_, '_> {
                             return None;
                         }
                         let then = self
-                            .emit_region_boxed(fallthrough, hi, exit, break_target, visited)
+                            .emit_region_boxed(
+                                fallthrough,
+                                hi,
+                                exit,
+                                break_target,
+                                catch_param,
+                                visited,
+                            )
                             .await?;
                         out.push(Stmt::If {
                             cond,
@@ -1880,16 +2007,30 @@ impl Structurer<'_, '_> {
                     let (then, els, join) = match self.cfg.blocks[taken - 1].term {
                         Term::Goto(e) if e > taken && e <= hi => {
                             let then = self
-                                .emit_region_boxed(fallthrough, taken, e, break_target, visited)
+                                .emit_region_boxed(
+                                    fallthrough,
+                                    taken,
+                                    e,
+                                    break_target,
+                                    catch_param,
+                                    visited,
+                                )
                                 .await?;
                             let els = self
-                                .emit_region_boxed(taken, e, e, break_target, visited)
+                                .emit_region_boxed(taken, e, e, break_target, catch_param, visited)
                                 .await?;
                             (then, els, e)
                         }
                         _ => {
                             let then = self
-                                .emit_region_boxed(fallthrough, taken, taken, break_target, visited)
+                                .emit_region_boxed(
+                                    fallthrough,
+                                    taken,
+                                    taken,
+                                    break_target,
+                                    catch_param,
+                                    visited,
+                                )
                                 .await?;
                             (then, Vec::new(), taken)
                         }
@@ -1906,7 +2047,11 @@ impl Structurer<'_, '_> {
     /// stack (the condition of a conditional-branch block; empty for every other block), and the
     /// flavor of a trailing `*cmp` fused into the block's conditional branch (its two operands are
     /// then the leftover stack, for [`Self::branch_condition`] to read back).
-    async fn run_block(&self, b: usize) -> Option<(Vec<Stmt>, Vec<StackValue>, Option<Cmp>)> {
+    async fn run_block(
+        &self,
+        b: usize,
+        catch_param: Option<(u16, &Local)>,
+    ) -> Option<(Vec<Stmt>, Vec<StackValue>, Option<Cmp>)> {
         let mut sim = Sim {
             pool: self.pool,
             bootstrap: self.bootstrap,
@@ -1917,6 +2062,7 @@ impl Structurer<'_, '_> {
             direct_superclass: self.direct_superclass.as_deref(),
             is_static: self.is_static,
             locals: &self.locals,
+            catch_param,
             return_type: &self.return_type,
             stack: Vec::new(),
             stmts: Vec::new(),
@@ -1925,6 +2071,13 @@ impl Structurer<'_, '_> {
         // branch (`Sim` has no encoding for its -1/0/1 result), so leave it — and its two operands,
         // which stay on the stack — to `branch_condition`.
         let mut body = self.cfg.blocks[b].body();
+        // A handler is entered with the caught reference already on the stack, and its first
+        // instruction stores it. That store *is* the `catch (T e)` declaration, so it is consumed
+        // here rather than replayed — emitting it would produce an assignment the source never
+        // wrote, and replaying it into an empty stack would bail the method outright.
+        if self.is_handler_entry(b) {
+            body.start += 1;
+        }
         let cmp = match self.cfg.blocks[b].term {
             Term::Branch { .. } if !body.is_empty() => Cmp::of(&self.code[body.end - 1]),
             _ => None,
@@ -1992,6 +2145,7 @@ impl Structurer<'_, '_> {
         latch: usize,
         hi: usize,
         preceding: &mut Vec<Stmt>,
+        catch_param: Option<(u16, &Local)>,
         visited: &mut [bool],
     ) -> Option<(Stmt, usize)> {
         match &self.cfg.blocks[latch].term {
@@ -2012,10 +2166,10 @@ impl Structurer<'_, '_> {
                 // `switch`, so an edge out of the loop to a switch join must bail (it needs a
                 // label) rather than render as `break;`.
                 let mut body = self
-                    .emit_region_boxed(header, latch, latch, None, visited)
+                    .emit_region_boxed(header, latch, latch, None, catch_param, visited)
                     .await?;
                 Self::claim(visited, latch)?;
-                let (mut tail, cond_stack, cmp) = self.run_block(latch).await?;
+                let (mut tail, cond_stack, cmp) = self.run_block(latch, catch_param).await?;
                 body.append(&mut tail);
                 let cond = Self::branch_condition(&self.code[instr], false, cmp, cond_stack)?;
                 Some((Stmt::DoWhile { body, cond }, exit))
@@ -2036,7 +2190,7 @@ impl Structurer<'_, '_> {
                 }
                 Self::claim(visited, header)?;
                 // The header carries only the loop condition — a side effect there would repeat.
-                let (head_stmts, cond_stack, cmp) = self.run_block(header).await?;
+                let (head_stmts, cond_stack, cmp) = self.run_block(header, catch_param).await?;
                 if !head_stmts.is_empty() {
                     return None;
                 }
@@ -2045,10 +2199,10 @@ impl Structurer<'_, '_> {
                 // latch's own statements finish it — the same split as the `do`-`while` arm above.
                 // `None` for the same reason as that arm.
                 let mut body = self
-                    .emit_region_boxed(body_start, latch, latch, None, visited)
+                    .emit_region_boxed(body_start, latch, latch, None, catch_param, visited)
                     .await?;
                 Self::claim(visited, latch)?;
-                let (mut tail, latch_stack, _) = self.run_block(latch).await?;
+                let (mut tail, latch_stack, _) = self.run_block(latch, catch_param).await?;
                 // The latch ends in the `goto` back-edge, which pops nothing, so a leftover operand
                 // means we mis-read the block. `emit_region` enforced this while it still emitted
                 // the latch itself; splitting it out moves the check here.
@@ -2203,6 +2357,7 @@ impl Structurer<'_, '_> {
         b: usize,
         hi: usize,
         mut stack: Vec<StackValue>,
+        catch_param: Option<(u16, &Local)>,
         visited: &mut [bool],
     ) -> Option<(Stmt, usize)> {
         let Term::Switch { default, cases } = &self.cfg.blocks[b].term else {
@@ -2310,7 +2465,7 @@ impl Structurer<'_, '_> {
                 .map(|key| labels.render(key))
                 .collect::<Option<Vec<_>>>()?;
             let mut body = self
-                .emit_region_boxed(lo, arm_hi, exit, Some(join), visited)
+                .emit_region_boxed(lo, arm_hi, exit, Some(join), catch_param, visited)
                 .await?;
             // A `break;` is needed exactly when the arm *ends* by reaching the join and another
             // arm follows it (for the last arm, falling out of the switch *is* the break). This is
@@ -2327,6 +2482,348 @@ impl Structurer<'_, '_> {
             });
         }
         Some((Stmt::Switch { selector, arms }, join))
+    }
+
+    /// Whether block `b` is a handler's entry — the one block whose first instruction is the store
+    /// of a caught reference rather than something the source wrote.
+    fn is_handler_entry(&self, b: usize) -> bool {
+        self.tries.iter().any(|region| {
+            region.clauses.iter().any(|clause| clause.handler == b)
+                || region.finally.as_ref().is_some_and(|f| f.handler == b)
+        })
+    }
+
+    /// The `try` statement whose protected range begins at block `b` and closes inside this region,
+    /// or `None`.
+    ///
+    /// `tries` is widest-first, so the outermost one wins — a nested `try` sharing the entry block
+    /// is found again when the outer body region is walked. The `body.end < hi` test is what stops
+    /// the outer one being picked a second time on the way in: its body ends exactly at the `hi` the
+    /// recursion was handed.
+    fn try_at(&self, b: usize, hi: usize) -> Option<&TryRegion> {
+        self.tries
+            .iter()
+            .find(|region| region.body.start == b && region.body.end < hi)
+    }
+
+    /// A name for a `catch` parameter the `LocalVariableTable` does not record.
+    ///
+    /// An unused parameter gets no entry even under `-g` — `catch (Exception e) { }` stores the
+    /// caught reference and never reads it — so the name it was written with is simply not in the
+    /// class file. A synthesised one is safe precisely because nothing refers to it, and it is
+    /// chosen to collide with nothing else in scope, exactly as an unnamed method parameter falls
+    /// back to `argN`.
+    fn synthetic_catch_name(&self, taken: &[String]) -> String {
+        for suffix in 0..=u32::try_from(taken.len()).unwrap_or(u32::MAX) {
+            let name = if suffix == 0 {
+                String::from("e")
+            } else {
+                alloc::format!("e{suffix}")
+            };
+            let clash = taken.contains(&name)
+                || self.locals.values().any(|local| local.name == name)
+                || self.lvt.iter().any(|entry| {
+                    self.pool.utf8(entry.name_index).as_deref() == Some(name.as_str())
+                });
+            if !clash {
+                return name;
+            }
+        }
+        String::from("e")
+    }
+
+    /// Structure a protected range and its handlers into a [`Stmt::Try`], returning the statement
+    /// and the block to resume at.
+    ///
+    /// The join is derived exactly as [`Self::structure_switch`] derives its own: **only from edges
+    /// the statement's own parts name**. The try body's normal exit and each non-final clause's
+    /// normal exit are consulted, and they must agree. A catch-all handler names nothing — it ends
+    /// in `athrow`, so [`Self::reaches`] reports no successor for it at all — which is right, since
+    /// the path that rethrows never reaches the join. Guessing a join from the surrounding layout
+    /// would be unchecked: the "every block emitted exactly once" guard catches a join that is too
+    /// small, but a join that is too large still visits every block once, just nested wrongly.
+    async fn structure_try(
+        &self,
+        region: &TryRegion,
+        hi: usize,
+        exit: usize,
+        catch_param: Option<(u16, &Local)>,
+        visited: &mut [bool],
+    ) -> Option<(Stmt, usize)> {
+        if let Some(finally) = &region.finally {
+            return self
+                .structure_try_finally(region, finally, hi, catch_param, visited)
+                .await;
+        }
+        // A protected range with no handler at all is not a statement.
+        if region.clauses.is_empty() {
+            return None;
+        }
+        // The handlers follow the body, in source order, inside this region.
+        let mut starts = alloc::vec![region.body.start];
+        for clause in &region.clauses {
+            starts.push(clause.handler);
+        }
+        if starts.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return None;
+        }
+        if region.body.end != region.clauses.first()?.handler || *starts.last()? >= hi {
+            return None;
+        }
+
+        // Read the join off the boundary blocks: the last block of the try body and of every clause
+        // but the last. A `goto` deeper inside one of them is never consulted, so an inner `if`'s
+        // skip can never be mistaken for the statement's own exit.
+        let mut boundary_exit = None;
+        let mut boundaries_all_exit = true;
+        for pair in starts.windows(2) {
+            match self.cfg.blocks[pair[1] - 1].term {
+                Term::Goto(e) => {
+                    if *boundary_exit.get_or_insert(e) != e {
+                        return None;
+                    }
+                }
+                // This part cannot reach the join, so it says nothing about where it is.
+                Term::Ret | Term::Throw => {}
+                _ => boundaries_all_exit = false,
+            }
+        }
+        let last_start = *starts.last()?;
+        let join = match boundary_exit {
+            Some(e) => {
+                if e <= last_start || e > hi {
+                    return None;
+                }
+                e
+            }
+            // Nothing reaches a join. That is structured only when nothing after the statement is
+            // reachable either, which the region's own tail states outright.
+            None if boundaries_all_exit
+                && matches!(self.cfg.blocks[hi - 1].term, Term::Ret | Term::Throw) =>
+            {
+                hi
+            }
+            None => return None,
+        };
+        if join != hi && join != exit && self.cfg.blocks[join].start >= self.cfg.blocks[hi - 1].end
+        {
+            return None;
+        }
+
+        let body = self
+            .emit_region_boxed(
+                region.body.start,
+                region.body.end,
+                join,
+                None,
+                catch_param,
+                visited,
+            )
+            .await?;
+        let mut catches: Vec<CatchClause> = Vec::with_capacity(region.clauses.len());
+        for (i, clause) in region.clauses.iter().enumerate() {
+            let clause_hi = region
+                .clauses
+                .get(i + 1)
+                .map_or(join, |next: &Clause| next.handler);
+            let (types, name, param) = self.catch_parameter(clause, &catches)?;
+            let body = self
+                .emit_region_boxed(
+                    clause.handler,
+                    clause_hi,
+                    join,
+                    None,
+                    Some((clause.slot, &param)),
+                    visited,
+                )
+                .await?;
+            catches.push(CatchClause { types, name, body });
+        }
+        Some((
+            Stmt::Try {
+                body,
+                catches,
+                finally_body: Vec::new(),
+            },
+            join,
+        ))
+    }
+
+    /// A `catch` clause's rendered types, its parameter name, and the local that name binds inside
+    /// the handler.
+    ///
+    /// The types come from the exception table and the name from the `LocalVariableTable`, because
+    /// each answers only for what it recorded: the table names the alternatives the source caught,
+    /// while a multi-catch parameter's recorded *type* is their least upper bound.
+    fn catch_parameter(
+        &self,
+        clause: &Clause,
+        taken: &[CatchClause],
+    ) -> Option<(Vec<String>, String, Local)> {
+        let types = clause
+            .types
+            .iter()
+            .map(|&index| Some(JavaType::internal_to_java(&self.pool.class_name(index)?)))
+            .collect::<Option<Vec<_>>>()?;
+        // An unused parameter has no entry to read a name from, and the type the *body* would see
+        // does not matter when no instruction loads the slot.
+        let recorded = Attrs::local_variable_at(self.lvt, self.pool, clause.slot, clause.param_pc);
+        let (name, ty) = if let Some(pair) = recorded {
+            pair
+        } else {
+            let names: Vec<String> = taken.iter().map(|c| c.name.clone()).collect();
+            let sole = self.pool.class_name(*clause.types.first()?)?;
+            let ty = FieldType::parse(&alloc::format!("L{sole};")).ok()?;
+            (self.synthetic_catch_name(&names), ty)
+        };
+        Some((types, name.clone(), Local { name, ty }))
+    }
+
+    /// The block starting exactly at instruction `index`, or `None` if that is not a block boundary.
+    fn block_starting_at(&self, index: usize) -> Option<usize> {
+        self.cfg
+            .blocks
+            .binary_search_by_key(&index, |block| block.start)
+            .ok()
+    }
+
+    /// The block containing instruction `index`.
+    fn block_containing(&self, index: usize) -> Option<usize> {
+        self.cfg
+            .blocks
+            .partition_point(|block| block.start <= index)
+            .checked_sub(1)
+    }
+
+    /// Structure a `try` whose statement has a `finally`, folding `javac`'s duplicated finalizers
+    /// back into one clause.
+    ///
+    /// A `finally` is compiled by copying its body onto every exit, so the recovered statement keeps
+    /// exactly one copy — the one on the try body's normal exit — and discards the rest, including
+    /// the handler's, whose `athrow` rethrows what the source never named. Discarding is safe only
+    /// because [`Exceptions::regions`] has already proved the copies identical instruction for
+    /// instruction; that proof is what replaces the "emitted exactly once" guard here, since a
+    /// discarded copy is visited without being emitted.
+    async fn structure_try_finally(
+        &self,
+        region: &TryRegion,
+        finally: &Finally,
+        hi: usize,
+        catch_param: Option<(u16, &Local)>,
+        visited: &mut [bool],
+    ) -> Option<(Stmt, usize)> {
+        // Each copy, and the handler, must start a block of its own.
+        let copies: Vec<usize> = finally
+            .copies
+            .iter()
+            .map(|&index| self.block_starting_at(index))
+            .collect::<Option<Vec<_>>>()?;
+        let first_copy = *copies.first()?;
+        if region.body.end != first_copy || finally.handler >= hi {
+            return None;
+        }
+        let mut starts = alloc::vec![region.body.start];
+        starts.extend(copies.iter().copied());
+        starts.extend(region.clauses.iter().map(|clause| clause.handler));
+        starts.push(finally.handler);
+        starts.sort_unstable();
+        starts.dedup();
+        if *starts.first()? != region.body.start
+            || starts.len() != copies.len() + region.clauses.len() + 2
+        {
+            return None;
+        }
+
+        // Every copy that can complete normally leaves for the same place, and that edge is the
+        // join. The handler's copy leaves by `athrow`, so it names nothing — correctly, since the
+        // rethrowing path never reaches the join.
+        let mut join = None;
+        for &copy in &finally.copies {
+            let last =
+                self.block_containing(copy.checked_add(finally.body.len())?.checked_sub(1)?)?;
+            match self.cfg.blocks[last].term {
+                Term::Goto(e) => {
+                    if *join.get_or_insert(e) != e {
+                        return None;
+                    }
+                }
+                Term::Ret | Term::Throw => {}
+                _ => return None,
+            }
+        }
+        let join = join?;
+        if join <= finally.handler || join > hi {
+            return None;
+        }
+
+        // The segment following each start, in block space.
+        let bound = |start: usize| -> usize {
+            starts
+                .iter()
+                .copied()
+                .find(|&other| other > start)
+                .unwrap_or(join)
+        };
+        let body = self
+            .emit_region_boxed(
+                region.body.start,
+                first_copy,
+                first_copy,
+                None,
+                catch_param,
+                visited,
+            )
+            .await?;
+        let finally_body = self
+            .emit_region_boxed(
+                first_copy,
+                bound(first_copy),
+                join,
+                None,
+                catch_param,
+                visited,
+            )
+            .await?;
+        let mut catches: Vec<CatchClause> = Vec::with_capacity(region.clauses.len());
+        for clause in &region.clauses {
+            let clause_hi = bound(clause.handler);
+            // A clause that completes normally falls into its own copy of the finalizer; one that
+            // leaves by `throw` or `return` has none, and simply ends.
+            let exit = if copies.contains(&clause_hi) {
+                clause_hi
+            } else {
+                join
+            };
+            let (types, name, param) = self.catch_parameter(clause, &catches)?;
+            let body = self
+                .emit_region_boxed(
+                    clause.handler,
+                    clause_hi,
+                    exit,
+                    None,
+                    Some((clause.slot, &param)),
+                    visited,
+                )
+                .await?;
+            catches.push(CatchClause { types, name, body });
+        }
+        // The duplicates and the rethrowing handler are accounted for, not emitted.
+        for &start in starts.iter().skip(1) {
+            if start == first_copy || region.clauses.iter().any(|c| c.handler == start) {
+                continue;
+            }
+            for block in start..bound(start) {
+                Self::claim(visited, block)?;
+            }
+        }
+        Some((
+            Stmt::Try {
+                body,
+                catches,
+                finally_body,
+            },
+            join,
+        ))
     }
 
     /// Whether block `from` has any control-flow edge to block `to`.

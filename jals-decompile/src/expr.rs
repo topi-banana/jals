@@ -180,6 +180,29 @@ pub(crate) enum Stmt {
     /// A `break;`. Only ever emitted to leave a [`Stmt::Switch`] arm — a loop `break` is not yet
     /// recovered (its edge bails the whole method).
     Break,
+    /// A `try { body } catch (…) { … } finally { … }`, recovered from the exception table.
+    ///
+    /// At least one of `catches` / `finally_body` is non-empty: an exception table entry is what
+    /// puts a `Stmt::Try` here in the first place, and `try {}` alone is not valid Java.
+    Try {
+        body: Vec<Self>,
+        catches: Vec<CatchClause>,
+        /// Empty when there was no `finally` clause. `javac` duplicates a finalizer onto every
+        /// exit, so what is stored here is the one copy that survived the fold.
+        finally_body: Vec<Self>,
+    },
+}
+
+/// One `catch` clause of a recovered [`Stmt::Try`].
+pub(crate) struct CatchClause {
+    /// The caught types, in source order. More than one is a multi-catch (`catch (A | B e)`).
+    ///
+    /// Taken from the exception table's `catch_type`s, never from the `LocalVariableTable`: `javac`
+    /// types a multi-catch parameter as the least upper bound of the alternatives, which is a type
+    /// the source did not write.
+    pub types: Vec<String>,
+    pub name: String,
+    pub body: Vec<Stmt>,
 }
 
 /// One arm of a recovered [`Stmt::Switch`]: the labels that share it, then its statements.
@@ -273,7 +296,45 @@ impl Stmt {
                 }
                 out.push(format!("{pad}}}"));
             }
-            simple => out.push(format!("{pad}{}", simple.render_simple())),
+            Self::Try {
+                body,
+                catches,
+                finally_body,
+            } => {
+                out.push(format!("{pad}try {{"));
+                for s in body {
+                    s.render_into(indent + 4, out);
+                }
+                for clause in catches {
+                    out.push(format!(
+                        "{pad}}} catch ({} {}) {{",
+                        clause.types.join(" | "),
+                        clause.name
+                    ));
+                    for s in &clause.body {
+                        s.render_into(indent + 4, out);
+                    }
+                }
+                if !finally_body.is_empty() {
+                    out.push(format!("{pad}}} finally {{"));
+                    for s in finally_body {
+                        s.render_into(indent + 4, out);
+                    }
+                }
+                out.push(format!("{pad}}}"));
+            }
+            // Listed rather than matched with a wildcard: a wildcard would route a new
+            // block-carrying variant into `render_simple`, whose `unreachable!` would then panic —
+            // the one thing this crate promises never to do. Enumerating the simple variants makes
+            // that a compile error instead.
+            Self::Expr(_)
+            | Self::Declare { .. }
+            | Self::Return(_)
+            | Self::Assign { .. }
+            | Self::Throw(_)
+            | Self::SuperCall(_)
+            | Self::ThisCall(_)
+            | Self::Break => out.push(format!("{pad}{}", self.render_simple())),
         }
     }
 
@@ -295,7 +356,8 @@ impl Stmt {
             | Self::While { .. }
             | Self::For { .. }
             | Self::DoWhile { .. }
-            | Self::Switch { .. } => {
+            | Self::Switch { .. }
+            | Self::Try { .. } => {
                 unreachable!("block statements are rendered by render_into")
             }
         }
@@ -331,6 +393,17 @@ impl Stmt {
                     for arm in arms {
                         Self::for_declared_names(&arm.body, out);
                     }
+                }
+                Self::Try {
+                    body,
+                    catches,
+                    finally_body,
+                } => {
+                    Self::for_declared_names(body, out);
+                    for clause in catches {
+                        Self::for_declared_names(&clause.body, out);
+                    }
+                    Self::for_declared_names(finally_body, out);
                 }
                 Self::Expr(_)
                 | Self::Declare { .. }

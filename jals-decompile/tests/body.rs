@@ -97,6 +97,12 @@ fn fake_ordinal() -> ClassFile {
     ))
 }
 
+fn tries() -> ClassFile {
+    fixture(include_bytes!(
+        "../../jals-classpath/tests/fixtures/Tries.class"
+    ))
+}
+
 fn int_carried() -> ClassFile {
     fixture(include_bytes!(
         "../../jals-classpath/tests/fixtures/IntCarried.class"
@@ -1475,4 +1481,344 @@ fn a_header_with_two_updates_keeps_the_extra_one_in_the_body() {
             "return total;",
         ]
     );
+}
+
+#[test]
+fn structures_a_try_whose_body_and_handler_both_return() {
+    // Neither part reaches a join, so no edge names one. Recovered only because the region itself
+    // ends by exiting, which says nothing after the statement is reachable.
+    let cf = tries();
+    let body = decompile(method(&cf, "catchAndReturn"), &cf, &["s".to_owned()])
+        .expect("catchAndReturn decompiles");
+    assert_eq!(
+        body,
+        [
+            "try {",
+            "    return this.parse(s);",
+            "} catch (java.io.IOException e) {",
+            "    return -1;",
+            "}",
+        ]
+    );
+}
+
+#[test]
+fn structures_a_try_whose_handler_falls_into_the_join() {
+    let cf = tries();
+    let body = decompile(method(&cf, "catchAndFallThrough"), &cf, &["s".to_owned()])
+        .expect("catchAndFallThrough decompiles");
+    assert_eq!(
+        body,
+        [
+            "try {",
+            "    this.value = this.parse(s);",
+            "} catch (java.io.IOException e) {",
+            "    this.value = -1;",
+            "}",
+        ]
+    );
+}
+
+#[test]
+fn statements_after_a_try_follow_it() {
+    let cf = tries();
+    let body =
+        decompile(method(&cf, "trailing"), &cf, &["s".to_owned()]).expect("trailing decompiles");
+    assert_eq!(
+        body,
+        [
+            "int r;",
+            "r = 0;",
+            "try {",
+            "    r = this.parse(s);",
+            "} catch (java.io.IOException e) {",
+            "    r = -1;",
+            "}",
+            "return r + 1;",
+        ]
+    );
+}
+
+#[test]
+fn sibling_catch_clauses_sharing_a_slot_each_get_their_own_type() {
+    // `javac` gives both parameters slot 2, with one `LocalVariableTable` entry each. Resolving by
+    // slot alone reports an ambiguous reuse; each clause is resolved by the offset its parameter is
+    // born at instead.
+    let cf = tries();
+    let body = decompile(method(&cf, "twoCatches"), &cf, &["s".to_owned()])
+        .expect("twoCatches decompiles");
+    assert_eq!(
+        body,
+        [
+            "try {",
+            "    return this.parse(s);",
+            "} catch (java.io.IOException e) {",
+            "    return -1;",
+            "} catch (java.lang.RuntimeException e) {",
+            "    return -2;",
+            "}",
+        ]
+    );
+}
+
+#[test]
+fn a_multi_catch_recovers_its_alternatives_from_the_exception_table() {
+    // The `LocalVariableTable` types this parameter as `RuntimeException` — the least upper bound
+    // `javac` computed — so the alternatives can only come from the two exception-table rows.
+    let cf = tries();
+    let body = decompile(method(&cf, "multiCatch"), &cf, &["s".to_owned()])
+        .expect("multiCatch decompiles");
+    assert_eq!(
+        body,
+        [
+            "try {",
+            "    this.value = java.lang.Integer.parseInt(s);",
+            "} catch (java.lang.NumberFormatException | java.lang.NullPointerException e) {",
+            "    this.value = -1;",
+            "}",
+        ]
+    );
+}
+
+#[test]
+fn an_unused_catch_parameter_is_named_even_without_a_table_entry() {
+    // An unused parameter gets no `LocalVariableTable` entry even under `-g`. Nothing loads the
+    // slot, so a synthesised name is safe — the same fallback an unnamed method parameter takes.
+    let cf = tries();
+    let body = decompile(method(&cf, "emptyCatch"), &cf, &["s".to_owned()])
+        .expect("emptyCatch decompiles");
+    assert_eq!(
+        body,
+        [
+            "try {",
+            "    this.value = java.lang.Integer.parseInt(s);",
+            "} catch (java.lang.RuntimeException e) {",
+            "}",
+        ]
+    );
+}
+
+#[test]
+fn a_nested_try_is_read_from_the_nesting_of_the_protected_ranges() {
+    let cf = tries();
+    let body =
+        decompile(method(&cf, "nestedTry"), &cf, &["s".to_owned()]).expect("nestedTry decompiles");
+    assert_eq!(
+        body,
+        [
+            "try {",
+            "    try {",
+            "        this.value = java.lang.Integer.parseInt(s);",
+            "    } catch (java.lang.NumberFormatException e) {",
+            "        this.value = 1;",
+            "    }",
+            "} catch (java.lang.RuntimeException e) {",
+            "    this.value = 2;",
+            "}",
+        ]
+    );
+}
+
+#[test]
+fn a_finally_folds_its_two_duplicates_into_one_clause() {
+    let cf = tries();
+    let body = decompile(method(&cf, "tryFinally"), &cf, &[]).expect("tryFinally decompiles");
+    assert_eq!(
+        body,
+        [
+            "try {",
+            "    this.mayThrow();",
+            "} finally {",
+            "    this.value = 9;",
+            "}",
+        ]
+    );
+}
+
+#[test]
+fn a_finally_beside_a_catch_folds_three_duplicates() {
+    // One copy per exit that completes normally — the try body's and the clause's — plus the
+    // handler's own, which rethrows.
+    let cf = tries();
+    let body =
+        decompile(method(&cf, "tryCatchFinally"), &cf, &[]).expect("tryCatchFinally decompiles");
+    assert_eq!(
+        body,
+        [
+            "try {",
+            "    this.mayThrow();",
+            "} catch (java.io.IOException e) {",
+            "    this.value = -1;",
+            "} finally {",
+            "    this.value = 9;",
+            "}",
+        ]
+    );
+}
+
+#[test]
+fn a_clause_that_throws_gets_no_duplicate_of_its_own() {
+    // The catch-all row covering the clause stops inside the handler's entry rather than before it,
+    // which is how the table says that clause leaves abruptly.
+    let cf = tries();
+    let body = decompile(method(&cf, "tryCatchFinallyThrowing"), &cf, &[])
+        .expect("tryCatchFinallyThrowing decompiles");
+    assert_eq!(
+        body,
+        [
+            "try {",
+            "    this.mayThrow();",
+            "} catch (java.io.IOException e) {",
+            "    throw new java.lang.IllegalStateException(\"boom\");",
+            "} finally {",
+            "    this.value = 9;",
+            "}",
+        ]
+    );
+}
+
+#[test]
+fn a_multi_statement_finalizer_folds() {
+    let cf = tries();
+    let body =
+        decompile(method(&cf, "tryFinallyBlock"), &cf, &[]).expect("tryFinallyBlock decompiles");
+    assert_eq!(
+        body,
+        [
+            "try {",
+            "    this.mayThrow();",
+            "} finally {",
+            "    this.value = 9;",
+            "    this.other = 10;",
+            "}",
+        ]
+    );
+}
+
+#[test]
+fn a_branching_finalizer_bails_because_its_copies_differ() {
+    // What follows a copy differs by copy — the normal exit continues past the statement, the
+    // handler rethrows — so the `if`'s arms jump to different places and the byte-level equality
+    // the fold rests on does not hold.
+    let cf = tries();
+    assert!(decompile(method(&cf, "finallyWithBranch"), &cf, &["n".to_owned()]).is_none());
+}
+
+#[test]
+fn a_return_inside_a_try_with_a_finally_bails() {
+    // The return value is spilled to a slot the `LocalVariableTable` never names.
+    let cf = tries();
+    assert!(
+        decompile(
+            method(&cf, "returnInsideTryFinally"),
+            &cf,
+            &["n".to_owned()]
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn a_catch_parameter_sharing_a_slot_with_a_local_bails() {
+    let cf = tries();
+    assert!(decompile(method(&cf, "sharedCatchSlot"), &cf, &["n".to_owned()]).is_none());
+}
+
+#[test]
+fn a_for_inside_a_try_bails_on_the_shared_counter_slot() {
+    // The counter dies at the closing brace and the catch parameter is born right after it, so they
+    // share a slot — the reuse M3 declines to split.
+    let cf = tries();
+    assert!(decompile(method(&cf, "loopInTry"), &cf, &["n".to_owned()]).is_none());
+}
+
+#[test]
+fn a_synchronized_block_is_not_read_as_a_finally() {
+    // It compiles to a catch-all handler that looks like one. The `monitorenter` / `monitorexit`
+    // pair is what separates them, and the simulator models neither.
+    let cf = tries();
+    assert!(decompile(method(&cf, "synchronizedBlock"), &cf, &["lock".to_owned()]).is_none());
+}
+
+#[test]
+fn a_finalizer_that_returns_bails() {
+    let cf = tries();
+    assert!(decompile(method(&cf, "finallyWithReturn"), &cf, &["n".to_owned()]).is_none());
+}
+
+#[test]
+fn a_try_inside_a_finalizer_bails() {
+    // Its handlers sit inside every copy, so folding the copies away would drop them.
+    let cf = tries();
+    assert!(decompile(method(&cf, "tryInsideFinally"), &cf, &[]).is_none());
+}
+
+#[test]
+fn two_returns_inside_one_try_split_the_range_and_bail() {
+    // Two rows share a handler but disagree on the range: a hole meaning "control left here" is not
+    // the same as one meaning "this is not protected".
+    let cf = tries();
+    assert!(decompile(method(&cf, "twoReturnsInTry"), &cf, &["s".to_owned()]).is_none());
+}
+
+#[test]
+fn try_with_resources_bails() {
+    let cf = tries();
+    assert!(decompile(method(&cf, "tryWithResources"), &cf, &["r".to_owned()]).is_none());
+}
+
+#[test]
+fn a_loop_heading_a_protected_range_stays_inside_the_try() {
+    // The loop header *is* the try's entry block, so the structurer must look for a `try` there
+    // before it looks for a loop — the other order lets the loop swallow the statement. The counter
+    // is a parameter, which is what keeps a fresh slot from competing with the catch parameter.
+    let cf = tries();
+    let body = decompile(method(&cf, "loopInTryBody"), &cf, &["n".to_owned()])
+        .expect("loopInTryBody decompiles");
+    assert_eq!(
+        body,
+        [
+            "try {",
+            "    while (n > 0) {",
+            "        n = n - 1;",
+            "    }",
+            "} catch (java.lang.RuntimeException e) {",
+            "    this.value = -1;",
+            "}",
+        ]
+    );
+}
+
+#[test]
+fn a_for_inside_a_try_drops_the_hoisted_declaration_it_absorbed() {
+    // A finalizer has no catch parameter, so the counter keeps a slot of its own and its
+    // declaration moves into the header (M9). The hoisted one must go with it: keeping both is a
+    // duplicate declaration, which parses cleanly and only `javac` rejects.
+    let cf = tries();
+    let body = decompile(method(&cf, "loopInTryFinally"), &cf, &["n".to_owned()])
+        .expect("loopInTryFinally decompiles");
+    assert_eq!(
+        body,
+        [
+            "int total;",
+            "total = 0;",
+            "try {",
+            "    for (int i = 0; i < n; i++) {",
+            "        total = total + i;",
+            "    }",
+            "} finally {",
+            "    this.value = 9;",
+            "}",
+            "return total;",
+        ]
+    );
+}
+
+#[test]
+fn an_empty_finally_leaves_no_handler_to_structure() {
+    // `javac` drops the whole handler for a `finally { }`, so what reaches the decompiler is a
+    // method with no exception table at all.
+    let cf = tries();
+    let body = decompile(method(&cf, "emptyFinally"), &cf, &[]).expect("emptyFinally decompiles");
+    assert_eq!(body, ["this.mayThrow();"]);
 }
