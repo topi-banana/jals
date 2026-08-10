@@ -8,7 +8,10 @@ use alloc::borrow::ToOwned;
 use alloc::string::String;
 use alloc::vec;
 
-use jals_config::fmt::{Comments, Config, ImportOrder, IndentStyle, Layout, WrapPolicy, Wrapping};
+use jals_config::fmt::{
+    BlankLines, Comments, Config, ImportOrder, IndentStyle, InlineAnnotations, Layout, WrapPolicy,
+    Wrapping,
+};
 
 use super::eclipse::EclipsePrefs;
 use super::gjf::{GjfStyle, GoogleJavaFormatConfig};
@@ -90,14 +93,43 @@ fn palantir_defaults_to_its_own_style() {
 }
 
 #[test]
-fn palantirs_borrowed_styles_match_google_java_formats() {
+fn palantirs_borrowed_styles_take_google_java_formats_metrics() {
     let palantir_google: Config = PalantirJavaFormatConfig {
         style: PalantirStyle::Google,
         format_javadoc: true,
     }
     .into();
     let gjf: Config = GoogleJavaFormatConfig::default().into();
-    assert_eq!(palantir_google, gjf);
+    // `--google` picks GJF's metrics, not GJF's formatter: the fork's own emission rules still
+    // apply, so the two configs agree on everything *except* those.
+    assert_eq!(palantir_google.layout, gjf.layout);
+    assert_eq!(palantir_google.spacing, gjf.spacing);
+    assert_eq!(palantir_google.braces, gjf.braces);
+    assert_eq!(palantir_google.imports, gjf.imports);
+    assert_eq!(palantir_google.comments, gjf.comments);
+    assert_eq!(
+        palantir_google.wrapping.inline_argumentless_annotations,
+        InlineAnnotations::Locals,
+    );
+    assert_eq!(palantir_google.blank_lines.around_documented_member, 0);
+    assert_eq!(
+        Config {
+            wrapping: gjf.wrapping,
+            blank_lines: gjf.blank_lines,
+            ..palantir_google.clone()
+        },
+        Config {
+            wrapping: Wrapping {
+                inline_argumentless_annotations: InlineAnnotations::Declarations,
+                ..palantir_google.wrapping
+            },
+            blank_lines: BlankLines {
+                around_documented_member: 1,
+                ..palantir_google.blank_lines
+            },
+            ..gjf
+        },
+    );
 }
 
 #[test]
@@ -317,7 +349,7 @@ fn the_gjf_family_profile_is_the_google_preset() {
             labeled_statement: WrapPolicy::AlwaysPerItem,
             // `fieldAnnotationDirection` — a variable's annotations stay on its line unless one
             // of them takes arguments.
-            inline_argumentless_annotations: true,
+            inline_argumentless_annotations: InlineAnnotations::Declarations,
             // `JavaFormatterOptions.reflowLongStrings` — google-java-format runs `StringWrapper`
             // unless `--skip-reflowing-long-strings`.
             reflow_long_strings: true,

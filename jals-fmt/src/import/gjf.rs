@@ -23,8 +23,8 @@ use alloc::borrow::ToOwned;
 use alloc::vec;
 
 use jals_config::fmt::{
-    Comments, Config, ImportOrder, Imports, IndentStyle, KeepOnOneLine, Layout, ParenPositions,
-    Spacing, WrapPolicy, Wrapping,
+    Comments, Config, ImportOrder, Imports, IndentStyle, InlineAnnotations, KeepOnOneLine, Layout,
+    ParenPositions, Spacing, WrapPolicy, Wrapping,
 };
 use serde::Deserialize;
 
@@ -188,7 +188,7 @@ impl GoogleJavaFormatConfig {
                 // own lines, unless none of them takes arguments.
                 parameter_annotations: WrapPolicy::AlwaysPerItem,
                 variable_annotations: WrapPolicy::AlwaysPerItem,
-                inline_argumentless_annotations: true,
+                inline_argumentless_annotations: InlineAnnotations::Declarations,
                 reflow_long_strings: native.reflow_long_strings,
                 ..Wrapping::default()
             },

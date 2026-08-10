@@ -332,7 +332,7 @@ IntelliJ の `SPACE_*` 45 とはほぼ 1:1。代表例（全数は importer の 
 | `imports.reorder-modifiers` | — | — | `ModifierOrderer`（固定 true） |
 | `imports.remove-unused` | — | —（`CLASS_COUNT_TO_USE_IMPORT_ON_DEMAND` 等は classpath 依存で §7） | `RemoveUnusedImports`（`--skip-removing-unused-imports` の否定、既定 true） |
 | `wrapping.reflow-long-strings` | — | — | `JavaFormatterOptions.reflowLongStrings` → `StringWrapper`（既定 true） |
-| `wrapping.inline-argumentless-annotations` | — | — | `fieldAnnotationDirection`（引数付き注釈が 1 つでもあれば縦、なければ横。固定 true） |
+| `wrapping.inline-argumentless-annotations` (`never`/`locals`/`declarations`) | — | — | `fieldAnnotationDirection`（引数付き注釈が 1 つでもあれば縦、なければ横）→ `declarations`。Palantir は field を常に縦にするので `locals` |
 | `blank-lines.around-documented-member` | — | — | `hasJavaDoc(bodyDeclaration)` → `thisOneGetsBlankLineBefore`（固定 1） |
 | `wrapping.fill-item-width` | —（構文ごとの split bit で表す） | — | `hasOnlyShortItems` / `MAX_ITEM_LENGTH_FOR_FILLING`（固定 10） |
 | `wrapping.format-string-arguments` | — | — | `isFormatMethod`（先頭引数が `%` / `{0}` を含む文字列リテラル連結なら、それだけを 1 行に。固定 true） |

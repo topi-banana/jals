@@ -79,7 +79,11 @@ pub(crate) struct Ctx<'a> {
     /// The branch just emitted got its braces from `[braces] force-*`, so the continuation
     /// keyword after it cuddles a `}` the source never had.
     braced_branch: bool,
-    /// The file's leading comment has been seen (`comments.format-header` gates only the first).
+    /// A significant token has been emitted, so the file's header region is over.
+    ///
+    /// The header is not "the first comment": it is every comment before the first declaration —
+    /// JDT's `comment.format_header` covers the whole run, and an OpenJDK file routinely opens
+    /// with a licence block, a blank line and a second attribution block.
     header_seen: bool,
     /// Token offsets whose own-line leading comments were already hoisted by an enclosing node.
     hoisted: BTreeSet<usize>,
@@ -324,6 +328,7 @@ impl<'a> Ctx<'a> {
         }
         let text = LiteralRewrite::apply(tok.text(), tok.kind(), self.style.cfg.literals);
         self.ops.token(&text);
+        self.header_seen = true;
         self.spaced = false;
         self.previous = Some(tok.clone());
         self.emit_trailing(tok);
@@ -600,7 +605,6 @@ impl<'a> Ctx<'a> {
     /// Emit a comment's text, reflowed when its `[comments]` rule is on.
     fn emit_comment(&mut self, comment: &Comment) {
         let is_header = !self.header_seen;
-        self.header_seen = true;
         let text = CommentFormatter::render(
             &comment.text,
             comment.kind,

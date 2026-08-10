@@ -398,6 +398,7 @@ fn variants(section: &str, key: &str) -> Vec<&'static str> {
             vec!["never", "always", "if-single-item", "preserve"]
         }
         ("braces", _) => vec!["next-line", "next-line-shifted", "next-line-on-wrap"],
+        ("wrapping", "inline-argumentless-annotations") => vec!["locals", "declarations"],
         ("wrapping", key) if key.starts_with("paren-") => {
             vec!["separate-lines", "separate-lines-if-wrapped", "preserve"]
         }

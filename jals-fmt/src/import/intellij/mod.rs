@@ -826,9 +826,18 @@ impl From<IntellijConfig> for Config {
 
         // --- [comments] -----------------------------------------------------------------
         let comments = &mut config.comments;
+        // jals's rule is *reflow*, and IDEA reflows a Javadoc only when both of its switches are
+        // on: `ENABLE_JAVADOC_FORMATTING` turns the Javadoc pass on at all, and `WRAP_COMMENTS`
+        // (off in a stock IDEA) is what lets that pass move a line break. With the pass on and
+        // wrapping off it still aligns tags and adds a `<p>` at a blank line, but every line of
+        // prose stays where the author put it — which is `DESIGN.md` §18.2's **D5**, so jals
+        // approximates the pair with "do not reflow" rather than reflowing against a margin IDEA
+        // is not using.
         Lower::set(
             &mut comments.format_javadoc,
-            javadoc.enable_javadoc_formatting,
+            javadoc
+                .enable_javadoc_formatting
+                .map(|on| on && wrapping.wrap_comments.unwrap_or(false)),
             |b| b,
         );
         Lower::set(&mut comments.format_line, wrapping.wrap_comments, |b| b);

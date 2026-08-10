@@ -55,7 +55,7 @@ pub use imports::{ImportOrder, Imports};
 pub use layout::{IndentStyle, Layout, LineEnding};
 pub use literals::{FloatLiteralTrailingZero, HexLiteralCase, LiteralSuffixCase, Literals};
 pub use spacing::Spacing;
-pub use wrapping::{ParenPositions, WrapPolicy, Wrapping};
+pub use wrapping::{InlineAnnotations, ParenPositions, WrapPolicy, Wrapping};
 
 /// Formatter style settings.
 ///

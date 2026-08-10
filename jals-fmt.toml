@@ -54,7 +54,7 @@ tabular-array-initializers = true
 # annotation with arguments puts the whole run onto its own lines.
 parameter-annotations = "always-per-item"
 variable-annotations = "always-per-item"
-inline-argumentless-annotations = true
+inline-argumentless-annotations = "declarations"
 # `StringWrapper`: re-wrap a string concatenation that overflows the column limit.
 reflow-long-strings = true
 
