@@ -1,7 +1,7 @@
 //! What one `switch` arm's labels say.
 //!
-//! This module's header lists the arm reader among the three copies that were "duplicated down to
-//! [their] explanatory comment", and it was: the two backends held the same forty lines, the same
+//! The `facts` header lists the arm reader among the three copies that were "duplicated down to
+//! its explanatory comment", and it was: the two backends held the same forty lines, the same
 //! pattern-kind list, and the same note about a `Guard`'s condition, differing only in the last
 //! statement of the loop. That note is the load-bearing part — a `when` clause's condition is an
 //! expression child of the label just as a `case` key is, so a reader that took every expression
