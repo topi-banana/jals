@@ -10,6 +10,10 @@
 /jals-tests/sources/openjdk-eclipse
 /jals-tests/sources/openjdk-intellij
 /jals-tests/sources/openjdk-*.tmp.*
+# The generated compiler corpus: OpenJDK's own javac tests plus the class files javac
+# produced from them — GPL derivatives and binaries both, so likewise never committed.
+/jals-tests/sources/javac-langtools
+/jals-tests/sources/javac-langtools.tmp.*
 # Locally fetched reference formatters and the compiled Eclipse driver (binaries — never
 # commit).
 /jals-tests/vendor

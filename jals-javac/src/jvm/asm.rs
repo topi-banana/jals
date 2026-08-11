@@ -345,6 +345,17 @@ struct LabelInfo {
     targeted: bool,
 }
 
+/// The longest `Code` a method may carry (JVMS §4.7.3: `code_length` must be less than 65536).
+///
+/// Checked while emitting rather than only while resolving offsets, and the difference is not
+/// cosmetic. `finally` is inlined on every exit path, so its copies compose: sixteen nested
+/// `try {} finally {}` blocks — `OpenJDK`'s own `JsrRet.java`, the regression test for javac's own
+/// blow-up on the shape — are 2^16 copies of the innermost one. A check that runs after emission
+/// reports the same [`AsmError::TooLarge`], having first built every copy: 2.4 GB of items at
+/// fourteen levels and 37 GB at sixteen, which is a corpus run the host kills rather than a
+/// diagnosis. Refusing at the first item past the limit bounds that to the limit itself.
+const MAX_CODE_LENGTH: usize = 65535;
+
 /// Assembles one method body.
 ///
 /// Emission methods mirror what a lowering wants to say (`push a string constant`, `call this
@@ -354,6 +365,11 @@ struct LabelInfo {
 pub struct Assembler<'pool> {
     pool: &'pool mut ConstantPool,
     items: Vec<Item>,
+    /// How many items emitted so far occupy at least one byte of the `Code` attribute — every item
+    /// but a [`Item::Mark`], which is a bound label and encodes to nothing. A lower bound on
+    /// `code_length`, which is what makes refusing past [`MAX_CODE_LENGTH`] exact rather than a
+    /// heuristic: the real length can only be larger.
+    code_items: usize,
     labels: Vec<LabelInfo>,
     /// The exception table, still in terms of labels.
     handlers: Vec<Protected>,
@@ -406,6 +422,7 @@ impl<'pool> Assembler<'pool> {
         Ok(Self {
             pool,
             items: Vec::new(),
+            code_items: 0,
             labels: Vec::new(),
             handlers: Vec::new(),
             state,
@@ -584,6 +601,7 @@ impl<'pool> Assembler<'pool> {
         self.record_arrival(target)?;
         self.info_mut(target)?.targeted = true;
         let fallthrough = self.state.clone();
+        self.reserve_code_item()?;
         self.items.push(Item::Jump {
             branch,
             target,
@@ -681,6 +699,7 @@ impl<'pool> Assembler<'pool> {
         self.info_mut(default)?.targeted = true;
 
         let table = Self::prefers_table(&cases);
+        self.reserve_code_item()?;
         self.items.push(Item::Switch {
             cases,
             default,
@@ -922,8 +941,7 @@ impl<'pool> Assembler<'pool> {
         self.state.pop();
         self.state.set_local(index, ty);
         self.max_locals = self.max_locals.max(self.state.slot_count());
-        self.push_item(instruction);
-        Ok(())
+        self.push_item(instruction)
     }
 
     /// `iinc slot, delta` — add `delta` to an `int` local in place, without touching the stack.
@@ -945,8 +963,7 @@ impl<'pool> Assembler<'pool> {
                 value: delta,
             }),
         };
-        self.push_item(instruction);
-        Ok(())
+        self.push_item(instruction)
     }
 
     /// Convert the value on top of the stack from `from` to `to`.
@@ -1320,8 +1337,7 @@ impl<'pool> Assembler<'pool> {
             self.state.push(value);
         }
         self.state.push(ty);
-        self.push_item(instruction);
-        Ok(())
+        self.push_item(instruction)
     }
 
     /// Duplicate the **two** one-word values on top of the stack.
@@ -1343,7 +1359,7 @@ impl<'pool> Assembler<'pool> {
         }
         self.state.push(second);
         self.state.push(first);
-        self.push_item(Instruction::Dup2);
+        self.push_item(Instruction::Dup2)?;
         Ok(())
     }
 
@@ -1364,7 +1380,7 @@ impl<'pool> Assembler<'pool> {
         self.state.pop();
         self.state.push(first);
         self.state.push(second);
-        self.push_item(Instruction::Swap);
+        self.push_item(Instruction::Swap)?;
         Ok(())
     }
 
@@ -1531,8 +1547,7 @@ impl<'pool> Assembler<'pool> {
         if let Some(pushed) = pushed {
             self.state.push(pushed);
         }
-        self.push_item(instruction);
-        Ok(())
+        self.push_item(instruction)
     }
 
     /// Pop a call's arguments (and receiver), then push its result.
@@ -1557,9 +1572,20 @@ impl<'pool> Assembler<'pool> {
         self.emit(instruction, &popped, pushed)
     }
 
-    fn push_item(&mut self, instruction: Instruction) {
+    fn push_item(&mut self, instruction: Instruction) -> Result<()> {
+        self.reserve_code_item()?;
         self.items.push(Item::Fixed(instruction));
         self.note_frame();
+        Ok(())
+    }
+
+    /// Account for one item that will occupy bytes, refusing the body once it cannot fit one.
+    const fn reserve_code_item(&mut self) -> Result<()> {
+        self.code_items += 1;
+        if self.code_items > MAX_CODE_LENGTH {
+            return Err(AsmError::TooLarge);
+        }
+        Ok(())
     }
 
     fn note_frame(&mut self) {

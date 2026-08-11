@@ -1709,6 +1709,40 @@ public class Cleanup {
     );
 }
 
+/// `finally` nested past what a method body can hold is refused **while** the body is emitted.
+///
+/// A finalizer is inlined on every exit path, so nested ones compose: sixteen `try {} finally {}`
+/// blocks are 2^16 copies of the innermost. That shape is `OpenJDK`'s own `JsrRet.java` — the
+/// regression test for javac's blow-up on it — and it is what the `jals-compile` corpus ran into.
+/// The class-file limit was checked once the item stream was assembled, which reports the right
+/// error having first built every copy: 37 GB of items, and a corpus run the host kills instead of
+/// a diagnosis.
+///
+/// The assertion is the *outcome*, because that is all a test can state; what the check buys is
+/// bounded memory, and the number that shows it is the corpus run's peak — 37.8 GB before, 2.5 GB
+/// after, flat as the nesting grows. Kept off wasm for that reason: the refusal costs the limit
+/// itself, which is comfortable natively and most of a 32-bit address space.
+#[test]
+#[cfg(not(target_family = "wasm"))]
+fn a_finally_nested_past_the_code_limit_is_refused() {
+    let mut source = String::from("class Deep {\n    {\n");
+    for _ in 0..16 {
+        source.push_str("        try {} finally {\n");
+    }
+    for _ in 0..16 {
+        source.push_str("        }\n");
+    }
+    source.push_str("    }\n}\n");
+    let error = compile(&source).expect_err("2^16 inlined copies cannot fit one method body");
+    assert!(
+        matches!(
+            error,
+            LowerError::Assembly(jals_javac::jvm::AsmError::TooLarge)
+        ),
+        "should report the class-file limit, got {error}"
+    );
+}
+
 /// `synchronized` releases its monitor however the block ends — the JVM refuses to return from a
 /// method still holding one it took, so a missing release fails at run time rather than at load.
 #[test]
@@ -3444,6 +3478,171 @@ public class Uses {
         return;
     }
     assert_eq!(run(source, "Uses"), "13\n5\n2\n");
+}
+
+/// An unqualified name that resolves to an **enclosing** class's member is reached through `this$0`.
+///
+/// `this` inside an inner class is the inner instance, so emitting `getfield Outer.v` against it is a
+/// class file the verifier rejects outright — `Type 'Outer$Inner' is not assignable to 'Outer'`. The
+/// enclosing instance has to be loaded out of the synthetic field first, and the same holds for an
+/// assignment and for an unqualified call to an enclosing method.
+///
+/// Found by the `jals-compile` corpus over `OpenJDK`'s own javac tests, where it accounted for six of
+/// the nine class files a real JVM refused to load.
+#[test]
+fn an_uplevel_member_is_reached_through_the_enclosing_instance() {
+    let source = r#"
+public class Uplevel {
+    int v = 5;
+    String tag = "outer";
+
+    class Inner {
+        int read() { return v; }
+        void write() { v = 9; }
+        String label() { return tag; }
+    }
+
+    public static void main(String[] args) {
+        Uplevel o = new Uplevel();
+        Uplevel.Inner i = o.new Inner();
+        System.out.println(i.read());
+        System.out.println(i.label());
+        i.write();
+        System.out.println(o.v);
+    }
+}
+"#;
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Uplevel"), "5\nouter\n9\n");
+}
+
+/// The same walk for an unqualified **call** to an enclosing class's method.
+///
+/// The lowering is ready for it — `Expr::load_unqualified_receiver` treats a method's owner exactly
+/// as it treats a field's — but the call never reaches it: `jals-hir` does not resolve an unqualified
+/// call to an enclosing class's method at all, so lowering reports `helper()` as unresolved. The gap
+/// is in resolution, not in this crate, and the test stays here as the ratchet for closing it.
+#[test]
+#[ignore = "jals-hir does not resolve an unqualified call to an enclosing class's method"]
+fn an_uplevel_call_is_made_on_the_enclosing_instance() {
+    let source = r"
+public class UplevelCall {
+    int helper() { return 3; }
+
+    class Inner {
+        int call() { return helper(); }
+    }
+
+    public static void main(String[] args) {
+        UplevelCall o = new UplevelCall();
+        System.out.println(o.new Inner().call());
+    }
+}
+";
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "UplevelCall"), "3\n");
+}
+
+/// The same walk from an **anonymous** class, whose enclosing instance is filled in the same way.
+///
+/// `Closure4` in `OpenJDK`'s suite is exactly this shape, and its class file was rejected with
+/// `Type 'Closure4$1' is not assignable to 'Closure4'`.
+#[test]
+fn an_anonymous_class_reaches_an_uplevel_field_through_its_enclosing_instance() {
+    let source = r"
+interface Task {
+    void go();
+}
+
+public class Anon {
+    int v = 7;
+
+    // A file-local interface, not `Runnable`: the embedded stubs these tests index against carry
+    // neither, and a missing JDK type would fail this for a reason that is not its subject.
+    Task t = new Task() {
+        public void go() { System.out.println(v); }
+    };
+
+    public static void main(String[] args) {
+        new Anon().t.go();
+    }
+}
+";
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Anon"), "7\n");
+}
+
+/// Two levels out: the walk keeps following `this$0` until it reaches the member's owner.
+#[test]
+fn an_uplevel_member_two_levels_out_walks_the_whole_chain() {
+    let source = r"
+public class Deep {
+    int v = 11;
+
+    class Middle {
+        class Innermost {
+            int read() { return v; }
+        }
+    }
+
+    public static void main(String[] args) {
+        Deep d = new Deep();
+        Deep.Middle m = d.new Middle();
+        System.out.println(m.new Innermost().read());
+    }
+}
+";
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Deep"), "11\n");
+}
+
+/// An **inherited** member is still reached through `this`, even from an inner class.
+///
+/// This is what makes the walk a matter of following the resolution rather than counting nesting
+/// levels: `Inner` here extends `Base`, so `v` is its own inherited field and `this` is the receiver.
+/// A rule that walked outwards whenever the owner is not the class being compiled would emit
+/// `this$0.v` and read the wrong object's field — silently, since both are well-typed.
+///
+/// Red for a reason that is not the receiver walk: `jals-hir` binds `v` to `Shadow.v` rather than to
+/// the `Base.v` the inner class inherits, so the walk faithfully follows a resolution that is wrong
+/// and prints 2 where javac prints 1. That is the worse half of the bug — it produces a class file
+/// every verifier accepts and every JVM runs, reading a different object's field — and it is
+/// `jals-hir`'s to fix (JLS §6.5.6.1: the name binds in the innermost enclosing scope, and an inner
+/// class's own inherited members are in it).
+#[test]
+#[ignore = "jals-hir binds an inner class's inherited field to the enclosing class's instead"]
+fn an_inherited_member_is_still_reached_through_this() {
+    let source = r"
+class Base {
+    int v = 1;
+}
+
+public class Shadow {
+    int v = 2;
+
+    class Inner extends Base {
+        int read() { return v; }
+    }
+
+    public static void main(String[] args) {
+        Shadow s = new Shadow();
+        System.out.println(s.new Inner().read());
+    }
+}
+";
+    if !java_available() {
+        return;
+    }
+    // `Base.v`, not `Shadow.v`: the name binds in the inner class's own supertype chain first.
+    assert_eq!(run(source, "Shadow"), "1\n");
 }
 
 /// A local class — one declared inside a method body — is its own class file.

@@ -2,8 +2,8 @@
 name = "jals-tests"
 version.workspace = true
 edition.workspace = true
-# The crate ships two binaries (jals-tests, jals-golden); keep `cargo run -p
-# jals-tests` resolving to the parse-soundness CLI.
+# The crate ships three binaries (jals-tests, jals-golden, jals-compile); keep `cargo run
+# -p jals-tests` resolving to the parse-soundness CLI.
 default-run = "jals-tests"
 
 [lib]
@@ -18,20 +18,34 @@ path = "src/main.rs"
 name = "jals-golden"
 path = "src/bin/golden.rs"
 
+[[bin]]
+name = "jals-compile"
+path = "src/bin/compile.rs"
+
+# A binary cannot see `[dev-dependencies]`, so the compiler harness's crates are ordinary
+# dependencies even though nothing but a test corpus reads them.
 [dependencies]
 clap.workspace = true
+jals-classfile.workspace = true
 jals-config.workspace = true
 jals-exec = { workspace = true, features = ["tokio"] }
 # `std` brings in the XML config importers: the Eclipse and IntelliJ golden corpora are
 # scored with the very profile/scheme files their generators hand the native tool, and
 # IntelliJ's is a code-style XML.
 jals-fmt = { workspace = true, features = ["std"] }
+jals-hir.workspace = true
+jals-javac.workspace = true
 jals-syntax.workspace = true
 rayon.workspace = true
 similar.workspace = true
+# The compiler corpus stages each case's class files into a scratch directory for the JVM
+# to link, so this is a dependency of a binary rather than of the tests alone.
+tempfile = "3"
 walkdir.workspace = true
+# Reads `$JAVA_HOME/lib/ct.sym` for the compiler corpus's classpath, exactly as
+# `jals-javac`'s stdlib oracle does: a host-side test harness, never the product.
+zip.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
 # Reads the `jals-fmt.toml` Google preset back, so the file and the importer cannot drift.
 toml.workspace = true

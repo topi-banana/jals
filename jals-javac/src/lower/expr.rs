@@ -24,7 +24,7 @@ use alloc::borrow::ToOwned as _;
 use alloc::string::{String, ToString as _};
 
 use jals_classfile::MethodDescriptor;
-use jals_hir::{DefId, DefKind, MemberId, Primitive, Ty};
+use jals_hir::{DefId, DefKind, ItemId, MemberId, Primitive, Ty};
 use jals_syntax::SyntaxKind::{
     AMP, AMP_AMP, BANG, BANG_EQ, CARET, EQ_EQ, GT, INSTANCEOF_KW, LSHIFT, LT, LT_EQ, MINUS,
     MINUS_MINUS, PERCENT, PIPE, PIPE_PIPE, PLUS, PLUS_PLUS, SLASH, STAR, TILDE,
@@ -36,7 +36,7 @@ use crate::desc::{DescError, Descriptor};
 use crate::facts::{Facts, Hierarchy, Literal};
 use crate::jvm::{BinOp, Branch, Compare, Numeric};
 use crate::lower::place::Place;
-use crate::lower::{Context, Emit, LowerError, Result};
+use crate::lower::{Context, Emit, LowerError, OUTER, Result};
 
 /// The builder a string concatenation runs through.
 const STRING_BUILDER: &str = "java/lang/StringBuilder";
@@ -470,8 +470,51 @@ impl Expr {
         if context.index.member(member).modifiers.is_static {
             emit.asm.get_static(&owner, &field, &descriptor)?;
         } else {
-            emit.load_this()?;
+            Self::load_unqualified_receiver(context.index.member(member).owner, context, emit)?;
             emit.asm.get_field(&owner, &field, &descriptor)?;
+        }
+        Ok(())
+    }
+
+    /// Load the instance an **unqualified** instance-member access is reached through.
+    ///
+    /// `this` for a member of the class being compiled and for every member it *inherits* — an
+    /// inherited field is this object's own, so no walk is involved. Anything else was resolved on a
+    /// lexically **enclosing** class, whose instance lives in the synthetic `this$0` field, and one
+    /// hop out need not be enough: `Outer.Middle.Innermost` reading `Outer`'s field walks twice.
+    ///
+    /// Which of the two it is follows the *resolution*, not the nesting: the owner the index gave
+    /// back is the type the name bound to. `Inner extends Base` reading a `Base` field is `this`
+    /// even though `Base` is not the class being compiled, and it stays `this` even when the
+    /// enclosing class declares that name too — which is why the test is a subtype test against the
+    /// resolved owner rather than an equality test against [`Context::this_item`].
+    ///
+    /// Without this the access is emitted against `this` outright, which is a class file the JVM
+    /// refuses to load: `Type 'Outer$Inner' is not assignable to 'Outer'`.
+    pub(crate) fn load_unqualified_receiver(
+        owner: ItemId,
+        context: &Context<'_>,
+        emit: &mut Emit<'_, '_>,
+    ) -> Result<()> {
+        emit.load_this()?;
+        let mut item = context.this_item;
+        let mut name = context.this_class.clone();
+        let mut enclosing = context.encloses.clone();
+        while !context.index.is_subtype(item, owner) {
+            let Some(next) = enclosing else {
+                // Every enclosing instance in reach has been walked and none of them owns the
+                // member. Emitting the access against `this` anyway is exactly the defect this walk
+                // exists to remove, so it stops here rather than producing a class file no JVM
+                // loads.
+                return Err(LowerError::Unsupported(
+                    "an unqualified member of no enclosing instance in scope",
+                ));
+            };
+            emit.asm
+                .get_field(&name, OUTER, &alloc::format!("L{};", next.name))?;
+            enclosing = context.inner.get(&next.item).cloned();
+            item = next.item;
+            name = next.name;
         }
         Ok(())
     }
@@ -639,8 +682,9 @@ impl Expr {
                 Some(ast::Expr::FieldAccess(access)) => {
                     Self::lower(&Self::inner(access.receiver())?, context, emit)?;
                 }
-                // A bare call in an instance method is an implicit `this`.
-                _ => emit.load_this()?,
+                // A bare call in an instance method is an implicit receiver — `this` for its own and
+                // inherited methods, the enclosing instance for an enclosing class's.
+                _ => Self::load_unqualified_receiver(info.owner, context, emit)?,
             }
         }
         let arguments: alloc::vec::Vec<ast::Expr> = call
@@ -863,7 +907,11 @@ impl Expr {
             .and_then(|item| context.captures_of_item(item))
             .unwrap_or_default();
         let mut descriptor = match &enclosing {
-            Some(name) => alloc::format!("(L{name};{}", descriptor.trim_start_matches('(')),
+            Some(enclosing) => alloc::format!(
+                "(L{};{}",
+                enclosing.name,
+                descriptor.trim_start_matches('(')
+            ),
             None => descriptor,
         };
         if !captured.is_empty() {

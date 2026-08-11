@@ -190,11 +190,12 @@ pub(crate) struct Context<'a> {
     /// attributes this does not emit, so the constructors widen to package-private instead. Not
     /// observable in a well-formed program: `new` on an `enum` is not a Java program at all.
     enum_subclassed: bool,
-    /// The internal name of the class an inner class holds an instance of. `None` for every other class.
-    encloses: Option<String>,
+    /// The class an inner class holds an instance of. `None` for every other class.
+    encloses: Option<Enclosing>,
     /// Every inner class in this file and the class it holds an instance of, so a `new` of one can pass
-    /// the enclosing instance even when the creation is not inside the inner class itself.
-    inner: alloc::collections::BTreeMap<ItemId, String>,
+    /// the enclosing instance even when the creation is not inside the inner class itself — and so the
+    /// walk out to an uplevel member can keep going past the first enclosing class.
+    inner: alloc::collections::BTreeMap<ItemId, Enclosing>,
     /// Every local class in this file and the locals it captures, in source order. A `new` of one reads
     /// this to pass their values; the class itself reads it to turn a capture into a field.
     captures: alloc::collections::BTreeMap<ItemId, alloc::vec::Vec<jals_hir::DefId>>,
@@ -203,6 +204,20 @@ pub(crate) struct Context<'a> {
     /// Every lambda in this class, by its span: the call site's name and descriptor, and which
     /// `BootstrapMethods` entry links it.
     lambdas: alloc::collections::BTreeMap<(usize, usize), Lambda>,
+}
+
+/// The class an inner class holds an instance of, in the two forms the lowering needs it.
+///
+/// The name spells the `this$0` descriptor and the `Fieldref` it is read through; the item is what
+/// makes the walk out to an *uplevel* member exact. Deriving one from the other would mean turning an
+/// internal name back into an [`ItemId`], and `Foo$Bar` is a legal class name — a lookup by mangled
+/// name resolves to the wrong type or to none at all, silently either way.
+#[derive(Clone)]
+pub(crate) struct Enclosing {
+    /// The enclosing type.
+    item: ItemId,
+    /// Its internal name.
+    name: String,
 }
 
 /// What a lambda's `invokedynamic` needs, worked out before any body is lowered.
@@ -302,17 +317,9 @@ impl Compile {
         class_version: u16,
     ) -> Result<CompiledClass> {
         let (index, file) = (typed.index(), typed.file());
-        // A non-`static` nested class holds its enclosing instance in a synthetic field, and every one
-        // of its constructors takes that instance as an extra first parameter. The index computed its
-        // descriptors from the declaration, so all of them would be one parameter short — which is a
-        // `NoSuchMethodError` at the first `new`, not a missing convenience.
-        // A nested interface, `@interface`, and `enum` are implicitly `static` and hold no enclosing
-        // instance, so only a nested *class* can be an inner one. One that is holds its enclosing
-        // instance in a synthetic field, and every constructor takes it as an extra first parameter.
-        let encloses = (Facts::is_inner_class(node)
-            && matches!(index.item(item).kind, DefKind::Class))
-        .then(|| Self::enclosing_name(node, index, file))
-        .transpose()?;
+        let encloses = Self::holds_enclosing_instance(node, item, index)
+            .then(|| Self::enclosing_of(node, index, file))
+            .transpose()?;
         let internal_name = Descriptor::internal_name_of(item, index);
         // An `@interface` *is* an interface: its members are implicitly `public abstract`, it has no
         // constructor, and `ACC_INTERFACE` is set. `ACC_ANNOTATION` is the only thing on top.
@@ -554,7 +561,7 @@ impl Compile {
             });
         }
         if let Some(enclosing) = &encloses {
-            fields.push(Self::enclosing_field(enclosing, &mut pool)?);
+            fields.push(Self::enclosing_field(&enclosing.name, &mut pool)?);
         }
         // One `final synthetic` field per captured local, which is how the class outlives the frame the
         // local lived in.
@@ -1205,32 +1212,47 @@ impl Compile {
         methods.next().is_none().then_some(only)
     }
 
-    /// Every inner class declared in the file `node` belongs to, mapped to the internal name of the class
-    /// it holds an instance of.
+    /// Every class in the file `node` belongs to that holds an enclosing instance, mapped to the class
+    /// it holds one of.
     ///
     /// Walked from the file root rather than passed in, because a `new Inner()` may sit in any class in
     /// the file and each is compiled on its own — the creation needs the *target's* shape, not its own.
+    ///
+    /// This is the **creation** side of [`Self::holds_enclosing_instance`], and the two have to answer
+    /// alike: the class being compiled reads it to decide whether its constructors take the enclosing
+    /// instance, and a `new` reads this to decide whether to pass one. A disagreement is not a lost
+    /// uplevel access but a `NoSuchMethodError` at the first `new` — which is why one predicate
+    /// answers for both, over the same node.
+    ///
+    /// Anonymous class bodies are here too, keyed the way the index keys them: on the `new` keyword's
+    /// own position, there being no name to key on.
     fn inner_classes_of(
         node: &SyntaxNode,
         index: &ProjectIndex,
         file: FileId,
-    ) -> alloc::collections::BTreeMap<ItemId, String> {
+    ) -> alloc::collections::BTreeMap<ItemId, Enclosing> {
         let mut out = alloc::collections::BTreeMap::new();
         let Some(root) = node.ancestors().last() else {
             return out;
         };
-        for declaration in root.descendants().filter(|n| n.kind() == CLASS_DECL) {
-            if !Facts::is_inner_class(&declaration) {
+        for declaration in root.descendants() {
+            let keyed_at = match declaration.kind() {
+                CLASS_DECL => ast::Decl::name_token_of(&declaration)
+                    .map(|name| usize::from(name.text_range().start())),
+                jals_syntax::SyntaxKind::NEW_EXPR
+                    if declaration.children().any(|c| c.kind() == CLASS_BODY) =>
+                {
+                    Some(usize::from(declaration.text_range().start()))
+                }
+                _ => None,
+            };
+            let Some(item) = keyed_at.and_then(|at| index.item_by_decl(file, at)) else {
+                continue;
+            };
+            if !Self::holds_enclosing_instance(&declaration, item, index) {
                 continue;
             }
-            let Some(name) = ast::Decl::name_token_of(&declaration) else {
-                continue;
-            };
-            let Some(item) = index.item_by_decl(file, usize::from(name.text_range().start()))
-            else {
-                continue;
-            };
-            if let Ok(enclosing) = Self::enclosing_name(&declaration, index, file) {
+            if let Ok(enclosing) = Self::enclosing_of(&declaration, index, file) {
                 out.insert(item, enclosing);
             }
         }
@@ -1360,20 +1382,85 @@ impl Compile {
         })
     }
 
-    /// The internal name of the class a nested declaration sits inside.
-    fn enclosing_name(node: &SyntaxNode, index: &ProjectIndex, file: FileId) -> Result<String> {
-        let declaration =
-            node.parent()
-                .and_then(|body| body.parent())
-                .ok_or(LowerError::Unsupported(
-                    "an inner class with no enclosing type",
-                ))?;
+    /// Whether a class holds an instance of the class it is declared inside.
+    ///
+    /// Three shapes do, and for one reason: their bodies can name the enclosing instance's members.
+    ///
+    /// - an **inner** class — a non-`static` class declared directly in another's body;
+    /// - a **local** class, declared in a method body that is not `static`;
+    /// - an **anonymous** class body, created somewhere that is not `static`.
+    ///
+    /// A nested interface, `@interface`, `enum`, and `record` are implicitly `static` and hold none,
+    /// which the [`DefKind::Class`] test covers — and so is an `enum` constant's body, which is an
+    /// anonymous subclass of the `enum` itself and therefore excluded by its node kind.
+    ///
+    /// The last two used to be excluded outright, and that is precisely what made an uplevel access
+    /// from one a class file the JVM refuses: the field was there to reach the enclosing instance
+    /// through, and the class had no such field, so the access was emitted against `this`.
+    ///
+    /// Every constructor of such a class takes the enclosing instance as an extra *first* parameter,
+    /// so this answer has to match what a `new` of the class passes — [`Self::inner_classes_of`]
+    /// answers that side and the two ask the same question of the same node.
+    fn holds_enclosing_instance(node: &SyntaxNode, item: ItemId, index: &ProjectIndex) -> bool {
+        if !matches!(index.item(item).kind, DefKind::Class) {
+            return false;
+        }
+        match node.kind() {
+            // Declared directly in another type's body: the `static` modifier is what decides, and
+            // it is written or not written on the declaration itself.
+            CLASS_DECL if Facts::is_nested(node) => Facts::is_inner_class(node),
+            // A local class, nested inside a method body rather than a class body. It cannot write
+            // `static`, so what decides is where it sits.
+            CLASS_DECL => !Facts::in_static_context(node),
+            // An anonymous class body, with one extra condition. A *qualified* creation
+            // (`outer.new Inner() {}`) already hands the class an enclosing instance — the one its
+            // supertype's constructor needs — and there is a single such parameter, so it cannot
+            // also carry the lexically enclosing one. (An `enum` constant's body is an anonymous
+            // class too, but of the `enum`, which is implicitly `static`.)
+            jals_syntax::SyntaxKind::NEW_EXPR => {
+                !Facts::in_static_context(node)
+                    && ast::NewExpr::cast(node.clone()).is_none_or(|new| new.qualifier().is_none())
+            }
+            _ => false,
+        }
+    }
+
+    /// The class a nested, local, or anonymous declaration sits inside.
+    fn enclosing_of(node: &SyntaxNode, index: &ProjectIndex, file: FileId) -> Result<Enclosing> {
+        // The nearest enclosing *type*, not the parent's parent: a local class's parent chain runs
+        // through a block and a method, and an anonymous class's through whatever expression created
+        // it. For a class declared directly in another's body the two agree.
+        //
+        // An `enum` constant's body is in this list because it *is* the nearest enclosing type — an
+        // anonymous subclass of the `enum` — and it has no name to key an item on, which is the
+        // report that comes out below rather than a walk that skips past it to the `enum` and
+        // silently names the wrong enclosing class.
+        let declaration = node
+            .ancestors()
+            .skip(1)
+            .find(|ancestor| {
+                matches!(
+                    ancestor.kind(),
+                    CLASS_DECL
+                        | INTERFACE_DECL
+                        | ENUM_DECL
+                        | ANNOTATION_TYPE_DECL
+                        | RECORD_DECL
+                        | jals_syntax::SyntaxKind::ENUM_CONSTANT
+                )
+            })
+            .ok_or(LowerError::Unsupported(
+                "an inner class with no enclosing type",
+            ))?;
         let name = ast::Decl::name_token_of(&declaration)
             .ok_or(LowerError::Unsupported("an enclosing type with no name"))?;
-        let enclosing = index
+        let item = index
             .item_by_decl(file, usize::from(name.text_range().start()))
             .ok_or_else(|| LowerError::Unresolved(name.text().into()))?;
-        Ok(Descriptor::internal_name_of(enclosing, index))
+        Ok(Enclosing {
+            item,
+            name: Descriptor::internal_name_of(item, index),
+        })
     }
 
     /// The synthetic field an inner class holds its enclosing instance in.
@@ -1745,7 +1832,7 @@ impl Compile {
         if let Some(enclosing) = &context.encloses {
             descriptor
                 .params
-                .insert(0, jals_classfile::FieldType::Object(enclosing.clone()));
+                .insert(0, jals_classfile::FieldType::Object(enclosing.name.clone()));
         }
         // An `enum`'s takes the constant's name and ordinal first, for the same reason: they are what
         // `Enum`'s own constructor needs, and the declaration writes neither.
@@ -2666,7 +2753,7 @@ impl Compile {
         let mut params = String::new();
         if let Some(enclosing) = &context.encloses {
             params.push('L');
-            params.push_str(enclosing);
+            params.push_str(&enclosing.name);
             params.push(';');
         }
         // An anonymous class's own constructor takes the superclass constructor's parameters and passes
@@ -3156,8 +3243,11 @@ impl Compile {
         if let Some(enclosing) = &context.encloses {
             emit.asm.load(0)?;
             emit.asm.load(1)?;
-            emit.asm
-                .put_field(&context.this_class, OUTER, &alloc::format!("L{enclosing};"))?;
+            emit.asm.put_field(
+                &context.this_class,
+                OUTER,
+                &alloc::format!("L{};", enclosing.name),
+            )?;
         }
         // Each capture's parameter sits after every declared one, and the widths are what say where.
         let mut slot = emit.slots.next_free();
