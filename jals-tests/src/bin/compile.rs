@@ -11,7 +11,9 @@ use std::process::ExitCode;
 
 use clap::Parser;
 use jals_tests::Harness;
-use jals_tests::compile::{COMPILE_SOURCES, CompileReport, CompileSource, Jdk, Verifier};
+use jals_tests::compile::{
+    COMPILE_SOURCES, CompileReport, CompileSource, JAVAC_PIN, Jdk, Verifier,
+};
 
 #[derive(Parser)]
 #[command(
@@ -91,6 +93,18 @@ impl Cli {
             return ExitCode::from(2);
         };
         eprintln!("using JDK {} at {} ...", jdk.version, jdk.home.display());
+        // Not the pinned release, so this run is not the measurement the numbers are defined as:
+        // javac chose the scope under one JDK and `ct.sym` supplied the classpath under another.
+        // The report's `reference` column states the host's version, which is why an unpinned host
+        // has to say so here — the alternative is a rate labelled with a release it was not scored
+        // against. A warning rather than a refusal: a local run on whatever JDK is installed is
+        // still worth having, it just is not the number CI publishes.
+        if !JAVAC_PIN.parse::<u32>().is_ok_and(|pin| pin == jdk.version) {
+            eprintln!(
+                "warning: the corpus is defined against JDK {JAVAC_PIN}; rates from this run are \
+                 not comparable with the pinned ones"
+            );
+        }
         let (classpath, signatures) = match jdk.classpath() {
             Ok(classpath) => classpath,
             Err(message) => {

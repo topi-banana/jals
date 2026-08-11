@@ -301,7 +301,7 @@ impl Outcome {
     /// These are the outcomes that should fail a run rather than lower a percentage: a panic, a
     /// class file the JVM rejects, output this workspace cannot read back, and a syntax error on
     /// a file that is valid Java by construction.
-    pub const fn is_invariant_violation(&self) -> bool {
+    const fn is_invariant_violation(&self) -> bool {
         matches!(
             self,
             Self::Panicked | Self::Rejected(_) | Self::RereadError | Self::ParseError(_)
@@ -357,11 +357,11 @@ impl Outcome {
 }
 
 /// One corpus case: a `.java` file javac compiled on its own.
-pub struct Case {
+struct Case {
     /// The source path, relative to the corpus root.
-    pub rel: PathBuf,
+    rel: PathBuf,
     /// The absolute source path.
-    pub path: PathBuf,
+    path: PathBuf,
 }
 
 impl Case {
@@ -382,17 +382,17 @@ pub struct CaseResult {
     pub rel: PathBuf,
     /// How far it got.
     pub outcome: Outcome,
-    /// How many class files were emitted (0 unless lowering succeeded).
-    pub classes: usize,
 }
 
 /// A file the generator kept out of the corpus, and why.
+///
+/// Only the reason is held: the report tallies reasons, and the path each one belongs to is
+/// already in `SKIPPED.tsv` beside the corpus, which is where a reader goes to find out *which*
+/// file javac declined.
 #[derive(Debug, Clone)]
 pub struct Skipped {
-    /// The source path, relative to the corpus's own source tree.
-    pub rel: String,
     /// Why javac could not compile it alone — the generator's classification.
-    pub reason: String,
+    reason: String,
 }
 
 /// Aggregated compiler outcomes for one corpus.
@@ -405,7 +405,7 @@ pub struct CompileReport {
     /// Resolved root directory that was walked.
     pub root: PathBuf,
     /// Every case's result, worst rung first.
-    pub results: Vec<CaseResult>,
+    results: Vec<CaseResult>,
     /// What the generator left out of the corpus, with reasons.
     pub skipped: Vec<Skipped>,
 }
@@ -420,7 +420,7 @@ impl CompileReport {
 
     /// Every `.java` under `root` that has a sibling `<Base>.expected/` directory — the pairs the
     /// generator wrote, and nothing a stray file could add to them.
-    pub fn collect_cases(root: &Path) -> Vec<Case> {
+    fn collect_cases(root: &Path) -> Vec<Case> {
         let mut cases: Vec<Case> = WalkDir::new(root)
             .into_iter()
             .filter_map(Result::ok)
@@ -445,8 +445,7 @@ impl CompileReport {
         };
         text.lines()
             .filter_map(|line| line.split_once('\t'))
-            .map(|(rel, reason)| Skipped {
-                rel: rel.to_owned(),
+            .map(|(_rel, reason)| Skipped {
                 reason: reason.to_owned(),
             })
             .collect()
@@ -670,27 +669,21 @@ impl CaseResult {
     /// Never panics: a panic anywhere in the pipeline is caught and reported as
     /// [`Outcome::Panicked`], since catching invariant violations is the whole point.
     fn of(case: &Case, classpath: &LoweredClasspath, verifier: Option<&Verifier>) -> Self {
-        let (outcome, classes) = Self::compile(&case.path, classpath, verifier);
         Self {
             rel: case.rel.clone(),
-            outcome,
-            classes,
+            outcome: Self::compile(&case.path, classpath, verifier),
         }
     }
 
     /// Run the pipeline over one source file, catching a panic as an outcome of its own.
-    fn compile(
-        path: &Path,
-        classpath: &LoweredClasspath,
-        verifier: Option<&Verifier>,
-    ) -> (Outcome, usize) {
+    fn compile(path: &Path, classpath: &LoweredClasspath, verifier: Option<&Verifier>) -> Outcome {
         let Ok(source) = std::fs::read_to_string(path) else {
-            return (Outcome::ReadError, 0);
+            return Outcome::ReadError;
         };
         let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
             let parse = jals_exec::block_on_inline(jals_syntax::Parse::parse(&source));
             if !parse.errors().is_empty() {
-                return (Outcome::ParseError(parse.errors().len()), 0);
+                return Outcome::ParseError(parse.errors().len());
             }
             let root = parse.syntax();
             let analysis = jals_exec::block_on_inline(FileAnalysis::of(&root));
@@ -703,24 +696,23 @@ impl CaseResult {
             let semantics = analysis.in_project(&index, FileId(0));
             let typed = jals_exec::block_on_inline(semantics.typed());
             let classes = match Compile::file(typed, MAJOR_JAVA_25) {
-                Err(error) => return (Outcome::LowerError(format!("{error}")), 0),
+                Err(error) => return Outcome::LowerError(format!("{error}")),
                 Ok(classes) => classes,
             };
             if classes.is_empty() {
-                return (Outcome::NoClasses, 0);
+                return Outcome::NoClasses;
             }
             for class in &classes {
                 if jals_exec::block_on_inline(ClassFile::read(class.bytes.as_slice())).is_err() {
-                    return (Outcome::RereadError, classes.len());
+                    return Outcome::RereadError;
                 }
             }
-            let count = classes.len();
             if let Some(verifier) = verifier {
                 verifier.stage(path, &classes);
             }
-            (Outcome::Unverified, count)
+            Outcome::Unverified
         }));
-        outcome.unwrap_or((Outcome::Panicked, 0))
+        outcome.unwrap_or(Outcome::Panicked)
     }
 }
 
@@ -810,7 +802,6 @@ mod tests {
         CaseResult {
             rel: PathBuf::from("A.java"),
             outcome,
-            classes: 1,
         }
     }
 
@@ -822,7 +813,6 @@ mod tests {
             root: PathBuf::new(),
             results: vec![result(Outcome::Verified)],
             skipped: vec![Skipped {
-                rel: "T.java".to_owned(),
                 reason: "cannot find symbol".to_owned(),
             }],
         };

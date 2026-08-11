@@ -278,7 +278,7 @@ jobs:
 
   hawk:
     # One cell per *supported* host platform. There is deliberately no wasm cell: hawk's
-    # reachability roots are the `[[production]]` binaries in hawk.toml — the `jals` CLI, both
+    # reachability roots are the `[[production]]` binaries in hawk.toml — the `jals` CLI, the three
     # corpus harnesses, xtask — and none of those build for wasm32, so a wasm closed-world analysis
     # would have no closed world to analyse. What the host cells differ on is which `#[cfg]` arms
     # exist, which is the reason to run the gate more than once at all.
