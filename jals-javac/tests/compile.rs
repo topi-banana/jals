@@ -1709,6 +1709,40 @@ public class Cleanup {
     );
 }
 
+/// `finally` nested past what a method body can hold is refused **while** the body is emitted.
+///
+/// A finalizer is inlined on every exit path, so nested ones compose: sixteen `try {} finally {}`
+/// blocks are 2^16 copies of the innermost. That shape is `OpenJDK`'s own `JsrRet.java` — the
+/// regression test for javac's blow-up on it — and it is what the `jals-compile` corpus ran into.
+/// The class-file limit was checked once the item stream was assembled, which reports the right
+/// error having first built every copy: 37 GB of items, and a corpus run the host kills instead of
+/// a diagnosis.
+///
+/// The assertion is the *outcome*, because that is all a test can state; what the check buys is
+/// bounded memory, and the number that shows it is the corpus run's peak — 37.8 GB before, 2.5 GB
+/// after, flat as the nesting grows. Kept off wasm for that reason: the refusal costs the limit
+/// itself, which is comfortable natively and most of a 32-bit address space.
+#[test]
+#[cfg(not(target_family = "wasm"))]
+fn a_finally_nested_past_the_code_limit_is_refused() {
+    let mut source = String::from("class Deep {\n    {\n");
+    for _ in 0..16 {
+        source.push_str("        try {} finally {\n");
+    }
+    for _ in 0..16 {
+        source.push_str("        }\n");
+    }
+    source.push_str("    }\n}\n");
+    let error = compile(&source).expect_err("2^16 inlined copies cannot fit one method body");
+    assert!(
+        matches!(
+            error,
+            LowerError::Assembly(jals_javac::jvm::AsmError::TooLarge)
+        ),
+        "should report the class-file limit, got {error}"
+    );
+}
+
 /// `synchronized` releases its monitor however the block ends — the JVM refuses to return from a
 /// method still holding one it took, so a missing release fails at run time rather than at load.
 #[test]
