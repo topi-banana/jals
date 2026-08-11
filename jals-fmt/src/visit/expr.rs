@@ -395,9 +395,10 @@ impl Ctx<'_> {
     /// out as `(x)` — the outer pair goes, the inner one is emitted as written, and a third layer
     /// is reached the same way on the way down.
     ///
-    /// Which pair is redundant is [`License::is_redundant_paren`], not a predicate of this
-    /// function's own: the rule that drops the tokens and the check that licenses the drop have to
-    /// agree, and two implementations of that question is what `token_license` exists to prevent.
+    /// Which pair is redundant is [`License::wraps_a_paren`], not a predicate of this function's
+    /// own: the rule that drops the tokens and the check that licenses the drop have to agree, and
+    /// two implementations of that question is what `token_license` exists to prevent. The license
+    /// lane reaches the same predicate from a token through `License::is_redundant_paren`.
     pub(super) async fn visit_paren(&mut self, node: &SyntaxNode) {
         if self.style.cfg.wrapping.remove_nested_parens && License::wraps_a_paren(node) {
             for child in Self::children(node) {

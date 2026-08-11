@@ -76,7 +76,7 @@ impl ImportNames {
 
     /// Whether a declaration carries a jals attribute, so re-cutting it would redistribute a
     /// condition rather than a layout.
-    pub(crate) fn is_conditional(decl: &ImportDecl) -> bool {
+    fn is_conditional(decl: &ImportDecl) -> bool {
         decl.syntax()
             .children()
             .any(|child| child.kind() == S::ATTRIBUTE)

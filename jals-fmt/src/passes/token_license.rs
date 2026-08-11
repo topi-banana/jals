@@ -668,12 +668,17 @@ impl License {
 
     /// Whether `tok` is a parenthesis of a redundantly nested `PAREN_EXPR`.
     ///
-    /// The predicate `Ctx::visit_paren` drops by and [`lane`](Self::lane) licenses by — the
-    /// one-predicate-two-callers rule this module exists to enforce. "Redundant" is decided on the
-    /// **outer** pair: a `PAREN_EXPR` whose only significant child is another `PAREN_EXPR` says
-    /// nothing the inner one does not, so its own parentheses go and the inner pair stays. Asking
-    /// it of the inner pair instead would drop the wrong two tokens and leave `(x + y))`.
-    pub(crate) fn is_redundant_paren(tok: &SyntaxToken) -> bool {
+    /// The token-level spelling of [`wraps_a_paren`](Self::wraps_a_paren), for the one caller that
+    /// has a token rather than a node: [`lane`](Self::lane). `Ctx::visit_paren` holds the
+    /// `PAREN_EXPR` itself and asks that predicate directly, so the rule that drops the tokens and
+    /// the check that licenses the drop still bottom out in one definition — the
+    /// one-predicate-two-callers rule this module exists to enforce.
+    ///
+    /// "Redundant" is decided on the **outer** pair: a `PAREN_EXPR` whose only significant child is
+    /// another `PAREN_EXPR` says nothing the inner one does not, so its own parentheses go and the
+    /// inner pair stays. Asking it of the inner pair instead would drop the wrong two tokens and
+    /// leave `(x + y))`.
+    fn is_redundant_paren(tok: &SyntaxToken) -> bool {
         if !matches!(tok.kind(), SyntaxKind::LPAREN | SyntaxKind::RPAREN) {
             return false;
         }

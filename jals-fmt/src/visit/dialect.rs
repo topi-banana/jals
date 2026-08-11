@@ -210,7 +210,7 @@ impl Ctx<'_> {
     }
 
     /// Emit an element's comments while dropping every significant token it holds.
-    pub(super) fn drop_element(&mut self, element: &SyntaxElement) {
+    fn drop_element(&mut self, element: &SyntaxElement) {
         match element {
             SyntaxElement::Token(tok) if !tok.kind().is_trivia() => {
                 self.emit_comments_without_token(tok);
