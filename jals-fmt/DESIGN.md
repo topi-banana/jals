@@ -528,7 +528,7 @@ GJF エンジン (`Break` の UNIFIED/INDEPENDENT/FORCED + BreakTag) は prettie
 | **S1 エンジン定数** | 列上限、indent 幅、継続 indent、tab/space、行終端 | `computeBreaks` の `maxWidth` と `Indent::Const` の焼き込み値 | `[layout]` |
 | **S2 発行の形** | どこで `Level` を開くか、その `plus_indent`、break の `FillMode`（`Unified`/`Independent`/`Forced`）、break を token の**前**に置くか**後**に置くか、`Space` を出すか | L2 visitor の分岐 | `[wrapping]`, `[spacing]`, `[braces]` の brace position |
 | **S3 強制改行・空行** | `Forced` break の挿入（brace 強制・1 行化の可否）、`blankLineWanted` の本数 | L2 visitor + `OpsBuilder` | `[braces]` の force/keep-on-one-line, `[blank-lines]` |
-| **S4 パスの on/off とパラメータ** | L0/L3/L4 の各パスを走らせるか、走らせる時の順序規則 | `passes::Formatter`（パイプライン段）と `passes::token_license`（トークンを変える操作の宣言、§20） | `[imports]`, `[comments]`, `[literals]`, `[wrapping] reflow-long-strings`, `[braces] force-*`, `[layout] formatter-tags` |
+| **S4 パスの on/off とパラメータ** | L0/L3/L4 の各パスを走らせるか、走らせる時の順序規則 | `passes::Formatter`（パイプライン段）と `passes::token_license`（トークンを変える操作の宣言、§20） | `[imports]`, `[comments]`, `[literals]`, `[wrapping] reflow-long-strings`, `[wrapping] remove-nested-parens`, `[braces] force-*`, `[layout] formatter-tags` |
 
 **変えないもの（＝「単一エンジン」の定義）**: `computeBreaks`/`computeBroken`/`computeBreakAndSplit`/
 `getWidth` の**解決アルゴリズムそのもの**。greedy・単一パス・バックトラックなし・Level 境界で止まる
@@ -562,7 +562,7 @@ rule の一般性とエンジン忠実度が衝突したら、**単一エンジ�
 ### 8.4 rustfmt 風オプションとの関係
 
 前段の考察は rustfmt 風の**設定可能**フォーマッタを志向していた。本書はその語彙を捨て
-（`MAPPING.md` §1 の P1–P4）、**Java フォーマッタ 4 者の観測から選んだ rule set**（8 節・190 rule）に
+（`MAPPING.md` §1 の P1–P4）、**Java フォーマッタ 4 者の観測から選んだ rule set**（8 節・196 rule）に
 置き換える。単一エンジン方針の下では、rule set はエンジンの上の薄い層であり、**エンジンが表現できない
 rule は最初から置かない**（`MAPPING.md` §2 の基準に「到達可能な 2 つのターゲットが食い違う」を課して
 いるのはそのため。列揃えのようにエンジンが表現できない概念は rule にせず、native モデル側に型付きで
@@ -663,7 +663,7 @@ IntelliJ IDEA / Palantir へ拡げ、**「エンジンを増やさずに rule �
    以上 import」の計数＝実 import 解決が要り、pure CST では不可。⇒ **恒久差分**（§18）。
 
 5. **jalsfmt.toml 自動生成は「共通語彙への射影」として行う。** 生成 toml は engine 多重化器ではなく、
-   `jals_config::fmt::Config`（8 節・190 rule）**そのもの**であり、単一エンジンが読む唯一の形である。
+   `jals_config::fmt::Config`（8 節・196 rule）**そのもの**であり、単一エンジンが読む唯一の形である。
    射影は**全単射ではない**（写せない native option は importer の native モデル側に型付きで残る）。
    写像の台帳が `MAPPING.md`、実装が `jals_fmt::import`。§15 が生成の流れと限界を扱う。
 
@@ -790,7 +790,7 @@ rule で分岐させる近似で行う（▲）。つまり `jals-fmt` は「マ
         │  jals_fmt::import                              │
         └──────────────┬─────────────────────────────────┘
                        ▼
-        jals_config::fmt::Config  ── 8 節 / 190 rule（唯一の style 表面）
+        jals_config::fmt::Config  ── 8 節 / 196 rule（唯一の style 表面）
                        │  style::reify  ← 解決済みパラメータ束（§8 の seam S1–S4）
  ┌─────────────────────┼──────────────────────────────────────────────┐
  │ 単一パイプライン                                                    │
@@ -814,7 +814,7 @@ rule で分岐させる近似で行う（▲）。つまり `jals-fmt` は「マ
 
 ## 15. jalsfmt.toml 自動生成
 
-**方式: 共通語彙への射影**。生成 toml は `jals_config::fmt::Config` そのもの（8 節・190 rule）であり、
+**方式: 共通語彙への射影**。生成 toml は `jals_config::fmt::Config` そのもの（8 節・196 rule）であり、
 engine 選択子も engine 固有 option の透過テーブルも持たない。生成例（Eclipse `.prefs` 由来）:
 
 ```toml
@@ -914,6 +914,13 @@ call-arguments = "if-long-per-item"  # alignment_for_arguments_in_method_invocat
   | `wrapping.join-wrapped-lines = false` | Eclipse `join_wrapped_lines=false` / IntelliJ `KEEP_LINE_BREAKS=true` | 常に join（`true`） |
   | `wrapping.wrap-long-lines = true` | IntelliJ `WRAP_LONG_LINES=true` | `false`（既定）。break 点の無い行は折らない — Doc エンジンは発行された break しか取れない |
   | `comments.preserve-line-breaks = true` | IntelliJ `JD_PRESERVE_LINE_FEEDS` | 常に refill（`false`） |
+
+  `Style::reify` はもう 1 つ丸めを持つが、上の表とは**読んでいる事実が違う**ので別扱いである:
+  `imports.granularity = "package"` は方言の grouped import を*書く*ので、`[package] features` が
+  `grouped-imports` を有効にしていないプロジェクトでは `preserve` へ丸めて `Warning` を出す
+  （`MAPPING-rustfmt.md` §6.1）。入力の改行ではなくプロジェクトの feature set を読むため、
+  `generate::MigrationWarning::rounding` — native config から生成した toml の見出しに載る 5 行 —
+  には現れない。生成器は feature set を持たないし、native config からこの値は決して立たない。
 
   再検討の条件は §10 に 1 行だけ置いた。
 - **golden 検証**: `gjf` プロファイルは pin した実 GJF に対する byte diff（pass/fail）。
@@ -1074,16 +1081,25 @@ kind が互いに素**でなければならず（site の重なりは表から�
   | # | 操作 | 変更の種類 | gate |
   |---|---|---|---|
   | 1 | **方言 グループ import 末尾カンマ削除** | 削除（`IMPORT_GROUP` 内の `COMMA` 1 個） | **なし（無条件）** |
-  | 2 | 長文字列再折り (R4.1) | **再分配**（`+`/文字列片は増減する。site が綴る内容のみ保存） | `[wrapping] reflow-long-strings` |
-  | 3 | 未使用 import 削除 (R0.2) | 部分木削除（`IMPORT_DECL`） | `[imports] remove-unused` |
-  | 4 | text block 再インデント (R4.1) | 綴り変更（個数は保存） | `[wrapping] reflow-long-strings` |
-  | 5 | `[literals]` 数値書換え | 綴り変更（`INT_LITERAL`/`FLOAT_LITERAL` のみ） | `[literals]` |
-  | 6 | `[braces] force-*` | **挿入**（`{` `}`） | `[braces] force-*` ×4 |
-  | 7 | import 整列 (R0.1) | 並べ替え（多重集合保存 = 免除不要） | `[imports] order` |
-  | 8 | modifier 整列 (R0.3) | 並べ替え（多重集合保存 = 免除不要） | `[imports] reorder-modifiers` |
+  | 2 | 冗長括弧削除 | 削除（`PAREN_EXPR` を包むだけの `(` `)`） | `[wrapping] remove-nested-parens` |
+  | 3 | 長文字列再折り (R4.1) | **再分配**（`+`/文字列片は増減する。site が綴る内容のみ保存） | `[wrapping] reflow-long-strings` |
+  | 4 | import 再粒度化 (R0.4) | **再切断**（`IMPORT_DECL` 内は増減・移動とも自由。名指しする型の集合のみ保存） | `[imports] granularity` |
+  | 5 | 未使用 import 削除 (R0.2) | 部分木削除（`IMPORT_DECL`） | `[imports] remove-unused` |
+  | 6 | text block 再インデント (R4.1) | 綴り変更（個数は保存） | `[wrapping] reflow-long-strings` |
+  | 7 | `[literals]` 数値書換え | 綴り変更（`INT_LITERAL`/`FLOAT_LITERAL` のみ） | `[literals]` |
+  | 8 | `[braces] force-*` | **挿入**（`{` `}`） | `[braces] force-*` ×5 |
+  | 9 | import 整列 (R0.1) | 並べ替え（多重集合保存 = 免除不要） | `[imports] order` |
+  | 10 | modifier 整列 (R0.3) | 並べ替え（多重集合保存 = 免除不要） | `[imports] reorder-modifiers` |
+
+  **4 行目が新しい effect variant を要した理由**（`Effect::Recuts`）。merge / split は**増加と減少を
+  同時に**行う — `import a.{B, C};` を割ると `import` / prefix / `;` が増え `{}` `,` が減る。
+  `RemovesSubtrees` は減少しか許さず、`Removes` / `Redistributes` で書くと `COMMA` を名指しすることに
+  なり 1 行目と同順位で互いを隠す。そこでノード単位版の `Redistributes` を新設し、`Removes` の下・
+  `RemovesSubtrees` の上という専用順位に置いた。この順位のおかげで、両方 on のときは 4 行目が import
+  ブロック全体を答え、`remove-unused` が消した名前も**部分集合**判定なら通る。
 
   R0.1 / R0.2 / R0.3 / R4.1 は **`gjf` プロファイルでは既定 on** であり、GJF のネイティブ挙動そのもの。
-  2 と 4 が同じ gate で別行なのは、text block は**個数が保存され綴りだけが変わる**別種の効果だから。
+  3 と 6 が同じ gate で別行なのは、text block は**個数が保存され綴りだけが変わる**別種の効果だから。
   畳んでいた間、消えた text block は多重集合から抜けていて内容検査しか番人が無かった。
 
   **1 行目が表の存在理由である。** config キーを持たないので、config フィールドから例外を再構成する
@@ -1095,11 +1111,11 @@ kind が互いに素**でなければならず（site の重なりは表から�
 
 | 行 | 許諾の幅 | 狭めるのに必要なもの |
 |---|---|---|
-| 3 未使用 import 削除 | `IMPORT_DECL` 内の**任意の**トークンが欠けてよい（使用中 import の型名でも） | `UnusedImports::used_names` を `lane` に通す per-tree payload。ただし締めると今受理している出力が黙って fallback に変わり得る一方、それを見せる golden corpora が未初期化 submodule |
-| 2 長文字列再折り | site は `overflows` を通さないので、実質「ファイル中の全文字列リテラル」 | 過長 site だけに絞る = 入力と出力で site 集合が変わるので比較不能（`Site::Reflow` の doc） |
-| 6 `[braces] force-*` | site が無いので `{` `}` の**増加はファイル全域**で無料 | brace 強制の可否を入力木から答える共有述語。`if-multiline` はエンジンの結果を読むので、そもそも入力木では決まらない |
+| 5 未使用 import 削除 | `IMPORT_DECL` 内の**任意の**トークンが欠けてよい（使用中 import の型名でも） | `UnusedImports::used_names` を `lane` に通す per-tree payload。ただし締めると今受理している出力が黙って fallback に変わり得る一方、それを見せる golden corpora が未初期化 submodule |
+| 3 長文字列再折り | site は `overflows` を通さないので、実質「ファイル中の全文字列リテラル」 | 過長 site だけに絞る = 入力と出力で site 集合が変わるので比較不能（`Site::Reflow` の doc） |
+| 8 `[braces] force-*` | site が無いので `{` `}` の**増加はファイル全域**で無料 | brace 強制の可否を入力木から答える共有述語。`if-multiline` はエンジンの結果を読むので、そもそも入力木では決まらない |
 
-  3 つのうち 6 が最も軽い: 場所違いの brace は多くの場合そもそも parse しないので、fail-safe の
+  3 つのうち 8 が最も軽い: 場所違いの brace は多くの場合そもそも parse しないので、fail-safe の
   無条件半分（新規 syntax error なし）が受け止める。**閉じてはいない**（parse が通る挿入は残る）。
 
 ### 20.2 採用した改訂

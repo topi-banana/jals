@@ -530,7 +530,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.wrapping.reflow_long_strings = true;
         cfg.layout.formatter_tags = tags;
-        let (style, _) = Style::reify(&cfg, src);
+        let (style, _) = Style::reify(&cfg, src, jals_config::FeatureSet::default());
         jals_exec::block_on_inline(StringWrapper::candidate(src, &style))
     }
 

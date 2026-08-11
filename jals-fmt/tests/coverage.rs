@@ -1,6 +1,6 @@
 //! Every rule in `jals_config::fmt::Config` must actually reach the formatter.
 //!
-//! "All 190 rules are implemented" is not a claim to make in prose. This walks the **schema** — so
+//! "All 196 rules are implemented" is not a claim to make in prose. This walks the **schema** — so
 //! a rule added later is covered the moment it exists — moves each leaf away from its default one
 //! at a time, and requires the formatter to notice.
 //!
@@ -22,6 +22,7 @@
 //! meaning — if one is wrong, the test still fails, just for the base instead.
 
 use jals_config::fmt::{Config, ImportOrder, IndentStyle, WrapPolicy};
+use jals_config::{Feature, FeatureSet};
 use serde_json::{Map, Value};
 
 /// Java that exercises most of the language at once.
@@ -111,6 +112,11 @@ public class Demo<T extends Comparable<T> & Cloneable> extends Base implements F
                 break;
         }
         if (label instanceof String s && total > 0) { report(); }
+        int doubled = ((total + mixed));
+        switch (total) {
+            case 3 -> report();
+            default -> cleanup();
+        }
         return switch (total) {
             case 1 -> null;
             default -> null;
@@ -170,7 +176,7 @@ const WRAPPING: &str = r#"class Overflow {
 const TAGGED: &str = "class T {\n  // @formatter:off\n  int   x   =   1;\n  // @formatter:on\n  int    y    =    2;\n}\n";
 
 /// An unused import, imports out of order, and modifiers in non-canonical order.
-const IMPORTS: &str = "package p;\n\nimport javax.tools.Tool;\nimport java.util.Map;\nimport java.util.List;\nimport static java.lang.Math.PI;\n\nclass T {\n  static final public List<String> xs = null;\n}\n";
+const IMPORTS: &str = "package p;\n\nimport javax.tools.Tool;\nimport java.util.Map;\nimport java.util.List;\nimport java.nio.{Buffer, file.Path};\nimport static java.lang.Math.PI;\n\nclass T {\n  static final public List<String> xs = null;\n}\n";
 
 /// A single string literal too long for its line, which is what `reflow-long-strings` splits.
 /// A concatenation the author already broke into short pieces is *not* reflowed, so it would
@@ -297,8 +303,9 @@ fn alloc_groups() -> Vec<String> {
 /// leaf off its default in turn.
 ///
 /// Asserted in the helper rather than at the two call sites so a third one cannot skip it.
-fn format(src: &str, config: &Config) -> jals_fmt::FormatOutput {
-    let out = jals_exec::block_on_inline(jals_fmt::FormatOutput::format_source(src, config));
+fn format(src: &str, config: &Config, features: FeatureSet) -> jals_fmt::FormatOutput {
+    let out =
+        jals_exec::block_on_inline(jals_fmt::FormatOutput::format_source(src, config, features));
     assert!(
         !out.fell_back(),
         "the fail-safe refused its own output, so this run formatted nothing and every rule under \
@@ -312,7 +319,7 @@ fn format(src: &str, config: &Config) -> jals_fmt::FormatOutput {
 /// The `section.key = value` pairs where `config` differs from [`Config::default`].
 ///
 /// The sweep moves one leaf at a time, so this is normally one entry — plus whatever
-/// [`base_for`] had to turn on first. Enough to reproduce a failure without printing all 190 rules.
+/// [`base_for`] had to turn on first. Enough to reproduce a failure without printing all 196 rules.
 fn off_default(config: &Config) -> Vec<String> {
     let Value::Object(current) = serde_json::to_value(config).expect("serializable") else {
         panic!("the config is a table of tables");
@@ -353,6 +360,13 @@ fn base_for(section: &str, key: &str) -> Value {
         // These two decide where a parameter comment goes and how it is spelled; reflow would
         // rewrite it either way and mask the difference.
         ("comments", "inline-block-comments" | "normalize-parameter-comments") => {}
+        // The one `[comments]` rule that governs a *snippet* rather than prose, so the reflow the
+        // arm below turns on is not enough: nothing re-indents a `<pre>` region until
+        // `format-source-in-comments` is on, and this rule is a budget on that re-indent.
+        ("comments", "code-block-width") => {
+            config.comments.format_javadoc = true;
+            config.comments.format_source_in_comments = true;
+        }
         ("comments", _) => {
             config.comments.format_line = true;
             config.comments.format_block = true;
@@ -418,6 +432,7 @@ fn variants(section: &str, key: &str) -> Vec<&'static str> {
         ("layout", "formatter-off-tag") => vec!["@fmt:off"],
         ("layout", "formatter-on-tag") => vec!["@fmt:on"],
         ("imports", "order") => vec!["group", "sort"],
+        ("imports", "granularity") => vec!["item", "package"],
         ("comments", "paragraph-tags") => vec!["own-line", "authored"],
         ("comments", "tag-alignment") => vec!["grouped", "all"],
         ("literals", "hex-case" | "suffix-case") => vec!["upper", "lower"],
@@ -433,6 +448,22 @@ fn variants(section: &str, key: &str) -> Vec<&'static str> {
         }
         ("wrapping", _) => vec!["always-per-item", "never", "if-long-per-item"],
         _ => panic!("no non-default variant known for {section}.{key}"),
+    }
+}
+
+/// The dialect a rule needs before it can do anything.
+///
+/// The sibling of [`base_for`] for the one precondition that is not a config key: `[imports]
+/// granularity = "package"` *writes* grouped imports, so a run whose project has not enabled
+/// `grouped-imports` rounds it away (`style::Style::reify`) and the rule would read as inert. The
+/// rounding is deliberate — see `every_rule_reaches_the_formatter`'s sibling test below — so the
+/// sweep asks the question in the project where the answer can be yes.
+fn features_for(section: &str, key: &str) -> FeatureSet {
+    match (section, key) {
+        ("imports", "granularity") | ("wrapping", "import-group") => {
+            FeatureSet::resolve(&[Feature::GroupedImports])
+        }
+        _ => FeatureSet::default(),
     }
 }
 
@@ -465,11 +496,12 @@ fn every_rule_reaches_the_formatter() {
             } else {
                 base_for(&section, &key)
             };
+            let features = features_for(&section, &key);
             let baseline: Config =
                 serde_json::from_value(base.clone()).expect("the base deserializes");
             let outputs: Vec<String> = FIXTURES
                 .iter()
-                .map(|src| format(src, &baseline).formatted)
+                .map(|src| format(src, &baseline, features).formatted)
                 .collect();
 
             // The value to move *away from* is the base's, not the schema default's: a rule with
@@ -487,7 +519,7 @@ fn every_rule_reaches_the_formatter() {
                         return false;
                     };
                     FIXTURES.iter().zip(&outputs).any(|(src, expected)| {
-                        let out = format(src, &config);
+                        let out = format(src, &config, features);
                         out.formatted != *expected || out.warnings.iter().any(|w| w.range.is_none())
                     })
                 });
@@ -522,7 +554,7 @@ fn the_schema_is_the_documented_size() {
         .map(|section| section.as_object().map_or(0, Map::len))
         .sum();
     assert_eq!(
-        total, 190,
-        "the rule set is documented as 190 keys in jals-fmt/MAPPING.md",
+        total, 196,
+        "the rule set is documented as 196 keys in jals-fmt/MAPPING.md",
     );
 }

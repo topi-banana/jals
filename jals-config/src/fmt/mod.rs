@@ -97,7 +97,7 @@ pub use crate::loader::ConfigError;
 pub use blank_lines::{BlankLines, DocumentedMember};
 pub use braces::{BraceStyle, Braces, ForceBraces, KeepOnOneLine};
 pub use comments::{Comments, ParagraphTags, TagAlignment};
-pub use imports::{ImportOrder, Imports};
+pub use imports::{ImportGranularity, ImportOrder, Imports};
 pub use layout::{IndentStyle, Layout, LineEnding};
 pub use literals::{FloatLiteralTrailingZero, HexLiteralCase, LiteralSuffixCase, Literals};
 pub use spacing::Spacing;

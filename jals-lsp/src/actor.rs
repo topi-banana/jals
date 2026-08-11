@@ -1442,7 +1442,14 @@ impl Actor {
             return Ok(None);
         };
         let config = self.discovery.for_uri(uri).await;
-        let formatted = Formatting::formatting_edits(&doc.content, &config).await;
+        // The dialect the *owning project* enabled, not the server's: a document outside every
+        // workspace has no manifest to answer for it, and the empty set is what the formatter
+        // reads as "do not write dialect syntax".
+        let features = self.workspace_for(uri).map_or_else(
+            jals_config::FeatureSet::default,
+            ProjectWorkspace::feature_set,
+        );
+        let formatted = Formatting::formatting_edits(&doc.content, &config, features).await;
         // No edits is the *same* response as "already formatted", so a refusal has to say so out of
         // band or the command looks like it did nothing. `window/showMessage` rather than a
         // diagnostic: the fail-safe's subject is the whole file, and there is no range to point at.

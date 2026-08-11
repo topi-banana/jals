@@ -649,6 +649,17 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
         self.storage.view()
     }
 
+    /// The project's resolved `[package] features`.
+    ///
+    /// Read back out because the *formatter* needs it too, and for the same reason the lint rules
+    /// do: one rule (`[imports] granularity = "package"`) emits dialect syntax, which compiles
+    /// only where the dialect is on. `jals_fmt::FormatOutput::format_source` therefore takes a
+    /// feature set, and a host that already built a workspace asks it rather than re-reading the
+    /// manifest — the workspace is where the resolution happened.
+    pub const fn feature_set(&self) -> FeatureSet {
+        self.feature_set
+    }
+
     /// Mutable access to the file tree. Writing a file does *not* update the index — reflect an
     /// edit with [`set_overlay`](Workspace::set_overlay) / [`sync_overlay`](Workspace::sync_overlay).
     pub const fn storage(&self) -> &ProjectStorage<S, C> {

@@ -274,6 +274,27 @@ pub struct Wrapping {
     /// each concatenation *spells*, and that is what the formatter's fail-safe compares. Eclipse
     /// and IntelliJ have no equivalent.
     pub reflow_long_strings: bool,
+    /// How a jals-dialect grouped import's member list breaks when it does not fit
+    /// (`import java.util.{HashMap, List};`).
+    ///
+    /// Mirrors rustfmt's `imports_layout` over the dialect's own construct, and defaults to
+    /// [`Never`](WrapPolicy::Never) — the compact one-line form the dialect canonicalizes to. No
+    /// Java formatter has an opinion here, because no Java formatter has the construct; rustfmt's
+    /// `Visual` variant of the sibling `imports_indent` is column alignment and is not modeled at
+    /// all (`jals-fmt/MAPPING-rustfmt.md` §2, `DESIGN.md` §18.2 D1).
+    pub import_group: WrapPolicy,
+    /// Drop a pair of parentheses that only wraps another pair — `((x + y))` to `(x + y)`.
+    ///
+    /// Mirrors rustfmt's `remove_nested_parens`, but defaults to `false` where rustfmt's defaults
+    /// to `true`: removing a token is not something a Java formatter does unasked, and every one
+    /// of the four references leaves redundant parentheses exactly as written.
+    ///
+    /// Only a **directly** nested pair is removed, so the parentheses that carry meaning are all
+    /// safe: a cast's, a method call's argument list, a control statement's condition, and a pair
+    /// around anything that is not itself a parenthesized expression are untouched. `(((x)))`
+    /// collapses to `(x)` because the rule reaches each redundant pair in turn, not because it
+    /// counts them.
+    pub remove_nested_parens: bool,
 }
 
 impl Default for Wrapping {
@@ -326,6 +347,8 @@ impl Default for Wrapping {
             wrap_long_lines: false,
             tabular_array_initializers: false,
             reflow_long_strings: false,
+            import_group: WrapPolicy::Never,
+            remove_nested_parens: false,
         }
     }
 }

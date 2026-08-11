@@ -66,18 +66,27 @@ mod passes;
 mod style;
 mod visit;
 
+use jals_config::FeatureSet;
 use jals_config::fmt::Config;
 
 pub use output::{FormatOutput, Warning};
 
 impl FormatOutput {
-    /// Format `src` according to `config`.
+    /// Format `src` according to `config`, for a project enabling `features`.
     ///
     /// Parsing is lossless and error-resilient, so a source with syntax errors is still formatted
     /// best-effort and the errors come back as [`Warning`]s. Configuration diagnostics — a rule
-    /// rounded because it would have read input whitespace — arrive the same way, with no range.
-    pub async fn format_source(src: &str, config: &Config) -> Self {
-        let (style, mut warnings) = style::Style::reify(config, src);
+    /// rounded because it would have read input whitespace, or because it would have *written*
+    /// syntax the project's dialect does not enable — arrive the same way, with no range.
+    ///
+    /// `features` is the project's `[package] features`, or [`FeatureSet::default`] for a source
+    /// formatted outside any project (a bare file, stdin, a corpus fixture). Only a rule that
+    /// emits dialect syntax reads it, and there is exactly one: `[imports] granularity =
+    /// "package"` writes grouped imports, which do not compile unless `grouped-imports` is on.
+    /// The formatter cannot discover that itself — a lossless parser accepts a grouped import in
+    /// any project, and so does the fail-safe — so the answer is a parameter rather than a guess.
+    pub async fn format_source(src: &str, config: &Config, features: FeatureSet) -> Self {
+        let (style, mut warnings) = style::Style::reify(config, src, features);
 
         let parse = jals_syntax::Parse::parse(src).await;
         let errors = parse.errors().len();

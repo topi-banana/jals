@@ -118,6 +118,19 @@ pub struct Braces {
     pub force_while: ForceBraces,
     /// Force braces on a `do`-`while` body. IntelliJ `DOWHILE_BRACE_FORCE`.
     pub force_do_while: ForceBraces,
+    /// Wrap an arrow `case`'s body in a block — `case A -> run();` to `case A -> { run(); }`.
+    ///
+    /// Mirrors rustfmt's `match_arm_blocks`, but defaults to [`ForceBraces::Never`] where
+    /// rustfmt's default is `true`: no Java formatter adds braces unasked, and the four
+    /// `force-*` rules above are all off for the same reason. IntelliJ's `*_BRACE_FORCE` is the
+    /// vendor behind those four; an arrow `case` has no counterpart, so this key is jals-native.
+    ///
+    /// **Statement switches only.** A `case` of a switch *expression* has to produce a value, so
+    /// braces alone do not do it — `case A -> f();` would have to become `case A -> { yield f(); }`,
+    /// which inserts a keyword and changes what the arm *means*. That is a rewrite rather than a
+    /// layout decision, so a switch expression's arms are left exactly as written whatever this is
+    /// set to. An arm whose body is already a block, or a `throw`, is likewise untouched.
+    pub force_switch_arm: ForceBraces,
     /// One-line collapsing of a type body. Eclipse `keep_type_declaration_on_one_line` /
     /// IntelliJ `KEEP_SIMPLE_CLASSES_IN_ONE_LINE`.
     pub keep_type_body_on_one_line: KeepOnOneLine,
@@ -162,6 +175,7 @@ impl Default for Braces {
             force_for: ForceBraces::Never,
             force_while: ForceBraces::Never,
             force_do_while: ForceBraces::Never,
+            force_switch_arm: ForceBraces::Never,
             keep_type_body_on_one_line: KeepOnOneLine::IfEmpty,
             keep_method_body_on_one_line: KeepOnOneLine::IfEmpty,
             keep_block_on_one_line: KeepOnOneLine::IfEmpty,

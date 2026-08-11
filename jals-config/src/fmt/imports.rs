@@ -30,12 +30,48 @@ pub enum ImportOrder {
     Group,
 }
 
+/// How many types one `import` declaration names.
+///
+/// Mirrors rustfmt's `imports_granularity`, over the jals dialect's grouped import
+/// (`import java.util.{HashMap, List};` — the Java analogue of a `use` tree), plus a
+/// [`Preserve`](Self::Preserve) default that leaves every declaration exactly as written. No Java
+/// formatter has this: the construct is jals's own syntax, so `[literals]` is its only company in
+/// the rule set (`jals-fmt/MAPPING-rustfmt.md` §6).
+///
+/// rustfmt's `Crate` and `Module` collapse into the single [`Package`](Self::Package) value —
+/// Java has no crate, and its module is the package — and its `One` has no Java spelling at all,
+/// because a group shares one package prefix and two packages cannot join in one declaration.
+///
+/// # `package` requires the dialect
+///
+/// [`Package`](Self::Package) *writes* grouped imports, which only compile when the project
+/// enables the `grouped-imports` feature — the frontend keys its desugaring off
+/// [`FeatureSet::permits`](crate::FeatureSet::permits), so an undeclared group reaches
+/// `javac` verbatim. The formatter is therefore given the project's feature set and rounds this
+/// value back to [`Preserve`](Self::Preserve) with a warning when the dialect is off. Splitting
+/// ([`Item`](Self::Item)) only ever *removes* dialect syntax and is safe either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ImportGranularity {
+    /// Leave each declaration naming exactly what it already named. The default; preserves the
+    /// significant-token sequence.
+    Preserve,
+    /// Merge every import sharing a package into one grouped import
+    /// (`import a.B; import a.C;` → `import a.{B, C};`). Requires the `grouped-imports` feature.
+    Package,
+    /// Split every grouped import into one plain declaration per member
+    /// (`import a.{B, C};` → `import a.B; import a.C;`).
+    Item,
+}
+
 /// Import ordering and modifier ordering.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct Imports {
     /// How imports are ordered.
     pub order: ImportOrder,
+    /// How many types one declaration names — whether grouped imports are merged or split.
+    pub granularity: ImportGranularity,
     /// The ordered groups consulted under [`ImportOrder::Group`]: a list of name prefixes. A
     /// non-static import joins the group of its *longest* matching prefix (ties broken by list
     /// order); `"*"` is the catch-all and `"static"` collects every static import. A missing
@@ -71,6 +107,7 @@ impl Default for Imports {
     fn default() -> Self {
         Self {
             order: ImportOrder::Preserve,
+            granularity: ImportGranularity::Preserve,
             groups: vec![
                 "java.".to_owned(),
                 "javax.".to_owned(),

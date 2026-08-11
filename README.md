@@ -424,6 +424,8 @@ width = 80 # only consulted when a reflow key is on
 `jals-fmt/jalsfmt.toml` lists the frequently-touched keys of every section; each section module
 under `jals-config/src/fmt/` documents the full surface, and `jals-fmt/MAPPING.md` records which
 Eclipse / IntelliJ / google-java-format / Spotless setting each key corresponds to.
+`jals-fmt/MAPPING-rustfmt.md` does the same for every rustfmt option, and says why the ones with
+no jals rule have none.
 
 ### Migrating an existing formatter config
 

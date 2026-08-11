@@ -274,6 +274,11 @@ impl ProjectWorkspace {
         &self.project_root
     }
 
+    /// The project's resolved `[package] features`, for the formatter's one dialect-emitting rule.
+    pub(crate) const fn feature_set(&self) -> FeatureSet {
+        self.editor.workspace().feature_set()
+    }
+
     /// Publish a fresh native snapshot and rebuild the index while preserving editor overlays.
     pub(crate) async fn refresh(&mut self) {
         let _ = self.editor.workspace_mut().refresh().await;

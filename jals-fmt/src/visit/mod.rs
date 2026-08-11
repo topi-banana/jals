@@ -268,6 +268,7 @@ impl<'a> Ctx<'a> {
             S::TERNARY_EXPR => self.visit_ternary(node).await,
             S::LAMBDA_EXPR => self.visit_lambda(node).await,
             S::CAST_EXPR => self.visit_cast(node).await,
+            S::PAREN_EXPR => self.visit_paren(node).await,
             S::CALL_EXPR | S::FIELD_ACCESS | S::METHOD_REF_EXPR | S::INDEX_EXPR => {
                 self.visit_chain(node).await;
             }
@@ -614,11 +615,28 @@ impl<'a> Ctx<'a> {
             comment.kind,
             self.indent,
             comment.column,
-            is_header,
-            own_line,
+            crate::javadoc::Placement {
+                is_header,
+                own_line,
+                alone_on_line: comment.alone_on_line,
+            },
             self.style,
         );
+        let ends_open = text
+            .rsplit('\n')
+            .next()
+            .is_some_and(|last| last.trim_start().starts_with("//"));
         self.ops.comment(&text);
+        // A `//` swallows the rest of its line, so whatever follows has to start a new one. The
+        // callers ask [`Comment::is_line`], which reads the **source's** kind — and that is one
+        // answer short: `[comments] normalize-block-comments` renders a `BLOCK_COMMENT` *as* line
+        // comments, so the source kind says "no break needed" while the rendered text says the
+        // opposite, and the next token lands behind a `//`. Asked here, of the text actually
+        // emitted, there is one answer rather than two. Redundant with a caller's own call, which
+        // is harmless: it sets a flag rather than emitting a break.
+        if ends_open {
+            self.ops.force_next_break();
+        }
         self.emitted_comments += 1;
         self.spaced = false;
         self.previous = None;

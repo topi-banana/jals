@@ -39,6 +39,7 @@ else-on-new-line = false
 keep-method-body-on-one-line = "if-empty" # "never" | "if-empty" | "if-single-item"
 keep-block-on-one-line = "if-empty"       #   | "always" | "preserve"
 force-if = "never"                        # "never" | "if-multiline" | "always"; adds braces when not "never"
+force-switch-arm = "never"                # wrap an arrow `case` body in a block (statement switches only)
 
 [wrapping]
 # Every construct key below takes:
@@ -52,6 +53,8 @@ method-chain = "if-long"
 method-annotations = "always-per-item"
 parameter-annotations = "never"
 before-binary-operator = true          # the operator starts the continuation line
+remove-nested-parens = false           # drop a `(` `)` pair that only wraps another pair
+import-group = "never"                 # how a jals grouped import's member list breaks
 # "common-lines" | "separate-lines-if-wrapped" | "separate-lines-if-not-empty"
 #   | "separate-lines" | "preserve"
 paren-method-invocation = "common-lines"
@@ -74,9 +77,13 @@ format-line = false
 format-block = false
 format-javadoc = false
 width = 80             # only consulted when one of the reflow keys above is on
+code-block-width = 0   # width budget for a <pre> snippet; 0 tracks `width`
+normalize-block-comments = false # rewrite an own-line /* ... */ as //
 
 [imports]
 order = "preserve"                          # "preserve" | "sort" | "group"
+granularity = "preserve"                    # "preserve" | "package" | "item"; needs the
+                                            #   grouped-imports feature for "package"
 groups = ["java.", "javax.", "*", "static"]
 reorder-modifiers = false
 

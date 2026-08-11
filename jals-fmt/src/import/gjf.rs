@@ -23,8 +23,9 @@ use alloc::borrow::ToOwned;
 use alloc::vec;
 
 use jals_config::fmt::{
-    BlankLines, Comments, Config, DocumentedMember, ImportOrder, Imports, IndentStyle,
-    InlineAnnotations, KeepOnOneLine, Layout, ParenPositions, Spacing, WrapPolicy, Wrapping,
+    BlankLines, Comments, Config, DocumentedMember, ImportGranularity, ImportOrder, Imports,
+    IndentStyle, InlineAnnotations, KeepOnOneLine, Layout, ParenPositions, Spacing, WrapPolicy,
+    Wrapping,
 };
 use serde::Deserialize;
 
@@ -235,6 +236,9 @@ impl GoogleJavaFormatConfig {
                 static_first: true,
                 reorder_modifiers: native.reorder_modifiers,
                 remove_unused: native.remove_unused_imports,
+                // A grouped import is jals dialect syntax; google-java-format parses plain Java
+                // and has no construct to merge into or split from.
+                granularity: ImportGranularity::Preserve,
             },
             ..Config::default()
         }

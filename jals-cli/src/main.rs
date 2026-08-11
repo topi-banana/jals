@@ -257,6 +257,7 @@ impl FmtArgs {
         let show_diff = self.check || self.diff;
 
         let mut discovery = HostConfigs::new(explicit_config);
+        let mut features = HostFeatures::default();
         let mut any_changed = false;
         let mut any_warning = false;
         // A file the fail-safe refused is byte-identical to a file that was already formatted, so
@@ -276,7 +277,9 @@ impl FmtArgs {
             self.migrate(std::slice::from_ref(&cwd), false, &mut discovery, exec)
                 .await?;
             let cfg = discovery.for_dir(&cwd)?;
-            let out = jals_fmt::FormatOutput::format_source(&src, &cfg).await;
+            let out =
+                jals_fmt::FormatOutput::format_source(&src, &cfg, features.for_dir(&cwd).await)
+                    .await;
             let changed = out.formatted != src;
             any_changed |= changed;
             any_warning |= out.has_warnings();
@@ -344,8 +347,14 @@ impl FmtArgs {
                         .text()
                         .map_err(|_| anyhow!("source is not valid UTF-8: {}", path.display()))?
                         .to_owned();
-                    let cfg = discovery.for_dir(path.parent().unwrap_or_else(|| Path::new(".")))?;
-                    let out = jals_fmt::FormatOutput::format_source(&src, &cfg).await;
+                    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+                    let cfg = discovery.for_dir(dir)?;
+                    let out = jals_fmt::FormatOutput::format_source(
+                        &src,
+                        &cfg,
+                        features.for_dir(dir).await,
+                    )
+                    .await;
                     let changed = out.formatted != src;
                     any_changed |= changed;
                     any_warning |= out.has_warnings();
@@ -2125,6 +2134,41 @@ impl<C: DiscoverableConfig + Clone + Default> HostConfigs<C> {
             .with_context(|| format!("discovering config from {}", dir.display()))?;
         self.by_root.insert(root.to_path_buf(), config.clone());
         Ok(config)
+    }
+}
+
+/// Host-side memoized `[package] features` discovery for one `jals fmt` run.
+///
+/// The sibling of [`HostConfigs`] for the one formatter input that is not a formatter config:
+/// `[imports] granularity = "package"` writes jals dialect syntax, which compiles only where
+/// `[package] features` enables `grouped-imports`. So `jals fmt` resolves the manifest governing
+/// each file the same way it resolves the `jalsfmt.toml` governing it — upward from the file's own
+/// directory — instead of assuming a project or assuming none.
+///
+/// A directory with no manifest above it, or one whose manifest does not parse, answers with the
+/// empty set. That is not a silent degradation: the empty set is exactly what the formatter reads
+/// as "do not write dialect syntax", and it reports the rounding as a warning of its own.
+#[derive(Default)]
+struct HostFeatures {
+    by_dir: HashMap<PathBuf, FeatureSet>,
+}
+
+impl HostFeatures {
+    /// The feature set governing `dir`, discovered once per directory.
+    async fn for_dir(&mut self, dir: &Path) -> FeatureSet {
+        let key = App::canonical_path(dir);
+        if let Some(features) = self.by_dir.get(&key) {
+            return *features;
+        }
+        let features = match Manifest::discover_path(&key).await {
+            Some(path) => Manifest::from_file(&path)
+                .await
+                .map(|manifest| manifest.feature_set())
+                .unwrap_or_default(),
+            None => FeatureSet::default(),
+        };
+        self.by_dir.insert(key, features);
+        features
     }
 }
 

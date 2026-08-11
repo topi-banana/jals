@@ -26,11 +26,12 @@ use alloc::borrow::ToOwned;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use jals_config::fmt::ImportOrder;
+use jals_config::fmt::{ImportGranularity, ImportOrder};
 use jals_syntax::SyntaxNode;
 use jals_syntax::ast::{AstNode, ImportDecl};
 
 use crate::passes::unused_imports::UnusedImports;
+use crate::passes::{Granularity, Unit};
 use crate::style::Style;
 
 /// One import, with the sort keys the plan needs.
@@ -45,12 +46,25 @@ struct Entry {
     group: usize,
 }
 
-/// The emission order of a compilation unit's imports.
+/// The emission order of a compilation unit's imports, and how each one is cut.
+///
+/// Order and granularity are one plan because they compose in one direction only: `[imports]
+/// granularity = "package"` merges *adjacent* declarations, so which ones are adjacent is
+/// whatever `[imports] order` already decided. Two plans would let a caller apply them the other
+/// way round and merge a block the user asked to preserve.
 pub(crate) struct ImportPlan {
     /// The declarations, in emission order.
-    entries: Vec<SyntaxNode>,
+    entries: Vec<Unit>,
     /// For each entry, how many blank lines precede it (a group separation).
     separators: Vec<usize>,
+    /// The declarations `[imports] remove-unused` deleted, in source order.
+    ///
+    /// Carried because a deleted declaration may have had **comments** anchored to it, and those
+    /// are not the pass's to delete: `//RI import` above an import documents a decision, and the
+    /// import going away does not make the decision untrue. Kept here so the visitor can emit them
+    /// where the block starts — the tokens go, the prose stays, which is the same bargain
+    /// `visit/dialect.rs` makes for the trailing comma it drops.
+    dropped: Vec<SyntaxNode>,
 }
 
 impl ImportPlan {
@@ -63,13 +77,19 @@ impl ImportPlan {
         style: &Style,
     ) -> Option<Self> {
         let cfg = &style.cfg.imports;
-        if cfg.order == ImportOrder::Preserve && used.is_none() {
+        if cfg.order == ImportOrder::Preserve
+            && used.is_none()
+            && cfg.granularity == ImportGranularity::Preserve
+        {
             return None;
         }
 
-        let kept: Vec<&ImportDecl> = imports
+        let (kept, dropped): (Vec<&ImportDecl>, Vec<&ImportDecl>) = imports
             .iter()
-            .filter(|decl| used.is_none_or(|used| UnusedImports::is_used(decl, used)))
+            .partition(|decl| used.is_none_or(|used| UnusedImports::is_used(decl, used)));
+        let dropped: Vec<SyntaxNode> = dropped
+            .into_iter()
+            .map(|decl| decl.syntax().clone())
             .collect();
 
         let groups = Self::group_prefixes(style);
@@ -111,25 +131,40 @@ impl ImportPlan {
             }
         }
 
+        // Re-granulation runs last: it joins declarations that are *already* neighbours, so the
+        // order above is what decides which ones those are.
         let between = style.cfg.blank_lines.between_import_groups;
-        let mut separators = Vec::with_capacity(entries.len());
         let mut previous: Option<usize> = None;
-        for entry in &entries {
-            separators.push(match previous {
-                Some(group) if group != entry.group => between,
-                _ => 0,
-            });
-            previous = Some(entry.group);
-        }
+        let block: Vec<(SyntaxNode, usize)> = entries
+            .into_iter()
+            .map(|entry| {
+                let separation = match previous {
+                    Some(group) if group != entry.group => between,
+                    _ => 0,
+                };
+                previous = Some(entry.group);
+                (entry.node, separation)
+            })
+            .collect();
+
+        let (entries, separators) = Granularity::apply(block, cfg.granularity)
+            .into_iter()
+            .unzip();
 
         Some(Self {
-            entries: entries.into_iter().map(|entry| entry.node).collect(),
+            entries,
             separators,
+            dropped,
         })
     }
 
+    /// The declarations `remove-unused` deleted, whose comments still have to be emitted.
+    pub(crate) fn dropped(&self) -> &[SyntaxNode] {
+        &self.dropped
+    }
+
     /// The declarations in emission order, each with the blank lines that precede it.
-    pub(crate) fn entries(&self) -> impl Iterator<Item = (&SyntaxNode, usize)> {
+    pub(crate) fn entries(&self) -> impl Iterator<Item = (&Unit, usize)> {
         self.entries.iter().zip(self.separators.iter().copied())
     }
 

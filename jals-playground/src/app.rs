@@ -369,6 +369,14 @@ pub struct App {
     /// [`EditorPane`]) reads the latest settings without a second synced copy (cloned before any
     /// await; never borrowed across one).
     config: Rc<RefCell<Config>>,
+    /// Sync mirror of the project's resolved `[package] features`, updated in the same statement
+    /// that hands them to the workspace. The workspace owns the resolution; this exists because
+    /// the once-registered Monaco *Format Document* provider is a plain closure with no handle to
+    /// it, and the formatter needs the feature set — its one dialect-emitting rule
+    /// (`[imports] granularity = "package"`) must not write a grouped import into a project whose
+    /// manifest never enabled `grouped-imports`. Shared behind an `Rc<Cell<…>>` for the same
+    /// reason [`config`](Self::config) is: `FeatureSet` is `Copy`, so no borrow outlives a read.
+    features: Rc<Cell<FeatureSet>>,
     /// Sync mirror of the workspace's indexed Java files, rebuilt after generated-source changes.
     tree_entries: Vec<TreeEntry>,
     /// Sync mirror of the active Java file's path (the pane label / tree highlight).
@@ -475,6 +483,7 @@ impl App {
         App {
             workspace: None,
             config: Rc::new(RefCell::new(Config::default())),
+            features: Rc::new(Cell::new(FeatureSet::default())),
             tree_entries: Vec::new(),
             active_path: String::new(),
             active_source: String::new(),
@@ -1513,6 +1522,7 @@ impl Component for App {
                         if let Some(workspace) = self.workspace() {
                             let link = ctx.link().clone();
                             let build_generation = Rc::clone(&self.build_generation);
+                            let features_mirror = Rc::clone(&self.features);
                             spawn_local(async move {
                                 if build_generation.get() != generation {
                                     return;
@@ -1524,6 +1534,10 @@ impl Component for App {
                                 if build_generation.get() != generation {
                                     return;
                                 }
+                                // Mirrored in the same statement that hands the workspace its
+                                // copy, so the Monaco format provider can never read a feature set
+                                // the index has already moved past.
+                                features_mirror.set(resolution.feature_set);
                                 ws.apply_project_inputs(
                                     resolution.classpath,
                                     resolution.feature_set,
@@ -1677,6 +1691,7 @@ impl Component for App {
                     on_open={link.callback(Msg::ModelOpened)}
                     on_formatted={link.callback(|fell_back| Msg::Formatted { fell_back })}
                     config={self.config.clone()}
+                    features={self.features.clone()}
                 />
             }
         } else {

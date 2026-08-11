@@ -5,7 +5,9 @@
 //!
 //! **Token-changing (L0).** [`ImportPlan`], [`UnusedImports`], and [`ModifierOrder`] each build a
 //! *plan* over the original nodes rather than rewriting the tree, so comments travel with the tokens
-//! they are anchored to. [`LiteralRewrite`] changes a token's spelling; it runs inside
+//! they are anchored to. [`Granularity`] is the one that cannot promise that — merging and
+//! splitting a grouped import change the token multiset by construction — so it carries a
+//! different promise instead, [`ImportNames`], which the fail-safe checks. [`LiteralRewrite`] changes a token's spelling; it runs inside
 //! `Ctx::token` rather than as a tree pass, which is why it is filed by what it changes and not by
 //! when it runs.
 //!
@@ -26,6 +28,7 @@
 //! rather than at a call site inside the lowering walk.
 
 pub(crate) mod finalize;
+pub(crate) mod import_granularity;
 pub(crate) mod import_order;
 pub(crate) mod literals;
 pub(crate) mod modifier_order;
@@ -37,6 +40,7 @@ pub(crate) mod token_license;
 pub(crate) mod unused_imports;
 
 pub(crate) use finalize::Finalize;
+pub(crate) use import_granularity::{Granularity, ImportNames, Parts, Unit};
 pub(crate) use import_order::ImportPlan;
 pub(crate) use literals::LiteralRewrite;
 pub(crate) use modifier_order::ModifierOrder;

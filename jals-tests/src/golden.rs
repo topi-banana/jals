@@ -318,8 +318,14 @@ impl PairResult {
     /// Format `input` with `cfg` and score it against the expected `expected` output:
     /// a line-level similarity ratio plus whether the two are byte-identical.
     fn score(input: &str, expected: &str, cfg: &Config) -> (f64, bool) {
-        let formatted =
-            jals_exec::block_on_inline(jals_fmt::FormatOutput::format_source(input, cfg)).formatted;
+        // The corpora are plain Java, so no dialect feature is enabled: a grouped import cannot
+        // appear in the input and must not appear in the output.
+        let formatted = jals_exec::block_on_inline(jals_fmt::FormatOutput::format_source(
+            input,
+            cfg,
+            jals_config::FeatureSet::default(),
+        ))
+        .formatted;
         let exact = formatted == expected;
         let ratio = TextDiff::from_lines(expected, &formatted).ratio() as f64;
         (ratio, exact)
@@ -362,9 +368,12 @@ impl Ceiling {
             .filter_map(|(input_path, output_path)| {
                 let input = std::fs::read_to_string(&input_path).ok()?;
                 let expected = std::fs::read_to_string(&output_path).ok()?;
-                let formatted =
-                    jals_exec::block_on_inline(jals_fmt::FormatOutput::format_source(&input, cfg))
-                        .formatted;
+                let formatted = jals_exec::block_on_inline(jals_fmt::FormatOutput::format_source(
+                    &input,
+                    cfg,
+                    jals_config::FeatureSet::default(),
+                ))
+                .formatted;
                 let (expected_code, comments) = Self::without_comments(&expected);
                 let (formatted_code, _) = Self::without_comments(&formatted);
                 let a = expected_code.lines().count() as f64;

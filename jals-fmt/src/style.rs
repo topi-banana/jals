@@ -24,7 +24,10 @@
 use alloc::format;
 use alloc::vec::Vec;
 
-use jals_config::fmt::{Comments, Config, IndentStyle, KeepOnOneLine, ParenPositions, Wrapping};
+use jals_config::fmt::{
+    Comments, Config, ImportGranularity, IndentStyle, KeepOnOneLine, ParenPositions, Wrapping,
+};
+use jals_config::{Feature, FeatureSet};
 
 use crate::ir::Indent;
 use crate::output::Warning;
@@ -47,15 +50,16 @@ pub(crate) struct Style {
 }
 
 impl Style {
-    /// Resolve `config` for formatting `src`, collecting a [`Warning`] for every rule rounded to
-    /// the single engine's canonical value.
-    pub(crate) fn reify(config: &Config, src: &str) -> (Self, Vec<Warning>) {
+    /// Resolve `config` for formatting `src` in a project enabling `features`, collecting a
+    /// [`Warning`] for every rule rounded to the single engine's canonical value.
+    pub(crate) fn reify(config: &Config, src: &str, features: FeatureSet) -> (Self, Vec<Warning>) {
         let mut cfg = config.clone();
         let mut warnings = Vec::new();
 
         Self::round_keep_on_one_line(&mut cfg, &mut warnings);
         Self::round_paren_positions(&mut cfg, &mut warnings);
         Self::round_line_break_rules(&mut cfg, &mut warnings);
+        Self::round_import_granularity(&mut cfg, features, &mut warnings);
 
         let style = Self {
             newline: cfg.layout.newline(src),
@@ -176,6 +180,31 @@ impl Style {
                 "[comments] preserve-line-breaks = true keeps the source's line breaks inside \
                  comment prose, which the single layout engine does not do; prose is always \
                  refilled"
+                    .into(),
+            ));
+        }
+    }
+
+    /// `granularity = package` *writes* grouped imports, which are jals dialect syntax: a project
+    /// that has not enabled `grouped-imports` hands them to `javac` verbatim and fails to build.
+    ///
+    /// This is the one rounding that is not about input whitespace. It is here for the same
+    /// reason the others are — the config asks for something this run cannot deliver, and silently
+    /// ignoring it would leave the user believing it took effect — but the fact it reads is the
+    /// project's feature set rather than the source's line breaks. Splitting is never rounded:
+    /// `item` only removes dialect syntax, so it is safe in a project that never enabled it.
+    fn round_import_granularity(
+        cfg: &mut Config,
+        features: FeatureSet,
+        warnings: &mut Vec<Warning>,
+    ) {
+        if cfg.imports.granularity == ImportGranularity::Package
+            && !features.permits(Feature::GroupedImports)
+        {
+            cfg.imports.granularity = ImportGranularity::Preserve;
+            warnings.push(Warning::config(
+                "[imports] granularity = \"package\" writes grouped imports, which need the \
+                 `grouped-imports` feature in [package] features; leaving imports as written"
                     .into(),
             ));
         }

@@ -10,7 +10,7 @@ use jals_syntax::ast::{AstNode, ImportDecl};
 use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::ir::Indent;
-use crate::passes::ImportPlan;
+use crate::passes::{ImportPlan, Unit};
 use crate::visit::Ctx;
 
 impl Ctx<'_> {
@@ -97,28 +97,99 @@ impl Ctx<'_> {
         let plan = ImportPlan::build(&decls, self.used.as_ref(), self.style);
         let lead = owed.max(self.style.cfg.blank_lines.before_imports);
 
-        let entries: Vec<(SyntaxNode, usize)> = plan.as_ref().map_or_else(
-            || run.iter().map(|node| (node.clone(), 0)).collect(),
+        let entries: Vec<(Unit, usize)> = plan.as_ref().map_or_else(
+            || {
+                run.iter()
+                    .map(|node| (Unit::Whole(node.clone()), 0))
+                    .collect()
+            },
             |plan| {
                 plan.entries()
-                    .map(|(node, separation)| (node.clone(), separation))
+                    .map(|(unit, separation)| (unit.clone(), separation))
                     .collect()
             },
         );
+
+        // A deleted import's comments are emitted first, at the head of the block.
+        //
+        // `remove-unused` deletes *declarations*; the prose written above one is not part of the
+        // declaration, and google-java-format's own pass — which removes the import's source range
+        // and nothing else — leaves it standing too. Emitting it here rather than at the position
+        // the deleted import held is the concession the reordering forces: the plan has already
+        // decided where every surviving declaration goes, and there is no gap left to put it in.
+        //
+        // Without this the comment vanished, and the only thing that noticed was a `debug_assert`
+        // that fires in no shipped build.
+        let dropped: Vec<SyntaxNode> = plan
+            .as_ref()
+            .map(|plan| plan.dropped().to_vec())
+            .unwrap_or_default();
 
         // A planned block states its own separation exactly: the plan decides where a group
         // boundary is, so a blank line the author left *inside* a group is not preserved but
         // removed. Only an unplanned block (`order = "preserve"`) keeps what the source had.
         let planned = plan.is_some();
-        for (nth, (node, separation)) in entries.iter().enumerate() {
-            let enforced = if nth == 0 { lead } else { *separation };
-            if planned && nth > 0 {
-                self.ensure_blank_lines(enforced, Indent::ZERO);
+        let flushed = self.flush_dropped_imports(&dropped, lead, first);
+        for (nth, (unit, separation)) in entries.iter().enumerate() {
+            let enforced = if nth == 0 && !flushed {
+                lead
             } else {
-                self.separate(node, enforced, first && nth == 0);
+                *separation
+            };
+            // A unit the re-granulation *added* has no source node to read a blank line off, so
+            // it takes the enforced count alone — which is what `ensure_blank_lines` already does
+            // for every planned entry after the first.
+            match (planned && nth > 0, unit.source()) {
+                (false, Some(node)) => {
+                    self.separate(node, enforced, first && nth == 0 && !flushed);
+                }
+                _ => self.ensure_blank_lines(enforced, Indent::ZERO),
             }
-            self.visit(node).await;
+            self.visit_import_unit(unit).await;
         }
+    }
+
+    /// Emit the comments of the imports `remove-unused` deleted, each on a line of its own.
+    ///
+    /// Returns whether anything was emitted, because that decides who leads the block: a comment
+    /// flushed here takes the separation the first surviving import would otherwise have asked
+    /// for, and the import follows it on the next line.
+    ///
+    /// A comment that *trailed* a deleted import gets its own line too. It has nothing left to
+    /// trail — the tokens it sat behind are gone — and leaving it hugging whatever came next is
+    /// how ` //why` ended up in front of a class declaration.
+    fn flush_dropped_imports(&mut self, dropped: &[SyntaxNode], lead: usize, first: bool) -> bool {
+        let mut flushed = false;
+        for node in dropped {
+            for tok in node
+                .descendants_with_tokens()
+                .filter_map(SyntaxElement::into_token)
+                .filter(|tok| !tok.kind().is_trivia())
+            {
+                let comments: Vec<_> = self
+                    .comments
+                    .leading(&tok)
+                    .iter()
+                    .chain(self.comments.leading_inline(&tok))
+                    .chain(self.comments.trailing(&tok))
+                    .chain(self.comments.trailing_below(&tok))
+                    .cloned()
+                    .collect();
+                for comment in comments {
+                    if flushed {
+                        self.forced_break(Indent::ZERO);
+                    } else {
+                        self.separate(node, lead, first);
+                        flushed = true;
+                    }
+                    self.emit_comment(&comment, true);
+                }
+            }
+        }
+        if flushed {
+            self.forced_break(Indent::ZERO);
+        }
+        flushed
     }
 
     /// Emit the separation before an item: the enforced count, raised by whatever the source had
