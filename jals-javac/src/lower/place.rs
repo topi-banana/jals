@@ -111,8 +111,10 @@ impl Place {
                 ty,
             })
         } else {
-            // The `this` the source left unwritten. It is the receiver, so it goes on the stack now.
-            emit.load_this()?;
+            // The receiver the source left unwritten. It is `this` for this class's own and inherited
+            // fields, and the enclosing instance for an enclosing class's; either way it goes on the
+            // stack now.
+            Expr::load_unqualified_receiver(context.index.member(member).owner, context, emit)?;
             Ok(Self::Field {
                 owner,
                 name: field,

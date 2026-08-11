@@ -227,6 +227,58 @@ impl<'a> Facts<'a> {
             && !Self::has_modifier(node, SyntaxKind::STATIC_KW)
     }
 
+    /// Whether `node` sits where there is no `this` — a `static` method, a `static` initialiser, or
+    /// a `static` field's initialiser.
+    ///
+    /// A local or anonymous class declared in such a place holds **no** enclosing instance: there is
+    /// none to hand it. The distinction is not cosmetic on either side of the seam. Give such a class
+    /// a `this$0` and its constructor takes an argument the `new` has nothing to pass; take one away
+    /// from a class in an instance context and every uplevel access it makes is emitted against the
+    /// wrong object — well-typed, and reading another instance's fields.
+    ///
+    /// The walk stops at the first member declaration because that is what owns the `static`-ness. A
+    /// type declaration reached first means the node is not inside a member at all, which only a
+    /// malformed tree produces; a walk that runs out of ancestors is at the file's top level, where
+    /// there is likewise no instance.
+    ///
+    /// The arguments of an explicit constructor invocation count as such a place even though a
+    /// constructor is otherwise the most instance-bound context there is: they are evaluated before
+    /// `super()` returns, so `this` does not exist yet (JLS §8.8.7.1). javac skips the enclosing
+    /// instance for an anonymous class created there for exactly this reason (JDK-8166108), and a
+    /// backend that passes one emits `super(this)` from a frame whose `this` is `UninitializedThis`.
+    pub(crate) fn in_static_context(node: &SyntaxNode) -> bool {
+        for ancestor in node.ancestors() {
+            if Self::is_explicit_constructor_invocation(&ancestor) {
+                return true;
+            }
+            match ancestor.kind() {
+                SyntaxKind::METHOD_DECL | SyntaxKind::FIELD_DECL | SyntaxKind::INITIALIZER => {
+                    return Self::has_modifier(&ancestor, SyntaxKind::STATIC_KW);
+                }
+                // A constructor is an instance context by definition — there is no `static` one.
+                SyntaxKind::CONSTRUCTOR_DECL => return false,
+                _ => {}
+            }
+        }
+        true
+    }
+
+    /// Whether `node` is a bare `this(…)` or `super(…)` call.
+    ///
+    /// The shape [`explicit_constructor_invocation`](Self::explicit_constructor_invocation) looks for,
+    /// asked of one node rather than found as a body's first statement — which is what an upward walk
+    /// out of an argument needs.
+    fn is_explicit_constructor_invocation(node: &SyntaxNode) -> bool {
+        node.kind() == SyntaxKind::CALL_EXPR
+            && ast::CallExpr::cast(node.clone())
+                .and_then(|call| call.callee())
+                .is_some_and(|callee| {
+                    matches!(&callee, ast::Expr::NameRef(name)
+                        if Self::has_keyword(name.syntax(), SyntaxKind::THIS_KW)
+                            || Self::has_keyword(name.syntax(), SyntaxKind::SUPER_KW))
+                })
+    }
+
     /// A body's explicit constructor invocation — a bare `this(…)` or `super(…)`.
     ///
     /// JLS §8.8.7 puts it first or nowhere, so only the first statement is examined. Only the bare
