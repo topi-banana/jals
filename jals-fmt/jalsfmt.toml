@@ -76,14 +76,15 @@ before-assert-colon = true
 format-line = false
 format-block = false
 format-javadoc = false
-width = 80             # only consulted when one of the reflow keys above is on
-code-block-width = 0   # width budget for a <pre> snippet; 0 tracks `width`
+width = 80                       # only consulted when one of the reflow keys above is on
+code-block-width = 0             # width budget for a <pre> snippet; 0 tracks `width`
 normalize-block-comments = false # rewrite an own-line /* ... */ as //
 
 [imports]
-order = "preserve"                          # "preserve" | "sort" | "group"
-granularity = "preserve"                    # "preserve" | "package" | "item"; needs the
-                                            #   grouped-imports feature for "package"
+order = "preserve" # "preserve" | "sort" | "group"
+# "preserve" | "package" | "item". "package" writes grouped imports, so it needs the
+#   grouped-imports feature; without it the value rounds back to "preserve" with a warning.
+granularity = "preserve"
 groups = ["java.", "javax.", "*", "static"]
 reorder-modifiers = false
 
