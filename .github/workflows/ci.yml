@@ -839,6 +839,13 @@ jobs:
       PJF_VERSION: "2.96.0"
       ECLIPSE_JDT_VERSION: "3.46.0"
       IDEA_VERSION: "2025.3"
+      # The JDK the compiler corpus is defined against. It decides that measurement twice:
+      # javac chooses which files are in scope (the ones it compiles on their own) and its
+      # `ct.sym` is the classpath the harness resolves against, so a corpus generated under
+      # one release and scored under another is two measurements wearing one number.
+      # `jals_tests::compile::JAVAC_PIN` restates it and `the_javac_pin_matches_ci` fails
+      # when the two drift; `gen-javac-corpus.sh` refuses a javac that is not this release.
+      JAVAC_VERSION: "25"
     steps:
       - parallel:
           - uses: actions/checkout@v7
@@ -848,11 +855,13 @@ jobs:
               submodules: true
               fetch-depth: 1
           - uses: dtolnay/rust-toolchain@stable
-          - name: Set up JDK (for google-java-format and Eclipse JDT)
+          - name: Set up JDK (for google-java-format, Eclipse JDT and the javac corpus)
             uses: actions/setup-java@v5
             with:
               distribution: temurin
-              java-version: "25"
+              # The compiler corpus's pin, so this job's javac and its `ct.sym` are the ones
+              # `jals_tests::compile` says the numbers are defined against.
+              java-version: ${{ env.JAVAC_VERSION }}
       - uses: Swatinem/rust-cache@v2
       # Backgrounded across everything the reference formatters need: the vendor downloads, the
       # classpath resolution and the corpus generation drive `curl` and the JVM, and none of them
@@ -993,6 +1002,21 @@ jobs:
           JOBS: "2"
         run: jals-tests/scripts/gen-openjdk-corpus.sh eclipse 0
 
+      # The compiler corpus. Unlike the four above it runs no downloaded tool — the JDK set up
+      # at the top of this job *is* the reference — but it is generated and cached on the same
+      # terms: one javac per candidate is the expensive part, and its result only changes when
+      # the submodule pin, the JDK release, or the generator does.
+      - name: Cache the langtools javac corpus
+        id: javac-corpus
+        uses: actions/cache@v6
+        with:
+          path: jals-tests/sources/javac-langtools
+          key: javac-langtools-${{ env.JAVAC_VERSION }}-${{ steps.openjdk.outputs.sha }}-${{ hashFiles('jals-tests/scripts/gen-javac-corpus.sh') }}
+      - name: Generate the langtools javac corpus
+        continue-on-error: true
+        if: steps.javac-corpus.outputs.cache-hit != 'true'
+        run: jals-tests/scripts/gen-javac-corpus.sh 0
+
       # `wait-all`, not `wait: idea`: the download is `if`-guarded, so on a corpus cache hit there
       # is no such step to name. This is the job's one join — after it the IDE is on disk if it was
       # fetched at all, and the corpus tools are built.
@@ -1018,6 +1042,9 @@ jobs:
             echo
             cargo run --release -p jals-tests --bin jals-golden -- \
               --worst 20 --allow-missing --markdown
+            echo
+            cargo run --release -p jals-tests --bin jals-compile -- \
+              --limit 20 --allow-missing --markdown
           } | tee corpus.md >> "$GITHUB_STEP_SUMMARY"
       - name: Comment corpus reports on PR
         if: always() && github.event_name == 'pull_request' && hashFiles('corpus.md') != ''

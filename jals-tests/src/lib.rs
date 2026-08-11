@@ -6,8 +6,11 @@
 //! parse-failure rate plus the offending files.
 //!
 //! [`golden`] is a separate harness that checks formatter *fidelity* against
-//! `google-java-format` output, rather than parser soundness.
+//! `google-java-format` output, rather than parser soundness. [`compile`] is a third:
+//! it compiles a corpus of real Java with `jals-javac` and asks a real JVM's bytecode
+//! verifier whether the class files that came out are ones it will load.
 
+pub mod compile;
 pub mod golden;
 
 use std::panic::{self, AssertUnwindSafe};

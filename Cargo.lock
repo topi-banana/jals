@@ -1358,15 +1358,19 @@ name = "jals-tests"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "jals-classfile",
  "jals-config",
  "jals-exec",
  "jals-fmt",
+ "jals-hir",
+ "jals-javac",
  "jals-syntax",
  "rayon",
  "similar",
  "tempfile",
  "toml",
  "walkdir",
+ "zip",
 ]
 
 [[package]]

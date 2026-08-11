@@ -2,12 +2,13 @@
 
 Corpus harnesses that exercise jals against large bodies of real Java.
 
-Two binaries, two questions:
+Three binaries, three questions:
 
 | binary | question | metric |
 | --- | --- | --- |
 | `jals-tests` | Does the **parser** hold its invariants? | never panics, lossless round-trip, syntax-error rate |
 | `jals-golden` | How close is the **formatter** to each native Java formatter? | exact-match count + mean line similarity |
+| `jals-compile` | Does the **compiler** emit class files a real JVM loads? | how far each file gets: parsed → lowered → re-read → verified |
 
 The corpora are git submodules (and, for the generated ones, local files) under
 `sources/`; none of the Java is committed to this repo.
@@ -178,12 +179,96 @@ the pinned release per tool and prints it in the report's `reference` column;
 drift from `.github/workflows/ci.yml` or from `scripts/fetch-eclipse-jdt.sh`. Bump all of
 them together.
 
-### In CI
+## Compiler end-to-end — `jals-compile`
 
-The `corpus-reports` job downloads each pinned tool, generates the four OpenJDK corpora, and
-runs `jals-golden --worst 20 --allow-missing --markdown` over everything, putting all six
-corpora in one table with a least-similar `<details>` list each. Every corpus is cached
-independently on the OpenJDK submodule commit, the tool version, the generator script and
+Does `jals-javac` turn real Java into class files a real JVM loads? Every case reports how far
+it got, because one number over a compiler says nothing about what is missing:
+
+| rung | what it proves |
+| --- | --- |
+| parsed | `jals-syntax` accepted the source with no syntax error |
+| lowered | `Compile::file` produced class files rather than a `LowerError` |
+| re-read | `jals-classfile` reads back what the assembler wrote |
+| **verified** | a real JVM **linked** the class: the bytecode verifier accepted it |
+
+The last rung is the point. The assembler computes its own `max_stack`, `max_locals` and
+`StackMapTable`, and `jals-classfile` reads back whatever those say — so a frame describing the
+wrong type round-trips perfectly and is still a class no JVM will load. Only the verifier has an
+opinion, and it is the authority.
+
+```sh
+git submodule update --init --depth 1 jals-tests/sources/openjdk
+jals-tests/scripts/gen-javac-corpus.sh 0          # or a COUNT, for a quick local sample
+cargo run -p jals-tests --bin jals-compile -- langtools
+```
+
+Generation runs one `javac` per candidate, so it is the slow half: `JOBS` sets how many run at
+once, and `JAVAC_TIMEOUT` (default 60s) bounds each one. That bound is not hygiene — this is a
+*compiler's* regression suite, and some of it exists to push javac to its limits, so a handful of
+files never finish compiling at all. `SUBTREE` picks a different tree to walk.
+
+### Why the corpus is generated, and what the denominator excludes
+
+There is no ready-made `.java` → expected `.class` corpus, in OpenJDK or anywhere else.
+`test/langtools/tools/javac` is a jtreg-driven **behaviour and diagnostic** suite: a fifth of it
+is `@compile/fail` — deliberately invalid Java, which measures nothing for a compiler that never
+checks (diagnostics are `jals-lint`'s job over `jals-hir`) — and a third has no `@test` header at
+all, being auxiliary sources that only mean something beside a sibling.
+
+So `scripts/gen-javac-corpus.sh` runs the pinned `javac` over each candidate **on its own** and
+keeps the ones it compiles. That is what makes the denominator honest: a file javac itself cannot
+compile alone — a multi-file test, one that needs `com.sun.tools.javac` internals, one whose
+sibling package is missing — is **out of scope**, recorded with javac's own reason in
+`SKIPPED.tsv`, and never counted as a compiler failure. Negative tests are excluded outright
+rather than left to fail, since scoring a file whose purpose is to be rejected would quietly turn
+this harness into a checker.
+
+Each case is `<Base>.java` beside a `<Base>.expected/` directory holding javac's own class files.
+Nothing reads `expected/` yet; it is written now because a future run-equivalence rung needs it
+and regenerating the corpus to obtain it later costs the whole generation pass. The corpus is a
+derivative of GPL'd OpenJDK sources, so like the four formatter corpora it is **generated locally
+and gitignored, never committed**.
+
+### The classpath is a real JDK's
+
+`jals-hir`'s embedded stubs are ~58 signature-only types — enough to say something useful about
+an editor buffer, nowhere near enough to compile arbitrary Java. Scoring against them would
+report *stub coverage* wearing a compiler's name. `$JAVA_HOME/lib/ct.sym` is the signature data
+`javac --release` reads (an ordinary zip of ordinary class files with their bodies stripped), so
+the harness lowers it into the `LoweredClasspath` the analysis resolves against — the same thing
+the product does through `jals-classpath` for a real dependency. Reading it needs a host path,
+which is why this lives in a test harness; `jals-javac`'s own stdlib oracle reads the same file
+for the same reason.
+
+### What fails the run, and what only lowers the rate
+
+An unimplemented lowering path lowers the percentage. Four outcomes are **defects** and are
+listed separately: a class file the JVM rejects, output that does not read back, a panic, and a
+syntax error on a file that is valid Java by construction. `--strict` exits non-zero on those, so
+a regression into a wrong class file fails a build while the long tail of unimplemented syntax
+does not.
+
+CI leaves `--strict` off: known defects are still open (a nested `new` passing the wrong enclosing
+instance, `this$0` stored after `super()`, and two `jals-syntax` gaps), so the report is a
+measurement rather than a gate. Turning it on is what would make it one, and that is a decision to
+take once the list is empty.
+
+### Version pin
+
+The rate depends on the JDK twice — javac decides the scope and its `ct.sym` is the classpath —
+so it is pinned like the formatter releases: `compile::JAVAC_PIN`, `JAVAC_VERSION` in
+`.github/workflows/ci.yml`, and the generator's own check, with `the_javac_pin_matches_ci` and
+`the_generator_states_the_pin` failing when they drift.
+
+## In CI
+
+The `corpus-reports` job downloads each pinned tool, generates the four OpenJDK formatter corpora
+plus the javac one, and runs all three harnesses, putting every corpus in one summary. Each is
+cached independently on the OpenJDK submodule commit, the tool version, the generator script and
 (for Eclipse) the committed profile, so a corpus is rebuilt only when something it depends on
-moves. `--allow-missing` is what keeps one failed or timed-out generation step from costing
-the whole report.
+moves. `--allow-missing` is what keeps one failed or timed-out generation step from costing the
+whole report.
+
+The formatter table lists six corpora with a least-similar `<details>` list each; the compiler
+table lists the ladder per corpus, the defects in full, and collapsed lists of what stopped the
+rest and of what javac declined.
