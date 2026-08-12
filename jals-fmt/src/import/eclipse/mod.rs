@@ -39,8 +39,9 @@ use jals_config::fmt::{
 
 use serde::{Deserialize, Deserializer};
 
+use super::baseline::pin_java_baseline;
 use super::serde_kv::Kv;
-use super::{ConfigImporter, ImportError, pin_java_baseline};
+use super::{ConfigImporter, ImportError};
 
 mod alignment;
 mod blank_lines;
