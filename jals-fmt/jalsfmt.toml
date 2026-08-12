@@ -81,7 +81,7 @@ code-block-width = 100           # width budget for a <pre> snippet; 0 tracks `w
 normalize-block-comments = false # rewrite an own-line /* ... */ as //
 
 [imports]
-order = "sort"     # "preserve" | "sort" | "group"
+order = "sort" # "preserve" | "sort" | "group"
 # "preserve" | "package" | "item". "package" writes grouped imports, so it needs the
 #   grouped-imports feature; without it the value rounds back to "preserve" with a warning.
 granularity = "preserve"
