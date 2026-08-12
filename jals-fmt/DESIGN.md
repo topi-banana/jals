@@ -545,9 +545,12 @@ GJF エンジン (`Break` の UNIFIED/INDEPENDENT/FORCED + BreakTag) は prettie
 ### 8.2 プロファイル = rule 束のプリセット
 
 `gjf` / `gjf-aosp` / `palantir` / `eclipse` / `intellij` / `jals` は**エンジンの切り替えではなく
-`Config` の既定値セットの切り替え**である。native config があれば `jals_fmt::import` が同じ `Config`
-へ射影する（§15、`MAPPING.md`）ので、プロファイルと importer 出力は**同じ型の値**であり、混ぜて
-使える（プロファイルを土台に、native config の非既定値だけを上書きする）。
+`Config` の既定値セットの切り替え**である。`jals` は `Config::default()` そのもので、写る rustfmt
+option は rustfmt の既定、写らない Java キーは従来の Java 慣用値。ベンダープロファイルは rustfmt
+既定が `..Default` から漏れないよう、書いていないキーに旧 Java 床をピンする。native config があれば
+`jals_fmt::import` が同じ `Config` へ射影する（§15、`MAPPING.md`）ので、プロファイルと importer
+出力は**同じ型の値**であり、混ぜて使える（プロファイルを土台に、native config の非既定値だけを
+上書きする）。
 
 ### 8.3 優先順位（衝突したとき）
 
@@ -574,8 +577,9 @@ rule は最初から置かない**（`MAPPING.md` §2 の基準に「到達可�
 
 - **有意トークン保存**: 不変条件は「**§20 の表に宣言された操作を除き有意トークンの多重集合は保存**」。
   例外を散文で数え上げるのはやめ、**`passes::token_license::OPERATIONS` を唯一の定義とする**
-  （fail-safe はその表だけを読み、`Config` を見ない）。表の 8 行のうち 7 行は config gate 付きで
-  すべて既定 off、8 行目（方言のグループ import 末尾カンマ削除）は**無条件**である。
+  （fail-safe はその表だけを読み、`Config` を見ない）。表の 10 行のうち既定で on なのは、無条件の
+  方言末尾カンマ削除、`[wrapping] remove-nested-parens`、`[braces] force-*`（`force-switch-arm =
+  always`）、そしてレーンを持たない `R0.1 import ordering`。残りは既定 off/`preserve`。
   なお StringWrapper は「再配置のみ」ではない — 単一リテラルを分割して `+` を**追加する**（§10 参照）。
   保存されるのは各 site が**綴るもの**であり、多重集合ではない。
 - **never-panic / lossless**: 未対応ノード・ERROR ノードは **verbatim 出力**へ fallback。最上位に
@@ -893,7 +897,8 @@ call-arguments = "if-long-per-item"  # alignment_for_arguments_in_method_invocat
 持ち込む不純ではない。しかも L0 で確定して Ops に載る事実なので、L1 の解決アルゴリズムは純粋なまま
 であり、**冪等は構成的に保たれる**。
 
-**例外は 1 つだけ: `braces.force-* = if-multiline`**（既定は `never` なので通常は発生しない）。
+**例外は 1 つだけ: `braces.force-* = if-multiline`**（`force-if` 等は既定 `never`。既定 on の
+`force-switch-arm = always` は条件を読まないのでこの例外ではない）。
 §8.1 のとおり、この rule だけは条件がエンジン自身の出力を参照するため、冪等が構成的には出てこない。
 この rule に限り、冪等は**テストで保証する性質**であり、`fmt∘fmt=fmt` の property test に
 `if-multiline` を有効にしたケースを必ず含める。
@@ -1124,10 +1129,12 @@ kind が互いに素**でなければならず（site の重なりは表から�
 
 > *Formatting is idempotent. It preserves the significant token multiset except where a declared
 > token-changing operation applies. The operations are enumerated as data in
-> `jals_fmt::passes::token_license::OPERATIONS` … Seven rows are configured and every one is off (or
-> `preserve`) by default … The eighth is unconditional — the jals dialect drops a grouped import's
-> trailing comma — so "explicitly configured" is not a complete qualifier, and a new token-changing
-> pass belongs in the table, not in prose.*
+> `jals_fmt::passes::token_license::OPERATIONS`. `Config::default()` licenses exactly: the
+> unconditional dialect grouped-import trailing-comma drop; `[wrapping] remove-nested-parens`;
+> and `[braces] force-*` (because `force-switch-arm = always`). `[imports] order = sort` is also
+> on by default but is `Reorders` — sequence, not multiset. Every other configured row stays
+> off/`preserve`. A new token-changing pass belongs in the table, and a new default-on row
+> belongs in `the_default_config_enables_exactly_these_rows`.*
 
 旧文言（"the four token-changing passes … plus the opt-in literal normalizations and brace forcing"）
 からの変更点は 2 つ:

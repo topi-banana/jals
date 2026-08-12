@@ -17,10 +17,9 @@
 //!
 //! The justification used to be narrower — "a group is always laid out flat, so a trailing comma
 //! has no vertical form to serve" — and `[wrapping] import-group` retired it by giving the group a
-//! vertical form. The drop stays **unconditional** regardless: gating it on the layout would make
-//! it a configured row that is *on* by default, which is exactly what `token_license`'s
-//! `the_default_config_licenses_exactly_the_unconditional_rows` forbids, and would put the
-//! canonical form of the construct at the mercy of a wrapping rule.
+//! vertical form. The drop stays **unconditional** regardless: the dialect's canonical form has
+//! no trailing comma, and gating the drop on `[wrapping] import-group` would put that form at the
+//! mercy of a wrapping rule.
 //!
 //! Which comma is "the trailing one" is [`License::is_group_trailing_comma`], not a predicate of
 //! this module's own: the pass that drops it and the check that licenses it have to agree, and two
@@ -325,7 +324,7 @@ mod tests {
     const SRC: &str = "import java.util.{HashMap, List, Map};\nclass Z {}\n";
 
     #[test]
-    fn the_default_keeps_a_group_on_one_line() {
+    fn never_keeps_a_group_on_one_line() {
         assert!(
             formatted(SRC, WrapPolicy::Never).contains("import java.util.{HashMap, List, Map};"),
         );

@@ -32,13 +32,12 @@
 //!   formatted", which it is otherwise byte-identical to.
 //! - **Idempotent.** `format(format(x)) == format(x)`.
 //! - **Significant tokens are preserved as a multiset**, except where an operation declared in
-//!   [`OPERATIONS`](passes::token_license::OPERATIONS) applies. Seven of the eight rows are
-//!   configured and every one of them is off (or `preserve`) in [`Config::default`]: import
-//!   ordering, unused-import removal, modifier ordering, long-string rewrapping, text-block
-//!   re-indentation, the `[literals]` rewrites, and `[braces] force-*`. The eighth is
-//!   **unconditional** — the dialect drops a grouped import's trailing comma — so "except where an
-//!   explicitly configured rule applies" is not the whole story, and the table rather than this
-//!   sentence is what [`TokenBudget`](passes::TokenBudget) reads.
+//!   [`OPERATIONS`](passes::token_license::OPERATIONS) applies. [`Config::default`] licenses
+//!   exactly the unconditional dialect grouped-import trailing-comma drop, `[wrapping]
+//!   remove-nested-parens`, and `[braces] force-*` (because `force-switch-arm = always`).
+//!   `[imports] order = sort` is also on by default but is `Reorders` — sequence, not multiset.
+//!   Every other configured row stays off/`preserve`. The table rather than this sentence is what
+//!   [`TokenBudget`](passes::TokenBudget) reads.
 //! - **Comments are never dropped.** Each is anchored to exactly one token and emitted with it.
 //! - **Layout never reads input whitespace**, with one exception the engine shares with
 //!   google-java-format: whether two significant tokens had a blank line between them. Rules that

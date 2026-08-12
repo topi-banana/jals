@@ -141,18 +141,18 @@ rule 単位で次の 1 行を適用する。
 
 ### 4.4 rustfmt 由来の jals-native rule（6）
 
-`[literals]` と同じ位置に立つ 6 key。どのベンダーも produce しないので既定は全て「何もしない」
-側であり、非既定値は jals-native プロファイル専用である。写像と設計判断は
+`[literals]` と同じ位置に立つ 6 key。どのベンダーも produce しない。既定は rustfmt に合わせ、
+ベンダープロファイルが旧 Java 床（何もしない側）をピンする。写像と設計判断は
 [`MAPPING-rustfmt.md`](MAPPING-rustfmt.md) §6 にある。
 
 | jals rule | rustfmt option | 既定 |
 |---|---|---|
 | `imports.granularity` | `imports_granularity` | `preserve` |
-| `wrapping.import-group` | `imports_layout` | `never` |
-| `wrapping.remove-nested-parens` | `remove_nested_parens` | `false` |
+| `wrapping.import-group` | `imports_layout` | `if-long` |
+| `wrapping.remove-nested-parens` | `remove_nested_parens` | `true` |
 | `comments.normalize-block-comments` | `normalize_comments` | `false` |
-| `comments.code-block-width` | `doc_comment_code_block_width` | `0` |
-| `braces.force-switch-arm` | `match_arm_blocks` | `never` |
+| `comments.code-block-width` | `doc_comment_code_block_width` | `100` |
+| `braces.force-switch-arm` | `match_arm_blocks` | `always` |
 
 先の 2 つは**方言の grouped import**（`import a.{B, C};`）に対する rule で、Java の構文ではない
 から 4 ベンダーが持たない。`granularity = "package"` だけは方言が有効なプロジェクトでしか動かず、

@@ -32,13 +32,13 @@ pub enum BraceStyle {
 
 /// Whether a control-flow statement's braceless body gains braces.
 ///
-/// The only rule in this crate that *adds* significant tokens, so it defaults to
-/// [`Never`](Self::Never) and the strict token-sequence invariant holds unless opted into.
-/// IntelliJ `IF_BRACE_FORCE` and friends.
+/// The four IntelliJ `*_BRACE_FORCE` keys default to [`Never`](Self::Never).
+/// [`force_switch_arm`](Braces::force_switch_arm) defaults to [`Always`](Self::Always) — rustfmt's
+/// `match_arm_blocks = true`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ForceBraces {
-    /// Leave a braceless body exactly as written. The default.
+    /// Leave a braceless body exactly as written.
     Never,
     /// Add braces only when the statement spans more than one line. The only rule whose
     /// condition consumes the engine's own line-breaking result, so its idempotency is a tested
@@ -120,10 +120,10 @@ pub struct Braces {
     pub force_do_while: ForceBraces,
     /// Wrap an arrow `case`'s body in a block — `case A -> run();` to `case A -> { run(); }`.
     ///
-    /// Mirrors rustfmt's `match_arm_blocks`, but defaults to [`ForceBraces::Never`] where
-    /// rustfmt's default is `true`: no Java formatter adds braces unasked, and the four
-    /// `force-*` rules above are all off for the same reason. IntelliJ's `*_BRACE_FORCE` is the
-    /// vendor behind those four; an arrow `case` has no counterpart, so this key is jals-native.
+    /// Mirrors rustfmt's `match_arm_blocks`, and defaults to [`ForceBraces::Always`] with it.
+    /// Vendor profiles pin [`Never`](ForceBraces::Never): no Java formatter adds braces unasked,
+    /// and the four IntelliJ `*_BRACE_FORCE` keys above stay off for the same reason. An arrow
+    /// `case` has no vendor counterpart, so this key is jals-native.
     ///
     /// **Statement switches only.** A `case` of a switch *expression* has to produce a value, so
     /// braces alone do not do it — `case A -> f();` would have to become `case A -> { yield f(); }`,
@@ -175,7 +175,7 @@ impl Default for Braces {
             force_for: ForceBraces::Never,
             force_while: ForceBraces::Never,
             force_do_while: ForceBraces::Never,
-            force_switch_arm: ForceBraces::Never,
+            force_switch_arm: ForceBraces::Always,
             keep_type_body_on_one_line: KeepOnOneLine::IfEmpty,
             keep_method_body_on_one_line: KeepOnOneLine::IfEmpty,
             keep_block_on_one_line: KeepOnOneLine::IfEmpty,

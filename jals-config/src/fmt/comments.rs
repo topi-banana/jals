@@ -107,8 +107,9 @@ pub struct Comments {
     /// wrote, rather than being pushed past the margin in the name of normalizing it.
     ///
     /// No native option: Eclipse's `comment.format_source_code` shares `comment.line_length`
-    /// with prose and has no separate budget for a snippet, which is exactly what the `0`
-    /// default spells (`jals-fmt/MAPPING-rustfmt.md` §6).
+    /// with prose and has no separate budget for a snippet. The default is `100`, rustfmt's
+    /// `doc_comment_code_block_width`; `0` still means "track [`width`](Self::width)", which is
+    /// what every vendor profile pins (`jals-fmt/MAPPING-rustfmt.md` §6).
     pub code_block_width: usize,
     /// Keep blank lines inside a comment's **description** instead of collapsing them. Eclipse
     /// `comment.clear_blank_lines_in_javadoc_comment` (inverted) / IntelliJ `JD_KEEP_EMPTY_LINES`.
@@ -207,7 +208,7 @@ impl Default for Comments {
             format_source_in_comments: false,
             width: 80,
             count_width_from_start: false,
-            code_block_width: 0,
+            code_block_width: 100,
             preserve_blank_lines: true,
             blank_lines_between_tags: false,
             preserve_line_breaks: false,

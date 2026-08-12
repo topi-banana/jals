@@ -36,7 +36,7 @@ use jals_config::fmt::{
 use serde::{Deserialize, Deserializer};
 
 use super::serde_kv::Kv;
-use super::{ConfigImporter, ImportError, ImportGroups};
+use super::{ConfigImporter, ImportError, ImportGroups, pin_java_baseline};
 
 mod blank_lines;
 mod codegen;
@@ -266,6 +266,7 @@ impl Lower {
 impl From<IntellijConfig> for Config {
     fn from(native: IntellijConfig) -> Self {
         let mut config = Self::default();
+        pin_java_baseline(&mut config);
         let IntellijConfig {
             indent,
             spacing,

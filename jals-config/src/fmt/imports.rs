@@ -1,8 +1,9 @@
 //! `[imports]` and modifier ordering — the two passes that reorder significant tokens.
 //!
-//! Everything here changes the token *sequence* (never the multiset), so every key is off or
-//! `preserve` by default and the strict invariant holds unless opted into. The Eclipse JDT
-//! formatter deliberately owns none of this (Organize Imports is a separate IDE action), so the
+//! Everything here changes the token *sequence* (never the multiset). [`Imports::order`] defaults
+//! to [`Sort`](ImportOrder::Sort) — rustfmt's `reorder_imports = true` — so the default already
+//! reorders; `granularity` / `reorder-modifiers` / `remove-unused` stay off/`preserve`. The Eclipse
+//! JDT formatter deliberately owns none of this (Organize Imports is a separate IDE action), so the
 //! vendors that do are IntelliJ, Spotless, and google-java-format
 //! (`jals-fmt/MAPPING.md` §5.6).
 
@@ -20,9 +21,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ImportOrder {
-    /// Leave the import block exactly as written. The default.
+    /// Leave the import block exactly as written.
     Preserve,
-    /// Sort every import alphabetically as one block, non-static before static.
+    /// Sort every import alphabetically as one block, non-static before static. The default —
+    /// rustfmt's `reorder_imports = true`. `group_imports = Preserve` has no jals mode; [`Group`]
+    /// would apply `java.` / `javax.` prefixes rustfmt does not.
     Sort,
     /// Sort into the blocks named by [`groups`](Imports::groups), separated by
     /// `blank-lines.between-import-groups`. IntelliJ `IMPORT_LAYOUT_TABLE` /
@@ -95,18 +98,17 @@ pub struct Imports {
     /// google-java-format has. IntelliJ's optimize-imports resolves the classpath instead and
     /// therefore does not project here (`jals-fmt/MAPPING.md` §7).
     ///
-    /// The only *configurable* rule in this crate that removes significant tokens, so it defaults
-    /// to `false`. It is not the only operation that removes one: the jals dialect drops a grouped
-    /// import's trailing comma unconditionally, which is why the formatter's exemptions are
-    /// enumerated in `jals-fmt`'s own table (`jals-fmt/DESIGN.md` §20) rather than being read off
-    /// this section's keys.
+    /// Defaults to `false`. Token-removing operations are enumerated in `jals-fmt`'s own table
+    /// (`jals-fmt/DESIGN.md` §20) rather than being read off this section's keys: the dialect
+    /// also drops a grouped import's trailing comma unconditionally, and
+    /// `[wrapping] remove-nested-parens` is on by default.
     pub remove_unused: bool,
 }
 
 impl Default for Imports {
     fn default() -> Self {
         Self {
-            order: ImportOrder::Preserve,
+            order: ImportOrder::Sort,
             granularity: ImportGranularity::Preserve,
             groups: vec![
                 "java.".to_owned(),

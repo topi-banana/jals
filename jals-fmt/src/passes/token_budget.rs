@@ -407,10 +407,12 @@ mod tests {
 
     #[test]
     fn extra_braces_are_rejected_when_no_force_rule_is_on() {
+        let mut cfg = Config::default();
+        cfg.braces.force_switch_arm = jals_config::fmt::ForceBraces::Never;
         assert!(!Verdict::of(
             "class A { void m() { do x(); while (c); } }",
             "class A { void m() { do { x(); } while (c); } }",
-            &Config::default(),
+            &cfg,
         ));
     }
 

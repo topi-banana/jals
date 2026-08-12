@@ -24,9 +24,10 @@ build front end (`jals build` / `run` / `clean` / `init`) wraps the JDK's `javac
   lambdas, switch expressions, patterns (including record patterns and guards), and more.
 - **A formatter with guarantees.** Comments are never dropped or reordered, formatting is idempotent
   (`format(format(x)) == format(x)`), and the significant-token multiset changes only where a
-  declared operation says it may — every one of them off by default bar the dialect's own. An output
-  that fails that check is discarded and the input handed back untouched — and the run *says* so,
-  because a file that was refused is byte-identical to one that needed nothing.
+  declared operation says it may. `Config::default()` licenses the dialect's trailing-comma drop,
+  rustfmt-on `remove-nested-parens` and `force-switch-arm`, and import sort (sequence, not
+  multiset). An output that fails that check is discarded and the input handed back untouched — and
+  the run *says* so, because a file that was refused is byte-identical to one that needed nothing.
 - **A linter with real semantics.** Beyond syntactic checks, `jals lint` catches unused
   locals, type mismatches, unreported checked exceptions, and dead conditionals, using name
   resolution and type inference over the CST — not just pattern matching.
@@ -407,14 +408,14 @@ indent-style = "space" # "space" | "tab" | "mixed"
 indent-width = 4       # columns per indentation level
 tab-width = 4          # display width of a literal tab
 max-width = 100        # column limit
-line-ending = "lf"     # "lf" | "crlf" | "auto" | "native"
+line-ending = "auto"   # "lf" | "crlf" | "auto" | "native"
 insert-final-newline = true
 
 [blank-lines]
 max-in-code = 1 # longest run of source blank lines kept in a body
 
 [imports]
-order = "preserve" # "preserve" | "sort" | "group"
+order = "sort"     # "preserve" | "sort" | "group"
 
 [comments]
 format-javadoc = false

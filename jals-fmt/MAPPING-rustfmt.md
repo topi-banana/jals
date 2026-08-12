@@ -81,7 +81,7 @@ option（R）に加えて、rustfmt 特有の**部分幅しきい値**という�
 | `max_width` | 100 | `layout.max-width`（100） |
 | `hard_tabs` | false | `layout.indent-style`（jals は `space`/`tab`/`mixed` の 3 値に一般化） |
 | `tab_spaces` | 4 | `layout.indent-width`（4）＋ `layout.tab-width`（4）。jals は 2 分割 — `mixed` では 1 レベルが indent-width 列、それを tab-width 幅のタブで描く |
-| `newline_style` | Auto | `layout.line-ending`。`Auto`/`Native`/`Unix`/`Windows` ↔ `auto`/`native`/`lf`/`crlf` と 1:1 |
+| `newline_style` | Auto | `layout.line-ending`（`auto`）。`Auto`/`Native`/`Unix`/`Windows` ↔ `auto`/`native`/`lf`/`crlf` と 1:1 |
 | `wrap_comments` | false | `comments.format-line` / `format-block` / `format-javadoc`（3 分割）。3 ベンダー共通の分け方 |
 | `format_code_in_doc_comments` | false | `comments.format-source-in-comments`（Eclipse `comment.format_source_code`） |
 | `comment_width` | 80 | `comments.width`（80） |
@@ -91,15 +91,15 @@ option（R）に加えて、rustfmt 特有の**部分幅しきい値**という�
 | `empty_item_single_line` | true | `braces.keep-*-on-one-line = if-empty`（8 key） |
 | `fn_single_line` | false | `braces.keep-method-body-on-one-line` |
 | `force_multiline_blocks` | false | `braces.keep-*-on-one-line = never` |
-| `reorder_imports` | true | `imports.order = "sort"` |
+| `reorder_imports` | true | `imports.order = "sort"`（既定） |
 | `group_imports` | Preserve | `imports.order = "group"` ＋ `imports.groups` |
 | `type_punctuation_density` | Wide | `spacing.around-type-bounds`（Java の bound は `&`） |
 | `space_before_colon` | false | `spacing.before-{ternary,foreach,label,case,assert}-colon`（5 分割 = §4.1 P2 の解消） |
 | `space_after_colon` | true | `spacing.after-*-colon`（同 5 分割） |
 | `binop_separator` | Front | `wrapping.before-binary-operator`（Front=true）。jals は演算子種別ごとに 6 分割（`-ternary-operator` / `-assignment-operator` / `-method-chain-dot` / `-comma` / `-assert-colon`） |
-| `short_array_element_width_threshold` | 10 | `wrapping.fill-item-width`（既定 0、GJF は 10）。**幅族の唯一の生き残り**（§4） |
+| `short_array_element_width_threshold` | 10 | `wrapping.fill-item-width`（既定 10）。**幅族の唯一の生き残り**（§4） |
 | `match_arm_indent` | true | `layout.indent-switch-labels` ＋ `layout.indent-switch-case-body` |
-| `fn_params_layout` | Tall | `wrapping.method-parameters`。`Compressed`/`Tall`/`Vertical` → `if-long`/`if-long-per-item`/`always-per-item` |
+| `fn_params_layout` | Tall | `wrapping.method-parameters`（既定 `if-long-per-item`）。`Compressed`/`Tall`/`Vertical` → `if-long`/`if-long-per-item`/`always-per-item` |
 | `fn_args_layout` | Tall | 同上（非推奨 alias） |
 | `brace_style` | SameLineWhere | `braces.type-declaration` / `braces.method-declaration`（`BraceStyle` 5 値）。`SameLineWhere` の `where` 判定は Rust 固有なので `same-line` に潰れる |
 | `control_brace_style` | AlwaysSameLine | `braces.block` ＋ `braces.{else,while,catch,finally}-on-new-line`。`ClosingNextLine` = `else-on-new-line = true` |
@@ -182,11 +182,11 @@ option（R）に加えて、rustfmt 特有の**部分幅しきい値**という�
 |---|---|---|---|
 | `imports_granularity` | Preserve | `[imports] granularity` | `preserve` |
 | `merge_imports`（非推奨 alias） | false | 同上 | — |
-| `imports_layout` | Mixed | `[wrapping] import-group`（`WrapPolicy`） | `never` |
+| `imports_layout` | Mixed | `[wrapping] import-group`（`WrapPolicy`） | `if-long` |
 | `normalize_comments` | false | `[comments] normalize-block-comments` | `false` |
-| `remove_nested_parens` | true | `[wrapping] remove-nested-parens` | `false` |
-| `doc_comment_code_block_width` | 100 | `[comments] code-block-width` | `0`（= `comments.width`） |
-| `match_arm_blocks` | true | `[braces] force-switch-arm`（`ForceBraces`） | `never` |
+| `remove_nested_parens` | true | `[wrapping] remove-nested-parens` | `true` |
+| `doc_comment_code_block_width` | 100 | `[comments] code-block-width` | `100` |
+| `match_arm_blocks` | true | `[braces] force-switch-arm`（`ForceBraces`） | `always` |
 
 ---
 
@@ -211,8 +211,8 @@ MAPPING.md §4.1 の P1 が既に結論を出している:
 
 そして後者は GJF が `MAX_ITEM_LENGTH_FOR_FILLING = 10` として実際に持っている固定挙動である。
 既定値まで rustfmt と一致するのは偶然ではなく、「短い項目は詰めてよいが、長いものが 1 つでも混ざれば
-詰め方が恣意的になる」という同じ判断を両者が独立に下したためである。jals の既定は `0`（無効）で、
-GJF プロファイルが `10` を書き込む。
+詰め方が恣意的になる」という同じ判断を両者が独立に下したためである。jals の既定も `10`。
+GJF プロファイルは同じ値を明示する。
 
 `inline_attribute_width` も同じ置き換えを受けている。rustfmt は「注釈と宣言の合計幅がしきい値未満なら
 同じ行」と幅で言うが、jals は `wrapping.inline-argumentless-annotations` という 3 値 enum
@@ -245,9 +245,9 @@ rustfmt に由来を持つのはその 35 に対応する部分だけである�
 
 ## 6. N の 6 key — 設計判断
 
-7 つとも**どの Java ベンダーも produce しない jals-native rule** で、既定値は `preserve` / `never` /
-`false` / `0`。これは `[literals]` が既に占めている位置（MAPPING.md §4.3 の脚注、§6 のテスト 3 が
-「どの importer からも動かない」と明示的に記録している唯一の族）と同格である。
+7 つとも**どの Java ベンダーも produce しない jals-native rule**。既定は rustfmt に合わせ、
+ベンダープロファイルが旧 Java 床をピンする。`granularity` と `normalize-block-comments` だけは
+rustfmt も「何もしない」側が既定なので、床と一致する。
 
 ### 6.1 `[imports] granularity` ← `imports_granularity`
 
@@ -304,14 +304,14 @@ import ブロック全体をこの row が答えるため（`remove-unused` は�
 ### 6.2 `[wrapping] import-group` ← `imports_layout`
 
 grouped import のメンバ一覧の折り返し。`WrapPolicy` の 4 値がそのまま
-`Horizontal`/`Mixed`/`HorizontalVertical`/`Vertical` に対応する。既定 `never` は方言の canonical 形。
+`Horizontal`/`Mixed`/`HorizontalVertical`/`Vertical` に対応する。既定 `if-long` は rustfmt の
+`Mixed`。
 
 **`visit/dialect.rs` の前提を書き換えた。** 同ファイルは末尾カンマを無条件に落とす根拠として
 「a group is always laid out flat, so there is no vertical form for a trailing comma to serve」と
 書いていた。縦形が入るとこの根拠は成立しない。**drop は無条件のまま**にし、根拠を「方言の
-canonical form に trailing comma は存在しない」に書き換えた。gate 化できないのは、
-`the_default_config_licenses_exactly_the_unconditional_rows` が「gate 付き row は既定で必ず off」を
-要求するため — 既定 on の gate 付き row は作れない。
+canonical form に trailing comma は存在しない」に書き換えた。wrap policy にゲートすると、
+方言の canonical なトークン形が wrapping ルールに左右される。
 
 ### 6.3 `[comments] normalize-block-comments` ← `normalize_comments`
 
@@ -337,8 +337,8 @@ comment になるのでコメントの**個数**が変わる。
 
 ### 6.4 `[wrapping] remove-nested-parens` ← `remove_nested_parens`
 
-`((x + y))` → `(x + y)`。**既定は `false`**（rustfmt は `true`）。トークンを消すのは Java
-フォーマッタが頼まれずにやることではなく、4 ベンダー全員が冗長な括弧を原文どおり残す。
+`((x + y))` → `(x + y)`。**既定は `true`**（rustfmt と同じ）。ベンダープロファイルは `false` をピンする
+— 4 ベンダー全員が冗長な括弧を原文どおり残す。
 
 述語は「`PAREN_EXPR` の唯一の子が `PAREN_EXPR`」で、外側の対を落とす。cast の括弧・呼び出しの
 引数リスト・制御文の条件は `PAREN_EXPR` の子ではないので候補にならない。`(((x)))` が `(x)` になるのは
@@ -350,8 +350,8 @@ one-predicate-two-callers 規則）。row は `Removes { kinds: [LPAREN, RPAREN]
 ### 6.5 `[comments] code-block-width` ← `doc_comment_code_block_width`
 
 **§2 の採否基準を満たさない**ことは明示しておく: Eclipse は `comment.line_length` を prose と共用し、
-snippet 専用の幅を持たない。既定 `0` =「`comments.width` に従う」とすることで、到達可能な既存設定は
-どれも動かない。
+snippet 専用の幅を持たない。既定は rustfmt と同じ `100`。`0` =「`comments.width` に従う」は
+ベンダープロファイルがピンする値で、到達可能な既存設定はどれも動かない。
 
 守る対象も rustfmt より狭い。jals は snippet を**再整形しない**（字下げの正規化だけ）ので、
 「再字下げした結果がこの幅を超えるなら、著者が書いた字下げのまま残す」という予算として働く。
@@ -359,7 +359,8 @@ snippet 専用の幅を持たない。既定 `0` =「`comments.width` に従う�
 
 ### 6.6 `[braces] force-switch-arm` ← `match_arm_blocks`
 
-`case A -> run();` → `case A -> { run(); }`。**switch 文の arm のみ**。
+`case A -> run();` → `case A -> { run(); }`。**switch 文の arm のみ**。既定は rustfmt と同じ
+`always`。ベンダープロファイルは `never` をピンする。
 
 switch *式* の arm は値を作らねばならないので、ブロック化には `case A -> { yield f(); }` と
 `yield` の挿入が要る。これはレイアウトではなく**意味の書き換え**なので、switch 式の arm には一切

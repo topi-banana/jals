@@ -85,6 +85,22 @@ impl fmt::Display for ImportError {
 
 impl core::error::Error for ImportError {}
 
+/// Pre-rustfmt Java-idiomatic floor for the keys [`Config::default`] now takes from rustfmt.
+///
+/// Vendor `From` impls apply this immediately after `Config::default()`, then overlay native
+/// values, so an omitted native option cannot leak rustfmt into a Java profile.
+pub(crate) const fn pin_java_baseline(config: &mut Config) {
+    use jals_config::fmt::{ForceBraces, ImportOrder, LineEnding, WrapPolicy};
+    config.layout.line_ending = LineEnding::Lf;
+    config.imports.order = ImportOrder::Preserve;
+    config.wrapping.method_parameters = WrapPolicy::IfLong;
+    config.wrapping.fill_item_width = 0;
+    config.wrapping.import_group = WrapPolicy::Never;
+    config.wrapping.remove_nested_parens = false;
+    config.comments.code_block_width = 0;
+    config.braces.force_switch_arm = ForceBraces::Never;
+}
+
 /// A native formatter config that can be parsed from its file text and lowered to a jals
 /// [`Config`].
 ///

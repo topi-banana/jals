@@ -728,6 +728,8 @@ impl License {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec::Vec;
+
     use jals_config::fmt::{Config, ForceBraces, HexLiteralCase, ImportGranularity, ImportOrder};
     use jals_syntax::{SyntaxElement, SyntaxKind};
 
@@ -822,21 +824,49 @@ mod tests {
     }
 
     #[test]
-    fn the_default_config_licenses_exactly_the_unconditional_rows() {
-        // `CLAUDE.md`'s invariant, machine-checked: every *configured* token-changing operation is
-        // off (or `preserve`) by default, so the only thing the default license permits is the one
-        // operation that has no config key to turn off.
+    fn the_default_config_enables_exactly_these_rows() {
+        // `CLAUDE.md`'s invariant, machine-checked: `Config::default()` licenses exactly the
+        // rustfmt-on rows plus the one operation that has no config key to turn off.
         let cfg = Config::default();
-        for op in &OPERATIONS {
-            assert_eq!(
-                (op.enabled)(&cfg),
-                op.gate.is_none(),
-                "{}: a row is enabled under the default config iff it is the unconditional one \
-                 (gate: {})",
-                op.id,
-                op.gate.unwrap_or("—"),
-            );
-        }
+        let enabled: Vec<_> = OPERATIONS
+            .iter()
+            .filter(|op| (op.enabled)(&cfg))
+            .map(|op| (op.id, op.gate))
+            .collect();
+        assert_eq!(
+            enabled,
+            [
+                ("dialect grouped-import trailing comma", None),
+                (
+                    "[wrapping] remove-nested-parens",
+                    Some("[wrapping] remove-nested-parens")
+                ),
+                (
+                    "[braces] force-*",
+                    Some(
+                        "[braces] force-if / force-for / force-while / force-do-while / force-switch-arm"
+                    )
+                ),
+                ("R0.1 import ordering", Some("[imports] order")),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_default_config_grants_exactly_these_lanes() {
+        // R0.1 is enabled but `Reorders` — sequence, not multiset — so it grants no lane.
+        const LANES: &[&str] = &[
+            "dialect grouped-import trailing comma",
+            "[wrapping] remove-nested-parens",
+            "[braces] force-*",
+        ];
+        let cfg = Config::default();
+        let lanes: Vec<_> = OPERATIONS
+            .iter()
+            .filter(|op| (op.enabled)(&cfg) && op.effect.specificity().is_some())
+            .map(|op| op.id)
+            .collect();
+        assert_eq!(lanes, LANES);
     }
 
     #[test]

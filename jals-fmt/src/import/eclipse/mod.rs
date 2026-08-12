@@ -19,7 +19,8 @@
 //! Eclipse itself groups the surface. Each family deserializes from the same flat map — no
 //! `#[serde(flatten)]`, just nine passes over one `serde_json::Map`, so the behavior is
 //! explicit. Every field is `Option`: absent means "the profile did not say", which leaves the
-//! corresponding jals option at its default rather than at Eclipse's.
+//! corresponding jals option at the Java baseline (`pin_java_baseline`) rather than at
+//! Eclipse's — not at `Config::default()`, whose mapped keys now follow rustfmt.
 //!
 //! # Projection
 //!
@@ -39,7 +40,7 @@ use jals_config::fmt::{
 use serde::{Deserialize, Deserializer};
 
 use super::serde_kv::Kv;
-use super::{ConfigImporter, ImportError};
+use super::{ConfigImporter, ImportError, pin_java_baseline};
 
 mod alignment;
 mod blank_lines;
@@ -223,6 +224,7 @@ impl Lower {
 impl From<EclipseConfig> for Config {
     fn from(native: EclipseConfig) -> Self {
         let mut config = Self::default();
+        pin_java_baseline(&mut config);
         let EclipseConfig {
             indentation,
             braces,
