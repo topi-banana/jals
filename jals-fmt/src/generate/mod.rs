@@ -19,7 +19,7 @@
 //! illustrative block would need a provenance side-channel threaded through every `From` impl and
 //! are deliberately not attempted here.
 //!
-//! # Why serde and not 174 hand-written comparisons
+//! # Why serde and not one hand-written comparison per rule
 //!
 //! [`Config`] is exactly two levels deep — eight section tables of scalars, strings, string lists
 //! and unit-variant enums, with no scalar at the root — so diffing it against its default through

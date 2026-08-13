@@ -97,6 +97,20 @@ pub struct Comments {
     /// Measure [`width`](Self::width) from the comment's start column rather than from column
     /// zero. Eclipse `comment.count_line_length_from_starting_position`.
     pub count_width_from_start: bool,
+    /// The width a `<pre>` / `{@code}` region inside a comment is allowed to occupy, or `0` to
+    /// use [`width`](Self::width).
+    ///
+    /// Mirrors rustfmt's `doc_comment_code_block_width`, and like it has no effect unless
+    /// [`format_source_in_comments`](Self::format_source_in_comments) is on. What it governs is
+    /// narrower than rustfmt's, because the re-indent is narrower than a re-format: a region
+    /// whose re-indented lines would pass this width is left at the indentation the author
+    /// wrote, rather than being pushed past the margin in the name of normalizing it.
+    ///
+    /// No native option: Eclipse's `comment.format_source_code` shares `comment.line_length`
+    /// with prose and has no separate budget for a snippet. The default is `100`, rustfmt's
+    /// `doc_comment_code_block_width`; `0` still means "track [`width`](Self::width)", which is
+    /// what every vendor profile pins (`jals-fmt/MAPPING-rustfmt.md` §6).
+    pub code_block_width: usize,
     /// Keep blank lines inside a comment's **description** instead of collapsing them. Eclipse
     /// `comment.clear_blank_lines_in_javadoc_comment` (inverted) / IntelliJ `JD_KEEP_EMPTY_LINES`.
     pub preserve_blank_lines: bool,
@@ -162,6 +176,19 @@ pub struct Comments {
     /// (`/*a=*/` → `/* a= */`). Its `CommentsHelper.reformatParameterComment`; no Eclipse or
     /// IntelliJ equivalent.
     pub normalize_parameter_comments: bool,
+    /// Rewrite an own-line block comment as a run of line comments — `/* note */` to `// note`.
+    ///
+    /// Mirrors rustfmt's `normalize_comments`, including its "where possible": only a block
+    /// comment that stands **alone on its own line** is converted. A block comment sharing a line
+    /// with code (`foo(/* x */ y)`, or a trailing `int x; /* why */`) is left exactly as written,
+    /// because turning it into a line comment would send everything after it to the next line —
+    /// a layout change nothing asked for, and one the token fail-safe cannot see, since a
+    /// comment's interior holds no significant tokens.
+    ///
+    /// A converted comment is **not** also reflowed: the conversion is a change of delimiter, and
+    /// which of the `[comments]` reflow rules then applies is those rules' own business. No native
+    /// option: all four references keep a comment's delimiters exactly as the author chose them.
+    pub normalize_block_comments: bool,
     /// Keep a block comment written before a token on the same line hugging that token
     /// (`java.lang./* @A */ String`) instead of flushing it to end of line. What
     /// google-java-format does; no Eclipse or IntelliJ equivalent.
@@ -181,6 +208,7 @@ impl Default for Comments {
             format_source_in_comments: false,
             width: 80,
             count_width_from_start: false,
+            code_block_width: 100,
             preserve_blank_lines: true,
             blank_lines_between_tags: false,
             preserve_line_breaks: false,
@@ -193,6 +221,7 @@ impl Default for Comments {
             reflow_unclosed_html: true,
             set_off_html_lists: true,
             tables_are_preformatted: true,
+            normalize_block_comments: false,
             normalize_parameter_comments: false,
             inline_block_comments: false,
         }

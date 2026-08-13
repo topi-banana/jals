@@ -48,6 +48,15 @@ pub(crate) struct Comment {
     /// The column the comment opened at in the source, so a comment the formatter does not
     /// reflow can move its continuation lines with it.
     pub(crate) column: usize,
+    /// Whether the **source** put this comment alone on its line — nothing significant before
+    /// it, nothing after it.
+    ///
+    /// A fact about the input, not about the layout being decided, which is why it is recorded
+    /// here rather than derived at emission time: by then `own_line` says where the *output* will
+    /// put the comment, and a `/* x */` written mid-expression can end up there. Read by
+    /// `[comments] normalize-block-comments`, whose whole precondition is that converting the
+    /// comment cannot push code onto another line.
+    pub(crate) alone_on_line: bool,
     /// Whether a break stands in front of this comment.
     ///
     /// `OpsBuilder.build` inserts one for every comment it puts in a token's `toksBefore` — a
@@ -148,6 +157,8 @@ impl CommentMap {
                     text,
                     blank_lines_before: newlines.saturating_sub(1),
                     column: Self::column_of(&tok),
+                    alone_on_line: (newlines > 0 || last_sig.is_none())
+                        && !Self::followed_by_same_line_token(&tok),
                     breaks,
                 };
 

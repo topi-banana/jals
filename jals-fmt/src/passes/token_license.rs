@@ -39,7 +39,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use jals_config::fmt::{Config, ForceBraces, ImportOrder};
+use jals_config::fmt::{Config, ForceBraces, ImportGranularity, ImportOrder};
 use jals_syntax::ast::{AstNode, ImportGroup};
 use jals_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 use text_size::{TextRange, TextSize};
@@ -56,6 +56,8 @@ use super::literals::LiteralRewrite;
 pub(crate) enum Site {
     /// A `COMMA` in an `IMPORT_GROUP` that separates nothing.
     TrailingGroupComma,
+    /// A parenthesis of a `PAREN_EXPR` whose whole content is another `PAREN_EXPR`.
+    RedundantParen,
     /// Inside a node [`StringWrapper::sites`](super::StringWrapper::sites) reports.
     ///
     /// **How wide this really is**: `sites` is the pass's *eligibility* test, and it applies no
@@ -78,6 +80,7 @@ impl Site {
     fn holds(self, tok: &SyntaxToken, sites: &Sites) -> bool {
         match self {
             Self::TrailingGroupComma => License::is_group_trailing_comma(tok),
+            Self::RedundantParen => License::is_redundant_paren(tok),
             Self::Reflow => sites.holds(tok.text_range().start()),
         }
     }
@@ -95,6 +98,24 @@ pub(crate) enum Content {
     Concatenations,
     /// What each text block spells once its incidental whitespace is stripped.
     TextBlocks,
+    /// Every type an import declaration names, fully qualified, with its `static` flag.
+    ///
+    /// # It is a subset check, not an equality one
+    ///
+    /// Deliberately, and for the same reason [`Site::Reflow`] is wider than the tokens a reflow
+    /// actually moves. The row carrying it ([`Effect::Recuts`]) is declared *above* the
+    /// unused-import row and therefore answers for the whole import block whenever both are on —
+    /// and `remove-unused` removes names by design. Equality would reject every run that deleted an
+    /// unused import, so what the check states is that the output invents nothing: every name it
+    /// declares was declared by the input.
+    ///
+    /// What that closes is the failure mode re-granulation actually has. Splitting
+    /// `import a.b.{C, D};` rebuilds each member's qualified name from a prefix, and merging
+    /// rebuilds a prefix from several names; a rebuild that concatenates wrong produces an import
+    /// of a type the file never mentioned, which the surrounding subtree allowance would otherwise
+    /// let through unremarked. What it does **not** close is a name that vanishes — that is the
+    /// gap [`Effect::RemovesSubtrees`] already documents, and this narrows it from one side only.
+    ImportedNames,
 }
 
 /// What one operation may do to the significant-token multiset.
@@ -117,6 +138,22 @@ pub(crate) enum Effect {
     /// submodules whose harness asserts nothing — so there is no way to tell a fixed hole from a new
     /// regression.
     RemovesSubtrees { kind: SyntaxKind },
+    /// Every token inside a `kind` subtree may appear, vanish, and move between subtrees;
+    /// `content` is all that survives.
+    ///
+    /// The node-scoped sibling of [`Redistributes`](Self::Redistributes), and it exists because
+    /// re-cutting the import block needs **both** directions at once: splitting
+    /// `import a.b.{C, D};` gains an `import`, a `;` and a copy of the prefix while losing the
+    /// braces and the comma, and merging does the reverse. [`RemovesSubtrees`](Self::RemovesSubtrees)
+    /// grants only losses, so it cannot answer for the gains; a [`Removes`](Self::Removes) or
+    /// [`Redistributes`](Self::Redistributes) row naming `COMMA` would sit in the same tier as the
+    /// dialect's trailing-comma row and mask it.
+    ///
+    /// It is scoped more narrowly than `RemovesSubtrees` *in effect* — the content check is what
+    /// the wider allowance buys — so its tier is declared above it. That ordering is what lets the
+    /// two compose: with both rows enabled an import token reaches this one first, and a name
+    /// `remove-unused` deleted still satisfies a subset check.
+    Recuts { kind: SyntaxKind, content: Content },
     /// Tokens of `kinds` at `site` may be missing.
     Removes {
         kinds: &'static [SyntaxKind],
@@ -188,7 +225,8 @@ impl Effect {
     )]
     const fn specificity(self) -> Option<u8> {
         match self {
-            Self::Removes { .. } | Self::Redistributes { .. } => Some(3),
+            Self::Removes { .. } | Self::Redistributes { .. } => Some(4),
+            Self::Recuts { .. } => Some(3),
             Self::RemovesSubtrees { .. } => Some(2),
             Self::Inserts { .. } => Some(1),
             Self::Reorders | Self::Respells { .. } => None,
@@ -206,7 +244,7 @@ impl Effect {
             | Self::Respells { kinds, .. }
             | Self::Redistributes { kinds, .. } => Some(kinds),
             // Claims every kind inside its scope rather than any kind by name.
-            Self::RemovesSubtrees { .. } | Self::Reorders => None,
+            Self::RemovesSubtrees { .. } | Self::Recuts { .. } | Self::Reorders => None,
         }
     }
 
@@ -216,6 +254,7 @@ impl Effect {
         match self {
             Self::Removes { site, .. } | Self::Redistributes { site, .. } => Some(site),
             Self::RemovesSubtrees { .. }
+            | Self::Recuts { .. }
             | Self::Inserts { .. }
             | Self::Respells { .. }
             | Self::Reorders => None,
@@ -271,7 +310,7 @@ pub(crate) enum Lane {
 ///
 /// Adding a token-changing pass means adding a row here. [`TokenBudget`](super::TokenBudget) needs
 /// no change, and neither does any test that reads its allowances off a [`License`].
-pub(crate) const OPERATIONS: [Operation; 8] = [
+pub(crate) const OPERATIONS: [Operation; 10] = [
     Operation {
         id: "dialect grouped-import trailing comma",
         gate: None,
@@ -283,6 +322,15 @@ pub(crate) const OPERATIONS: [Operation; 8] = [
         },
     },
     Operation {
+        id: "[wrapping] remove-nested-parens",
+        gate: Some("[wrapping] remove-nested-parens"),
+        enabled: |cfg| cfg.wrapping.remove_nested_parens,
+        effect: Effect::Removes {
+            kinds: &[SyntaxKind::LPAREN, SyntaxKind::RPAREN],
+            site: Site::RedundantParen,
+        },
+    },
+    Operation {
         id: "R4.1 long-string rewrapping",
         gate: Some("[wrapping] reflow-long-strings"),
         enabled: |cfg| cfg.wrapping.reflow_long_strings,
@@ -290,6 +338,15 @@ pub(crate) const OPERATIONS: [Operation; 8] = [
             kinds: &[SyntaxKind::STRING_LITERAL, SyntaxKind::PLUS],
             site: Site::Reflow,
             content: Content::Concatenations,
+        },
+    },
+    Operation {
+        id: "R0.4 import re-granulation",
+        gate: Some("[imports] granularity"),
+        enabled: |cfg| cfg.imports.granularity != ImportGranularity::Preserve,
+        effect: Effect::Recuts {
+            kind: SyntaxKind::IMPORT_DECL,
+            content: Content::ImportedNames,
         },
     },
     Operation {
@@ -327,7 +384,9 @@ pub(crate) const OPERATIONS: [Operation; 8] = [
     },
     Operation {
         id: "[braces] force-*",
-        gate: Some("[braces] force-if / force-for / force-while / force-do-while"),
+        gate: Some(
+            "[braces] force-if / force-for / force-while / force-do-while / force-switch-arm",
+        ),
         enabled: License::forces_braces,
         effect: Effect::Inserts {
             kinds: &[SyntaxKind::LBRACE, SyntaxKind::RBRACE],
@@ -490,6 +549,9 @@ impl License {
                 {
                     return Lane::Redistributed(row);
                 }
+                Effect::Recuts { kind, .. } if Site::within(tok, kind) => {
+                    return Lane::Redistributed(row);
+                }
                 Effect::RemovesSubtrees { kind } if Site::within(tok, kind) => {
                     return Lane::Removable(row);
                 }
@@ -561,7 +623,7 @@ impl License {
     )]
     pub(crate) fn removable_scopes(self) -> impl Iterator<Item = SyntaxKind> {
         self.rows().filter_map(|(_, op)| match op.effect {
-            Effect::RemovesSubtrees { kind } => Some(kind),
+            Effect::RemovesSubtrees { kind } | Effect::Recuts { kind, .. } => Some(kind),
             _ => None,
         })
     }
@@ -572,7 +634,8 @@ impl License {
             Effect::Respells {
                 content: Some(it), ..
             }
-            | Effect::Redistributes { content: it, .. } => it == content,
+            | Effect::Redistributes { content: it, .. }
+            | Effect::Recuts { content: it, .. } => it == content,
             _ => false,
         })
     }
@@ -597,9 +660,40 @@ impl License {
             cfg.braces.force_for,
             cfg.braces.force_while,
             cfg.braces.force_do_while,
+            cfg.braces.force_switch_arm,
         ]
         .iter()
         .any(|force| *force != ForceBraces::Never)
+    }
+
+    /// Whether `tok` is a parenthesis of a redundantly nested `PAREN_EXPR`.
+    ///
+    /// The token-level spelling of [`wraps_a_paren`](Self::wraps_a_paren), for the one caller that
+    /// has a token rather than a node: [`lane`](Self::lane). `Ctx::visit_paren` holds the
+    /// `PAREN_EXPR` itself and asks that predicate directly, so the rule that drops the tokens and
+    /// the check that licenses the drop still bottom out in one definition — the
+    /// one-predicate-two-callers rule this module exists to enforce.
+    ///
+    /// "Redundant" is decided on the **outer** pair: a `PAREN_EXPR` whose only significant child is
+    /// another `PAREN_EXPR` says nothing the inner one does not, so its own parentheses go and the
+    /// inner pair stays. Asking it of the inner pair instead would drop the wrong two tokens and
+    /// leave `(x + y))`.
+    fn is_redundant_paren(tok: &SyntaxToken) -> bool {
+        if !matches!(tok.kind(), SyntaxKind::LPAREN | SyntaxKind::RPAREN) {
+            return false;
+        }
+        tok.parent().is_some_and(|parent| {
+            parent.kind() == SyntaxKind::PAREN_EXPR && Self::wraps_a_paren(&parent)
+        })
+    }
+
+    /// Whether a `PAREN_EXPR`'s whole content is a single `PAREN_EXPR`.
+    pub(crate) fn wraps_a_paren(node: &SyntaxNode) -> bool {
+        let mut children = node.children();
+        let Some(only) = children.next() else {
+            return false;
+        };
+        only.kind() == SyntaxKind::PAREN_EXPR && children.next().is_none()
     }
 
     /// Whether `tok` is a grouped import's trailing comma — one that separates nothing.
@@ -634,7 +728,9 @@ impl License {
 
 #[cfg(test)]
 mod tests {
-    use jals_config::fmt::{Config, ForceBraces, HexLiteralCase, ImportOrder};
+    use alloc::vec::Vec;
+
+    use jals_config::fmt::{Config, ForceBraces, HexLiteralCase, ImportGranularity, ImportOrder};
     use jals_syntax::{SyntaxElement, SyntaxKind};
 
     use super::{Effect, License, OPERATIONS};
@@ -728,21 +824,49 @@ mod tests {
     }
 
     #[test]
-    fn the_default_config_licenses_exactly_the_unconditional_rows() {
-        // `CLAUDE.md`'s invariant, machine-checked: every *configured* token-changing operation is
-        // off (or `preserve`) by default, so the only thing the default license permits is the one
-        // operation that has no config key to turn off.
+    fn the_default_config_enables_exactly_these_rows() {
+        // `CLAUDE.md`'s invariant, machine-checked: `Config::default()` licenses exactly the
+        // rustfmt-on rows plus the one operation that has no config key to turn off.
         let cfg = Config::default();
-        for op in &OPERATIONS {
-            assert_eq!(
-                (op.enabled)(&cfg),
-                op.gate.is_none(),
-                "{}: a row is enabled under the default config iff it is the unconditional one \
-                 (gate: {})",
-                op.id,
-                op.gate.unwrap_or("—"),
-            );
-        }
+        let enabled: Vec<_> = OPERATIONS
+            .iter()
+            .filter(|op| (op.enabled)(&cfg))
+            .map(|op| (op.id, op.gate))
+            .collect();
+        assert_eq!(
+            enabled,
+            [
+                ("dialect grouped-import trailing comma", None),
+                (
+                    "[wrapping] remove-nested-parens",
+                    Some("[wrapping] remove-nested-parens")
+                ),
+                (
+                    "[braces] force-*",
+                    Some(
+                        "[braces] force-if / force-for / force-while / force-do-while / force-switch-arm"
+                    )
+                ),
+                ("R0.1 import ordering", Some("[imports] order")),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_default_config_grants_exactly_these_lanes() {
+        // R0.1 is enabled but `Reorders` — sequence, not multiset — so it grants no lane.
+        const LANES: &[&str] = &[
+            "dialect grouped-import trailing comma",
+            "[wrapping] remove-nested-parens",
+            "[braces] force-*",
+        ];
+        let cfg = Config::default();
+        let lanes: Vec<_> = OPERATIONS
+            .iter()
+            .filter(|op| (op.enabled)(&cfg) && op.effect.specificity().is_some())
+            .map(|op| op.id)
+            .collect();
+        assert_eq!(lanes, LANES);
     }
 
     #[test]
@@ -812,9 +936,11 @@ mod tests {
         all.imports.order = ImportOrder::Group;
         all.imports.reorder_modifiers = true;
         all.imports.remove_unused = true;
+        all.imports.granularity = ImportGranularity::Package;
         all.wrapping.reflow_long_strings = true;
         all.literals.hex_case = HexLiteralCase::Upper;
         all.braces.force_if = ForceBraces::Always;
+        all.wrapping.remove_nested_parens = true;
 
         let license = License::of(&all);
         for (nth, op) in OPERATIONS.iter().enumerate() {

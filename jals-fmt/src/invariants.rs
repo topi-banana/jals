@@ -17,9 +17,10 @@
 //! - **Significant tokens.** A token no [`OPERATIONS`](crate::passes::token_license::OPERATIONS) row
 //!   can reach must come out with an identical count, and a token inside a scope a row may *empty*
 //!   may go missing but never appear.
-//! - **Comments.** Every comment in the input appears in the output. A profile that deletes unused
-//!   imports takes their comments with them, so the *import block* is excluded rather than the whole
-//!   profile.
+//! - **Comments.** Every comment in the input appears in the output — unconditionally, with no
+//!   scope excluded. Deleting an unused import does *not* delete the prose written above it; the
+//!   only concession is that such a comment moves to the head of the import block, so the block's
+//!   comment order is compared as a multiset when `remove-unused` is on.
 //! - **Never panics.** Malformed input is formatted best-effort or returned unchanged, never dropped
 //!   and never a crash.
 //!
@@ -87,6 +88,12 @@ impl Corpus {
         // token change. Paired with a body that is *obviously* misformatted on purpose: the drop
         // used to make the fail-safe reject the whole run, and a source that was already canonical
         // would have come back byte-identical either way and satisfied every property.
+        // An unused import carrying prose, next to a used one. `remove-unused` deletes the
+        // declaration; the comment above it is not the declaration's to take, and before the
+        // deleted imports' comments were flushed this source lost `// why this is here`
+        // outright — invisible to every property, because the import block was excluded from the
+        // comment one and comments are not significant tokens.
+        "package p;\n\n// why this is here\nimport q.Unused;\nimport q.Alpha;\n\nclass A {\n  Alpha a;\n}\n",
         "import a.{B,};\nclass  A  {  }\n",
         // The same construct with the comma separating something, so an allowance greedy enough to
         // swallow a separator shows up here rather than in the field.
@@ -169,7 +176,7 @@ impl Corpus {
     /// Format once, keeping whether the formatter could vouch for the result.
     fn run(src: &str, config: &Config) -> Formatted {
         jals_exec::block_on_inline(async {
-            let (style, _) = Style::reify(config, src);
+            let (style, _) = Style::reify(config, src, jals_config::FeatureSet::default());
             let parse = jals_syntax::Parse::parse(src).await;
             let errors = parse.errors().len();
             Formatter::run(&parse.syntax(), src, errors, &style).await
@@ -183,7 +190,9 @@ impl Corpus {
 
     /// The license `config` grants, resolved the way the engine resolves it.
     fn license(src: &str, config: &Config) -> License {
-        Style::reify(config, src).0.license
+        Style::reify(config, src, jals_config::FeatureSet::default())
+            .0
+            .license
     }
 
     /// Whether `tok` sits inside a node of one of `scopes`.
@@ -250,16 +259,15 @@ impl Corpus {
     /// line's own indentation normalized away: moving a comment to its new column is precisely
     /// what [`CommentFormatter::shift`](crate::javadoc) is for, and a multi-line comment on a
     /// member that changed indent width would otherwise read as a comment that went missing.
-    fn comments(src: &str, imports: bool, reflow: bool) -> Vec<String> {
+    fn comments(src: &str, reordered: bool, reflow: bool) -> Vec<String> {
         let parse = jals_exec::block_on_inline(jals_syntax::Parse::parse(src));
-        parse
+        let mut collected: Vec<String> = parse
             .syntax()
             .descendants_with_tokens()
             .filter_map(SyntaxElement::into_token)
             // The crate's own definition of a comment, not a second list beside it: a fourth
             // comment kind would otherwise be one this property silently stopped checking.
             .filter(|tok| CommentMap::is_comment(tok.kind()))
-            .filter(|tok| imports || !Self::within(tok, &[SyntaxKind::IMPORT_DECL]))
             .map(|tok| {
                 if reflow {
                     alloc::format!("{:?}", tok.kind())
@@ -268,7 +276,15 @@ impl Corpus {
                     lines.join("\n")
                 }
             })
-            .collect()
+            .collect();
+        // `remove-unused` deletes declarations but not the prose above them, and the surviving
+        // block has no gap left to put that prose back into — so it is flushed to the head of the
+        // block and the *order* inside the block moves. Compared as a multiset there, and as a
+        // sequence everywhere else.
+        if reordered {
+            collected.sort();
+        }
+        collected
     }
 }
 
@@ -313,8 +329,11 @@ fn the_public_output_reports_the_verdict_the_pipeline_reached() {
     for (name, config) in Corpus::configurations() {
         for src in Corpus::SOURCES {
             let internal = Corpus::run(src, &config);
-            let public =
-                jals_exec::block_on_inline(crate::FormatOutput::format_source(src, &config));
+            let public = jals_exec::block_on_inline(crate::FormatOutput::format_source(
+                src,
+                &config,
+                jals_config::FeatureSet::default(),
+            ));
             assert_eq!(
                 public.vouched,
                 internal.vouched(),
@@ -362,19 +381,27 @@ fn a_token_no_operation_claims_is_never_touched() {
 #[test]
 fn no_comment_is_ever_dropped() {
     for (name, config) in Corpus::configurations() {
-        // A profile that deletes unused imports takes the comments attached to them with it, so the
-        // import block is excluded rather than the whole profile being skipped — the rest of the
-        // file is still held to exact comment preservation.
-        let scope = !config.imports.remove_unused;
+        // Nothing is excluded any more. A profile that deletes unused imports used to take their
+        // comments with it, and the import block was skipped rather than the whole profile; the
+        // comments now survive, so the only concession left is that their *order* inside the block
+        // may change (`Corpus::comments`).
+        let reordered = config.imports.remove_unused;
         // A reflow rewrites the comment's interior by design, so under one this asks only that
         // the comment survived. Which rule is on is read off the config, not assumed per profile.
+        //
+        // `normalize-block-comments` joins the list for a stronger reason than the reflow rules:
+        // it changes a comment's *delimiters*, and a multi-line block becomes several line
+        // comments — so the count moves too, not only the text.
         let comments = &config.comments;
-        let reflow = comments.format_line || comments.format_block || comments.format_javadoc;
+        let reflow = comments.format_line
+            || comments.format_block
+            || comments.format_javadoc
+            || comments.normalize_block_comments;
         for src in Corpus::SOURCES {
             let formatted = Corpus::format(src, &config);
             assert_eq!(
-                Corpus::comments(src, scope, reflow),
-                Corpus::comments(&formatted, scope, reflow),
+                Corpus::comments(src, reordered, reflow),
+                Corpus::comments(&formatted, reordered, reflow),
                 "{name}: a comment was dropped or duplicated for {src:?}\n--- output ---\n{formatted}",
             );
         }

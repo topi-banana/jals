@@ -9,8 +9,8 @@ use alloc::string::String;
 use alloc::vec;
 
 use jals_config::fmt::{
-    BlankLines, Comments, Config, DocumentedMember, ImportOrder, IndentStyle, InlineAnnotations,
-    Layout, WrapPolicy, Wrapping,
+    BlankLines, Comments, Config, DocumentedMember, ForceBraces, ImportOrder, IndentStyle,
+    InlineAnnotations, KeepOnOneLine, Layout, LineEnding, WrapPolicy, Wrapping,
 };
 
 use super::eclipse::EclipsePrefs;
@@ -299,6 +299,7 @@ fn the_gjf_family_profile_is_the_google_preset() {
             indent_width: 2,
             tab_width: 2,
             continuation_indent: Some(4),
+            line_ending: LineEnding::Lf,
             ..Layout::default()
         }
     );
@@ -313,6 +314,7 @@ fn the_gjf_family_profile_is_the_google_preset() {
             reflow_unclosed_html: false,
             normalize_parameter_comments: true,
             inline_block_comments: true,
+            code_block_width: 0,
             ..Comments::default()
         }
     );
@@ -357,7 +359,19 @@ fn the_gjf_family_profile_is_the_google_preset() {
             // `JavaFormatterOptions.reflowLongStrings` — google-java-format runs `StringWrapper`
             // unless `--skip-reflowing-long-strings`.
             reflow_long_strings: true,
+            import_group: WrapPolicy::Never,
+            remove_nested_parens: false,
             ..Wrapping::default()
+        }
+    );
+    assert_eq!(
+        config.braces,
+        jals_config::fmt::Braces {
+            keep_type_body_on_one_line: KeepOnOneLine::IfEmpty,
+            keep_method_body_on_one_line: KeepOnOneLine::IfEmpty,
+            keep_control_statement_on_one_line: true,
+            force_switch_arm: ForceBraces::Never,
+            ..jals_config::fmt::Braces::default()
         }
     );
     assert!(

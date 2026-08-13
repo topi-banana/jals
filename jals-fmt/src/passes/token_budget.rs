@@ -22,10 +22,11 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use jals_syntax::ast::{AstNode, ImportDecl};
 use jals_syntax::{SyntaxElement, SyntaxKind, SyntaxNode};
 
-use super::StringWrapper;
 use super::token_license::{Content, Lane, License, Sites};
+use super::{ImportNames, StringWrapper};
 
 /// A significant-token multiset, keyed by the lane that answers for each token.
 ///
@@ -40,6 +41,9 @@ struct Ledger {
     /// What the tokens a scoped allowance removed from the count must nonetheless still spell.
     concatenations: String,
     text_blocks: String,
+    /// Every type the import block names, fully qualified — sorted, so the comparison is a
+    /// multiset one and re-ordering the block is not a difference.
+    imported_names: Vec<String>,
 }
 
 impl Ledger {
@@ -78,6 +82,11 @@ impl Ledger {
             } else {
                 String::new()
             },
+            imported_names: if license.checks(Content::ImportedNames) {
+                Self::imported_names(root)
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -92,6 +101,23 @@ impl Ledger {
             .map(|tok| StringWrapper::text_block_content(tok.text()))
             .collect::<Vec<_>>()
             .join("\u{1}")
+    }
+
+    /// Every type the import block names, fully qualified and sorted.
+    ///
+    /// A grouped import contributes one entry per member, spelled as the plain declaration it
+    /// desugars to — which is exactly what makes merging and splitting invisible here and a
+    /// mis-rebuilt prefix visible. `static` is part of the entry: `import static a.B;` and
+    /// `import a.B;` are different declarations, and a re-granulation must not turn one into the
+    /// other.
+    fn imported_names(root: &SyntaxNode) -> Vec<String> {
+        let mut names: Vec<String> = root
+            .descendants()
+            .filter_map(ImportDecl::cast)
+            .flat_map(|decl| ImportNames::of(&decl))
+            .collect();
+        names.sort_unstable();
+        names
     }
 
     /// Whether `after` is a rendering of `self` that `license` authorizes.
@@ -119,6 +145,25 @@ impl Ledger {
         }
         if license.checks(Content::TextBlocks) && self.text_blocks != after.text_blocks {
             return false;
+        }
+        // Subset, not equality — the reason is [`Content::ImportedNames`]' own. Both sides are
+        // sorted, so this is one merge walk rather than a quadratic containment test.
+        if license.checks(Content::ImportedNames)
+            && !Self::is_submultiset(&after.imported_names, &self.imported_names)
+        {
+            return false;
+        }
+        true
+    }
+
+    /// Whether every entry of `part` appears in `whole` at least as often. Both must be sorted.
+    fn is_submultiset(part: &[String], whole: &[String]) -> bool {
+        let mut rest = whole;
+        for name in part {
+            match rest.iter().position(|candidate| candidate == name) {
+                Some(at) => rest = &rest[at + 1..],
+                None => return false,
+            }
         }
         true
     }
@@ -166,7 +211,7 @@ mod tests {
         /// Whether `formatted` is an acceptable rendering of `src` under `config`.
         fn of(src: &str, formatted: &str, config: &Config) -> bool {
             jals_exec::block_on_inline(async {
-                let (style, _) = Style::reify(config, src);
+                let (style, _) = Style::reify(config, src, jals_config::FeatureSet::default());
                 let parse = jals_syntax::Parse::parse(src).await;
                 let errors = parse.errors().len();
                 TokenBudget::accepts(src, &parse.syntax(), errors, formatted, style.license).await
@@ -362,10 +407,12 @@ mod tests {
 
     #[test]
     fn extra_braces_are_rejected_when_no_force_rule_is_on() {
+        let mut cfg = Config::default();
+        cfg.braces.force_switch_arm = jals_config::fmt::ForceBraces::Never;
         assert!(!Verdict::of(
             "class A { void m() { do x(); while (c); } }",
             "class A { void m() { do { x(); } while (c); } }",
-            &Config::default(),
+            &cfg,
         ));
     }
 

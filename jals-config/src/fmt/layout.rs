@@ -146,7 +146,7 @@ impl Default for Layout {
             continuation_indent: None,
             label_indent: 0,
             max_width: 100,
-            line_ending: LineEnding::Lf,
+            line_ending: LineEnding::Auto,
             insert_final_newline: true,
             trim_trailing_whitespace: true,
             indent_empty_lines: false,

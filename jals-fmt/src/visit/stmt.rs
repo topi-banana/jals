@@ -773,6 +773,9 @@ impl Ctx<'_> {
     pub(super) async fn visit_switch_rule(&mut self, node: &SyntaxNode) {
         let policy = self.style.cfg.wrapping.switch_expression;
         let continuation = self.style.continuation();
+        let forced = self.forces_switch_arm_braces(node);
+        let indent = self.style.indent();
+        let mut braced = false;
         self.open(continuation.clone());
         let children = Self::children(node);
         for (nth, child) in children.iter().enumerate() {
@@ -784,6 +787,21 @@ impl Ctx<'_> {
                     .get(nth + 1)
                     .and_then(SyntaxElement::as_node)
                     .is_some_and(|next| next.kind() == S::BLOCK);
+                if forced {
+                    // The arm's continuation level closes first, exactly as it does for a body
+                    // that already *is* a block: a synthetic block indented inside it would sit
+                    // one continuation deeper than the same block written by hand, and the second
+                    // run — which sees a real block — would move it back. That is the idempotence
+                    // `forcing_a_statement_arm_is_idempotent` holds this rule to.
+                    self.close_indent(&continuation);
+                    self.brace_before(self.style.cfg.braces.block);
+                    self.space_if(self.style.cfg.spacing.before_left_brace);
+                    self.synthetic("{");
+                    self.open(indent.clone());
+                    self.forced_break(Indent::ZERO);
+                    braced = true;
+                    continue;
+                }
                 if !block {
                     self.list_break(policy, Indent::ZERO);
                 }
@@ -799,7 +817,39 @@ impl Ctx<'_> {
             }
             self.visit_element(child).await;
         }
+        if braced {
+            self.close_indent(&indent);
+            self.forced_break(Indent::ZERO);
+            self.synthetic("}");
+            return;
+        }
         self.close_indent(&continuation);
+    }
+
+    /// Whether `[braces] force-switch-arm` wraps this arrow arm's body in a block.
+    ///
+    /// **Statement switches only.** A switch *expression*'s arm produces a value, so a block
+    /// around `f()` would have to be `{ yield f(); }` — a `yield` keyword this rule has no
+    /// business inserting, and a change to what the arm means rather than to how it is laid out.
+    /// An arm already carrying a block or a `throw` has nothing to wrap either.
+    fn forces_switch_arm_braces(&self, node: &SyntaxNode) -> bool {
+        let force = self.style.cfg.braces.force_switch_arm;
+        if force == ForceBraces::Never {
+            return false;
+        }
+        if node
+            .parent()
+            .and_then(|block| block.parent())
+            .is_none_or(|switch| switch.kind() != S::SWITCH_STMT)
+        {
+            return false;
+        }
+        node.children().last().is_some_and(|body| {
+            // `SwitchRule = label '->' (Block | ThrowStmt | expr ';')`. The first two already end
+            // the arm on their own terms; only the expression form has a body to wrap.
+            !matches!(body.kind(), S::BLOCK | S::THROW_STMT | S::SWITCH_LABEL)
+                && Self::forces_braces(&body, force)
+        })
     }
 
     /// A colon-form group: one or more labels, then its statements indented one level.
@@ -929,5 +979,57 @@ impl Ctx<'_> {
     /// The wrap policy a `try`-with-resources list uses.
     pub(super) const fn resource_policy(&self) -> WrapPolicy {
         self.style.cfg.wrapping.resource_list
+    }
+}
+
+#[cfg(test)]
+mod switch_arm_tests {
+    use jals_config::FeatureSet;
+    use jals_config::fmt::{Config, ForceBraces};
+
+    fn formatted(src: &str, force: ForceBraces) -> String {
+        let mut cfg = Config::default();
+        cfg.braces.force_switch_arm = force;
+        let out = jals_exec::block_on_inline(crate::FormatOutput::format_source(
+            src,
+            &cfg,
+            FeatureSet::default(),
+        ));
+        assert!(!out.fell_back(), "the fail-safe refused its own output");
+        out.formatted
+    }
+
+    const STATEMENT_SWITCH: &str = "class Z {\n  void m(int x) {\n    switch (x) {\n      case 1 -> run();\n      default -> stop();\n    }\n  }\n}\n";
+
+    #[test]
+    fn a_statement_arm_gains_a_block() {
+        assert!(formatted(STATEMENT_SWITCH, ForceBraces::Never).contains("case 1 -> run();"));
+        let out = formatted(STATEMENT_SWITCH, ForceBraces::Always);
+        assert!(out.contains("case 1 -> {"), "{out}");
+        assert!(out.contains("run();"), "{out}");
+    }
+
+    #[test]
+    fn a_switch_expression_arm_is_left_alone() {
+        // Braces alone would not do it — the arm has to produce a value, so a block form needs a
+        // `yield`. Inserting one is a rewrite, not a layout decision.
+        let src = "class Z {\n  int m(int x) {\n    return switch (x) {\n      case 1 -> 10;\n      default -> 20;\n    };\n  }\n}\n";
+        let out = formatted(src, ForceBraces::Always);
+        assert!(out.contains("case 1 -> 10;"), "{out}");
+        assert!(!out.contains("yield"), "{out}");
+    }
+
+    #[test]
+    fn an_arm_that_already_has_a_block_is_untouched() {
+        let src = "class Z {\n  void m(int x) {\n    switch (x) {\n      case 1 -> {\n        run();\n      }\n    }\n  }\n}\n";
+        let out = formatted(src, ForceBraces::Always);
+        assert!(!out.contains("{ {"), "{out}");
+        assert_eq!(out.matches('{').count(), src.matches('{').count(), "{out}");
+    }
+
+    #[test]
+    fn forcing_a_statement_arm_is_idempotent() {
+        let once = formatted(STATEMENT_SWITCH, ForceBraces::Always);
+        assert_eq!(formatted(&once, ForceBraces::Always), once);
     }
 }

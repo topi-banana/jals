@@ -1,8 +1,9 @@
 //! The center editor section: the Monaco editor mount and its lifecycle.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use jals_config::FeatureSet;
 use jals_config::fmt::Config;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
@@ -31,6 +32,10 @@ pub struct EditorPaneProps {
     pub on_formatted: Callback<bool>,
     /// Shared formatter config the once-registered *Format Document* provider reads.
     pub config: Rc<RefCell<Config>>,
+    /// Shared `[package] features` the same provider reads. The formatter's one dialect-emitting
+    /// rule (`[imports] granularity = "package"`) rounds itself away unless `grouped-imports` is
+    /// on, so formatting without this would silently write syntax the project cannot compile.
+    pub features: Rc<Cell<FeatureSet>>,
 }
 
 /// The center editor section: a label naming the active file, and the Monaco editor mounted into a
@@ -93,14 +98,16 @@ impl Component for EditorPane {
         // is async, so the closure bridges to a Promise; the config is cloned out of the
         // `RefCell` before the future runs — no borrow is held across an await.
         let config = props.config.clone();
+        let features = props.features.clone();
         let on_formatted = props.on_formatted.clone();
         let formatter =
             Closure::<dyn FnMut(String) -> js_sys::Promise>::new(move |text: String| {
                 let cfg = config.borrow().clone();
+                let feature_set = features.get();
                 // Cloned per invocation: the closure is `FnMut` and the future takes ownership.
                 let on_formatted = on_formatted.clone();
                 wasm_bindgen_futures::future_to_promise(async move {
-                    let out = jals_fmt::FormatOutput::format_source(&text, &cfg).await;
+                    let out = jals_fmt::FormatOutput::format_source(&text, &cfg, feature_set).await;
                     on_formatted.emit(out.fell_back());
                     Ok(JsValue::from(out.formatted))
                 })

@@ -23,8 +23,9 @@ use alloc::borrow::ToOwned;
 use alloc::vec;
 
 use jals_config::fmt::{
-    BlankLines, Comments, Config, DocumentedMember, ImportOrder, Imports, IndentStyle,
-    InlineAnnotations, KeepOnOneLine, Layout, ParenPositions, Spacing, WrapPolicy, Wrapping,
+    BlankLines, Comments, Config, DocumentedMember, ForceBraces, ImportGranularity, ImportOrder,
+    Imports, IndentStyle, InlineAnnotations, KeepOnOneLine, Layout, LineEnding, ParenPositions,
+    Spacing, WrapPolicy, Wrapping,
 };
 use serde::Deserialize;
 
@@ -126,6 +127,7 @@ impl GoogleJavaFormatConfig {
                 tab_width: indent_width,
                 continuation_indent: Some(continuation_indent),
                 max_width,
+                line_ending: LineEnding::Lf,
                 ..Layout::default()
             },
             // GJF collapses an empty body to `{}` and never joins a non-empty one, which is
@@ -136,6 +138,7 @@ impl GoogleJavaFormatConfig {
                 // `visitStatement` separates a braceless body from its header with a break whose
                 // flat form is a space, so `if (a) return;` stays on one line when it fits.
                 keep_control_statement_on_one_line: true,
+                force_switch_arm: ForceBraces::Never,
                 ..jals_config::fmt::Braces::default()
             },
             wrapping: Wrapping {
@@ -190,6 +193,8 @@ impl GoogleJavaFormatConfig {
                 variable_annotations: WrapPolicy::AlwaysPerItem,
                 inline_argumentless_annotations: InlineAnnotations::Declarations,
                 reflow_long_strings: native.reflow_long_strings,
+                import_group: WrapPolicy::Never,
+                remove_nested_parens: false,
                 ..Wrapping::default()
             },
             // `thisOneGetsBlankLineBefore`: a member with Javadoc, and a field whose annotations
@@ -223,6 +228,7 @@ impl GoogleJavaFormatConfig {
                 reflow_unclosed_html: false,
                 normalize_parameter_comments: true,
                 inline_block_comments: true,
+                code_block_width: 0,
                 ..Comments::default()
             },
             imports: Imports {
@@ -235,6 +241,9 @@ impl GoogleJavaFormatConfig {
                 static_first: true,
                 reorder_modifiers: native.reorder_modifiers,
                 remove_unused: native.remove_unused_imports,
+                // A grouped import is jals dialect syntax; google-java-format parses plain Java
+                // and has no construct to merge into or split from.
+                granularity: ImportGranularity::Preserve,
             },
             ..Config::default()
         }

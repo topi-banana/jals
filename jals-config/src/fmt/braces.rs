@@ -32,13 +32,13 @@ pub enum BraceStyle {
 
 /// Whether a control-flow statement's braceless body gains braces.
 ///
-/// The only rule in this crate that *adds* significant tokens, so it defaults to
-/// [`Never`](Self::Never) and the strict token-sequence invariant holds unless opted into.
-/// IntelliJ `IF_BRACE_FORCE` and friends.
+/// The four IntelliJ `*_BRACE_FORCE` keys default to [`Never`](Self::Never).
+/// [`force_switch_arm`](Braces::force_switch_arm) defaults to [`Always`](Self::Always) — rustfmt's
+/// `match_arm_blocks = true`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ForceBraces {
-    /// Leave a braceless body exactly as written. The default.
+    /// Leave a braceless body exactly as written.
     Never,
     /// Add braces only when the statement spans more than one line. The only rule whose
     /// condition consumes the engine's own line-breaking result, so its idempotency is a tested
@@ -118,6 +118,19 @@ pub struct Braces {
     pub force_while: ForceBraces,
     /// Force braces on a `do`-`while` body. IntelliJ `DOWHILE_BRACE_FORCE`.
     pub force_do_while: ForceBraces,
+    /// Wrap an arrow `case`'s body in a block — `case A -> run();` to `case A -> { run(); }`.
+    ///
+    /// Mirrors rustfmt's `match_arm_blocks`, and defaults to [`ForceBraces::Always`] with it.
+    /// Vendor profiles pin [`Never`](ForceBraces::Never): no Java formatter adds braces unasked,
+    /// and the four IntelliJ `*_BRACE_FORCE` keys above stay off for the same reason. An arrow
+    /// `case` has no vendor counterpart, so this key is jals-native.
+    ///
+    /// **Statement switches only.** A `case` of a switch *expression* has to produce a value, so
+    /// braces alone do not do it — `case A -> f();` would have to become `case A -> { yield f(); }`,
+    /// which inserts a keyword and changes what the arm *means*. That is a rewrite rather than a
+    /// layout decision, so a switch expression's arms are left exactly as written whatever this is
+    /// set to. An arm whose body is already a block, or a `throw`, is likewise untouched.
+    pub force_switch_arm: ForceBraces,
     /// One-line collapsing of a type body. Eclipse `keep_type_declaration_on_one_line` /
     /// IntelliJ `KEEP_SIMPLE_CLASSES_IN_ONE_LINE`.
     pub keep_type_body_on_one_line: KeepOnOneLine,
@@ -162,6 +175,7 @@ impl Default for Braces {
             force_for: ForceBraces::Never,
             force_while: ForceBraces::Never,
             force_do_while: ForceBraces::Never,
+            force_switch_arm: ForceBraces::Always,
             keep_type_body_on_one_line: KeepOnOneLine::IfEmpty,
             keep_method_body_on_one_line: KeepOnOneLine::IfEmpty,
             keep_block_on_one_line: KeepOnOneLine::IfEmpty,

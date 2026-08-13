@@ -9,6 +9,11 @@
 > - `jals-fmt/src/import/intellij/inventory.tsv` — 297 setting
 >
 > この 2 ファイルは飾りではなく、各 importer の**カバレッジテストが読む入力**である（§6）。
+>
+> **rustfmt との対応は本書には無い。** rustfmt は §2 の意味での「到達可能なターゲット」では
+> ないので（Java を整形しないので比較できる出力が存在しない）、§5 の表に列を足すと採否基準の
+> 前提を黙って覆すことになる。全 90 option の写像は [`MAPPING-rustfmt.md`](MAPPING-rustfmt.md)
+> にある。
 
 ---
 
@@ -77,7 +82,7 @@ rule 単位で次の 1 行を適用する。
 | 層 | 成果物 | 完全性の基準 | 規模 |
 |---|---|---|---|
 | **native モデル** | `jals_fmt::import::{eclipse, intellij, gjf, palantir, spotless}` | **全数**。ベンダー option は 1 つも落とさない。jals に写像先が無い option も**型付きで保持**する | Eclipse 416 / IntelliJ 297 |
-| **共通語彙** | `jals_config::fmt::Config` | **選別**。§2 の基準を満たすものだけ。union ではない | 8 節・190 |
+| **共通語彙** | `jals_config::fmt::Config` | **選別**。§2 の基準を満たすものだけ。union ではない | 8 節・196 |
 
 「jals-config でキャプチャされない rule が構造化されていない」という問題への答えがこの表である。
 **捨てるのではなく、native モデル側に型付きで残す。** 未写像の option は
@@ -122,17 +127,36 @@ rule 単位で次の 1 行を適用する。
 | 節 | 数 | 主な典拠 |
 |---|---|---|
 | `[layout]` | 16 | `tab-width`（Eclipse `tabulation.size` と `indentation.size` の分離 / IntelliJ `TAB_SIZE`）、`trim-trailing-whitespace`（Spotless / EditorConfig）、`indent-empty-lines`、`indent-switch-labels`、formatter on/off タグ（Eclipse `disabling_tag` / IntelliJ `ij_formatter_off_tag` / Spotless `toggleOffOn`） |
-| `[blank-lines]` | 20 | Eclipse `blank_lines_*` 15 + `number_of_blank_lines_*` / IntelliJ `BLANK_LINES_*` + `KEEP_BLANK_LINES_*` |
-| `[braces]` | 24 | Eclipse `brace_position_for_*` 15 + `keep_*_on_one_line` 14 / IntelliJ `*_BRACE_STYLE` 4 + `*_BRACE_FORCE` 4 + `KEEP_SIMPLE_*` |
-| `[wrapping]` | 42 | Eclipse `alignment_for_*` 53 + `wrap_before_*` 13 + `parentheses_positions_in_*` 11 / IntelliJ `*_WRAP` 26 + `ALIGN_MULTILINE_*` |
+| `[blank-lines]` | 22 | Eclipse `blank_lines_*` 15 + `number_of_blank_lines_*` / IntelliJ `BLANK_LINES_*` + `KEEP_BLANK_LINES_*` |
+| `[braces]` | 25 | Eclipse `brace_position_for_*` 15 + `keep_*_on_one_line` 14 / IntelliJ `*_BRACE_STYLE` 4 + `*_BRACE_FORCE` 4 + `KEEP_SIMPLE_*` |
+| `[wrapping]` | 49 | Eclipse `alignment_for_*` 53 + `wrap_before_*` 13 + `parentheses_positions_in_*` 11 / IntelliJ `*_WRAP` 26 + `ALIGN_MULTILINE_*` |
 | `[spacing]` | 49 | Eclipse `insert_space_*` 219 / IntelliJ `SPACE_*` 45 |
-| `[comments]` | 16 | Eclipse `comment.*` 25 / IntelliJ `JD_*` 20 + `WRAP_COMMENTS` |
-| `[imports]` | 4 | IntelliJ `IMPORT_LAYOUT_TABLE` ほか / Spotless `importOrder` / GJF `ImportOrderer` |
+| `[comments]` | 26 | Eclipse `comment.*` 25 / IntelliJ `JD_*` 20 + `WRAP_COMMENTS` |
+| `[imports]` | 6 | IntelliJ `IMPORT_LAYOUT_TABLE` ほか / Spotless `importOrder` / GJF `ImportOrderer` |
 | `[literals]` | 3 | jals 固有（どのベンダーも持たないが、3 者とも「書き換えない」で一致するため既定は `preserve`） |
 
 `[literals]` は §2 の基準の例外に見えるが、既定値がすべて `preserve`＝全ベンダー一致の挙動であり、
-非既定値は jals-native プロファイル専用である（§5.6 の表で 4 者すべてが「—」になっている唯一の族）。
-この「どの importer からも動かない」性質は §6 のテスト 3 が明示的に表明している。
+非既定値は jals-native プロファイル専用である。この「どの importer からも動かない」性質は §6 の
+テスト 3 が明示的に表明している。
+
+### 4.4 rustfmt 由来の jals-native rule（6）
+
+`[literals]` と同じ位置に立つ 6 key。どのベンダーも produce しない。既定は rustfmt に合わせ、
+ベンダープロファイルが旧 Java 床（何もしない側）をピンする。写像と設計判断は
+[`MAPPING-rustfmt.md`](MAPPING-rustfmt.md) §6 にある。
+
+| jals rule | rustfmt option | 既定 |
+|---|---|---|
+| `imports.granularity` | `imports_granularity` | `preserve` |
+| `wrapping.import-group` | `imports_layout` | `if-long` |
+| `wrapping.remove-nested-parens` | `remove_nested_parens` | `true` |
+| `comments.normalize-block-comments` | `normalize_comments` | `false` |
+| `comments.code-block-width` | `doc_comment_code_block_width` | `100` |
+| `braces.force-switch-arm` | `match_arm_blocks` | `always` |
+
+先の 2 つは**方言の grouped import**（`import a.{B, C};`）に対する rule で、Java の構文ではない
+から 4 ベンダーが持たない。`granularity = "package"` だけは方言が有効なプロジェクトでしか動かず、
+formatter は `FeatureSet` を受け取ってそれ以外では `preserve` へ丸め、`Warning` を出す。
 
 ---
 
@@ -343,6 +367,12 @@ IntelliJ の `SPACE_*` 45 とはほぼ 1:1。代表例（全数は importer の 
 | `wrapping.format-string-arguments` | — | — | `isFormatMethod`（先頭引数が `%` / `{0}` を含む文字列リテラル連結なら、それだけを 1 行に。固定 true） |
 | `wrapping.tabular-array-initializers` | — | — | `argumentsAreTabular` / 配列初期化子の table 判定（引数リストにも効く。固定 true） |
 | `literals.*` | — | — | すべて `preserve`（GJF はリテラルを書き換えない） |
+| `imports.granularity` | — | — | — |
+| `wrapping.import-group` | — | — | — |
+| `wrapping.remove-nested-parens` | — | — | — |
+| `comments.normalize-block-comments` | — | — | — |
+| `comments.code-block-width` | —（`comment.line_length` を prose と共用） | — | — |
+| `braces.force-switch-arm` | — | —（`*_BRACE_FORCE` に arrow `case` は無い） | — |
 
 ---
 

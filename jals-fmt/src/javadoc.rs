@@ -90,6 +90,23 @@ enum Block {
 /// Reflows comment bodies.
 pub(crate) struct CommentFormatter;
 
+/// Where the comment being rendered sits — the three facts the rules ask about.
+///
+/// Bundled rather than passed as three booleans because two of them are easy to confuse:
+/// [`own_line`](Self::own_line) is about the **output** the engine is building, and
+/// [`alone_on_line`](Self::alone_on_line) about the **source** the author wrote. A rule that reads
+/// the wrong one converts a `/* x */` written mid-expression and pushes the code after it down a
+/// line.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Placement {
+    /// The comment stands in the file's header region, before any declaration.
+    pub(crate) is_header: bool,
+    /// The output will give the comment a line of its own.
+    pub(crate) own_line: bool,
+    /// The source gave the comment a line of its own, with nothing else on it.
+    pub(crate) alone_on_line: bool,
+}
+
 impl CommentFormatter {
     /// The text to emit for a comment, reflowed when the matching `[comments]` rule is on.
     ///
@@ -100,11 +117,21 @@ impl CommentFormatter {
         kind: SyntaxKind,
         indent: usize,
         column: usize,
-        is_header: bool,
-        own_line: bool,
+        at: Placement,
         style: &Style,
     ) -> String {
+        let Placement {
+            is_header,
+            own_line,
+            alone_on_line,
+        } = at;
         let cfg = style.comments();
+        // Asked before the reflow gate, because the two are independent: `normalize_comments` is
+        // rustfmt's own shape for this, and a project that wants `//` delimiters has not thereby
+        // asked for its prose to be refilled.
+        if kind == SyntaxKind::BLOCK_COMMENT && alone_on_line && cfg.normalize_block_comments {
+            return Self::to_line_comments(text, indent);
+        }
         let enabled = match kind {
             SyntaxKind::LINE_COMMENT => cfg.format_line,
             SyntaxKind::BLOCK_COMMENT => cfg.format_block,
@@ -118,6 +145,43 @@ impl CommentFormatter {
             SyntaxKind::LINE_COMMENT => Self::render_line(text, indent, style),
             _ => Self::render_block(text, kind, indent, column, own_line, style),
         }
+    }
+
+    /// Rewrite an own-line block comment as a run of line comments.
+    ///
+    /// The delimiters go, each interior line loses the leading `*` a block comment conventionally
+    /// carries, and every line gains `//`. A line that held nothing becomes a bare `//` rather
+    /// than an empty line, so the run stays one comment rather than becoming two separated by a
+    /// gap the blank-line rules would then have an opinion about.
+    fn to_line_comments(text: &str, indent: usize) -> String {
+        let body = text
+            .strip_prefix("/*")
+            .and_then(|rest| rest.strip_suffix("*/"))
+            .unwrap_or(text);
+        let mut out = String::new();
+        let mut wrote = false;
+        for line in body.split('\n') {
+            let line = line.trim();
+            let line = line.strip_prefix('*').map_or(line, str::trim_start);
+            if wrote {
+                out.push('\n');
+                for _ in 0..indent {
+                    out.push(' ');
+                }
+            }
+            wrote = true;
+            if line.is_empty() {
+                out.push_str("//");
+            } else {
+                out.push_str("// ");
+                out.push_str(line);
+            }
+        }
+        // A block comment with nothing in it at all still has to leave a comment behind.
+        if !wrote {
+            out.push_str("//");
+        }
+        out
     }
 
     /// Move a comment the formatter does not reflow to its new column.
@@ -1578,6 +1642,26 @@ impl CommentFormatter {
         let Some(unit) = lines.iter().filter_map(|line| columns(line)).min() else {
             return;
         };
+        // `[comments] code-block-width` is a budget on the *result*: normalizing a snippet's
+        // indentation is worth doing only while it keeps the snippet inside the margin, so a
+        // region that would come out wider than the budget is left at the indentation its author
+        // wrote. Measured before anything is written, so the region is re-indented all or not
+        // at all — a half-re-indented snippet says less than either.
+        let budget = if style.comments().code_block_width == 0 {
+            style.comments().width
+        } else {
+            style.comments().code_block_width
+        };
+        let fits = lines.iter().all(|line| {
+            let Some(cols) = columns(line) else {
+                return true;
+            };
+            let body = line.trim_start_matches([' ', '\t']);
+            cols / unit * style.indent_cols() + body.chars().count() <= budget
+        });
+        if !fits {
+            return;
+        }
         for line in lines {
             let Some(cols) = columns(line) else {
                 continue;
@@ -2062,7 +2146,11 @@ mod tests {
 
     /// Format `src` under `config`, refusing a run the fail-safe could not vouch for.
     fn format(src: &str, config: &Config) -> String {
-        let out = jals_exec::block_on_inline(crate::FormatOutput::format_source(src, config));
+        let out = jals_exec::block_on_inline(crate::FormatOutput::format_source(
+            src,
+            config,
+            jals_config::FeatureSet::default(),
+        ));
         assert!(!out.fell_back(), "the fail-safe refused:\n{src}");
         out.formatted
     }
@@ -2314,5 +2402,135 @@ mod tests {
             out.contains("*     b();"),
             "the snippet was not re-indented:\n{out}",
         );
+    }
+}
+
+#[cfg(test)]
+mod code_block_width_tests {
+    use jals_config::FeatureSet;
+    use jals_config::fmt::Config;
+
+    /// A Javadoc `<pre>` whose lines are indented far enough that re-indenting moves them.
+    const SRC: &str = "class Z {\n  /**\n   * <pre>\n   * if (a) {\n   *      b();\n   * }\n   * </pre>\n   */\n  void m() {}\n}\n";
+
+    fn formatted(width: usize) -> String {
+        let mut cfg = Config::default();
+        cfg.comments.format_javadoc = true;
+        cfg.comments.format_source_in_comments = true;
+        cfg.comments.code_block_width = width;
+        let out = jals_exec::block_on_inline(crate::FormatOutput::format_source(
+            SRC,
+            &cfg,
+            FeatureSet::default(),
+        ));
+        assert!(!out.fell_back(), "the fail-safe refused its own output");
+        out.formatted
+    }
+
+    #[test]
+    fn the_default_budget_lets_a_short_snippet_be_reindented() {
+        // `0` means "use `[comments] width`", which a three-line snippet is nowhere near.
+        assert_ne!(formatted(0), SRC);
+    }
+
+    #[test]
+    fn a_budget_the_snippet_cannot_meet_leaves_it_as_written() {
+        let out = formatted(3);
+        assert!(out.contains("*      b();"), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod normalize_block_comment_tests {
+    use jals_config::FeatureSet;
+    use jals_config::fmt::Config;
+
+    fn formatted(src: &str, normalize: bool) -> String {
+        let mut cfg = Config::default();
+        cfg.comments.normalize_block_comments = normalize;
+        let out = jals_exec::block_on_inline(crate::FormatOutput::format_source(
+            src,
+            &cfg,
+            FeatureSet::default(),
+        ));
+        assert!(!out.fell_back(), "the fail-safe refused its own output");
+        out.formatted
+    }
+
+    #[test]
+    fn an_own_line_block_comment_becomes_a_line_comment() {
+        let src = "class Z {\n  /* a note */\n  int x = 1;\n}\n";
+        assert!(formatted(src, false).contains("/* a note */"));
+        let out = formatted(src, true);
+        assert!(out.contains("// a note"), "{out}");
+        assert!(!out.contains("/*"), "{out}");
+    }
+
+    #[test]
+    fn a_multi_line_block_becomes_a_run_of_line_comments() {
+        let src = "class Z {\n  /*\n   * first\n   * second\n   */\n  int x = 1;\n}\n";
+        let out = formatted(src, true);
+        assert!(out.contains("// first"), "{out}");
+        assert!(out.contains("// second"), "{out}");
+    }
+
+    #[test]
+    fn a_comment_sharing_its_line_with_code_is_left_alone() {
+        // rustfmt's "where possible": converting these would push everything after them onto the
+        // next line, which is a layout change nothing asked for.
+        let src = "class Z {\n  int x = f(/* why */ 1); /* trailing */\n}\n";
+        let out = formatted(src, true);
+        assert!(out.contains("/* why */"), "{out}");
+        assert!(out.contains("/* trailing */"), "{out}");
+    }
+
+    #[test]
+    fn a_javadoc_is_not_a_block_comment() {
+        let src = "class Z {\n  /** documented */\n  int x = 1;\n}\n";
+        let out = formatted(src, true);
+        assert!(out.contains("/** documented */"), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod normalized_comment_break_tests {
+    use jals_config::FeatureSet;
+    use jals_config::fmt::Config;
+
+    fn formatted(src: &str) -> crate::FormatOutput {
+        let mut cfg = Config::default();
+        cfg.comments.normalize_block_comments = true;
+        jals_exec::block_on_inline(crate::FormatOutput::format_source(
+            src,
+            &cfg,
+            FeatureSet::default(),
+        ))
+    }
+
+    #[test]
+    fn nothing_follows_a_converted_comment_on_its_line() {
+        // A converted comment ends in a `//`, which swallows the rest of the line — but its
+        // source *kind* is still `BLOCK_COMMENT`, so the break decision cannot be read off that.
+        // If it were, the next token would land behind the `//`, the output would stop parsing,
+        // and the whole file would come back unformatted.
+        for src in [
+            "class Z {\n  /* one */\n  /* two */\n  int x = 1;\n}\n",
+            "class Z {\n  /* note */\n  int x = 1;\n}\n",
+            "/* header */\nclass Z {}\n",
+            "class Z {\n  void m() {\n    /* inside */\n    call();\n  }\n}\n",
+        ] {
+            let out = formatted(src);
+            assert!(!out.fell_back(), "the fail-safe refused:\n{src}");
+            for line in out.formatted.lines() {
+                let trimmed = line.trim_start();
+                if let Some(rest) = trimmed.strip_prefix("//") {
+                    assert!(
+                        !rest.contains(';') && !rest.contains('{'),
+                        "code ended up behind a converted comment:\n{}",
+                        out.formatted,
+                    );
+                }
+            }
+        }
     }
 }

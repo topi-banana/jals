@@ -566,6 +566,7 @@ mod tests {
         let out = jals_exec::block_on_inline(crate::FormatOutput::format_source(
             "class Z { void m() { if (label instanceof String s && total > 0) { report(); } } }\n",
             &cfg,
+            jals_config::FeatureSet::default(),
         ));
         assert!(
             !out.fell_back(),

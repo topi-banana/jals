@@ -12,10 +12,10 @@ impl Fixture {
 }
 
 #[test]
-fn defaults_are_the_common_java_baseline() {
+fn defaults_align_mapped_keys_with_rustfmt() {
     let c = Config::default();
 
-    // Layout: 4-space indent, a 100-column limit, LF, final newline.
+    // Layout: 4-space indent, a 100-column limit, rustfmt `newline_style = Auto`.
     assert_eq!(c.layout.indent_style, IndentStyle::Space);
     assert_eq!(c.layout.indent_width, 4);
     assert_eq!(c.layout.tab_width, 4);
@@ -23,7 +23,7 @@ fn defaults_are_the_common_java_baseline() {
     assert_eq!(c.layout.continuation_indent, None);
     assert_eq!(c.layout.continuation_cols(), 4);
     assert_eq!(c.layout.max_width, 100);
-    assert_eq!(c.layout.line_ending, LineEnding::Lf);
+    assert_eq!(c.layout.line_ending, LineEnding::Auto);
     assert!(c.layout.insert_final_newline);
     assert!(c.layout.trim_trailing_whitespace);
     // Formatter on/off regions are opt-in, but the tags carry the vendors' common spelling.
@@ -44,12 +44,18 @@ fn defaults_are_the_common_java_baseline() {
         c.braces.keep_method_body_on_one_line,
         KeepOnOneLine::IfEmpty
     );
-    // Brace forcing adds significant tokens, so it stays off.
+    // The four IntelliJ `*_BRACE_FORCE` keys stay off; rustfmt `match_arm_blocks` is on.
     assert_eq!(c.braces.force_if, ForceBraces::Never);
+    assert_eq!(c.braces.force_switch_arm, ForceBraces::Always);
 
     // Wrapping: wrap on overflow, break before the operator, hug the delimiters.
+    // rustfmt `fn_params_layout = Tall` / `short_array_element_width_threshold = 10` /
+    // `imports_layout = Mixed` / `remove_nested_parens = true`.
     assert_eq!(c.wrapping.call_arguments, WrapPolicy::IfLong);
-    assert_eq!(c.wrapping.method_parameters, WrapPolicy::IfLong);
+    assert_eq!(c.wrapping.method_parameters, WrapPolicy::IfLongPerItem);
+    assert_eq!(c.wrapping.fill_item_width, 10);
+    assert_eq!(c.wrapping.import_group, WrapPolicy::IfLong);
+    assert!(c.wrapping.remove_nested_parens);
     assert!(c.wrapping.before_binary_operator);
     assert_eq!(
         c.wrapping.paren_method_invocation,
@@ -65,13 +71,16 @@ fn defaults_are_the_common_java_baseline() {
     assert!(c.spacing.before_keyword_parentheses);
     assert!(!c.spacing.before_method_call_parentheses);
 
-    // Comment reflow is opt-in.
+    // Comment reflow is opt-in. rustfmt `doc_comment_code_block_width = 100`.
     assert!(!c.comments.format_javadoc);
     assert_eq!(c.comments.width, 80);
+    assert_eq!(c.comments.code_block_width, 100);
 
-    // Both token-reordering passes are off, so the significant-token sequence is preserved.
-    assert_eq!(c.imports.order, ImportOrder::Preserve);
+    // rustfmt `reorder_imports = true`; the other token-reordering / token-removing import
+    // passes stay off.
+    assert_eq!(c.imports.order, ImportOrder::Sort);
     assert!(!c.imports.reorder_modifiers);
+    assert!(!c.imports.remove_unused);
     assert_eq!(c.imports.groups, ["java.", "javax.", "*", "static"]);
 
     // Literal rewrites preserve the source, the behavior all four targets share.
@@ -297,7 +306,7 @@ fn line_ending_resolution() {
     );
 
     let c = Config::default();
-    assert_eq!(c.layout.newline("a\r\nb"), "\n");
+    assert_eq!(c.layout.newline("a\r\nb"), "\r\n");
 }
 
 #[test]

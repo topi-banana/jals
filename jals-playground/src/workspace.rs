@@ -368,8 +368,18 @@ impl Workspace {
     }
 
     /// Format the active file (file-local; no project index needed).
+    ///
+    /// The project's own `[package] features` travel with it: the formatter's one dialect-emitting
+    /// rule (`[imports] granularity = "package"`) must not write a grouped import into a project
+    /// whose manifest never enabled `grouped-imports`, and the workspace is where that resolution
+    /// already happened.
     pub async fn format_active(&self, config: &FmtConfig) -> FormatOutput {
-        jals_fmt::FormatOutput::format_source(&self.active_source(), config).await
+        jals_fmt::FormatOutput::format_source(
+            &self.active_source(),
+            config,
+            self.editor.workspace().feature_set(),
+        )
+        .await
     }
 
     /// Parse the active file for the syntax-tree dump.

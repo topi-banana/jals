@@ -24,9 +24,10 @@ linter・language server（LSP）を提供しており、いずれも名前解�
   switch 式、パターン（record パターンや guard を含む）などをサポートします。
 - **保証付きのフォーマッタ。** コメントを削除・並べ替えすることがなく、冪等
   （`format(format(x)) == format(x)`）で、意味のあるトークンの多重集合が変わるのは**宣言された操作**が
-  それを許す箇所だけです（方言自身のものを除き、すべて既定 off）。この検査を通らなかった出力は破棄され、
-  入力がそのまま返ります。拒否されたファイルは「変更不要だったファイル」とバイト単位で区別できないため、
-  その事実は実行時に**報告されます**。
+  それを許す箇所だけです。`Config::default()` が許すのは方言の末尾カンマ削除、rustfmt 既定 on の
+  `remove-nested-parens` と `force-switch-arm`、そして import の sort（列の並べ替えであり多重集合は
+  変わらない）です。この検査を通らなかった出力は破棄され、入力がそのまま返ります。拒否されたファイルは
+  「変更不要だったファイル」とバイト単位で区別できないため、その事実は実行時に**報告されます**。
 - **本物のセマンティクスを持つ linter。** 構文的なチェックにとどまらず、`jals lint` は名前解決と
   型推論を CST 上で行い、未使用のローカル変数・型不一致・報告されていない検査例外・到達しない
   条件分岐を検出します（単なるパターンマッチではありません）。
@@ -396,14 +397,14 @@ indent-style = "space" # "space" | "tab" | "mixed"
 indent-width = 4       # インデント 1 段あたりの桁数
 tab-width = 4          # タブ文字の表示幅
 max-width = 100        # 列上限
-line-ending = "lf"     # "lf" | "crlf" | "auto" | "native"
+line-ending = "auto"   # "lf" | "crlf" | "auto" | "native"
 insert-final-newline = true
 
 [blank-lines]
 max-in-code = 1 # 本体中に残す、ソース由来の連続空行の上限
 
 [imports]
-order = "preserve" # "preserve" | "sort" | "group"
+order = "sort"     # "preserve" | "sort" | "group"
 
 [comments]
 format-javadoc = false

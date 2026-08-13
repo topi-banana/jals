@@ -1,6 +1,7 @@
 //! Whole-document formatting via `jals-fmt`.
 
 use async_lsp::lsp_types::{Position, Range, TextEdit};
+use jals_config::FeatureSet;
 use jals_config::fmt::Config;
 use jals_editor::Document;
 
@@ -34,8 +35,17 @@ impl Formatting {
     /// `warning:` line there reads to the user as the *absence* of a reaction — the same symptom the
     /// fallback already has. The line is kept as the server's own log, and [`Formatted::fell_back`]
     /// carries the fact out to the actor, which has the client handle a `window/showMessage` needs.
-    pub(crate) async fn formatting_edits(doc: &Document, config: &Config) -> Formatted {
-        let out = jals_fmt::FormatOutput::format_source(&doc.text, config).await;
+    ///
+    /// `features` is the owning project's `[package] features`, or the empty set for a document
+    /// that belongs to no workspace — the same fallback the rest of this file already makes for a
+    /// detached document, and the safe one: the formatter's single dialect-emitting rule rounds
+    /// itself away rather than writing syntax the project cannot compile.
+    pub(crate) async fn formatting_edits(
+        doc: &Document,
+        config: &Config,
+        features: FeatureSet,
+    ) -> Formatted {
+        let out = jals_fmt::FormatOutput::format_source(&doc.text, config, features).await;
         if out.fell_back() {
             eprintln!(
                 "jals-lsp: the formatter could not vouch for its output; the document was left \
@@ -75,7 +85,8 @@ mod tests {
     fn already_formatted_yields_no_edits() {
         block_on_inline(async {
             let doc = Document::new("class C {\n    int x = 1;\n}\n".to_owned()).await;
-            let out = Formatting::formatting_edits(&doc, &Config::default()).await;
+            let out =
+                Formatting::formatting_edits(&doc, &Config::default(), FeatureSet::default()).await;
             assert!(out.edits.is_empty());
             // The distinction the actor turns into a `window/showMessage`: nothing to do is not the
             // same answer as a refusal, even though both produce no edits.

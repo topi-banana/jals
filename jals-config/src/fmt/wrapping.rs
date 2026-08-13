@@ -106,6 +106,8 @@ pub struct Wrapping {
     pub call_arguments: WrapPolicy,
     /// A method / constructor parameter list. Eclipse
     /// `alignment_for_parameters_in_method_declaration` / IntelliJ `METHOD_PARAMETERS_WRAP`.
+    /// Defaults to [`IfLongPerItem`](WrapPolicy::IfLongPerItem) — rustfmt's `fn_params_layout =
+    /// Tall`.
     pub method_parameters: WrapPolicy,
     /// A record header's component list. Eclipse `alignment_for_record_components` /
     /// IntelliJ `RECORD_COMPONENTS_WRAP`.
@@ -165,7 +167,8 @@ pub struct Wrapping {
     /// A list of short items reads well packed several to a line; one long item in the same list
     /// makes that packing arbitrary, so the list goes one item per line instead. The width is
     /// measured on the item's **source text**, so it is a property of what the author wrote
-    /// rather than of the layout being decided. `0` disables the test and always fills.
+    /// rather than of the layout being decided. `0` disables the test and always fills; the
+    /// default is `10`, rustfmt's `short_array_element_width_threshold`.
     ///
     /// google-java-format's `hasOnlyShortItems` / `MAX_ITEM_LENGTH_FOR_FILLING` (10). Eclipse
     /// spells the same distinction as two separate `alignment_for_*` bits (`M_COMPACT_SPLIT` vs
@@ -274,13 +277,35 @@ pub struct Wrapping {
     /// each concatenation *spells*, and that is what the formatter's fail-safe compares. Eclipse
     /// and IntelliJ have no equivalent.
     pub reflow_long_strings: bool,
+    /// How a jals-dialect grouped import's member list breaks when it does not fit
+    /// (`import java.util.{HashMap, List};`).
+    ///
+    /// Mirrors rustfmt's `imports_layout` over the dialect's own construct, and defaults to
+    /// [`IfLong`](WrapPolicy::IfLong) — rustfmt's `Mixed`. The dialect's canonical *token* form
+    /// (no trailing comma) is independent of this wrap and stays unconditional. No Java formatter
+    /// has an opinion here, because no Java formatter has the construct; rustfmt's `Visual`
+    /// variant of the sibling `imports_indent` is column alignment and is not modeled at all
+    /// (`jals-fmt/MAPPING-rustfmt.md` §2, `DESIGN.md` §18.2 D1).
+    pub import_group: WrapPolicy,
+    /// Drop a pair of parentheses that only wraps another pair — `((x + y))` to `(x + y)`.
+    ///
+    /// Mirrors rustfmt's `remove_nested_parens`, and defaults to `true` with it. Vendor profiles
+    /// pin `false`: every one of the four Java references leaves redundant parentheses exactly as
+    /// written.
+    ///
+    /// Only a **directly** nested pair is removed, so the parentheses that carry meaning are all
+    /// safe: a cast's, a method call's argument list, a control statement's condition, and a pair
+    /// around anything that is not itself a parenthesized expression are untouched. `(((x)))`
+    /// collapses to `(x)` because the rule reaches each redundant pair in turn, not because it
+    /// counts them.
+    pub remove_nested_parens: bool,
 }
 
 impl Default for Wrapping {
     fn default() -> Self {
         Self {
             call_arguments: WrapPolicy::IfLong,
-            method_parameters: WrapPolicy::IfLong,
+            method_parameters: WrapPolicy::IfLongPerItem,
             record_components: WrapPolicy::IfLong,
             resource_list: WrapPolicy::IfLong,
             throws_list: WrapPolicy::IfLong,
@@ -300,7 +325,7 @@ impl Default for Wrapping {
             for_statement: WrapPolicy::IfLong,
             assert_statement: WrapPolicy::IfLong,
             labeled_statement: WrapPolicy::Never,
-            fill_item_width: 0,
+            fill_item_width: 10,
             format_string_arguments: false,
             switch_expression: WrapPolicy::IfLong,
             type_annotations: WrapPolicy::AlwaysPerItem,
@@ -326,6 +351,8 @@ impl Default for Wrapping {
             wrap_long_lines: false,
             tabular_array_initializers: false,
             reflow_long_strings: false,
+            import_group: WrapPolicy::IfLong,
+            remove_nested_parens: true,
         }
     }
 }

@@ -14,6 +14,7 @@ use jals_config::fmt::WrapPolicy;
 use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::ir::Indent;
+use crate::passes::token_license::License;
 use crate::visit::{Ctx, Spacing};
 
 impl Ctx<'_> {
@@ -386,6 +387,90 @@ impl Ctx<'_> {
             self.visit_element(&child).await;
         }
     }
+
+    /// A parenthesized expression — `(x + y)`.
+    ///
+    /// The only rule here is `[wrapping] remove-nested-parens`: a pair that wraps nothing but
+    /// another pair says nothing the inner one does not, so it is dropped. `((x))` therefore comes
+    /// out as `(x)` — the outer pair goes, the inner one is emitted as written, and a third layer
+    /// is reached the same way on the way down.
+    ///
+    /// Which pair is redundant is [`License::wraps_a_paren`], not a predicate of this function's
+    /// own: the rule that drops the tokens and the check that licenses the drop have to agree, and
+    /// two implementations of that question is what `token_license` exists to prevent. The license
+    /// lane reaches the same predicate from a token through `License::is_redundant_paren`.
+    pub(super) async fn visit_paren(&mut self, node: &SyntaxNode) {
+        if self.style.cfg.wrapping.remove_nested_parens && License::wraps_a_paren(node) {
+            for child in Self::children(node) {
+                match child.as_token() {
+                    Some(tok) if !tok.kind().is_trivia() => self.emit_comments_without_token(tok),
+                    Some(_) => {}
+                    None => self.visit_element(&child).await,
+                }
+            }
+            return;
+        }
+        self.visit_children(node).await;
+    }
+}
+
+#[cfg(test)]
+mod paren_tests {
+    use jals_config::FeatureSet;
+    use jals_config::fmt::Config;
+
+    fn formatted(src: &str, remove: bool) -> String {
+        let mut cfg = Config::default();
+        cfg.wrapping.remove_nested_parens = remove;
+        let out = jals_exec::block_on_inline(crate::FormatOutput::format_source(
+            src,
+            &cfg,
+            FeatureSet::default(),
+        ));
+        assert!(!out.fell_back(), "the fail-safe refused its own output");
+        out.formatted
+    }
+
+    #[test]
+    fn a_doubled_pair_loses_its_outer_layer() {
+        let src = "class Z {\n  int m() {\n    return ((1 + 2));\n  }\n}\n";
+        assert!(formatted(src, false).contains("((1 + 2))"));
+        let out = formatted(src, true);
+        assert!(out.contains("return (1 + 2);"), "{out}");
+    }
+
+    #[test]
+    fn three_layers_collapse_to_one() {
+        // Not because the rule counts layers: each redundant pair is reached in turn on the way
+        // down, and the innermost pair wraps an expression rather than a pair.
+        let out = formatted(
+            "class Z {\n  int m() {\n    return (((1)));\n  }\n}\n",
+            true,
+        );
+        assert!(out.contains("return (1);"), "{out}");
+    }
+
+    #[test]
+    fn a_pair_that_carries_meaning_is_untouched() {
+        // A cast's parentheses, a call's argument list, and a condition are not `PAREN_EXPR`
+        // children of a `PAREN_EXPR`, so none of them is ever a candidate.
+        let out = formatted(
+            "class Z {\n  int m(int a) {\n    if ((a) > 0) return ((int) f(a));\n    return (a);\n  }\n}\n",
+            true,
+        );
+        assert!(out.contains("(a) > 0"), "{out}");
+        assert!(out.contains("((int) f(a))"), "{out}");
+        assert!(out.contains("return (a);"), "{out}");
+    }
+
+    #[test]
+    fn a_comment_inside_the_dropped_pair_survives() {
+        let out = formatted(
+            "class Z {\n  int m() {\n    return ( /* keep */ (1 + 2));\n  }\n}\n",
+            true,
+        );
+        assert!(out.contains("keep"), "{out}");
+    }
 }
 
 #[cfg(test)]
@@ -396,7 +481,11 @@ mod tests {
     fn breaking_after(src: &str) -> crate::FormatOutput {
         let mut cfg = Config::default();
         cfg.wrapping.before_binary_operator = false;
-        jals_exec::block_on_inline(crate::FormatOutput::format_source(src, &cfg))
+        jals_exec::block_on_inline(crate::FormatOutput::format_source(
+            src,
+            &cfg,
+            jals_config::FeatureSet::default(),
+        ))
     }
 
     #[test]
@@ -435,6 +524,7 @@ mod tests {
         let out = jals_exec::block_on_inline(crate::FormatOutput::format_source(
             "class Z { void m() { int x = 1; x >>= 2; x >>>= 3; } }\n",
             &Config::default(),
+            jals_config::FeatureSet::default(),
         ));
         assert!(!out.fell_back(), "the fail-safe refused the output");
         assert!(out.formatted.contains("x >>= 2;"), "{}", out.formatted);
@@ -453,8 +543,13 @@ mod tests {
         let mut cfg = Config::default();
         cfg.wrapping.before_assignment_operator = true;
         cfg.layout.max_width = 24;
-        let format =
-            |src: &str| jals_exec::block_on_inline(crate::FormatOutput::format_source(src, &cfg));
+        let format = |src: &str| {
+            jals_exec::block_on_inline(crate::FormatOutput::format_source(
+                src,
+                &cfg,
+                jals_config::FeatureSet::default(),
+            ))
+        };
 
         let shifted = format(
             "class Z { void m() { int xxxxxxxxxxxxxxxx = 1; xxxxxxxxxxxxxxxx >>= 22222222222; } }\n",

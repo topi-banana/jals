@@ -32,13 +32,12 @@
 //!   formatted", which it is otherwise byte-identical to.
 //! - **Idempotent.** `format(format(x)) == format(x)`.
 //! - **Significant tokens are preserved as a multiset**, except where an operation declared in
-//!   [`OPERATIONS`](passes::token_license::OPERATIONS) applies. Seven of the eight rows are
-//!   configured and every one of them is off (or `preserve`) in [`Config::default`]: import
-//!   ordering, unused-import removal, modifier ordering, long-string rewrapping, text-block
-//!   re-indentation, the `[literals]` rewrites, and `[braces] force-*`. The eighth is
-//!   **unconditional** — the dialect drops a grouped import's trailing comma — so "except where an
-//!   explicitly configured rule applies" is not the whole story, and the table rather than this
-//!   sentence is what [`TokenBudget`](passes::TokenBudget) reads.
+//!   [`OPERATIONS`](passes::token_license::OPERATIONS) applies. [`Config::default`] licenses
+//!   exactly the unconditional dialect grouped-import trailing-comma drop, `[wrapping]
+//!   remove-nested-parens`, and `[braces] force-*` (because `force-switch-arm = always`).
+//!   `[imports] order = sort` is also on by default but is `Reorders` — sequence, not multiset.
+//!   Every other configured row stays off/`preserve`. The table rather than this sentence is what
+//!   [`TokenBudget`](passes::TokenBudget) reads.
 //! - **Comments are never dropped.** Each is anchored to exactly one token and emitted with it.
 //! - **Layout never reads input whitespace**, with one exception the engine shares with
 //!   google-java-format: whether two significant tokens had a blank line between them. Rules that
@@ -66,18 +65,27 @@ mod passes;
 mod style;
 mod visit;
 
+use jals_config::FeatureSet;
 use jals_config::fmt::Config;
 
 pub use output::{FormatOutput, Warning};
 
 impl FormatOutput {
-    /// Format `src` according to `config`.
+    /// Format `src` according to `config`, for a project enabling `features`.
     ///
     /// Parsing is lossless and error-resilient, so a source with syntax errors is still formatted
     /// best-effort and the errors come back as [`Warning`]s. Configuration diagnostics — a rule
-    /// rounded because it would have read input whitespace — arrive the same way, with no range.
-    pub async fn format_source(src: &str, config: &Config) -> Self {
-        let (style, mut warnings) = style::Style::reify(config, src);
+    /// rounded because it would have read input whitespace, or because it would have *written*
+    /// syntax the project's dialect does not enable — arrive the same way, with no range.
+    ///
+    /// `features` is the project's `[package] features`, or [`FeatureSet::default`] for a source
+    /// formatted outside any project (a bare file, stdin, a corpus fixture). Only a rule that
+    /// emits dialect syntax reads it, and there is exactly one: `[imports] granularity =
+    /// "package"` writes grouped imports, which do not compile unless `grouped-imports` is on.
+    /// The formatter cannot discover that itself — a lossless parser accepts a grouped import in
+    /// any project, and so does the fail-safe — so the answer is a parameter rather than a guess.
+    pub async fn format_source(src: &str, config: &Config, features: FeatureSet) -> Self {
+        let (style, mut warnings) = style::Style::reify(config, src, features);
 
         let parse = jals_syntax::Parse::parse(src).await;
         let errors = parse.errors().len();

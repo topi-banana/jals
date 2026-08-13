@@ -14,6 +14,7 @@
 indent-width = 2
 tab-width = 2
 continuation-indent = 4
+line-ending = "lf"
 
 [wrapping]
 # google-java-format has no per-construct width thresholds — it wraps against the single column
@@ -57,6 +58,10 @@ variable-annotations = "always-per-item"
 inline-argumentless-annotations = "declarations"
 # `StringWrapper`: re-wrap a string concatenation that overflows the column limit.
 reflow-long-strings = true
+# A grouped import is jals dialect syntax; google-java-format has no construct to wrap.
+import-group = "never"
+# GJF leaves redundant parentheses exactly as written.
+remove-nested-parens = false
 
 [blank-lines]
 # `thisOneGetsBlankLineBefore`: a member carrying Javadoc — and a field whose annotations went
@@ -70,6 +75,8 @@ around-documented-member = 1
 keep-type-body-on-one-line = "if-empty"
 keep-method-body-on-one-line = "if-empty"
 keep-control-statement-on-one-line = true
+# No Java formatter adds braces to a switch arm unasked.
+force-switch-arm = "never"
 
 [spacing]
 # `new String[] { … }` takes a space before the initializer's brace.
@@ -83,6 +90,8 @@ format-block = false
 format-javadoc = true
 format-header = true
 width = 100
+# Track `width`; a separate snippet budget is rustfmt's, not GJF's.
+code-block-width = 0
 blank-line-before-tags = true
 # `JavadocFormatter.formatJavadoc` catches its own lexer's `LexException` and hands the comment
 # back unchanged, so a Javadoc whose `<pre>`, `<code>`, `<table>` or `{@…}` never closes is one

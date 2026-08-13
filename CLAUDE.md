@@ -305,13 +305,14 @@ its `lib.rs`; every other module imports with `use alloc::...`. The
 - Formatting is idempotent. It preserves the significant token multiset except where a **declared
   token-changing operation** applies. The operations are enumerated as data in
   `jals_fmt::passes::token_license::OPERATIONS` — `jals-fmt/DESIGN.md` §20's table — and the
-  fail-safe reads that table rather than reconstructing the list from config keys. Seven rows are
-  configured and every one is off (or `preserve`) by default: import ordering, unused-import
-  removal, modifier ordering, long-string rewrapping, text-block re-indentation, the literal
-  normalizations, and brace forcing. The eighth is **unconditional** — the jals dialect drops a
-  grouped import's trailing comma — so "explicitly configured" is not a complete qualifier, and a
-  new token-changing pass belongs in the table, not in prose. Long-string rewrapping *adds* `+`
-  tokens when it splits a lone literal; what it preserves is what each concatenation spells.
+  fail-safe reads that table rather than reconstructing the list from config keys.
+  `Config::default()` licenses exactly: the unconditional dialect grouped-import trailing-comma
+  drop; `[wrapping] remove-nested-parens`; and `[braces] force-*` (because `force-switch-arm =
+  always`). `[imports] order = sort` is also on by default but is `Reorders` — sequence, not
+  multiset. Every other configured row stays off/`preserve`. A new token-changing pass belongs in
+  the table, and a new default-on row belongs in `the_default_config_enables_exactly_these_rows`.
+  Long-string rewrapping *adds* `+` tokens when it splits a lone literal; what it preserves is
+  what each concatenation spells.
 - All project and artifact enumeration is deterministic.
 - File/directory collisions, duplicate entries, file ancestors, root escape, unsafe archive
   members, and cache digest mismatches must be rejected or diagnosed structurally.
