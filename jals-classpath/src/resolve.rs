@@ -157,6 +157,10 @@ impl MappingSpec {
         };
         let format = match source.format() {
             MappingFormatKind::Proguard {} => MappingFormat::Proguard,
+            MappingFormatKind::TinyV2 { from, to } => MappingFormat::TinyV2 {
+                from: from.clone(),
+                to: to.clone(),
+            },
         };
         let location = match source {
             MappingSource::File(file) => match FileKey::parse(&file.file) {

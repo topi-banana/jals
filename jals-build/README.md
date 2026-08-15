@@ -289,6 +289,8 @@ asynchronously after Rhai evaluation and capability preflight succeed:
 | `extract_java(jar, prefix)`                                                      | Safe `.java` source tree below `prefix`, with the prefix stripped.            |
 | `nested_jar(jar, member)`                                                        | Extract one nested `.jar` member and treat it as a JAR.                       |
 | `remap_jar(jar, mappings)`                                                       | Deobfuscate a JAR with Mojang/ProGuard mappings text (hierarchy-aware).       |
+| `remap_jar(jar, mappings, format)`                                               | The same, over a stated mapping grammar.                                      |
+| `proguard()` / `tiny_v2(from, to)`                                               | The grammar `remap_jar` reads. Tiny v2 names the namespace pair to read.      |
 | `merge_jars(base, overlay)`                                                      | Deterministic JAR union; overlay wins path conflicts.                         |
 | `decompile_java(jar, prefix)`                                                    | Compile-oriented skeleton source tree below `prefix`.                         |
 | `add_classpath(jar)`                                                             | Add a task-produced JAR to the root classpath.                                |

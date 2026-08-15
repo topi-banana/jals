@@ -318,7 +318,7 @@ render = { path = "../render", features = ["vulkan"], default-features = false }
 選択された `[features]` を読み、通常の生成物を `target/jals/build/rhai/out` 以下へ書き、
 生成 source・classpath entry・`javac`/JVM
 flag・compile/run environment entry を追加できます。さらに型付き `tasks` DAG で、size/digest 検証付き
-download、JSON projection、安全な sources JAR 展開、Mojang mappings による jar remap、jar merge、
+download、JSON projection、安全な sources JAR 展開、mappings による jar remap（Mojang/ProGuard・tiny v2）、jar merge、
 compile 向け decompile、排他的な物理 source tree の publish を宣言できます。
 Rhai は task 結果を読めず process も起動しません。`replace-root` は宣言した destination 以下を全置換し、
 通常出力と同じ transaction で publish されます。native CLI と LSP は task を実行し、LSP は destination

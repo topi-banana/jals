@@ -198,7 +198,7 @@ impl RemapPlan {
             &key,
             &RemapRequest {
                 mappings: &mappings,
-                format: mapping.format,
+                format: mapping.format.clone(),
                 direction: RemapDirection::Reobfuscate,
                 hierarchy,
             },
