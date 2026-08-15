@@ -458,7 +458,7 @@ impl Mappings {
     /// A member section's descriptor column, validated against the kind of member that declared it.
     ///
     /// Validated rather than carried through verbatim because a descriptor is what a member lookup
-    /// is keyed by: an unparseable one would silently key an entry nothing can ever match, which is
+    /// is keyed by: an unparsable one would silently key an entry nothing can ever match, which is
     /// a member that quietly keeps its obfuscated name in an otherwise remapped jar.
     fn tiny_descriptor(
         raw: &str,
@@ -780,7 +780,7 @@ impl Mappings {
     }
 
     /// [`remap_descriptor`](Self::remap_descriptor) for one already-parsed type.
-    pub(crate) fn remap_field_type(&self, ty: FieldType) -> FieldType {
+    fn remap_field_type(&self, ty: FieldType) -> FieldType {
         match ty {
             FieldType::Base(base) => FieldType::Base(base),
             FieldType::Object(name) => {
@@ -1219,7 +1219,7 @@ c\ta\tcom/example/N\\Amed
         );
         assert!(
             reject("tiny\t2\t0\tofficial\tnamed\nc\ta\tX\n\tm\tnot-a-descriptor\tx\ty\n"),
-            "an unparseable descriptor keys an entry nothing can match"
+            "an unparsable descriptor keys an entry nothing can match"
         );
         assert!(
             reject("tiny\t2\t0\tofficial\tnamed\nc\ta\tX\nc\tb\tX\n"),
