@@ -265,3 +265,86 @@ fn a_new_binds_to_the_constructor_its_arguments_select() {
         new_target(src, "new Pair(1.5)")
     );
 }
+
+/// Every reference type is a subtype of `java.lang.Object`, however it was declared.
+///
+/// Java writes the edge for you and the source never spells it, so there is no `extends` clause for
+/// the index to have resolved — which left `class Foo {}` with an empty supertype chain and
+/// `is_subtype(Foo, Object)` answering `false`. An interface is included deliberately: JLS §9.2
+/// gives it no *superinterface*, but every interface-typed value is still an `Object`.
+#[test]
+fn every_reference_type_is_a_subtype_of_object() {
+    let src = "
+        class Plain {}
+        interface Iface {}
+        enum Color { RED }
+        record Point(int x, int y) {}
+        class Holder { Object make() { return new Object() {}; } }
+    ";
+    let fixture = Fixture::new(src);
+    let index = &fixture.index;
+    let object = index
+        .item_by_fqn("java.lang.Object")
+        .expect("the stubs declare java.lang.Object");
+    for name in ["Plain", "Iface", "Color", "Point", "Holder"] {
+        let id = index
+            .item_by_fqn(name)
+            .unwrap_or_else(|| panic!("`{name}` is indexed"));
+        assert!(index.is_subtype(id, object), "`{name}` is not an Object");
+    }
+    // The anonymous class too — it has no name to look up, so find it by its enclosing declaration.
+    let anonymous = index
+        .items()
+        .find(|(_, item)| {
+            item.fqn.to_string().starts_with("Holder.") || item.fqn.to_string() == "Holder$1"
+        })
+        .map(|(id, _)| id);
+    if let Some(id) = anonymous {
+        assert!(
+            index.is_subtype(id, object),
+            "the anonymous class is not an Object"
+        );
+    }
+}
+
+/// `Object` does not extend itself, and a written `extends Object` is not doubled.
+#[test]
+fn the_implicit_object_edge_is_added_exactly_once() {
+    let fixture = Fixture::new("class Written extends Object {}");
+    let index = &fixture.index;
+    let object = index
+        .item_by_fqn("java.lang.Object")
+        .expect("the stubs declare java.lang.Object");
+    assert!(
+        index.item(object).supertypes.is_empty(),
+        "Object must not be its own supertype"
+    );
+    let written = index.item_by_fqn("Written").expect("Written is indexed");
+    let to_object: Vec<bool> = index
+        .item(written)
+        .supertypes
+        .iter()
+        .filter(|sup| sup.id == object)
+        .map(|sup| sup.implicit)
+        .collect();
+    assert_eq!(
+        to_object,
+        [false],
+        "a written `extends Object` stays the one edge, and stays non-implicit"
+    );
+}
+
+/// With no stubs and no classpath there is no `java.lang.Object` to point at, and the absence must
+/// stay an absence: marking the type as having an *external* supertype instead would suppress every
+/// "no member" conclusion in the workspace.
+#[test]
+fn the_implicit_object_edge_is_absent_without_an_indexed_object() {
+    let node = jals_exec::block_on_inline(jals_syntax::Parse::parse("class Foo {}")).syntax();
+    let index = jals_exec::block_on_inline(ProjectIndex::builder(&[(FileId(0), node)]).build());
+    let foo = index.item_by_fqn("Foo").expect("Foo is indexed");
+    assert!(index.item(foo).supertypes.is_empty());
+    assert!(
+        index.method_set_complete(foo, "anything"),
+        "an unindexed Object is not an external supertype"
+    );
+}

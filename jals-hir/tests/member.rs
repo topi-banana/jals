@@ -149,6 +149,8 @@ fn supertype_arguments_are_recorded() {
     let sub = index.item(item(&index, &sources, 0, "Sub"));
     assert_eq!(
         sub.supertypes,
+        // One edge, not two: `build` indexes no stubs and no classpath, so `java.lang.Object` is not
+        // an indexed type and the implicit edge has nothing to point at.
         vec![Supertype {
             id: base_id,
             args: vec![MemberType::Named {
@@ -157,6 +159,7 @@ fn supertype_arguments_are_recorded() {
                 dims: 0,
                 args: Vec::new(),
             }],
+            implicit: false,
         }]
     );
 }

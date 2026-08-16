@@ -87,6 +87,9 @@ impl fmt::Display for Fqn {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ItemId(u32);
 
+/// The one type name the language supplies as a supertype without any source writing it.
+const OBJECT_FQN: &str = "java.lang.Object";
+
 /// Where an indexed [`Item`] comes from: the project's own sources, a `git`/`path` dependency's
 /// sources, an external `.class` file, or an embedded standard-library stub.
 ///
@@ -186,6 +189,20 @@ pub struct Supertype {
     pub id: ItemId,
     /// The type arguments supplied to it, captured like a [`Member`]'s type; empty for a raw use.
     pub args: Vec<MemberType>,
+    /// Whether the language supplies this edge rather than the source writing it — the implicit
+    /// `java.lang.Object` every reference type extends.
+    ///
+    /// Every walk wants it (`x.toString()` has to resolve, and every reference type *is* an
+    /// `Object`) except one: [`method_set_complete`](ProjectIndex::method_set_complete) treats a
+    /// reached stub as proof the overload set is partial, and an edge from every type to a stub
+    /// `Object` would make that predicate universally `false`. Skipping the implicit edge there
+    /// loses nothing, because [`is_object_method`](ProjectIndex::is_object_method) already answers
+    /// `false` for every name `Object` declares.
+    ///
+    /// The implicit `java.lang.Enum` / `java.lang.Record` edges are deliberately **not** marked:
+    /// there is no name list covering *their* members, so their stub-incompleteness must keep
+    /// propagating.
+    pub implicit: bool,
 }
 
 /// A dense identifier for a [`Member`] within one [`ProjectIndex`].
@@ -683,7 +700,8 @@ impl ProjectIndex {
     ///
     /// Each file contributes its package, its type-name imports, and every type declaration it
     /// holds (top-level and nested). When two files declare the same fully-qualified name, the
-    /// first one indexed wins. With no options the JDK / classpath is *not* indexed — opt in with
+    /// first one indexed wins, and the indexing order is the priority order stated on
+    /// [`assemble`](Self::assemble). With no options the JDK / classpath is *not* indexed — opt in with
     /// [`with_stdlib`](ProjectIndexBuilder::with_stdlib),
     /// [`with_classpath`](ProjectIndexBuilder::with_classpath),
     /// [`with_source_locations`](ProjectIndexBuilder::with_source_locations), and
@@ -869,9 +887,10 @@ impl ProjectIndex {
 
     /// Assemble an index from pre-extracted per-file [`FileFacts`], folding in the classpath facts and
     /// the source-location overlay — the non-CST-walking half of indexing. `project` (host-editable
-    /// sources), `source` (`git`/`path` library sources), and `stub` (from
-    /// [`stub_facts`](Self::stub_facts)) are indexed in that priority order, so on a
-    /// fully-qualified-name clash a project type wins over a library type wins over a stub. Cheap
+    /// sources), `source` (`git`/`path` library sources), `classes` (the classpath), and `stub`
+    /// (from [`stub_facts`](Self::stub_facts)) are indexed in that priority order, so on a
+    /// fully-qualified-name clash a project type wins over a library type wins over a classpath type
+    /// wins over a stub — the stub last because it is signature-only and deliberately partial. Cheap
     /// relative to extraction (allocations, hashing, and supertype resolution only), so re-running it
     /// on every edit — reusing cached facts for the unchanged files — is the incremental path, bit-for
     /// -bit identical to a from-scratch [`builder`](Self::builder) build over the same inputs. Pure and
@@ -903,10 +922,11 @@ impl ProjectIndex {
             decl_to_member: HashMap::new(),
         };
 
-        // Every compilation unit to index, in priority order: the host's project files first, then the
-        // `git`/`path` library sources, then the embedded stubs — so on a fully-qualified-name clash a
-        // project type wins over a library type wins over a stub (`by_fqn` keeps the first insert). All
-        // passes below walk this one origin-tagged list.
+        // Every source compilation unit to index, in priority order: the host's project files first,
+        // then the `git`/`path` library sources — so on a fully-qualified-name clash a project type
+        // wins over a library type (`by_fqn` keeps the first insert). Every pass below walks this
+        // list and then `stubs`; the *first* pass interleaves the classpath between them, which is
+        // what puts a real `.class` ahead of a stub of the same name.
         let units: Vec<(FileId, &FileFacts, ItemOrigin)> = project
             .iter()
             .map(|(file, facts)| (*file, *facts, ItemOrigin::Project))
@@ -915,10 +935,10 @@ impl ProjectIndex {
                     .iter()
                     .map(|(file, facts)| (*file, *facts, ItemOrigin::Source)),
             )
-            .chain(
-                stub.iter()
-                    .map(|(file, facts)| (*file, *facts, ItemOrigin::Stdlib)),
-            )
+            .collect();
+        let stubs: Vec<(FileId, &FileFacts, ItemOrigin)> = stub
+            .iter()
+            .map(|(file, facts)| (*file, *facts, ItemOrigin::Stdlib))
             .collect();
 
         // First pass: package, imports, and type declarations.
@@ -927,6 +947,12 @@ impl ProjectIndex {
         }
         // Classpath `.class` files (already lowered to self-contained data) registered like source
         // types. Their reserved `FileId`s sit just below the stub block so they never collide.
+        //
+        // Registered *before* the stubs, and that order is the whole priority rule between them: a
+        // stub is signature-only and deliberately partial (`crate::stdlib`), a classpath type is the
+        // complete declared member set of a real class, and `ItemOrigin::Classpath` already says so.
+        // With the stubs first, indexing a real JDK left `java.lang.System` resolving to a stub that
+        // does not declare `lineSeparator`, and `println(Object)` binding to `println(String)`.
         let classfile_block_start = u32::MAX - stub.len() as u32 - 1;
         let classfiles: Vec<(FileId, &crate::classpath::ClassfileClass)> = classes
             .iter()
@@ -938,6 +964,9 @@ impl ProjectIndex {
         for &(file, class) in &classfiles {
             yielder.tick().await;
             classfile_owners.push(index.collect_classfile_type(file, class, sources));
+        }
+        for &(file, facts, origin) in &stubs {
+            index.register_file_types(file, facts, origin).await;
         }
         // Index each type's declaration site, so a same-file type reference (which resolves
         // file-locally, not through the project) can be mapped back to its item for find-references.
@@ -952,8 +981,9 @@ impl ProjectIndex {
             index.decl_to_item.insert(key, id);
         }
         // Second pass: members and project-internal inheritance. It runs after every type is indexed
-        // so a supertype declared later (or in another file / stub) still resolves.
-        for &(file, facts, _) in &units {
+        // so a supertype declared later (or in another file / stub) still resolves. Order is
+        // immaterial here — unlike the first pass, this one resolves against a complete `by_fqn`.
+        for &(file, facts, _) in units.iter().chain(&stubs) {
             index.register_file_members(file, facts).await;
         }
         // The same second pass for classpath types, now that every type (project, stub, classpath) is
@@ -1040,6 +1070,7 @@ impl ProjectIndex {
                 supertypes.push(Supertype {
                     id,
                     args: Vec::new(),
+                    implicit: false,
                 });
             }
             // The same for a `record` and `java.lang.Record`, which is also where `equals`,
@@ -1051,8 +1082,10 @@ impl ProjectIndex {
                 supertypes.push(Supertype {
                     id,
                     args: Vec::new(),
+                    implicit: false,
                 });
             }
+            self.push_implicit_object(owner, file, &mut supertypes);
             // A lambda item's one member is the interface method it implements. Only its *name* and arity
             // matter here — a dispatch built on subtyping looks the member up by those, and a backend makes
             // the descriptor itself. Done after the supertypes resolve, because the interface is one of them.
@@ -1120,11 +1153,60 @@ impl ProjectIndex {
                 TypeResolution::Project(id) => supertypes.push(Supertype {
                     id,
                     args: args.clone(),
+                    implicit: false,
                 }),
                 TypeResolution::External | TypeResolution::Unresolved => has_external = true,
             }
         }
         (supertypes, has_external)
+    }
+
+    /// Appends the implicit `java.lang.Object` edge to a reference type's resolved `supertypes`.
+    ///
+    /// Java gives every class, enum, record, and interface `Object`'s members, and no source writes
+    /// the clause — so like the `java.lang.Enum` / `java.lang.Record` edges above there is nothing
+    /// for [`resolve_supertypes`](Self::resolve_supertypes) to have resolved. Without it
+    /// `x.toString()` binds to nothing on a plain `class`, and `Object o = new Foo();` is a
+    /// mismatch as soon as `Object` is a classpath type rather than a (leniently demoted) stub.
+    ///
+    /// Silently does nothing when `java.lang.Object` is not indexed at all — no stubs, no
+    /// classpath. That is deliberate and is *not* an external supertype: `has_external_supertype`
+    /// is computed from the clauses the source wrote, and marking every type as having an unknown
+    /// supertype would suppress every "no member" conclusion in the workspace, which is the same
+    /// damage this edge is being careful to avoid in `method_set_complete`.
+    ///
+    /// An interface gets the edge too. JLS §9.2 says an interface with no `extends` has no
+    /// *superinterface*, but its member set implicitly declares `Object`'s public methods and every
+    /// interface-typed value is an `Object`; [`implicit`](Supertype::implicit) is what records that
+    /// the edge is not a written `extends`.
+    fn push_implicit_object(
+        &self,
+        owner: ItemId,
+        file: FileId,
+        supertypes: &mut Vec<Supertype>,
+    ) {
+        if !matches!(
+            self.items[owner.0 as usize].kind,
+            DefKind::Class | DefKind::Interface | DefKind::Enum | DefKind::Record
+        ) {
+            return;
+        }
+        // `Object` is the one type that does not extend it.
+        if self.items[owner.0 as usize].fqn.as_str() == OBJECT_FQN {
+            return;
+        }
+        let TypeResolution::Project(id) = self.resolve_qualified(file, OBJECT_FQN) else {
+            return;
+        };
+        // A written `extends Object`, or a classpath type whose `super_class` already named it.
+        if supertypes.iter().any(|sup| sup.id == id) {
+            return;
+        }
+        supertypes.push(Supertype {
+            id,
+            args: Vec::new(),
+            implicit: true,
+        });
     }
 
     /// Registers a classpath type (first pass): pushes its [`Item`] and a per-file [`FileMeta`], and
@@ -1150,7 +1232,8 @@ impl ProjectIndex {
             // A real-source go-to-definition target, when this type's library source is indexed.
             source_location: sources.type_location(&class.fqn),
         });
-        // A project or stub type of the same name wins (first insert).
+        // A project or library-source type of the same name wins (first insert); a *stub* does not,
+        // because the stubs are registered after this pass.
         self.by_fqn.entry(class.fqn.clone()).or_insert(id);
         // Each classpath type gets its own pseudo-file with empty imports: every captured type name is
         // emitted fully-qualified, so it resolves through `resolve_qualified` without an import context.
@@ -1201,7 +1284,12 @@ impl ProjectIndex {
                 },
             );
         }
-        let (supertypes, has_external) = self.resolve_supertypes(file, &class.supertypes);
+        let (mut supertypes, has_external) = self.resolve_supertypes(file, &class.supertypes);
+        // A `.class` file names `java/lang/Object` in its `super_class`, so this is usually a
+        // duplicate the helper declines to add. It is not always: an *interface* class file has
+        // `super_class` = `java/lang/Object` per JVMS §4.1 but `ClasspathLower` reads its supertypes
+        // from the generic `ClassSignature` when one is present, which lists only superinterfaces.
+        self.push_implicit_object(owner, file, &mut supertypes);
         let item = &mut self.items[owner.0 as usize];
         item.supertypes = supertypes;
         item.has_external_supertype = has_external;
@@ -1555,14 +1643,28 @@ impl ProjectIndex {
     /// or when the walk reaches a standard-library *stub* type, whose member set is deliberately
     /// partial (the common members only) — so a stub-owned or stub-inherited overload set is treated
     /// as incomplete, never yielding a "no overload" conclusion.
+    ///
+    /// The implicit [`java.lang.Object`](Supertype::implicit) edge is not walked through. Every
+    /// reference type has one, so counting it would reach the (stub) `Object` from *every* type and
+    /// make this predicate universally `false` — silencing the whole check rather than guarding it.
+    /// Skipping it is sound rather than merely convenient: the early return above already answers
+    /// `false` for every name `Object` declares, so an edge to `Object` can contribute no overload
+    /// this walk would otherwise have missed.
     pub fn method_set_complete(&self, owner: ItemId, name: &str) -> bool {
         if Self::is_object_method(name) {
             return false;
         }
-        self.walk_supertypes(owner, |current| {
-            let item = &self.items[current.0 as usize];
-            (item.origin == ItemOrigin::Stdlib || item.has_external_supertype).then_some(())
-        })
+        self.walk_supertypes_stateful(
+            owner,
+            false,
+            |current, &via_implicit| {
+                let item = &self.items[current.0 as usize];
+                (!via_implicit
+                    && (item.origin == ItemOrigin::Stdlib || item.has_external_supertype))
+                    .then_some(())
+            },
+            |_, &via_implicit, sup| via_implicit || sup.implicit,
+        )
         .is_none()
     }
 
@@ -2404,11 +2506,19 @@ mod tests {
 
         assert_eq!(summary(&built), summary(&assembled));
         // Sanity: the cross-file supertype actually resolved, so the comparison is not vacuous.
+        // `p.Base` is the written `extends`; the second edge is the implicit `java.lang.Object`,
+        // which the indexed stubs supply.
         let (_, sub) = built
             .items()
             .find(|(_, item)| item.fqn.to_string() == "p.Sub")
             .expect("Sub is indexed");
-        assert_eq!(sub.supertypes.len(), 1, "Sub extends the project type Base");
+        let written: Vec<&str> = sub
+            .supertypes
+            .iter()
+            .filter(|sup| !sup.implicit)
+            .map(|sup| built.item(sup.id).fqn.as_str())
+            .collect();
+        assert_eq!(written, ["p.Base"], "Sub extends the project type Base");
     }
 
     /// Extraction is a pure function of the tree, so a cached fact is a valid stand-in for a fresh one.

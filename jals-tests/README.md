@@ -249,9 +249,17 @@ a regression into a wrong class file fails a build while the long tail of unimpl
 does not.
 
 CI leaves `--strict` off: known defects are still open (a nested `new` passing the wrong enclosing
-instance, `this$0` stored after `super()`, and two `jals-syntax` gaps), so the report is a
-measurement rather than a gate. Turning it on is what would make it one, and that is a decision to
-take once the list is empty.
+instance, `this$0` read or stored before `super()` — which JEP 447's statements-before-`super()`
+reaches from a second direction — and four `jals-syntax` gaps: unicode escapes as JLS §3.3 defines
+them, a stray `;` at top level, `{,}` where the list may be empty, and `var` used as an ordinary
+identifier), so the report is a measurement rather than a gate. Turning it on is what would make it
+one, and that is a decision to take once the list is empty.
+
+Expect the list to *change* as the rate rises, and not always to shrink. A file blocked at
+`lowered` never reaches the verifier, so fixing what blocked it does not only move it up the
+ladder — it can move it into the defect list, exposing a backend bug that was always there. Reading
+a bigger defect count as a regression is therefore wrong on its own; what says whether a change
+regressed is which cases entered and left, and the ladder alongside them.
 
 ### Version pin
 

@@ -1289,11 +1289,8 @@ impl Compile {
             if context.index.member(own).modifiers.is_static {
                 continue;
             }
-            let own_text = MethodDescriptor::to_string(&Descriptor::method_descriptor(
-                own,
-                context.index,
-                false,
-            )?);
+            let own_descriptor = Descriptor::method_descriptor(own, context.index, false)?;
+            let own_text = MethodDescriptor::to_string(&own_descriptor);
             // Every inherited method of the same name and arity: an override of a *generic* one erases
             // differently, and that difference is exactly what needs bridging.
             for &inherited in &context.index.members_of(item) {
@@ -1326,6 +1323,15 @@ impl Compile {
                 if text == own_text {
                     continue;
                 }
+                // A bridge hands the target's returned value straight back, so it can only express a
+                // return that is *already* the erased one — a narrower reference. Returns that differ
+                // in kind are no covariant override at all, and writing one produces a method whose
+                // `ireturn` disagrees with its own `Ljava/lang/Object;` descriptor: exactly what
+                // `interface I { int clone(); }` (JLS §9.2, legal and impossible to implement) got
+                // once every type inherited `Object.clone()`.
+                if !Self::returns_are_bridgeable(&own_descriptor, &descriptor) {
+                    continue;
+                }
                 methods.push(Self::bridge(
                     context,
                     pool,
@@ -1338,6 +1344,25 @@ impl Compile {
             }
         }
         Ok(())
+    }
+
+    /// Whether a bridge from `inherited`'s erased descriptor to `own`'s can express the return.
+    ///
+    /// It can when both are reference types — the narrower one *is* an instance of the wider, so the
+    /// value passes through untouched, which is all [`bridge`](Self::bridge) knows how to do — or
+    /// when the returns already agree and only the parameters needed erasing. A primitive against a
+    /// reference is neither: no conversion the JVM would accept is implied by the source, and a
+    /// value returned unchanged fails the verifier against the descriptor it was declared under.
+    fn returns_are_bridgeable(own: &MethodDescriptor, inherited: &MethodDescriptor) -> bool {
+        use jals_classfile::{FieldType, ReturnType};
+        let reference = |ret: &ReturnType| {
+            matches!(
+                ret,
+                ReturnType::Type(FieldType::Object(_) | FieldType::Array(_))
+            )
+        };
+        reference(&own.return_type) && reference(&inherited.return_type)
+            || own.return_type == inherited.return_type
     }
 
     /// One bridge: take the erased arguments, cast each to what the override declared, and call it.
