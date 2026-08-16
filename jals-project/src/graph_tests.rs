@@ -1076,8 +1076,12 @@ fn resolve_native_runs_the_whole_graph_phase_in_one_call() {
         // `/private/var`, so a path comparison here would be testing the temporary directory.
         assert_eq!(
             assembly.plan.classpath.first(),
-            Some(&jals_classpath::ClasspathEntry::Artifact(task_key))
+            Some(&jals_classpath::ClasspathEntry::Artifact(task_key.clone()))
         );
+        // And it reached the *hierarchy* list, which is the half a post-compile `[build] remap`
+        // reads. The `lib/Box.class` entry above is on the same compile classpath and is not here:
+        // a hierarchy entry is unpacked as an archive, and bare class bytes would fail that.
+        assert_eq!(assembly.task_classpath, [task_key]);
     })
     .unwrap();
 }

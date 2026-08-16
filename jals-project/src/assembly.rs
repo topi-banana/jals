@@ -218,6 +218,16 @@ impl ProjectScript {
         classpath.append(&mut graph_assembly.plan.classpath);
         graph_assembly.plan.classpath = classpath;
 
+        // The same two groups in the same order, kept as keys because one consumer needs them as
+        // archives rather than as classpath entries: a post-compile `[build] remap` closes the
+        // hierarchy of what it reobfuscates against these, and a member inherited from a jar that is
+        // missing keeps its original name in an otherwise remapped archive. Concatenated and not
+        // deduplicated here — the set a host finally hands to the remap also carries the resolved
+        // `[dependencies]` jars, which never pass through this function, so the one place all of it
+        // is in hand is the host, and that is where the duplicates are dropped.
+        let mut task_classpath = self.task_classpath.clone();
+        task_classpath.extend(graph_assembly.task_classpath.iter().cloned());
+
         let graph_inputs =
             ProjectInputs::assemble(fetcher, storage, &graph_assembly.plan, options).await;
 
@@ -264,6 +274,7 @@ impl ProjectScript {
             inputs,
             source_roots,
             compile_classpath,
+            task_classpath,
             warnings: graph_assembly.warnings,
             errors: graph_assembly.errors,
         }
@@ -285,8 +296,8 @@ pub(crate) struct RootProjection {
 /// projection, not an oversight, so the portable build allows it rather than widening them back to
 /// `pub` for a consumer that does not exist.
 ///
-/// The allowance is per-field rather than on the struct: these four are the ones whose only reader
-/// is behind `native`, and a fifth that went unread would be a mistake worth hearing about.
+/// The allowance is per-field rather than on the struct: these five are the ones whose only reader
+/// is behind `native`, and a sixth that went unread would be a mistake worth hearing about.
 #[derive(Debug)]
 pub struct MemoryProjectAssembly {
     #[cfg_attr(not(feature = "native"), allow(dead_code))]
@@ -298,6 +309,15 @@ pub struct MemoryProjectAssembly {
     pub(crate) source_roots: Vec<DirKey>,
     #[cfg_attr(not(feature = "native"), allow(dead_code))]
     pub(crate) compile_classpath: Vec<CompileClasspathEntry>,
+    /// Every archive the build tasks put on the classpath: the root script's terminals, then each
+    /// dependency node's in discovery order — the order the plan's classpath already places them in.
+    ///
+    /// The subset of the compile classpath a `[build] remap` can read, and the reason it is a list
+    /// of its own: an entry here is an archive because a task terminal only accepts one, whereas the
+    /// compile classpath mixes those with directory members and bare `.class` artifacts that a
+    /// hierarchy index would try to unpack and fail on.
+    #[cfg_attr(not(feature = "native"), allow(dead_code))]
+    pub(crate) task_classpath: Vec<CacheKey>,
     pub(crate) warnings: Vec<GraphWarning>,
     pub(crate) errors: Vec<ProjectAssemblyError>,
 }
@@ -827,6 +847,188 @@ mod tests {
             // The mode still decides. `Analysis` loads the same class for the index and synthesizes
             // nothing, so the fold widened what navigation covers, not what every host pays for.
             assert!(analysis.is_empty(), "{analysis:?}");
+        });
+    }
+
+    /// A project holding an in-tree path dependency whose own build script puts `jar` on the
+    /// classpath — the shape a mod has, where the library it compiles against is a task artifact
+    /// rather than a declared dependency.
+    fn project_with_child_task_jar(jar: &[u8]) -> MemoryStorage {
+        MemoryStorage::memory(
+            CodeTree::new([
+                Entry::File(
+                    FileKey::parse("src/Main.java").expect("portable key"),
+                    b"class Main {}".to_vec(),
+                ),
+                Entry::File(
+                    FileKey::parse("deps/child/jals.toml").expect("portable key"),
+                    b"[build]\nsource-dirs = [\"src\"]\n\
+                      script = { type = \"rhai\", file = \"build.rhai\" }\n"
+                        .to_vec(),
+                ),
+                Entry::File(
+                    FileKey::parse("deps/child/build.rhai").expect("portable key"),
+                    br#"tasks.add_classpath(tasks.project_jar("vendor/lib.jar"));"#.to_vec(),
+                ),
+                Entry::File(
+                    FileKey::parse("deps/child/vendor/lib.jar").expect("portable key"),
+                    jar.to_vec(),
+                ),
+                Entry::File(
+                    FileKey::parse("deps/child/src/Child.java").expect("portable key"),
+                    b"class Child {}".to_vec(),
+                ),
+            ])
+            .expect("tree is valid"),
+        )
+    }
+
+    /// A one-class jar, packaged the way a task terminal's value would be.
+    fn task_jar() -> Vec<u8> {
+        const BOX_CLASS: &[u8] = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../jals-classpath/tests/fixtures/Box.class"
+        ));
+        jals_classpath::JarPackage::write(
+            &[(
+                RelativePath::parse("Box.class").expect("portable path"),
+                BOX_CLASS.to_vec(),
+            )],
+            None,
+        )
+        .expect("packaging one class is infallible")
+    }
+
+    /// The archives a `[build] remap` closes its hierarchy with are one list, and both halves are in
+    /// it: the root script's own terminals and every dependency node's.
+    ///
+    /// Either half missing is a *silent* wrong answer rather than a failure — the remap succeeds and
+    /// writes a jar whose inherited member still says the source name — so this asserts the list
+    /// itself rather than that some remap eventually worked.
+    #[test]
+    fn the_root_and_the_graphs_task_jars_are_one_hierarchy_in_that_order() {
+        block_on_inline(async {
+            let jar = task_jar();
+            let mut storage = project_with_child_task_jar(&jar);
+            let root_key = jals_storage::CacheKey::new(
+                CacheNamespace::BuildTaskArtifact,
+                ProvenanceFold::new(b"assembly-test\0").finish(),
+                ContentDigest::of(b"root task jar"),
+            );
+            storage
+                .artifacts_mut()
+                .publish(&root_key, b"root task jar")
+                .await
+                .expect("an in-memory publication is infallible");
+
+            // `Compile`, so nothing parses these bytes: what is under test is which keys the
+            // projection collects and in what order, not what a classpath loader makes of them.
+            let assembly = ProjectScript::from_parts(None, vec![root_key.clone()])
+                .resolve_memory(
+                    &root_manifest(),
+                    &mut storage,
+                    inert!(),
+                    ProjectInputOptions::Compile,
+                )
+                .await
+                .expect("an in-tree path dependency resolves offline");
+
+            assert!(assembly.errors.is_empty(), "{:?}", assembly.errors);
+            assert_eq!(
+                assembly.task_classpath.len(),
+                2,
+                "the root's terminal and the dependency's are both hierarchy jars"
+            );
+            assert_eq!(
+                assembly.task_classpath[0], root_key,
+                "the root's own terminal comes first, as it does on the plan's classpath"
+            );
+            assert_eq!(
+                assembly.task_classpath[1].content(),
+                ContentDigest::of(&jar),
+                "the second entry is the jar the dependency's script added"
+            );
+
+            // The two lists are produced by one traversal and must not drift apart: this fixture
+            // declares no `[build] classpath`, so every classpath artifact in the plan is a task
+            // jar and the two orders are directly comparable.
+            let planned: Vec<_> = assembly
+                .plan
+                .classpath
+                .iter()
+                .filter_map(|entry| match entry {
+                    ClasspathEntry::Artifact(key) | ClasspathEntry::ArtifactFile { key, .. } => {
+                        Some(key.clone())
+                    }
+                    ClasspathEntry::ProjectFile(_) | ClasspathEntry::ProjectDirectory(_) => None,
+                })
+                .collect();
+            assert_eq!(
+                planned, assembly.task_classpath,
+                "the hierarchy list and the plan's task entries are one traversal"
+            );
+        });
+    }
+
+    /// A `[build] classpath` *directory* contributes nothing to the hierarchy, and that is the point
+    /// rather than an omission.
+    ///
+    /// Its members are individual `.class` files. A hierarchy entry is unpacked as an archive and a
+    /// failure there fails the whole remap, so collecting keys from the compile classpath — where a
+    /// tree's members sit beside real jars — would turn a build that works today into a decode
+    /// error. The list is taken from task terminals precisely because those are archives by type.
+    #[test]
+    fn a_classpath_directory_contributes_no_hierarchy_entry() {
+        block_on_inline(async {
+            let mut storage = MemoryStorage::memory(
+                CodeTree::new([
+                    Entry::File(
+                        FileKey::parse("src/Main.java").expect("portable key"),
+                        b"class Main {}".to_vec(),
+                    ),
+                    Entry::File(
+                        FileKey::parse("deps/child/jals.toml").expect("portable key"),
+                        b"[build]\nsource-dirs = [\"src\"]\nclasspath = [\"vendor/classes\"]\n"
+                            .to_vec(),
+                    ),
+                    Entry::File(
+                        FileKey::parse("deps/child/vendor/classes/net/example/Api.class")
+                            .expect("portable key"),
+                        b"class bytes".to_vec(),
+                    ),
+                    Entry::File(
+                        FileKey::parse("deps/child/src/Child.java").expect("portable key"),
+                        b"class Child {}".to_vec(),
+                    ),
+                ])
+                .expect("tree is valid"),
+            );
+
+            let assembly = ProjectScript::skipped()
+                .resolve_memory(
+                    &root_manifest(),
+                    &mut storage,
+                    inert!(),
+                    ProjectInputOptions::Compile,
+                )
+                .await
+                .expect("an in-tree path dependency resolves offline");
+
+            // Assert the tree is actually there: an empty compile classpath would satisfy the
+            // second assertion for the wrong reason.
+            assert!(
+                assembly
+                    .compile_classpath
+                    .iter()
+                    .any(|entry| matches!(entry, CompileClasspathEntry::Tree(_))),
+                "the classpath directory reaches the compile classpath as a tree: {:?}",
+                assembly.compile_classpath
+            );
+            assert!(
+                assembly.task_classpath.is_empty(),
+                "a tree's `.class` members are not hierarchy jars: {:?}",
+                assembly.task_classpath
+            );
         });
     }
 

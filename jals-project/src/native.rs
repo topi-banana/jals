@@ -19,8 +19,8 @@ use jals_classpath::{
 use jals_config::{GitDependency, Manifest, PathDependency};
 use jals_exec::Exec;
 use jals_storage::{
-    Diagnostic, DirKey, FileKey, MemoryCache, Name, NativeSource, NativeStorage, ProjectStorage,
-    ProjectView, RelativePath,
+    CacheKey, Diagnostic, DirKey, FileKey, MemoryCache, Name, NativeSource, NativeStorage,
+    ProjectStorage, ProjectView, RelativePath,
 };
 
 use crate::assemble::{CompileClasspathEntry, ProjectAssemblyError};
@@ -69,6 +69,17 @@ pub struct NativeProjectAssembly {
     pub inputs: ProjectInputs,
     pub source_roots: Vec<DirKey>,
     pub compile_classpath: Vec<CompileClasspathEntry>,
+    /// Every archive a build task put on the classpath, as verified artifacts — the root script's
+    /// own terminals first, then each dependency node's.
+    ///
+    /// What a post-compile `[build] remap` closes its class hierarchy with, beside the resolved
+    /// `[dependencies]` jars in `inputs`. Not a projection of `compile_classpath`: the root's half
+    /// never appears there at all, and the dependency half sits among directory members and bare
+    /// `.class` artifacts that a hierarchy index would try to unpack and fail on. Kept as keys
+    /// rather than as the host paths a caller materializes, because the remap reads them from the
+    /// same verified cache and re-reading those paths off disk to publish them again would be the
+    /// same bytes acquired a second way.
+    pub task_classpath: Vec<CacheKey>,
     warnings: Vec<GraphWarning>,
     pub(crate) errors: Vec<ProjectAssemblyError>,
     pub watch_paths: Vec<PathBuf>,
@@ -276,6 +287,7 @@ impl ProjectScript {
             inputs: projected.inputs,
             source_roots: projected.source_roots,
             compile_classpath: projected.compile_classpath,
+            task_classpath: projected.task_classpath,
             warnings: projected.warnings,
             errors: projected.errors,
             watch_paths: graph.native.watch_paths.clone(),

@@ -2797,3 +2797,126 @@ fn resources_are_packaged_into_the_jar() {
     // `classes-dir` is the compiler's, and resources are not compiler output.
     assert!(!dir.path().join("target/classes/mixins.json").exists());
 }
+
+/// One member of a stored jar, as bytes.
+#[cfg(unix)]
+fn jar_member(path: &Path, name: &str) -> Vec<u8> {
+    let file = std::fs::File::open(path).unwrap();
+    let mut archive = zip::ZipArchive::new(file).unwrap();
+    let mut member = archive.by_name(name).unwrap();
+    let mut bytes = Vec::new();
+    std::io::copy(&mut member, &mut bytes).unwrap();
+    bytes
+}
+
+/// Whether `haystack` contains `needle` as a raw byte run — how a `Utf8` constant is stored.
+#[cfg(unix)]
+fn contains_bytes(haystack: &[u8], needle: &str) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle.as_bytes())
+}
+
+/// `HierarchyEvolution` implements `HierarchyLeft`, which extends `HierarchyRoot`, which is where
+/// `rootValue` is declared. Only the client is compiled; the two supertypes on the path to that
+/// declaration exist solely inside the jar a build task puts on the classpath.
+///
+/// Build the project and return the packaged client's bytes. `script` decides whether the task jar
+/// is added at all, which is the whole variable: everything else is identical between the two runs.
+///
+/// Built with the fake `javac`, which compiles nothing — the class bytes are placed in `classes-dir`
+/// directly and read back from there, exactly as a real process-based compile would leave them. That
+/// keeps this off a host JDK, and `javac` is required regardless: the in-process backend is handed
+/// an empty classpath by design and could not compile against a type that lives only in the jar.
+#[cfg(unix)]
+fn packaged_hierarchy_client(script: Option<&str>) -> Vec<u8> {
+    const CLIENT: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../jals-classpath/tests/fixtures/hierarchy-evolution/v1/evolution/HierarchyEvolution.class"
+    ));
+    const LEFT: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../jals-classpath/tests/fixtures/hierarchy-evolution/v1/evolution/HierarchyLeft.class"
+    ));
+    const ROOT: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../jals-classpath/tests/fixtures/hierarchy-evolution/v1/evolution/HierarchyRoot.class"
+    ));
+
+    let manifest = format!(
+        "[package]\nname = \"packaged\"\nversion = \"0.1.0\"\n[build]\n{}\
+         remap = {{ with = \"mojmap\" }}\n\
+         [mappings.mojmap]\nfile = \"maps/server.txt\"\n",
+        if script.is_some() {
+            "script = { type = \"rhai\", file = \"build.rhai\" }\n"
+        } else {
+            ""
+        }
+    );
+    let dir = project(&manifest);
+    if let Some(script) = script {
+        std::fs::write(dir.path().join("build.rhai"), script).unwrap();
+    }
+    std::fs::create_dir_all(dir.path().join("vendor")).unwrap();
+    write_source_jar(
+        &dir.path().join("vendor/lib.jar"),
+        &[
+            ("evolution/HierarchyLeft.class", LEFT),
+            ("evolution/HierarchyRoot.class", ROOT),
+        ],
+    );
+    // Reobfuscation reads the left side as the name the jar already carries. The obfuscated member
+    // name is deliberately distinctive: a one- or two-letter name matches somewhere in almost any
+    // constant pool, and a raw-byte assertion on it would hold whether or not the walk ever ran.
+    std::fs::create_dir_all(dir.path().join("maps")).unwrap();
+    std::fs::write(
+        dir.path().join("maps/server.txt"),
+        "evolution.HierarchyRoot -> evolution.ObfRoot:\n    int rootValue(int) -> hierarchyProvedIt\n",
+    )
+    .unwrap();
+    let classes = dir.path().join("target/classes/evolution");
+    std::fs::create_dir_all(&classes).unwrap();
+    std::fs::write(classes.join("HierarchyEvolution.class"), CLIENT).unwrap();
+
+    let output = build_with_fake_javac(dir.path());
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    jar_member(
+        &dir.path().join("target/jals/remap/packaged-0.1.0.jar"),
+        "evolution/HierarchyEvolution.class",
+    )
+}
+
+/// `[build] remap` closes its class hierarchy with the jars a build task put on the classpath, not
+/// only with the ones `[dependencies]` resolved.
+///
+/// The failure this pins is *silent*: the remap succeeds either way, and the jar it writes without
+/// the task jar differs only in that an inherited member kept its source name. So the test is a
+/// pair — the same project built with and without the terminal — rather than a single assertion
+/// about one output. `jals-classpath`'s `an_inherited_member_needs_the_jar_that_declares_it` is the
+/// same mechanism one layer down; what is under test here is whether the host hands the key over.
+///
+/// Asserted on the presence of the obfuscated name, never on the absence of the original: a rename
+/// leaves the superseded `Utf8` and `NameAndType` entries in the pool unreferenced rather than
+/// rewriting them, so the source spelling survives in the bytes of a correctly remapped class.
+#[cfg(unix)]
+#[test]
+fn an_inherited_member_from_a_task_jar_is_reobfuscated() {
+    let without = packaged_hierarchy_client(None);
+    assert!(
+        !contains_bytes(&without, "hierarchyProvedIt"),
+        "with no jar declaring `HierarchyRoot`, the walk cannot reach the declaration"
+    );
+
+    let with = packaged_hierarchy_client(Some(
+        r#"tasks.add_classpath(tasks.project_jar("vendor/lib.jar"));"#,
+    ));
+    assert!(
+        contains_bytes(&with, "hierarchyProvedIt"),
+        "the inherited member resolves once the task jar closes the hierarchy"
+    );
+}
