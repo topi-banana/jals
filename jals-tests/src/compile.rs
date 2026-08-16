@@ -687,9 +687,13 @@ impl CaseResult {
             }
             let root = parse.syntax();
             let analysis = jals_exec::block_on_inline(FileAnalysis::of(&root));
+            // `ct.sym` only — no `with_stdlib`. Indexing the embedded stubs as well would not add to
+            // the real JDK's signatures but *outrank* them (`by_fqn` keeps the first insert, and the
+            // stubs are registered before the classpath), so a partial stub `System` would hide the
+            // complete `java.lang.System` and this harness would score stub coverage under a
+            // compiler's name — the thing the module doc above says it does not do.
             let index = jals_exec::block_on_inline(
                 ProjectIndex::builder(&[(FileId(0), root)])
-                    .with_stdlib()
                     .with_classpath(classpath)
                     .build(),
             );

@@ -309,12 +309,23 @@ impl Ty {
             // is not a `String`, and admitting that made `append(String)` an applicable overload for
             // `append(1)`.
             (Primitive(source), Class(External { name, .. })) => source.boxes_to(name),
-            (Primitive(_), Class(Project { .. }) | Array(_) | Void) => false,
+            // A wrapper reached as a real *indexed* type boxes exactly as one reached by name. The
+            // two arms exist because a stub `Integer` is demoted above and a classpath one is not:
+            // scoring against a real JDK indexes `java.lang.Integer` from `ct.sym`, and reading only
+            // the external spelling here made `Integer n = 1;` a mismatch and dropped `f(Integer)`
+            // from the applicable overloads for `f(1)`.
+            (Primitive(source), Class(Project { id, .. })) => {
+                index.is_some_and(|index| source.boxes_to(index.item(*id).fqn.as_str()))
+            }
+            (Primitive(_), Array(_) | Void) => false,
 
             // Unboxing: only a wrapper class unboxes, and then the result may widen. A user type, an
             // array, and `Object` are all references and stay references.
             (Class(External { name, .. }), Primitive(target)) => target.unboxes_from(name),
-            (Class(Project { .. }) | Array(_), Primitive(_)) => false,
+            (Class(Project { id, .. }), Primitive(target)) => {
+                index.is_some_and(|index| target.unboxes_from(index.item(*id).fqn.as_str()))
+            }
+            (Array(_), Primitive(_)) => false,
 
             // Reference subtyping between two project types: walk the indexed supertype chain. With
             // no index (no hierarchy to consult) stay conservative rather than claim a mismatch.
