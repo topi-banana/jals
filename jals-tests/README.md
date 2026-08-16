@@ -266,9 +266,10 @@ empty. What is open, by family:
   `super()` — which JEP 447's statements-before-`super()` reaches from a second direction;
 - a value whose *erasure* is not narrowed back where the slot is narrower than `Object`. The
   argument direction is handled; a `return` of an erased value, and a receiver reached through one,
-  are not — which is most of what `generics/inference` fails on;
-- four `jals-syntax` gaps: unicode escapes as JLS §3.3 defines them, a stray `;` at top level,
-  `{,}` where the list may be empty, and `var` used as an ordinary identifier.
+  are not — which is most of what `generics/inference` fails on.
+
+The parser is no longer among them: every file in the corpus parses, so `parsed` is 100% and a
+syntax error there would now be a regression rather than a known gap.
 
 Expect the list to *change* as the rate rises, and not always to shrink. A file blocked at
 `lowered` never reaches the verifier, so fixing what blocked it does not only move it up the

@@ -5482,6 +5482,52 @@ fn a_lone_comma_does_not_generalise() {
     }
 }
 
+/// JLS §3.3: the escapes are resolved before the source is divided into tokens, so they change
+/// *what the tokens are* — and the tree still reproduces the source byte for byte.
+#[test]
+fn unicode_escapes_are_resolved_before_tokenizing() {
+    for src in [
+        // A keyword, spelled through an escape.
+        "\\u0070ublic class C {}",
+        // A comment delimiter, and a line terminator that closes one — so `int b;` is code.
+        "class C { void m() { \\u002f\\u002f x \\u000A int b; } }",
+        // String quotes: `\u0022\u0022` is the empty literal, and one quote can be written either way.
+        "class C { String a = \\u0022\\u0022; String b = \"\\u0022; String c = \\u0022\"; }",
+        // Identifiers, including one built from a surrogate pair.
+        "class C { void m(long \\u0061) {} }",
+        "class C { void m() { int \\ud801\\udc00abc = 1; } }",
+    ] {
+        let parse = helpers::parse(src);
+        assert!(
+            parse.errors().is_empty(),
+            "`{src}` is valid Java, got {:?}",
+            parse.errors()
+        );
+        assert_lossless(src);
+    }
+}
+
+/// The translation must not reach the tree: a token's text stays the source's own spelling.
+///
+/// This is the invariant the whole design turns on — the tree is the caller's `&str` reassembled,
+/// so a translated buffer leaking into it would break the lossless property everywhere at once.
+#[test]
+fn an_escaped_token_keeps_its_written_spelling() {
+    let src = "\\u0070ublic class C {}";
+    let parse = helpers::parse(src);
+    let spelled = parse
+        .syntax()
+        .descendants_with_tokens()
+        .filter_map(rowan::NodeOrToken::into_token)
+        .find(|token| token.kind() == crate::SyntaxKind::PUBLIC_KW)
+        .expect("the escape spelled a `public` keyword");
+    assert_eq!(spelled.text(), "\\u0070ublic");
+    assert_eq!(
+        usize::from(spelled.text_range().len()),
+        "\\u0070ublic".len()
+    );
+}
+
 #[test]
 fn wildcard_with_annotation() {
     // JSR 308: a type-use annotation before a wildcard `?` (`MyList<@A ?>`).

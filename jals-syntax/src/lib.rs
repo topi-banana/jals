@@ -37,6 +37,7 @@ mod parser;
 pub mod syntax_error;
 pub mod syntax_kind;
 pub mod token;
+mod unicode_escape;
 
 pub use language::{JavaLanguage, SyntaxElement, SyntaxNode, SyntaxToken};
 pub use lexer::{LexedToken, Lexer};
