@@ -1166,12 +1166,22 @@ struct App;
 #[derive(Default)]
 struct HostProjectInputs {
     extra_classpath: Vec<PathBuf>,
-    /// The resolved dependency jars, as verified cache artifacts.
+    /// Every cached archive the compiled classes are reobfuscated against: the resolved
+    /// `[dependencies]` jars, then the archives the build tasks put on the classpath.
+    ///
+    /// One field rather than two halves a caller concatenates, because a caller that passed one
+    /// half is the bug: a member inherited from the jar that was left out keeps its original name in
+    /// an otherwise remapped archive, which is a wrong answer and not a failure.
+    ///
+    /// Declared dependencies lead and script-added archives follow, which is where
+    /// `ProjectScript::augment_classpath` already places a `build.add_classpath` directive relative
+    /// to an authored `[build] classpath` entry. First occurrence wins, so a jar two nodes both
+    /// fetched is unpacked once.
     ///
     /// Kept beside `extra_classpath` rather than derived from it: a post-compile remap needs the
     /// compile classpath as a *class hierarchy*, and re-reading those paths off disk to publish
     /// them again would be the same bytes acquired a second way.
-    dependency_jars: Vec<jals_storage::CacheKey>,
+    remap_hierarchy: Vec<jals_storage::CacheKey>,
     classpath_classes: Vec<jals_classfile::ClassFile>,
     extra_sources: Vec<PathBuf>,
     /// The manifest's source roots as the assembly resolved them — the directory half of a
@@ -1417,9 +1427,24 @@ impl App {
             return Err(anyhow!("the project could not be assembled"));
         }
 
-        result
+        // The two halves are in hand here and nowhere else: `ProjectInputs` single-sources the
+        // declared jars for every host, and the assembly states which archives the scripts added.
+        // This is therefore also the only place the duplicates between them can be dropped.
+        //
+        // On the *content* digest rather than the whole key, because the two halves address the
+        // same archive differently: a library declared under `[dependencies]` and fetched again by
+        // a task is one jar under two namespaces, and the hierarchy index reads nothing but the
+        // bytes. Keying on the whole key would decode a game jar twice for no difference in the
+        // index it builds.
+        let mut seen = HashSet::new();
+        result.remap_hierarchy = assembly
+            .inputs
             .dependency_jars
-            .clone_from(&assembly.inputs.dependency_jars);
+            .iter()
+            .chain(&assembly.task_classpath)
+            .filter(|key| seen.insert(key.content()))
+            .cloned()
+            .collect();
 
         for entry in &assembly.compile_classpath {
             let path = match entry {
@@ -1919,7 +1944,7 @@ impl App {
                 fetcher,
                 &mut storage,
                 &classes,
-                &inputs.dependency_jars,
+                &inputs.remap_hierarchy,
                 main_class,
             )
             .await

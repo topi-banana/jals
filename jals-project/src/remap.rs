@@ -136,11 +136,28 @@ impl RemapPlan {
     /// declaring type is missing from the index keeps its original name in an otherwise remapped
     /// archive — a silent wrong answer rather than a failure.
     ///
-    /// Today a host supplies the archives resolved from `[dependencies]`, which is **not** the whole
-    /// compile classpath: a jar a dependency's build script put there with `tasks.add_classpath`,
-    /// and a `[build] classpath` entry that is a project file rather than a cached artifact, are
-    /// both absent. A mixin-style class that names its target only through an annotation `Class`
-    /// value is unaffected — the class table alone renames that — but a member inherited from such
+    /// A host supplies the archives resolved from `[dependencies]` together with every archive a
+    /// build task put on the classpath — its own script's terminals and each dependency's. That
+    /// second half is what a mod built against a build-script-provided game jar needs: the jar is a
+    /// task artifact and no declared dependency, so while it was missing a call to an inherited
+    /// `getUUID` came back out of the reobfuscation still spelled `getUUID`, on a receiver whose own
+    /// name had been rewritten.
+    ///
+    /// A `[build] classpath` entry that happens to be an archive is still absent, and deliberately —
+    /// an authored one, and equally one a script registered with `build.add_classpath`, which is
+    /// folded into the same list. Inside the project such an entry is a snapshot address and never
+    /// a cache key at all; outside it the native adapter does publish one, but not on the path a
+    /// compile takes. Even where the key exists, the only thing separating an archive from the bare
+    /// `.class` the same entry may equally be is its logical path's extension, and selecting on that
+    /// would put a path predicate back into the seam that exists to keep them out. A task terminal's
+    /// key is an archive by construction, which is why that half could be folded in and this one
+    /// could not.
+    ///
+    /// An entry that is not in the cache fails the whole step rather than being skipped, exactly as
+    /// a `[dependencies]` jar already did: skipping is how the silent wrong answer above gets made.
+    ///
+    /// A mixin-style class that names its target only through an annotation `Class` value is
+    /// unaffected either way — the class table alone renames that — but a member inherited from such
     /// a jar is exactly the silent case above.
     ///
     /// # Errors

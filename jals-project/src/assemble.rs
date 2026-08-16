@@ -126,6 +126,16 @@ pub struct ProjectGraphAssembly {
     pub(crate) graph: GraphMetadata,
     pub(crate) plan: ProjectInputPlan,
     pub(crate) compile_classpath: Vec<CompileClasspathEntry>,
+    /// Every archive a dependency node's build tasks put on the classpath, in discovery order.
+    ///
+    /// Not "the classpath entries that happen to be readable as archives": these keys arrive from a
+    /// `TaskValue::Jar`, which is the only thing `tasks.add_classpath` accepts, so being an archive
+    /// is something the type has already said. That is the whole reason they are collected here
+    /// rather than recovered from [`compile_classpath`](Self::compile_classpath), which carries
+    /// directory members and bare `.class` artifacts beside them — a reobfuscation's hierarchy index
+    /// can only unpack archives, and asking what a logical path ends in is the path predicate this
+    /// seam exists to keep out.
+    pub(crate) task_classpath: Vec<CacheKey>,
     /// Crate-internal: the projection folds these into the assembly a host receives, so a host that
     /// read them here would be reporting the graph's warnings without the root's.
     pub(crate) warnings: Vec<GraphWarning>,
@@ -142,6 +152,7 @@ struct Assembler<'a, C: CacheBackend> {
     published_sources: BTreeSet<(NodeId, RelativePath)>,
     published_classpath: BTreeSet<(NodeId, RelativePath)>,
     compile_classpath: Vec<CompileClasspathEntry>,
+    task_classpath: Vec<CacheKey>,
     warnings: Vec<GraphWarning>,
     errors: Vec<ProjectAssemblyError>,
 }
@@ -169,6 +180,7 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
             published_sources: BTreeSet::new(),
             published_classpath: BTreeSet::new(),
             compile_classpath: Vec::new(),
+            task_classpath: Vec::new(),
             warnings: graph.warnings.clone(),
             errors: Vec::new(),
         }
@@ -203,6 +215,7 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
             graph: self.graph.metadata(),
             plan: self.plan,
             compile_classpath: self.compile_classpath,
+            task_classpath: self.task_classpath,
             warnings: self.warnings,
             errors: self.errors,
         }
@@ -299,6 +312,13 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
                     path,
                     key: key.clone(),
                 }));
+            // The third destination is not a third copy of the classpath: it is the subset a
+            // post-compile `[build] remap` closes its class hierarchy against, and it is recorded
+            // here because here is where the key is still known to name an archive. Ordering comes
+            // free — the caller walks `graph.nodes`, so this list and the plan's task entries are
+            // one traversal and cannot disagree. Iterating `graph.exports` instead would yield
+            // NodeId-digest order: deterministic, compiling, and silently a different order.
+            self.task_classpath.push(key.clone());
         }
         // Navigation sources keep the package-relative path the task gave them, with no node token
         // in front: that is the address every other library source uses, and sharing it is what
