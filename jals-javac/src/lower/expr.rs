@@ -568,7 +568,16 @@ impl Expr {
         if context.index.member(member).modifiers.is_static {
             emit.asm.get_static(&owner, &name, &descriptor)?;
         } else {
-            Self::lower(&Self::inner(access.receiver())?, context, emit)?;
+            let receiver = Self::inner(access.receiver())?;
+            // `super.x` reads `this`; which `x` it reads is settled by the owner in the field
+            // reference, since a field is *hidden* rather than overridden (JLS §15.11.2) and
+            // `getfield` names where the field is declared. `super` itself lowers to nothing — it
+            // holds a keyword rather than a name, so there is no definition to load.
+            if Facts::is_super(receiver.syntax()) {
+                emit.load_this()?;
+            } else {
+                Self::lower(&receiver, context, emit)?;
+            }
             emit.asm.get_field(&owner, &name, &descriptor)?;
         }
         // A field of a type variable is erased in its descriptor exactly as a return type is, so the
@@ -681,9 +690,18 @@ impl Expr {
         };
         let params = context.index.resolved_param_tys(member);
 
+        // A `super.` qualifier: the receiver *is* `this`, and the call is not dispatched. `super`
+        // parses as a name reference holding a keyword, so it has neither a definition to load nor an
+        // inferred type — lowering it as an ordinary expression pushes nothing at all.
+        let super_qualified = matches!(
+            call.callee(),
+            Some(ast::Expr::FieldAccess(ref access))
+                if access.receiver().is_some_and(|r| Facts::is_super(r.syntax()))
+        );
         // The receiver comes first on the stack, below the arguments.
         if !is_static {
             match call.callee() {
+                _ if super_qualified => emit.load_this()?,
                 Some(ast::Expr::FieldAccess(access)) => {
                     Self::lower(&Self::inner(access.receiver())?, context, emit)?;
                 }
@@ -702,9 +720,11 @@ impl Expr {
         if is_static {
             emit.asm
                 .invoke_static(&owner, &name, &descriptor, interface_owner)?;
-        } else if is_private || constructor {
-            // A `private` method is not dispatched: the call site already knows the one body it can
-            // reach, and `invokevirtual` would look it up in a table it is not in.
+        } else if is_private || constructor || super_qualified {
+            // Not dispatched. A `private` method is one body the call site already knows, and
+            // `invokevirtual` would look it up in a table it is not in; a `super.` call names the
+            // superclass's body *because* it is not the one virtual dispatch would find — emitting
+            // `invokevirtual` for it is how an override calls itself forever.
             emit.asm
                 .invoke_special(&owner, &name, &descriptor, interface_owner)?;
         } else if interface_owner {

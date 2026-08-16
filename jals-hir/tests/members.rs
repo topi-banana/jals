@@ -348,3 +348,57 @@ fn the_implicit_object_edge_is_absent_without_an_indexed_object() {
         "an unindexed Object is not an external supertype"
     );
 }
+
+/// `super.f()` binds to the *overridden* member, not to the override.
+///
+/// That is the whole reason `super` is not given the enclosing type as its receiver: the enclosing
+/// type's member set starts with the override, so answering the lookup from there would make
+/// `super.f()` call itself. Its lookup starts at the superclass, and `resolve_member`'s walk begins
+/// at the item it is handed — which is exactly right, because the superclass's own `f` is what
+/// `super.f()` names.
+#[test]
+fn super_dot_method_binds_to_the_superclass_override() {
+    let src = "
+        class A { int f() { return 1; } }
+        class B extends A { int f() { return 2; } int g() { return super.f(); } }
+    ";
+    let fixture = Fixture::new(src);
+    let index = &fixture.index;
+    let a = index.item_by_fqn("A").expect("A is indexed");
+    let target = call_target(src, "super.f()");
+    assert_eq!(target, "A.f()", "got {target}");
+    let _ = a;
+}
+
+/// A field is *hidden* rather than overridden (JLS §15.11.2), and `super.x` names the hidden one.
+#[test]
+fn super_dot_field_binds_to_the_hidden_field() {
+    let src = "
+        class A { int x = 1; }
+        class B extends A { int x = 2; int g() { return super.x; } }
+    ";
+    let fixture = Fixture::new(src);
+    let semantics = fixture.semantics();
+    let typed = jals_exec::block_on_inline(semantics.typed());
+    let access = fixture
+        .node
+        .descendants()
+        .filter_map(jals_syntax::ast::FieldAccess::cast)
+        .find(|fa| fa.syntax().text().to_string().trim() == "super.x")
+        .expect("super.x");
+    let range = access.syntax().text_range();
+    let id = typed
+        .field_target_of(usize::from(range.start())..usize::from(range.end()))
+        .expect("super.x binds to a field");
+    let owner = fixture.index.item(fixture.index.member(id).owner);
+    assert_eq!(owner.fqn.to_string(), "A", "super.x is A's hidden field");
+}
+
+/// The join between the implicit `java.lang.Object` edge and the `super` receiver: a class with no
+/// `extends` still has a superclass to look `toString` up on.
+#[test]
+fn super_dot_object_method_resolves_after_the_implicit_edge() {
+    let src = "class C { public String toString() { return super.toString(); } }";
+    let target = call_target(src, "super.toString()");
+    assert_eq!(target, "java.lang.Object.toString()", "got {target}");
+}

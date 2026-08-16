@@ -178,6 +178,16 @@ impl<'a> Facts<'a> {
         Self::has_keyword(node, SyntaxKind::THIS_KW)
     }
 
+    /// Whether a node is the bare `super`.
+    ///
+    /// Like [`is_this`](Self::is_this) it carries no identifier token, so its keyword is the only
+    /// thing that identifies it. What separates the two is what each *forces*: `this.f()` is an
+    /// ordinary virtual call, and `super.f()` names one body in particular — the superclass's — so it
+    /// is not dispatched at all.
+    pub(crate) fn is_super(node: &SyntaxNode) -> bool {
+        Self::has_keyword(node, SyntaxKind::SUPER_KW)
+    }
+
     /// Whether a method reference names `new` rather than a method.
     ///
     /// `T::new` constructs; every other spelling selects an existing member. The wasm backend asked

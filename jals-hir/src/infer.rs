@@ -655,12 +655,7 @@ impl TypeInference {
         } else {
             // The class supertype, which is the only one a `super(…)` can name. An interface has no
             // constructor to reach.
-            index
-                .item(enclosing)
-                .supertypes
-                .iter()
-                .map(|supertype| supertype.id)
-                .find(|&id| index.item(id).kind != DefKind::Interface)?
+            index.superclass_of(enclosing)?
         };
         let args: Vec<ast::Expr> = call
             .args()
@@ -790,6 +785,14 @@ impl TypeInference {
         index: &ProjectIndex,
         file: FileId,
     ) -> Option<ItemId> {
+        // `super` is the third case, and it is neither of the other two: it has no inferred type (see
+        // `nameref_ty`, which leaves it `Unknown` on purpose) and no name to resolve. Its lookup
+        // starts at the *superclass* — `resolve_member`'s walk begins at the item it is given, which
+        // is exactly right, because `super.f()` may bind to the superclass's own `f`. Answering with
+        // the enclosing type instead would bind an overridden member to the override.
+        if Cst::is_super(receiver) {
+            return index.superclass_of(index.enclosing_item(file, receiver.syntax())?);
+        }
         self.type_of_expr(Collect::node_span(receiver.syntax()))
             .and_then(Ty::project_id)
             .or_else(|| Cst::type_qualifier(receiver, index, file))
@@ -1486,11 +1489,21 @@ impl<'a> Inferer<'a> {
         }
         match receiver {
             Ty::Unknown => match self.project {
-                // Not a value: `System.out` names the declaring class, not an instance of it.
-                Some((index, file)) => Cst::type_qualifier(&expr, index, file)
-                    .map_or(Ty::Unknown, |owner| {
+                // Not a value. `super` looks its member up on the superclass — which is what gives
+                // `super.f()` the *overridden* member's type rather than the override's — and
+                // `System.out` names the declaring class rather than an instance of it.
+                Some((index, file)) => {
+                    let owner = if Cst::is_super(&expr) {
+                        index
+                            .enclosing_item(file, expr.syntax())
+                            .and_then(|enclosing| index.superclass_of(enclosing))
+                    } else {
+                        Cst::type_qualifier(&expr, index, file)
+                    };
+                    owner.map_or(Ty::Unknown, |owner| {
                         self.member_ty_in(owner, &[], &name, namespace)
-                    }),
+                    })
+                }
                 None => Ty::Unknown,
             },
             receiver => self.member_ty(&receiver, &name, namespace),
@@ -1849,6 +1862,25 @@ impl Cst {
             .resolve_type_name(file, token.text(), None)
             .project_id()
     }
+
+    /// Whether a receiver is the bare `super`.
+    ///
+    /// It parses as a `NAME_REF` holding a `SUPER_KW` and no identifier, so neither of the two ways a
+    /// receiver is normally read applies: there is no name to look up and no inferred type to ask
+    /// for. The keyword is the only thing that identifies it.
+    ///
+    /// *Bare* only. A qualified super (`Iface.super.m()`, JLS §15.12.1) names one particular
+    /// superinterface's default method and is a different receiver — a field access whose own
+    /// receiver is a type name — so it is not this, and it is not handled.
+    fn is_super(receiver: &ast::Expr) -> bool {
+        let ast::Expr::NameRef(name) = receiver else {
+            return false;
+        };
+        name.syntax()
+            .children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .any(|token| token.kind() == SUPER_KW)
+    }
 }
 
 impl Cst {
@@ -2130,10 +2162,18 @@ impl crate::analysis::FileSemantics<'_> {
     async fn receiver_owner(&self, offset: usize) -> Option<ItemId> {
         let dot = Cst::member_access_dot(self.root(), offset)?;
         let before = Cst::prev_significant(&dot)?;
-        // A `this` / `super` receiver has no inferred type; its members are the enclosing type's (for
-        // `super` the strictly-inherited ones — approximated here by the whole enclosing member set).
+        // A `this` / `super` receiver has no inferred type. `this` completes the enclosing type's
+        // members; `super` completes the *superclass*'s, by the same rule `access_owner` uses — so a
+        // completion list and a resolved call cannot disagree about what `super.` reaches.
         if matches!(before.kind(), THIS_KW | SUPER_KW) {
-            return self.index().enclosing_item(self.file(), &before.parent()?);
+            let enclosing = self
+                .index()
+                .enclosing_item(self.file(), &before.parent()?)?;
+            return if before.kind() == SUPER_KW {
+                self.index().superclass_of(enclosing)
+            } else {
+                Some(enclosing)
+            };
         }
         let dot_start = usize::from(dot.text_range().start());
         let receiver = Cst::receiver_node(&before, dot_start)?;

@@ -1708,6 +1708,23 @@ impl ProjectIndex {
         .is_none()
     }
 
+    /// The class `super` names inside `owner`: its first indexed supertype that is not an interface.
+    ///
+    /// `None` for an interface, for a type whose only supertypes are interfaces, and for one whose
+    /// superclass is not indexed at all. Shared by the two questions `super` asks — which constructor
+    /// `super(..)` reaches, and which type `super.f()` looks its member up on — because they are the
+    /// same rule, and having been written twice is how they could have drifted.
+    ///
+    /// After the implicit `java.lang.Object` edge this answers for a class with no `extends` too,
+    /// which is what makes `super.toString()` resolve.
+    pub fn superclass_of(&self, owner: ItemId) -> Option<ItemId> {
+        self.item(owner)
+            .supertypes
+            .iter()
+            .map(|supertype| supertype.id)
+            .find(|&id| self.item(id).kind != DefKind::Interface)
+    }
+
     /// Whether project type `s` is `t` or a transitive subtype of it, walking `s`'s indexed
     /// supertype chain. Reflexive (`s == t` is `true`) and cycle-guarded — the reference-subtyping
     /// half of assignment conversion ([`Ty::is_assignable_to`](crate::Ty::is_assignable_to)).

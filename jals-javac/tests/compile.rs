@@ -5287,3 +5287,58 @@ public class Keep {
 "#;
     assert_eq!(run(source, "Keep"), "n1o3\n");
 }
+
+/// `super.f()` is `invokespecial`, and only running it can say so.
+///
+/// The two instructions differ in nothing a class-file reader would flag: same owner, same name,
+/// same descriptor. What separates them is that `invokevirtual` looks the method up in the receiver's
+/// own table and finds the *override* — so an override calling `super.f()` calls itself until the
+/// stack runs out. A `StackOverflowError` is the observation.
+#[test]
+fn a_super_call_is_invokespecial() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Sup {
+    static class A {
+        String describe() { return "A"; }
+    }
+
+    static class B extends A {
+        String describe() { return "B<" + super.describe() + ">"; }
+    }
+
+    public static void main(String[] args) {
+        System.out.println(new B().describe());
+    }
+}
+"#;
+    assert_eq!(run(source, "Sup"), "B<A>\n");
+}
+
+/// `super.x` reads the *hidden* field, which a `getfield` against the superclass's own owner does
+/// for free — the constant pool entry names where the field is declared.
+#[test]
+fn a_super_field_reads_the_hidden_one() {
+    if !java_available() {
+        return;
+    }
+    let source = r"
+public class Hid {
+    static class A {
+        int x = 1;
+    }
+
+    static class B extends A {
+        int x = 2;
+        int both() { return x * 10 + super.x; }
+    }
+
+    public static void main(String[] args) {
+        System.out.println(new B().both());
+    }
+}
+";
+    assert_eq!(run(source, "Hid"), "21\n");
+}
