@@ -5126,3 +5126,164 @@ public class Box implements Holder<String> {
 "#;
     assert_eq!(run(source, "Box"), "string:x\nint:7\n");
 }
+
+/// The descriptors a class emits, as `name descriptor` pairs — what a separately compiled caller
+/// links against, and the one thing the JVM's verifier cannot judge from a single compilation.
+fn descriptors(source: &str, internal_name: &str) -> Vec<String> {
+    let classes = compile(source).expect("compile");
+    let class = classes
+        .iter()
+        .find(|class| class.internal_name == internal_name)
+        .unwrap_or_else(|| panic!("no class `{internal_name}`"));
+    let parsed =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(class.bytes.as_slice()))
+            .expect("reparse");
+    let pool = &parsed.constant_pool;
+    parsed
+        .methods
+        .iter()
+        .map(|method| {
+            format!(
+                "{} {}",
+                pool.utf8(method.name_index).expect("name"),
+                pool.utf8(method.descriptor_index).expect("descriptor")
+            )
+        })
+        .collect()
+}
+
+/// A type variable erases to its leftmost bound (JLS §4.6), not to `Object`.
+///
+/// Answering `Object` for `<E extends Number>` is self-consistent within one compilation — the
+/// declaration and its call sites agree, so the verifier is satisfied — and disagrees with every
+/// caller compiled separately, which is a `NoSuchMethodError` rather than an imprecision. That is
+/// why this asserts the descriptor *text* and not that the class loads.
+#[test]
+fn a_bounded_method_type_parameter_erases_to_its_bound() {
+    let emitted = descriptors(
+        "public class B { static <E extends Number> E pick(E a, E b) { return a; } }",
+        "B",
+    );
+    assert!(
+        emitted
+            .contains(&"pick (Ljava/lang/Number;Ljava/lang/Number;)Ljava/lang/Number;".to_owned()),
+        "got {emitted:?}"
+    );
+}
+
+/// An *unbounded* one still erases to `Object` — the bound is what changes the answer, not the fact
+/// that the parameter belongs to the method.
+#[test]
+fn an_unbounded_method_type_parameter_still_erases_to_object() {
+    let emitted = descriptors(
+        "public class B { static <U> U plain(U a) { return a; } }",
+        "B",
+    );
+    assert!(
+        emitted.contains(&"plain (Ljava/lang/Object;)Ljava/lang/Object;".to_owned()),
+        "got {emitted:?}"
+    );
+}
+
+/// The same rule for a *class*'s type parameter, which the index has always recorded — the erasure
+/// simply never read its bound.
+#[test]
+fn a_bounded_class_type_parameter_erases_to_its_bound() {
+    let emitted = descriptors(
+        "public class Box<T extends Number> { T held; T get() { return held; } void put(T v) { held = v; } }",
+        "Box",
+    );
+    assert!(
+        emitted.contains(&"get ()Ljava/lang/Number;".to_owned()),
+        "got {emitted:?}"
+    );
+    assert!(
+        emitted.contains(&"put (Ljava/lang/Number;)V".to_owned()),
+        "got {emitted:?}"
+    );
+}
+
+/// A bound that names the variable it bounds must not send the erasure round forever.
+///
+/// `<T extends Comparable<T>>` is ordinary Java and terminates because the head is erased and the
+/// arguments dropped; `<T extends U, U extends Number>` walks one step further. This crate never
+/// checks, so it can also be handed a cyclic bound — which is what the depth limit is for.
+#[test]
+fn a_self_referential_bound_terminates() {
+    let emitted = descriptors(
+        "public class B { static <T extends Comparable<T>> T max(T a, T b) { return a; } }",
+        "B",
+    );
+    assert!(
+        emitted.contains(
+            &"max (Ljava/lang/Comparable;Ljava/lang/Comparable;)Ljava/lang/Comparable;".to_owned()
+        ),
+        "got {emitted:?}"
+    );
+    let chained = descriptors(
+        "public class B { static <T extends U, U extends Number> T thread(T a) { return a; } }",
+        "B",
+    );
+    assert!(
+        chained.contains(&"thread (Ljava/lang/Number;)Ljava/lang/Number;".to_owned()),
+        "got {chained:?}"
+    );
+}
+
+/// An unchecked call narrows its argument, because the descriptor no longer lies about the slot.
+///
+/// `EnumMap<K extends Enum<K>, V>.put` takes a `java/lang/Enum` once `K` erases to its bound. Handing
+/// it a value the JVM knows only as `Object` — which a raw use does — is legal Java and rejected by
+/// the verifier unless the `checkcast` javac emits is there too. Before the bound was read, the
+/// descriptor said `put(Object, Object)`: no cast was needed because the call named a method
+/// `EnumMap` does not have, so this verified and would have thrown `NoSuchMethodError`.
+#[test]
+fn an_unchecked_argument_is_cast_to_the_erased_parameter() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Raw {
+    interface Slot<K extends Number> {
+        String take(K key);
+    }
+
+    static class Cell implements Slot<Integer> {
+        public String take(Integer key) { return "took " + key; }
+    }
+
+    public static void main(String[] args) {
+        Object[] values = { Integer.valueOf(7) };
+        Slot raw = new Cell();
+        System.out.println(raw.take(values[0]));
+    }
+}
+"#;
+    assert_eq!(run(source, "Raw"), "took 7\n");
+}
+
+/// The narrowing fires only in the `Object`-to-narrower direction, and both guards matter.
+///
+/// A value the erasure already types as something else must not acquire a cast — that would turn a
+/// compile-time gap into a `ClassCastException` — and neither must one whose slot is `Object`, where
+/// there is nothing to narrow to. Run rather than inspected: a wrong cast is not a malformed class
+/// file, so only executing it says anything.
+#[test]
+fn a_matching_argument_gets_no_cast() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Keep {
+    static String widen(Number n) { return "n" + n; }
+
+    static String anything(Object o) { return "o" + o; }
+
+    public static void main(String[] args) {
+        Object opaque = Integer.valueOf(3);
+        System.out.println(widen(Integer.valueOf(1)) + anything(opaque));
+    }
+}
+"#;
+    assert_eq!(run(source, "Keep"), "n1o3\n");
+}

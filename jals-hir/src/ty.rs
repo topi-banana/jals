@@ -12,7 +12,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::project::{ItemId, ItemOrigin, ProjectIndex};
+use crate::project::{ItemId, ItemOrigin, MemberId, ProjectIndex};
 
 /// An inferred Java type.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,11 +29,20 @@ pub enum Ty {
     /// arguments (see [`ClassTy`]) — carried for display, member substitution, and same-nominal
     /// invariance.
     Class(ClassTy),
-    /// An un-substituted type variable: a reference to the type parameter `name` of the indexed type
-    /// `owner` (`class Box<E>` → `E` is `TypeVar { owner: Box, name: "E" }`). Substituted by a
+    /// An un-substituted type variable: a reference to the type parameter `name` declared by the
+    /// indexed type `owner` (`class Box<E>` → `E` is `TypeVar { owner: Box, member: None, name: "E" }`)
+    /// or, when `member` is set, by that *method* (`static <E> E pick(E,E)`). Substituted by a
     /// concrete type when a use supplies arguments (`Box<String>`); left as-is for a raw use, where
     /// it displays as its name. Treated leniently in subtyping (like [`Unknown`](Ty::Unknown)).
-    TypeVar { owner: ItemId, name: String },
+    ///
+    /// The declaring scope is carried, not just the name, because the two shadow: a method's `<T>`
+    /// hides its class's, so a receiver's type arguments must not be substituted into it, and the
+    /// bound it erases to is the method's.
+    TypeVar {
+        owner: ItemId,
+        member: Option<MemberId>,
+        name: String,
+    },
     /// The error / could-not-infer type. Propagates instead of failing; never surfaced as a real
     /// type to a consumer (hover suppresses it).
     Unknown,
@@ -409,14 +418,25 @@ impl Ty {
         }
     }
 
-    /// Returns a copy with every [`TypeVar`](Ty::TypeVar) replaced by `f(owner, name)` where that
-    /// yields `Some`, recursing through array elements and class type arguments. A type variable `f`
-    /// does not map (returns `None`) is left as-is — so an unbound parameter survives unchanged. The
-    /// basis for binding a generic type's parameters to the arguments a use supplies.
+    /// Returns a copy with every [`TypeVar`](Ty::TypeVar) replaced by `f(owner, member, name)` where
+    /// that yields `Some`, recursing through array elements and class type arguments. A type variable
+    /// `f` does not map (returns `None`) is left as-is — so an unbound parameter survives unchanged.
+    /// The basis for binding a generic type's parameters to the arguments a use supplies.
+    ///
+    /// `member` is passed so a substitution keyed on a *type*'s parameters can decline a method's:
+    /// `class Holder<T> { <T> T pick(T a) }` binds the receiver's argument to the class's `T` and
+    /// must leave the method's alone.
     #[must_use]
-    pub(crate) fn substitute(&self, f: &impl Fn(ItemId, &str) -> Option<Self>) -> Self {
+    pub(crate) fn substitute(
+        &self,
+        f: &impl Fn(ItemId, Option<MemberId>, &str) -> Option<Self>,
+    ) -> Self {
         match self {
-            Self::TypeVar { owner, name } => f(*owner, name).unwrap_or_else(|| self.clone()),
+            Self::TypeVar {
+                owner,
+                member,
+                name,
+            } => f(*owner, *member, name).unwrap_or_else(|| self.clone()),
             Self::Array(elem) => Self::Array(Box::new(elem.substitute(f))),
             Self::Class(ClassTy::Project { id, name, args }) => Self::Class(ClassTy::Project {
                 id: *id,

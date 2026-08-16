@@ -261,6 +261,15 @@ pub struct Member {
     /// Public because a *code generator* needs it: the JVM has no variable arity, so a varargs call
     /// site is the thing that builds the array, and it cannot know to unless it can ask.
     pub varargs: bool,
+    /// The method's or constructor's **own** type parameters (`static <E> E pick(E, E)`), captured
+    /// like [`Item::type_params`]. Empty for a field, an enum constant, and a non-generic method.
+    ///
+    /// Recorded because they are not the *class's*: without them a bare `E` in this member's
+    /// signature resolves to an external name the index has never heard of, and a backend asking for
+    /// the descriptor is told a type it cannot name rather than the `Object` (or bound) a type
+    /// variable erases to. Every consumer that reads a member's types has the member in hand, so it
+    /// says which member the types belong to — a method's `<T>` *shadows* the class's.
+    pub type_params: Vec<TypeParamDecl>,
     /// The checked exceptions a method / constructor declares in its `throws` clause, captured like
     /// [`ty`](Member::ty) as resolvable data (each a named reference type). Empty for a non-executable
     /// member and for one that declares no `throws`. Consumed by the checked-exception analysis
@@ -1106,6 +1115,7 @@ impl ProjectIndex {
                     owner,
                     name: shape.name.clone(),
                     kind: DefKind::Method,
+                    type_params: Vec::new(),
                     file,
                     // Nothing declares it, so there is no name range to point at.
                     name_range: 0..0,
@@ -1263,6 +1273,7 @@ impl ProjectIndex {
                     owner,
                     name: member.name.clone(),
                     kind: member.kind,
+                    type_params: member.type_params.clone(),
                     file,
                     name_range: 0..0,
                     ty: member.ty.clone(),
@@ -1489,7 +1500,7 @@ impl ProjectIndex {
     /// the import lookup. A constructor has no value type and yields [`Ty::Unknown`].
     pub fn resolved_member_ty(&self, id: MemberId) -> Ty {
         let member = self.member(id);
-        self.member_type_to_ty(member.file, member.owner, &member.ty)
+        self.member_type_to_ty(member.file, member.owner, Some(id), &member.ty)
     }
 
     /// A method's or constructor's formal parameter types, in declaration order, resolved like
@@ -1499,7 +1510,7 @@ impl ProjectIndex {
         member
             .params
             .iter()
-            .map(|param| self.member_type_to_ty(member.file, member.owner, &param.ty))
+            .map(|param| self.member_type_to_ty(member.file, member.owner, Some(id), &param.ty))
             .collect()
     }
 
@@ -1564,6 +1575,40 @@ impl ProjectIndex {
     /// a type parameter). Used to tell a bare type-variable reference apart from a real type name.
     pub(crate) fn is_type_param(&self, owner: ItemId, name: &str) -> bool {
         self.item(owner).type_params.iter().any(|p| p.name == name)
+    }
+
+    /// Whether `name` is one of *method* `member`'s own declared type parameters
+    /// (`static <E> E pick(E, E)` → `E`). The sibling of [`is_type_param`](Self::is_type_param), and
+    /// asked first wherever both are in scope, because a method's parameter shadows its class's.
+    pub(crate) fn is_member_type_param(&self, member: MemberId, name: &str) -> bool {
+        self.member(member)
+            .type_params
+            .iter()
+            .any(|p| p.name == name)
+    }
+
+    /// What type variable `name` erases to in the scope `(owner, member)`: its first declared bound,
+    /// or `None` for an unbounded one (which erases to `java.lang.Object`).
+    ///
+    /// JLS §4.6: the erasure of a type variable is the erasure of its leftmost bound. A backend that
+    /// answers `Object` for `<E extends Number>` produces a descriptor javac does not — self
+    /// consistent within one compilation, and a `NoSuchMethodError` against a caller compiled
+    /// separately. Resolved in the member's own declaring file, so the bound's name sees the imports
+    /// it was written under.
+    pub fn type_var_bound(
+        &self,
+        owner: ItemId,
+        member: Option<MemberId>,
+        name: &str,
+    ) -> Option<Ty> {
+        let (declared, file) = member
+            .filter(|&id| self.is_member_type_param(id, name))
+            .map_or_else(
+                || (&self.item(owner).type_params, self.item(owner).file),
+                |id| (&self.member(id).type_params, self.member(id).file),
+            );
+        let bound = declared.iter().find(|p| p.name == name)?.bounds.first()?;
+        Some(self.member_type_to_ty(file, owner, member, bound))
     }
 
     /// Resolves a member named `name` in name-space `namespace` (value for a field / enum constant,
@@ -1951,6 +1996,9 @@ impl ProjectIndex {
             owner,
             name: name_tok.text().to_owned(),
             kind,
+            // Overridden by the method / constructor arms, which read the declaration's own
+            // `<...>`; every other member kind cannot declare one.
+            type_params: Vec::new(),
             file,
             name_range: Collect::byte_range(name_tok),
             ty,
@@ -1994,6 +2042,10 @@ impl ProjectIndex {
                             params,
                             varargs,
                             throws,
+                            // The declaration's own `<...>`, which `type_params_of` reads off any
+                            // node carrying a `TypeParams` child — a method declaration as much as
+                            // a type declaration.
+                            type_params: Self::type_params_of(&member),
                             ..new_member(&name, DefKind::Method, ty)
                         });
                     }
@@ -2007,6 +2059,7 @@ impl ProjectIndex {
                             params,
                             varargs,
                             throws,
+                            type_params: Self::type_params_of(&member),
                             ..new_member(&name, DefKind::Constructor, MemberType::Unknown)
                         });
                     }
@@ -2093,6 +2146,7 @@ impl ProjectIndex {
                         owner,
                         name: name.text().to_owned(),
                         kind: DefKind::Method,
+                        type_params: Vec::new(),
                         file,
                         // No *declaration* range: the field above owns the header's, and two members
                         // sharing one would collide in the declaration-site map, where first wins.
@@ -2114,6 +2168,7 @@ impl ProjectIndex {
                     owner,
                     name: owner_simple.to_owned(),
                     kind: DefKind::Constructor,
+                    type_params: Vec::new(),
                     file,
                     name_range: 0..0,
                     ty: MemberType::Unknown,
@@ -2158,6 +2213,7 @@ impl ProjectIndex {
                 owner,
                 name: name.to_owned(),
                 kind: DefKind::Method,
+                type_params: Vec::new(),
                 file,
                 // Nothing declares them, so there is no name range to point at — which is also what
                 // keeps `member_by_decl` from ever finding one.

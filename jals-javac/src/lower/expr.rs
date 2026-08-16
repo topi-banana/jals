@@ -38,6 +38,9 @@ use crate::jvm::{BinOp, Branch, Compare, Numeric};
 use crate::lower::place::Place;
 use crate::lower::{Context, Emit, LowerError, OUTER, Result};
 
+/// The internal name every erasure falls back to, and the only one an argument narrowing repairs.
+const OBJECT_INTERNAL_NAME: &str = "java/lang/Object";
+
 /// The builder a string concatenation runs through.
 const STRING_BUILDER: &str = "java/lang/StringBuilder";
 
@@ -605,6 +608,7 @@ impl Expr {
                     .get(index)
                     .ok_or(LowerError::Unsupported("a call with too many arguments"))?;
                 Self::lower_as(argument, declared, context, emit)?;
+                Self::narrow_erased(argument, declared, context, emit)?;
             }
             return Ok(());
         }
@@ -613,6 +617,7 @@ impl Expr {
         };
         for (index, argument) in arguments.iter().take(fixed.len()).enumerate() {
             Self::lower_as(argument, &fixed[index], context, emit)?;
+            Self::narrow_erased(argument, &fixed[index], context, emit)?;
         }
         let rest = &arguments[fixed.len().min(arguments.len())..];
         let Ty::Array(element) = last else {
@@ -708,6 +713,45 @@ impl Expr {
             emit.asm.invoke_virtual(&owner, &name, &descriptor)?;
         }
         Self::restore_erased(call.syntax(), member, context, emit)
+    }
+
+    /// Cast an argument the JVM knows only as `Object` down to what the parameter's descriptor says.
+    ///
+    /// The mirror of [`restore_erased`](Self::restore_erased), on the way *in*. A raw or otherwise
+    /// unchecked use hands a value whose erasure is `Object` to a parameter whose own erasure is
+    /// narrower — `new EnumMap(Suit.class).put(objectArray[0], ..)`, where
+    /// `EnumMap<K extends Enum<K>, V>.put` takes a `java/lang/Enum`. The source is legal (unchecked,
+    /// and javac says so), the descriptor is right, and the verifier still rejects the call because
+    /// nothing on the stack says the value is an `Enum`. javac emits this `checkcast`; so does this.
+    ///
+    /// Only the `Object`-to-narrower direction is cast. A value the erasure already types as
+    /// something else either matches the slot or is a genuine mismatch, and papering over the second
+    /// with a cast would turn a compile-time gap into a `ClassCastException` at run time.
+    fn narrow_erased(
+        argument: &ast::Expr,
+        declared: &Ty,
+        context: &Context<'_>,
+        emit: &mut Emit<'_, '_>,
+    ) -> Result<()> {
+        let Ok(jals_classfile::FieldType::Object(target)) =
+            Descriptor::field_type_of(declared, context.index)
+        else {
+            return Ok(());
+        };
+        if target == OBJECT_INTERNAL_NAME {
+            return Ok(());
+        }
+        let Ok(actual) = Self::type_of(argument.syntax(), context) else {
+            return Ok(());
+        };
+        if !matches!(
+            Descriptor::field_type_of(&actual, context.index),
+            Ok(jals_classfile::FieldType::Object(ref name)) if name == OBJECT_INTERNAL_NAME
+        ) {
+            return Ok(());
+        }
+        emit.asm.check_cast(&target)?;
+        Ok(())
     }
 
     /// Put back the static type a generic call's erased descriptor threw away.

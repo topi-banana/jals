@@ -401,11 +401,11 @@ impl TypeInference {
         if !index.method_set_complete(owner, &name) {
             return;
         }
-        let matching: Vec<&crate::Member> = candidates.iter().map(|&id| index.member(id)).collect();
-        if let [only] = matching.as_slice() {
+        if let [id] = candidates.as_slice() {
             // A single overload: precise per-argument diagnostics against it.
+            let only = index.member(*id);
             for ((arg_ty, span), param) in arg_tys.iter().zip(&arg_spans).zip(&only.params) {
-                let param_ty = index.member_type_to_ty(only.file, only.owner, &param.ty);
+                let param_ty = index.member_type_to_ty(only.file, only.owner, Some(*id), &param.ty);
                 if let Some(ty) = arg_ty
                     && !ty.is_assignable_to(&param_ty, Some(index))
                 {
@@ -584,7 +584,7 @@ impl TypeInference {
                     arg_ty.is_none_or(|ty| ty.is_assignable_to(target, Some(index)))
                 };
                 let declared = |param: &crate::Param| {
-                    index.member_type_to_ty(member.file, member.owner, &param.ty)
+                    index.member_type_to_ty(member.file, member.owner, Some(id), &param.ty)
                 };
                 if !member.varargs {
                     return arg_tys
@@ -732,13 +732,13 @@ impl TypeInference {
     /// shadowing answer, which is the right one when the set is one method and its overrides.
     fn most_specific(applicable: &[MemberId], index: &ProjectIndex) -> Option<MemberId> {
         let first = applicable.first().copied()?;
-        let at_least_as_specific = |left: MemberId, right: MemberId| {
-            let (left, right) = (index.member(left), index.member(right));
+        let at_least_as_specific = |left_id: MemberId, right_id: MemberId| {
+            let (left, right) = (index.member(left_id), index.member(right_id));
             left.params.iter().zip(&right.params).all(|(from, to)| {
                 index
-                    .member_type_to_ty(left.file, left.owner, &from.ty)
+                    .member_type_to_ty(left.file, left.owner, Some(left_id), &from.ty)
                     .is_assignable_to(
-                        &index.member_type_to_ty(right.file, right.owner, &to.ty),
+                        &index.member_type_to_ty(right.file, right.owner, Some(right_id), &to.ty),
                         Some(index),
                     )
             })
@@ -1053,7 +1053,7 @@ impl<'a> Inferer<'a> {
                 let Some(param) = params.get(position) else {
                     continue;
                 };
-                let ty = index.member_type_to_ty(file, owner, &param.ty);
+                let ty = index.member_type_to_ty(file, owner, Some(method), &param.ty);
                 self.set_def_type(usize::from(name.text_range().start()), ty);
             }
         }
@@ -1565,7 +1565,13 @@ impl ProjectIndex {
     /// parameters becomes a [`Ty::TypeVar`] (to be substituted by the caller) rather than an external
     /// by-name type. Exposed so a caller holding only a [`TypeInference`] (e.g. argument checking) can
     /// use it.
-    pub(crate) fn member_type_to_ty(&self, file: FileId, owner: ItemId, mt: &MemberType) -> Ty {
+    pub(crate) fn member_type_to_ty(
+        &self,
+        file: FileId,
+        owner: ItemId,
+        member: Option<MemberId>,
+        mt: &MemberType,
+    ) -> Ty {
         match mt {
             MemberType::Primitive { keyword, dims } => {
                 let base = Primitive::from_keyword(keyword).map_or(Ty::Unknown, Ty::Primitive);
@@ -1578,11 +1584,18 @@ impl ProjectIndex {
                 dims,
                 args,
             } => {
-                let base = if qualified.is_none() && self.is_type_param(owner, name) {
-                    // A bare name matching one of `owner`'s type parameters is a type variable (`E`),
+                // The *member*'s own parameters are looked at first: a method's `<T>` shadows its
+                // class's, so binding a receiver's argument to it would be wrong.
+                let scope = member
+                    .filter(|&id| self.is_member_type_param(id, name))
+                    .map(Some)
+                    .or_else(|| self.is_type_param(owner, name).then_some(None));
+                let base = if let (None, Some(scope)) = (qualified, scope) {
+                    // A bare name matching a type parameter in scope is a type variable (`E`),
                     // recorded for later substitution (a type variable takes no arguments of its own).
                     Ty::TypeVar {
                         owner,
+                        member: scope,
                         name: name.clone(),
                     }
                 } else {
@@ -1590,7 +1603,7 @@ impl ProjectIndex {
                     // recursively (`List<String>` → element `String`; `List<E>` → element var `E`).
                     let ty_args = args
                         .iter()
-                        .map(|a| self.member_type_to_ty(file, owner, a))
+                        .map(|a| self.member_type_to_ty(file, owner, member, a))
                         .collect();
                     match self.resolve_type_name(file, name, qualified.as_deref()) {
                         TypeResolution::Project(id) => Ty::Class(ClassTy::Project {
@@ -1637,13 +1650,15 @@ impl ProjectIndex {
             |current, args| {
                 let member_id = self.declared_member(current, name, namespace)?;
                 let member = self.member(member_id);
-                Some(self.subst_member_ty(current, args, member.file, &member.ty))
+                Some(self.subst_member_ty(current, member_id, args, member.file, &member.ty))
             },
             |current, args, sup| {
                 let file = self.item(current).file;
+                // A supertype's type arguments belong to the `extends` clause, not to any member,
+                // so `None` is the scope: `class Sub extends Base<T>` threads the *class's* `T`.
                 sup.args
                     .iter()
-                    .map(|mt| self.subst_member_ty(current, args, file, mt))
+                    .map(|mt| self.subst_ty(current, None, args, file, mt))
                     .collect()
             },
         )
@@ -1654,8 +1669,28 @@ impl ProjectIndex {
     /// `current` (in `file`), with `current`'s type parameters bound to `args`. A raw frame (`args`
     /// empty — a non-generic or raw receiver, the common case) needs no binding, so the converted type
     /// is returned directly instead of cloning the whole tree through a no-op [`Ty::substitute`].
-    fn subst_member_ty(&self, current: ItemId, args: &[Ty], file: FileId, mt: &MemberType) -> Ty {
-        let ty = self.member_type_to_ty(file, current, mt);
+    fn subst_member_ty(
+        &self,
+        current: ItemId,
+        member: MemberId,
+        args: &[Ty],
+        file: FileId,
+        mt: &MemberType,
+    ) -> Ty {
+        self.subst_ty(current, Some(member), args, file, mt)
+    }
+
+    /// [`subst_member_ty`](Self::subst_member_ty) with the declaring scope spelled out: `Some` for a
+    /// member's own types, `None` for a type-level one such as an `extends` clause's arguments.
+    fn subst_ty(
+        &self,
+        current: ItemId,
+        member: Option<MemberId>,
+        args: &[Ty],
+        file: FileId,
+        mt: &MemberType,
+    ) -> Ty {
+        let ty = self.member_type_to_ty(file, current, member, mt);
         if args.is_empty() {
             ty
         } else {
@@ -1667,7 +1702,11 @@ impl ProjectIndex {
     /// `owner`'s type parameters, by position, to the supplied argument (suitable for
     /// [`Ty::substitute`]). A raw use (fewer arguments than parameters, typically none) leaves the
     /// surplus parameters unbound, so they stay type variables.
-    fn subst_fn(&self, owner: ItemId, args: &[Ty]) -> impl Fn(ItemId, &str) -> Option<Ty> {
+    fn subst_fn(
+        &self,
+        owner: ItemId,
+        args: &[Ty],
+    ) -> impl Fn(ItemId, Option<MemberId>, &str) -> Option<Ty> {
         let bindings: HashMap<String, Ty> = self
             .item(owner)
             .type_params
@@ -1675,7 +1714,14 @@ impl ProjectIndex {
             .zip(args)
             .map(|(p, arg)| (p.name.clone(), arg.clone()))
             .collect();
-        move |o, n| (o == owner).then(|| bindings.get(n).cloned()).flatten()
+        // A *method*'s own parameter is never bound by the receiver's arguments, however its name
+        // reads: `class Holder<T> { <T> T pick(T a) }` is two different `T`s, and substituting the
+        // receiver's into the method's is how a shadowed variable acquires a type it never had.
+        move |o, m, n| {
+            (o == owner && m.is_none())
+                .then(|| bindings.get(n).cloned())
+                .flatten()
+        }
     }
 
     /// The nearest ancestor type declaration of `node` that is an indexed project item, in `file`.
@@ -1895,7 +1941,7 @@ impl crate::analysis::FileSemantics<'_> {
         let signatures: Vec<Signature> = index
             .resolve_members_all(owner, &name, Namespace::Method)
             .into_iter()
-            .map(|id| index.render_signature(index.member(id)))
+            .map(|id| index.render_signature(id))
             .collect();
         if signatures.is_empty() {
             return None;
@@ -1917,7 +1963,8 @@ impl crate::analysis::FileSemantics<'_> {
 impl ProjectIndex {
     /// Renders one member's signature as `name(type1 p1, type2 p2)`, recording each parameter's byte
     /// range within the label. A parameter with no readable name is rendered as its type alone.
-    fn render_signature(&self, member: &crate::Member) -> Signature {
+    fn render_signature(&self, id: MemberId) -> Signature {
+        let member = self.member(id);
         let mut label = String::new();
         label.push_str(&member.name);
         label.push('(');
@@ -1927,7 +1974,7 @@ impl ProjectIndex {
                 label.push_str(", ");
             }
             let ty = self
-                .member_type_to_ty(member.file, member.owner, &param.ty)
+                .member_type_to_ty(member.file, member.owner, Some(id), &param.ty)
                 .to_string();
             let text = match &param.name {
                 Some(name) => format!("{ty} {name}"),
@@ -2025,7 +2072,7 @@ impl crate::analysis::FileSemantics<'_> {
             // keep the first per (name, name-space) and drop the rest (a shadowed field, a further
             // overload).
             if seen.insert((member.name.clone(), member.kind.namespace())) {
-                out.push(index.completion_of(member));
+                out.push(index.completion_of(id));
             }
         }
         out
@@ -2036,16 +2083,17 @@ impl ProjectIndex {
     /// Builds a [`Completion`] for `member`: a field's detail is its type; a method's is its parameter
     /// list and return type (`(int w, int h): int`), reusing
     /// [`render_signature`](ProjectIndex::render_signature) for the parameters.
-    fn completion_of(&self, member: &crate::Member) -> Completion {
+    fn completion_of(&self, id: MemberId) -> Completion {
+        let member = self.member(id);
         let detail = match member.kind {
             DefKind::Method => {
-                let signature = self.render_signature(member);
+                let signature = self.render_signature(id);
                 let params = &signature.label[member.name.len()..];
-                let ret = self.member_type_to_ty(member.file, member.owner, &member.ty);
+                let ret = self.member_type_to_ty(member.file, member.owner, Some(id), &member.ty);
                 format!("{params}: {ret}")
             }
             _ => self
-                .member_type_to_ty(member.file, member.owner, &member.ty)
+                .member_type_to_ty(member.file, member.owner, Some(id), &member.ty)
                 .to_string(),
         };
         Completion {

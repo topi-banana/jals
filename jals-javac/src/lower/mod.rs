@@ -1304,18 +1304,7 @@ impl Compile {
                 if Hierarchy::of(context.index).overrides(own, inherited) == Overrides::No {
                     continue;
                 }
-                let info = context.index.member(inherited);
-                // The declaring type's own parameters, so `Holder<T>.put(T)` erases to `put(Object)`
-                // rather than failing on a name the index resolves to nothing.
-                let vars: Vec<String> = context
-                    .index
-                    .item(info.owner)
-                    .type_params
-                    .iter()
-                    .map(|param| param.name.clone())
-                    .collect();
-                let Ok(descriptor) =
-                    Descriptor::method_descriptor_erasing(inherited, context.index, false, &vars)
+                let Ok(descriptor) = Descriptor::method_descriptor(inherited, context.index, false)
                 else {
                     continue;
                 };
@@ -1622,15 +1611,7 @@ impl Compile {
             .ok_or(LowerError::Unsupported("a method declaration with no name"))?;
         let name = token.text().to_owned();
         let member = context.facts().member_at(&token)?;
-        // The method's own type parameters are not the class's, so the index resolved each as an
-        // external name it has never heard of. Naming them here is what lets the descriptor erase them.
-        let own_vars: Vec<String> = node
-            .children()
-            .find_map(ast::TypeParams::cast)
-            .map(|params| params.params().filter_map(|param| param.name()).collect())
-            .unwrap_or_default();
-        let descriptor =
-            Descriptor::method_descriptor_erasing(member, context.index, false, &own_vars)?;
+        let descriptor = Descriptor::method_descriptor(member, context.index, false)?;
         let is_static = context.index.member(member).modifiers.is_static;
 
         let flags = Self::method_flags(node, context.in_interface);

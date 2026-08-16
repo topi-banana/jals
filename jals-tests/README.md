@@ -258,12 +258,17 @@ syntax error on a file that is valid Java by construction. `--strict` exits non-
 a regression into a wrong class file fails a build while the long tail of unimplemented syntax
 does not.
 
-CI leaves `--strict` off: known defects are still open (a nested `new` passing the wrong enclosing
-instance, `this$0` read or stored before `super()` — which JEP 447's statements-before-`super()`
-reaches from a second direction — and four `jals-syntax` gaps: unicode escapes as JLS §3.3 defines
-them, a stray `;` at top level, `{,}` where the list may be empty, and `var` used as an ordinary
-identifier), so the report is a measurement rather than a gate. Turning it on is what would make it
-one, and that is a decision to take once the list is empty.
+CI leaves `--strict` off: known defects are still open, so the report is a measurement rather than a
+gate. Turning it on is what would make it one, and that is a decision to take once the list is
+empty. What is open, by family:
+
+- a nested `new` passing the wrong enclosing instance, and `this$0` read or stored before
+  `super()` — which JEP 447's statements-before-`super()` reaches from a second direction;
+- a value whose *erasure* is not narrowed back where the slot is narrower than `Object`. The
+  argument direction is handled; a `return` of an erased value, and a receiver reached through one,
+  are not — which is most of what `generics/inference` fails on;
+- four `jals-syntax` gaps: unicode escapes as JLS §3.3 defines them, a stray `;` at top level,
+  `{,}` where the list may be empty, and `var` used as an ordinary identifier.
 
 Expect the list to *change* as the rate rises, and not always to shrink. A file blocked at
 `lowered` never reaches the verifier, so fixing what blocked it does not only move it up the

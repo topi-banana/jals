@@ -51,6 +51,9 @@ pub(crate) struct ClassfileMember {
     pub ty: MemberType,
     /// The method's parameters (empty for a field).
     pub params: Vec<Param>,
+    /// The method's own type parameters, read from its generic `Signature`. Empty for a field, for a
+    /// non-generic method, and for one carrying only a descriptor (which erases them away).
+    pub type_params: Vec<TypeParamDecl>,
     /// Whether the method is varargs.
     pub varargs: bool,
     /// The checked exceptions the method declares (`throws`), captured like a supertype so they
@@ -172,6 +175,7 @@ impl ClasspathLower {
             out.push(ClassfileMember {
                 name,
                 kind: DefKind::Field,
+                type_params: Vec::new(),
                 modifiers: MemberModifiers {
                     is_static: field.access_flags.contains(FieldAccessFlags::STATIC),
                     is_private: field.access_flags.contains(FieldAccessFlags::PRIVATE),
@@ -190,7 +194,7 @@ impl ClasspathLower {
             if raw_name == "<clinit>" {
                 continue;
             }
-            let (ret, params, varargs) = Self::method_shape(method, pool);
+            let (ret, params, varargs, type_params) = Self::method_shape(method, pool);
             // The declared checked exceptions (`throws`), from the `Exceptions` attribute, as
             // fully-qualified named types so they resolve without an import context.
             let throws = jals_decompile::Attrs::declared_throws(method, pool)
@@ -210,6 +214,7 @@ impl ClasspathLower {
             out.push(ClassfileMember {
                 name,
                 kind,
+                type_params,
                 modifiers: MemberModifiers {
                     is_static: method.access_flags.contains(MethodAccessFlags::STATIC),
                     is_private: method.access_flags.contains(MethodAccessFlags::PRIVATE),
@@ -247,7 +252,7 @@ impl ClasspathLower {
     fn method_shape(
         method: &jals_classfile::MethodInfo,
         pool: &ConstantPool,
-    ) -> (MemberType, Vec<Param>, bool) {
+    ) -> (MemberType, Vec<Param>, bool, Vec<TypeParamDecl>) {
         let varargs = method.access_flags.is_varargs();
         if let Some(sig) = jals_decompile::Attrs::signature_string(&method.attributes, pool)
             && let Ok(ms) = MethodSignature::parse(&sig)
@@ -264,7 +269,15 @@ impl ClasspathLower {
                 ResultSignature::Void => MemberType::Void,
                 ResultSignature::Type(t) => Self::type_sig_to_member_type(t),
             };
-            return (ret, params, varargs);
+            // A generic method's own `<E>` lives only in the `Signature` attribute; the descriptor
+            // has already erased it. Without it a bare `E` in this member's types resolves to an
+            // external name the index has never heard of.
+            return (
+                ret,
+                params,
+                varargs,
+                Self::lower_type_params(&ms.type_parameters),
+            );
         }
         if let Some(desc) = pool.utf8(method.descriptor_index)
             && let Ok(md) = MethodDescriptor::parse(&desc)
@@ -281,9 +294,11 @@ impl ClasspathLower {
                 ReturnType::Void => MemberType::Void,
                 ReturnType::Type(ft) => Self::field_type_to_member_type(ft),
             };
-            return (ret, params, varargs);
+            // No `Signature`: the descriptor is already erased, so there is no type variable left
+            // to name.
+            return (ret, params, varargs, Vec::new());
         }
-        (MemberType::Unknown, Vec::new(), varargs)
+        (MemberType::Unknown, Vec::new(), varargs, Vec::new())
     }
 
     // --- descriptor / signature → MemberType -----------------------------------------------------

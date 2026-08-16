@@ -96,23 +96,60 @@ impl Descriptor {
 
     /// The field type a value of `ty` has, erased.
     fn field_type(ty: &Ty, index: &ProjectIndex) -> Result<FieldType> {
+        Self::field_type_within(ty, index, 0)
+    }
+
+    /// [`field_type`](Self::field_type), for a lowering that has to compare a value's erasure with a
+    /// slot's — the argument narrowing an unchecked call needs.
+    ///
+    /// # Errors
+    /// As [`field_type`](Self::field_type): a type this layer cannot name is refused rather than
+    /// guessed at.
+    pub(crate) fn field_type_of(ty: &Ty, index: &ProjectIndex) -> Result<FieldType> {
+        Self::field_type(ty, index)
+    }
+
+    /// How far a chain of type-variable bounds is followed before answering `Object`.
+    ///
+    /// `<T extends U, U extends Number>` erases `T` through `U`, so the walk is genuinely recursive
+    /// and needs a stop. Real bound chains are a step or two; the limit exists so a cyclic or
+    /// malformed one — this crate never checks, so it can be handed either — terminates with the
+    /// conservative answer rather than the stack.
+    const BOUND_DEPTH: u8 = 8;
+    /// The one type every erasure falls back to.
+    const OBJECT: &'static str = "java/lang/Object";
+
+    /// [`field_type`](Self::field_type), tracking how many type-variable bounds have been followed.
+    fn field_type_within(ty: &Ty, index: &ProjectIndex, depth: u8) -> Result<FieldType> {
         Ok(match ty {
             Ty::Primitive(primitive) => FieldType::Base(Self::base_type(*primitive)),
-            Ty::Array(element) => {
-                FieldType::Array(alloc::boxed::Box::new(Self::field_type(element, index)?))
-            }
+            Ty::Array(element) => FieldType::Array(alloc::boxed::Box::new(
+                Self::field_type_within(element, index, depth)?,
+            )),
             Ty::Class(ClassTy::Project { id, .. }) => {
                 FieldType::Object(Self::internal_name_of(*id, index))
             }
             Ty::Class(ClassTy::External { name, .. }) => {
                 return Err(DescError::Unresolved(name.clone()));
             }
-            // Both erase to `Object`, for the same reason from opposite directions. `null` has no
-            // type of its own — whatever slot it flows into supplies one, and every such slot is a
-            // reference. An unbounded type variable has no type left after erasure. (A *bounded*
-            // variable erases to its bound, which needs the declaring item's `TypeParamDecl`; until
-            // a milestone needs it, `Object` is the conservative answer.)
-            Ty::Null | Ty::TypeVar { .. } => FieldType::Object("java/lang/Object".to_owned()),
+            // `null` has no type of its own — whatever slot it flows into supplies one, and every
+            // such slot is a reference.
+            Ty::Null => FieldType::Object(Self::OBJECT.to_owned()),
+            // A type variable erases to its leftmost bound (JLS §4.6), and to `Object` when it
+            // declares none. Answering `Object` for a *bounded* one is self-consistent within a
+            // single compilation — the declaration and its call sites agree — and disagrees with
+            // every separately compiled caller, which is a `NoSuchMethodError` rather than an
+            // imprecision. A bound this layer cannot name is the same refusal as any other.
+            Ty::TypeVar {
+                owner,
+                member,
+                name,
+            } => match index.type_var_bound(*owner, *member, name) {
+                Some(bound) if depth < Self::BOUND_DEPTH => {
+                    Self::field_type_within(&bound, index, depth + 1)?
+                }
+                _ => FieldType::Object(Self::OBJECT.to_owned()),
+            },
             Ty::Void => return Err(DescError::Void),
             Ty::Unknown => return Err(DescError::Unknown),
         })
@@ -135,57 +172,20 @@ impl Descriptor {
         index: &ProjectIndex,
         constructor: bool,
     ) -> Result<MethodDescriptor> {
-        Self::method_descriptor_erasing(id, index, constructor, &[])
-    }
-
-    /// The method descriptor of `id`, treating each name in `vars` as a type *variable*.
-    ///
-    /// A method's own type parameters (`static <E> E pick(E a, E b)`) are not the *class's*, so the index
-    /// resolves them as external names it has never heard of — and an unresolved external name is
-    /// reported rather than guessed at, which is right everywhere except here. The caller knows which
-    /// names its declaration bound, so it says so, and each becomes the `Object` a type variable erases
-    /// to. Passing an empty list is the ordinary case and changes nothing.
-    pub(crate) fn method_descriptor_erasing(
-        id: MemberId,
-        index: &ProjectIndex,
-        constructor: bool,
-        vars: &[String],
-    ) -> Result<MethodDescriptor> {
-        let erase = |ty: &Ty| Self::erase_variables(ty, vars);
         let params = index
             .resolved_param_tys(id)
             .iter()
-            .map(|ty| Self::field_type(&erase(ty), index))
+            .map(|ty| Self::field_type(ty, index))
             .collect::<Result<Vec<_>>>()?;
         let return_type = if constructor {
             ReturnType::Void
         } else {
-            Self::return_type(&erase(&index.resolved_member_ty(id)), index)?
+            Self::return_type(&index.resolved_member_ty(id), index)?
         };
         Ok(MethodDescriptor {
             params,
             return_type,
         })
-    }
-
-    /// Replace every external-by-name type whose name is in `vars` with a type variable, recursively
-    /// through array element types. A type variable erases to `Object`, which is what a method's own
-    /// unbounded type parameter erases to.
-    fn erase_variables(ty: &Ty, vars: &[String]) -> Ty {
-        match ty {
-            Ty::Class(jals_hir::ClassTy::External { name, .. })
-                if vars.iter().any(|var| var == name) =>
-            {
-                // `Null` and `TypeVar` share one erasure here — `Object` — and `Null` needs no owning
-                // item to name, which a synthetic `TypeVar` would have to invent.
-                let _ = name;
-                Ty::Null
-            }
-            Ty::Array(element) => {
-                Ty::Array(alloc::boxed::Box::new(Self::erase_variables(element, vars)))
-            }
-            other => other.clone(),
-        }
     }
 
     /// The field descriptor of the member `id`.
