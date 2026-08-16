@@ -190,11 +190,22 @@ it got, because one number over a compiler says nothing about what is missing:
 | lowered | `Compile::file` produced class files rather than a `LowerError` |
 | re-read | `jals-classfile` reads back what the assembler wrote |
 | **verified** | a real JVM **linked** the class: the bytecode verifier accepted it |
+| descriptor-equal | every method's descriptor is one javac gave the same name |
 
-The last rung is the point. The assembler computes its own `max_stack`, `max_locals` and
-`StackMapTable`, and `jals-classfile` reads back whatever those say — so a frame describing the
-wrong type round-trips perfectly and is still a class no JVM will load. Only the verifier has an
-opinion, and it is the authority.
+`verified` is what this harness was built for. The assembler computes its own `max_stack`,
+`max_locals` and `StackMapTable`, and `jals-classfile` reads back whatever those say — so a frame
+describing the wrong type round-trips perfectly and is still a class no JVM will load. Only the
+verifier has an opinion, and it is the authority.
+
+`descriptor-equal` is the rung the verifier structurally cannot reach. It judges one compilation at
+a time, and every case here is a single file, so an erasure the declaration and its call sites get
+*equally* wrong is self-consistent and links cleanly — `<T extends Comparable<T>> void f(T)` emitted
+as `f(Ljava/lang/Object;)` passes every rung below. Catching that needs a second opinion, and the
+corpus already holds one beside every case. It is a **rung, not a defect**: the bytes load and run,
+so `--strict` does not fail on one. And it is narrower than "compiled the way javac did" — where
+both compilers declared a method of the same name, they must agree on what it takes and returns,
+which is all a separately-compiled caller links against. Types jals did not emit, members javac has
+and jals does not, access flags, and attributes are all out of scope.
 
 ```sh
 git submodule update --init --depth 1 jals-tests/sources/openjdk
@@ -224,10 +235,9 @@ rather than left to fail, since scoring a file whose purpose is to be rejected w
 this harness into a checker.
 
 Each case is `<Base>.java` beside a `<Base>.expected/` directory holding javac's own class files.
-Nothing reads `expected/` yet; it is written now because a future run-equivalence rung needs it
-and regenerating the corpus to obtain it later costs the whole generation pass. The corpus is a
-derivative of GPL'd OpenJDK sources, so like the four formatter corpora it is **generated locally
-and gitignored, never committed**.
+That directory is both what makes a `.java` under the root a case at all and what the
+`descriptor-equal` rung reads. The corpus is a derivative of GPL'd OpenJDK sources, so like the four
+formatter corpora it is **generated locally and gitignored, never committed**.
 
 ### The classpath is a real JDK's
 

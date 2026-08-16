@@ -28,9 +28,17 @@
 //! | lowered | `Compile::file` produced class files rather than a [`LowerError`] |
 //! | re-read | `jals_classfile::ClassFile::read` reads back what the assembler wrote |
 //! | verified | a real JVM **linked** the class: the bytecode verifier accepted it |
+//! | descriptor-equal | every method's descriptor is one javac gave the same name |
 //!
-//! The last rung is the one that matters, and it is the reason this harness exists: nothing
-//! upstream of the JVM's verifier can tell a well-formed class file from a plausible one.
+//! `verified` is the rung this harness was built for: nothing upstream of the JVM's verifier can
+//! tell a well-formed class file from a plausible one.
+//!
+//! `descriptor-equal` is what the verifier structurally cannot reach. It judges one compilation at
+//! a time, and every case here is a single file — so an erasure the declaration and its call sites
+//! get *equally* wrong is self-consistent and links cleanly. Only a second opinion can catch that,
+//! and the corpus already holds one: javac's own class files, beside every case in `expected/`.
+//! See [`CaseResult::descriptor_disagreement`] for exactly what is compared, which is narrower than
+//! "compiled the same way javac did".
 //!
 //! # The classpath is a real JDK's, not the embedded stubs
 //!
@@ -232,8 +240,17 @@ impl Jdk {
 /// Ordered by rung: everything below [`Verified`](Self::Verified) is a place the pipeline stopped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    /// The JVM linked every emitted class: the bytecode verifier accepted them.
+    /// The JVM linked every emitted class *and* every method carries a descriptor javac gave the
+    /// same name — the top rung.
     Verified,
+    /// The JVM linked every emitted class, but a method's descriptor disagrees with javac's own
+    /// class file for that type.
+    ///
+    /// Not a defect: the bytes load and run. It is a rung because the verifier structurally cannot
+    /// catch it — a single-file corpus compiles the declaration and its call sites together, so an
+    /// erasure both sides get equally wrong is self-consistent and links. What it *would* break is a
+    /// separately-compiled caller, which is the thing a compiler's descriptors exist to agree with.
+    DescriptorMismatch(String),
     /// The JVM's verifier rejected a class — a `VerifyError` or `ClassFormatError`. The class file
     /// is wrong, and this is the finding the harness exists to produce.
     Rejected(String),
@@ -263,7 +280,8 @@ impl Outcome {
     /// A short, stable label for display and for the failure buckets.
     pub const fn label(&self) -> &'static str {
         match self {
-            Self::Verified => "verified",
+            Self::Verified => "descriptor-equal",
+            Self::DescriptorMismatch(_) => "verified",
             Self::Rejected(_) => "jvm-rejected",
             Self::Unlinkable(_) => "unlinkable",
             Self::Unverified => "unverified",
@@ -291,8 +309,13 @@ impl Outcome {
         self.lowered() && !matches!(self, Self::RereadError)
     }
 
-    /// Whether a real JVM linked every class the case emitted — the top rung.
+    /// Whether a real JVM linked every class the case emitted.
     const fn verified(&self) -> bool {
+        matches!(self, Self::Verified | Self::DescriptorMismatch(_))
+    }
+
+    /// Whether the emitted descriptors also agree with javac's own — the top rung.
+    const fn descriptor_equal(&self) -> bool {
         matches!(self, Self::Verified)
     }
 
@@ -319,18 +342,20 @@ impl Outcome {
             Self::LowerError(_) => 5,
             Self::Unlinkable(_) => 6,
             Self::Unverified => 7,
-            Self::Verified => 8,
+            Self::DescriptorMismatch(_) => 8,
+            Self::Verified => 9,
             // Not a rung at all: the harness never saw the source.
-            Self::ReadError => 9,
+            Self::ReadError => 10,
         }
     }
 
     /// The detail worth printing beside the label, if any.
     pub fn detail(&self) -> Option<&str> {
         match self {
-            Self::Rejected(message) | Self::Unlinkable(message) | Self::LowerError(message) => {
-                Some(message)
-            }
+            Self::Rejected(message)
+            | Self::Unlinkable(message)
+            | Self::LowerError(message)
+            | Self::DescriptorMismatch(message) => Some(message),
             _ => None,
         }
     }
@@ -382,6 +407,11 @@ pub struct CaseResult {
     pub rel: PathBuf,
     /// How far it got.
     pub outcome: Outcome,
+    /// The first descriptor that disagrees with javac's own class file, if any.
+    ///
+    /// Computed while the emitted bytes are still in hand, and applied only *after* the JVM stage:
+    /// the rung sits above `verified`, so a case that never linked is not judged on it.
+    descriptors: Option<String>,
 }
 
 /// A file the generator kept out of the corpus, and why.
@@ -471,6 +501,13 @@ impl CompileReport {
         if let Some(verifier) = verifier {
             verifier.link_all(&mut results);
         }
+        // The descriptor rung sits *above* `verified`, so it is applied only to what linked: bytes
+        // no JVM would load have already failed for a reason that says more than this one would.
+        for result in &mut results {
+            if let (Outcome::Verified, Some(message)) = (&result.outcome, &result.descriptors) {
+                result.outcome = Outcome::DescriptorMismatch(message.clone());
+            }
+        }
 
         // Worst rung first, so a truncated listing surfaces the hard failures rather than the
         // long tail of unimplemented syntax.
@@ -491,7 +528,7 @@ impl CompileReport {
     }
 
     /// How many cases reached each rung of the ladder.
-    pub fn ladder(&self) -> [usize; 4] {
+    pub fn ladder(&self) -> [usize; 5] {
         let count = |reached: fn(&Outcome) -> bool| {
             self.results
                 .iter()
@@ -503,6 +540,7 @@ impl CompileReport {
             count(Outcome::lowered),
             count(Outcome::reread),
             count(Outcome::verified),
+            count(Outcome::descriptor_equal),
         ]
     }
 
@@ -563,10 +601,16 @@ impl CompileReport {
              the denominator excludes what no single-file compiler could do; what the generator \
              left out is listed under *out of scope*. The rungs are cumulative — `verified` is \
              the one that means the class file is right, because nothing upstream of the JVM's \
-             bytecode verifier can tell a well-formed class file from a plausible one.\n\n",
+             bytecode verifier can tell a well-formed class file from a plausible one. \
+             `descriptor-equal` is the rung above it: the verifier judges one compilation at a \
+             time, so an erasure the declaration and its call sites get equally wrong still \
+             links — this rung asks javac's own class files whether the descriptors agree.\n\n",
         );
-        out.push_str("| corpus | reference | in scope | parsed | lowered | re-read | verified |\n");
-        out.push_str("| --- | --- | --: | --: | --: | --: | --: |\n");
+        out.push_str(
+            "| corpus | reference | in scope | parsed | lowered | re-read | verified | \
+             descriptor-equal |\n",
+        );
+        out.push_str("| --- | --- | --: | --: | --: | --: | --: | --: |\n");
         for report in reports {
             report.push_ladder_row(&mut out);
         }
@@ -595,7 +639,7 @@ impl CompileReport {
     /// This corpus's row of the ladder table.
     fn push_ladder_row(&self, out: &mut String) {
         let total = self.total();
-        let [parsed, lowered, reread, verified] = self.ladder();
+        let [parsed, lowered, reread, verified, descriptor_equal] = self.ladder();
         let cell = |n: usize| {
             if total == 0 {
                 "0".to_owned()
@@ -604,13 +648,14 @@ impl CompileReport {
             }
         };
         out.push_str(&format!(
-            "| {} | {} | {total} | {} | {} | {} | {} |\n",
+            "| {} | {} | {total} | {} | {} | {} | {} | {} |\n",
             self.name,
             self.reference,
             cell(parsed),
             cell(lowered),
             cell(reread),
             cell(verified),
+            cell(descriptor_equal),
         ));
     }
 
@@ -669,17 +714,122 @@ impl CaseResult {
     /// Never panics: a panic anywhere in the pipeline is caught and reported as
     /// [`Outcome::Panicked`], since catching invariant violations is the whole point.
     fn of(case: &Case, classpath: &LoweredClasspath, verifier: Option<&Verifier>) -> Self {
+        let mut descriptors = None;
+        let outcome = Self::compile(&case.path, classpath, verifier, &mut descriptors);
         Self {
             rel: case.rel.clone(),
-            outcome: Self::compile(&case.path, classpath, verifier),
+            outcome,
+            descriptors,
         }
     }
 
+    /// The first method jals emitted whose descriptor javac did not give that name, if any.
+    ///
+    /// **What this compares, and what it does not.** For each emitted type javac also produced, each
+    /// method jals emitted under a name javac also declares must carry one of the descriptors javac
+    /// gave that name. Deliberately nothing else: a type jals did not emit, a member javac has and
+    /// jals does not, an access flag, and every attribute are all out of scope, so a pass here is
+    /// *not* the claim that jals compiled the file the way javac did. It is the narrower claim the
+    /// verifier structurally cannot make — that where both compilers named a method, they agree on
+    /// what it takes and returns, which is the whole of what a separately-compiled caller links
+    /// against.
+    ///
+    /// A missing or unreadable `expected/` yields `None`: a corpus problem is not a finding about
+    /// the compiler, the same way an unreadable source is not a parse failure.
+    fn descriptor_disagreement(
+        source: &Path,
+        classes: &[jals_javac::lower::CompiledClass],
+    ) -> Option<String> {
+        let expected = Self::expected_signatures(&Case::expected_dir(source))?;
+        for class in classes {
+            let Some(javac) = expected.get(&class.internal_name) else {
+                continue;
+            };
+            let ours = Self::signatures(&class.bytes)?;
+            for (name, descriptor) in ours {
+                // A name javac never declared is a synthetic jals emits and javac does not (or the
+                // reverse of one it omits); that is a different question from descriptor agreement.
+                let Some(theirs) = javac.get(&name) else {
+                    continue;
+                };
+                if !theirs.contains(&descriptor) {
+                    // Shaped so `Outcome::bucket`'s elision leaves the sentence and drops only the
+                    // names: every one of these is one finding, and 47 rows spelled with the
+                    // corpus's own identifiers would bury that.
+                    return Some(format!(
+                        "a descriptor javac spells differently: `{}.{name}{descriptor}` against \
+                         javac's {}`",
+                        class.internal_name,
+                        theirs
+                            .iter()
+                            .map(|d| format!("`{name}{d}"))
+                            .collect::<Vec<_>>()
+                            .join("` / ")
+                    ));
+                }
+            }
+        }
+        None
+    }
+
+    /// Every `<name> -> [descriptor]` javac produced, per internal class name, from `expected/`.
+    fn expected_signatures(dir: &Path) -> Option<BTreeMap<String, BTreeMap<String, Vec<String>>>> {
+        let mut out = BTreeMap::new();
+        for entry in WalkDir::new(dir).into_iter().filter_map(Result::ok) {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("class") {
+                continue;
+            }
+            let bytes = std::fs::read(path).ok()?;
+            let class = jals_exec::block_on_inline(ClassFile::read(bytes.as_slice())).ok()?;
+            let internal = class
+                .constant_pool
+                .class_name(class.this_class)?
+                .into_owned();
+            out.insert(internal, Self::method_map(&class)?);
+        }
+        (!out.is_empty()).then_some(out)
+    }
+
+    /// The `(name, descriptor)` pairs of one emitted class file, in declaration order.
+    fn signatures(bytes: &[u8]) -> Option<Vec<(String, String)>> {
+        let class = jals_exec::block_on_inline(ClassFile::read(bytes)).ok()?;
+        let pool = &class.constant_pool;
+        class
+            .methods
+            .iter()
+            .map(|method| {
+                Some((
+                    pool.utf8(method.name_index)?.into_owned(),
+                    pool.utf8(method.descriptor_index)?.into_owned(),
+                ))
+            })
+            .collect()
+    }
+
+    /// One class file's methods, grouped by name — a name can carry several overloads.
+    fn method_map(class: &ClassFile) -> Option<BTreeMap<String, Vec<String>>> {
+        let pool = &class.constant_pool;
+        let mut out: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for method in &class.methods {
+            let name = pool.utf8(method.name_index)?.into_owned();
+            let descriptor = pool.utf8(method.descriptor_index)?.into_owned();
+            out.entry(name).or_default().push(descriptor);
+        }
+        Some(out)
+    }
+
     /// Run the pipeline over one source file, catching a panic as an outcome of its own.
-    fn compile(path: &Path, classpath: &LoweredClasspath, verifier: Option<&Verifier>) -> Outcome {
+    fn compile(
+        path: &Path,
+        classpath: &LoweredClasspath,
+        verifier: Option<&Verifier>,
+        descriptors: &mut Option<String>,
+    ) -> Outcome {
         let Ok(source) = std::fs::read_to_string(path) else {
             return Outcome::ReadError;
         };
+        let mut found = None;
         let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
             let parse = jals_exec::block_on_inline(jals_syntax::Parse::parse(&source));
             if !parse.errors().is_empty() {
@@ -711,11 +861,13 @@ impl CaseResult {
                     return Outcome::RereadError;
                 }
             }
+            found = Self::descriptor_disagreement(path, &classes);
             if let Some(verifier) = verifier {
                 verifier.stage(path, &classes);
             }
             Outcome::Unverified
         }));
+        *descriptors = found;
         outcome.unwrap_or(Outcome::Panicked)
     }
 }
@@ -792,20 +944,35 @@ mod tests {
             root: PathBuf::new(),
             results: vec![
                 result(Outcome::Verified),
+                result(Outcome::DescriptorMismatch("`A.f` is `()V`".to_owned())),
                 result(Outcome::Unverified),
                 result(Outcome::LowerError("gap".to_owned())),
                 result(Outcome::ParseError(2)),
             ],
             skipped: Vec::new(),
         };
-        // parsed 3, lowered 2, re-read 2, verified 1.
-        assert_eq!(report.ladder(), [3, 2, 2, 1]);
+        // parsed 4, lowered 3, re-read 3, verified 2, descriptor-equal 1 — the mismatch counts as
+        // verified (a JVM linked it) and stops one rung short, which is the whole point of the rung.
+        assert_eq!(report.ladder(), [4, 3, 3, 2, 1]);
+    }
+
+    /// A descriptor mismatch is a *rung*, not a defect: the bytes load and run, and only a second
+    /// compiler's opinion says they are wrong. Counting it under `--strict` would fail a build for
+    /// something no JVM objects to.
+    #[test]
+    fn a_descriptor_mismatch_is_not_an_invariant_violation() {
+        assert!(!Outcome::DescriptorMismatch("`A.f` is `()V`".to_owned()).is_invariant_violation());
+        assert!(Outcome::DescriptorMismatch("`A.f` is `()V`".to_owned()).verified());
+        assert!(!Outcome::DescriptorMismatch("`A.f` is `()V`".to_owned()).descriptor_equal());
+        assert!(Outcome::Verified.descriptor_equal());
     }
 
     fn result(outcome: Outcome) -> CaseResult {
         CaseResult {
             rel: PathBuf::from("A.java"),
             outcome,
+            // Already applied: `Report::new` folds this into the outcome before anything reads it.
+            descriptors: None,
         }
     }
 

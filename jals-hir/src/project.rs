@@ -1179,12 +1179,7 @@ impl ProjectIndex {
     /// *superinterface*, but its member set implicitly declares `Object`'s public methods and every
     /// interface-typed value is an `Object`; [`implicit`](Supertype::implicit) is what records that
     /// the edge is not a written `extends`.
-    fn push_implicit_object(
-        &self,
-        owner: ItemId,
-        file: FileId,
-        supertypes: &mut Vec<Supertype>,
-    ) {
+    fn push_implicit_object(&self, owner: ItemId, file: FileId, supertypes: &mut Vec<Supertype>) {
         if !matches!(
             self.items[owner.0 as usize].kind,
             DefKind::Class | DefKind::Interface | DefKind::Enum | DefKind::Record
