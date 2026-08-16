@@ -611,11 +611,11 @@ pub struct UrlMappings {
 
 /// The grammar a [`MappingSource`]'s text is written in, selected by its `type` field.
 ///
-/// Tagged from the start for the reason [`BackendKind`] is: adding tiny/tsrg/enigma later is a new
+/// Tagged from the start for the reason [`BackendKind`] is: adding tsrg/enigma later is a new
 /// variant rather than a schema change. Unlike that enum this one carries no `tag_name`, because
 /// nothing here is a cache key — the artifact a format identifies is remapped in `jals-classpath`,
 /// against its own `MappingFormat`, and the stable string the provenance fold reads is that one's.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum MappingFormatKind {
     /// The ProGuard-style text Mojang publishes per Minecraft release (`official -> obfuscated`,
@@ -625,11 +625,50 @@ pub enum MappingFormatKind {
     /// is: serde honors `deny_unknown_fields` for a struct variant of an internally-tagged enum and
     /// silently ignores it for a unit one.
     Proguard {},
+    /// The tab-separated text Fabric publishes (`tiny 2 0 official intermediary named`), read
+    /// through the namespace pair this entry names.
+    ///
+    /// The pair is required, and this is the one place in the manifest where a format carries
+    /// operands. A tiny v2 file describes two *or more* namespaces, so unlike a ProGuard-style one it
+    /// does not say by itself which renaming is meant, and the wrong pair renames nothing while
+    /// still producing a plausible jar — the same reason `[dependencies] remap` and `[build] remap`
+    /// are separate keys rather than a direction jals infers.
+    TinyV2 {
+        /// The namespace the *obfuscated* side is written in — what a `[dependencies] remap` reads
+        /// names from, and what a `[build] remap` writes them back into. Typically `official`.
+        from: String,
+        /// The namespace the project is written against, e.g. `named` or `intermediary`.
+        to: String,
+    },
 }
 
 impl Default for MappingFormatKind {
     fn default() -> Self {
         Self::Proguard {}
+    }
+}
+
+impl MappingFormatKind {
+    /// The value-level checks on this format's operands, reported against the mapping `name`.
+    fn validate(&self, name: &str) -> Result<(), MappingError> {
+        let Self::TinyV2 { from, to } = self else {
+            return Ok(());
+        };
+        for (field, value) in [("from", from), ("to", to)] {
+            if value.is_empty() {
+                return Err(MappingError::Empty {
+                    name: name.to_owned(),
+                    field,
+                });
+            }
+        }
+        if from == to {
+            return Err(MappingError::SameNamespace {
+                name: name.to_owned(),
+                namespace: from.clone(),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -707,6 +746,13 @@ pub enum MappingError {
         /// The 1-based position of the second.
         second: usize,
     },
+    /// A `tiny-v2` format whose `from` and `to` name one namespace, which renames nothing.
+    SameNamespace {
+        /// The mapping's name.
+        name: String,
+        /// The namespace named twice.
+        namespace: String,
+    },
 }
 
 impl fmt::Display for MappingError {
@@ -754,6 +800,11 @@ impl fmt::Display for MappingError {
                  are comparable by inclusion, so a selection could activate both: at most one \
                  alternative may be active"
             ),
+            Self::SameNamespace { name, namespace } => write!(
+                f,
+                "mapping `{name}` reads `{namespace}` into itself: a tiny v2 `from` and `to` name \
+                 the two namespaces a remap translates between, so naming one twice renames nothing"
+            ),
         }
     }
 }
@@ -762,10 +813,10 @@ impl Error for MappingError {}
 
 impl MappingSource {
     /// Which grammar this entry's text is written in.
-    pub const fn format(&self) -> MappingFormatKind {
+    pub const fn format(&self) -> &MappingFormatKind {
         match self {
-            Self::File(file) => file.format,
-            Self::Url(url) => url.format,
+            Self::File(file) => &file.format,
+            Self::Url(url) => &url.format,
         }
     }
 
@@ -830,6 +881,7 @@ impl MappingSource {
                 }
             }
         }
+        self.format().validate(name)?;
         for feature in self.required_features() {
             if feature.is_empty()
                 || feature == DEFAULT_BUILD_FEATURE
@@ -4447,7 +4499,7 @@ mod tests {
         };
         assert!(matches!(local, MappingSource::File(_)));
         // Both forms default the format, so an entry that says nothing still names one grammar.
-        assert_eq!(local.format(), MappingFormatKind::Proguard {});
+        assert_eq!(local.format(), &MappingFormatKind::Proguard {});
         assert!(local.required_features().is_empty());
 
         let [MappingSource::Url(mojmap)] = manifest.mappings["mojmap"].alternatives() else {
@@ -4458,6 +4510,68 @@ mod tests {
             Ok(MappingDigest::Sha1("aa5b7".to_owned()))
         );
         assert_eq!(mojmap.max_bytes, 16_777_216);
+    }
+
+    #[test]
+    fn a_tiny_v2_mapping_names_the_namespace_pair_it_is_read_through() {
+        let manifest: Manifest = r#"
+            [package]
+            name = "mod"
+            version = "0.1.0"
+
+            [mappings.yarn]
+            file = "mappings/yarn.tiny"
+            format = { type = "tiny-v2", from = "official", to = "named" }
+            "#
+        .parse()
+        .unwrap();
+        manifest.validate().unwrap();
+
+        let [yarn] = manifest.mappings["yarn"].alternatives() else {
+            panic!("the singular spelling holds exactly one alternative");
+        };
+        assert_eq!(
+            yarn.format(),
+            &MappingFormatKind::TinyV2 {
+                from: "official".to_owned(),
+                to: "named".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_tiny_v2_mapping_needs_a_pair_of_two_distinct_namespaces() {
+        // A `from` is not optional and a namespace cannot be read into itself: a tiny v2 file names
+        // two *or more* namespaces, so unlike a ProGuard file it does not say by itself which
+        // renaming is meant, and the wrong answer renames nothing while still producing a jar.
+        let with = |format: &str| {
+            let source = format!(
+                "[package]\nname = \"mod\"\nversion = \"0.1.0\"\n\n\
+                 [mappings.yarn]\nfile = \"m.tiny\"\nformat = {format}\n"
+            );
+            source
+                .parse::<Manifest>()
+                .map_err(|_| ())
+                .and_then(|manifest| manifest.validate().map_err(|_| ()))
+        };
+
+        assert!(with(r#"{ type = "tiny-v2", from = "official", to = "named" }"#).is_ok());
+        assert!(
+            with(r#"{ type = "tiny-v2", from = "named", to = "named" }"#).is_err(),
+            "one namespace read into itself renames nothing"
+        );
+        assert!(
+            with(r#"{ type = "tiny-v2", from = "", to = "named" }"#).is_err(),
+            "an empty namespace name matches no namespace in any file"
+        );
+        assert!(
+            with(r#"{ type = "tiny-v2", from = "official" }"#).is_err(),
+            "the pair is required, not half-defaulted"
+        );
+        assert!(
+            with(r#"{ type = "proguard", from = "official", to = "named" }"#).is_err(),
+            "a ProGuard file describes exactly one pair, so it takes no namespaces"
+        );
     }
 
     #[test]

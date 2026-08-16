@@ -1209,7 +1209,7 @@ impl BuildTaskExecutor {
                     &jar,
                     &jals_classpath::RemapRequest {
                         mappings,
-                        format: Self::mapping_format(*format),
+                        format: Self::mapping_format(format),
                         direction: Self::remap_direction(*direction),
                         hierarchy: &hierarchy,
                     },
@@ -1327,9 +1327,13 @@ impl BuildTaskExecutor {
     ///
     /// Two enums rather than one because they are frozen by different things: the plan's tag is
     /// written into cache records, the implementation's is not. This is the one place they meet.
-    const fn mapping_format(format: TaskMappingFormat) -> jals_classpath::MappingFormat {
+    fn mapping_format(format: &TaskMappingFormat) -> jals_classpath::MappingFormat {
         match format {
             TaskMappingFormat::Proguard => jals_classpath::MappingFormat::Proguard,
+            TaskMappingFormat::TinyV2 { from, to } => jals_classpath::MappingFormat::TinyV2 {
+                from: from.clone(),
+                to: to.clone(),
+            },
         }
     }
 

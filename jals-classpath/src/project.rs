@@ -231,7 +231,7 @@ impl ProjectInputs {
                 };
             let request = RemapRequest {
                 mappings: &text,
-                format: spec.format,
+                format: spec.format.clone(),
                 direction: RemapDirection::Deobfuscate,
                 // A dependency jar closes over its own hierarchy: it is the artifact the mapping
                 // set was published for. Reobfuscating compiled output is the case that needs the

@@ -327,7 +327,7 @@ project snapshot and the selected `[features]`, publish ordinary files below
 `target/jals/build/rhai/out`, and add generated
 sources, classpath entries, `javac`/JVM flags, and compile/run environment entries. A typed `tasks`
 DAG can also declare bounded, digest-verified downloads, JSON projections, safe source-JAR
-extraction, Mojang-mappings jar remapping, jar merge, compile-oriented decompilation, and explicit
+extraction, jar remapping (Mojang/ProGuard or tiny v2), jar merge, compile-oriented decompilation, and explicit
 exclusive source-tree publication; Rhai never reads task results or invokes a process.
 `replace-root` replaces every file below its declared destination and is atomic with
 ordinary script output. The native CLI and LSP execute tasks; the LSP defers a root containing an

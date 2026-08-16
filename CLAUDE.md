@@ -78,11 +78,16 @@ filesystem reads into portable interfaces.
   is the only public surface over that writer: `JarPackage::write` packages compiled classes,
   generating the `META-INF/MANIFEST.MF` a jar needs (first member, CRLF, 72-byte wrapped) and
   keeping `StoredZip`/`WriteMember` sealed.
-  Mojang/ProGuard mappings parsing, hierarchy-aware jar remapping, and compile-oriented jar
-  decompilation into source trees live under `archive` too. HTTP/local locator lowering is in its
-  native adapter. A manifest's `[build]` section is lowered into `ProjectInputPlan` by exactly two
-  siblings — portable `MemoryProjectPlan` and host-path `NativeProjectPlan` — and there must never
-  be a third: a host that lowers `[build] classpath` itself is a second rule that will drift.
+  Mappings parsing, hierarchy-aware jar remapping, and compile-oriented jar decompilation into
+  source trees live under `archive` too. Two grammars are read into one `Mappings` index —
+  Mojang/ProGuard and Fabric's tiny v2 — and a format that names more than two namespaces carries
+  the pair it is read through *inside* its `MappingFormat` variant, so the selection reaches the
+  remap's provenance fold with it: `official→named` and `official→intermediary` over one tiny file
+  are two jars, and folding the format tag alone would have served the second the first one's.
+  HTTP/local locator lowering is in its native adapter. A manifest's `[build]` section is lowered
+  into `ProjectInputPlan` by exactly two siblings — portable `MemoryProjectPlan` and host-path
+  `NativeProjectPlan` — and there must never be a third: a host that lowers `[build] classpath`
+  itself is a second rule that will drift.
   `MemoryProjectPlan` has no external fallback because an in-memory project has one address space;
   an entry reaching outside it is a warning, not a host path. A `Warning` carries its subject in
   `origin`, not in `message` — several messages name no location at all — so a host reports one by

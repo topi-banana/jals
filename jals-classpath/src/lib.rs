@@ -89,21 +89,62 @@ impl RemapDirection {
 
 /// Which grammar a mapping text is written in.
 ///
-/// One variant today. It exists as an enum so that adding tiny/tsrg/enigma is a new arm here and in
+/// Two variants today. It exists as an enum so that adding tsrg/enigma is a new arm here and in
 /// [`Mappings::parse`], rather than a second entry point every caller has to learn about.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// A format that names more than two namespaces carries the pair it is read through *inside* the
+/// variant rather than beside it. A namespace pair is meaningless for ProGuard-style text — whose file
+/// describes exactly one pair — and mandatory for tiny v2, so a field on the enum would be a value
+/// half its inhabitants must ignore, and a caller could pair one format with the other's selection.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum MappingFormat {
     /// The ProGuard-style text Mojang publishes per Minecraft release.
     Proguard,
+    /// The tab-separated tiny v2 text Fabric publishes, read through one pair of its namespaces.
+    ///
+    /// A tiny v2 file names two or more namespaces (`official intermediary named`), so *which* pair
+    /// is being read is not a property of the file. There is deliberately no default, for the same
+    /// reason [`RemapDirection`] has none: the wrong pair remaps to nothing at all and still
+    /// produces a plausible archive.
+    TinyV2 {
+        /// The namespace a [`RemapDirection::Deobfuscate`] reads names *from*.
+        ///
+        /// Named for that direction rather than for either namespace's role, because the file is
+        /// symmetric: a [`RemapDirection::Reobfuscate`] reads the same pair the other way. For a
+        /// Fabric jar this is typically `official` (the shipped, obfuscated names).
+        from: String,
+        /// The namespace a [`RemapDirection::Deobfuscate`] writes names *to* — typically `named`.
+        to: String,
+    },
 }
 
 impl MappingFormat {
     /// The format's cache identity. Scoped and gated like `RemapDirection::tag_name` above, and for
     /// the same reason: the remapper's provenance fold is its only reader.
     #[cfg(feature = "archive")]
-    const fn tag_name(self) -> &'static str {
+    const fn tag_name(&self) -> &'static str {
         match self {
             Self::Proguard => "proguard",
+            Self::TinyV2 { .. } => "tiny-v2",
+        }
+    }
+
+    /// Absorb the whole format into a provenance fold: the tag, plus every value that selects a
+    /// different renaming from the same mapping text.
+    ///
+    /// This lives here rather than at the fold site so the match is exhaustive over the enum. The
+    /// tag alone was the entire contribution while there was one variant; leaving it that way would
+    /// make `official→named` and `official→intermediary` over one tiny file share a cache key, and
+    /// the second remap would be served the first one's jar. `ProvenanceFold::bytes` is
+    /// length-framed, so no pair of namespace names can collide with another pair.
+    #[cfg(feature = "archive")]
+    fn fold_into(&self, fold: &mut jals_storage::ProvenanceFold) {
+        fold.bytes(self.tag_name().as_bytes());
+        match self {
+            Self::Proguard => {}
+            Self::TinyV2 { from, to } => {
+                fold.bytes(from.as_bytes()).bytes(to.as_bytes());
+            }
         }
     }
 }

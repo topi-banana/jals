@@ -22,9 +22,8 @@ use core::fmt::Write as _;
 use jals_classfile::{
     Annotation, Attribute, AttributeBody, ClassFile, ClassSignature, ClassTypeSignature,
     ConstantPool, ConstantPoolEntry, ElementValue, FieldInfo, FieldType, InnerClassEntry,
-    MethodAccessFlags, MethodDescriptor, MethodInfo, MethodSignature, RecordComponentInfo,
-    ReturnType, SimpleClassTypeSignature, ThrowsSignature, TypeAnnotation, TypeArgument,
-    TypeParameter, TypeSignature,
+    MethodAccessFlags, MethodInfo, MethodSignature, RecordComponentInfo, SimpleClassTypeSignature,
+    ThrowsSignature, TypeAnnotation, TypeArgument, TypeParameter, TypeSignature,
 };
 use jals_exec::Exec;
 use jals_storage::{
@@ -216,7 +215,7 @@ impl JarRemap {
             return Ok(key);
         }
 
-        let mappings = Mappings::parse(request.mappings, request.format, request.direction)
+        let mappings = Mappings::parse(request.mappings, &request.format, request.direction)
             .map_err(|error| format!("mappings parse failed: {error}"))?;
         let mappings = Arc::new(mappings);
 
@@ -394,7 +393,11 @@ impl JarRemap {
 
 /// What one [`JarRemap::remap`] applies: the mapping text, how to read it, which way to apply it,
 /// and the archives that close the hierarchy it needs.
-#[derive(Debug, Clone, Copy)]
+///
+/// Not `Copy`: a [`MappingFormat`] that names a namespace pair owns those names, and holding them
+/// by reference would put the format's lifetime into every type that carries one, including the
+/// owned [`crate::MappingSpec`] a resolver hands back.
+#[derive(Debug, Clone)]
 pub struct RemapRequest<'a> {
     /// The mapping text, already fetched and verified by whoever produced it.
     pub mappings: &'a str,
@@ -418,9 +421,12 @@ impl RemapRequest<'_> {
     fn provenance(&self, jar: &CacheKey) -> ContentDigest {
         let mut fold = ProvenanceFold::new(b"remap-jar\0");
         fold.parent(jar)
-            .digest(ContentDigest::of(self.mappings.as_bytes()))
-            .bytes(self.format.tag_name().as_bytes())
-            .bytes(self.direction.tag_name().as_bytes());
+            .digest(ContentDigest::of(self.mappings.as_bytes()));
+        // Through the format itself, so the match over its variants is exhaustive: a format that
+        // selects a renaming from more than its tag — tiny v2's namespace pair — has to reach the
+        // key, or two different remaps of one file would be served each other's jar.
+        self.format.fold_into(&mut fold);
+        fold.bytes(self.direction.tag_name().as_bytes());
         for extra in self.hierarchy {
             fold.parent(extra);
         }
@@ -709,7 +715,7 @@ mod helpers {
                     let Some(desc) = utf8_owned(pool, descriptor_index) else {
                         continue;
                     };
-                    let new_desc = remap_descriptor(&desc, mappings);
+                    let new_desc = mappings.remap_descriptor(&desc);
                     if new_desc != desc {
                         let idx = intern_utf8(pool, &new_desc)?;
                         pool.replace(
@@ -758,7 +764,7 @@ mod helpers {
         // Hierarchy walk for the member name.
         let new_name = lookup_member(mappings, index, &owner_obf, &name_obf, &desc_obf, is_field)
             .unwrap_or_else(|| name_obf.clone());
-        let new_desc = remap_descriptor(&desc_obf, mappings);
+        let new_desc = mappings.remap_descriptor(&desc_obf);
         if new_name == name_obf && new_desc == desc_obf {
             return Ok(None);
         }
@@ -789,7 +795,7 @@ mod helpers {
         let Some(desc_obf) = utf8_owned(pool, descriptor_index) else {
             return Ok(None);
         };
-        let new_desc = remap_descriptor(&desc_obf, mappings);
+        let new_desc = mappings.remap_descriptor(&desc_obf);
         if new_desc == desc_obf {
             return Ok(None);
         }
@@ -859,7 +865,7 @@ mod helpers {
     /// Remap a Class-entry Utf8: either an internal binary name or an array descriptor.
     fn remap_class_constant(raw: &str, mappings: &Mappings) -> String {
         if raw.starts_with('[') {
-            return remap_descriptor(raw, mappings);
+            return mappings.remap_descriptor(raw);
         }
         mappings
             .remap_class(raw)
@@ -912,7 +918,7 @@ mod helpers {
         let new_name = mappings
             .remap_field(official_owner, &name_obf, &desc_obf)
             .map_or_else(|| name_obf.clone(), str::to_owned);
-        let new_desc = remap_descriptor(&desc_obf, mappings);
+        let new_desc = mappings.remap_descriptor(&desc_obf);
         if new_name != name_obf {
             field.name_index = intern_utf8(pool, &new_name)?;
         }
@@ -958,7 +964,7 @@ mod helpers {
                 })
                 .unwrap_or_else(|| name_obf.clone())
         };
-        let new_desc = remap_descriptor(&desc_obf, mappings);
+        let new_desc = mappings.remap_descriptor(&desc_obf);
         if new_name != name_obf {
             method.name_index = intern_utf8(pool, &new_name)?;
         }
@@ -972,43 +978,11 @@ mod helpers {
     // Descriptor / signature rewriting
     // ---------------------------------------------------------------------------
 
-    fn remap_descriptor(desc: &str, mappings: &Mappings) -> String {
-        if let Ok(md) = MethodDescriptor::parse(desc) {
-            let params: Vec<_> = md
-                .params
-                .into_iter()
-                .map(|p| remap_field_type(p, mappings))
-                .collect();
-            let ret = match md.return_type {
-                ReturnType::Void => ReturnType::Void,
-                ReturnType::Type(t) => ReturnType::Type(remap_field_type(t, mappings)),
-            };
-            return MethodDescriptor {
-                params,
-                return_type: ret,
-            }
-            .to_string();
-        }
-        if let Ok(ft) = FieldType::parse(desc) {
-            return remap_field_type(ft, mappings).to_string();
-        }
-        desc.to_owned()
-    }
-
-    fn remap_field_type(ft: FieldType, mappings: &Mappings) -> FieldType {
-        match ft {
-            FieldType::Base(b) => FieldType::Base(b),
-            FieldType::Object(name) => FieldType::Object(
-                mappings
-                    .remap_class(&name)
-                    .map(str::to_owned)
-                    .unwrap_or(name),
-            ),
-            FieldType::Array(inner) => {
-                FieldType::Array(alloc::boxed::Box::new(remap_field_type(*inner, mappings)))
-            }
-        }
-    }
+    // Descriptor rewriting itself lives on `Mappings`: the tiny v2 parser needs the same rewrite to
+    // translate a member descriptor out of the file's first namespace before it can key an entry,
+    // and one derivation with two implementations is one derivation that will eventually give two
+    // answers. Signature rewriting stays here — a `Signature` attribute is a class-file structure,
+    // not something a mapping table has an opinion about.
 
     fn remap_type_signature(ts: TypeSignature, mappings: &Mappings) -> TypeSignature {
         match ts {
@@ -1213,7 +1187,7 @@ mod helpers {
                         let Some(desc) = utf8_owned(pool, entry.descriptor_index) else {
                             continue;
                         };
-                        let new = remap_descriptor(&desc, mappings);
+                        let new = mappings.remap_descriptor(&desc);
                         if new != desc {
                             entry.descriptor_index = intern_utf8(pool, &new)?;
                         }
@@ -1313,7 +1287,7 @@ mod helpers {
         let Some(desc) = utf8_owned(pool, anno.type_index) else {
             return Ok(());
         };
-        let new_desc = remap_descriptor(&desc, mappings);
+        let new_desc = mappings.remap_descriptor(&desc);
         if new_desc != desc {
             anno.type_index = intern_utf8(pool, &new_desc)?;
         }
@@ -1366,7 +1340,7 @@ mod helpers {
                 let Some(desc) = utf8_owned(pool, *type_name_index) else {
                     return Ok(());
                 };
-                let new_desc = remap_descriptor(&desc, mappings);
+                let new_desc = mappings.remap_descriptor(&desc);
                 if new_desc != desc {
                     *type_name_index = intern_utf8(pool, &new_desc)?;
                 }
@@ -1386,7 +1360,7 @@ mod helpers {
                 let new = if desc == "V" {
                     desc.clone()
                 } else {
-                    remap_descriptor(&desc, mappings)
+                    mappings.remap_descriptor(&desc)
                 };
                 if new != desc {
                     *class_info_index = intern_utf8(pool, &new)?;
@@ -1417,7 +1391,7 @@ mod helpers {
         };
         let new_name = lookup_member(mappings, index, this_obf, &name_obf, &desc_obf, true)
             .unwrap_or_else(|| name_obf.clone());
-        let new_desc = remap_descriptor(&desc_obf, mappings);
+        let new_desc = mappings.remap_descriptor(&desc_obf);
         if new_name != name_obf {
             component.name_index = intern_utf8(pool, &new_name)?;
         }

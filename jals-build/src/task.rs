@@ -88,11 +88,26 @@ pub enum TaskFetchKind {
 /// does not depend on the implementation, and the wire name here is frozen by written cache records
 /// while that enum's is frozen by nothing. Keeping them separate is the same split
 /// [`TaskPublishIntent`] makes between its serde tag and its script keyword.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Proguard` stays a unit variant so its wire form stays the bare string `"proguard"` that records
+/// written before tiny v2 existed carry; serde encodes the struct variant beside it as
+/// `{"tiny-v2": {…}}`, which those records never contain.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TaskMappingFormat {
     /// The ProGuard-style text Mojang publishes per Minecraft release.
     Proguard,
+    /// The tab-separated tiny v2 text Fabric publishes, read through one pair of its namespaces.
+    ///
+    /// The pair travels with the format because it is part of *which* renaming a node performs, so
+    /// it reaches the cache key the same way the format does — two pairs over one mapping text are
+    /// two different jars.
+    TinyV2 {
+        /// The namespace a deobfuscating remap reads names from.
+        from: String,
+        /// The namespace it writes names to.
+        to: String,
+    },
 }
 
 /// Which way a [`TaskNodeKind::RemapJar`] applies its mapping file.
@@ -279,8 +294,12 @@ impl TaskNodeKind {
             Self::ByteCount { .. }
             | Self::Fetch { .. }
             | Self::JsonU64 { .. }
-            | Self::RemapJar { .. }
             | Self::MergeJars { .. } => 0,
+            // A remap's only literals are the namespace names a tiny v2 format selects.
+            Self::RemapJar { format, .. } => match format {
+                TaskMappingFormat::Proguard => 0,
+                TaskMappingFormat::TinyV2 { from, to } => from.len() + to.len(),
+            },
             Self::JsonAt { path, .. }
             | Self::JsonUrl { path, .. }
             | Self::JsonDigest { path, .. } => path.iter().map(String::len).sum(),
@@ -663,6 +682,15 @@ handle!(TextTask);
 handle!(JarTask);
 handle!(SourceTreeTask);
 
+/// A mapping grammar as a script value — the optional third argument of `tasks.remap_jar`.
+///
+/// Not a `handle!` type: every one of those names a node the plan will execute, and a format is not
+/// a step. It is a value rather than a pair of loose strings because a namespace pair means nothing
+/// without the format that names it — `tasks.tiny_v2("official", "named")` is the only way to write
+/// one, so a script cannot pair namespaces with a grammar that has none.
+#[derive(Debug, Clone)]
+struct MappingFormatValue(TaskMappingFormat);
+
 /// Running totals over a plan's nodes and terminals.
 ///
 /// Keeping these lets a builder validate one declaration at a time. Re-deriving them per
@@ -982,17 +1010,67 @@ impl TasksApi {
         .map(JarTask)
     }
 
-    /// `tasks.remap_jar(jar, mappings)` — deobfuscate a jar that closes over its own hierarchy.
+    /// `tasks.proguard()` — the ProGuard-style grammar, which names no namespaces of its own.
     ///
-    /// The script surface keeps the two arguments it has always had, and the node's other three
-    /// fields take the values that spelling has always meant. A script fetching a game jar and its
-    /// mappings is asking for exactly this; the manifest's `remap` keys are where the other
-    /// direction and an extra hierarchy are said.
+    /// Registered even though it is what `tasks.remap_jar(jar, mappings)` already means, so that a
+    /// script naming its format never has to drop back to the two-argument spelling to say the
+    /// default one.
+    const fn proguard(_api: &mut Self) -> MappingFormatValue {
+        MappingFormatValue(TaskMappingFormat::Proguard)
+    }
+
+    /// `tasks.tiny_v2(from, to)` — the tiny v2 grammar, read through one pair of its namespaces.
+    ///
+    /// The pair is checked here as well as in the manifest because this is a second way into the
+    /// same node: a script reaches `TaskNodeKind::RemapJar` without passing `[mappings]` at all.
+    fn tiny_v2(
+        _api: &mut Self,
+        from: ImmutableString,
+        to: ImmutableString,
+    ) -> RhaiResult<MappingFormatValue> {
+        if from.is_empty() || to.is_empty() {
+            return Err(Self::rhai_error(
+                "tasks.tiny_v2 needs two namespace names, e.g. \
+                 tasks.tiny_v2(\"official\", \"named\")",
+            ));
+        }
+        if from == to {
+            return Err(Self::rhai_error(
+                "tasks.tiny_v2 names the two namespaces a remap translates between, so naming one \
+                 twice renames nothing",
+            ));
+        }
+        Ok(MappingFormatValue(TaskMappingFormat::TinyV2 {
+            from: from.into_owned(),
+            to: to.into_owned(),
+        }))
+    }
+
+    /// `tasks.remap_jar(jar, mappings)` — deobfuscate a jar that closes over its own hierarchy,
+    /// reading ProGuard-style text.
+    ///
+    /// The two-argument spelling keeps meaning exactly what it always has. A grammar that names its
+    /// own namespaces cannot be written this way, which is what the third argument below is for.
     fn remap_jar(api: &mut Self, jar: JarTask, mappings: TextTask) -> RhaiResult<JarTask> {
+        let format = MappingFormatValue(TaskMappingFormat::Proguard);
+        Self::remap_jar_as(api, jar, mappings, format)
+    }
+
+    /// `tasks.remap_jar(jar, mappings, format)` — the same step over a stated grammar.
+    ///
+    /// The direction stays deobfuscating and the hierarchy stays empty, as in the two-argument
+    /// form: a script fetching a game jar and its mappings is asking for exactly that, and the
+    /// manifest's `remap` keys are where the other direction and an extra hierarchy are said.
+    fn remap_jar_as(
+        api: &mut Self,
+        jar: JarTask,
+        mappings: TextTask,
+        format: MappingFormatValue,
+    ) -> RhaiResult<JarTask> {
         api.push(TaskNodeKind::RemapJar {
             jar: jar.0.id,
             mappings: mappings.0.id,
-            format: TaskMappingFormat::Proguard,
+            format: format.0,
             direction: TaskRemapDirection::Deobfuscate,
             hierarchy: Vec::new(),
         })
@@ -1090,6 +1168,7 @@ impl TasksApi {
             .register_type_with_name::<TextTask>("TextTask")
             .register_type_with_name::<JarTask>("JarTask")
             .register_type_with_name::<SourceTreeTask>("SourceTreeTask")
+            .register_type_with_name::<MappingFormatValue>("MappingFormat")
             .register_fn("https_url", Self::https_url)
             .register_fn("project_jar", Self::project_jar)
             .register_fn("sha1", Self::sha1)
@@ -1106,7 +1185,10 @@ impl TasksApi {
             .register_fn("json_u64", Self::json_u64)
             .register_fn("extract_java", Self::extract_java)
             .register_fn("nested_jar", Self::nested_jar)
+            .register_fn("proguard", Self::proguard)
+            .register_fn("tiny_v2", Self::tiny_v2)
             .register_fn("remap_jar", Self::remap_jar)
+            .register_fn("remap_jar", Self::remap_jar_as)
             .register_fn("merge_jars", Self::merge_jars)
             .register_fn("decompile_java", Self::decompile_java)
             .register_fn("add_classpath", Self::add_classpath)
@@ -1176,6 +1258,128 @@ mod tests {
         let decoded: TaskPlan = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(decoded, plan);
         assert_eq!(serde_json::to_vec(&decoded).unwrap(), bytes);
+    }
+
+    /// A plan's wire names are frozen by the cache records already written against them, so adding
+    /// a format must leave the old one's encoding byte-identical. Serde encodes a unit variant as a
+    /// bare string and a struct variant as a single-key object, so the two coexist — but that is a
+    /// property of how the enum is *written*, and turning `Proguard` into `Proguard {}` for symmetry
+    /// would silently invalidate every remap record in every user's cache.
+    #[test]
+    fn adding_a_mapping_format_leaves_the_existing_wire_name_alone() {
+        assert_eq!(
+            serde_json::to_string(&TaskMappingFormat::Proguard).unwrap(),
+            "\"proguard\""
+        );
+        let decoded: TaskMappingFormat = serde_json::from_str("\"proguard\"").unwrap();
+        assert_eq!(decoded, TaskMappingFormat::Proguard);
+
+        let tiny = TaskMappingFormat::TinyV2 {
+            from: "official".to_owned(),
+            to: "named".to_owned(),
+        };
+        let encoded = serde_json::to_string(&tiny).unwrap();
+        assert_eq!(encoded, r#"{"tiny-v2":{"from":"official","to":"named"}}"#);
+        assert_eq!(
+            serde_json::from_str::<TaskMappingFormat>(&encoded).unwrap(),
+            tiny
+        );
+    }
+
+    /// The namespace pair is the one thing a tiny v2 file cannot say about itself, so a script has
+    /// to — and it reaches the plan as an operand of the format rather than as a loose pair, which
+    /// is what stops it being written beside a grammar that has no namespaces.
+    #[test]
+    fn a_script_selects_the_namespace_pair_a_tiny_file_is_read_through() {
+        let mut engine = Engine::new();
+        TasksApi::register_rhai(&mut engine);
+        let api = TasksApi::new(limits());
+        let mut scope = rhai::Scope::new();
+        scope.push("tasks", api.clone());
+        engine
+            .run_with_scope(
+                &mut scope,
+                r#"
+                    let jar = tasks.project_jar("vendor/game.jar");
+                    let digest = tasks.sha256("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+                    let url = tasks.https_url("https://example.invalid/yarn.tiny");
+                    let mappings = tasks.fetch_text(url, digest, tasks.bytes(1024));
+                    let named = tasks.remap_jar(jar, mappings, tasks.tiny_v2("official", "named"));
+                    tasks.add_classpath(named);
+                "#,
+            )
+            .unwrap();
+        drop(scope);
+        let plan = api.finish().unwrap();
+        let remap = plan
+            .nodes
+            .iter()
+            .find_map(|node| match &node.kind {
+                TaskNodeKind::RemapJar { format, .. } => Some(format),
+                _ => None,
+            })
+            .expect("the script declared a remap");
+        assert_eq!(
+            remap,
+            &TaskMappingFormat::TinyV2 {
+                from: "official".to_owned(),
+                to: "named".to_owned(),
+            }
+        );
+    }
+
+    /// The two-argument spelling predates the format argument and is what every existing script
+    /// writes, so it has to keep meaning exactly what it meant.
+    #[test]
+    fn a_script_that_names_no_format_still_reads_proguard() {
+        let mut engine = Engine::new();
+        TasksApi::register_rhai(&mut engine);
+        let api = TasksApi::new(limits());
+        let mut scope = rhai::Scope::new();
+        scope.push("tasks", api.clone());
+        engine
+            .run_with_scope(
+                &mut scope,
+                r#"
+                    let jar = tasks.project_jar("vendor/game.jar");
+                    let digest = tasks.sha256("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+                    let url = tasks.https_url("https://example.invalid/client.txt");
+                    let mappings = tasks.fetch_text(url, digest, tasks.bytes(1024));
+                    tasks.add_classpath(tasks.remap_jar(jar, mappings));
+                "#,
+            )
+            .unwrap();
+        drop(scope);
+        let plan = api.finish().unwrap();
+        assert!(plan.nodes.iter().any(|node| matches!(
+            &node.kind,
+            TaskNodeKind::RemapJar {
+                format: TaskMappingFormat::Proguard,
+                direction: TaskRemapDirection::Deobfuscate,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn a_script_cannot_read_a_namespace_into_itself() {
+        let mut engine = Engine::new();
+        TasksApi::register_rhai(&mut engine);
+        let api = TasksApi::new(limits());
+        let mut scope = rhai::Scope::new();
+        scope.push("tasks", api);
+        // A second way into the same node, so the check the manifest applies has to exist here too.
+        // Asserted on `tiny_v2` alone rather than through a whole remap, so what fails is the pair
+        // and not some other argument of the step it would have been passed to.
+        let mut pair = |from: &str, to: &str| {
+            engine.eval_with_scope::<Dynamic>(
+                &mut scope,
+                &format!("tasks.tiny_v2(\"{from}\", \"{to}\")"),
+            )
+        };
+        assert!(pair("official", "named").is_ok());
+        assert!(pair("named", "named").is_err());
+        assert!(pair("", "named").is_err());
     }
 
     /// What a consumer does with a published tree is the one thing the graph cannot infer, so the

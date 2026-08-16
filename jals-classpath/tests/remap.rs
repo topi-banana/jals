@@ -43,6 +43,45 @@ const fn deobfuscate(mappings: &str) -> RemapRequest<'_> {
     }
 }
 
+/// The same, reading tiny v2 text through one pair of its namespaces.
+fn deobfuscate_tiny<'a>(mappings: &'a str, from: &str, to: &str) -> RemapRequest<'a> {
+    RemapRequest {
+        mappings,
+        format: MappingFormat::TinyV2 {
+            from: from.to_owned(),
+            to: to.to_owned(),
+        },
+        direction: RemapDirection::Deobfuscate,
+        hierarchy: &[],
+    }
+}
+
+/// The fixture's three namespaces: what the jar ships as, and two renamings of it.
+const BOX_TINY: &str = "\
+tiny\t2\t0\tofficial\tintermediary\tnamed
+c\tBox\tclass_1\tRenamed
+\tf\tLjava/lang/Object;\tvalue\tfield_1\tvalue
+\tm\t()Ljava/lang/Object;\tget\tmethod_1\tget
+\tm\t(Ljava/lang/Object;)V\tset\tmethod_2\tset
+";
+
+/// The name `this_class` carries in the single class member of a remapped jar.
+async fn remapped_class_name(cache: &ArtifactCache<MemoryCache>, key: &CacheKey) -> String {
+    let bytes = cache.lookup(key).await.expect("lookup").expect("present");
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes)).expect("remapped jar is a zip");
+    let name = archive.file_names().next().expect("one member").to_owned();
+    let mut member = archive.by_name(&name).expect("member");
+    let mut class_bytes = Vec::new();
+    std::io::copy(&mut member, &mut class_bytes).unwrap();
+    let cf = ClassFile::read(SioCursor::new(class_bytes.as_slice()))
+        .await
+        .expect("parse remapped class");
+    cf.constant_pool
+        .class_name(cf.this_class)
+        .expect("this_class")
+        .into_owned()
+}
+
 async fn publish(cache: &mut ArtifactCache<MemoryCache>, tag: &[u8], bytes: &[u8]) -> CacheKey {
     let key = CacheKey::new(
         CacheNamespace::BuildTaskArtifact,
@@ -89,6 +128,66 @@ Renamed -> Box:
             .expect("this_class")
             .into_owned();
         assert_eq!(name, "Renamed");
+    });
+}
+
+#[test]
+fn tiny_v2_remaps_the_same_jar_the_proguard_text_does() {
+    block_on_inline(async {
+        let jar_bytes = write_jar(&[("Box.class", box_class())]);
+        let exec = Exec::inline();
+        let mut cache = ArtifactCache::new(MemoryCache::default());
+        let jar = publish(&mut cache, b"fixture", &jar_bytes).await;
+        let remapped = JarRemap::remap(
+            &exec,
+            &mut cache,
+            &jar,
+            &deobfuscate_tiny(BOX_TINY, "official", "named"),
+        )
+        .await
+        .expect("remap succeeds");
+        assert_eq!(remapped_class_name(&cache, &remapped).await, "Renamed");
+    });
+}
+
+#[test]
+fn the_namespace_pair_a_tiny_file_is_read_through_is_part_of_the_cache_key() {
+    // One jar, one mapping text, two namespace pairs — two different jars. The identity a remap is
+    // published under is its *provenance*, and the pair has to reach it: were it folded no further
+    // than the format tag, these two derivations would share a provenance, and the cache's locator
+    // index (which recovers content from provenance, last-writer-wins) would hand one run the other
+    // run's jar. Compared as provenances rather than whole keys on purpose — the content halves
+    // differ whether or not the fold is right, so comparing keys would pass either way.
+    block_on_inline(async {
+        let jar_bytes = write_jar(&[("Box.class", box_class())]);
+        let exec = Exec::inline();
+        let mut cache = ArtifactCache::new(MemoryCache::default());
+        let jar = publish(&mut cache, b"fixture", &jar_bytes).await;
+
+        let named = JarRemap::remap(
+            &exec,
+            &mut cache,
+            &jar,
+            &deobfuscate_tiny(BOX_TINY, "official", "named"),
+        )
+        .await
+        .expect("remap succeeds");
+        let intermediary = JarRemap::remap(
+            &exec,
+            &mut cache,
+            &jar,
+            &deobfuscate_tiny(BOX_TINY, "official", "intermediary"),
+        )
+        .await
+        .expect("remap succeeds");
+
+        assert_ne!(
+            named.provenance(),
+            intermediary.provenance(),
+            "two namespace pairs over one mapping text are two derivations"
+        );
+        assert_eq!(remapped_class_name(&cache, &named).await, "Renamed");
+        assert_eq!(remapped_class_name(&cache, &intermediary).await, "class_1");
     });
 }
 
