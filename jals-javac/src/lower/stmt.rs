@@ -784,7 +784,7 @@ impl Stmt {
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
     ) -> Result<()> {
-        let label = label.map(|token| String::from(token.text()));
+        let label = label.map(|token| jals_syntax::decoded_ident(&token).into_owned());
         let (target, depth) = if exit {
             emit.exit_of(label.as_deref())?
         } else {

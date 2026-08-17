@@ -5507,6 +5507,43 @@ fn unicode_escapes_are_resolved_before_tokenizing() {
     }
 }
 
+/// A *contextual* keyword written through an escape is one too.
+///
+/// A reserved keyword survived the escape because `Lexer::tokenize` keeps the *kind* the translated
+/// source implies, but a contextual one is recognised by comparing token text — which was the raw
+/// spelling, so half the keyword vocabulary silently opted out of §3.3 inside one parse. The `record`
+/// row is the loud one: it produced a `METHOD_DECL` with no error at all, so a record declaration was
+/// read as a method and nothing said so.
+#[test]
+fn a_contextual_keyword_written_as_an_escape_is_one() {
+    for (src, want) in [
+        (
+            "\\u0073ealed class C permits D {}",
+            crate::SyntaxKind::CLASS_DECL,
+        ),
+        (
+            "class A { \\u0072ecord R(int x) {} }",
+            crate::SyntaxKind::RECORD_DECL,
+        ),
+        (
+            "class A { void m() { \\u0076ar x = 1; } }",
+            crate::SyntaxKind::LOCAL_VAR_DECL,
+        ),
+    ] {
+        let parse = helpers::parse(src);
+        assert!(
+            parse.errors().is_empty(),
+            "`{src}` is valid Java, got {:?}",
+            parse.errors()
+        );
+        assert!(
+            parse.syntax().descendants().any(|node| node.kind() == want),
+            "`{src}` should hold a {want:?}"
+        );
+        assert_lossless(src);
+    }
+}
+
 /// The translation must not reach the tree: a token's text stays the source's own spelling.
 ///
 /// This is the invariant the whole design turns on — the tree is the caller's `&str` reassembled,

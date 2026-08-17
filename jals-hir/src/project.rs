@@ -1869,19 +1869,16 @@ impl SourceLocations {
             let next_enclosing = if ProjectIndex::type_decl_kind(node.kind()).is_some()
                 && let Some(name_tok) = Collect::first_ident_token(&node)
             {
-                let fqn = ProjectIndex::build_fqn(package, enclosing.as_deref(), name_tok.text());
+                let name = jals_syntax::decoded_ident(&name_tok);
+                let fqn = ProjectIndex::build_fqn(package, enclosing.as_deref(), &name);
                 self.types
                     .entry(fqn.clone())
                     .or_insert_with(|| (file, Collect::byte_range(&name_tok)));
                 // Library sources are never `cfg`-filtered (they are navigation-only and a
                 // dependency's own feature selection does not reach this seam), so the empty map.
-                for member in ProjectIndex::members_of_decl(
-                    ItemId(0),
-                    file,
-                    &node,
-                    name_tok.text(),
-                    &CfgMap::default(),
-                ) {
+                for member in
+                    ProjectIndex::members_of_decl(ItemId(0), file, &node, &name, &CfgMap::default())
+                {
                     let loc = (member.file, member.name_range.clone());
                     self.members
                         .entry((fqn.clone(), member.name.clone(), member.params.len()))
@@ -2030,20 +2027,15 @@ impl ProjectIndex {
             let next_enclosing = if let Some(kind) = Self::type_decl_kind(node.kind())
                 && let Some(name_tok) = Collect::first_ident_token(&node)
             {
-                let fqn = Self::build_fqn(package, enclosing.as_deref(), name_tok.text());
+                let name = jals_syntax::decoded_ident(&name_tok);
+                let fqn = Self::build_fqn(package, enclosing.as_deref(), &name);
                 out.push(RawType {
                     fqn: fqn.clone(),
                     kind,
                     name_range: Collect::byte_range(&name_tok),
                     type_params: Self::type_params_of(&node),
                     // Placeholder owner/file, fixed up when these facts are folded into an index.
-                    members: Self::members_of_decl(
-                        ItemId(0),
-                        FileId(0),
-                        &node,
-                        name_tok.text(),
-                        cfg,
-                    ),
+                    members: Self::members_of_decl(ItemId(0), FileId(0), &node, &name, cfg),
                     raw_supertypes: Self::raw_supertypes_of(&node),
                 });
                 Some(alloc::rc::Rc::<str>::from(fqn.as_str()))
@@ -2088,7 +2080,9 @@ impl ProjectIndex {
         // struct-update) only the fields that apply to its member kind.
         let new_member = |name_tok: &SyntaxToken, kind: DefKind, ty: MemberType| Member {
             owner,
-            name: name_tok.text().to_owned(),
+            // The *decoded* spelling (JLS §3.3): a member declared `int \u0061;` is named `a`, and
+            // the raw text reached the constant pool as the field's own name.
+            name: jals_syntax::decoded_ident(name_tok).into_owned(),
             kind,
             // Overridden by the method / constructor arms, which read the declaration's own
             // `<...>`; every other member kind cannot declare one.
@@ -2243,10 +2237,11 @@ impl ProjectIndex {
                     },
                     ..new_member(name, DefKind::Field, ty.clone())
                 });
-                if !declared_accessors.iter().any(|have| have == name.text()) {
+                let decoded = jals_syntax::decoded_ident(name).into_owned();
+                if !declared_accessors.contains(&decoded) {
                     members.push(Member {
                         owner,
-                        name: name.text().to_owned(),
+                        name: decoded,
                         kind: DefKind::Method,
                         type_params: Vec::new(),
                         file,
@@ -2278,7 +2273,7 @@ impl ProjectIndex {
                     params: components
                         .iter()
                         .map(|(name, ty)| Param {
-                            name: Some(name.text().to_owned()),
+                            name: Some(jals_syntax::decoded_ident(name).into_owned()),
                             ty: ty.clone(),
                         })
                         .collect(),

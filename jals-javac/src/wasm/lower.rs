@@ -3023,7 +3023,7 @@ impl Lowering<'_> {
         continuing: bool,
         insn: &mut Insn,
     ) -> Result<()> {
-        let label = label.map(|token| token.text().to_owned());
+        let label = label.map(|token| jals_syntax::decoded_ident(&token).into_owned());
         let target = self
             .loops
             .iter()
@@ -3412,7 +3412,7 @@ impl Lowering<'_> {
     /// supertype's fields first, so the slot the inherited member lands in is the enclosing type's own.
     fn inherited_field(&self, node: &SyntaxNode) -> Option<MemberId> {
         let name = Facts::name_token(node)?;
-        Hierarchy::of(self.index).inherited_field(self.owner?, name.text())
+        Hierarchy::of(self.index).inherited_field(self.owner?, &jals_syntax::decoded_ident(&name))
     }
 
     /// `{1, 2, 3}`, whose elements are written rather than defaulted.

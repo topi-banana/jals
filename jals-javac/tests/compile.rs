@@ -5371,6 +5371,82 @@ fn a_bound_the_index_cannot_name_erases_to_object() {
     );
 }
 
+/// A varargs call narrows what it packs, not only the fixed parameters before it.
+///
+/// Two shapes, and the second is the harder failure. A trailing element is `aastore`d into an array
+/// whose component erases to the parameter's bound, so a value the JVM knows only as `Object` fails
+/// the *store*: an `ArrayStoreException` raised inside the packing where javac's `checkcast` throws
+/// `ClassCastException` at the call. The uncast form throws `ArrayStoreException` instead, which
+/// this catch does not name, so it escapes `main` and the JVM exits non-zero. And a lone array
+/// argument passes straight through (JLS §15.12.4.2) onto the stack, where an
+/// `[Ljava/lang/Object;` against a descriptor spelling `[LRawVar$Base;` is a `VerifyError` and the
+/// class never loads at all. Same rule as
+/// [`an_unchecked_argument_is_cast_to_the_erased_parameter`], asked of an array.
+#[test]
+fn a_varargs_call_is_cast_to_the_erased_parameter() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class RawVar {
+    static class Base {}
+
+    static class Holder<K extends Base> {
+        String all(K... keys) { return "n=" + keys.length; }
+    }
+
+    public static void main(String[] args) {
+        Object[] wrong = { "not a Base" };
+        Base[] real = { new Base(), new Base() };
+        Object[] right = real;
+        Holder raw = new Holder();
+        try {
+            raw.all(wrong[0]);
+            System.out.println("no throw");
+        } catch (ClassCastException e) {
+            System.out.println("cce");
+        }
+        System.out.println(raw.all(right));
+    }
+}
+"#;
+    assert_eq!(run(source, "RawVar"), "cce\nn=2\n");
+}
+
+/// A bridge casts an *array* parameter too, which is every varargs and every `T[]`.
+///
+/// The cast was emitted only when both the erased and the target parameter were class types, so an
+/// array parameter went through untouched and the bridge failed the verifier the moment its class
+/// was loaded — `Type '[LArrBridge$Base;' is not assignable to '[LArrBridge$Leaf;'`. A `checkcast`
+/// to an array names the array's own descriptor as its class, which is the whole difference.
+#[test]
+fn a_bridge_casts_an_array_parameter() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class ArrBridge {
+    static class Base {}
+
+    static class Leaf extends Base {}
+
+    interface Slot<K extends Base> {
+        String take(K... keys);
+    }
+
+    static class Cell implements Slot<Leaf> {
+        public String take(Leaf... keys) { return "n=" + keys.length; }
+    }
+
+    public static void main(String[] args) {
+        Cell cell = new Cell();
+        System.out.println(cell.take(new Leaf(), new Leaf()));
+    }
+}
+"#;
+    assert_eq!(run(source, "ArrBridge"), "n=2\n");
+}
+
 /// A parameter that is a bounded type variable is an *overload*, and gets no bridge.
 ///
 /// Once such a variable erases to its bound rather than to `Object`, the descriptor differs from a
@@ -5504,78 +5580,37 @@ public class HidW {
     assert_eq!(run(source, "HidW"), "208\n");
 }
 
-/// A varargs call narrows what it packs, not only the fixed parameters before it.
+/// A name written through a JLS §3.3 escape is the *same* name as its plain spelling.
 ///
-/// Two shapes, and the second is the harder failure. A trailing element is `aastore`d into an array
-/// whose component erases to the parameter's bound, so a value the JVM knows only as `Object` fails
-/// the *store*: an `ArrayStoreException` raised inside the packing where javac's `checkcast` throws
-/// `ClassCastException` at the call. The uncast form throws `ArrayStoreException` instead, which
-/// this catch does not name, so it escapes `main` and the JVM exits non-zero. And a lone array
-/// argument passes straight through (JLS §15.12.4.2) onto the stack, where an
-/// `[Ljava/lang/Object;` against a descriptor spelling `[LRawVar$Base;` is a `VerifyError` and the
-/// class never loads at all. Same rule as
-/// [`an_unchecked_argument_is_cast_to_the_erased_parameter`], asked of an array.
+/// The tree keeps the source's own spelling — that is what makes the parse lossless — so an
+/// identifier's identity has to come from the decoded text instead. Reading the raw one made
+/// `a` a different name from `a` everywhere that keys on token text: one declaration and one
+/// use of the same variable did not resolve to each other, and the field the class file declared was
+/// literally named `a`, which no separately compiled reader can find.
 #[test]
-fn a_varargs_call_is_cast_to_the_erased_parameter() {
-    if !java_available() {
-        return;
-    }
-    let source = r#"
-public class RawVar {
-    static class Base {}
-
-    static class Holder<K extends Base> {
-        String all(K... keys) { return "n=" + keys.length; }
-    }
-
-    public static void main(String[] args) {
-        Object[] wrong = { "not a Base" };
-        Base[] real = { new Base(), new Base() };
-        Object[] right = real;
-        Holder raw = new Holder();
-        try {
-            raw.all(wrong[0]);
-            System.out.println("no throw");
-        } catch (ClassCastException e) {
-            System.out.println("cce");
-        }
-        System.out.println(raw.all(right));
-    }
-}
-"#;
-    assert_eq!(run(source, "RawVar"), "cce\nn=2\n");
-}
-
-/// A bridge casts an *array* parameter too, which is every varargs and every `T[]`.
-///
-/// The cast was emitted only when both the erased and the target parameter were class types, so an
-/// array parameter went through untouched and the bridge failed the verifier the moment its class
-/// was loaded — `Type '[LArrBridge$Base;' is not assignable to '[LArrBridge$Leaf;'`. A `checkcast`
-/// to an array names the array's own descriptor as its class, which is the whole difference.
-#[test]
-fn a_bridge_casts_an_array_parameter() {
-    if !java_available() {
-        return;
-    }
-    let source = r#"
-public class ArrBridge {
-    static class Base {}
-
-    static class Leaf extends Base {}
-
-    interface Slot<K extends Base> {
-        String take(K... keys);
-    }
-
-    static class Cell implements Slot<Leaf> {
-        public String take(Leaf... keys) { return "n=" + keys.length; }
-    }
-
-    public static void main(String[] args) {
-        Cell cell = new Cell();
-        System.out.println(cell.take(new Leaf(), new Leaf()));
-    }
-}
-"#;
-    assert_eq!(run(source, "ArrBridge"), "n=2\n");
+fn an_escaped_identifier_is_the_name_it_spells() {
+    let emitted = descriptors(
+        "public class Esc { int \\u0061 = 1; int \\u0067et() { return a; } }",
+        "Esc",
+    );
+    assert!(
+        emitted.contains(&"get ()I".to_owned()),
+        "the method is named `get`, got {emitted:?}"
+    );
+    let fields = {
+        let classes =
+            compile("public class Esc { int \\u0061 = 1; int \\u0067et() { return a; } }")
+                .expect("compile");
+        let parsed = jals_exec::block_on_inline(jals_classfile::ClassFile::read(
+            classes[0].bytes.as_slice(),
+        ))
+        .expect("reparse");
+        let pool = &parsed.constant_pool;
+        parsed
+            .fields
+            .iter()
+            .map(|field| pool.utf8(field.name_index).expect("name").into_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(fields, ["a"], "the field is named `a`");
 }

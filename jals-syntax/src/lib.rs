@@ -44,3 +44,4 @@ pub use lexer::{LexedToken, Lexer};
 pub use parser::Parse;
 pub use syntax_error::SyntaxError;
 pub use syntax_kind::SyntaxKind;
+pub use unicode_escape::decoded as decoded_ident;

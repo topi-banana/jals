@@ -738,7 +738,9 @@ impl Compile {
             let outer_index = pool
                 .class_index(&Descriptor::internal_name_of(enclosing, context.index))
                 .ok_or(AsmError::PoolFull)?;
-            let name_index = pool.utf8_index(name.text()).ok_or(AsmError::PoolFull)?;
+            let name_index = pool
+                .utf8_index(&jals_syntax::decoded_ident(&name))
+                .ok_or(AsmError::PoolFull)?;
             // The flags the *source* wrote, which is where a nested type's `private` and `static` go.
             let kind = context.index.item(item).kind;
             let is_annotation = kind == DefKind::AnnotationType;
@@ -1284,7 +1286,7 @@ impl Compile {
             let Some(token) = decl.name_token() else {
                 continue;
             };
-            let name = token.text().to_owned();
+            let name = jals_syntax::decoded_ident(&token).into_owned();
             let own = context.facts().member_at(&token)?;
             if context.index.member(own).modifiers.is_static {
                 continue;
@@ -1314,10 +1316,13 @@ impl Compile {
                 }
                 // A bridge hands the target's returned value straight back, so it can only express a
                 // return that is *already* the erased one — a narrower reference. Returns that differ
-                // in kind are no covariant override at all, and writing one produces a method whose
-                // `ireturn` disagrees with its own `Ljava/lang/Object;` descriptor: exactly what
-                // `interface I { int clone(); }` (JLS §9.2, legal and impossible to implement) got
-                // once every type inherited `Object.clone()`.
+                // in kind are no covariant override at all (JLS §8.4.8.3 admits a subtype, and a
+                // primitive is a subtype of nothing), so nothing legitimate is dropped by refusing;
+                // what is avoided is a method whose `ireturn` disagrees with its own
+                // `Ljava/lang/Object;` descriptor. `interface I { int clone(); }` (JLS §9.2 — legal,
+                // and impossible to implement) is how it was reached, back when an interface
+                // inherited `Object.clone()`. It no longer does, and this stays: the rule is about
+                // what a bridge can express, not about that one arrival.
                 if !Self::returns_are_bridgeable(&own_descriptor, &descriptor) {
                     continue;
                 }
@@ -1597,7 +1602,9 @@ impl Compile {
             }
             out.push(FieldInfo {
                 access_flags: FieldAccessFlags(Self::field_flags(node, context.in_interface)),
-                name_index: pool.utf8_index(name.text()).ok_or(AsmError::PoolFull)?,
+                name_index: pool
+                    .utf8_index(&jals_syntax::decoded_ident(&name))
+                    .ok_or(AsmError::PoolFull)?,
                 descriptor_index: pool.utf8_index(&descriptor).ok_or(AsmError::PoolFull)?,
                 attributes,
             });
@@ -1618,7 +1625,9 @@ impl Compile {
         let token = decl
             .name_token()
             .ok_or(LowerError::Unsupported("a method declaration with no name"))?;
-        let name = token.text().to_owned();
+        // The *decoded* spelling (JLS §3.3), which is the name the method has: a `void \u0066()`
+        // declares `f`, and the raw text reached the constant pool as the method's own name.
+        let name = jals_syntax::decoded_ident(&token).into_owned();
         let member = context.facts().member_at(&token)?;
         let descriptor = Descriptor::method_descriptor(member, context.index, false)?;
         let is_static = context.index.member(member).modifiers.is_static;
@@ -1733,7 +1742,7 @@ impl Compile {
             node.children_with_tokens()
                 .filter_map(jals_syntax::SyntaxElement::into_token)
                 .find(|token| !token.kind().is_trivia())
-                .map(|token| token.text().to_owned())
+                .map(|token| jals_syntax::decoded_ident(&token).into_owned())
         };
         match value {
             // `{…}` — every element at the *component* type, which is the only thing that says what tag
@@ -2249,7 +2258,9 @@ impl Compile {
             .descendants_with_tokens()
             .filter_map(jals_syntax::SyntaxElement::into_token)
             .any(|token| match token.kind() {
-                jals_syntax::SyntaxKind::IDENT => vars.iter().any(|var| var == token.text()),
+                jals_syntax::SyntaxKind::IDENT => vars
+                    .iter()
+                    .any(|var| *var == *jals_syntax::decoded_ident(&token)),
                 // A wildcard names no variable and still needs a signature: `Holder<?>` erases to
                 // `Holder`, and the `?` exists nowhere else.
                 jals_syntax::SyntaxKind::QUESTION => true,
@@ -2287,16 +2298,20 @@ impl Compile {
             // through the accessors.
             fields.push(FieldInfo {
                 access_flags: FieldAccessFlags(FieldAccessFlags::PRIVATE | FieldAccessFlags::FINAL),
-                name_index: pool.utf8_index(name.text()).ok_or(AsmError::PoolFull)?,
+                name_index: pool
+                    .utf8_index(&jals_syntax::decoded_ident(name))
+                    .ok_or(AsmError::PoolFull)?,
                 descriptor_index: pool.utf8_index(&descriptor).ok_or(AsmError::PoolFull)?,
                 attributes: Vec::new(),
             });
             infos.push(jals_classfile::RecordComponentInfo {
-                name_index: pool.utf8_index(name.text()).ok_or(AsmError::PoolFull)?,
+                name_index: pool
+                    .utf8_index(&jals_syntax::decoded_ident(name))
+                    .ok_or(AsmError::PoolFull)?,
                 descriptor_index: pool.utf8_index(&descriptor).ok_or(AsmError::PoolFull)?,
                 attributes: Vec::new(),
             });
-            descriptors.push((name.text().to_owned(), descriptor));
+            descriptors.push((jals_syntax::decoded_ident(name).into_owned(), descriptor));
         }
 
         // A *compact* constructor (`P { … }`, with no parameter list at all) **is** the canonical one:
@@ -3205,11 +3220,17 @@ impl Compile {
                 // `i2l`.
                 expr::Expr::lower_as(&value, &ty, context, emit)?;
                 if statics {
-                    emit.asm
-                        .put_static(&context.this_class, name.text(), &descriptor)?;
+                    emit.asm.put_static(
+                        &context.this_class,
+                        &jals_syntax::decoded_ident(&name),
+                        &descriptor,
+                    )?;
                 } else {
-                    emit.asm
-                        .put_field(&context.this_class, name.text(), &descriptor)?;
+                    emit.asm.put_field(
+                        &context.this_class,
+                        &jals_syntax::decoded_ident(&name),
+                        &descriptor,
+                    )?;
                 }
             }
         }
@@ -3414,7 +3435,7 @@ impl Context<'_> {
                     jals_syntax::SyntaxKind::IDENT | jals_syntax::SyntaxKind::DOT
                 )
             })
-            .map(|token| token.text().to_owned())
+            .map(|token| jals_syntax::decoded_ident(&token).into_owned())
             .collect();
         let simple = text.rsplit('.').next().unwrap_or(&text).to_owned();
         let qualified = text.contains('.').then(|| text.clone());

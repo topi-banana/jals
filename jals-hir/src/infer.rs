@@ -766,7 +766,8 @@ impl TypeInference {
                 Some((owner, name))
             }
             ast::Expr::NameRef(n) => {
-                let name = Collect::first_ident_token(n.syntax())?.text().to_owned();
+                let name = jals_syntax::decoded_ident(&Collect::first_ident_token(n.syntax())?)
+                    .into_owned();
                 Some((index.enclosing_item(file, call.syntax())?, name))
             }
             _ => None,
@@ -1237,7 +1238,11 @@ impl<'a> Inferer<'a> {
         // the enclosing type, which is the implicit `this` a bare call already reads its callee from —
         // and the member lookup walks the supertypes. Without this `own + 1` had an operand of no type
         // at all, in a class where the read itself is perfectly ordinary.
-        self.member_ty(&self.self_ty(node), tok.text(), Namespace::Value)
+        self.member_ty(
+            &self.self_ty(node),
+            &jals_syntax::decoded_ident(&tok),
+            Namespace::Value,
+        )
     }
 
     /// The indexed type `name` resolves to from this file, or an external one by that name.
@@ -1440,7 +1445,7 @@ impl<'a> Inferer<'a> {
         let Some(tok) = ty.simple_name_token() else {
             return Ty::Unknown;
         };
-        let name = tok.text().to_owned();
+        let name = jals_syntax::decoded_ident(&tok).into_owned();
         let args = self.type_args_of(ty);
         if let Some((index, file)) = self.project
             && let Some(&ri) = self.ref_by_start.get(&Collect::token_start(&tok))
@@ -1517,8 +1522,8 @@ impl<'a> Inferer<'a> {
         match call.callee() {
             Some(ast::Expr::FieldAccess(fa)) => self.field_access_member_ty(&fa, Namespace::Method),
             Some(ast::Expr::NameRef(n)) => {
-                let Some(name) =
-                    Collect::first_ident_token(n.syntax()).map(|t| t.text().to_owned())
+                let Some(name) = Collect::first_ident_token(n.syntax())
+                    .map(|t| jals_syntax::decoded_ident(&t).into_owned())
                 else {
                     return Ty::Unknown;
                 };
@@ -1859,7 +1864,7 @@ impl Cst {
         };
         let token = Collect::first_ident_token(name.syntax())?;
         index
-            .resolve_type_name(file, token.text(), None)
+            .resolve_type_name(file, &jals_syntax::decoded_ident(&token), None)
             .project_id()
     }
 

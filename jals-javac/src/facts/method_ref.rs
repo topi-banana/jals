@@ -100,7 +100,7 @@ impl Facts<'_> {
             .filter_map(jals_syntax::SyntaxElement::into_token)
             .filter(|token| matches!(token.kind(), SyntaxKind::IDENT | SyntaxKind::DOT))
         {
-            text.push_str(token.text());
+            text.push_str(&jals_syntax::decoded_ident(&token));
         }
         let simple = alloc::borrow::ToOwned::to_owned(text.rsplit('.').next().unwrap_or(&text));
         let qualified = text.contains('.').then(|| text.clone());
@@ -202,7 +202,7 @@ impl Facts<'_> {
             .filter(|token| token.kind() == SyntaxKind::IDENT)
             .last()
             .ok_or(FactError::Unsupported("a method reference with no name"))?;
-        let name = referenced.text();
+        let name = jals_syntax::decoded_ident(&referenced);
         let is_bound = matches!(receiver, RefReceiver::Bound(_));
 
         let target = index

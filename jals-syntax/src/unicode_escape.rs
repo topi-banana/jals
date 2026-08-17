@@ -20,15 +20,55 @@
 //! tile the input in order, so token boundaries map to original boundaries and the slices still
 //! concatenate to the input.
 //!
-//! # What it deliberately does not do
+//! # The decoded spelling, carried beside the raw one
 //!
-//! A token's `text` stays the source's own spelling, escapes and all. That is what keeps the tree
-//! lossless, and it means two spellings of one identifier — `a` and `\u0061` — are two names to
-//! everything downstream, which keys on token text. No file in the corpus writes a name both ways,
-//! and closing it needs a *decoded* spelling carried beside the raw one rather than in place of it.
+//! A token's `text` stays the source's own spelling, escapes and all — that is what keeps the tree
+//! lossless. But an identifier's *identity* is the decoded spelling: `a` and `\u0061` are one name to
+//! the language and were two to everything downstream, which keys on token text. One declaration and
+//! one use of the same variable did not resolve to each other, the emitted class file declared a
+//! field literally named `\u0061` — a `NoSuchFieldError` against any separately compiled reader —
+//! and an editor showed a false "cannot resolve", a false "unused", and a rename that changed one
+//! spelling only.
+//!
+//! [`decoded`] is that spelling, taken from a token's own text rather than carried through the tree:
+//! the raw text stays what the *source* says (formatting, ranges, the lossless round-trip), and the
+//! decoded one is what a *name* is.
 
 use alloc::string::String;
 use alloc::vec::Vec;
+
+pub(crate) use api::decode;
+pub use api::decoded;
+
+/// The free-function surface, grouped per the repository's no-free-functions layout; `lib.rs`
+/// re-exports [`decoded`] at the crate root as `decoded_ident`.
+mod api {
+    use alloc::borrow::Cow;
+
+    use super::Translation;
+    use crate::language::SyntaxToken;
+
+    /// A token's text with its JLS §3.3 escapes resolved — the spelling the *language* reads.
+    ///
+    /// Borrowed unchanged for the overwhelmingly common token that holds no escape.
+    ///
+    /// Decoding a token's text on its own is sound, and [`Translation::of`]'s own invariant is why:
+    /// every byte the lexer put in a token either came through verbatim or was one eligible escape,
+    /// and a token never begins part-way into a backslash run — so a fresh scan from the token's
+    /// first byte reaches the verdicts the whole-source pass reached. That is what lets this be a
+    /// function of the text rather than a fourth thing the tree has to carry.
+    pub fn decoded(token: &SyntaxToken) -> Cow<'_, str> {
+        decode(token.text())
+    }
+
+    /// [`decoded`] for text the caller already holds — a lexed token, which is not in a tree yet.
+    pub(crate) fn decode(text: &str) -> Cow<'_, str> {
+        match Translation::of(text) {
+            Some(translated) => Cow::Owned(translated.text),
+            None => Cow::Borrowed(text),
+        }
+    }
+}
 
 /// A source with its eligible `\uXXXX` escapes replaced, plus the map back to the original.
 pub(crate) struct Translation {
