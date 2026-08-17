@@ -257,6 +257,16 @@ pub enum Outcome {
     /// Linking failed for a reason that is not about this class file's shape (a type it references
     /// is not on the harness's classpath). The bytes were not judged either way.
     Unlinkable(String),
+    /// The JVM linked every emitted class and the descriptor rung could not be *judged*: javac's
+    /// own class files for the case could not be read, so no `(name, descriptor)` pair was compared.
+    ///
+    /// Its own outcome rather than a pass, because the rung fails **open** otherwise and open is the
+    /// top rung — a corpus or class-file-reader problem would be scored as "jals agrees with javac"
+    /// and would inflate the headline number systematically, since a construct family shares its
+    /// `expected/` output. "Nothing compared" and "everything agreed" have to be distinguishable, so
+    /// the count of compared pairs is what separates them. Kept apart from every *finding*, exactly
+    /// as [`ReadError`](Self::ReadError) is: this says nothing about the compiler.
+    DescriptorsUnjudged,
     /// The class files were emitted but the JVM stage did not run (`--no-verify`, or no JVM).
     Unverified,
     /// Lowering succeeded but produced no class file at all, so there is nothing for a JVM to
@@ -282,6 +292,7 @@ impl Outcome {
         match self {
             Self::Verified => "descriptor-equal",
             Self::DescriptorMismatch(_) => "verified",
+            Self::DescriptorsUnjudged => "descriptors-unjudged",
             Self::Rejected(_) => "jvm-rejected",
             Self::Unlinkable(_) => "unlinkable",
             Self::Unverified => "unverified",
@@ -311,7 +322,10 @@ impl Outcome {
 
     /// Whether a real JVM linked every class the case emitted.
     const fn verified(&self) -> bool {
-        matches!(self, Self::Verified | Self::DescriptorMismatch(_))
+        matches!(
+            self,
+            Self::Verified | Self::DescriptorMismatch(_) | Self::DescriptorsUnjudged
+        )
     }
 
     /// Whether the emitted descriptors also agree with javac's own — the top rung.
@@ -344,8 +358,10 @@ impl Outcome {
             Self::Unverified => 7,
             Self::DescriptorMismatch(_) => 8,
             Self::Verified => 9,
-            // Not a rung at all: the harness never saw the source.
-            Self::ReadError => 10,
+            // Not rungs at all: one is a case the harness never saw the source of, the other one it
+            // could not read javac's answer for. Both are corpus problems.
+            Self::DescriptorsUnjudged => 10,
+            Self::ReadError => 11,
         }
     }
 
@@ -407,11 +423,30 @@ pub struct CaseResult {
     pub rel: PathBuf,
     /// How far it got.
     pub outcome: Outcome,
-    /// The first descriptor that disagrees with javac's own class file, if any.
+    /// What javac's own class files said about the descriptors jals emitted.
     ///
     /// Computed while the emitted bytes are still in hand, and applied only *after* the JVM stage:
     /// the rung sits above `verified`, so a case that never linked is not judged on it.
-    descriptors: Option<String>,
+    descriptors: Descriptors,
+}
+
+/// The three answers the descriptor rung has, which is one more than "agreed or not".
+///
+/// [`Unjudged`](Self::Unjudged) exists because the comparison can fail to happen: javac's own class
+/// files are read through this workspace's own reader, and a `.class` it refuses, a constant-pool
+/// entry it cannot resolve, or a directory a partial generation run left empty all mean *nothing was
+/// compared*. Folding that into "agreed" made the rung fail open — and open is the top rung, so a
+/// corpus problem was scored as "jals agrees with javac", per construct family, invisibly: no
+/// bucket, no `--list-failures` entry, and no effect on `--strict`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Descriptors {
+    /// Every method both compilers named carried a descriptor javac also gave that name — and at
+    /// least one pair was actually compared.
+    Agreed,
+    /// The first method jals emitted whose descriptor javac did not give that name.
+    Disagreed(String),
+    /// No `(name, descriptor)` pair was compared, so the rung has no answer for this case.
+    Unjudged,
 }
 
 /// A file the generator kept out of the corpus, and why.
@@ -501,13 +536,7 @@ impl CompileReport {
         if let Some(verifier) = verifier {
             verifier.link_all(&mut results);
         }
-        // The descriptor rung sits *above* `verified`, so it is applied only to what linked: bytes
-        // no JVM would load have already failed for a reason that says more than this one would.
-        for result in &mut results {
-            if let (Outcome::Verified, Some(message)) = (&result.outcome, &result.descriptors) {
-                result.outcome = Outcome::DescriptorMismatch(message.clone());
-            }
-        }
+        Self::apply_descriptor_rung(&mut results);
 
         // Worst rung first, so a truncated listing surfaces the hard failures rather than the
         // long tail of unimplemented syntax.
@@ -586,6 +615,26 @@ impl CompileReport {
         let mut tallied: Vec<(String, usize)> = counts.into_iter().collect();
         tallied.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         tallied
+    }
+
+    /// Apply the descriptor rung to every case a JVM linked.
+    ///
+    /// The rung sits *above* `verified`, so it is applied only to what linked: bytes no JVM would
+    /// load have already failed for a reason that says more than this one would. All three answers
+    /// are applied, [`Descriptors::Unjudged`] included — leaving that one as
+    /// [`Outcome::Verified`] is the fail-open this rung cannot afford, because `Verified` *is* the
+    /// `descriptor-equal` column.
+    fn apply_descriptor_rung(results: &mut [CaseResult]) {
+        for result in results {
+            if result.outcome != Outcome::Verified {
+                continue;
+            }
+            result.outcome = match &result.descriptors {
+                Descriptors::Agreed => Outcome::Verified,
+                Descriptors::Disagreed(message) => Outcome::DescriptorMismatch(message.clone()),
+                Descriptors::Unjudged => Outcome::DescriptorsUnjudged,
+            };
+        }
     }
 
     /// Render the reports as a GitHub-flavored Markdown summary, for a CI step summary or a
@@ -714,7 +763,7 @@ impl CaseResult {
     /// Never panics: a panic anywhere in the pipeline is caught and reported as
     /// [`Outcome::Panicked`], since catching invariant violations is the whole point.
     fn of(case: &Case, classpath: &LoweredClasspath, verifier: Option<&Verifier>) -> Self {
-        let mut descriptors = None;
+        let mut descriptors = Descriptors::Unjudged;
         let outcome = Self::compile(&case.path, classpath, verifier, &mut descriptors);
         Self {
             rel: case.rel.clone(),
@@ -734,29 +783,37 @@ impl CaseResult {
     /// what it takes and returns, which is the whole of what a separately-compiled caller links
     /// against.
     ///
-    /// A missing or unreadable `expected/` yields `None`: a corpus problem is not a finding about
-    /// the compiler, the same way an unreadable source is not a parse failure.
-    fn descriptor_disagreement(
+    /// A corpus problem answers [`Descriptors::Unjudged`] rather than "agreed": it is not a finding
+    /// about the compiler, the same way an unreadable source is not a parse failure — and the same
+    /// way, it gets an outcome of its own rather than the benefit of the doubt on the rung above
+    /// `verified`.
+    fn descriptor_agreement(
         source: &Path,
         classes: &[jals_javac::lower::CompiledClass],
-    ) -> Option<String> {
-        let expected = Self::expected_signatures(&Case::expected_dir(source))?;
+    ) -> Descriptors {
+        let expected = Self::expected_signatures(&Case::expected_dir(source));
+        // What was actually compared, which is the whole difference between "nothing to compare"
+        // and "everything agreed".
+        let mut compared = 0usize;
         for class in classes {
             let Some(javac) = expected.get(&class.internal_name) else {
                 continue;
             };
-            let ours = Self::signatures(&class.bytes)?;
+            let Some(ours) = Self::signatures(&class.bytes) else {
+                continue;
+            };
             for (name, descriptor) in ours {
                 // A name javac never declared is a synthetic jals emits and javac does not (or the
                 // reverse of one it omits); that is a different question from descriptor agreement.
                 let Some(theirs) = javac.get(&name) else {
                     continue;
                 };
+                compared += 1;
                 if !theirs.contains(&descriptor) {
                     // Shaped so `Outcome::bucket`'s elision leaves the sentence and drops only the
                     // names: every one of these is one finding, and 47 rows spelled with the
                     // corpus's own identifiers would bury that.
-                    return Some(format!(
+                    return Descriptors::Disagreed(format!(
                         "a descriptor javac spells differently: `{}.{name}{descriptor}` against \
                          javac's {}`",
                         class.internal_name,
@@ -769,26 +826,38 @@ impl CaseResult {
                 }
             }
         }
-        None
+        if compared == 0 {
+            return Descriptors::Unjudged;
+        }
+        Descriptors::Agreed
     }
 
     /// Every `<name> -> [descriptor]` javac produced, per internal class name, from `expected/`.
-    fn expected_signatures(dir: &Path) -> Option<BTreeMap<String, BTreeMap<String, Vec<String>>>> {
+    ///
+    /// A `.class` this workspace's reader refuses is *skipped* rather than abandoning the map: one
+    /// unreadable file among twenty is nineteen classes' worth of comparison still worth doing, and
+    /// aborting made a single refusal look like agreement on the whole case.
+    fn expected_signatures(dir: &Path) -> BTreeMap<String, BTreeMap<String, Vec<String>>> {
         let mut out = BTreeMap::new();
         for entry in WalkDir::new(dir).into_iter().filter_map(Result::ok) {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("class") {
                 continue;
             }
-            let bytes = std::fs::read(path).ok()?;
-            let class = jals_exec::block_on_inline(ClassFile::read(bytes.as_slice())).ok()?;
-            let internal = class
-                .constant_pool
-                .class_name(class.this_class)?
-                .into_owned();
-            out.insert(internal, Self::method_map(&class)?);
+            let Some(class) = std::fs::read(path).ok().and_then(|bytes| {
+                jals_exec::block_on_inline(ClassFile::read(bytes.as_slice())).ok()
+            }) else {
+                continue;
+            };
+            let Some(internal) = class.constant_pool.class_name(class.this_class) else {
+                continue;
+            };
+            let Some(methods) = Self::method_map(&class) else {
+                continue;
+            };
+            out.insert(internal.into_owned(), methods);
         }
-        (!out.is_empty()).then_some(out)
+        out
     }
 
     /// The `(name, descriptor)` pairs of one emitted class file, in declaration order.
@@ -824,12 +893,12 @@ impl CaseResult {
         path: &Path,
         classpath: &LoweredClasspath,
         verifier: Option<&Verifier>,
-        descriptors: &mut Option<String>,
+        descriptors: &mut Descriptors,
     ) -> Outcome {
         let Ok(source) = std::fs::read_to_string(path) else {
             return Outcome::ReadError;
         };
-        let mut found = None;
+        let mut found = Descriptors::Unjudged;
         let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
             let parse = jals_exec::block_on_inline(jals_syntax::Parse::parse(&source));
             if !parse.errors().is_empty() {
@@ -861,7 +930,7 @@ impl CaseResult {
                     return Outcome::RereadError;
                 }
             }
-            found = Self::descriptor_disagreement(path, &classes);
+            found = Self::descriptor_agreement(path, &classes);
             if let Some(verifier) = verifier {
                 verifier.stage(path, &classes);
             }
@@ -967,12 +1036,62 @@ mod tests {
         assert!(Outcome::Verified.descriptor_equal());
     }
 
+    /// A case whose descriptors could not be *judged* is not a case whose descriptors agreed.
+    ///
+    /// The rung has three answers and only two used to be representable, so "nothing compared"
+    /// arrived as `Verified` — the top rung, reached by failing open. It counts as `verified` (a JVM
+    /// linked the bytes, which is a real answer) and not as `descriptor-equal`, and it is a corpus
+    /// problem rather than a defect, so `--strict` ignores it exactly as it ignores a `ReadError`.
+    #[test]
+    fn unjudged_descriptors_are_not_agreement() {
+        assert!(Outcome::DescriptorsUnjudged.verified());
+        assert!(!Outcome::DescriptorsUnjudged.descriptor_equal());
+        assert!(!Outcome::DescriptorsUnjudged.is_invariant_violation());
+        assert_eq!(Outcome::DescriptorsUnjudged.label(), "descriptors-unjudged");
+    }
+
+    /// The fold from a linked case to its rung reads all three answers, and the ladder counts what
+    /// each one earns.
+    #[test]
+    fn the_descriptor_rung_counts_only_what_was_compared() {
+        let case = |outcome: Outcome, descriptors: Descriptors| CaseResult {
+            rel: PathBuf::from("A.java"),
+            outcome,
+            descriptors,
+        };
+        let mut results = vec![
+            case(Outcome::Verified, Descriptors::Agreed),
+            case(Outcome::Verified, Descriptors::Unjudged),
+            case(
+                Outcome::Verified,
+                Descriptors::Disagreed("`A.f` is `()V`".to_owned()),
+            ),
+        ];
+        CompileReport::apply_descriptor_rung(&mut results);
+        assert_eq!(
+            results
+                .iter()
+                .map(|r| r.outcome.label())
+                .collect::<Vec<_>>(),
+            ["descriptor-equal", "descriptors-unjudged", "verified"]
+        );
+        let report = CompileReport {
+            name: "corpus".to_owned(),
+            reference: "javac 25".to_owned(),
+            root: PathBuf::from("."),
+            results,
+            skipped: Vec::new(),
+        };
+        // Three linked cases, one of which agreed and one of which was never compared.
+        assert_eq!(report.ladder(), [3, 3, 3, 3, 1]);
+    }
+
     fn result(outcome: Outcome) -> CaseResult {
         CaseResult {
             rel: PathBuf::from("A.java"),
             outcome,
             // Already applied: `Report::new` folds this into the outcome before anything reads it.
-            descriptors: None,
+            descriptors: Descriptors::Unjudged,
         }
     }
 

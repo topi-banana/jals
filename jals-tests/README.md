@@ -191,6 +191,7 @@ it got, because one number over a compiler says nothing about what is missing:
 | re-read | `jals-classfile` reads back what the assembler wrote |
 | **verified** | a real JVM **linked** the class: the bytecode verifier accepted it |
 | descriptor-equal | every method's descriptor is one javac gave the same name |
+| *descriptors-unjudged* | not a rung: javac's own class files for the case could not be read, so nothing was compared |
 
 `verified` is what this harness was built for. The assembler computes its own `max_stack`,
 `max_locals` and `StackMapTable`, and `jals-classfile` reads back whatever those say — so a frame
@@ -206,6 +207,16 @@ so `--strict` does not fail on one. And it is narrower than "compiled the way ja
 both compilers declared a method of the same name, they must agree on what it takes and returns,
 which is all a separately-compiled caller links against. Types jals did not emit, members javac has
 and jals does not, access flags, and attributes are all out of scope.
+
+It also has a third answer, `descriptors-unjudged`, and it exists because the comparison can fail
+to *happen*: javac's own `expected/` class files are read through this workspace's own reader, so a
+`.class` it refuses, a constant-pool entry it cannot resolve, or a directory a partial generation
+run left empty all mean nothing was compared. Folding that into "agreed" made the rung fail **open**
+— and open is the top rung, so a corpus problem was scored as "jals agrees with javac", per
+construct family (a whole package shares its `expected/` output), and invisibly: no bucket, no
+`--list-failures` entry, no effect on `--strict`. A case that lands there counts as `verified`, is
+not counted as `descriptor-equal`, and is a corpus problem rather than a defect — the same treatment
+`read-error` gets for a source the harness could not read.
 
 ```sh
 git submodule update --init --depth 1 jals-tests/sources/openjdk
