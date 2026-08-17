@@ -372,6 +372,12 @@ impl Outcome {
             | Self::Unlinkable(message)
             | Self::LowerError(message)
             | Self::DescriptorMismatch(message) => Some(message),
+            // Fixed rather than carried: there is nothing case-specific to say, and a bucket is the
+            // only place a reader would otherwise see that the rung was not judged at all — which is
+            // half of what makes it distinct from agreement.
+            Self::DescriptorsUnjudged => {
+                Some("javac's own class files for the case could not be read")
+            }
             _ => None,
         }
     }
@@ -1048,6 +1054,12 @@ mod tests {
         assert!(!Outcome::DescriptorsUnjudged.descriptor_equal());
         assert!(!Outcome::DescriptorsUnjudged.is_invariant_violation());
         assert_eq!(Outcome::DescriptorsUnjudged.label(), "descriptors-unjudged");
+        // And it is *visible*: half of what separates it from agreement is that a reader can see
+        // the rung went unjudged, which is the bucket.
+        assert_eq!(
+            Outcome::DescriptorsUnjudged.bucket().as_deref(),
+            Some("javac's own class files for the case could not be read")
+        );
     }
 
     /// The fold from a linked case to its rung reads all three answers, and the ladder counts what
