@@ -768,7 +768,19 @@ impl TypeInference {
             ast::Expr::NameRef(n) => {
                 let name = jals_syntax::decoded_ident(&Collect::first_ident_token(n.syntax())?)
                     .into_owned();
-                Some((index.enclosing_item(file, call.syntax())?, name))
+                // A bare call is an implicit `this` first (JLS §15.12.1); a `static` import is what
+                // answers when the enclosing type has no such method. Falling back to the enclosing
+                // type when *neither* has it keeps the report about the call the source wrote.
+                let enclosing = index.enclosing_item(file, call.syntax());
+                let owner = enclosing
+                    .filter(|&item| {
+                        index
+                            .resolve_member(item, &name, Namespace::Method)
+                            .is_some()
+                    })
+                    .or_else(|| index.static_import_owner(file, &name, Namespace::Method))
+                    .or(enclosing)?;
+                Some((owner, name))
             }
             _ => None,
         }
@@ -794,8 +806,11 @@ impl TypeInference {
         if Cst::is_super(receiver) {
             return index.superclass_of(index.enclosing_item(file, receiver.syntax())?);
         }
+        // Through `member_receiver`, so a type variable is looked up on its bound and an array on
+        // `Object` (JLS §4.4, §10.7) — the two shapes that resolved to nothing at all.
         self.type_of_expr(Collect::node_span(receiver.syntax()))
-            .and_then(Ty::project_id)
+            .map(|ty| index.member_receiver(ty))
+            .and_then(|ty| ty.project_id())
             .or_else(|| Cst::type_qualifier(receiver, index, file))
     }
 
@@ -1238,11 +1253,17 @@ impl<'a> Inferer<'a> {
         // the enclosing type, which is the implicit `this` a bare call already reads its callee from —
         // and the member lookup walks the supertypes. Without this `own + 1` had an operand of no type
         // at all, in a class where the read itself is perfectly ordinary.
-        self.member_ty(
-            &self.self_ty(node),
-            &jals_syntax::decoded_ident(&tok),
-            Namespace::Value,
-        )
+        let name = jals_syntax::decoded_ident(&tok);
+        let own = self.member_ty(&self.self_ty(node), &name, Namespace::Value);
+        if own != Ty::Unknown {
+            return own;
+        }
+        // And a `static` import binds a bare *field* name too (`import static java.lang.Math.PI;`),
+        // by the same rule and after the same implicit `this`.
+        self.static_import_owner(&name, Namespace::Value)
+            .map_or(Ty::Unknown, |owner| {
+                self.member_ty_in(owner, &[], &name, Namespace::Value)
+            })
     }
 
     /// The indexed type `name` resolves to from this file, or an external one by that name.
@@ -1454,6 +1475,19 @@ impl<'a> Inferer<'a> {
         {
             return Ty::Class(ClassTy::Project { id, name, args });
         }
+        // A name no item answers to is either a type this project does not contain or a **type
+        // variable**, and only the enclosing declarations can tell them apart. Spelling `T` as an
+        // external type left `t.size()` looking members up on a name the index had never heard of,
+        // and gave a local declared `T` no internal name for a backend to erase.
+        if let Some((index, file)) = self.project
+            && let Some((owner, member)) = index.enclosing_type_var(file, ty.syntax(), &name)
+        {
+            return Ty::TypeVar {
+                owner,
+                member,
+                name,
+            };
+        }
         Ty::Class(ClassTy::External { name, args })
     }
 
@@ -1491,6 +1525,13 @@ impl<'a> Inferer<'a> {
         // the type every `for (int i = 0; i < a.length; i++)` in Java depends on.
         if namespace == Namespace::Value && name == "length" && matches!(receiver, Ty::Array(_)) {
             return Ty::Primitive(Primitive::Int);
+        }
+        // The other half of §10.7: an array's `clone()` returns *the array type*, covariantly. Every
+        // other member it has is `Object`'s and is answered by the ordinary lookup, but this one no
+        // declaration can state — `Object.clone()` returns `Object`, and typing `xs.clone()` that way
+        // makes `int[] ys = xs.clone();` a mismatch against a conversion Java does not need.
+        if namespace == Namespace::Method && name == "clone" && matches!(receiver, Ty::Array(_)) {
+            return receiver;
         }
         match receiver {
             Ty::Unknown => match self.project {
@@ -1530,7 +1571,17 @@ impl<'a> Inferer<'a> {
                 // A bare (`this`) call resolves against the enclosing type, which is used raw so its
                 // own type variables stay un-substituted (they survive by name); no enclosing type
                 // means the callee is unknown.
-                self.enclosing_item(call.syntax())
+                let own = self
+                    .enclosing_item(call.syntax())
+                    .map_or(Ty::Unknown, |owner| {
+                        self.member_ty_in(owner, &[], &name, Namespace::Method)
+                    });
+                // A `static` import answers when the enclosing type does not (JLS §7.5.3), which is
+                // what gives `max(1, 2)` a type under `import static java.lang.Math.max;`.
+                if own != Ty::Unknown {
+                    return own;
+                }
+                self.static_import_owner(&name, Namespace::Method)
                     .map_or(Ty::Unknown, |owner| {
                         self.member_ty_in(owner, &[], &name, Namespace::Method)
                     })
@@ -1543,10 +1594,13 @@ impl<'a> Inferer<'a> {
     /// field's type or a method's return type — when `receiver` is an indexed project type.
     fn member_ty(&self, receiver: &Ty, name: &str, namespace: Namespace) -> Ty {
         // A project receiver carries the type arguments to substitute into the member's type; any
-        // other receiver (primitive, external, array, type variable) has no indexed members.
-        match receiver {
+        // other receiver (primitive, external) has no indexed members.
+        let Some((index, _)) = self.project else {
+            return Ty::Unknown;
+        };
+        match index.member_receiver(receiver) {
             Ty::Class(ClassTy::Project { id, args, .. }) => {
-                self.member_ty_in(*id, args, name, namespace)
+                self.member_ty_in(id, &args, name, namespace)
             }
             _ => Ty::Unknown,
         }
@@ -1568,6 +1622,13 @@ impl<'a> Inferer<'a> {
         }
     }
 
+    /// The type this file's `import static` declarations make a bare `name` a member of —
+    /// [`ProjectIndex::static_import_owner`] guarded by the project index being present.
+    fn static_import_owner(&self, name: &str, namespace: Namespace) -> Option<ItemId> {
+        let (index, file) = self.project?;
+        index.static_import_owner(file, name, namespace)
+    }
+
     /// The enclosing project type of `node`: the nearest ancestor type declaration that is an
     /// indexed item, for resolving a bare (`this`) method call.
     fn enclosing_item(&self, node: &SyntaxNode) -> Option<ItemId> {
@@ -1577,6 +1638,124 @@ impl<'a> Inferer<'a> {
 }
 
 impl ProjectIndex {
+    /// How deep a chain of type-variable bounds is followed before giving up.
+    ///
+    /// `<T extends U, U extends V>` is legal and each step is one lookup; `<T extends U, U extends T>`
+    /// is not, but a resolver reads what is written and must terminate on it anyway.
+    const BOUND_DEPTH: u8 = 8;
+
+    /// The scope a written type name `name` is a **type variable** of, seen from `node`: the
+    /// declaring `(owner, member)` pair, or `None` when no enclosing declaration declares it.
+    ///
+    /// Nothing else can tell a type variable from a type this project happens not to contain. Both
+    /// are a bare capitalised name that resolves to no item, and treating `T` as the second is what
+    /// left `<T extends Seq> int len(T t) { return t.size(); }` with a receiver that has no members
+    /// — and a local of type `T` with no internal name for a backend to emit.
+    ///
+    /// Walked outward, method before type, because a method's `<T>` **shadows** its class's (JLS
+    /// §6.4) and a nested class may still name its enclosing type's.
+    fn enclosing_type_var(
+        &self,
+        file: FileId,
+        node: &SyntaxNode,
+        name: &str,
+    ) -> Option<(ItemId, Option<MemberId>)> {
+        for ancestor in node.ancestors() {
+            let Some(declared) = Collect::first_ident_token(&ancestor) else {
+                continue;
+            };
+            let start = Collect::token_start(&declared);
+            if matches!(ancestor.kind(), METHOD_DECL | CONSTRUCTOR_DECL) {
+                if let Some(member) = self.member_by_decl(file, start)
+                    && self.is_member_type_param(member, name)
+                {
+                    return Some((self.member(member).owner, Some(member)));
+                }
+            } else if Self::type_decl_kind(ancestor.kind()).is_some()
+                && let Some(item) = self.item_by_decl(file, start)
+                && self.is_type_param(item, name)
+            {
+                return Some((item, None));
+            }
+        }
+        None
+    }
+
+    /// The type whose members a receiver of type `ty` actually has.
+    ///
+    /// Two rules the type itself does not carry:
+    ///
+    /// - **JLS §4.4** — a type variable's members are its *bound's*. `<T extends CharSequence> int
+    ///   len(T t) { return t.length(); }` is ordinary Java, and a lookup on the variable finds
+    ///   nothing at all.
+    /// - **JLS §10.7** — an array's members are `Object`'s, plus a `length` field and a `clone()`
+    ///   that no declaration provides. Those two are answered where they are read (the array type is
+    ///   what `clone()` returns, which `Object`'s declaration cannot say); everything else —
+    ///   `equals`, `hashCode`, `getClass` — is genuinely `Object`'s and is answered here.
+    ///
+    /// Anything else is its own receiver. Bounds are followed transitively, which is why the depth
+    /// cap is here rather than at a call site.
+    fn member_receiver(&self, ty: &Ty) -> Ty {
+        let mut current = ty.clone();
+        for _ in 0..Self::BOUND_DEPTH {
+            current = match current {
+                Ty::TypeVar {
+                    owner,
+                    member,
+                    ref name,
+                } => self
+                    .type_var_bound(owner, member, name)
+                    // An unbounded variable erases to `Object`, and `Object`'s members are the ones
+                    // it really does have.
+                    .unwrap_or_else(|| self.object_ty()),
+                Ty::Array(_) => return self.object_ty(),
+                other => return other,
+            };
+        }
+        self.object_ty()
+    }
+
+    /// `java.lang.Object` as a receiver type, or [`Ty::Unknown`] when it is not indexed at all.
+    fn object_ty(&self) -> Ty {
+        self.item_by_fqn("java.lang.Object")
+            .map_or(Ty::Unknown, |id| {
+                Ty::Class(ClassTy::Project {
+                    id,
+                    name: "java.lang.Object".to_owned(),
+                    args: Vec::new(),
+                })
+            })
+    }
+
+    /// The type a bare `name` may be a **static** member of, through this file's `import static`
+    /// declarations (JLS §7.5.3, §7.5.4).
+    ///
+    /// `import static java.lang.Math.max;` makes `max(1, 2)` a call, and nothing else in the file
+    /// says so: a bare call is looked up on the enclosing type (an implicit `this`), which declares
+    /// no `max`. Sixty corpus files carry a static import, and every bare use in them resolved to
+    /// nothing.
+    ///
+    /// Single imports before on-demand ones, which is the order §7.5.3 gives them, and each owner
+    /// is checked for the member so an unrelated `import static` does not answer for a name it does
+    /// not declare. The lookup walks supertypes, because a static member is inherited.
+    fn static_import_owner(
+        &self,
+        file: FileId,
+        name: &str,
+        namespace: Namespace,
+    ) -> Option<ItemId> {
+        let (static_single, static_on_demand) = self.static_imports(file)?;
+        let declares = |owner: &str| {
+            let id = self.item_by_fqn(owner)?;
+            self.resolve_member(id, name, namespace).map(|_| id)
+        };
+        static_single
+            .iter()
+            .filter(|(member, _)| member == name)
+            .find_map(|(_, owner)| declares(owner))
+            .or_else(|| static_on_demand.iter().find_map(|o| declares(o)))
+    }
+
     /// Turns a member's captured [`MemberType`] into a concrete [`Ty`], resolving a named type against
     /// the project from the member's *declaring* `file` (its import / package context). `owner` is the
     /// type whose declaration the `MemberType` lives in: a bare name matching one of its type

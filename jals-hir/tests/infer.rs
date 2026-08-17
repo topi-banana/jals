@@ -475,3 +475,105 @@ fn snapshot_switch_expression() {
         "]],
     );
 }
+
+// --- Member lookup on a receiver that declares no members ------------------------------------
+
+/// JLS §4.4: a type variable's members are its *bound's*.
+///
+/// `<T extends CharSequence> int len(T t) { return t.length(); }` is ordinary Java. A lookup on the
+/// variable itself finds nothing at all, which is the largest share of "did not resolve to an
+/// indexed member".
+#[test]
+fn a_type_variables_members_are_its_bounds() {
+    let src = "class Box { \
+                 interface Seq { int size(); } \
+                 static <T extends Seq> int len(T t) { return t.size(); } \
+                 static <U> int any(U u) { return 0; } \
+               }";
+    assert_eq!(expr_ty(src, "t.size()"), "int");
+    // An unbounded variable is `Object`'s member set, and nothing in this project declares `size`
+    // there, so the lookup answers nothing rather than the bound's answer.
+    let src = "class Box { static <U> int len(U u) { return u.size(); } }";
+    assert_eq!(expr_ty(src, "u.size()"), "?");
+}
+
+/// JLS §10.7: an array has `Object`'s members, a `length` field, and a `clone()` returning the
+/// array type.
+///
+/// `clone()` is the one no declaration can state — `Object.clone()` returns `Object`, and typing
+/// `xs.clone()` that way makes `int[] ys = xs.clone();` a mismatch against a conversion Java does
+/// not require.
+#[test]
+fn an_arrays_clone_returns_the_array_type() {
+    let src = "class A { int[] copy(int[] xs) { return xs.clone(); } int n(int[] xs) { return xs.length; } }";
+    assert_eq!(expr_ty(src, "xs.clone()"), "int[]");
+    assert_eq!(expr_ty(src, "xs.length"), "int");
+    let src = "class A { String[][] copy(String[][] xs) { return xs.clone(); } }";
+    assert_eq!(expr_ty(src, "xs.clone()"), "String[][]");
+}
+
+/// JLS §7.5.3/§7.5.4: a `static` import binds a bare name to a member of the type it names.
+///
+/// `import static p.Math2.max;` makes `max(1, 2)` a call, and nothing else in the file says so — a
+/// bare call is looked up on the enclosing type, which declares no `max`.
+#[test]
+fn a_static_import_binds_a_bare_name() {
+    let owner = "package p; public class Math2 { public static int max(int a, int b) { return a; } \
+                 public static final String NAME = \"m\"; }";
+    let single = "import static p.Math2.max; \
+                  class Use { int m() { return max(1, 2); } }";
+    let on_demand = "import static p.Math2.*; \
+                     class Use { int m() { return max(1, 2); } String s() { return NAME; } }";
+    let unrelated = "class Use { int m() { return max(1, 2); } }";
+
+    for (src, expected) in [
+        (single, "int"),
+        (on_demand, "int"),
+        // No import, so the enclosing type still answers — and it declares no `max`.
+        (unrelated, "?"),
+    ] {
+        let nodes = [
+            (FileId(0), parse(owner)),
+            (FileId(1), parse(&alloc_src(src))),
+        ];
+        let index = jals_exec::block_on_inline(ProjectIndex::builder(&nodes).build());
+        let analysis = jals_exec::block_on_inline(FileAnalysis::of(&nodes[1].1));
+        let semantics = analysis.in_project(&index, FileId(1));
+        let typed = jals_exec::block_on_inline(semantics.typed());
+        let call = nodes[1]
+            .1
+            .descendants()
+            .filter_map(ast::Expr::cast)
+            .find(|e| e.syntax().text().to_string().trim() == "max(1, 2)")
+            .expect("the call");
+        assert_eq!(
+            type_at(typed, call.syntax()).unwrap().to_string(),
+            expected,
+            "in: {src}"
+        );
+    }
+}
+
+/// A static-imported *field* takes the same route as a method, after the same implicit `this`.
+#[test]
+fn a_static_import_binds_a_bare_field() {
+    let owner = "package p; public class K { public static final String NAME = \"k\"; }";
+    let use_src = "import static p.K.NAME; class Use { String s() { return NAME; } }";
+    let nodes = [(FileId(0), parse(owner)), (FileId(1), parse(use_src))];
+    let index = jals_exec::block_on_inline(ProjectIndex::builder(&nodes).build());
+    let analysis = jals_exec::block_on_inline(FileAnalysis::of(&nodes[1].1));
+    let semantics = analysis.in_project(&index, FileId(1));
+    let typed = jals_exec::block_on_inline(semantics.typed());
+    let name = nodes[1]
+        .1
+        .descendants()
+        .filter_map(ast::Expr::cast)
+        .find(|e| e.syntax().text().to_string().trim() == "NAME")
+        .expect("the reference");
+    assert_eq!(type_at(typed, name.syntax()).unwrap().to_string(), "String");
+}
+
+/// Identity, so the loop above reads as three sources rather than three formats.
+fn alloc_src(src: &str) -> String {
+    src.to_owned()
+}

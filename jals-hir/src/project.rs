@@ -531,6 +531,14 @@ struct FileMeta {
     single_imports: Vec<(String, String)>,
     /// On-demand imports `import a.b.*;` as the package prefix (`a.b`).
     on_demand: Vec<String>,
+    /// Single static imports `import static a.b.C.max;` as `(member simple name, owner FQN)`.
+    ///
+    /// A separate list from [`single_imports`](Self::single_imports) because it binds a *member*
+    /// rather than a type: `max` is not a name any type resolution should answer, and the owner is
+    /// the only thing a member lookup can start from.
+    static_single: Vec<(String, String)>,
+    /// On-demand static imports `import static a.b.C.*;` as the owner's FQN (`a.b.C`).
+    static_on_demand: Vec<String>,
 }
 
 /// One type declaration's cacheable facts: everything a single [`ProjectIndex`] build extracts from
@@ -870,18 +878,35 @@ impl ProjectIndex {
 
         let mut single_imports = Vec::new();
         let mut on_demand = Vec::new();
+        let mut static_single = Vec::new();
+        let mut static_on_demand = Vec::new();
         for import in src.imports() {
             // A `cfg`-disabled import resolves nothing.
             if cfg.disables_node(import.syntax()) {
                 continue;
             }
-            // Type-name resolution ignores static and module imports.
-            if import.is_static() || import.is_module() {
+            // A module import names no type and no member.
+            if import.is_module() {
                 continue;
             }
             let Some(name) = import.name() else {
                 continue;
             };
+            // A static import binds a *member* of the named type, so its two halves split at the
+            // last segment rather than at the package boundary: `import static a.b.C.max;` is `max`
+            // on `a.b.C`, and `import static a.b.C.*;` is every static member of `a.b.C`. Type-name
+            // resolution ignores both, which is why they are kept apart from the lists above.
+            if import.is_static() {
+                if name.is_wildcard() {
+                    if let Some(owner) = name.qualifier() {
+                        static_on_demand.push(owner);
+                    }
+                } else if let (Some(member), Some(owner)) = (name.last_segment(), name.qualifier())
+                {
+                    static_single.push((member, owner));
+                }
+                continue;
+            }
             // jals grouped import: each member resolves relative to the shared prefix, exactly as
             // if it had been written as a separate single/on-demand import.
             if let Some(group) = import.group() {
@@ -914,6 +939,8 @@ impl ProjectIndex {
                 package,
                 single_imports,
                 on_demand,
+                static_single,
+                static_on_demand,
             }),
             types,
         }
@@ -1294,6 +1321,8 @@ impl ProjectIndex {
                 package,
                 single_imports: Vec::new(),
                 on_demand: Vec::new(),
+                static_single: Vec::new(),
+                static_on_demand: Vec::new(),
             },
         );
         id
@@ -1586,6 +1615,17 @@ impl ProjectIndex {
     /// reachable here: there is no declaration site to ask about.
     pub fn member_by_decl(&self, file: FileId, name_start: usize) -> Option<MemberId> {
         self.decl_to_member.get(&(file, name_start)).copied()
+    }
+
+    /// This file's `import static` declarations: the single ones as `(member, owner FQN)` and the
+    /// on-demand ones as owner FQNs. `None` for a file the index never saw.
+    ///
+    /// The two lists are read together and only by the static-import lookup, so they are handed out
+    /// together rather than through an accessor each — a caller that could take one without the
+    /// other would be applying half of JLS §7.5.3.
+    pub(crate) fn static_imports(&self, file: FileId) -> Option<(&[(String, String)], &[String])> {
+        let meta = self.files.get(&file)?;
+        Some((&meta.static_single, &meta.static_on_demand))
     }
 
     /// The members declared *directly* on `owner` (no inheritance walk), in declaration order. Empty
