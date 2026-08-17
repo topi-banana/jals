@@ -1374,11 +1374,20 @@ impl Compile {
             asm.load(slot)?;
             // The override declared something narrower, so the erased argument is cast to it — which is
             // the `checkcast` javac emits and the reason a bridge can throw `ClassCastException`.
-            if let Some(jals_classfile::FieldType::Object(narrower)) =
-                target_descriptor.params.get(position)
-                && matches!(param, jals_classfile::FieldType::Object(wider) if *wider != *narrower)
+            //
+            // An *array* parameter is a reference like any other and needs the same cast: reading
+            // only `FieldType::Object` let every `T[]` and varargs parameter through uncast, and
+            // `take([Ljava/lang/Number;)` delegating to `take([Ljava/lang/Integer;)` is a
+            // `VerifyError` rather than a run-time failure. A `checkcast` to an array names the
+            // array's own descriptor as its class, which is what `FieldType`'s `Display` spells.
+            if let Some(target) = target_descriptor.params.get(position)
+                && let (Some(narrower), Some(wider)) = (
+                    Descriptor::checkcast_class(target),
+                    Descriptor::checkcast_class(param),
+                )
+                && narrower != wider
             {
-                asm.check_cast(narrower)?;
+                asm.check_cast(&narrower)?;
             }
             slot += Slots::descriptor_width(&param.to_string());
         }

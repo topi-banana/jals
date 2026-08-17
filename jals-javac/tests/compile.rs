@@ -5503,3 +5503,79 @@ public class HidW {
 ";
     assert_eq!(run(source, "HidW"), "208\n");
 }
+
+/// A varargs call narrows what it packs, not only the fixed parameters before it.
+///
+/// Two shapes, and the second is the harder failure. A trailing element is `aastore`d into an array
+/// whose component erases to the parameter's bound, so a value the JVM knows only as `Object` fails
+/// the *store*: an `ArrayStoreException` raised inside the packing where javac's `checkcast` throws
+/// `ClassCastException` at the call. The uncast form throws `ArrayStoreException` instead, which
+/// this catch does not name, so it escapes `main` and the JVM exits non-zero. And a lone array
+/// argument passes straight through (JLS §15.12.4.2) onto the stack, where an
+/// `[Ljava/lang/Object;` against a descriptor spelling `[LRawVar$Base;` is a `VerifyError` and the
+/// class never loads at all. Same rule as
+/// [`an_unchecked_argument_is_cast_to_the_erased_parameter`], asked of an array.
+#[test]
+fn a_varargs_call_is_cast_to_the_erased_parameter() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class RawVar {
+    static class Base {}
+
+    static class Holder<K extends Base> {
+        String all(K... keys) { return "n=" + keys.length; }
+    }
+
+    public static void main(String[] args) {
+        Object[] wrong = { "not a Base" };
+        Base[] real = { new Base(), new Base() };
+        Object[] right = real;
+        Holder raw = new Holder();
+        try {
+            raw.all(wrong[0]);
+            System.out.println("no throw");
+        } catch (ClassCastException e) {
+            System.out.println("cce");
+        }
+        System.out.println(raw.all(right));
+    }
+}
+"#;
+    assert_eq!(run(source, "RawVar"), "cce\nn=2\n");
+}
+
+/// A bridge casts an *array* parameter too, which is every varargs and every `T[]`.
+///
+/// The cast was emitted only when both the erased and the target parameter were class types, so an
+/// array parameter went through untouched and the bridge failed the verifier the moment its class
+/// was loaded — `Type '[LArrBridge$Base;' is not assignable to '[LArrBridge$Leaf;'`. A `checkcast`
+/// to an array names the array's own descriptor as its class, which is the whole difference.
+#[test]
+fn a_bridge_casts_an_array_parameter() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class ArrBridge {
+    static class Base {}
+
+    static class Leaf extends Base {}
+
+    interface Slot<K extends Base> {
+        String take(K... keys);
+    }
+
+    static class Cell implements Slot<Leaf> {
+        public String take(Leaf... keys) { return "n=" + keys.length; }
+    }
+
+    public static void main(String[] args) {
+        Cell cell = new Cell();
+        System.out.println(cell.take(new Leaf(), new Leaf()));
+    }
+}
+"#;
+    assert_eq!(run(source, "ArrBridge"), "n=2\n");
+}

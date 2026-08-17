@@ -642,7 +642,8 @@ impl Expr {
             && Self::type_of(rest[0].syntax(), context)
                 .is_ok_and(|ty| matches!(ty, Ty::Array(_) | Ty::Null))
         {
-            return Self::lower_as(&rest[0], last, context, emit);
+            Self::lower_as(&rest[0], last, context, emit)?;
+            return Self::narrow_erased(&rest[0], last, context, emit);
         }
         let descriptor = Descriptor::descriptor_of(element, context.index)?.to_string();
         emit.asm.const_int(
@@ -657,6 +658,11 @@ impl Expr {
                     .map_err(|_| LowerError::Unsupported("a call with this many arguments"))?,
             )?;
             Self::lower_as(argument, element, context, emit)?;
+            // The element the tail is packed into erases exactly as a fixed parameter does, and a
+            // value the JVM knows only as `Object` fails the `aastore` against a narrower component
+            // — an `ArrayStoreException` inside the packing where javac throws `ClassCastException`
+            // at the call.
+            Self::narrow_erased(argument, element, context, emit)?;
             emit.asm.array_store(&descriptor)?;
         }
         Ok(())
@@ -771,31 +777,55 @@ impl Expr {
     /// Only the `Object`-to-narrower direction is cast. A value the erasure already types as
     /// something else either matches the slot or is a genuine mismatch, and papering over the second
     /// with a cast would turn a compile-time gap into a `ClassCastException` at run time.
+    ///
+    /// The same rule holds one array level down, and has to: a varargs parameter's *whole array*
+    /// arrives this way too (`raw.all(objectArray)` against `all(K...)`), and pushing an
+    /// `[Ljava/lang/Object;` where the descriptor says `[LBase;` is a `VerifyError` rather than a
+    /// run-time surprise.
     fn narrow_erased(
         argument: &ast::Expr,
         declared: &Ty,
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
     ) -> Result<()> {
-        let Ok(jals_classfile::FieldType::Object(target)) =
-            Descriptor::field_type_of(declared, context.index)
-        else {
+        let Ok(target) = Descriptor::field_type_of(declared, context.index) else {
             return Ok(());
         };
-        if target == OBJECT_INTERNAL_NAME {
-            return Ok(());
-        }
         let Ok(actual) = Self::type_of(argument.syntax(), context) else {
             return Ok(());
         };
-        if !matches!(
-            Descriptor::field_type_of(&actual, context.index),
-            Ok(jals_classfile::FieldType::Object(ref name)) if name == OBJECT_INTERNAL_NAME
-        ) {
+        let Ok(actual) = Descriptor::field_type_of(&actual, context.index) else {
+            return Ok(());
+        };
+        if !Self::narrows_from_object(&actual, &target) {
             return Ok(());
         }
-        emit.asm.check_cast(&target)?;
+        let Some(class) = Descriptor::checkcast_class(&target) else {
+            return Ok(());
+        };
+        emit.asm.check_cast(&class)?;
         Ok(())
+    }
+
+    /// Whether a value erased as `actual` reaches a slot erased as `target` only through a cast:
+    /// `Object` to anything narrower, at whatever array depth the two share.
+    ///
+    /// Both guards are the ones [`narrow_erased`](Self::narrow_erased) documents, restated so an
+    /// array can be asked the same question as its component. A pair that differs in *shape* — an
+    /// array against a class, a reference against a primitive — is no erasure gap at all, and gets
+    /// no cast.
+    fn narrows_from_object(
+        actual: &jals_classfile::FieldType,
+        target: &jals_classfile::FieldType,
+    ) -> bool {
+        use jals_classfile::FieldType::{Array, Object};
+        match (actual, target) {
+            (Array(actual), Array(target)) => Self::narrows_from_object(actual, target),
+            (Object(actual), Object(target)) => {
+                actual == OBJECT_INTERNAL_NAME && target != OBJECT_INTERNAL_NAME
+            }
+            _ => false,
+        }
     }
 
     /// Put back the static type a generic call's erased descriptor threw away.

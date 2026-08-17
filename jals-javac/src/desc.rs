@@ -12,7 +12,7 @@
 //! surfaces the gap at compile time instead.
 
 use alloc::borrow::ToOwned;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use jals_classfile::{BaseType, FieldType, MethodDescriptor, ReturnType};
@@ -154,6 +154,21 @@ impl Descriptor {
             Ty::Void => return Err(DescError::Void),
             Ty::Unknown => return Err(DescError::Unknown),
         })
+    }
+
+    /// The class a `checkcast` to `field_type` names, or `None` for a primitive — which is never
+    /// cast.
+    ///
+    /// A class type names itself; an array names its own descriptor (`[Ljava/lang/Integer;`), which
+    /// is how a `CONSTANT_Class` spells one. Reading only the class case is what let every array
+    /// parameter — which is every varargs and every `T[]` — through a bridge and an unchecked call
+    /// uncast.
+    pub(crate) fn checkcast_class(field_type: &FieldType) -> Option<String> {
+        match field_type {
+            FieldType::Object(name) => Some(name.clone()),
+            array @ FieldType::Array(_) => Some(array.to_string()),
+            FieldType::Base(_) => None,
+        }
     }
 
     /// The return descriptor for `ty`, where `void` is legal.
