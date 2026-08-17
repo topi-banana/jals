@@ -5370,3 +5370,68 @@ fn a_bound_the_index_cannot_name_erases_to_object() {
         "got {class_level:?}"
     );
 }
+
+/// A parameter that is a bounded type variable is an *overload*, and gets no bridge.
+///
+/// Once such a variable erases to its bound rather than to `Object`, the descriptor differs from a
+/// same-name, same-arity inherited method's — and the override rule could not decide, so the bridge
+/// writer kept its leniency and wrote one. javac writes none, because neither method overrides the
+/// other: `((Object) new C<Integer>()).equals("hello")` returns `false` under javac and threw
+/// `ClassCastException` here, and the sibling shape sent `((B) c).f("s")` into `C` instead of `B`.
+#[test]
+fn a_bounded_type_variable_parameter_gets_no_bridge() {
+    let inherited_from_object = descriptors(
+        "public class C<T extends Number> { public boolean equals(T other) { return true; } }",
+        "C",
+    );
+    assert_eq!(
+        inherited_from_object
+            .iter()
+            .filter(|emitted| emitted.starts_with("equals "))
+            .collect::<Vec<_>>(),
+        ["equals (Ljava/lang/Number;)Z"],
+        "got {inherited_from_object:?}"
+    );
+    let inherited_from_a_class = descriptors(
+        "class B { void f(Object x) {} } public class C<T extends Number> extends B { void f(T x) {} }",
+        "C",
+    );
+    assert_eq!(
+        inherited_from_a_class
+            .iter()
+            .filter(|emitted| emitted.starts_with("f "))
+            .collect::<Vec<_>>(),
+        ["f (Ljava/lang/Number;)V"],
+        "got {inherited_from_a_class:?}"
+    );
+}
+
+/// …and one whose parameter is a variable the *supertype* supplied still gets its bridge.
+///
+/// The discriminator is which side the variable is on. `I<T>.f(T)` implemented by `C<U extends
+/// Number>.f(U)` is a genuine override whose erasures differ, so the `f(Object)` bridge is what makes
+/// a call through the interface reach it at all — refusing every type-variable parameter would have
+/// turned this into an `AbstractMethodError`, which only running it says.
+#[test]
+fn an_override_of_a_generic_supertype_keeps_its_bridge() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Keep2 {
+    interface I<T> {
+        String f(T x);
+    }
+
+    static class C<U extends Number> implements I<U> {
+        public String f(U x) { return "f" + x; }
+    }
+
+    public static void main(String[] args) {
+        I raw = new C<Integer>();
+        System.out.println(raw.f(Integer.valueOf(3)));
+    }
+}
+"#;
+    assert_eq!(run(source, "Keep2"), "f3\n");
+}

@@ -314,13 +314,37 @@ impl<'a> Hierarchy<'a> {
     fn same_parameter(own: &Ty, inherited: &Ty) -> Overrides {
         match (own, inherited) {
             (Ty::Array(a), Ty::Array(b)) => Self::same_parameter(a, b),
-            // An array against a non-array is a different parameter whatever the element is, and a
+            // The three shapes that are provably different parameters.
+            //
+            // An array against a non-array is a different parameter whatever the element is. A
             // primitive never instantiates a type parameter — which is what rules `put(int)` out
-            // against `Holder<T>.put(T)`, the case name-and-arity could not see.
+            // against `Holder<T>.put(T)`, the case name-and-arity could not see, and rules it out
+            // against a *surviving* variable for the same reason.
+            //
+            // And a type variable against a type the index **holds** is a different parameter too:
+            // the substitution has already run, so a concrete inherited parameter is one no
+            // instantiation maps onto the variable. `class C<T extends Number> { boolean equals(T) }`
+            // against `Object.equals(Object)` is an overload, and javac says so by emitting no
+            // bridge. Once a bounded variable erased to its bound rather than to `Object` the two
+            // descriptors differed, and answering `Unknown` here meant a bridge was written for it:
+            // `((Object) new C<Integer>()).equals("hello")` then threw `ClassCastException` where
+            // javac returns `false`, and the same shape sent `((B) c).f("s")` into `C` instead of
+            // `B`.
+            //
+            // A variable against an *unindexed name* is a different case and is left to the lenient
+            // arm below — it is the residue of a substitution this layer could not resolve
+            // (`interface I<T> { void f(T); } class C<U extends Number> implements I<U>` lowers the
+            // substituted `U` to a name, not to the variable it is), and claiming a difference there
+            // drops the bridge that override genuinely needs. Nor are the two directions symmetric:
+            // only the *inherited* side has been substituted, so a variable arriving on it says
+            // nothing about `own`.
             (Ty::Array(_), _)
             | (_, Ty::Array(_))
-            | (Ty::Primitive(_), Ty::Class(_))
-            | (Ty::Class(_), Ty::Primitive(_)) => Overrides::No,
+            | (Ty::Primitive(_), Ty::Class(_) | Ty::TypeVar { .. })
+            | (Ty::Class(_), Ty::Primitive(_))
+            | (Ty::TypeVar { .. }, Ty::Primitive(_) | Ty::Class(ClassTy::Project { .. })) => {
+                Overrides::No
+            }
             (Ty::Primitive(a), Ty::Primitive(b)) => {
                 if a == b {
                     Overrides::Yes
@@ -350,9 +374,31 @@ impl<'a> Hierarchy<'a> {
                     Overrides::No
                 }
             }
-            // An indexed type against an unindexed name, a surviving type variable (a generic
-            // *method*'s own parameter, which `jals_hir::Member` does not record), or a type
-            // inference never worked out: not decidable, and not a licence to claim either answer.
+            // Two type variables are the same parameter when they are the same *variable*. The
+            // declaring scope is part of that: a method's `<T>` shadows its class's, so two `T`s can
+            // be two parameters. Different variables are not decidable here — substitution may yet
+            // relate them — and stay lenient.
+            (
+                Ty::TypeVar {
+                    owner: a,
+                    member: am,
+                    name: an,
+                },
+                Ty::TypeVar {
+                    owner: b,
+                    member: bm,
+                    name: bn,
+                },
+            ) => {
+                if (a, am, an) == (b, bm, bn) {
+                    Overrides::Yes
+                } else {
+                    Overrides::Unknown
+                }
+            }
+            // An indexed type against an unindexed name, a type variable the substitution left on one
+            // side only, or a type inference never worked out: not decidable, and not a licence to
+            // claim either answer.
             _ => Overrides::Unknown,
         }
     }
