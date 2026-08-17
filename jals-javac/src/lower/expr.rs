@@ -782,8 +782,12 @@ impl Expr {
     /// The same rule holds one array level down, and has to: a varargs parameter's *whole array*
     /// arrives this way too (`raw.all(objectArray)` against `all(K...)`), and pushing an
     /// `[Ljava/lang/Object;` where the descriptor says `[LBase;` is a `VerifyError` rather than a
-    /// run-time surprise.
-    fn narrow_erased(
+    /// run-time surprise. A bare `Object` reaching an *array* slot is the same gap once more: every
+    /// array is an `Object`, so `<T> T pick(..)` handed to a `[LException;` needs the cast too.
+    ///
+    /// A `return` takes the same treatment against the method's declared return type, which is the
+    /// only other slot whose descriptor the source does not write at the point of use.
+    pub(crate) fn narrow_erased(
         argument: &ast::Expr,
         declared: &Ty,
         context: &Context<'_>,
@@ -825,6 +829,10 @@ impl Expr {
             (Object(actual), Object(target)) => {
                 actual == OBJECT_INTERNAL_NAME && target != OBJECT_INTERNAL_NAME
             }
+            // Every array type is an `Object` too, so a `T` erased to `Object` reaching a slot
+            // spelled `[LException;` is the same gap one level up — and the one shape a caller
+            // cannot express as a pair of arrays, because the actual side has no component at all.
+            (Object(actual), Array(_)) => actual == OBJECT_INTERNAL_NAME,
             _ => false,
         }
     }

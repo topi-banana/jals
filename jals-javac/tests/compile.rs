@@ -5722,3 +5722,82 @@ public class Sam {
     }
     assert_eq!(run(source, "Sam").trim(), "hi!\n1".trim());
 }
+
+/// A value the JVM knows only as `Object` is cast down at a `return`, not just at an argument.
+///
+/// `<T> T pick(T x)` erases to `(Ljava/lang/Object;)Ljava/lang/Object;`, so returning its result
+/// where the method declares `Exception[]` is an `areturn` the verifier rejects — "Bad return type:
+/// 'java/lang/Object' is not assignable to '[Ljava/lang/Exception;'". The source is legal, the
+/// descriptor is right, and javac emits a `checkcast` in exactly this place. The array target is the
+/// shape the argument-side rule could not express: `Object` against `[LException;` is not a pair of
+/// arrays.
+#[test]
+fn an_erased_value_is_cast_at_a_return() {
+    let source = "
+public class Erased {
+    static <T> T pick(T x) { return x; }
+    static String[] arrays(String[] xs) { return pick(xs); }
+    static String classes(String s) { return pick(s); }
+    public static void main(String[] args) {
+        System.out.println(arrays(new String[] { \"a\", \"b\" }).length);
+        System.out.println(classes(\"hi\"));
+    }
+}
+";
+    if !java_available() {
+        // The claim is a verifier's; without one this test is checking that it compiles.
+        compile(source).expect("compile");
+        return;
+    }
+    assert_eq!(run(source, "Erased").trim(), "2\nhi");
+}
+
+/// And a value that already matches, or is genuinely something else, gets no cast.
+///
+/// Only the `Object`-to-narrower direction: papering over a real mismatch with a `checkcast` turns
+/// a compile-time gap into a `ClassCastException` at run time.
+#[test]
+fn a_matching_value_is_not_cast_on_the_way_out() {
+    let source = "
+public class NoCast {
+    static String same(String s) { return s; }
+    static Object widen(String s) { return s; }
+    public static void main(String[] args) {
+        System.out.println(same(\"a\") + widen(\"b\"));
+    }
+}
+";
+    let classes = compile(source).expect("compile");
+    let class = jals_exec::block_on_inline(jals_classfile::ClassFile::read(
+        classes
+            .iter()
+            .find(|class| class.internal_name == "NoCast")
+            .expect("the class")
+            .bytes
+            .as_slice(),
+    ))
+    .expect("reparse");
+    // `checkcast` is 0xc0; neither method should carry one.
+    let pool = &class.constant_pool;
+    for method in &class.methods {
+        let name = pool.utf8(method.name_index).expect("utf8").into_owned();
+        if name != "same" && name != "widen" {
+            continue;
+        }
+        let code = method
+            .attributes
+            .iter()
+            .find_map(|attribute| match &attribute.body {
+                jals_classfile::AttributeBody::Code(code) => Some(code),
+                _ => None,
+            })
+            .expect("a body");
+        assert!(
+            !code.code.iter().any(|instruction| matches!(
+                instruction,
+                jals_classfile::Instruction::CheckCast(_)
+            )),
+            "`{name}` should carry no checkcast"
+        );
+    }
+}
