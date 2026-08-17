@@ -1617,6 +1617,20 @@ impl ProjectIndex {
         self.decl_to_member.get(&(file, name_start)).copied()
     }
 
+    /// The member type named `name` that `owner` declares or inherits (JLS §8.5), if any.
+    ///
+    /// A *type* member rather than a value one, so it is looked up by fully-qualified name — a
+    /// nested type's identity is its enclosing type's name plus its own, which is exactly what the
+    /// index keys on. The supertype walk is what makes an inherited nested type reachable, and it is
+    /// the same cycle-guarded one every other member lookup rides.
+    pub(crate) fn member_type(&self, owner: ItemId, name: &str) -> Option<ItemId> {
+        self.walk_supertypes(owner, |current| {
+            self.by_fqn
+                .get(&format!("{}.{name}", self.items[current.0 as usize].fqn))
+                .copied()
+        })
+    }
+
     /// This file's `import static` declarations: the single ones as `(member, owner FQN)` and the
     /// on-demand ones as owner FQNs. `None` for a file the index never saw.
     ///

@@ -5801,3 +5801,43 @@ public class NoCast {
         );
     }
 }
+
+/// An enclosing instance is the one the *target* is declared inside, reached from wherever the
+/// creation is written.
+///
+/// Two shapes, both of which produced a class file no JVM loads:
+///
+/// - `new Inner2().new Nested()` where two inner classes both declare a `Nested`. The qualified
+///   creation names a member of the *qualifier's* type (JLS §15.9.1); resolving it by scope emitted
+///   the other class's constructor with an `Inner2` beneath it.
+/// - `class Local` declared inside an anonymous class body. Its enclosing type is the anonymous
+///   class, and the walk out to a named declaration skipped past it — so `Local`'s constructor took
+///   the file's outer class while every `new Local()` in the body pushed the anonymous `this`.
+#[test]
+fn an_enclosing_instance_is_the_targets_own() {
+    let source = "
+public class Nest {
+    boolean reached = false;
+    class Inner1 { class Nested { int id() { return 1; } } }
+    class Inner2 { class Nested { int id() { return 2; } } }
+    int qualified() { return new Inner2().new Nested().id(); }
+    void anonymous() {
+        new Object() {
+            class Local {{ reached = true; }}
+            { new Local(); }
+        };
+    }
+    public static void main(String[] args) {
+        Nest n = new Nest();
+        System.out.println(n.qualified());
+        n.anonymous();
+        System.out.println(n.reached);
+    }
+}
+";
+    if !java_available() {
+        compile(source).expect("compile");
+        return;
+    }
+    assert_eq!(run(source, "Nest").trim(), "2\ntrue");
+}

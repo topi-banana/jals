@@ -1056,10 +1056,15 @@ impl Expr {
         // The constructor consumes one reference and returns nothing, so the expression's own value
         // has to be a second copy — made *before* the arguments go on top of it.
         emit.asm.dup()?;
-        if enclosing.is_some() {
+        if let Some(enclosing) = &enclosing {
             match new.qualifier() {
                 Some(qualifier) => Self::lower(&qualifier, context, emit)?,
-                None => emit.asm.load(0)?,
+                // Not `this`: the class being compiled need not be the one the target is declared
+                // in. `new One(null)` written inside an anonymous class inside `One` passes the
+                // *enclosing method's* instance, which this class reaches through `this$0` — pushing
+                // `this` there is `Type 'Outer$One$1' is not assignable to 'Outer'`. The walk is the
+                // one an unqualified member access already takes, and for the same reason.
+                None => Self::load_unqualified_receiver(enclosing.item, context, emit)?,
             }
         }
         let varargs = selected.is_some_and(|member| context.index.member(member).varargs);

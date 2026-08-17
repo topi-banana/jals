@@ -577,3 +577,39 @@ fn a_static_import_binds_a_bare_field() {
 fn alloc_src(src: &str) -> String {
     src.to_owned()
 }
+
+/// JLS §15.9.1: a qualified `new` looks its type up as a member of the qualifier's type.
+///
+/// `new Inner2().new InnerMost()` in a class that has both an `Inner1.InnerMost` and an
+/// `Inner2.InnerMost` resolved to whichever the ordinary scope rules found first — and a lowering
+/// then emitted the *other* class's constructor, with the qualifier beneath it, which no verifier
+/// accepts.
+#[test]
+fn a_qualified_new_resolves_against_its_qualifier() {
+    let src = "class Q { \
+                 class Inner1 { class Nested { } } \
+                 class Inner2 { class Nested { } } \
+                 Object a() { return new Inner1().new Nested(); } \
+                 Object b() { return new Inner2().new Nested(); } \
+               }";
+    assert_eq!(expr_ty(src, "new Inner1().new Nested()"), "Nested");
+    let fixture = Fixture::new(src);
+    let semantics = fixture.semantics();
+    let typed = jals_exec::block_on_inline(semantics.typed());
+    // Same simple name, two different items: what the qualifier decides.
+    let ids: Vec<String> = ["new Inner1().new Nested()", "new Inner2().new Nested()"]
+        .into_iter()
+        .map(|text| {
+            let expr = fixture
+                .node
+                .descendants()
+                .filter_map(ast::Expr::cast)
+                .find(|e| e.syntax().text().to_string().trim() == text)
+                .expect("the creation");
+            let ty = type_at(typed, expr.syntax()).expect("a type");
+            let id = ty.project_id().expect("an indexed type");
+            fixture.index.item(id).fqn.to_string()
+        })
+        .collect();
+    assert_eq!(ids, ["Q.Inner1.Nested", "Q.Inner2.Nested"]);
+}

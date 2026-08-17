@@ -1352,8 +1352,37 @@ impl<'a> Inferer<'a> {
     }
 
     fn new_ty(&self, n: &ast::NewExpr) -> Ty {
-        let base = self.ty_of_opt_type(n.ty().as_ref());
+        let base = self
+            .qualified_new_ty(n)
+            .unwrap_or_else(|| self.ty_of_opt_type(n.ty().as_ref()));
         base.array_of(Cst::lbrack_count(n.syntax()))
+    }
+
+    /// The type a *qualified* class instance creation names (JLS §15.9.1): `p.new Inner()` looks
+    /// `Inner` up as a member type of `p`'s compile-time type, not by the scope rules.
+    ///
+    /// `None` when there is no qualifier, or when the lookup fails and ordinary resolution should
+    /// answer instead. The difference is not academic: `new Inner2().new InnerMost()` in a class
+    /// that has both an `Inner1.InnerMost` and an `Inner2.InnerMost` resolved to whichever the scope
+    /// found first, and the constructor the lowering then emitted was the *other* class's — an
+    /// `invokespecial` on `Inner1$InnerMost` with an `Inner2` beneath it, which no verifier accepts.
+    fn qualified_new_ty(&self, n: &ast::NewExpr) -> Option<Ty> {
+        let (index, _) = self.project?;
+        let qualifier = n.qualifier()?;
+        let ty = n.ty()?;
+        // Only a simple name is looked up this way. A qualified one (`p.new a.b.C()`) is not legal
+        // Java, and resolving it against the qualifier would be inventing a rule.
+        if ty.is_qualified() {
+            return None;
+        }
+        let name = ty.simple_name()?;
+        let owner = self.expr_ty(qualifier.syntax()).project_id()?;
+        let member = index.member_type(owner, &name)?;
+        Some(Ty::Class(ClassTy::Project {
+            id: member,
+            name,
+            args: self.type_args_of(&ty),
+        }))
     }
 
     fn index_ty(&self, i: &ast::IndexExpr) -> Ty {

@@ -1454,6 +1454,12 @@ impl Compile {
         // anonymous subclass of the `enum` — and it has no name to key an item on, which is the
         // report that comes out below rather than a walk that skips past it to the `enum` and
         // silently names the wrong enclosing class.
+        //
+        // An **anonymous class body** is in it for the same reason and was missing: a class declared
+        // inside `new Object() { class Local {} }` is `Local` of the *anonymous* class, not of the
+        // file's outer one. Walking past it named `Outer` as the enclosing type, so `Local`'s
+        // constructor took an `Outer` while every `new Local()` inside the body pushed the anonymous
+        // `this` — a class file the JVM refuses at the first creation.
         let declaration = node
             .ancestors()
             .skip(1)
@@ -1466,20 +1472,36 @@ impl Compile {
                         | ANNOTATION_TYPE_DECL
                         | RECORD_DECL
                         | jals_syntax::SyntaxKind::ENUM_CONSTANT
-                )
+                ) || Self::is_anonymous_body(ancestor)
             })
             .ok_or(LowerError::Unsupported(
                 "an inner class with no enclosing type",
             ))?;
-        let name = ast::Decl::name_token_of(&declaration)
-            .ok_or(LowerError::Unsupported("an enclosing type with no name"))?;
-        let item = index
-            .item_by_decl(file, usize::from(name.text_range().start()))
-            .ok_or_else(|| LowerError::Unresolved(name.text().into()))?;
+        // An anonymous class has no name, so its item is keyed on where its `new` starts — the same
+        // key `inner_classes_of` uses, because the two have to agree about which item this is.
+        let item = if Self::is_anonymous_body(&declaration) {
+            index
+                .item_by_decl(file, usize::from(declaration.text_range().start()))
+                .ok_or(LowerError::Unsupported(
+                    "an anonymous enclosing class that is not indexed",
+                ))?
+        } else {
+            let name = ast::Decl::name_token_of(&declaration)
+                .ok_or(LowerError::Unsupported("an enclosing type with no name"))?;
+            index
+                .item_by_decl(file, usize::from(name.text_range().start()))
+                .ok_or_else(|| LowerError::Unresolved(name.text().into()))?
+        };
         Ok(Enclosing {
             item,
             name: Descriptor::internal_name_of(item, index),
         })
+    }
+
+    /// Whether `node` is a `new` that carries a class body — an anonymous class declaration.
+    fn is_anonymous_body(node: &SyntaxNode) -> bool {
+        node.kind() == jals_syntax::SyntaxKind::NEW_EXPR
+            && node.children().any(|child| child.kind() == CLASS_BODY)
     }
 
     /// The synthetic field an inner class holds its enclosing instance in.
