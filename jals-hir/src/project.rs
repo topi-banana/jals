@@ -196,8 +196,8 @@ pub struct Supertype {
     /// `Object`) except one: [`method_set_complete`](ProjectIndex::method_set_complete) treats a
     /// reached stub as proof the overload set is partial, and an edge from every type to a stub
     /// `Object` would make that predicate universally `false`. Skipping the implicit edge there
-    /// loses nothing, because [`is_object_method`](ProjectIndex::is_object_method) already answers
-    /// `false` for every name `Object` declares.
+    /// loses nothing, because `ProjectIndex::is_object_method` already answers `false` for every
+    /// name `Object` declares.
     ///
     /// The implicit `java.lang.Enum` / `java.lang.Record` edges are deliberately **not** marked:
     /// there is no name list covering *their* members, so their stub-incompleteness must keep
@@ -1717,7 +1717,7 @@ impl ProjectIndex {
     ///
     /// After the implicit `java.lang.Object` edge this answers for a class with no `extends` too,
     /// which is what makes `super.toString()` resolve.
-    pub fn superclass_of(&self, owner: ItemId) -> Option<ItemId> {
+    pub(crate) fn superclass_of(&self, owner: ItemId) -> Option<ItemId> {
         self.item(owner)
             .supertypes
             .iter()
