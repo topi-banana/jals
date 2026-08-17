@@ -139,6 +139,33 @@ mod tests {
         assert_eq!(imports[2].name().unwrap().text(), "a.b.*");
     }
 
+    /// A qualified name is the name it *spells*, in every shape one appears in.
+    ///
+    /// `text` is composed from the decoded segments rather than read off the node, because JLS §3.3
+    /// makes `\u0043` the letter `C` before anything is tokenized — so `import a.b.\u0043;` imports
+    /// `a.b.C`, and matching it against the declaration of `C` needs both spelled the same way. The
+    /// grouped-import member and the wildcard are here because the composition has to reproduce them
+    /// as the node's own text did: a member is a whole `QualifiedName` of its own, and the `*` is
+    /// punctuation of the import rather than a segment.
+    #[test]
+    fn a_qualified_name_is_the_name_it_spells() {
+        let file = source_file(
+            "package a.\\u0062.c;\nimport java.util.{HashMap, x.\\u0059};\nimport a.\\u0062.*;\n",
+        );
+        assert_eq!(file.package().unwrap().name().unwrap().text(), "a.b.c");
+
+        let imports: Vec<_> = file.imports().collect();
+        let group = imports[0].group().expect("a grouped import");
+        let members: Vec<String> = group.members().map(|m| m.text()).collect();
+        assert_eq!(members, ["HashMap", "x.Y"]);
+        assert_eq!(imports[0].name().unwrap().text(), "java.util");
+
+        assert!(imports[1].name().unwrap().is_wildcard());
+        assert_eq!(imports[1].name().unwrap().text(), "a.b.*");
+        assert_eq!(imports[1].name().unwrap().qualifier().unwrap(), "a.b");
+        assert_eq!(imports[1].name().unwrap().last_segment(), None);
+    }
+
     #[test]
     fn class_shape() {
         let file = source_file(
