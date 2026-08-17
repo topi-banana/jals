@@ -398,3 +398,62 @@ fn c_style_dimensions_reach_parameters_and_return_types() {
         }
     );
 }
+
+/// A functional interface is the one with a single *abstract* method (JLS §9.8), which is not the
+/// same as "declares one method".
+///
+/// No JDK functional interface declares one method: `Function` has `apply` beside `compose`,
+/// `andThen`, and `identity`. Counting declarations refused every lambda written against the
+/// standard library.
+#[test]
+fn a_functional_interface_is_counted_by_abstract_methods() {
+    let sources = ["interface Fn { \
+           String apply(String s); \
+           default Fn andThen(Fn next) { return null; } \
+           static Fn identity() { return null; } \
+           private String helper() { return null; } \
+         }
+         interface TwoAbstract { void a(); void b(); }
+         interface NoAbstract { default void a() {} }
+         class NotAnInterface { void only() {} }"];
+    let (_nodes, index) = build(&sources);
+    let of = |name: &str| index.functional_member(item(&index, &sources, 0, name));
+
+    let apply = of("Fn").expect("`apply` is the single abstract method");
+    assert_eq!(index.member(apply).name, "apply");
+    assert!(of("TwoAbstract").is_none());
+    assert!(of("NoAbstract").is_none());
+    // A class's method is not abstract, so a class is never functional — which the old rule got
+    // right only by accident, having no abstract bit to read.
+    assert!(of("NotAnInterface").is_none());
+}
+
+/// JLS §9.8 does not count a method override-equivalent to a public instance method of `Object`.
+///
+/// `Comparator` is the shape: it redeclares `equals(Object)` beside `compare`, and every
+/// implementation already has one from `Object`. The exclusion is narrower than "a method `Object`
+/// declares" — `clone` and `finalize` are `protected`, so an interface declaring one really does
+/// have that abstract method.
+#[test]
+fn object_s_public_methods_do_not_count_toward_the_single_abstract_method() {
+    let sources = [
+        "interface Cmp { int compare(String a, String b); boolean equals(Object o); }
+         interface Named { String toString(); int hashCode(); void run(); }
+         interface Cloner { int clone(); }
+         interface OnlyObject { boolean equals(Object o); }",
+    ];
+    let (_nodes, index) = build(&sources);
+    let of = |name: &str| {
+        index
+            .functional_member(item(&index, &sources, 0, name))
+            .map(|id| index.member(id).name.clone())
+    };
+
+    assert_eq!(of("Cmp").as_deref(), Some("compare"));
+    assert_eq!(of("Named").as_deref(), Some("run"));
+    // `clone()` is `protected` on `Object`, so §9.8 excludes nothing here: this interface has one
+    // abstract method and it is `clone`.
+    assert_eq!(of("Cloner").as_deref(), Some("clone"));
+    // And an interface whose only abstract method *is* excluded has none left.
+    assert!(of("OnlyObject").is_none());
+}

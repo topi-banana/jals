@@ -30,10 +30,10 @@ use hashbrown::{HashMap, HashSet};
 use jals_exec::Yielder;
 
 use jals_syntax::SyntaxKind::{
-    ANNOTATION_TYPE_DECL, CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL, ELLIPSIS, ENUM_BODY,
-    ENUM_CONSTANT, ENUM_DECL, EXTENDS_CLAUSE, FIELD_DECL, IMPLEMENTS_CLAUSE, INTERFACE_DECL,
-    LAMBDA_EXPR, LBRACK, METHOD_DECL, MODIFIERS, NEW_EXPR, PRIVATE_KW, PUBLIC_KW, RECORD_COMPONENT,
-    RECORD_DECL, RECORD_HEADER, STATIC_KW,
+    ABSTRACT_KW, ANNOTATION_TYPE_DECL, CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL, DEFAULT_KW,
+    ELLIPSIS, ENUM_BODY, ENUM_CONSTANT, ENUM_DECL, EXTENDS_CLAUSE, FIELD_DECL, IMPLEMENTS_CLAUSE,
+    INTERFACE_DECL, LAMBDA_EXPR, LBRACK, METHOD_DECL, MODIFIERS, NEW_EXPR, PRIVATE_KW, PUBLIC_KW,
+    RECORD_COMPONENT, RECORD_DECL, RECORD_HEADER, STATIC_KW,
 };
 use jals_syntax::ast::{self, AstNode};
 use jals_syntax::cfg::CfgMap;
@@ -214,12 +214,17 @@ pub struct MemberId(u32);
 ///
 /// Recorded because they decide an *instruction* rather than a diagnostic: `invokestatic` against
 /// `invokevirtual`, `getstatic` against `getfield`, and `invokespecial` for a `private` method,
-/// which is not dispatched at all. Modifiers that change no instruction (`final`, `abstract`,
-/// `synchronized`, the access levels beyond `private`) are deliberately absent; add one when
-/// something has to act on it.
+/// which is not dispatched at all. Modifiers that change no instruction (`final`, `synchronized`,
+/// the access levels beyond `private`) are deliberately absent; add one when something has to act
+/// on it.
 ///
 /// Implicit modifiers are folded in at capture time — an interface field is `static` whether or
 /// not the source says so — so a consumer never re-derives JLS defaults from the owner's kind.
+// Four bools, and clippy is right that four bools are usually a type wearing a disguise. Not here:
+// this *is* a modifier set, each one written independently in the source and read independently by
+// a consumer, and a bitflags newtype would trade four named fields for a constructor and four
+// accessors saying the same thing.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct MemberModifiers {
     /// Belongs to the type rather than to an instance.
@@ -240,6 +245,16 @@ pub struct MemberModifiers {
     /// emits, and this decides a *member set* the resolver answers with, so no consumer outside this
     /// crate reads it. The struct stays constructible only in here, which it already was.
     pub(crate) is_public: bool,
+    /// Declared `abstract`, or implicitly so because its owner is an interface and it is none of
+    /// `default`, `static`, or `private` (JLS §9.4.1.1).
+    ///
+    /// Here for the reason the doc above asks for: something has to act on it. A functional
+    /// interface is the one with a single *abstract* method (JLS §9.8), and without this bit the
+    /// only available test was "declares exactly one method" — which no JDK functional interface
+    /// passes. `java.util.function.Function` declares `apply` alongside `compose`, `andThen`, and
+    /// `identity`, so every lambda written against the standard library was refused for having no
+    /// single method to convert to.
+    pub(crate) is_abstract: bool,
 }
 
 /// A member of an indexed type: a field, method, constructor, or enum constant.
@@ -315,6 +330,7 @@ impl MemberModifiers {
                 STATIC_KW => out.is_static = true,
                 PRIVATE_KW => out.is_private = true,
                 PUBLIC_KW => out.is_public = true,
+                ABSTRACT_KW => out.is_abstract = true,
                 _ => {}
             }
         }
@@ -1580,6 +1596,54 @@ impl ProjectIndex {
         self.members_by_owner.get(&owner).map_or(&[], Vec::as_slice)
     }
 
+    /// The single abstract method of a functional interface `owner`, or `None` when it has none or
+    /// several (JLS §9.8).
+    ///
+    /// **What a lambda and a method reference are converted to**, so a wrong answer is not a missed
+    /// optimisation: it is a lambda the backend refuses to lower, or one lowered against the wrong
+    /// shape. Three copies of the rule used to answer it — `jals-hir`'s own lambda-parameter typing
+    /// and two in `jals-javac` — and all three read "declares exactly one method", which is not the
+    /// rule. **No JDK functional interface passes it**: `Function` declares `apply` beside
+    /// `compose`, `andThen`, and `identity`, so every lambda written against the standard library
+    /// was refused.
+    ///
+    /// Two exclusions, and both are load-bearing:
+    ///
+    /// - Only `abstract` methods count, which is what [`MemberModifiers::is_abstract`] is for. A
+    ///   `default` or `static` interface method carries a body and is not the interface's shape.
+    /// - A method override-equivalent to a **public instance method of `java.lang.Object`** does not
+    ///   count (JLS §9.8), because every implementation already has one. `Comparator` needs this:
+    ///   it redeclares `equals(Object)` beside `compare`. The list is `equals`, `hashCode`, and
+    ///   `toString` and is matched by *signature*, deliberately narrower than
+    ///   [`is_object_method`](Self::is_object_method) — that one includes `clone` and `finalize`,
+    ///   which are `protected`, so §9.8 does not exclude them and `interface I { int clone(); }`
+    ///   really is functional.
+    ///
+    /// Only `own_members`, so an interface that inherits its single abstract method rather than
+    /// declaring one is not recognised. That is a narrowing, not a wrong answer, and it is where the
+    /// three previous copies also stopped.
+    pub fn functional_member(&self, owner: ItemId) -> Option<MemberId> {
+        let mut abstracts = self.own_members(owner).iter().copied().filter(|&id| {
+            let info = self.member(id);
+            info.kind == DefKind::Method
+                && info.modifiers.is_abstract
+                && !Self::is_object_public_method(&info.name, info.params.len())
+        });
+        let only = abstracts.next()?;
+        abstracts.next().is_none().then_some(only)
+    }
+
+    /// Whether `name`/`arity` is one of `java.lang.Object`'s **public instance** methods that JLS
+    /// §9.8 excludes from a functional interface's abstract-method count.
+    ///
+    /// Arity rather than full signature: an interface that redeclares one of these at a different
+    /// arity has written an overload, not an override, and `equals(Object)` / `hashCode()` /
+    /// `toString()` each have exactly one. `getClass`, `notify`, `notifyAll`, and `wait` are public
+    /// too but `final`, so no interface may declare them at all.
+    fn is_object_public_method(name: &str, arity: usize) -> bool {
+        matches!((name, arity), ("equals", 1) | ("hashCode" | "toString", 0))
+    }
+
     /// The member named `name` in name-space `namespace` declared *directly* on `owner` (no
     /// inheritance walk), if any. The single-level building block of the inheritance-aware
     /// [`resolve_member`](Self::resolve_member); used by generic member substitution, which threads
@@ -2158,6 +2222,17 @@ impl ProjectIndex {
                         // implicitly declares.
                         let mut modifiers = MemberModifiers::of(&member);
                         modifiers.is_public |= in_interface;
+                        // And implicitly `abstract` unless it is `default`, `static`, or `private`
+                        // (JLS §9.4.1.1) — the three that must carry a body. `abstract` is what
+                        // §9.8 counts, so getting this wrong in either direction is a functional
+                        // interface the lowering either cannot find or finds twice.
+                        modifiers.is_abstract |= in_interface
+                            && !modifiers.is_static
+                            && !modifiers.is_private
+                            && !member
+                                .children()
+                                .find_map(ast::Modifiers::cast)
+                                .is_some_and(|m| m.has(DEFAULT_KW));
                         members.push(Member {
                             modifiers,
                             params,
@@ -2199,6 +2274,7 @@ impl ProjectIndex {
                                 is_static: true,
                                 is_private: false,
                                 is_public: true,
+                                is_abstract: false,
                             },
                             ..new_member(&name, DefKind::EnumConstant, ty)
                         });
@@ -2261,6 +2337,7 @@ impl ProjectIndex {
                         is_static: false,
                         is_private: true,
                         is_public: false,
+                        is_abstract: false,
                     },
                     ..new_member(name, DefKind::Field, ty.clone())
                 });
@@ -2347,6 +2424,7 @@ impl ProjectIndex {
                     is_static: true,
                     is_private: false,
                     is_public: true,
+                    is_abstract: false,
                 },
                 params,
                 varargs: false,

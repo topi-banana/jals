@@ -5685,3 +5685,40 @@ public class Dims {
     // And the local's own brackets: `v.length` only resolves if `v` is an `int[]` in the body too.
     assert_eq!(run(source, "Dims").trim(), "3");
 }
+
+/// A lambda converts to an interface's single *abstract* method, past its `default` and `static`
+/// ones.
+///
+/// The shape every JDK functional interface has: `Function` declares `apply` beside `compose`,
+/// `andThen`, and `identity`. Counting declarations rather than abstract methods refused all of
+/// them, so no lambda written against the standard library lowered at all.
+#[test]
+fn a_lambda_converts_past_default_and_static_interface_methods() {
+    let source = "
+public class Sam {
+    interface Fn {
+        String apply(String s);
+        default Fn andThen(Fn next) { return null; }
+        static Fn upper() { return s -> s; }
+        private String unused() { return null; }
+    }
+    // JLS 9.8: a method override-equivalent to a public instance method of `Object` does not count.
+    interface Cmp {
+        int compare(String a, String b);
+        boolean equals(Object o);
+    }
+    public static void main(String[] args) {
+        Fn f = s -> s + \"!\";
+        Cmp c = (a, b) -> a.length() - b.length();
+        System.out.println(f.apply(\"hi\"));
+        System.out.println(c.compare(\"aa\", \"b\"));
+    }
+}
+";
+    // Lowering at all is the claim: with the old rule both interfaces were "no single method".
+    compile(source).expect("compile");
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Sam").trim(), "hi!\n1".trim());
+}

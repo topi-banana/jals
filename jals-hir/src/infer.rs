@@ -1034,18 +1034,12 @@ impl<'a> Inferer<'a> {
             let Some(item) = self.target_ty(&lambda).project_id() else {
                 continue;
             };
-            // One method, or this is no functional interface and there is nothing to take a shape from.
-            let mut methods = index
-                .own_members(item)
-                .iter()
-                .copied()
-                .filter(|&id| index.member(id).kind == DefKind::Method);
-            let Some(method) = methods.next() else {
+            // One *abstract* method, or this is no functional interface and there is nothing to take
+            // a shape from. Asked of the index rather than counted here: the rule is JLS §9.8's and
+            // a lowering converts the lambda against the same answer.
+            let Some(method) = index.functional_member(item) else {
                 continue;
             };
-            if methods.next().is_some() {
-                continue;
-            }
             let params = index.member(method).params.clone();
             let owner = index.member(method).owner;
             let file = index.member(method).file;

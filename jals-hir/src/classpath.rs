@@ -192,6 +192,8 @@ impl ClasspathLower {
                     is_static: field.access_flags.contains(FieldAccessFlags::STATIC),
                     is_private: field.access_flags.contains(FieldAccessFlags::PRIVATE),
                     is_public: field.access_flags.contains(FieldAccessFlags::PUBLIC),
+                    // A field is never abstract; the flag does not exist for one.
+                    is_abstract: false,
                 },
                 ty: Self::field_member_type(&field.attributes, field.descriptor_index, pool),
                 params: Vec::new(),
@@ -232,6 +234,9 @@ impl ClasspathLower {
                     is_static: method.access_flags.contains(MethodAccessFlags::STATIC),
                     is_private: method.access_flags.contains(MethodAccessFlags::PRIVATE),
                     is_public: method.access_flags.contains(MethodAccessFlags::PUBLIC),
+                    // `ACC_ABSTRACT` is the compiled form of the same bit, implicit interface
+                    // modifiers already folded in by whatever compiler wrote the class file.
+                    is_abstract: method.access_flags.contains(MethodAccessFlags::ABSTRACT),
                 },
                 ty,
                 params,

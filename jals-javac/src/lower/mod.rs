@@ -925,9 +925,12 @@ impl Compile {
             let item = expr::Expr::type_of(lambda, &context)?
                 .project_id()
                 .ok_or(LowerError::Unsupported("a lambda with no target type"))?;
-            let member = Self::functional_member(item, &context).ok_or(LowerError::Unsupported(
-                "a lambda target with no single method",
-            ))?;
+            let member = context
+                .index
+                .functional_member(item)
+                .ok_or(LowerError::Unsupported(
+                    "a lambda target with no single method",
+                ))?;
             let name = context.index.member(member).name.clone();
             let descriptor = MethodDescriptor::to_string(&Descriptor::method_descriptor(
                 member,
@@ -1200,18 +1203,6 @@ impl Compile {
                 bootstrap_arguments: alloc::vec![shape, handle, shape],
             },
         ))
-    }
-
-    /// The one method a functional interface declares, or `None` when it declares none or several.
-    fn functional_member(item: ItemId, context: &Context<'_>) -> Option<jals_hir::MemberId> {
-        let mut methods = context
-            .index
-            .own_members(item)
-            .iter()
-            .copied()
-            .filter(|&id| context.index.member(id).kind == DefKind::Method);
-        let only = methods.next()?;
-        methods.next().is_none().then_some(only)
     }
 
     /// Every class in the file `node` belongs to that holds an enclosing instance, mapped to the class
