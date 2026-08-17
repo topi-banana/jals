@@ -5435,3 +5435,71 @@ public class Keep2 {
 "#;
     assert_eq!(run(source, "Keep2"), "f3\n");
 }
+
+/// A `super.` call names the **direct superclass**, whatever type the member walk found it on.
+///
+/// JVMS §6.5 lets `invokespecial` name only the direct superclass or a *direct* superinterface, and
+/// the member walk routinely finds neither: a `default` method inherited *through* the superclass
+/// resolves to the interface that declares it, which is not one of `C`'s own. The class file that
+/// produced was refused at load — "interface method to invoke is not in a direct superinterface" —
+/// so the only observation is running it. javac names the superclass here, and so does this.
+#[test]
+fn a_super_call_names_the_direct_superclass() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class SupIface {
+    interface I {
+        default String f() { return "I"; }
+    }
+
+    static class B implements I {}
+
+    static class C extends B {
+        String g() { return "C<" + super.f() + ">"; }
+    }
+
+    public static void main(String[] args) {
+        System.out.println(new C().g());
+    }
+}
+"#;
+    assert_eq!(run(source, "SupIface"), "C<I>\n");
+}
+
+/// `super.x = 5` and `super.x += 5` lower, which needs the receiver answered where the *write* path
+/// passes.
+///
+/// A store goes `Place::resolve` → `Place::field` → `Expr::lower` → `Expr::name`, and that chain has
+/// no receiver branch of its own: the one the read path grew special-cased `this` only, so a `super`
+/// write reported `Unresolved("super")` while `super.x` read fine. Which `x` is written is the
+/// hiding rule (JLS §15.11.2), which the `Fieldref`'s owner already carries.
+#[test]
+fn a_super_field_is_written_as_well_as_read() {
+    if !java_available() {
+        return;
+    }
+    let source = r"
+public class HidW {
+    static class A {
+        int x = 1;
+    }
+
+    static class B extends A {
+        int x = 2;
+
+        int set() {
+            super.x = 5;
+            super.x += 3;
+            return x * 100 + super.x;
+        }
+    }
+
+    public static void main(String[] args) {
+        System.out.println(new B().set());
+    }
+}
+";
+    assert_eq!(run(source, "HidW"), "208\n");
+}

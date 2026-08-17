@@ -442,9 +442,16 @@ impl Expr {
 
     /// A bare name: a local, a parameter, or an unqualified field of the enclosing type.
     fn name(name: &ast::NameRef, context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
-        // `this` is not a name that resolves to anything — it is slot 0, which is why it has no
-        // identifier token to look up.
-        if Facts::is_this(name.syntax()) {
+        // Neither `this` nor `super` is a name that resolves to anything — both are slot 0, which is
+        // why neither has an identifier token to look up. They part company at the *access*, not at
+        // the value: which member a `super.` reaches is settled by the owner in the reference and by
+        // `invokespecial`, and the receiver pushed for both is the same one.
+        //
+        // Answering here rather than at each access is what makes the write path work. A store goes
+        // `Place::resolve` → `Place::field` → `Expr::lower` → here, with no receiver branch of its
+        // own anywhere along it, so `super.x = 5` and `super.x += 5` failed to lower at all while
+        // `super.x` read fine.
+        if Facts::is_this(name.syntax()) || Facts::is_super(name.syntax()) {
             return emit.load_this();
         }
         let text = name.syntax().text().to_string();
@@ -568,16 +575,11 @@ impl Expr {
         if context.index.member(member).modifiers.is_static {
             emit.asm.get_static(&owner, &name, &descriptor)?;
         } else {
-            let receiver = Self::inner(access.receiver())?;
-            // `super.x` reads `this`; which `x` it reads is settled by the owner in the field
-            // reference, since a field is *hidden* rather than overridden (JLS §15.11.2) and
-            // `getfield` names where the field is declared. `super` itself lowers to nothing — it
-            // holds a keyword rather than a name, so there is no definition to load.
-            if Facts::is_super(receiver.syntax()) {
-                emit.load_this()?;
-            } else {
-                Self::lower(&receiver, context, emit)?;
-            }
+            // `super.x` reads `this`, which [`Self::name`] answers for the keyword like it does for
+            // `this`. Which `x` it reads is settled by the owner in the field reference, since a
+            // field is *hidden* rather than overridden (JLS §15.11.2) and `getfield` names where the
+            // field is declared.
+            Self::lower(&Self::inner(access.receiver())?, context, emit)?;
             emit.asm.get_field(&owner, &name, &descriptor)?;
         }
         // A field of a type variable is erased in its descriptor exactly as a return type is, so the
@@ -669,9 +671,6 @@ impl Expr {
                 LowerError::Unresolved(call.syntax().text().to_string().trim().into())
             })?;
         let info = context.index.member(member);
-        let owner_item = context.index.item(info.owner);
-        let owner = Descriptor::internal_name_of(info.owner, context.index);
-        let interface_owner = owner_item.kind == DefKind::Interface;
         let constructor = info.kind == DefKind::Constructor;
         let descriptor = MethodDescriptor::to_string(&Descriptor::method_descriptor(
             member,
@@ -698,10 +697,35 @@ impl Expr {
             Some(ast::Expr::FieldAccess(ref access))
                 if access.receiver().is_some_and(|r| Facts::is_super(r.syntax()))
         );
+        // Which class the `Methodref` names. Ordinarily it is where the member is *declared*, which
+        // is what the member walk found. A `super.` call is the exception, and not an optional one:
+        // JVMS §6.5 lets `invokespecial` name only the direct superclass or a *direct*
+        // superinterface, and the walk routinely finds neither — `interface I { default f(){} } class
+        // B implements I {} class C extends B { f(){ return super.f(); } }` resolves to `I.f`, whose
+        // interface is not `C`'s, and the class file it produced was refused at load with "interface
+        // method to invoke is not in a direct superinterface". javac names the direct superclass, so
+        // this does. `Iface.super.m()` (JLS §15.12.1) is the other receiver and is still not handled.
+        let (owner_item, owner) =
+            if super_qualified {
+                let superclass = context.index.superclass_of(context.this_item).ok_or(
+                    LowerError::Unsupported("a `super.` call with no indexed superclass"),
+                )?;
+                (
+                    superclass,
+                    Descriptor::internal_name_of(superclass, context.index),
+                )
+            } else {
+                (
+                    info.owner,
+                    Descriptor::internal_name_of(info.owner, context.index),
+                )
+            };
+        let interface_owner = context.index.item(owner_item).kind == DefKind::Interface;
         // The receiver comes first on the stack, below the arguments.
         if !is_static {
             match call.callee() {
-                _ if super_qualified => emit.load_this()?,
+                // A `super.` receiver needs no arm of its own: [`Self::name`] pushes `this` for the
+                // keyword, exactly as it does for `this` itself.
                 Some(ast::Expr::FieldAccess(access)) => {
                     Self::lower(&Self::inner(access.receiver())?, context, emit)?;
                 }
