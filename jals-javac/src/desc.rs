@@ -139,7 +139,16 @@ impl Descriptor {
             // declares none. Answering `Object` for a *bounded* one is self-consistent within a
             // single compilation — the declaration and its call sites agree — and disagrees with
             // every separately compiled caller, which is a `NoSuchMethodError` rather than an
-            // imprecision. A bound this layer cannot name is the same refusal as any other.
+            // imprecision.
+            //
+            // A bound this layer cannot *name* falls back to `Object` rather than refusing, which
+            // is the one place that leniency is right. Every other unresolved type is a value the
+            // caller wrote and the descriptor has to spell; a bound is a fact about the index, and
+            // the index is routinely partial — `Runnable`, `Cloneable`, `Comparator`, and every
+            // `java.util.function` type are absent from the embedded stubs, so refusing here made
+            // `<T extends Runnable>` uncompilable in the stub-only configuration the playground and
+            // this crate's own tests use. `Object` is what an unbounded parameter erases to anyway,
+            // so the fallback is the answer this line gave before bounds were read at all.
             Ty::TypeVar {
                 owner,
                 member,
