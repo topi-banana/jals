@@ -72,26 +72,14 @@ impl<'a> Hierarchy<'a> {
     /// The one supertype that is a *superclass* — the `extends` a class file names, and the struct a
     /// wasm layout inherits from.
     ///
-    /// Three sites answered this three ways. Two asked which supertype is `kind != Interface`, one
-    /// asked which is `Class | Enum | Record`. The negative form is not the same question: an
-    /// `@interface` is [`DefKind::AnnotationType`], which the rest of this crate treats *as* an
-    /// interface, so the negative filter would follow one as a superclass. The positive form is the
-    /// rule, and it is stated here once.
-    ///
-    /// An `enum` counts: a constant with a body is a subclass of one, and it is the only way a
-    /// declaration that is not a `class` appears here at all.
+    /// Four sites answered this, three ways: two asked which supertype is `kind != Interface`, one
+    /// asked which is `Class | Enum | Record`, and consolidating the copies *in this crate* left the
+    /// resolver holding the fourth — in the negative form, so `super.f()` looked its member up on an
+    /// `@interface` while the class file this crate emitted named `java.lang.Object`. The rule is
+    /// therefore stated where the supertypes are, and this is a projection of it rather than a
+    /// second copy.
     pub(crate) fn superclass(self, item: ItemId) -> Option<ItemId> {
-        self.index
-            .item(item)
-            .supertypes
-            .iter()
-            .map(|supertype| supertype.id)
-            .find(|&id| {
-                matches!(
-                    self.index.item(id).kind,
-                    DefKind::Class | DefKind::Enum | DefKind::Record
-                )
-            })
+        self.index.superclass_of(item)
     }
 
     /// The field `name` reaches from `from`, searched up the superclass chain, nearest first.

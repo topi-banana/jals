@@ -1708,21 +1708,36 @@ impl ProjectIndex {
         .is_none()
     }
 
-    /// The class `super` names inside `owner`: its first indexed supertype that is not an interface.
+    /// The class `super` names inside `owner`: its first indexed supertype that is a *class*.
     ///
     /// `None` for an interface, for a type whose only supertypes are interfaces, and for one whose
-    /// superclass is not indexed at all. Shared by the two questions `super` asks — which constructor
-    /// `super(..)` reaches, and which type `super.f()` looks its member up on — because they are the
-    /// same rule, and having been written twice is how they could have drifted.
+    /// superclass is not indexed at all. Shared by every question `super` asks — which constructor
+    /// `super(..)` reaches, which type `super.f()` looks its member up on, which class a
+    /// `super.`-qualified `invokespecial` names as its owner, and which struct a wasm layout
+    /// inherits from — because they are the same rule, and having been written more than once is how
+    /// they drifted.
+    ///
+    /// The rule is stated **positively**. Asking which supertype is `kind != Interface` is not the
+    /// same question: an `@interface` is [`DefKind::AnnotationType`], which the rest of the
+    /// workspace treats *as* an interface, so the negative filter follows one as a superclass —
+    /// `@interface Marker {} class C implements Marker {}` answered `Marker`, and `super(...)` then
+    /// searched a member set with no constructor in it while the emitted `super_class` said
+    /// `java.lang.Object`. An `enum` counts: a constant with a body is a subclass of one, and it is
+    /// the only way a declaration that is not a `class` appears here at all.
     ///
     /// After the implicit `java.lang.Object` edge this answers for a class with no `extends` too,
     /// which is what makes `super.toString()` resolve.
-    pub(crate) fn superclass_of(&self, owner: ItemId) -> Option<ItemId> {
+    pub fn superclass_of(&self, owner: ItemId) -> Option<ItemId> {
         self.item(owner)
             .supertypes
             .iter()
             .map(|supertype| supertype.id)
-            .find(|&id| self.item(id).kind != DefKind::Interface)
+            .find(|&id| {
+                matches!(
+                    self.item(id).kind,
+                    DefKind::Class | DefKind::Enum | DefKind::Record
+                )
+            })
     }
 
     /// Whether project type `s` is `t` or a transitive subtype of it, walking `s`'s indexed
