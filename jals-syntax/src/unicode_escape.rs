@@ -34,49 +34,69 @@ use alloc::vec::Vec;
 pub(crate) struct Translation {
     /// The source as the language defines it after §3.3.
     text: String,
-    /// For each byte of [`text`](Self::text), the original byte offset it came from — plus one final
-    /// entry for the end, so a translated range maps to an original range with no special case.
-    origin: Vec<usize>,
+    /// Where each untouched run *after* an escape begins, as `(translated offset, original
+    /// offset)`, in increasing order.
+    ///
+    /// Sparse rather than per-byte: between two entries the two sources run in lockstep, so the map
+    /// is `original = entry.1 + (offset - entry.0)` and the identity prefix before the first entry
+    /// needs no entry at all. A per-byte `Vec<usize>` cost `8 * src.len()` bytes on a file with one
+    /// escape in it, built one push per source byte.
+    runs: Vec<(usize, usize)>,
 }
 
 impl Translation {
     /// Translates `src`, or `None` when it holds no eligible escape and the original *is* the
     /// translation.
     ///
-    /// The common case by far, and worth its own answer: it costs one scan for `\` and lets the
-    /// lexer keep borrowing the caller's string with no map at all.
+    /// The common case by far, and worth its own answer: the scan allocates nothing until it
+    /// reaches an escape, so a source that merely *mentions* `\\u` — a Windows path, a regex, a
+    /// javadoc — costs one pass and no allocation at all, and the lexer keeps borrowing the
+    /// caller's string with no map. `Lexer::tokenize` calls this on every parse, and `jals-editor`
+    /// reparses per keystroke, so the pre-pass runs on a current-thread executor before the first
+    /// yield.
+    ///
+    /// The backslash run's parity is carried forward across the one left-to-right pass rather than
+    /// rescanned backwards at each `\`, which is what makes a run of *k* backslashes cost *k* steps
+    /// instead of *k(k+1)/2*.
     pub(crate) fn of(src: &str) -> Option<Self> {
-        if !src.contains("\\u") {
-            return None;
-        }
-        let mut text = String::with_capacity(src.len());
-        let mut origin = Vec::with_capacity(src.len());
         let bytes = src.as_bytes();
+        // Allocated at the first escape, so a source holding none pays nothing.
+        let mut built: Option<(String, Vec<(usize, usize)>)> = None;
         let mut at = 0;
-        let mut translated = false;
+        // Whether the run of backslashes immediately before `at` is even in number, which is what
+        // makes a backslash begin an escape (JLS §3.3): `\\u0041` is a backslash then `u0041`.
+        let mut run_even = true;
         while at < src.len() {
-            if let Some((decoded, width)) = Self::escape_at(src, at) {
-                translated = true;
-                // The whole escape collapses to one character, and every byte of that character
-                // maps back to where the escape began — so a token boundary either side of it lands
-                // on a real boundary in the original.
+            if run_even
+                && bytes[at] == b'\\'
+                && let Some((decoded, width)) = Self::escape_at(src, at)
+            {
+                let (text, runs) = built.get_or_insert_with(|| {
+                    let mut text = String::with_capacity(src.len());
+                    text.push_str(&src[..at]);
+                    (text, Vec::new())
+                });
                 text.push(decoded);
-                for _ in 0..decoded.len_utf8() {
-                    origin.push(at);
-                }
+                // The run after the escape resumes in lockstep: one translated character stands for
+                // `width` original bytes, and a token boundary never falls inside it, because an
+                // escape becomes exactly one character and a token is made of whole characters.
+                runs.push((text.len(), at + width));
                 at += width;
+                // The escape's own trailing hex digit is not a backslash, so the next one starts a
+                // fresh run.
+                run_even = true;
                 continue;
             }
-            // Not an escape: copy one whole UTF-8 sequence, so `origin` stays byte-aligned.
+            // Not an escape: copy one whole UTF-8 sequence.
             let width = Self::utf8_width(bytes[at]);
-            text.push_str(&src[at..at + width]);
-            for _ in 0..width {
-                origin.push(at);
+            if let Some((text, _)) = built.as_mut() {
+                text.push_str(&src[at..at + width]);
             }
+            run_even = bytes[at] != b'\\' || !run_even;
             at += width;
         }
-        origin.push(src.len());
-        translated.then_some(Self { text, origin })
+        let (text, runs) = built?;
+        Some(Self { text, runs })
     }
 
     /// The translated text, for the lexer to divide into tokens.
@@ -90,10 +110,15 @@ impl Translation {
     /// boundary plus the end — a token never begins or ends inside a translated character, because
     /// an escape becomes exactly one character and a token is made of whole characters.
     pub(crate) fn origin(&self, translated_offset: usize) -> usize {
-        self.origin
-            .get(translated_offset)
-            .copied()
-            .unwrap_or_else(|| self.origin.last().copied().unwrap_or(0))
+        // The last run that begins at or before the offset; before the first escape the two sources
+        // are the same string, so the identity is the answer and needs no stored entry.
+        let partition = self
+            .runs
+            .partition_point(|&(start, _)| start <= translated_offset);
+        let (translated_start, original_start) = partition
+            .checked_sub(1)
+            .map_or((0, 0), |index| self.runs[index]);
+        original_start + (translated_offset - translated_start)
     }
 
     /// The escape starting at `at`, as `(character, original byte width)`.
@@ -104,21 +129,21 @@ impl Translation {
     /// escapes is one character — `\ud801\udc00` is U+10400 — which is the only reason this returns a
     /// width rather than a fixed six.
     ///
+    /// The eligibility half is the caller's: [`of`](Self::of) carries the backslash run's parity
+    /// forward across its single left-to-right pass, and the low surrogate this reaches on its own
+    /// is preceded by a hex digit, so it always begins a fresh run.
+    ///
     /// An ill-formed escape (`\u` with fewer than four hex digits) is a compile-time error in Java.
     /// Nothing here checks, so it is left untranslated and reaches the lexer as the `\` it is; the
     /// error it becomes there is the same shape as any other malformed input.
     fn escape_at(src: &str, at: usize) -> Option<(char, usize)> {
         let bytes = src.as_bytes();
-        if bytes[at] != b'\\' || !Self::eligible(bytes, at) {
-            return None;
-        }
         let (unit, width) = Self::escape_unit(bytes, at)?;
         // A high surrogate pairs with a low one written as its own escape; anything else stands
         // alone. A lone surrogate has no `char`, so it stays untranslated rather than becoming one.
         if (0xD800..0xDC00).contains(&unit) {
             if let Some((low, low_width)) = Self::escape_unit(bytes, at + width)
                 && (0xDC00..0xE000).contains(&low)
-                && Self::eligible(bytes, at + width)
             {
                 let combined =
                     0x1_0000 + ((u32::from(unit) - 0xD800) << 10) + (u32::from(low) - 0xDC00);
@@ -150,16 +175,6 @@ impl Translation {
             unit = unit.checked_mul(16)?.checked_add(value)?;
         }
         Some((unit, cursor + 4 - at))
-    }
-
-    /// Whether the backslash at `at` begins an escape, i.e. the backslashes before it are even in
-    /// number. `\\u0041` is a literal backslash then `u0041`; `\\A` is one then an escape.
-    fn eligible(bytes: &[u8], at: usize) -> bool {
-        let mut before = at;
-        while before > 0 && bytes[before - 1] == b'\\' {
-            before -= 1;
-        }
-        (at - before).is_multiple_of(2)
     }
 
     /// The byte width of the UTF-8 sequence a lead byte starts.
@@ -216,6 +231,57 @@ mod tests {
         assert!(Translation::of("class C {}").is_none());
         // A `\u` that cannot be an escape still yields `None` rather than a copy.
         assert!(Translation::of("String s = \"\\\\u\";").is_none());
+    }
+
+    /// A source that merely *mentions* an escape holds none. Every one of these matches a
+    /// `contains("\\u")` fast-out, which is why that is not the eligibility test: each used to build
+    /// a full copy of the source and a per-byte offset map before answering `None`.
+    #[test]
+    fn a_mention_of_an_escape_is_not_one() {
+        for src in [
+            r#"String path = "C:\\users";"#,
+            r#"String regex = "\\\\u";"#,
+            r"// a javadoc writing \\u0041 to mean an escape",
+        ] {
+            assert!(Translation::of(src).is_none(), "translating `{src}`");
+        }
+    }
+
+    /// The run's parity is carried across the one left-to-right pass rather than rescanned backwards
+    /// at every backslash — and still answers what counting the run would.
+    #[test]
+    fn a_backslash_run_keeps_its_parity() {
+        for run in 0..12usize {
+            let prefix = "\\".repeat(run);
+            let src = format!("{prefix}\\u0041");
+            match Translation::of(&src) {
+                Some(translated) => {
+                    assert!(
+                        run.is_multiple_of(2),
+                        "a run of {run} should leave it ineligible"
+                    );
+                    assert_eq!(translated.text(), format!("{prefix}A"));
+                }
+                None => assert!(
+                    !run.is_multiple_of(2),
+                    "a run of {run} should leave it eligible"
+                ),
+            }
+        }
+    }
+
+    /// The offsets before the first escape map to themselves, with no stored entry — the identity
+    /// prefix the sparse map leaves implicit.
+    #[test]
+    fn offsets_before_the_first_escape_map_to_themselves() {
+        let src = "class C { int \\u0061; }";
+        let translated = Translation::of(src).expect("holds an escape");
+        let prefix = src.find('\\').expect("the escape is in there");
+        for offset in 0..=prefix {
+            assert_eq!(translated.origin(offset), offset, "at {offset}");
+        }
+        // And the tail after it runs in lockstep again, one character standing for six bytes.
+        assert_eq!(translated.origin(prefix + 1), prefix + 6);
     }
 
     /// Every translated offset maps back into the original, and the map is monotonic — which is what
