@@ -118,16 +118,28 @@ impl ClasspathLower {
     fn lower_type_params(params: &[TypeParameter]) -> Vec<TypeParamDecl> {
         params
             .iter()
-            .map(|tp| TypeParamDecl {
-                name: tp.name.clone(),
-                // Like the source path, an implicit `Object` class bound contributes no listed bound.
-                bounds: tp
-                    .class_bound
-                    .iter()
-                    .filter(|t| !t.is_java_lang_object())
-                    .chain(tp.interface_bounds.iter())
-                    .map(Self::type_sig_to_member_type)
-                    .collect(),
+            .map(|tp| {
+                // An unbounded `<T>` is written `<T:Ljava/lang/Object;>`, so its class bound has to
+                // be dropped for the parameter to contribute none. An *explicit* `<T extends Object
+                // & Comparable<? super T>>` is written `<T:Ljava/lang/Object;:Ljava/lang/Comparable
+                // <-TT;>;>`, and the two are distinguishable by exactly one thing: javac spells the
+                // first form of an interface-bounded parameter with an *empty* class bound
+                // (`<T::Ljava/lang/Comparable<TT;>;>`, which parses to `class_bound: None`). So a
+                // class bound that survived the parse alongside interface bounds is one the source
+                // wrote, and dropping it erased `T` to its first *interface* bound —
+                // `java.util.Collections.max`/`min` are declared exactly that way, and a call to one
+                // was emitted as `(Ljava/util/Collection;)Ljava/lang/Comparable;`.
+                let explicit = !tp.interface_bounds.is_empty();
+                TypeParamDecl {
+                    name: tp.name.clone(),
+                    bounds: tp
+                        .class_bound
+                        .iter()
+                        .filter(|t| explicit || !t.is_java_lang_object())
+                        .chain(tp.interface_bounds.iter())
+                        .map(Self::type_sig_to_member_type)
+                        .collect(),
+                }
             })
             .collect()
     }
@@ -395,5 +407,67 @@ impl ClasspathLower {
             dims,
             args,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec::Vec;
+
+    use jals_classfile::MethodSignature;
+
+    use super::{ClasspathLower, MemberType};
+
+    /// The bound names lowered from the type parameters of `signature`, in order.
+    fn bounds(signature: &str) -> Vec<Vec<&'static str>> {
+        let parsed =
+            MethodSignature::parse(signature).expect("a signature javac could have written");
+        ClasspathLower::lower_type_params(&parsed.type_parameters)
+            .iter()
+            .map(|param| {
+                param
+                    .bounds
+                    .iter()
+                    .map(|bound| match bound {
+                        MemberType::Named { name, .. } => match name.as_str() {
+                            "Object" => "Object",
+                            "Comparable" => "Comparable",
+                            "Number" => "Number",
+                            other => panic!("unexpected bound `{other}`"),
+                        },
+                        other => panic!("unexpected bound {other:?}"),
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// An `Object` class bound is dropped only when it is the *implicit* one.
+    ///
+    /// javac spells the two forms apart, and this is the whole reason the distinction is readable:
+    /// an unbounded `<T>` is written with `java/lang/Object` as its class bound, while a parameter
+    /// bounded only by interfaces is written with an *empty* one. So a surviving `Object` alongside
+    /// interface bounds is a bound the source wrote, and dropping it erased `T` to its first
+    /// interface — `java.util.Collections.max`/`min` are declared exactly this way, and a call to
+    /// one was emitted as `(Ljava/util/Collection;)Ljava/lang/Comparable;`, which links against
+    /// nothing.
+    #[test]
+    fn an_explicit_object_bound_survives_beside_interface_bounds() {
+        // `static <T> void f(T)` — the implicit bound, which contributes none.
+        assert_eq!(bounds("<T:Ljava/lang/Object;>(TT;)V"), [Vec::<&str>::new()]);
+        // `static <T extends Comparable<T>> void f(T)` — an empty class bound.
+        assert_eq!(
+            bounds("<T::Ljava/lang/Comparable<TT;>;>(TT;)V"),
+            [["Comparable"]]
+        );
+        // `static <T extends Object & Comparable<? super T>> T max(Collection<? extends T>)`.
+        assert_eq!(
+            bounds(
+                "<T:Ljava/lang/Object;:Ljava/lang/Comparable<-TT;>;>(Ljava/util/Collection<+TT;>;)TT;"
+            ),
+            [["Object", "Comparable"]]
+        );
+        // A non-`Object` class bound was never filtered and still is not.
+        assert_eq!(bounds("<T:Ljava/lang/Number;>(TT;)V"), [["Number"]]);
     }
 }
