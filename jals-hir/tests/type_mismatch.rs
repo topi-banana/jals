@@ -448,3 +448,38 @@ fn boxing_survives_a_classpath_wrapper() {
     assert!(indexed_with_stdlib(&[unboxing], 0).is_empty());
     assert!(indexed_with_classpath(&[unboxing], 0, &fixtures).is_empty());
 }
+
+/// An array is assignable to `java.lang.Object` however `Object` reached the index.
+///
+/// The sibling of [`assigning_a_project_type_to_object_is_not_a_mismatch`] for the one reference
+/// type that has no supertype chain to walk. Through the stubs the target is demoted to a spelling
+/// and the lenient external arm answers; through a classpath `Object` it is an indexed item, and
+/// the array arm decided it by refusing outright — a reported mismatch on `Object o = args;` in
+/// every `main`, and, in argument position, `f(Object)` dropped from the applicable set so overload
+/// selection picked the wrong member or none.
+#[test]
+fn assigning_an_array_to_object_is_not_a_mismatch() {
+    let fixtures = java_lang_fixtures();
+    let src = "class C { void m() { int[] a = new int[3]; Object o = a; } }";
+    assert!(indexed_with_stdlib(&[src], 0).is_empty());
+    assert!(indexed_with_classpath(&[src], 0, &fixtures).is_empty());
+    let overload = "class C { void f(Object o) {} void f(int n) {} void m(int[] a) { f(a); } }";
+    assert!(indexed_with_classpath(&[overload], 0, &fixtures).is_empty());
+}
+
+/// A project type merely *named* like a wrapper class is not one.
+///
+/// Boxing and unboxing are defined on eight classes in `java.lang` (JLS §5.1.7 / §5.1.8), and the
+/// rule reached an indexed item through its fully-qualified name — matched on its last segment
+/// alone, so `package app; class Number {}` accepted `Number n = 1;`. The damage is not a missing
+/// diagnostic: applicability is built on the same conversion, so `f(app.Number)` became applicable
+/// to `f(1)` and the lowering emitted `invokevirtual C.f:(Lapp/Number;)V` with an `int` on the
+/// stack.
+#[test]
+fn a_project_type_named_like_a_wrapper_is_not_one() {
+    let boxing = "package app; class Number {} class C { void m() { Number n = 1; } }";
+    assert_eq!(indexed(&[boxing], 0).len(), 1);
+    let unboxing =
+        "package app; class Integer {} class C { void m(Integer boxed) { int n = boxed; } }";
+    assert_eq!(indexed(&[unboxing], 0).len(), 1);
+}

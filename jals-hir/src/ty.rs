@@ -149,7 +149,9 @@ impl Primitive {
     /// overload for `append(1)` — and overload selection, finding no candidate more specific than
     /// every other, then took the first declared one.
     fn boxes_to(self, name: &str) -> bool {
-        let simple = Self::simple(name);
+        let Some(simple) = Self::matchable(name) else {
+            return false;
+        };
         simple == self.wrapper()
             || matches!(simple, "Object" | "Comparable" | "Serializable")
             // Only the numeric wrappers extend `Number`; `Boolean` and `Character` do not.
@@ -163,16 +165,40 @@ impl Primitive {
     /// not a wrapper at all cannot unbox — an unindexed external type is still a *reference*, and no
     /// spelling of one turns it into a number.
     fn unboxes_from(self, name: &str) -> bool {
-        Self::unwrap_name(Self::simple(name))
+        Self::matchable(name)
+            .and_then(Self::unwrap_name)
             .is_some_and(|source| source == self || source.widens_to(self))
     }
 
-    /// The last segment of a possibly-qualified name: an external type carries whatever spelling the
-    /// source used, so `java.lang.Integer` and `Integer` both have to match.
-    fn simple(name: &str) -> &str {
-        name.rsplit('.').next().unwrap_or(name)
+    /// The simple name a possibly-qualified spelling may be matched on, or `None` when the qualifier
+    /// rules every match out.
+    ///
+    /// An *external* type carries whatever spelling the source used, so `java.lang.Integer` and a
+    /// bare `Integer` both have to match. An *indexed* one carries its whole fully-qualified name,
+    /// and matching that on its last segment alone made every type merely *named* `Integer`,
+    /// `Number`, `Object`, `Comparable`, or `Serializable` a wrapper class — `package app; class
+    /// Number {}` accepted `Number n = 1;`, and, because applicability is built on
+    /// [`Ty::is_assignable_to`], `f(app.Number)` became applicable to `f(1)` and a lowering emitted
+    /// `invokevirtual C.f:(Lapp/Number;)V` with an `int` on the stack.
+    ///
+    /// So a qualifier is admitted only when it is the package the type it names actually lives in.
+    /// Every type in this rule is in `java.lang` bar one — `Serializable` is `java.io`'s.
+    fn matchable(name: &str) -> Option<&str> {
+        match name.rsplit_once('.') {
+            None => Some(name),
+            Some(("java.lang", simple) | ("java.io", simple @ "Serializable")) => Some(simple),
+            Some(_) => None,
+        }
     }
 }
+
+/// The three types an array is assignable to: `Object`, and the two interfaces JLS §10.7 gives
+/// every array. Fully qualified, because these are matched against an *indexed* item's own name.
+const ARRAY_SUPERTYPES: [&str; 3] = [
+    "java.lang.Object",
+    "java.lang.Cloneable",
+    "java.io.Serializable",
+];
 
 /// A nominal reference type, identified by name and carrying its type arguments as written.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -352,10 +378,17 @@ impl Ty {
                 (Primitive(a), Primitive(b)) => a == b,
                 _ => s.is_assignable_to(t, index),
             },
-            // An array is a reference type: it widens to `Object` / `Cloneable` / `Serializable`
-            // (external), but never to a user class.
+            // An array is a reference type: it widens to `Object` / `Cloneable` / `Serializable`,
+            // but never to a user class. The two arms exist for the same reason the boxing pair
+            // above does — a stub `Object` is demoted to a spelling and a classpath one is not, so
+            // registering the classpath ahead of the stubs made `Object o = a;` land here as an
+            // indexed type. Reading it as a confident mismatch reported one on every array-to-
+            // `Object` assignment and, in argument position, dropped `f(Object)` from the
+            // applicable set so the wrong overload was selected or none was.
             (Array(_), Class(External { .. })) => true,
-            (Array(_), Class(Project { .. })) => false,
+            (Array(_), Class(Project { id, .. })) => {
+                index.is_none_or(|index| ARRAY_SUPERTYPES.contains(&index.item(*id).fqn.as_str()))
+            }
 
             // `void` is assignable only to itself (handled by identity above).
             (Void, _) => false,
