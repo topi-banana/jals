@@ -191,7 +191,7 @@ it got, because one number over a compiler says nothing about what is missing:
 | re-read | `jals-classfile` reads back what the assembler wrote |
 | **verified** | a real JVM **linked** the class: the bytecode verifier accepted it |
 | descriptor-equal | every method's descriptor is one javac gave the same name |
-| *descriptors-unjudged* | not a rung: javac's own class files for the case could not be read, so nothing was compared |
+| *descriptors-unjudged* | not a rung: nothing was compared, and the outcome says which of three reasons |
 
 `verified` is what this harness was built for. The assembler computes its own `max_stack`,
 `max_locals` and `StackMapTable`, and `jals-classfile` reads back whatever those say — so a frame
@@ -209,14 +209,29 @@ which is all a separately-compiled caller links against. Types jals did not emit
 and jals does not, access flags, and attributes are all out of scope.
 
 It also has a third answer, `descriptors-unjudged`, and it exists because the comparison can fail
-to *happen*: javac's own `expected/` class files are read through this workspace's own reader, so a
-`.class` it refuses, a constant-pool entry it cannot resolve, or a directory a partial generation
-run left empty all mean nothing was compared. Folding that into "agreed" made the rung fail **open**
-— and open is the top rung, so a corpus problem was scored as "jals agrees with javac", per
-construct family (a whole package shares its `expected/` output), and invisibly: no bucket, no
-`--list-failures` entry, no effect on `--strict`. A case that lands there counts as `verified`, is
-not counted as `descriptor-equal`, and is a corpus problem rather than a defect — the same treatment
-`read-error` gets for a source the harness could not read.
+to *happen*. Folding that into "agreed" made the rung fail **open** — and open is the top rung, so
+nothing-compared was scored as "jals agrees with javac", per construct family (a whole package
+shares its `expected/` output), and invisibly: no bucket, no `--list-failures` entry, no effect on
+`--strict`. A case that lands there counts as `verified` and not as `descriptor-equal`, and is never
+a defect — the same treatment `read-error` gets for a source the harness could not read.
+
+The outcome carries **which** of three reasons, because they are not one finding and only the first
+is about the corpus:
+
+| reason | what it means |
+| --- | --- |
+| the class files could not be read | javac's own `expected/` output is read through this workspace's own reader, so a `.class` it refuses or a directory a partial generation run left empty means there was nothing to read |
+| jals emitted no type javac also named | both compilers produced class files and named none of them the same — a disagreement about *names*, which is a finding of its own and not one about descriptors |
+| neither compiler declares a method the other does | an annotation interface, a marker interface, a `package-info`: javac's class file declares no method, so there is nothing to agree about |
+
+The distinction is not cosmetic. Every one of these used to print "javac's own class files for the
+case could not be read", which sent a reader to the corpus generator for something the compiler
+decided — and of the thirty cases in the current run, **none** is an unreadable class file.
+
+Both this and `descriptor-equal`'s failures are listed **per case** rather than bucketed. A bucket
+exists to bundle failures of one shape, and these have none in common: each names a different method
+of a different class, so eliding the names leaves one row saying `a descriptor javac spells
+differently` forty-seven times over. `--limit` bounds the listing the way it bounds the gaps.
 
 ```sh
 git submodule update --init --depth 1 jals-tests/sources/openjdk
