@@ -315,3 +315,86 @@ fn a_method_type_parameter_shadows_the_enclosing_class() {
         "the method's `T` is unbounded; the class's bound is not its own"
     );
 }
+
+/// A declarator's own array brackets belong to the *name*, not to the declaration's type.
+///
+/// `int a[], b;` is one written type and two different member types (JLS §10.2). Reading only the
+/// `TYPE` node captured both as `int`, and a field's type is not a spelling detail: `a.length` and
+/// `a[0]` are then errors against a type the source never wrote, and the class file spells the
+/// field `I` where javac spells it `[I`.
+#[test]
+fn a_c_style_declarator_carries_its_own_dimensions() {
+    let sources = ["class T { int a[], b; String s[][]; int[] mixed[]; }"];
+    let (_nodes, index) = build(&sources);
+    let t = item(&index, &sources, 0, "T");
+    let field = |name: &str| index.member(index.resolve_member(t, name, Namespace::Value).unwrap());
+
+    let primitive = |dims| MemberType::Primitive {
+        keyword: "int".into(),
+        dims,
+    };
+    assert_eq!(field("a").ty, primitive(1));
+    // The second declarator wrote no brackets, so it is not an array — which is the whole reason
+    // the count has to be per name.
+    assert_eq!(field("b").ty, primitive(0));
+    assert_eq!(
+        field("s").ty,
+        MemberType::Named {
+            name: "String".into(),
+            qualified: None,
+            dims: 2,
+            args: Vec::new(),
+        }
+    );
+    // Legal, and the two halves add: `int[] mixed[]` is an `int[][]`.
+    assert_eq!(field("mixed").ty, primitive(2));
+}
+
+/// A parameter and a return type take the same brackets, in the two places Java puts them.
+///
+/// This is what a *descriptor* is made of, so a caller compiled separately links against it:
+/// `void m(int xs[])` is `([I)V` and `int m()[]` returns `[I`.
+#[test]
+fn c_style_dimensions_reach_parameters_and_return_types() {
+    let sources = [
+        "class T { void m(int xs[], String a[][]) {} int r()[] { return null; } int[] q()[] { return null; } }",
+    ];
+    let (_nodes, index) = build(&sources);
+    let t = item(&index, &sources, 0, "T");
+    let method =
+        |name: &str| index.member(index.resolve_member(t, name, Namespace::Method).unwrap());
+
+    let params = &method("m").params;
+    assert_eq!(
+        params[0].ty,
+        MemberType::Primitive {
+            keyword: "int".into(),
+            dims: 1
+        }
+    );
+    assert_eq!(
+        params[1].ty,
+        MemberType::Named {
+            name: "String".into(),
+            qualified: None,
+            dims: 2,
+            args: Vec::new(),
+        }
+    );
+    // The return brackets sit *after* the parameter list, so they are in neither the return `TYPE`
+    // node nor on a declarator name.
+    assert_eq!(
+        method("r").ty,
+        MemberType::Primitive {
+            keyword: "int".into(),
+            dims: 1
+        }
+    );
+    assert_eq!(
+        method("q").ty,
+        MemberType::Primitive {
+            keyword: "int".into(),
+            dims: 2
+        }
+    );
+}

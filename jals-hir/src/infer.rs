@@ -933,8 +933,14 @@ impl<'a> Inferer<'a> {
                     if Self::is_variable_arity(&node) {
                         t = Ty::Array(Box::new(t));
                     }
-                    for tok in Collect::direct_ident_tokens(&node) {
-                        self.set_def_type(Collect::token_start(&tok), t.clone());
+                    // Each name may add array dimensions of its own — `int a[], b;` binds an `int[]`
+                    // and an `int` from one written type, and a method's return dimensions
+                    // (`int m()[]`) are written after the parameter list, where the same walk finds
+                    // them. Giving every name the declaration's type made `a.length` a lookup on an
+                    // `int`, which is a report about a type the source never wrote.
+                    for (tok, dims) in ast::Declarators::dims_of(&node) {
+                        let ty = (0..dims).fold(t.clone(), |ty, _| Ty::Array(Box::new(ty)));
+                        self.set_def_type(Collect::token_start(&tok), ty);
                     }
                 }
             }

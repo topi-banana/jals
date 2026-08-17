@@ -5614,3 +5614,74 @@ fn an_escaped_identifier_is_the_name_it_spells() {
     };
     assert_eq!(fields, ["a"], "the field is named `a`");
 }
+
+/// A C-style array declarator reaches the *descriptor*, which is the half no verifier can catch.
+///
+/// `void m(int xs[])` is `([I)V`. Emitting it as `(I)V` links perfectly inside one compilation —
+/// the declaration and its call sites are equally wrong — and is a `NoSuchMethodError` for anything
+/// compiled separately. `public static void main(String argc[])` is the shape that matters: spelled
+/// `(Ljava/lang/String;)V`, the JVM does not find `main` at all.
+#[test]
+fn a_c_style_array_declarator_reaches_the_descriptor() {
+    let source = "
+public class Dims {
+    static int f1[];
+    static int[] mixed[];
+    static void m1(int xs[]) {}
+    static void m2(String a[][], int b[]) {}
+    static int m3()[] { return null; }
+    public static void main(String argc[]) {
+        int v[] = new int[3];
+        System.out.println(v.length);
+    }
+}
+";
+    let classes = compile(source).expect("compile");
+    let class = jals_exec::block_on_inline(jals_classfile::ClassFile::read(
+        classes
+            .iter()
+            .find(|class| class.internal_name == "Dims")
+            .expect("the class")
+            .bytes
+            .as_slice(),
+    ))
+    .expect("reparse");
+    let pool = &class.constant_pool;
+    let utf8 = |index| pool.utf8(index).expect("utf8").into_owned();
+
+    let fields: Vec<(String, String)> = class
+        .fields
+        .iter()
+        .map(|field| (utf8(field.name_index), utf8(field.descriptor_index)))
+        .collect();
+    assert_eq!(
+        fields,
+        [
+            ("f1".to_owned(), "[I".to_owned()),
+            ("mixed".to_owned(), "[[I".to_owned()),
+        ]
+    );
+
+    let methods: Vec<(String, String)> = class
+        .methods
+        .iter()
+        .map(|method| (utf8(method.name_index), utf8(method.descriptor_index)))
+        .collect();
+    for (name, descriptor) in [
+        ("m1", "([I)V"),
+        ("m2", "([[Ljava/lang/String;[I)V"),
+        ("m3", "()[I"),
+        ("main", "([Ljava/lang/String;)V"),
+    ] {
+        assert!(
+            methods.contains(&(name.to_owned(), descriptor.to_owned())),
+            "{name} should be {descriptor}, got {methods:?}"
+        );
+    }
+
+    if !java_available() {
+        return;
+    }
+    // And the local's own brackets: `v.length` only resolves if `v` is an `int[]` in the body too.
+    assert_eq!(run(source, "Dims").trim(), "3");
+}

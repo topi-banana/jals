@@ -14,15 +14,74 @@ use rowan::ast::support;
 
 use super::{
     AssignmentExpr, AstNode, AstSupport, AttrMeta, Attribute, BinaryExpr, BreakStmt, CatchClause,
-    ContinueStmt, Decl, Expr, FieldAccess, FieldDecl, ForStmt, Literal, LocalVarDecl, Modifiers,
-    QualifiedName, Resource, Stmt, SwitchExpr, Type, YieldStmt,
+    ContinueStmt, Decl, Expr, FieldAccess, FieldDecl, ForStmt, Literal, LocalVarDecl, MethodDecl,
+    Modifiers, Param, QualifiedName, Resource, Stmt, SwitchExpr, Type, YieldStmt,
 };
 use crate::language::{SyntaxNode, SyntaxToken};
 use crate::syntax_kind::SyntaxKind::{
-    self, DOT, EQ, FOR_KW, IDENT, RPAREN, SEMICOLON, SWITCH_EXPR, SWITCH_STMT, YIELD_STMT,
+    self, COMMA, DOT, EQ, FOR_KW, IDENT, LBRACK, RPAREN, SEMICOLON, SWITCH_EXPR, SWITCH_STMT,
+    UNDERSCORE, YIELD_STMT,
 };
 #[cfg(test)]
 use crate::syntax_kind::SyntaxKind::{MODIFIERS, NON_SEALED_KW};
+
+/// The declarator-level reader every binding form shares: a name and the array dimensions written
+/// after it.
+///
+/// Its own namespace rather than an accessor on one node type, because the same shape is written in
+/// six places — a field, a local, a parameter, a `catch` binding, a `for`-each variable, a
+/// `try` resource — and `jals-hir` types all of them in one walk. A per-node accessor would have
+/// been six copies of the rule, and a rule with six copies is the reason `int a[]` was captured as
+/// an `int` in some of them and not others.
+pub struct Declarators;
+
+impl Declarators {
+    /// Each directly-declared name of `node`, paired with the array dimensions written **after** it.
+    ///
+    /// Java lets a declarator carry its own brackets (JLS §8.4.1, §10.2): `int a[], b;` declares an
+    /// `int[]` and an `int`, from one type. So the dimensions belong to the *name*, not to the
+    /// declaration's `TYPE` node — which is why a name accessor such as [`FieldDecl::names`] alone
+    /// is not enough to type a binding, and reading only the `TYPE` node captured `int a[]` as an
+    /// `int`.
+    ///
+    /// The tokens are walked in order rather than counted per node, exactly as a declaration's
+    /// initialisers have to be: `int a[] = {1}, b;` puts brackets, an `=`, and a second name under
+    /// one node, and only their order says which name the brackets belong to. A `,` closes the open
+    /// declarator, and so does an `=` — everything a `[` could mean after that is inside the
+    /// initialiser's own node, not a direct token here.
+    ///
+    /// A method declaration passes through the same walk and comes out right for a different
+    /// reason: its brackets are written after the parameter list (`int m()[]`), which is a node, so
+    /// the only open declarator when they arrive is the method's own name.
+    ///
+    /// An unnamed `_` binding contributes nothing, matching the name accessors; brackets written
+    /// after one belong to a declarator this does not report, so they are dropped rather than added
+    /// to the name before it.
+    pub fn dims_of(node: &SyntaxNode) -> Vec<(SyntaxToken, u32)> {
+        let mut out: Vec<(SyntaxToken, u32)> = Vec::new();
+        // Whether the declarator now open is one this reports, and still able to take brackets.
+        let mut open = false;
+        for token in node
+            .children_with_tokens()
+            .filter_map(rowan::NodeOrToken::into_token)
+        {
+            match token.kind() {
+                IDENT => {
+                    out.push((token, 0));
+                    open = true;
+                }
+                LBRACK if open => {
+                    if let Some((_, dims)) = out.last_mut() {
+                        *dims += 1;
+                    }
+                }
+                EQ | COMMA | UNDERSCORE => open = false,
+                _ => {}
+            }
+        }
+        out
+    }
+}
 
 impl QualifiedName {
     /// The full dotted name, e.g. `a.b.c` or `a.b.*` — each segment with its JLS §3.3 escapes
@@ -266,6 +325,49 @@ impl FieldDecl {
     pub fn names(&self) -> impl Iterator<Item = SyntaxToken> {
         AstSupport::ident_tokens(&self.syntax)
     }
+
+    /// Every declared field name token paired with the array dimensions written after it
+    /// (`int a[], b;` → `[(a, 1), (b, 0)]`).
+    ///
+    /// What [`names`](Self::names) cannot say. The declaration has one `TYPE` node and each
+    /// declarator may add brackets of its own (JLS §10.2), so a consumer that types a binding from
+    /// the `TYPE` node alone captures `int a[]` as an `int` — and then `a.length` and `a[0]` are
+    /// errors against a type the source never wrote.
+    ///
+    /// There is deliberately no twin on [`LocalVarDecl`]. A field is captured name by name, so it
+    /// reads the two together; a local's type comes from the whole-declaration walk
+    /// ([`Declarators::dims_of`]), which is the same rule reached one level lower.
+    pub fn names_with_dims(&self) -> Vec<(SyntaxToken, u32)> {
+        Declarators::dims_of(&self.syntax)
+    }
+}
+
+impl Param {
+    /// The array dimensions written after the parameter's name (`int xs[]` → 1).
+    ///
+    /// A parameter is a declarator too (JLS §8.4.1), so the C-style form is legal here and means
+    /// exactly what `int[] xs` means — including in the method's *descriptor*, which is what a
+    /// separately-compiled caller links against. `void m(int xs[])` is `([I)V`, and reading only
+    /// the `TYPE` node spelled it `(I)V`.
+    pub fn extra_dims(&self) -> u32 {
+        Declarators::dims_of(&self.syntax)
+            .first()
+            .map_or(0, |&(_, dims)| dims)
+    }
+}
+
+impl MethodDecl {
+    /// The array dimensions written after the parameter list (`int m()[]` → 1).
+    ///
+    /// The odd one out: these brackets belong to neither the return `TYPE` node nor a declarator
+    /// name, because the grammar puts them after `params` (`int m()[]` returns an `int[]`). The
+    /// parameter list is a node, so [`Declarators::dims_of`] still reads them the same way — the
+    /// method's own name is the only declarator open when they arrive.
+    pub fn extra_return_dims(&self) -> u32 {
+        Declarators::dims_of(&self.syntax)
+            .first()
+            .map_or(0, |&(_, dims)| dims)
+    }
 }
 
 impl CatchClause {
@@ -471,9 +573,9 @@ impl SwitchExpr {
 mod tests {
     use super::{AstNode, SyntaxNode};
     use crate::ast::{
-        AttrArg, Attribute, BreakStmt, CatchClause, ClassDecl, ContinueStmt, Decl, ExprStmt,
-        FieldDecl, ForStmt, ImportDecl, ImportGroup, LocalVarDecl, MethodDecl, QualifiedName,
-        Resource, Stmt, SwitchExpr, Type,
+        AttrArg, Attribute, BreakStmt, CatchClause, ClassDecl, ContinueStmt, Decl, Declarators,
+        ExprStmt, FieldDecl, ForStmt, ImportDecl, ImportGroup, LocalVarDecl, MethodDecl,
+        QualifiedName, Resource, Stmt, SwitchExpr, Type,
     };
     use crate::parser::Parse;
 
@@ -500,6 +602,58 @@ mod tests {
     fn field_names_collects_every_declarator() {
         let field: FieldDecl = first("class C { int x, y; }");
         assert_eq!(names_of(field.names()), ["x", "y"]);
+    }
+
+    fn dims_of(pairs: Vec<(crate::language::SyntaxToken, u32)>) -> Vec<(String, u32)> {
+        pairs
+            .into_iter()
+            .map(|(token, dims)| (token.text().to_owned(), dims))
+            .collect()
+    }
+
+    /// `int a[], b;` is one written type and two different declared ones.
+    ///
+    /// The brackets are a *declarator's*, not the declaration's (JLS §10.2), so only their position
+    /// among the tokens says which name they belong to.
+    #[test]
+    fn declarator_dims_belong_to_the_name_they_follow() {
+        let local: LocalVarDecl = first("class C { void m() { int a[], b, c[][] = null; } }");
+        assert_eq!(
+            dims_of(Declarators::dims_of(local.syntax())),
+            [
+                ("a".to_owned(), 1),
+                ("b".to_owned(), 0),
+                ("c".to_owned(), 2)
+            ]
+        );
+        let field: FieldDecl = first("class C { int[] mixed[]; }");
+        // The two halves add: the `TYPE` node's own dimension is not this accessor's to report.
+        assert_eq!(dims_of(field.names_with_dims()), [("mixed".to_owned(), 1)]);
+    }
+
+    /// An initialiser closes the declarator, so nothing inside it is mistaken for a dimension.
+    #[test]
+    fn an_initialiser_closes_the_declarator() {
+        let local: LocalVarDecl = first("class C { void m() { int a = xs[0], b[] = null; } }");
+        assert_eq!(
+            dims_of(Declarators::dims_of(local.syntax())),
+            [("a".to_owned(), 0), ("b".to_owned(), 1)]
+        );
+    }
+
+    /// The two places that are not a declarator list at all: a parameter, and a return type whose
+    /// brackets are written after the parameter list.
+    #[test]
+    fn parameters_and_return_types_carry_their_own_dims() {
+        let method: MethodDecl = first("class C { int m(String a[][], int b)[] { return null; } }");
+        assert_eq!(method.extra_return_dims(), 1);
+        let params: Vec<u32> = method
+            .params()
+            .expect("a parameter list")
+            .params()
+            .map(|param| param.extra_dims())
+            .collect();
+        assert_eq!(params, [2, 0]);
     }
 
     #[test]

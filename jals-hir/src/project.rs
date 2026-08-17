@@ -395,6 +395,14 @@ impl MemberType {
         }
     }
 
+    /// This type with `extra` more array levels.
+    ///
+    /// What a C-style declarator needs: `int a[][]` writes its dimensions after the *name*, so the
+    /// count comes from the declarator rather than from the type, and it can be more than one.
+    fn with_dimensions(self, extra: u32) -> Self {
+        (0..extra).fold(self, |ty, _| ty.with_extra_dimension())
+    }
+
     /// This type with one more array level.
     ///
     /// What `int... xs` needs: the `...` is the only thing saying the parameter is an `int[]`, and both
@@ -2115,18 +2123,33 @@ impl ProjectIndex {
                         let mut modifiers = MemberModifiers::of(&member);
                         modifiers.is_static |= in_interface;
                         modifiers.is_public |= in_interface;
-                        for name in field.names() {
+                        // Each declarator carries its own array dimensions (`int a[], b;` declares
+                        // an `int[]` and an `int`), so the type is per name rather than per
+                        // declaration.
+                        for (name, dims) in field.names_with_dims() {
                             members.push(Member {
                                 modifiers,
-                                ..new_member(&name, DefKind::Field, ty.clone())
+                                ..new_member(
+                                    &name,
+                                    DefKind::Field,
+                                    ty.clone().with_dimensions(dims),
+                                )
                             });
                         }
                     }
                 }
                 METHOD_DECL => {
                     if let Some(name) = Collect::first_ident_token(&member) {
+                        let declared = ast::MethodDecl::cast(member.clone());
+                        // `int m()[]` returns an `int[]`, and those brackets sit after the parameter
+                        // list — neither in the return `TYPE` node nor on a declarator name.
                         let ty = MemberType::of(
-                            ast::MethodDecl::cast(member.clone()).and_then(|m| m.return_type()),
+                            declared.as_ref().and_then(ast::MethodDecl::return_type),
+                        )
+                        .with_dimensions(
+                            declared
+                                .as_ref()
+                                .map_or(0, ast::MethodDecl::extra_return_dims),
                         );
                         let (params, varargs) = Self::params_of(&member);
                         let throws = Self::throws_of(&member);
@@ -2365,7 +2388,9 @@ impl ProjectIndex {
                 // `int... xs` declares an `int[]`, and the `...` is the only thing that says so. Its
                 // *type* has to carry the dimension: the parameter is a local of that type inside the
                 // body, and the method's descriptor is `([I)V` rather than `(I)V`.
-                let mut ty = MemberType::of(param.ty());
+                // `int xs[]` is the same parameter as `int[] xs` (JLS §8.4.1), and the brackets are
+                // written after the name, so the descriptor depends on reading them here too.
+                let mut ty = MemberType::of(param.ty()).with_dimensions(param.extra_dims());
                 if spread {
                     ty = ty.with_extra_dimension();
                 }
