@@ -235,7 +235,11 @@ pub struct MemberModifiers {
     /// which completion offered, a lowering would have emitted a call javac rejects, and
     /// `interface I { int clone(); }` acquired a bridge from. `is_private` is still separate rather
     /// than folded in: the two answer different questions, and a package-private member is neither.
-    pub is_public: bool,
+    ///
+    /// `pub(crate)` where its two siblings are `pub`: they decide an *instruction* a code generator
+    /// emits, and this decides a *member set* the resolver answers with, so no consumer outside this
+    /// crate reads it. The struct stays constructible only in here, which it already was.
+    pub(crate) is_public: bool,
 }
 
 /// A member of an indexed type: a field, method, constructor, or enum constant.
