@@ -738,7 +738,9 @@ impl Compile {
             let outer_index = pool
                 .class_index(&Descriptor::internal_name_of(enclosing, context.index))
                 .ok_or(AsmError::PoolFull)?;
-            let name_index = pool.utf8_index(name.text()).ok_or(AsmError::PoolFull)?;
+            let name_index = pool
+                .utf8_index(&jals_syntax::decoded_ident(&name))
+                .ok_or(AsmError::PoolFull)?;
             // The flags the *source* wrote, which is where a nested type's `private` and `static` go.
             let kind = context.index.item(item).kind;
             let is_annotation = kind == DefKind::AnnotationType;
@@ -1284,16 +1286,13 @@ impl Compile {
             let Some(token) = decl.name_token() else {
                 continue;
             };
-            let name = token.text().to_owned();
+            let name = jals_syntax::decoded_ident(&token).into_owned();
             let own = context.facts().member_at(&token)?;
             if context.index.member(own).modifiers.is_static {
                 continue;
             }
-            let own_text = MethodDescriptor::to_string(&Descriptor::method_descriptor(
-                own,
-                context.index,
-                false,
-            )?);
+            let own_descriptor = Descriptor::method_descriptor(own, context.index, false)?;
+            let own_text = MethodDescriptor::to_string(&own_descriptor);
             // Every inherited method of the same name and arity: an override of a *generic* one erases
             // differently, and that difference is exactly what needs bridging.
             for &inherited in &context.index.members_of(item) {
@@ -1307,23 +1306,24 @@ impl Compile {
                 if Hierarchy::of(context.index).overrides(own, inherited) == Overrides::No {
                     continue;
                 }
-                let info = context.index.member(inherited);
-                // The declaring type's own parameters, so `Holder<T>.put(T)` erases to `put(Object)`
-                // rather than failing on a name the index resolves to nothing.
-                let vars: Vec<String> = context
-                    .index
-                    .item(info.owner)
-                    .type_params
-                    .iter()
-                    .map(|param| param.name.clone())
-                    .collect();
-                let Ok(descriptor) =
-                    Descriptor::method_descriptor_erasing(inherited, context.index, false, &vars)
+                let Ok(descriptor) = Descriptor::method_descriptor(inherited, context.index, false)
                 else {
                     continue;
                 };
                 let text = MethodDescriptor::to_string(&descriptor);
                 if text == own_text {
+                    continue;
+                }
+                // A bridge hands the target's returned value straight back, so it can only express a
+                // return that is *already* the erased one — a narrower reference. Returns that differ
+                // in kind are no covariant override at all (JLS §8.4.8.3 admits a subtype, and a
+                // primitive is a subtype of nothing), so nothing legitimate is dropped by refusing;
+                // what is avoided is a method whose `ireturn` disagrees with its own
+                // `Ljava/lang/Object;` descriptor. `interface I { int clone(); }` (JLS §9.2 — legal,
+                // and impossible to implement) is how it was reached, back when an interface
+                // inherited `Object.clone()`. It no longer does, and this stays: the rule is about
+                // what a bridge can express, not about that one arrival.
+                if !Self::returns_are_bridgeable(&own_descriptor, &descriptor) {
                     continue;
                 }
                 methods.push(Self::bridge(
@@ -1338,6 +1338,25 @@ impl Compile {
             }
         }
         Ok(())
+    }
+
+    /// Whether a bridge from `inherited`'s erased descriptor to `own`'s can express the return.
+    ///
+    /// It can when both are reference types — the narrower one *is* an instance of the wider, so the
+    /// value passes through untouched, which is all [`bridge`](Self::bridge) knows how to do — or
+    /// when the returns already agree and only the parameters needed erasing. A primitive against a
+    /// reference is neither: no conversion the JVM would accept is implied by the source, and a
+    /// value returned unchanged fails the verifier against the descriptor it was declared under.
+    fn returns_are_bridgeable(own: &MethodDescriptor, inherited: &MethodDescriptor) -> bool {
+        use jals_classfile::{FieldType, ReturnType};
+        let reference = |ret: &ReturnType| {
+            matches!(
+                ret,
+                ReturnType::Type(FieldType::Object(_) | FieldType::Array(_))
+            )
+        };
+        reference(&own.return_type) && reference(&inherited.return_type)
+            || own.return_type == inherited.return_type
     }
 
     /// One bridge: take the erased arguments, cast each to what the override declared, and call it.
@@ -1360,11 +1379,20 @@ impl Compile {
             asm.load(slot)?;
             // The override declared something narrower, so the erased argument is cast to it — which is
             // the `checkcast` javac emits and the reason a bridge can throw `ClassCastException`.
-            if let Some(jals_classfile::FieldType::Object(narrower)) =
-                target_descriptor.params.get(position)
-                && matches!(param, jals_classfile::FieldType::Object(wider) if *wider != *narrower)
+            //
+            // An *array* parameter is a reference like any other and needs the same cast: reading
+            // only `FieldType::Object` let every `T[]` and varargs parameter through uncast, and
+            // `take([Ljava/lang/Number;)` delegating to `take([Ljava/lang/Integer;)` is a
+            // `VerifyError` rather than a run-time failure. A `checkcast` to an array names the
+            // array's own descriptor as its class, which is what `FieldType`'s `Display` spells.
+            if let Some(target) = target_descriptor.params.get(position)
+                && let (Some(narrower), Some(wider)) = (
+                    Descriptor::checkcast_class(target),
+                    Descriptor::checkcast_class(param),
+                )
+                && narrower != wider
             {
-                asm.check_cast(narrower)?;
+                asm.check_cast(&narrower)?;
             }
             slot += Slots::descriptor_width(&param.to_string());
         }
@@ -1574,7 +1602,9 @@ impl Compile {
             }
             out.push(FieldInfo {
                 access_flags: FieldAccessFlags(Self::field_flags(node, context.in_interface)),
-                name_index: pool.utf8_index(name.text()).ok_or(AsmError::PoolFull)?,
+                name_index: pool
+                    .utf8_index(&jals_syntax::decoded_ident(&name))
+                    .ok_or(AsmError::PoolFull)?,
                 descriptor_index: pool.utf8_index(&descriptor).ok_or(AsmError::PoolFull)?,
                 attributes,
             });
@@ -1595,17 +1625,11 @@ impl Compile {
         let token = decl
             .name_token()
             .ok_or(LowerError::Unsupported("a method declaration with no name"))?;
-        let name = token.text().to_owned();
+        // The *decoded* spelling (JLS §3.3), which is the name the method has: a `void \u0066()`
+        // declares `f`, and the raw text reached the constant pool as the method's own name.
+        let name = jals_syntax::decoded_ident(&token).into_owned();
         let member = context.facts().member_at(&token)?;
-        // The method's own type parameters are not the class's, so the index resolved each as an
-        // external name it has never heard of. Naming them here is what lets the descriptor erase them.
-        let own_vars: Vec<String> = node
-            .children()
-            .find_map(ast::TypeParams::cast)
-            .map(|params| params.params().filter_map(|param| param.name()).collect())
-            .unwrap_or_default();
-        let descriptor =
-            Descriptor::method_descriptor_erasing(member, context.index, false, &own_vars)?;
+        let descriptor = Descriptor::method_descriptor(member, context.index, false)?;
         let is_static = context.index.member(member).modifiers.is_static;
 
         let flags = Self::method_flags(node, context.in_interface);
@@ -1718,7 +1742,7 @@ impl Compile {
             node.children_with_tokens()
                 .filter_map(jals_syntax::SyntaxElement::into_token)
                 .find(|token| !token.kind().is_trivia())
-                .map(|token| token.text().to_owned())
+                .map(|token| jals_syntax::decoded_ident(&token).into_owned())
         };
         match value {
             // `{…}` — every element at the *component* type, which is the only thing that says what tag
@@ -1960,8 +1984,11 @@ impl Compile {
                 // bound is the whole rule and the position does not change it.
                 let _ = position;
                 out.push(':');
-                let ty = context.ty_of_type(bound)?;
-                out.push_str(&Descriptor::descriptor_of(&ty, context.index)?.to_string());
+                let erased = context
+                    .ty_of_type(bound)
+                    .and_then(|ty| Ok(Descriptor::descriptor_of(&ty, context.index)?.to_string()))
+                    .unwrap_or_else(|_| Self::UNNAMEABLE_BOUND.to_owned());
+                out.push_str(&erased);
             }
         }
         out.push('>');
@@ -2044,7 +2071,10 @@ impl Compile {
                 }
                 for bound in &bounds {
                     out.push(':');
-                    out.push_str(&Self::type_signature(bound, &vars, context)?);
+                    out.push_str(
+                        &Self::type_signature(bound, &vars, context)
+                            .unwrap_or_else(|_| Self::UNNAMEABLE_BOUND.to_owned()),
+                    );
                 }
             }
             out.push('>');
@@ -2102,6 +2132,21 @@ impl Compile {
     /// is where the variable itself is kept. Type *arguments* are erased here for the same reason the
     /// class signature erases its supertypes: leaving them out loses only what a reflective reader would
     /// see, never what the JVM links on.
+    /// The `Signature` encoding a type-parameter **bound** falls back to when the index cannot name
+    /// the type it writes.
+    ///
+    /// The one place a `Signature` here says less than the source did, and it is deliberate: the
+    /// descriptor erasure makes the same fallback for the same reason — the index is routinely
+    /// partial, `Runnable`, `Cloneable`, `Comparator`, and every `java.util.function` type are
+    /// absent from the embedded stubs, and refusing made `<T extends Runnable>` uncompilable
+    /// outright. The two have to agree: a `Signature` naming a bound the descriptor erased
+    /// differently is worse than one naming none.
+    ///
+    /// Nothing else in a signature reaches this leniency, and nothing else should: every other
+    /// unresolvable type in one is a value the *descriptor* refuses too, so the compile stops there
+    /// whatever this writes.
+    const UNNAMEABLE_BOUND: &'static str = "Ljava/lang/Object;";
+
     fn type_signature(ty: &ast::Type, vars: &[String], context: &Context<'_>) -> Result<String> {
         use jals_syntax::SyntaxKind::{LBRACK, TYPE_ARGS};
         let dimensions = ty
@@ -2213,7 +2258,9 @@ impl Compile {
             .descendants_with_tokens()
             .filter_map(jals_syntax::SyntaxElement::into_token)
             .any(|token| match token.kind() {
-                jals_syntax::SyntaxKind::IDENT => vars.iter().any(|var| var == token.text()),
+                jals_syntax::SyntaxKind::IDENT => vars
+                    .iter()
+                    .any(|var| *var == *jals_syntax::decoded_ident(&token)),
                 // A wildcard names no variable and still needs a signature: `Holder<?>` erases to
                 // `Holder`, and the `?` exists nowhere else.
                 jals_syntax::SyntaxKind::QUESTION => true,
@@ -2251,16 +2298,20 @@ impl Compile {
             // through the accessors.
             fields.push(FieldInfo {
                 access_flags: FieldAccessFlags(FieldAccessFlags::PRIVATE | FieldAccessFlags::FINAL),
-                name_index: pool.utf8_index(name.text()).ok_or(AsmError::PoolFull)?,
+                name_index: pool
+                    .utf8_index(&jals_syntax::decoded_ident(name))
+                    .ok_or(AsmError::PoolFull)?,
                 descriptor_index: pool.utf8_index(&descriptor).ok_or(AsmError::PoolFull)?,
                 attributes: Vec::new(),
             });
             infos.push(jals_classfile::RecordComponentInfo {
-                name_index: pool.utf8_index(name.text()).ok_or(AsmError::PoolFull)?,
+                name_index: pool
+                    .utf8_index(&jals_syntax::decoded_ident(name))
+                    .ok_or(AsmError::PoolFull)?,
                 descriptor_index: pool.utf8_index(&descriptor).ok_or(AsmError::PoolFull)?,
                 attributes: Vec::new(),
             });
-            descriptors.push((name.text().to_owned(), descriptor));
+            descriptors.push((jals_syntax::decoded_ident(name).into_owned(), descriptor));
         }
 
         // A *compact* constructor (`P { … }`, with no parameter list at all) **is** the canonical one:
@@ -3169,11 +3220,17 @@ impl Compile {
                 // `i2l`.
                 expr::Expr::lower_as(&value, &ty, context, emit)?;
                 if statics {
-                    emit.asm
-                        .put_static(&context.this_class, name.text(), &descriptor)?;
+                    emit.asm.put_static(
+                        &context.this_class,
+                        &jals_syntax::decoded_ident(&name),
+                        &descriptor,
+                    )?;
                 } else {
-                    emit.asm
-                        .put_field(&context.this_class, name.text(), &descriptor)?;
+                    emit.asm.put_field(
+                        &context.this_class,
+                        &jals_syntax::decoded_ident(&name),
+                        &descriptor,
+                    )?;
                 }
             }
         }
@@ -3378,7 +3435,7 @@ impl Context<'_> {
                     jals_syntax::SyntaxKind::IDENT | jals_syntax::SyntaxKind::DOT
                 )
             })
-            .map(|token| token.text().to_owned())
+            .map(|token| jals_syntax::decoded_ident(&token).into_owned())
             .collect();
         let simple = text.rsplit('.').next().unwrap_or(&text).to_owned();
         let qualified = text.contains('.').then(|| text.clone());

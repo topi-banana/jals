@@ -193,9 +193,11 @@ RecordComponent =
 ClassBody =
   '{' members:Member* '}'
 
-// The constants come first; an optional `;` then introduces the members.
+// The constants come first, with an optional trailing comma that JLS 8.9.1 allows
+// even when the list is empty (`enum a { , }`); an optional `;` then introduces the
+// members.
 EnumBody =
-  '{' constants:(EnumConstant (',' EnumConstant)*)? (';' members:Member*)? '}'
+  '{' constants:(EnumConstant (',' EnumConstant)*)? ','? (';' members:Member*)? '}'
 
 EnumConstant =
   Annotation* name:'ident' args:ArgList? body:ClassBody?

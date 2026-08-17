@@ -219,6 +219,13 @@ impl Parser<'_> {
             self.import_decl().await;
         }
         while !self.at_eof() {
+            // JLS §7.6: `TypeDeclaration` has a `;` alternative, so `enum Color { RED };` is a
+            // declaration followed by one that declares nothing. Eaten here rather than inside
+            // `type_decl`, which has three callers and whose other two already handle `;` their own
+            // way — the statement position as an `EmptyStmt`, the class body as an empty member.
+            if self.eat(SEMICOLON) {
+                continue;
+            }
             let before = self.pos();
             let decl = self.start();
             self.type_decl(decl).await;
@@ -553,14 +560,22 @@ impl Parser<'_> {
     async fn array_init(&mut self) {
         let m = self.start();
         self.bump(LBRACE);
-        while !self.at(RBRACE) && !self.at_eof() {
-            let before = self.pos();
-            self.element_value().await;
-            if self.pos() == before {
-                self.err_and_bump("unexpected element");
-            }
-            if !self.eat(COMMA) {
-                break;
+        // JLS §10.6 (`ArrayInitializer`) and §9.7.1 (`ElementValueArrayInitializer`) make the list
+        // and the trailing comma *each* optional, so a lone comma is the empty list plus that comma.
+        // Only before any element: `{,,}` and `{,1}` are not derivable from either production, and a
+        // guard inside the loop would accept both.
+        if self.at(COMMA) {
+            self.bump(COMMA);
+        } else {
+            while !self.at(RBRACE) && !self.at_eof() {
+                let before = self.pos();
+                self.element_value().await;
+                if self.pos() == before {
+                    self.err_and_bump("unexpected element");
+                }
+                if !self.eat(COMMA) {
+                    break;
+                }
             }
         }
         self.expect(RBRACE);
@@ -747,19 +762,26 @@ impl Parser<'_> {
             m.complete(self, ENUM_BODY);
             return;
         }
-        // Constant list (up to `;` or `}`).
-        while !self.at(RBRACE) && !self.at(SEMICOLON) && !self.at_eof() {
-            let before = self.pos();
-            if self.at(IDENT) || self.at(AT) {
-                self.enum_constant().await;
-            } else {
-                self.err_and_bump("expected an enum constant");
-            }
-            if self.pos() == before {
-                self.err_and_bump("unexpected token");
-            }
-            if !self.eat(COMMA) {
-                break;
+        // Constant list (up to `;` or `}`). JLS §8.9.1 spells `EnumBody` as
+        // `{ [EnumConstantList] [,] [EnumBodyDeclarations] }` — the same both-optional shape as an
+        // array initialiser, so `enum a { , }` and `enum c { , ; }` are the empty list plus its
+        // trailing comma. Only before any constant, for the reason `array_init` gives.
+        if self.at(COMMA) {
+            self.bump(COMMA);
+        } else {
+            while !self.at(RBRACE) && !self.at(SEMICOLON) && !self.at_eof() {
+                let before = self.pos();
+                if self.at(IDENT) || self.at(AT) {
+                    self.enum_constant().await;
+                } else {
+                    self.err_and_bump("expected an enum constant");
+                }
+                if self.pos() == before {
+                    self.err_and_bump("unexpected token");
+                }
+                if !self.eat(COMMA) {
+                    break;
+                }
             }
         }
         // Optional `;` followed by members.
@@ -1707,8 +1729,12 @@ impl Parser<'_> {
         if self.at(AT) && !self.nth_at(1, INTERFACE_KW) {
             return true; // Annotated local variable.
         }
+        // `var` is contextual, and a declaration is the *only* context that promotes it: `var` names
+        // a variable in `var.getInitializer()` and `var *= 2`, both of which this used to claim.
+        // A declared type is always followed by the name it declares, so that is the test — the same
+        // one the `IDENT` branch below applies to every other type name.
         if self.at_contextual_kw("var") {
-            return true;
+            return matches!(self.nth_nofuel(1), IDENT | UNDERSCORE);
         }
         if self.at_ts(PRIMITIVE_TYPE) {
             // `int.class` / `int[].class` / `int[]::new` starts an expression, not a declaration.

@@ -5433,6 +5433,138 @@ fn lossless_on_various_inputs() {
     }
 }
 
+/// The four productions whose list *and* trailing separator are both optional, and the one
+/// contextual keyword that had no lookahead.
+///
+/// Every one of these is valid Java that javac compiles, so a syntax error on one is a parser gap
+/// rather than a rate: `jals-tests`' compiler corpus holds only files javac accepted, and counts a
+/// syntax error there as a violated invariant.
+#[test]
+fn optional_lists_and_contextual_var() {
+    for src in [
+        // JLS §7.6: `TypeDeclaration: ;` — a declaration that declares nothing.
+        "enum Color { RED, GREEN };",
+        "class A {};;",
+        // JLS §8.9.1: `EnumBody: { [EnumConstantList] [,] [EnumBodyDeclarations] }`.
+        "class B { enum a { , }; enum b { x , }; enum c { , ; }; enum d { x , ; }; }",
+        // JLS §10.6 and §9.7.1: the same both-optional shape for an array initialiser and for an
+        // annotation's array-valued element.
+        "class C { int[] i = {,}; int[] j = new int[] {,}; }",
+        "@interface Foo { int[] value(); } class D { @Foo({,}) void b() {} @Foo({}) void c() {} }",
+        // `var` is promoted only where a declaration follows it; elsewhere it is an ordinary name.
+        "class E { int var = 0; void m() { var *= 2; var = 1; } }",
+        "class F { void m(VariableTree var) { var.getInitializer(); } }",
+        // …and still promoted where one does.
+        "class G { void m() { var x = 1; for (var y : xs) {} } }",
+    ] {
+        let parse = helpers::parse(src);
+        assert!(
+            parse.errors().is_empty(),
+            "`{src}` is valid Java, got {:?}",
+            parse.errors()
+        );
+        assert_lossless(src);
+    }
+}
+
+/// The shapes above are *not* a licence to accept what the grammar does not derive.
+#[test]
+fn a_lone_comma_does_not_generalise() {
+    for src in [
+        // `{ [list] [,] }` derives neither of these: two commas, and a comma before an element.
+        "class C { int[] i = {,,}; }",
+        "class C { int[] i = {,1}; }",
+        "class B { enum a { , x }; }",
+    ] {
+        let parse = helpers::parse(src);
+        assert!(!parse.errors().is_empty(), "`{src}` should not parse clean");
+        assert_lossless(src);
+    }
+}
+
+/// JLS §3.3: the escapes are resolved before the source is divided into tokens, so they change
+/// *what the tokens are* — and the tree still reproduces the source byte for byte.
+#[test]
+fn unicode_escapes_are_resolved_before_tokenizing() {
+    for src in [
+        // A keyword, spelled through an escape.
+        "\\u0070ublic class C {}",
+        // A comment delimiter, and a line terminator that closes one — so `int b;` is code.
+        "class C { void m() { \\u002f\\u002f x \\u000A int b; } }",
+        // String quotes: `\u0022\u0022` is the empty literal, and one quote can be written either way.
+        "class C { String a = \\u0022\\u0022; String b = \"\\u0022; String c = \\u0022\"; }",
+        // Identifiers, including one built from a surrogate pair.
+        "class C { void m(long \\u0061) {} }",
+        "class C { void m() { int \\ud801\\udc00abc = 1; } }",
+    ] {
+        let parse = helpers::parse(src);
+        assert!(
+            parse.errors().is_empty(),
+            "`{src}` is valid Java, got {:?}",
+            parse.errors()
+        );
+        assert_lossless(src);
+    }
+}
+
+/// A *contextual* keyword written through an escape is one too.
+///
+/// A reserved keyword survived the escape because `Lexer::tokenize` keeps the *kind* the translated
+/// source implies, but a contextual one is recognised by comparing token text — which was the raw
+/// spelling, so half the keyword vocabulary silently opted out of §3.3 inside one parse. The `record`
+/// row is the loud one: it produced a `METHOD_DECL` with no error at all, so a record declaration was
+/// read as a method and nothing said so.
+#[test]
+fn a_contextual_keyword_written_as_an_escape_is_one() {
+    for (src, want) in [
+        (
+            "\\u0073ealed class C permits D {}",
+            crate::SyntaxKind::CLASS_DECL,
+        ),
+        (
+            "class A { \\u0072ecord R(int x) {} }",
+            crate::SyntaxKind::RECORD_DECL,
+        ),
+        (
+            "class A { void m() { \\u0076ar x = 1; } }",
+            crate::SyntaxKind::LOCAL_VAR_DECL,
+        ),
+    ] {
+        let parse = helpers::parse(src);
+        assert!(
+            parse.errors().is_empty(),
+            "`{src}` is valid Java, got {:?}",
+            parse.errors()
+        );
+        assert!(
+            parse.syntax().descendants().any(|node| node.kind() == want),
+            "`{src}` should hold a {want:?}"
+        );
+        assert_lossless(src);
+    }
+}
+
+/// The translation must not reach the tree: a token's text stays the source's own spelling.
+///
+/// This is the invariant the whole design turns on — the tree is the caller's `&str` reassembled,
+/// so a translated buffer leaking into it would break the lossless property everywhere at once.
+#[test]
+fn an_escaped_token_keeps_its_written_spelling() {
+    let src = "\\u0070ublic class C {}";
+    let parse = helpers::parse(src);
+    let spelled = parse
+        .syntax()
+        .descendants_with_tokens()
+        .filter_map(rowan::NodeOrToken::into_token)
+        .find(|token| token.kind() == crate::SyntaxKind::PUBLIC_KW)
+        .expect("the escape spelled a `public` keyword");
+    assert_eq!(spelled.text(), "\\u0070ublic");
+    assert_eq!(
+        usize::from(spelled.text_range().len()),
+        "\\u0070ublic".len()
+    );
+}
+
 #[test]
 fn wildcard_with_annotation() {
     // JSR 308: a type-use annotation before a wildcard `?` (`MyList<@A ?>`).

@@ -38,12 +38,34 @@ impl<'a> Lexer<'a> {
     /// Tokenizes the whole input and returns the token sequence. Yields cooperatively
     /// (amortized, once per [`Yielder`] period of tokens) so long inputs do not
     /// monopolize the executor; the output is identical to iterating [`Lexer`] directly.
+    ///
+    /// JLS §3.3's unicode escapes are resolved first, and only their *effect* reaches the caller:
+    /// the division into tokens is the one the translated source implies (`public` is a
+    /// keyword, `//` starts a comment), while every token's `text` and `range` still point into the
+    /// caller's own string. See [`crate::unicode_escape`] for why the translation cannot be handed
+    /// out instead.
     pub async fn tokenize(src: &str) -> Vec<LexedToken<'_>> {
         let mut yielder = Yielder::new();
         let mut tokens = Vec::new();
-        for token in Lexer::new(src) {
+        let Some(translation) = crate::unicode_escape::Translation::of(src) else {
+            for token in Lexer::new(src) {
+                yielder.tick().await;
+                tokens.push(token);
+            }
+            return tokens;
+        };
+        for token in Lexer::new(translation.text()) {
             yielder.tick().await;
-            tokens.push(token);
+            let start = translation.origin(usize::from(token.range.start()));
+            let end = translation.origin(usize::from(token.range.end()));
+            tokens.push(LexedToken {
+                kind: token.kind,
+                text: &src[start..end],
+                range: TextRange::new(
+                    TextSize::try_from(start).expect("source byte offset exceeds TextSize range"),
+                    TextSize::try_from(end).expect("source byte offset exceeds TextSize range"),
+                ),
+            });
         }
         tokens
     }
@@ -657,13 +679,31 @@ impl Scan {
         use unicode_properties::{GeneralCategory as GC, UnicodeGeneralCategory as _};
 
         if c.is_ascii() {
-            return c.is_ascii_alphanumeric() || c == '_' || c == '$';
+            return c.is_ascii_alphanumeric()
+                || c == '_'
+                || c == '$'
+                || Self::is_identifier_ignorable(c);
         }
         Self::is_ident_start(c)
+            || Self::is_identifier_ignorable(c)
             || matches!(
                 c.general_category(),
                 GC::DecimalNumber | GC::NonspacingMark | GC::SpacingMark | GC::Format
             )
+    }
+
+    /// Whether `c` is *identifier-ignorable* (`Character.isIdentifierIgnorable`).
+    ///
+    /// `Character.isJavaIdentifierPart` — which is what JLS §3.8 defines an identifier's continuation
+    /// by — admits these, and they are not letters, digits, or marks: the non-whitespace ISO control
+    /// characters, plus the format characters the category test above already covers. So
+    /// `zero\u0000zero` is one identifier, which is the sort of name
+    /// `MethodParameters/UncommonParamNames` exists to write down.
+    ///
+    /// Only *continuation*: `isJavaIdentifierStart` does not admit them, so a name cannot begin with
+    /// one.
+    const fn is_identifier_ignorable(c: char) -> bool {
+        matches!(c, '\u{0}'..='\u{8}' | '\u{e}'..='\u{1b}' | '\u{7f}'..='\u{9f}')
     }
 }
 
@@ -709,6 +749,18 @@ mod tests {
         }
         // 予約語の前方一致はより長い IDENT。
         assert_eq!(lexed("classes"), vec![(IDENT, "classes")]);
+    }
+
+    /// JLS §3.8 defines an identifier's continuation as `Character.isJavaIdentifierPart`, which
+    /// admits the *identifier-ignorable* characters — the non-whitespace ISO controls. They are not
+    /// letters or digits, so an ASCII fast path written as "alphanumeric, `_`, or `$`" drops them.
+    #[test]
+    fn identifier_ignorable_characters_continue_an_identifier() {
+        assert_eq!(lexed("zero\u{0}zero"), vec![(IDENT, "zero\u{0}zero")]);
+        assert_eq!(lexed("a\u{1b}b"), vec![(IDENT, "a\u{1b}b")]);
+        assert_eq!(lexed("a\u{7f}"), vec![(IDENT, "a\u{7f}")]);
+        // Not a *start*: `isJavaIdentifierStart` admits none of them, so the control stands alone.
+        assert_ne!(kinds("\u{0}a"), vec![IDENT]);
     }
 
     #[test]

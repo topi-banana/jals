@@ -199,12 +199,14 @@ impl Cx<'_> {
             return Vec::new();
         };
         let argc = Self::arg_count(call.args());
-        let candidates: Vec<&crate::Member> = self
+        let candidates: Vec<crate::MemberId> = self
             .index
             .resolve_members_all(owner, &name, Namespace::Method)
             .into_iter()
-            .map(|id| self.index.member(id))
-            .filter(|m| m.kind == DefKind::Method && Self::applies_to_arity(m, argc))
+            .filter(|&id| {
+                let m = self.index.member(id);
+                m.kind == DefKind::Method && Self::applies_to_arity(m, argc)
+            })
             .collect();
         self.intersect_member_throws(&candidates)
     }
@@ -221,22 +223,25 @@ impl Cx<'_> {
         };
         let argc = Self::arg_count(new.args());
         // Constructors are never inherited, so only `owner`'s own members can apply — no supertype walk.
-        let candidates: Vec<&crate::Member> = self
+        let candidates: Vec<crate::MemberId> = self
             .index
             .own_members(owner)
             .iter()
-            .map(|&id| self.index.member(id))
-            .filter(|m| m.kind == DefKind::Constructor && Self::applies_to_arity(m, argc))
+            .copied()
+            .filter(|&id| {
+                let m = self.index.member(id);
+                m.kind == DefKind::Constructor && Self::applies_to_arity(m, argc)
+            })
             .collect();
         self.intersect_member_throws(&candidates)
     }
 
     /// The intersection of the resolvable `throws` items across `members`. Empty when `members` is
     /// empty or the intersection is empty (nothing is thrown by *every* candidate).
-    fn intersect_member_throws(&self, members: &[&crate::Member]) -> Vec<ItemId> {
+    fn intersect_member_throws(&self, members: &[crate::MemberId]) -> Vec<ItemId> {
         members
             .iter()
-            .map(|m| self.member_throws(m))
+            .map(|&id| self.member_throws(id))
             .reduce(|mut acc, next| {
                 acc.retain(|id| next.contains(id));
                 acc
@@ -246,13 +251,14 @@ impl Cx<'_> {
 
     /// The resolvable exception items a single member declares in its `throws`, in its declaring
     /// file's context.
-    fn member_throws(&self, member: &crate::Member) -> Vec<ItemId> {
+    fn member_throws(&self, id: crate::MemberId) -> Vec<ItemId> {
+        let member = self.index.member(id);
         member
             .throws
             .iter()
             .filter_map(|mt| {
                 self.index
-                    .member_type_to_ty(member.file, member.owner, mt)
+                    .member_type_to_ty(member.file, member.owner, Some(id), mt)
                     .project_id()
             })
             .collect()

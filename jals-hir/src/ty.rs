@@ -12,7 +12,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
-use crate::project::{ItemId, ItemOrigin, ProjectIndex};
+use crate::project::{ItemId, ItemOrigin, MemberId, ProjectIndex};
 
 /// An inferred Java type.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,11 +29,20 @@ pub enum Ty {
     /// arguments (see [`ClassTy`]) — carried for display, member substitution, and same-nominal
     /// invariance.
     Class(ClassTy),
-    /// An un-substituted type variable: a reference to the type parameter `name` of the indexed type
-    /// `owner` (`class Box<E>` → `E` is `TypeVar { owner: Box, name: "E" }`). Substituted by a
+    /// An un-substituted type variable: a reference to the type parameter `name` declared by the
+    /// indexed type `owner` (`class Box<E>` → `E` is `TypeVar { owner: Box, member: None, name: "E" }`)
+    /// or, when `member` is set, by that *method* (`static <E> E pick(E,E)`). Substituted by a
     /// concrete type when a use supplies arguments (`Box<String>`); left as-is for a raw use, where
     /// it displays as its name. Treated leniently in subtyping (like [`Unknown`](Ty::Unknown)).
-    TypeVar { owner: ItemId, name: String },
+    ///
+    /// The declaring scope is carried, not just the name, because the two shadow: a method's `<T>`
+    /// hides its class's, so a receiver's type arguments must not be substituted into it, and the
+    /// bound it erases to is the method's.
+    TypeVar {
+        owner: ItemId,
+        member: Option<MemberId>,
+        name: String,
+    },
     /// The error / could-not-infer type. Propagates instead of failing; never surfaced as a real
     /// type to a consumer (hover suppresses it).
     Unknown,
@@ -140,7 +149,9 @@ impl Primitive {
     /// overload for `append(1)` — and overload selection, finding no candidate more specific than
     /// every other, then took the first declared one.
     fn boxes_to(self, name: &str) -> bool {
-        let simple = Self::simple(name);
+        let Some(simple) = Self::matchable(name) else {
+            return false;
+        };
         simple == self.wrapper()
             || matches!(simple, "Object" | "Comparable" | "Serializable")
             // Only the numeric wrappers extend `Number`; `Boolean` and `Character` do not.
@@ -154,16 +165,40 @@ impl Primitive {
     /// not a wrapper at all cannot unbox — an unindexed external type is still a *reference*, and no
     /// spelling of one turns it into a number.
     fn unboxes_from(self, name: &str) -> bool {
-        Self::unwrap_name(Self::simple(name))
+        Self::matchable(name)
+            .and_then(Self::unwrap_name)
             .is_some_and(|source| source == self || source.widens_to(self))
     }
 
-    /// The last segment of a possibly-qualified name: an external type carries whatever spelling the
-    /// source used, so `java.lang.Integer` and `Integer` both have to match.
-    fn simple(name: &str) -> &str {
-        name.rsplit('.').next().unwrap_or(name)
+    /// The simple name a possibly-qualified spelling may be matched on, or `None` when the qualifier
+    /// rules every match out.
+    ///
+    /// An *external* type carries whatever spelling the source used, so `java.lang.Integer` and a
+    /// bare `Integer` both have to match. An *indexed* one carries its whole fully-qualified name,
+    /// and matching that on its last segment alone made every type merely *named* `Integer`,
+    /// `Number`, `Object`, `Comparable`, or `Serializable` a wrapper class — `package app; class
+    /// Number {}` accepted `Number n = 1;`, and, because applicability is built on
+    /// [`Ty::is_assignable_to`], `f(app.Number)` became applicable to `f(1)` and a lowering emitted
+    /// `invokevirtual C.f:(Lapp/Number;)V` with an `int` on the stack.
+    ///
+    /// So a qualifier is admitted only when it is the package the type it names actually lives in.
+    /// Every type in this rule is in `java.lang` bar one — `Serializable` is `java.io`'s.
+    fn matchable(name: &str) -> Option<&str> {
+        match name.rsplit_once('.') {
+            None => Some(name),
+            Some(("java.lang", simple) | ("java.io", simple @ "Serializable")) => Some(simple),
+            Some(_) => None,
+        }
     }
 }
+
+/// The three types an array is assignable to: `Object`, and the two interfaces JLS §10.7 gives
+/// every array. Fully qualified, because these are matched against an *indexed* item's own name.
+const ARRAY_SUPERTYPES: [&str; 3] = [
+    "java.lang.Object",
+    "java.lang.Cloneable",
+    "java.io.Serializable",
+];
 
 /// A nominal reference type, identified by name and carrying its type arguments as written.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -309,12 +344,23 @@ impl Ty {
             // is not a `String`, and admitting that made `append(String)` an applicable overload for
             // `append(1)`.
             (Primitive(source), Class(External { name, .. })) => source.boxes_to(name),
-            (Primitive(_), Class(Project { .. }) | Array(_) | Void) => false,
+            // A wrapper reached as a real *indexed* type boxes exactly as one reached by name. The
+            // two arms exist because a stub `Integer` is demoted above and a classpath one is not:
+            // scoring against a real JDK indexes `java.lang.Integer` from `ct.sym`, and reading only
+            // the external spelling here made `Integer n = 1;` a mismatch and dropped `f(Integer)`
+            // from the applicable overloads for `f(1)`.
+            (Primitive(source), Class(Project { id, .. })) => {
+                index.is_some_and(|index| source.boxes_to(index.item(*id).fqn.as_str()))
+            }
+            (Primitive(_), Array(_) | Void) => false,
 
             // Unboxing: only a wrapper class unboxes, and then the result may widen. A user type, an
             // array, and `Object` are all references and stay references.
             (Class(External { name, .. }), Primitive(target)) => target.unboxes_from(name),
-            (Class(Project { .. }) | Array(_), Primitive(_)) => false,
+            (Class(Project { id, .. }), Primitive(target)) => {
+                index.is_some_and(|index| target.unboxes_from(index.item(*id).fqn.as_str()))
+            }
+            (Array(_), Primitive(_)) => false,
 
             // Reference subtyping between two project types: walk the indexed supertype chain. With
             // no index (no hierarchy to consult) stay conservative rather than claim a mismatch.
@@ -332,10 +378,17 @@ impl Ty {
                 (Primitive(a), Primitive(b)) => a == b,
                 _ => s.is_assignable_to(t, index),
             },
-            // An array is a reference type: it widens to `Object` / `Cloneable` / `Serializable`
-            // (external), but never to a user class.
+            // An array is a reference type: it widens to `Object` / `Cloneable` / `Serializable`,
+            // but never to a user class. The two arms exist for the same reason the boxing pair
+            // above does — a stub `Object` is demoted to a spelling and a classpath one is not, so
+            // registering the classpath ahead of the stubs made `Object o = a;` land here as an
+            // indexed type. Reading it as a confident mismatch reported one on every array-to-
+            // `Object` assignment and, in argument position, dropped `f(Object)` from the
+            // applicable set so the wrong overload was selected or none was.
             (Array(_), Class(External { .. })) => true,
-            (Array(_), Class(Project { .. })) => false,
+            (Array(_), Class(Project { id, .. })) => {
+                index.is_none_or(|index| ARRAY_SUPERTYPES.contains(&index.item(*id).fqn.as_str()))
+            }
 
             // `void` is assignable only to itself (handled by identity above).
             (Void, _) => false,
@@ -398,14 +451,25 @@ impl Ty {
         }
     }
 
-    /// Returns a copy with every [`TypeVar`](Ty::TypeVar) replaced by `f(owner, name)` where that
-    /// yields `Some`, recursing through array elements and class type arguments. A type variable `f`
-    /// does not map (returns `None`) is left as-is — so an unbound parameter survives unchanged. The
-    /// basis for binding a generic type's parameters to the arguments a use supplies.
+    /// Returns a copy with every [`TypeVar`](Ty::TypeVar) replaced by `f(owner, member, name)` where
+    /// that yields `Some`, recursing through array elements and class type arguments. A type variable
+    /// `f` does not map (returns `None`) is left as-is — so an unbound parameter survives unchanged.
+    /// The basis for binding a generic type's parameters to the arguments a use supplies.
+    ///
+    /// `member` is passed so a substitution keyed on a *type*'s parameters can decline a method's:
+    /// `class Holder<T> { <T> T pick(T a) }` binds the receiver's argument to the class's `T` and
+    /// must leave the method's alone.
     #[must_use]
-    pub(crate) fn substitute(&self, f: &impl Fn(ItemId, &str) -> Option<Self>) -> Self {
+    pub(crate) fn substitute(
+        &self,
+        f: &impl Fn(ItemId, Option<MemberId>, &str) -> Option<Self>,
+    ) -> Self {
         match self {
-            Self::TypeVar { owner, name } => f(*owner, name).unwrap_or_else(|| self.clone()),
+            Self::TypeVar {
+                owner,
+                member,
+                name,
+            } => f(*owner, *member, name).unwrap_or_else(|| self.clone()),
             Self::Array(elem) => Self::Array(Box::new(elem.substitute(f))),
             Self::Class(ClassTy::Project { id, name, args }) => Self::Class(ClassTy::Project {
                 id: *id,

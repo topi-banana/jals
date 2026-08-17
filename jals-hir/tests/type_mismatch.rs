@@ -1,6 +1,7 @@
 //! Tests for assignment-context type-mismatch detection: the
 //! index-free subset (primitives, `null`, arrays) and the index-aware project subtyping cases.
 
+use jals_classfile::ClassFile;
 use jals_hir::{FileAnalysis, FileId, MismatchKind, ProjectIndex, TypeMismatch};
 use jals_syntax::SyntaxNode;
 
@@ -27,6 +28,85 @@ fn indexed(sources: &[&str], file: u32) -> Vec<TypeMismatch> {
     let (fid, root) = &nodes[file as usize];
     let analysis = jals_exec::block_on_inline(FileAnalysis::of(root));
     jals_exec::block_on_inline(analysis.in_project(&index, *fid).type_mismatches())
+}
+
+/// Mismatches found in `sources[file]` with the embedded stubs indexed as well.
+///
+/// The sibling of [`indexed`] that the *product* actually resembles: every host builds its index
+/// with `ProjectIndex::builder(..).with_stdlib()`, so a guard written through [`indexed`] alone is
+/// blind to anything the stubs change — which is how a `java.lang.Object` reachable from every type
+/// could silence [`ProjectIndex::method_set_complete`] for the whole workspace without a red test.
+fn indexed_with_stdlib(sources: &[&str], file: u32) -> Vec<TypeMismatch> {
+    let nodes = parsed(sources);
+    let index = jals_exec::block_on_inline(ProjectIndex::builder(&nodes).with_stdlib().build());
+    mismatches_of(&nodes, &index, file)
+}
+
+/// Mismatches found in `sources[file]` with `java.lang` types indexed from **class files** — so they
+/// are [`ItemOrigin::Classpath`](jals_hir::ItemOrigin::Classpath) items rather than stubs.
+///
+/// This is the only shape that exercises the precise rules. `Ty::demote_stdlib` rewrites a
+/// stub-origin type to its lenient by-name form before assignment conversion, so through the stubs
+/// `Object` never reaches the project-to-project subtyping arm and `Integer` never reaches the
+/// project boxing arm — both answer `true` for a reason that says nothing about either rule. A real
+/// JDK on the classpath is not demoted, and both arms decide the answer.
+fn indexed_with_classpath(
+    sources: &[&str],
+    file: u32,
+    classfiles: &[ClassFile],
+) -> Vec<TypeMismatch> {
+    let nodes = parsed(sources);
+    let lowered = jals_exec::block_on_inline(ProjectIndex::lower_classpath(classfiles));
+    let index = jals_exec::block_on_inline(
+        ProjectIndex::builder(&nodes)
+            .with_classpath(&lowered)
+            .build(),
+    );
+    mismatches_of(&nodes, &index, file)
+}
+
+/// The `java.lang` fixtures, compiled from `tests/fixtures/JavaLang*.java` (see their provenance
+/// headers, which record the `--patch-module` invocation `java.lang` needs).
+fn java_lang_fixtures() -> Vec<ClassFile> {
+    ["JavaLangObject.class", "JavaLangInteger.class"]
+        .iter()
+        .map(|name| {
+            let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures")
+                .join(name);
+            jals_exec::block_on_inline(ClassFile::read(
+                std::fs::read(path)
+                    .unwrap_or_else(|e| panic!("read {name}: {e}"))
+                    .as_slice(),
+            ))
+            .unwrap_or_else(|e| panic!("parse {name}: {e:?}"))
+        })
+        .collect()
+}
+
+/// Each source parsed and paired with its [`FileId`], in order.
+fn parsed(sources: &[&str]) -> Vec<(FileId, SyntaxNode)> {
+    sources
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            (
+                FileId(u32::try_from(i).unwrap()),
+                jals_exec::block_on_inline(jals_syntax::Parse::parse(s)).syntax(),
+            )
+        })
+        .collect()
+}
+
+/// The mismatches in `nodes[file]` against an already-built `index`.
+fn mismatches_of(
+    nodes: &[(FileId, SyntaxNode)],
+    index: &ProjectIndex,
+    file: u32,
+) -> Vec<TypeMismatch> {
+    let (fid, root) = &nodes[file as usize];
+    let analysis = jals_exec::block_on_inline(FileAnalysis::of(root));
+    jals_exec::block_on_inline(analysis.in_project(index, *fid).type_mismatches())
 }
 
 /// Wraps a statement body in a method so it parses as a valid local context.
@@ -314,4 +394,92 @@ fn object_method_names_are_not_reported() {
     // `equals` is an `Object` method, so the call may bind to `Object.equals(Object)` — not flagged.
     let src = "class C { void equals(int x) {} void g() { equals(1.0); } }";
     assert!(indexed(&[src], 0).is_empty());
+}
+
+/// The guard on [`ProjectIndex::method_set_complete`] surviving an indexed `java.lang.Object`.
+///
+/// Every class implicitly extends `Object`, and the stubs are `ItemOrigin::Stdlib` — whose whole
+/// purpose in that predicate is to make an overload set *incomplete*. Attaching the implicit edge
+/// without exempting it therefore makes the walk reach a stub from **every** type, `check_call`
+/// concludes nothing anywhere, and `type-mismatch` goes silent across the workspace with no other
+/// test noticing. What makes the exemption sound is that `is_object_method` already forces
+/// `false` for every name `Object` declares, so skipping the edge can lose nothing.
+#[test]
+fn no_overload_is_still_reported_with_stdlib_indexed() {
+    // The `complete` case of `overload_reporting_is_guarded_by_method_set_completeness`, re-asked
+    // of the index shape the product actually builds.
+    let complete = "class Foo {} \
+                    class C extends Foo { void f(int x) {} void f(boolean b) {} void g() { f(1.0); } }";
+    assert_eq!(indexed_with_stdlib(&[complete], 0).len(), 1);
+    // And the external-supertype suppression is not collateral damage of the exemption.
+    let external =
+        "class C extends Foo { void f(int x) {} void f(boolean b) {} void g() { f(1.0); } }";
+    assert!(indexed_with_stdlib(&[external], 0).is_empty());
+}
+
+/// A project type is assignable to `java.lang.Object` however `Object` reached the index.
+///
+/// Through the stubs this passes for a reason that says nothing about subtyping: `demote_stdlib`
+/// rewrites the stub to its lenient by-name form, and an external target is assignable from
+/// anything. Through a classpath `Object` there is no demotion, so the answer comes from
+/// `is_subtype` walking a real supertype chain — which is exactly the chain the implicit
+/// `java.lang.Object` edge supplies, and which is empty for `class Foo {}` without it.
+#[test]
+fn assigning_a_project_type_to_object_is_not_a_mismatch() {
+    let src = "class Foo {} class C { void m() { Object o = new Foo(); } }";
+    assert!(indexed_with_stdlib(&[src], 0).is_empty());
+    assert!(indexed_with_classpath(&[src], 0, &java_lang_fixtures()).is_empty());
+}
+
+/// Autoboxing survives a wrapper that reached the index as a real class rather than as a stub.
+///
+/// A stub `Integer` is rewritten to its lenient by-name form before assignment conversion, so the
+/// boxing rule was only ever consulted through the external arm. Scoring against a real JDK indexes
+/// `java.lang.Integer` from `ct.sym`, there is no demotion, and reading only the external spelling
+/// made `Integer n = 1;` a mismatch — and, worse, silently dropped `f(Integer)` from the applicable
+/// overloads for `f(1)`.
+#[test]
+fn boxing_survives_a_classpath_wrapper() {
+    let fixtures = java_lang_fixtures();
+    let src = "class C { void m() { Integer n = 1; } }";
+    assert!(indexed_with_stdlib(&[src], 0).is_empty());
+    assert!(indexed_with_classpath(&[src], 0, &fixtures).is_empty());
+    let unboxing = "class C { void m(Integer boxed) { int n = boxed; } }";
+    assert!(indexed_with_stdlib(&[unboxing], 0).is_empty());
+    assert!(indexed_with_classpath(&[unboxing], 0, &fixtures).is_empty());
+}
+
+/// An array is assignable to `java.lang.Object` however `Object` reached the index.
+///
+/// The sibling of [`assigning_a_project_type_to_object_is_not_a_mismatch`] for the one reference
+/// type that has no supertype chain to walk. Through the stubs the target is demoted to a spelling
+/// and the lenient external arm answers; through a classpath `Object` it is an indexed item, and
+/// the array arm decided it by refusing outright — a reported mismatch on `Object o = args;` in
+/// every `main`, and, in argument position, `f(Object)` dropped from the applicable set so overload
+/// selection picked the wrong member or none.
+#[test]
+fn assigning_an_array_to_object_is_not_a_mismatch() {
+    let fixtures = java_lang_fixtures();
+    let src = "class C { void m() { int[] a = new int[3]; Object o = a; } }";
+    assert!(indexed_with_stdlib(&[src], 0).is_empty());
+    assert!(indexed_with_classpath(&[src], 0, &fixtures).is_empty());
+    let overload = "class C { void f(Object o) {} void f(int n) {} void m(int[] a) { f(a); } }";
+    assert!(indexed_with_classpath(&[overload], 0, &fixtures).is_empty());
+}
+
+/// A project type merely *named* like a wrapper class is not one.
+///
+/// Boxing and unboxing are defined on eight classes in `java.lang` (JLS §5.1.7 / §5.1.8), and the
+/// rule reached an indexed item through its fully-qualified name — matched on its last segment
+/// alone, so `package app; class Number {}` accepted `Number n = 1;`. The damage is not a missing
+/// diagnostic: applicability is built on the same conversion, so `f(app.Number)` became applicable
+/// to `f(1)` and the lowering emitted `invokevirtual C.f:(Lapp/Number;)V` with an `int` on the
+/// stack.
+#[test]
+fn a_project_type_named_like_a_wrapper_is_not_one() {
+    let boxing = "package app; class Number {} class C { void m() { Number n = 1; } }";
+    assert_eq!(indexed(&[boxing], 0).len(), 1);
+    let unboxing =
+        "package app; class Integer {} class C { void m(Integer boxed) { int n = boxed; } }";
+    assert_eq!(indexed(&[unboxing], 0).len(), 1);
 }

@@ -38,6 +38,9 @@ use crate::jvm::{BinOp, Branch, Compare, Numeric};
 use crate::lower::place::Place;
 use crate::lower::{Context, Emit, LowerError, OUTER, Result};
 
+/// The internal name every erasure falls back to, and the only one an argument narrowing repairs.
+const OBJECT_INTERNAL_NAME: &str = "java/lang/Object";
+
 /// The builder a string concatenation runs through.
 const STRING_BUILDER: &str = "java/lang/StringBuilder";
 
@@ -439,9 +442,16 @@ impl Expr {
 
     /// A bare name: a local, a parameter, or an unqualified field of the enclosing type.
     fn name(name: &ast::NameRef, context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
-        // `this` is not a name that resolves to anything — it is slot 0, which is why it has no
-        // identifier token to look up.
-        if Facts::is_this(name.syntax()) {
+        // Neither `this` nor `super` is a name that resolves to anything — both are slot 0, which is
+        // why neither has an identifier token to look up. They part company at the *access*, not at
+        // the value: which member a `super.` reaches is settled by the owner in the reference and by
+        // `invokespecial`, and the receiver pushed for both is the same one.
+        //
+        // Answering here rather than at each access is what makes the write path work. A store goes
+        // `Place::resolve` → `Place::field` → `Expr::lower` → here, with no receiver branch of its
+        // own anywhere along it, so `super.x = 5` and `super.x += 5` failed to lower at all while
+        // `super.x` read fine.
+        if Facts::is_this(name.syntax()) || Facts::is_super(name.syntax()) {
             return emit.load_this();
         }
         let text = name.syntax().text().to_string();
@@ -462,8 +472,9 @@ impl Expr {
                 context.facts().member_of_def(id)
             }
             // Nothing in the file declared it, which an *inherited* field never is.
-            None => Facts::name_token(name.syntax())
-                .and_then(|token| Self::inherited_field(token.text(), context)),
+            None => Facts::name_token(name.syntax()).and_then(|token| {
+                Self::inherited_field(&jals_syntax::decoded_ident(&token), context)
+            }),
         };
         let member = member.ok_or_else(unresolved)?;
         let (owner, field, descriptor) = Self::field_ref(member, context)?;
@@ -565,6 +576,10 @@ impl Expr {
         if context.index.member(member).modifiers.is_static {
             emit.asm.get_static(&owner, &name, &descriptor)?;
         } else {
+            // `super.x` reads `this`, which [`Self::name`] answers for the keyword like it does for
+            // `this`. Which `x` it reads is settled by the owner in the field reference, since a
+            // field is *hidden* rather than overridden (JLS §15.11.2) and `getfield` names where the
+            // field is declared.
             Self::lower(&Self::inner(access.receiver())?, context, emit)?;
             emit.asm.get_field(&owner, &name, &descriptor)?;
         }
@@ -605,6 +620,7 @@ impl Expr {
                     .get(index)
                     .ok_or(LowerError::Unsupported("a call with too many arguments"))?;
                 Self::lower_as(argument, declared, context, emit)?;
+                Self::narrow_erased(argument, declared, context, emit)?;
             }
             return Ok(());
         }
@@ -613,6 +629,7 @@ impl Expr {
         };
         for (index, argument) in arguments.iter().take(fixed.len()).enumerate() {
             Self::lower_as(argument, &fixed[index], context, emit)?;
+            Self::narrow_erased(argument, &fixed[index], context, emit)?;
         }
         let rest = &arguments[fixed.len().min(arguments.len())..];
         let Ty::Array(element) = last else {
@@ -626,7 +643,8 @@ impl Expr {
             && Self::type_of(rest[0].syntax(), context)
                 .is_ok_and(|ty| matches!(ty, Ty::Array(_) | Ty::Null))
         {
-            return Self::lower_as(&rest[0], last, context, emit);
+            Self::lower_as(&rest[0], last, context, emit)?;
+            return Self::narrow_erased(&rest[0], last, context, emit);
         }
         let descriptor = Descriptor::descriptor_of(element, context.index)?.to_string();
         emit.asm.const_int(
@@ -641,6 +659,11 @@ impl Expr {
                     .map_err(|_| LowerError::Unsupported("a call with this many arguments"))?,
             )?;
             Self::lower_as(argument, element, context, emit)?;
+            // The element the tail is packed into erases exactly as a fixed parameter does, and a
+            // value the JVM knows only as `Object` fails the `aastore` against a narrower component
+            // — an `ArrayStoreException` inside the packing where javac throws `ClassCastException`
+            // at the call.
+            Self::narrow_erased(argument, element, context, emit)?;
             emit.asm.array_store(&descriptor)?;
         }
         Ok(())
@@ -655,9 +678,6 @@ impl Expr {
                 LowerError::Unresolved(call.syntax().text().to_string().trim().into())
             })?;
         let info = context.index.member(member);
-        let owner_item = context.index.item(info.owner);
-        let owner = Descriptor::internal_name_of(info.owner, context.index);
-        let interface_owner = owner_item.kind == DefKind::Interface;
         let constructor = info.kind == DefKind::Constructor;
         let descriptor = MethodDescriptor::to_string(&Descriptor::method_descriptor(
             member,
@@ -676,9 +696,43 @@ impl Expr {
         };
         let params = context.index.resolved_param_tys(member);
 
+        // A `super.` qualifier: the receiver *is* `this`, and the call is not dispatched. `super`
+        // parses as a name reference holding a keyword, so it has neither a definition to load nor an
+        // inferred type — lowering it as an ordinary expression pushes nothing at all.
+        let super_qualified = matches!(
+            call.callee(),
+            Some(ast::Expr::FieldAccess(ref access))
+                if access.receiver().is_some_and(|r| Facts::is_super(r.syntax()))
+        );
+        // Which class the `Methodref` names. Ordinarily it is where the member is *declared*, which
+        // is what the member walk found. A `super.` call is the exception, and not an optional one:
+        // JVMS §6.5 lets `invokespecial` name only the direct superclass or a *direct*
+        // superinterface, and the walk routinely finds neither — `interface I { default f(){} } class
+        // B implements I {} class C extends B { f(){ return super.f(); } }` resolves to `I.f`, whose
+        // interface is not `C`'s, and the class file it produced was refused at load with "interface
+        // method to invoke is not in a direct superinterface". javac names the direct superclass, so
+        // this does. `Iface.super.m()` (JLS §15.12.1) is the other receiver and is still not handled.
+        let (owner_item, owner) =
+            if super_qualified {
+                let superclass = context.index.superclass_of(context.this_item).ok_or(
+                    LowerError::Unsupported("a `super.` call with no indexed superclass"),
+                )?;
+                (
+                    superclass,
+                    Descriptor::internal_name_of(superclass, context.index),
+                )
+            } else {
+                (
+                    info.owner,
+                    Descriptor::internal_name_of(info.owner, context.index),
+                )
+            };
+        let interface_owner = context.index.item(owner_item).kind == DefKind::Interface;
         // The receiver comes first on the stack, below the arguments.
         if !is_static {
             match call.callee() {
+                // A `super.` receiver needs no arm of its own: [`Self::name`] pushes `this` for the
+                // keyword, exactly as it does for `this` itself.
                 Some(ast::Expr::FieldAccess(access)) => {
                     Self::lower(&Self::inner(access.receiver())?, context, emit)?;
                 }
@@ -697,9 +751,11 @@ impl Expr {
         if is_static {
             emit.asm
                 .invoke_static(&owner, &name, &descriptor, interface_owner)?;
-        } else if is_private || constructor {
-            // A `private` method is not dispatched: the call site already knows the one body it can
-            // reach, and `invokevirtual` would look it up in a table it is not in.
+        } else if is_private || constructor || super_qualified {
+            // Not dispatched. A `private` method is one body the call site already knows, and
+            // `invokevirtual` would look it up in a table it is not in; a `super.` call names the
+            // superclass's body *because* it is not the one virtual dispatch would find — emitting
+            // `invokevirtual` for it is how an override calls itself forever.
             emit.asm
                 .invoke_special(&owner, &name, &descriptor, interface_owner)?;
         } else if interface_owner {
@@ -708,6 +764,69 @@ impl Expr {
             emit.asm.invoke_virtual(&owner, &name, &descriptor)?;
         }
         Self::restore_erased(call.syntax(), member, context, emit)
+    }
+
+    /// Cast an argument the JVM knows only as `Object` down to what the parameter's descriptor says.
+    ///
+    /// The mirror of [`restore_erased`](Self::restore_erased), on the way *in*. A raw or otherwise
+    /// unchecked use hands a value whose erasure is `Object` to a parameter whose own erasure is
+    /// narrower — `new EnumMap(Suit.class).put(objectArray[0], ..)`, where
+    /// `EnumMap<K extends Enum<K>, V>.put` takes a `java/lang/Enum`. The source is legal (unchecked,
+    /// and javac says so), the descriptor is right, and the verifier still rejects the call because
+    /// nothing on the stack says the value is an `Enum`. javac emits this `checkcast`; so does this.
+    ///
+    /// Only the `Object`-to-narrower direction is cast. A value the erasure already types as
+    /// something else either matches the slot or is a genuine mismatch, and papering over the second
+    /// with a cast would turn a compile-time gap into a `ClassCastException` at run time.
+    ///
+    /// The same rule holds one array level down, and has to: a varargs parameter's *whole array*
+    /// arrives this way too (`raw.all(objectArray)` against `all(K...)`), and pushing an
+    /// `[Ljava/lang/Object;` where the descriptor says `[LBase;` is a `VerifyError` rather than a
+    /// run-time surprise.
+    fn narrow_erased(
+        argument: &ast::Expr,
+        declared: &Ty,
+        context: &Context<'_>,
+        emit: &mut Emit<'_, '_>,
+    ) -> Result<()> {
+        let Ok(target) = Descriptor::field_type_of(declared, context.index) else {
+            return Ok(());
+        };
+        let Ok(actual) = Self::type_of(argument.syntax(), context) else {
+            return Ok(());
+        };
+        let Ok(actual) = Descriptor::field_type_of(&actual, context.index) else {
+            return Ok(());
+        };
+        if !Self::narrows_from_object(&actual, &target) {
+            return Ok(());
+        }
+        let Some(class) = Descriptor::checkcast_class(&target) else {
+            return Ok(());
+        };
+        emit.asm.check_cast(&class)?;
+        Ok(())
+    }
+
+    /// Whether a value erased as `actual` reaches a slot erased as `target` only through a cast:
+    /// `Object` to anything narrower, at whatever array depth the two share.
+    ///
+    /// Both guards are the ones [`narrow_erased`](Self::narrow_erased) documents, restated so an
+    /// array can be asked the same question as its component. A pair that differs in *shape* — an
+    /// array against a class, a reference against a primitive — is no erasure gap at all, and gets
+    /// no cast.
+    fn narrows_from_object(
+        actual: &jals_classfile::FieldType,
+        target: &jals_classfile::FieldType,
+    ) -> bool {
+        use jals_classfile::FieldType::{Array, Object};
+        match (actual, target) {
+            (Array(actual), Array(target)) => Self::narrows_from_object(actual, target),
+            (Object(actual), Object(target)) => {
+                actual == OBJECT_INTERNAL_NAME && target != OBJECT_INTERNAL_NAME
+            }
+            _ => false,
+        }
     }
 
     /// Put back the static type a generic call's erased descriptor threw away.

@@ -586,7 +586,7 @@ impl Const<'_> {
             .filter_map(jals_syntax::SyntaxElement::into_token)
             .filter(|token| token.kind() == IDENT)
             .last()
-            .is_some_and(|token| token.text() == "String")
+            .is_some_and(|token| *jals_syntax::decoded_ident(&token) == *"String")
     }
 
     /// Java's string conversion of a constant, for a `+` with a `String` operand.

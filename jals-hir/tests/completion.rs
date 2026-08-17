@@ -210,3 +210,49 @@ fn never_panics_on_broken_input() {
         }
     }
 }
+
+/// JLS §9.2: an interface implicitly declares abstract methods corresponding to
+/// `java.lang.Object`'s **public instance** methods, and nothing else of `Object`'s.
+///
+/// The implicit `Object` supertype edge every reference type carries is a *subtyping* fact, and it
+/// is right for an interface too — every interface-typed value is an `Object`. Its member set is
+/// not: `clone()` and `finalize()` are `protected`, `Object()` is a constructor, and none of the
+/// three is a member of any interface. The embedded stub `Object` declares only public methods, so
+/// only a `java.lang.Object` carrying the real member set shows it — and the consequence reaches
+/// past completion, since `resolve_member` is also what tells the bridge writer whether a method
+/// overrides one.
+#[test]
+fn an_interface_offers_only_objects_public_instance_methods() {
+    let object = "
+        package java.lang;
+        public class Object {
+            public Object() {}
+            public String toString() { return null; }
+            protected Object clone() { return null; }
+            protected void finalize() {}
+        }
+    ";
+    let on_interface = labels(
+        &[object, "interface I {} class Use { void m(I i) { i.$0 } }"],
+        1,
+    );
+    assert!(
+        on_interface.contains(&"toString".to_owned()),
+        "{on_interface:?}"
+    );
+    assert!(
+        !on_interface.contains(&"clone".to_owned()),
+        "{on_interface:?}"
+    );
+    assert!(
+        !on_interface.contains(&"finalize".to_owned()),
+        "{on_interface:?}"
+    );
+    // A *class* keeps them: it inherits `Object`'s members by extension, which §9.2 does not touch.
+    let on_class = labels(
+        &[object, "class K {} class Use { void m(K k) { k.$0 } }"],
+        1,
+    );
+    assert!(on_class.contains(&"clone".to_owned()), "{on_class:?}");
+    assert!(on_class.contains(&"finalize".to_owned()), "{on_class:?}");
+}

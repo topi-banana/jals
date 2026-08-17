@@ -247,12 +247,13 @@ impl Cli {
                 report.skipped.len()
             );
         }
-        let [parsed, lowered, reread, verified] = report.ladder();
+        let [parsed, lowered, reread, verified, descriptor_equal] = report.ladder();
         for (label, count) in [
             ("parsed", parsed),
             ("lowered", lowered),
             ("re-read", reread),
             ("verified", verified),
+            ("descriptor-equal", descriptor_equal),
         ] {
             println!("  {label:<11} {count:6}  {:6.2}%", rate(count));
         }

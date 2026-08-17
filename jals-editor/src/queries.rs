@@ -293,7 +293,10 @@ impl<'a> ProjectQueries<'a> {
                 .filter(|reference| {
                     reference.namespace == Namespace::Type
                         && reference.resolution == Resolution::Unresolved
-                        && reference.name == target.text()
+                        // A reference's name is the decoded spelling (JLS §3.3), so the token it is
+                        // matched against has to be decoded too — otherwise a name written one way
+                        // and used the other is two names here and one everywhere else.
+                        && reference.name == *jals_syntax::decoded_ident(&target)
                 })
                 .filter(|reference| {
                     self.index()
@@ -308,7 +311,10 @@ impl<'a> ProjectQueries<'a> {
             .root()
             .descendants_with_tokens()
             .filter_map(SyntaxElement::into_token)
-            .filter(|token| token.kind() == SyntaxKind::IDENT && token.text() == target.text())
+            .filter(|token| {
+                token.kind() == SyntaxKind::IDENT
+                    && jals_syntax::decoded_ident(token) == jals_syntax::decoded_ident(&target)
+            })
             .map(|token| Highlight {
                 range: crate::byte_range(token.text_range()),
                 kind: HighlightKind::of_token(&token),
