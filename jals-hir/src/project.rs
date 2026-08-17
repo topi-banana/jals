@@ -32,7 +32,7 @@ use jals_exec::Yielder;
 use jals_syntax::SyntaxKind::{
     ANNOTATION_TYPE_DECL, CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL, ELLIPSIS, ENUM_BODY,
     ENUM_CONSTANT, ENUM_DECL, EXTENDS_CLAUSE, FIELD_DECL, IMPLEMENTS_CLAUSE, INTERFACE_DECL,
-    LAMBDA_EXPR, LBRACK, METHOD_DECL, MODIFIERS, NEW_EXPR, PRIVATE_KW, RECORD_COMPONENT,
+    LAMBDA_EXPR, LBRACK, METHOD_DECL, MODIFIERS, NEW_EXPR, PRIVATE_KW, PUBLIC_KW, RECORD_COMPONENT,
     RECORD_DECL, RECORD_HEADER, STATIC_KW,
 };
 use jals_syntax::ast::{self, AstNode};
@@ -226,6 +226,16 @@ pub struct MemberModifiers {
     pub is_static: bool,
     /// Not visible outside its declaring type, and so never virtually dispatched.
     pub is_private: bool,
+    /// Declared `public`, or implicitly so because its owner is an interface (JLS §9.3, §9.4).
+    ///
+    /// Recorded because JLS §9.2 acts on exactly this bit: an interface implicitly declares abstract
+    /// methods corresponding to `java.lang.Object`'s **public instance methods**, and no others. The
+    /// implicit `Object` supertype edge every reference type carries would otherwise give an
+    /// interface `clone()` and `finalize()` — both `protected`, both members of no interface —
+    /// which completion offered, a lowering would have emitted a call javac rejects, and
+    /// `interface I { int clone(); }` acquired a bridge from. `is_private` is still separate rather
+    /// than folded in: the two answer different questions, and a package-private member is neither.
+    pub is_public: bool,
 }
 
 /// A member of an indexed type: a field, method, constructor, or enum constant.
@@ -300,6 +310,7 @@ impl MemberModifiers {
             match token.kind() {
                 STATIC_KW => out.is_static = true,
                 PRIVATE_KW => out.is_private = true,
+                PUBLIC_KW => out.is_public = true,
                 _ => {}
             }
         }
@@ -1186,9 +1197,15 @@ impl ProjectIndex {
     /// damage this edge is being careful to avoid in `method_set_complete`.
     ///
     /// An interface gets the edge too. JLS §9.2 says an interface with no `extends` has no
-    /// *superinterface*, but its member set implicitly declares `Object`'s public methods and every
-    /// interface-typed value is an `Object`; [`implicit`](Supertype::implicit) is what records that
-    /// the edge is not a written `extends`.
+    /// *superinterface*, but its member set implicitly declares `Object`'s public **instance
+    /// methods** and every interface-typed value is an `Object`; [`implicit`](Supertype::implicit)
+    /// is what records that the edge is not a written `extends`.
+    ///
+    /// "Public instance methods" is the whole of what §9.2 gives it, and the member walks enforce
+    /// that half rather than this one — see [`interface_declares`](Self::interface_declares). The
+    /// edge is a *supertype* relation, which is true of the whole of `Object`; which of its members
+    /// an interface declares is a different question, and answering it here would also have to
+    /// answer it for the subtyping and `instanceof` the same edge carries.
     fn push_implicit_object(&self, owner: ItemId, file: FileId, supertypes: &mut Vec<Supertype>) {
         if !matches!(
             self.items[owner.0 as usize].kind,
@@ -1626,9 +1643,45 @@ impl ProjectIndex {
     ) -> Option<MemberId> {
         // The type's own members win over inherited ones — the walk reaches `current`'s
         // supertypes only after `declared_member` returns `None`.
+        let on_interface = self.declares_object_publics_only(owner);
         self.walk_supertypes(owner, |current| {
             self.declared_member(current, name, namespace)
+                .filter(|&id| !on_interface || self.interface_declares(id))
         })
+    }
+
+    /// Whether members reached from `owner` have to be filtered by JLS §9.2 — i.e. whether `owner`
+    /// is an interface.
+    ///
+    /// The predicate is on the *type asked*, not on the path a walk took to `Object`. Threading it
+    /// down the walk instead would answer differently depending on which edge arrived first: `class
+    /// C implements I {}` reaches `Object` through its own implicit edge *and* through `I`'s, and C
+    /// genuinely has `clone()`.
+    fn declares_object_publics_only(&self, owner: ItemId) -> bool {
+        matches!(
+            self.items[owner.0 as usize].kind,
+            DefKind::Interface | DefKind::AnnotationType
+        )
+    }
+
+    /// Whether an interface really declares `member`, for a member reached from an interface.
+    ///
+    /// The implicit [`java.lang.Object`](Supertype::implicit) edge stands for JLS §9.2: an interface
+    /// with no direct superinterface implicitly declares abstract methods corresponding to
+    /// `Object`'s **public instance methods**, and nothing else of `Object`'s is a member of it.
+    /// `clone()` and `finalize()` are `protected`, and `Object()` is a constructor an interface
+    /// cannot have. Answering them made completion offer a call javac rejects, and let
+    /// `interface I { int clone(); }` (JLS §9.2 — legal, and impossible to implement) reach the
+    /// bridge writer as an override.
+    ///
+    /// Only `Object`'s members are filtered. Every other supertype of an interface is a
+    /// superinterface, whose members it does declare.
+    fn interface_declares(&self, member: MemberId) -> bool {
+        let member = &self.members[member.0 as usize];
+        if self.items[member.owner.0 as usize].fqn.as_str() != OBJECT_FQN {
+            return true;
+        }
+        member.kind == DefKind::Method && member.modifiers.is_public && !member.modifiers.is_static
     }
 
     /// Every member named `name` in name-space `namespace` reachable from `owner` (the type and its
@@ -1642,12 +1695,16 @@ impl ProjectIndex {
         namespace: Namespace,
     ) -> Vec<MemberId> {
         let mut out = Vec::new();
+        let on_interface = self.declares_object_publics_only(owner);
         // Always returning `None` walks the whole (cycle-guarded) chain, accumulating into `out`.
         self.walk_supertypes(owner, |current| {
             if let Some(ids) = self.members_by_owner.get(&current) {
                 for &id in ids {
                     let member = &self.members[id.0 as usize];
-                    if member.name == name && member.kind.namespace() == namespace {
+                    if member.name == name
+                        && member.kind.namespace() == namespace
+                        && (!on_interface || self.interface_declares(id))
+                    {
                         out.push(id);
                     }
                 }
@@ -1665,9 +1722,14 @@ impl ProjectIndex {
     /// its own de-duplication policy. A member of an external supertype is not reachable and absent.
     pub fn members_of(&self, owner: ItemId) -> Vec<MemberId> {
         let mut out = Vec::new();
+        let on_interface = self.declares_object_publics_only(owner);
         self.walk_supertypes(owner, |current| {
             if let Some(ids) = self.members_by_owner.get(&current) {
-                out.extend_from_slice(ids);
+                out.extend(
+                    ids.iter()
+                        .copied()
+                        .filter(|&id| !on_interface || self.interface_declares(id)),
+                );
             }
             None::<()>
         });
@@ -2050,10 +2112,11 @@ impl ProjectIndex {
                 FIELD_DECL => {
                     if let Some(field) = ast::FieldDecl::cast(member.clone()) {
                         let ty = MemberType::of(field.ty());
-                        // An interface field is implicitly `public static final` (JLS §9.3); only
-                        // `static` changes how it is reached.
+                        // An interface field is implicitly `public static final` (JLS §9.3);
+                        // `static` changes how it is reached, and `public` is what JLS §9.2 acts on.
                         let mut modifiers = MemberModifiers::of(&member);
                         modifiers.is_static |= in_interface;
+                        modifiers.is_public |= in_interface;
                         for name in field.names() {
                             members.push(Member {
                                 modifiers,
@@ -2069,8 +2132,13 @@ impl ProjectIndex {
                         );
                         let (params, varargs) = Self::params_of(&member);
                         let throws = Self::throws_of(&member);
+                        // An interface method is implicitly `public` (JLS §9.4), which is the bit
+                        // §9.2 reads back when it decides which of `Object`'s members an interface
+                        // implicitly declares.
+                        let mut modifiers = MemberModifiers::of(&member);
+                        modifiers.is_public |= in_interface;
                         members.push(Member {
-                            modifiers: MemberModifiers::of(&member),
+                            modifiers,
                             params,
                             varargs,
                             throws,
@@ -2109,6 +2177,7 @@ impl ProjectIndex {
                             modifiers: MemberModifiers {
                                 is_static: true,
                                 is_private: false,
+                                is_public: true,
                             },
                             ..new_member(&name, DefKind::EnumConstant, ty)
                         });
@@ -2170,6 +2239,7 @@ impl ProjectIndex {
                     modifiers: MemberModifiers {
                         is_static: false,
                         is_private: true,
+                        is_public: false,
                     },
                     ..new_member(name, DefKind::Field, ty.clone())
                 });
@@ -2254,6 +2324,7 @@ impl ProjectIndex {
                 modifiers: MemberModifiers {
                     is_static: true,
                     is_private: false,
+                    is_public: true,
                 },
                 params,
                 varargs: false,

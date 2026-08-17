@@ -191,6 +191,7 @@ impl ClasspathLower {
                 modifiers: MemberModifiers {
                     is_static: field.access_flags.contains(FieldAccessFlags::STATIC),
                     is_private: field.access_flags.contains(FieldAccessFlags::PRIVATE),
+                    is_public: field.access_flags.contains(FieldAccessFlags::PUBLIC),
                 },
                 ty: Self::field_member_type(&field.attributes, field.descriptor_index, pool),
                 params: Vec::new(),
@@ -230,6 +231,7 @@ impl ClasspathLower {
                 modifiers: MemberModifiers {
                     is_static: method.access_flags.contains(MethodAccessFlags::STATIC),
                     is_private: method.access_flags.contains(MethodAccessFlags::PRIVATE),
+                    is_public: method.access_flags.contains(MethodAccessFlags::PUBLIC),
                 },
                 ty,
                 params,
