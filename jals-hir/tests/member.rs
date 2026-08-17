@@ -300,7 +300,7 @@ fn a_methods_own_type_parameters_are_recorded() {
 /// argument to the method's would give a shadowed parameter a type it never had, and erasing the
 /// method's to the *class's* bound would produce a descriptor javac does not.
 #[test]
-fn a_method_type_parameter_shadows_the_classs() {
+fn a_method_type_parameter_shadows_the_enclosing_class() {
     let sources = ["class Holder<T extends Number> { <T> T pick(T a) { return a; } }"];
     let (_nodes, index) = build(&sources);
     let holder = item(&index, &sources, 0, "Holder");
