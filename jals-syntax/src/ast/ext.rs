@@ -20,7 +20,7 @@ use super::{
 use crate::language::{SyntaxNode, SyntaxToken};
 use crate::syntax_kind::SyntaxKind::{
     self, COMMA, DOT, EQ, FOR_KW, IDENT, LBRACK, RPAREN, SEMICOLON, SWITCH_EXPR, SWITCH_STMT,
-    UNDERSCORE, YIELD_STMT,
+    THIS_KW, UNDERSCORE, YIELD_STMT,
 };
 #[cfg(test)]
 use crate::syntax_kind::SyntaxKind::{MODIFIERS, NON_SEALED_KW};
@@ -343,6 +343,19 @@ impl FieldDecl {
 }
 
 impl Param {
+    /// Whether this is a **receiver parameter** (`void m(Foo this)`, `Inner(Outer Outer.this)`).
+    ///
+    /// JLS §8.4.1 gives it no slot and no descriptor entry: it exists to carry type annotations onto
+    /// the receiver, and `void m(Foo this)` is `()V`. Counting it made the method's arity one too
+    /// high — so a call to it resolved to nothing — and put a parameter in the descriptor javac does
+    /// not write.
+    pub fn is_receiver(&self) -> bool {
+        self.syntax
+            .children_with_tokens()
+            .filter_map(rowan::NodeOrToken::into_token)
+            .any(|token| token.kind() == THIS_KW)
+    }
+
     /// The array dimensions written after the parameter's name (`int xs[]` → 1).
     ///
     /// A parameter is a declarator too (JLS §8.4.1), so the C-style form is legal here and means

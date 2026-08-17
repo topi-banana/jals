@@ -2883,6 +2883,7 @@ impl Compile {
     ) -> Result<()> {
         let descriptor = alloc::format!("L{internal_name};");
         let array = alloc::format!("[{descriptor}");
+        let values = Self::values_field(members);
         for constant in constants {
             let name = constant
                 .name()
@@ -2906,7 +2907,7 @@ impl Compile {
                     | FieldAccessFlags::FINAL
                     | FieldAccessFlags::SYNTHETIC,
             ),
-            name_index: pool.utf8_index(VALUES).ok_or(AsmError::PoolFull)?,
+            name_index: pool.utf8_index(&values).ok_or(AsmError::PoolFull)?,
             descriptor_index: pool.utf8_index(&array).ok_or(AsmError::PoolFull)?,
             attributes: Vec::new(),
         });
@@ -2953,7 +2954,7 @@ impl Compile {
             .utf8_index(&values_descriptor)
             .ok_or(AsmError::PoolFull)?;
         let mut asm = Assembler::new(pool, Receiver::Static, &values_descriptor)?;
-        asm.get_static(internal_name, VALUES, &array)?;
+        asm.get_static(internal_name, &values, &array)?;
         asm.invoke_virtual(&array, "clone", "()Ljava/lang/Object;")?;
         asm.check_cast(&array)?;
         let returned = asm.stack_top().ok_or(AsmError::StackUnderflow)?;
@@ -3065,7 +3066,7 @@ impl Compile {
         // An `enum`'s constants are built *first*, because a `static` initialiser below them may read
         // one and JLS §12.4.2 runs them in that order.
         if !constants.is_empty() {
-            Self::enum_constants(constants, internal_name, context, &mut emit)?;
+            Self::enum_constants(constants, internal_name, members, context, &mut emit)?;
         }
         Self::initializers(context, &mut emit, members, true)?;
         if asm.reachable() {
@@ -3079,6 +3080,26 @@ impl Compile {
         }))
     }
 
+    /// The name the synthetic constants array takes, which is `$VALUES` unless the source used it.
+    ///
+    /// `enum SynthValues { red; SynthValues[] $VALUES = null; }` is legal Java — the name is only
+    /// reserved by convention — and emitting the synthetic one anyway declared the field twice, which
+    /// is a `ClassFormatError` at load. javac appends a `$` until the name is free, so this does.
+    fn values_field(members: &[SyntaxNode]) -> String {
+        let declared: Vec<String> = members
+            .iter()
+            .filter(|member| member.kind() == FIELD_DECL)
+            .filter_map(|member| ast::FieldDecl::cast(member.clone()))
+            .flat_map(|field| field.names().collect::<Vec<_>>())
+            .map(|name| jals_syntax::decoded_ident(&name).into_owned())
+            .collect();
+        let mut name = VALUES.to_owned();
+        while declared.contains(&name) {
+            name.push('$');
+        }
+        name
+    }
+
     /// Build every `enum` constant, then the `$VALUES` array holding them in declaration order.
     ///
     /// The ordinal *is* the declaration position: it is what `ordinal()` returns, what a `switch` over
@@ -3087,6 +3108,7 @@ impl Compile {
     fn enum_constants(
         constants: &[ast::EnumConstant],
         internal_name: &str,
+        members: &[SyntaxNode],
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
     ) -> Result<()> {
@@ -3154,9 +3176,11 @@ impl Compile {
             emit.asm.get_static(internal_name, &name, &descriptor)?;
             emit.asm.array_store(&descriptor)?;
         }
-        Ok(emit
-            .asm
-            .put_static(internal_name, VALUES, &alloc::format!("[{descriptor}"))?)
+        Ok(emit.asm.put_static(
+            internal_name,
+            &Self::values_field(members),
+            &alloc::format!("[{descriptor}"),
+        )?)
     }
 
     /// `$assertionsDisabled = !Foo.class.desiredAssertionStatus();`

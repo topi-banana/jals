@@ -2511,6 +2511,12 @@ impl ProjectIndex {
         // return none for one — leaving every constructor with an empty parameter list.
         if let Some(list) = method.children().find_map(ast::ParamList::cast) {
             for param in list.params() {
+                // A receiver parameter (`void m(Foo this)`) is not one: JLS §8.4.1 gives it no slot
+                // and no descriptor entry. Counting it made the method one parameter too wide, so a
+                // call to it matched nothing at all.
+                if param.is_receiver() {
+                    continue;
+                }
                 let spread = param
                     .syntax()
                     .children_with_tokens()

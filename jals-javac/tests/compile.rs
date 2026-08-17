@@ -5894,3 +5894,84 @@ public class Early {
     }
     assert_eq!(run(source, "Early").trim(), "1\n42\nOK");
 }
+
+/// A receiver parameter is not a parameter (JLS §8.4.1), and a synthetic name the source already
+/// used is not the synthetic's to take.
+///
+/// `void m(Recv this)` is `()V`: the declaration exists to carry type annotations onto the receiver.
+/// Counting it made the method one parameter wide, so `m()` matched nothing and the descriptor javac
+/// writes was not the one emitted.
+///
+/// `enum E { a; E[] $VALUES; }` is legal — the name is reserved by convention only — and emitting the
+/// synthetic array anyway declared the field twice, which is a `ClassFormatError` at load. javac
+/// appends a `$` until the name is free.
+#[test]
+fn a_receiver_parameter_and_a_taken_synthetic_name() {
+    let source = "
+public class Recv {
+    int seed = 7;
+    int read(Recv this) { return seed; }
+    int plus(Recv this, int n) { return seed + n; }
+    enum E {
+        a, b;
+        E[] $VALUES = null;
+    }
+    public static void main(String[] args) {
+        Recv r = new Recv();
+        System.out.println(r.read());
+        System.out.println(r.plus(3));
+        System.out.println(E.values().length);
+    }
+}
+";
+    let classes = compile(source).expect("compile");
+    let read = |name: &str| {
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(
+            classes
+                .iter()
+                .find(|class| class.internal_name == name)
+                .unwrap_or_else(|| panic!("{name} is emitted"))
+                .bytes
+                .as_slice(),
+        ))
+        .expect("reparse")
+    };
+    let class = read("Recv");
+    let pool = &class.constant_pool;
+    let methods: Vec<(String, String)> = class
+        .methods
+        .iter()
+        .map(|method| {
+            (
+                pool.utf8(method.name_index).expect("utf8").into_owned(),
+                pool.utf8(method.descriptor_index)
+                    .expect("utf8")
+                    .into_owned(),
+            )
+        })
+        .collect();
+    assert!(
+        methods.contains(&("read".to_owned(), "()I".to_owned())),
+        "{methods:?}"
+    );
+    assert!(
+        methods.contains(&("plus".to_owned(), "(I)I".to_owned())),
+        "{methods:?}"
+    );
+
+    // The declared `$VALUES` keeps its name; the synthetic one steps aside, as javac's does.
+    let class = read("Recv$E");
+    let pool = &class.constant_pool;
+    let fields: Vec<String> = class
+        .fields
+        .iter()
+        .map(|field| pool.utf8(field.name_index).expect("utf8").into_owned())
+        .collect();
+    assert!(fields.contains(&"$VALUES".to_owned()), "{fields:?}");
+    assert!(fields.contains(&"$VALUES$".to_owned()), "{fields:?}");
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Recv").trim(), "7\n10\n2");
+}
