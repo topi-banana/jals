@@ -5342,3 +5342,31 @@ public class Hid {
 ";
     assert_eq!(run(source, "Hid"), "21\n");
 }
+
+/// A type-variable bound the index cannot *name* erases to `Object` rather than refusing.
+///
+/// Every other unresolved type is a value the caller wrote and the descriptor has to spell, so
+/// refusing is right there. A bound is a fact about the *index*, and the index is routinely partial:
+/// `Runnable`, `Cloneable`, `Comparator`, and every `java.util.function` type are absent from the
+/// embedded stubs, which is the only configuration this crate's own tests and the playground index.
+/// Refusing therefore made `<T extends Runnable>` uncompilable outright — including the class-level
+/// form, which compiled before any bound was read at all.
+#[test]
+fn a_bound_the_index_cannot_name_erases_to_object() {
+    let method = descriptors(
+        "public class D { static <T extends Runnable> T r(T a) { return a; } }",
+        "D",
+    );
+    assert!(
+        method.contains(&"r (Ljava/lang/Object;)Ljava/lang/Object;".to_owned()),
+        "got {method:?}"
+    );
+    let class_level = descriptors(
+        "public class F<T extends Runnable> { T held; T get() { return held; } }",
+        "F",
+    );
+    assert!(
+        class_level.contains(&"get ()Ljava/lang/Object;".to_owned()),
+        "got {class_level:?}"
+    );
+}

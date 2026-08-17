@@ -1966,8 +1966,11 @@ impl Compile {
                 // bound is the whole rule and the position does not change it.
                 let _ = position;
                 out.push(':');
-                let ty = context.ty_of_type(bound)?;
-                out.push_str(&Descriptor::descriptor_of(&ty, context.index)?.to_string());
+                let erased = context
+                    .ty_of_type(bound)
+                    .and_then(|ty| Ok(Descriptor::descriptor_of(&ty, context.index)?.to_string()))
+                    .unwrap_or_else(|_| Self::UNNAMEABLE_BOUND.to_owned());
+                out.push_str(&erased);
             }
         }
         out.push('>');
@@ -2050,7 +2053,10 @@ impl Compile {
                 }
                 for bound in &bounds {
                     out.push(':');
-                    out.push_str(&Self::type_signature(bound, &vars, context)?);
+                    out.push_str(
+                        &Self::type_signature(bound, &vars, context)
+                            .unwrap_or_else(|_| Self::UNNAMEABLE_BOUND.to_owned()),
+                    );
                 }
             }
             out.push('>');
@@ -2108,6 +2114,21 @@ impl Compile {
     /// is where the variable itself is kept. Type *arguments* are erased here for the same reason the
     /// class signature erases its supertypes: leaving them out loses only what a reflective reader would
     /// see, never what the JVM links on.
+    /// The `Signature` encoding a type-parameter **bound** falls back to when the index cannot name
+    /// the type it writes.
+    ///
+    /// The one place a `Signature` here says less than the source did, and it is deliberate: the
+    /// descriptor erasure makes the same fallback for the same reason — the index is routinely
+    /// partial, `Runnable`, `Cloneable`, `Comparator`, and every `java.util.function` type are
+    /// absent from the embedded stubs, and refusing made `<T extends Runnable>` uncompilable
+    /// outright. The two have to agree: a `Signature` naming a bound the descriptor erased
+    /// differently is worse than one naming none.
+    ///
+    /// Nothing else in a signature reaches this leniency, and nothing else should: every other
+    /// unresolvable type in one is a value the *descriptor* refuses too, so the compile stops there
+    /// whatever this writes.
+    const UNNAMEABLE_BOUND: &'static str = "Ljava/lang/Object;";
+
     fn type_signature(ty: &ast::Type, vars: &[String], context: &Context<'_>) -> Result<String> {
         use jals_syntax::SyntaxKind::{LBRACK, TYPE_ARGS};
         let dimensions = ty

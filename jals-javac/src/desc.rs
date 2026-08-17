@@ -146,7 +146,8 @@ impl Descriptor {
                 name,
             } => match index.type_var_bound(*owner, *member, name) {
                 Some(bound) if depth < Self::BOUND_DEPTH => {
-                    Self::field_type_within(&bound, index, depth + 1)?
+                    Self::field_type_within(&bound, index, depth + 1)
+                        .unwrap_or_else(|_| FieldType::Object(Self::OBJECT.to_owned()))
                 }
                 _ => FieldType::Object(Self::OBJECT.to_owned()),
             },
