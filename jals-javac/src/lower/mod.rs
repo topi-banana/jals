@@ -1915,14 +1915,21 @@ impl Compile {
         let params = node.children().find_map(ast::ParamList::cast);
         let mut asm = Assembler::new(pool, Receiver::Constructor(&context.this_class), &text)?;
         let slots = Slots::for_constructor(context, params.as_ref(), synthetic);
-        let mut emit = Emit::new(&mut asm, slots, jals_hir::Ty::Void, true);
+        let capture_slots = Self::capture_slots_of(context, &slots)?;
+        let mut emit =
+            Emit::new(&mut asm, slots, jals_hir::Ty::Void, true).with_capture_slots(capture_slots);
         match &delegation {
             // `this(…)` and `super(…)` each replace part of what the prologue emits, and running
             // both would run that part twice (JLS §8.8.7). `this(…)` replaces all of it — the
             // constructor it delegates to has already run the field initialisers — while `super(…)`
             // replaces only the `super()` call, so the initialisers still follow it.
             Some(call) => {
-                expr::Expr::lower(&ast::Expr::Call(call.clone()), context, &mut emit)?;
+                // `this` is `uninitializedThis` until this call returns, so the arguments cannot
+                // read a synthetic field off it — the values are still in the parameters they
+                // arrived in.
+                emit.while_uninitialized(|emit| {
+                    expr::Expr::lower(&ast::Expr::Call(call.clone()), context, emit)
+                })?;
                 if !Facts::delegates_to(call, jals_syntax::SyntaxKind::THIS_KW) {
                     Self::initializers(context, &mut emit, members, false)?;
                 }
@@ -2837,7 +2844,9 @@ impl Compile {
         let descriptor_index = pool.utf8_index(&text).ok_or(AsmError::PoolFull)?;
         let mut asm = Assembler::new(pool, Receiver::Constructor(&context.this_class), &text)?;
         let slots = Slots::for_constructor(context, None, synthetic);
-        let mut emit = Emit::new(&mut asm, slots, jals_hir::Ty::Void, true);
+        let capture_slots = Self::capture_slots_of(context, &slots)?;
+        let mut emit =
+            Emit::new(&mut asm, slots, jals_hir::Ty::Void, true).with_capture_slots(capture_slots);
         Self::prologue(
             context, &mut emit, super_name, super_item, members, forwarded,
         )?;
@@ -3252,6 +3261,25 @@ impl Compile {
 
     /// `super()` followed by every instance field's initialiser — what a constructor runs before
     /// its own body, and the reason a field initialiser is not a statement anywhere in the source.
+    /// Where each of this class's captures arrives in a constructor: after every declared parameter,
+    /// at its own width.
+    ///
+    /// Worked out before anything runs, so a temporary declared mid-body cannot move it — and in one
+    /// place, because two readers depend on it agreeing: the prologue that stores each capture into
+    /// its field, and the argument lowering that has to read one *before* `super(...)` has done so.
+    fn capture_slots_of(
+        context: &Context<'_>,
+        slots: &Slots,
+    ) -> Result<Vec<(jals_hir::DefId, u16)>> {
+        let mut out = Vec::new();
+        let mut slot = slots.next_free();
+        for &captured in context.captured_here() {
+            out.push((captured, slot));
+            slot += Slots::descriptor_width(&Self::capture_descriptor(captured, context)?);
+        }
+        Ok(out)
+    }
+
     fn prologue(
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
@@ -3319,16 +3347,15 @@ impl Compile {
                 &alloc::format!("L{};", enclosing.name),
             )?;
         }
-        // Each capture's parameter sits after every declared one, and the widths are what say where.
-        let mut slot = emit.slots.next_free();
-        for &captured in context.captured_here() {
+        // Each capture's parameter sits after every declared one; where exactly is `Emit`'s answer,
+        // shared with the argument lowering that has to read one before `super(...)` has run.
+        for (captured, slot) in emit.capture_slots().to_vec() {
             let name = Self::capture_field(captured, context);
             let descriptor = Self::capture_descriptor(captured, context)?;
             emit.asm.load(0)?;
             emit.asm.load(slot)?;
             emit.asm
                 .put_field(&context.this_class, &name, &descriptor)?;
-            slot += Slots::descriptor_width(&descriptor);
         }
         Self::initializers(context, emit, members, false)
     }

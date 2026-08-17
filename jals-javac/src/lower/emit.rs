@@ -65,6 +65,21 @@ pub(crate) struct Emit<'a, 'pool> {
     /// The `switch` expressions being lowered, innermost last: where a `yield` jumps, the type it has
     /// to produce, and how deep the `switch`'s own scope is so a `yield` knows which guards it crosses.
     yields: Vec<(Label, Ty, usize)>,
+    /// Whether `this` is still `uninitializedThis` — inside a constructor, up to and including the
+    /// arguments of its explicit `super(...)` / `this(...)` invocation.
+    ///
+    /// The verifier allows almost nothing on that value: no `getfield`, no `invokespecial` receiver
+    /// other than the constructor being delegated to. So an argument naming the enclosing instance
+    /// or a captured local cannot be lowered the ordinary way, which reads a synthetic field the
+    /// prologue has not filled yet.
+    uninitialized_this: bool,
+    /// Where each captured local *arrives*, before the prologue stores it into its field.
+    ///
+    /// A constructor's synthetic capture parameters sit after every declared one, at their own
+    /// widths. Computed once, here, and read by both the prologue that stores them and the argument
+    /// lowering that has to read one before `super(...)` has run — the two used to be one
+    /// calculation in one place, and a second copy is how they would come to disagree.
+    capture_slots: Vec<(jals_hir::DefId, u16)>,
 }
 
 /// What a guarded region has to run before control leaves it.
@@ -116,7 +131,42 @@ impl<'a, 'pool> Emit<'a, 'pool> {
             scopes: Vec::new(),
             guards: Vec::new(),
             yields: Vec::new(),
+            uninitialized_this: false,
+            capture_slots: Vec::new(),
         }
+    }
+
+    /// Record where this constructor's synthetic capture parameters arrive, in declaration order.
+    pub(crate) fn with_capture_slots(mut self, slots: Vec<(jals_hir::DefId, u16)>) -> Self {
+        self.capture_slots = slots;
+        self
+    }
+
+    /// The capture parameter slots, in the order the descriptor names them.
+    pub(crate) fn capture_slots(&self) -> &[(jals_hir::DefId, u16)] {
+        &self.capture_slots
+    }
+
+    /// The slot a captured local arrives in, when this is a constructor that takes one.
+    pub(crate) fn capture_slot(&self, id: jals_hir::DefId) -> Option<u16> {
+        self.capture_slots
+            .iter()
+            .find_map(|&(captured, slot)| (captured == id).then_some(slot))
+    }
+
+    /// Whether `this` is still `uninitializedThis`.
+    pub(crate) const fn uninitialized_this(&self) -> bool {
+        self.uninitialized_this
+    }
+
+    /// Run `body` with `this` marked uninitialized — the explicit constructor invocation and its
+    /// arguments.
+    pub(crate) fn while_uninitialized<R>(&mut self, body: impl FnOnce(&mut Self) -> R) -> R {
+        let previous = self.uninitialized_this;
+        self.uninitialized_this = true;
+        let out = body(self);
+        self.uninitialized_this = previous;
+        out
     }
 
     /// The method's declared return type.

@@ -5841,3 +5841,56 @@ public class Nest {
     }
     assert_eq!(run(source, "Nest").trim(), "2\ntrue");
 }
+
+/// Before `super(...)` returns, `this` is `uninitializedThis` and almost nothing may be read off it.
+///
+/// Both of these are ordinary Java that produced a class file no JVM loads:
+///
+/// - `class Sub extends Outer { Sub() { super(i); } }` — `i` is the *enclosing* instance's field,
+///   not an inherited one, and the enclosing instance is a constructor parameter at that point. The
+///   walk stopped at `this` (`Sub` really is a subtype of the field's owner) and emitted a `getfield`
+///   on `uninitializedThis`.
+/// - `super(new Object() {{ use(x); }})` where `x` is a captured local. The capture lives in a
+///   synthetic field the prologue has not written yet, so its value is still in the parameter it
+///   arrived in — which is where javac reads it too.
+///
+/// The `super(...)` call itself is the one instruction `uninitializedThis` may be the receiver of,
+/// so the delegation keeps loading slot 0 while its arguments do not.
+#[test]
+fn a_constructor_reads_its_parameters_before_super_returns() {
+    let source = "
+public class Early {
+    // Package-private, not `private`: reading a private outer field from an inner class needs the
+    // nestmate attributes this compiler does not emit yet, which is a different gap.
+    int i = 41;
+    Early(int seed) { System.out.println(seed); }
+    class Sub extends Early {
+        Sub() { super(i + 1); }
+    }
+    static String seen = \"\";
+    // Kept off `println(Object)`: this harness indexes the embedded stubs, whose `println` set is
+    // not the real one, and overload selection there is a different gap.
+    static class Holder { Holder(Object o) { seen = o.toString(); } }
+    static void capturing(final char x) {
+        class Sub2 extends Holder {
+            Sub2(final char y) {
+                super(new Object() {
+                    public String toString() { return \"\" + x + y; }
+                });
+            }
+        }
+        new Sub2('K');
+    }
+    public static void main(String[] args) {
+        new Early(1).new Sub();
+        capturing('O');
+        System.out.println(seen);
+    }
+}
+";
+    if !java_available() {
+        compile(source).expect("compile");
+        return;
+    }
+    assert_eq!(run(source, "Early").trim(), "1\n42\nOK");
+}
