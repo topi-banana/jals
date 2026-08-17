@@ -19,8 +19,8 @@
 #   <rel>/<Base>.expected/     the class files javac produced from it
 #   SKIPPED.tsv                <rel> \t <why javac declined it alone>
 #
-# `expected/` is what a future run-equivalence rung diffs against. Nothing reads it yet; it is
-# written now because regenerating the corpus to obtain it later costs the whole generation pass.
+# `expected/` is javac's own output for the case. Its presence is what makes a `.java` under the
+# root a case at all, and the harness's `descriptor-equal` rung diffs method descriptors against it.
 #
 # # Why javac is the oracle
 #

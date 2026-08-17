@@ -9,7 +9,6 @@
 mod build;
 pub(crate) mod collect;
 
-use alloc::borrow::ToOwned;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -282,7 +281,9 @@ impl Resolver {
         self.defs.push(Def {
             id,
             kind,
-            name: name_tok.text().to_owned(),
+            // The *decoded* spelling (JLS §3.3): `int \u0061;` declares `a`, and keying a
+            // definition on the raw text made it a different name from every plain-spelled use.
+            name: jals_syntax::decoded_ident(name_tok).into_owned(),
             name_range: Collect::byte_range(name_tok),
             scope,
         });
@@ -306,7 +307,7 @@ impl Resolver {
         };
         self.raw_refs.push(RawRef {
             range: Collect::byte_range(&tok),
-            name: tok.text().to_owned(),
+            name: jals_syntax::decoded_ident(&tok).into_owned(),
             namespace,
             scope,
             qualified: None,
@@ -331,7 +332,7 @@ impl Resolver {
         let qualified = ty.qualified_text().filter(|q| q.contains('.'));
         self.raw_refs.push(RawRef {
             range: Collect::byte_range(&tok),
-            name: tok.text().to_owned(),
+            name: jals_syntax::decoded_ident(&tok).into_owned(),
             namespace: Namespace::Type,
             scope,
             qualified,

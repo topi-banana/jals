@@ -149,6 +149,8 @@ fn supertype_arguments_are_recorded() {
     let sub = index.item(item(&index, &sources, 0, "Sub"));
     assert_eq!(
         sub.supertypes,
+        // One edge, not two: `build` indexes no stubs and no classpath, so `java.lang.Object` is not
+        // an indexed type and the implicit edge has nothing to point at.
         vec![Supertype {
             id: base_id,
             args: vec![MemberType::Named {
@@ -157,6 +159,7 @@ fn supertype_arguments_are_recorded() {
                 dims: 0,
                 args: Vec::new(),
             }],
+            implicit: false,
         }]
     );
 }
@@ -268,4 +271,47 @@ fn build_never_panics_on_broken_or_cyclic_input() {
         "class",
         "class C extends C { int x; }",
     ]);
+}
+
+/// A method declares type parameters of its own, and they are not the class's.
+///
+/// Without them a bare `E` in `static <E> E pick(E, E)` resolves to an external name the index has
+/// never heard of, so a backend asking for the descriptor is told a type it cannot name rather than
+/// the `Object` a type variable erases to — which is a method that does not compile at all.
+#[test]
+fn a_methods_own_type_parameters_are_recorded() {
+    let sources = ["class C { static <E extends Number> E pick(E a, E b) { return a; } }"];
+    let (_nodes, index) = build(&sources);
+    let c = item(&index, &sources, 0, "C");
+    let pick = index
+        .resolve_member(c, "pick", Namespace::Method)
+        .expect("pick is indexed");
+    let declared = &index.member(pick).type_params;
+    assert_eq!(declared.len(), 1);
+    assert_eq!(declared[0].name, "E");
+    assert_eq!(declared[0].bounds.len(), 1, "`extends Number` is captured");
+    // And the class itself declares none — that is the whole distinction.
+    assert!(index.item(c).type_params.is_empty());
+}
+
+/// A method's `<T>` shadows its class's, so the two must be told apart by more than the name.
+///
+/// `class Holder<T> { <T> T pick(T a) }` is two different variables. Binding the receiver's type
+/// argument to the method's would give a shadowed parameter a type it never had, and erasing the
+/// method's to the *class's* bound would produce a descriptor javac does not.
+#[test]
+fn a_method_type_parameter_shadows_the_enclosing_class() {
+    let sources = ["class Holder<T extends Number> { <T> T pick(T a) { return a; } }"];
+    let (_nodes, index) = build(&sources);
+    let holder = item(&index, &sources, 0, "Holder");
+    let pick = index
+        .resolve_member(holder, "pick", Namespace::Method)
+        .expect("pick is indexed");
+    assert_eq!(index.item(holder).type_params[0].name, "T");
+    let declared = &index.member(pick).type_params;
+    assert_eq!(declared.len(), 1, "the method declares its own `T`");
+    assert!(
+        declared[0].bounds.is_empty(),
+        "the method's `T` is unbounded; the class's bound is not its own"
+    );
 }

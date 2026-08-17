@@ -32,7 +32,7 @@ use jals_exec::Yielder;
 use jals_syntax::SyntaxKind::{
     ANNOTATION_TYPE_DECL, CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL, ELLIPSIS, ENUM_BODY,
     ENUM_CONSTANT, ENUM_DECL, EXTENDS_CLAUSE, FIELD_DECL, IMPLEMENTS_CLAUSE, INTERFACE_DECL,
-    LAMBDA_EXPR, LBRACK, METHOD_DECL, MODIFIERS, NEW_EXPR, PRIVATE_KW, RECORD_COMPONENT,
+    LAMBDA_EXPR, LBRACK, METHOD_DECL, MODIFIERS, NEW_EXPR, PRIVATE_KW, PUBLIC_KW, RECORD_COMPONENT,
     RECORD_DECL, RECORD_HEADER, STATIC_KW,
 };
 use jals_syntax::ast::{self, AstNode};
@@ -86,6 +86,9 @@ impl fmt::Display for Fqn {
 /// A dense identifier for an [`Item`] within one [`ProjectIndex`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ItemId(u32);
+
+/// The one type name the language supplies as a supertype without any source writing it.
+const OBJECT_FQN: &str = "java.lang.Object";
 
 /// Where an indexed [`Item`] comes from: the project's own sources, a `git`/`path` dependency's
 /// sources, an external `.class` file, or an embedded standard-library stub.
@@ -186,6 +189,20 @@ pub struct Supertype {
     pub id: ItemId,
     /// The type arguments supplied to it, captured like a [`Member`]'s type; empty for a raw use.
     pub args: Vec<MemberType>,
+    /// Whether the language supplies this edge rather than the source writing it — the implicit
+    /// `java.lang.Object` every reference type extends.
+    ///
+    /// Every walk wants it (`x.toString()` has to resolve, and every reference type *is* an
+    /// `Object`) except one: [`method_set_complete`](ProjectIndex::method_set_complete) treats a
+    /// reached stub as proof the overload set is partial, and an edge from every type to a stub
+    /// `Object` would make that predicate universally `false`. Skipping the implicit edge there
+    /// loses nothing, because `ProjectIndex::is_object_method` already answers `false` for every
+    /// name `Object` declares.
+    ///
+    /// The implicit `java.lang.Enum` / `java.lang.Record` edges are deliberately **not** marked:
+    /// there is no name list covering *their* members, so their stub-incompleteness must keep
+    /// propagating.
+    pub implicit: bool,
 }
 
 /// A dense identifier for a [`Member`] within one [`ProjectIndex`].
@@ -209,6 +226,20 @@ pub struct MemberModifiers {
     pub is_static: bool,
     /// Not visible outside its declaring type, and so never virtually dispatched.
     pub is_private: bool,
+    /// Declared `public`, or implicitly so because its owner is an interface (JLS §9.3, §9.4).
+    ///
+    /// Recorded because JLS §9.2 acts on exactly this bit: an interface implicitly declares abstract
+    /// methods corresponding to `java.lang.Object`'s **public instance methods**, and no others. The
+    /// implicit `Object` supertype edge every reference type carries would otherwise give an
+    /// interface `clone()` and `finalize()` — both `protected`, both members of no interface —
+    /// which completion offered, a lowering would have emitted a call javac rejects, and
+    /// `interface I { int clone(); }` acquired a bridge from. `is_private` is still separate rather
+    /// than folded in: the two answer different questions, and a package-private member is neither.
+    ///
+    /// `pub(crate)` where its two siblings are `pub`: they decide an *instruction* a code generator
+    /// emits, and this decides a *member set* the resolver answers with, so no consumer outside this
+    /// crate reads it. The struct stays constructible only in here, which it already was.
+    pub(crate) is_public: bool,
 }
 
 /// A member of an indexed type: a field, method, constructor, or enum constant.
@@ -244,6 +275,15 @@ pub struct Member {
     /// Public because a *code generator* needs it: the JVM has no variable arity, so a varargs call
     /// site is the thing that builds the array, and it cannot know to unless it can ask.
     pub varargs: bool,
+    /// The method's or constructor's **own** type parameters (`static <E> E pick(E, E)`), captured
+    /// like [`Item::type_params`]. Empty for a field, an enum constant, and a non-generic method.
+    ///
+    /// Recorded because they are not the *class's*: without them a bare `E` in this member's
+    /// signature resolves to an external name the index has never heard of, and a backend asking for
+    /// the descriptor is told a type it cannot name rather than the `Object` (or bound) a type
+    /// variable erases to. Every consumer that reads a member's types has the member in hand, so it
+    /// says which member the types belong to — a method's `<T>` *shadows* the class's.
+    pub type_params: Vec<TypeParamDecl>,
     /// The checked exceptions a method / constructor declares in its `throws` clause, captured like
     /// [`ty`](Member::ty) as resolvable data (each a named reference type). Empty for a non-executable
     /// member and for one that declares no `throws`. Consumed by the checked-exception analysis
@@ -274,6 +314,7 @@ impl MemberModifiers {
             match token.kind() {
                 STATIC_KW => out.is_static = true,
                 PRIVATE_KW => out.is_private = true,
+                PUBLIC_KW => out.is_public = true,
                 _ => {}
             }
         }
@@ -683,7 +724,8 @@ impl ProjectIndex {
     ///
     /// Each file contributes its package, its type-name imports, and every type declaration it
     /// holds (top-level and nested). When two files declare the same fully-qualified name, the
-    /// first one indexed wins. With no options the JDK / classpath is *not* indexed — opt in with
+    /// first one indexed wins, and the indexing order is the priority order stated on
+    /// [`assemble`](Self::assemble). With no options the JDK / classpath is *not* indexed — opt in with
     /// [`with_stdlib`](ProjectIndexBuilder::with_stdlib),
     /// [`with_classpath`](ProjectIndexBuilder::with_classpath),
     /// [`with_source_locations`](ProjectIndexBuilder::with_source_locations), and
@@ -869,9 +911,10 @@ impl ProjectIndex {
 
     /// Assemble an index from pre-extracted per-file [`FileFacts`], folding in the classpath facts and
     /// the source-location overlay — the non-CST-walking half of indexing. `project` (host-editable
-    /// sources), `source` (`git`/`path` library sources), and `stub` (from
-    /// [`stub_facts`](Self::stub_facts)) are indexed in that priority order, so on a
-    /// fully-qualified-name clash a project type wins over a library type wins over a stub. Cheap
+    /// sources), `source` (`git`/`path` library sources), `classes` (the classpath), and `stub`
+    /// (from [`stub_facts`](Self::stub_facts)) are indexed in that priority order, so on a
+    /// fully-qualified-name clash a project type wins over a library type wins over a classpath type
+    /// wins over a stub — the stub last because it is signature-only and deliberately partial. Cheap
     /// relative to extraction (allocations, hashing, and supertype resolution only), so re-running it
     /// on every edit — reusing cached facts for the unchanged files — is the incremental path, bit-for
     /// -bit identical to a from-scratch [`builder`](Self::builder) build over the same inputs. Pure and
@@ -903,10 +946,11 @@ impl ProjectIndex {
             decl_to_member: HashMap::new(),
         };
 
-        // Every compilation unit to index, in priority order: the host's project files first, then the
-        // `git`/`path` library sources, then the embedded stubs — so on a fully-qualified-name clash a
-        // project type wins over a library type wins over a stub (`by_fqn` keeps the first insert). All
-        // passes below walk this one origin-tagged list.
+        // Every source compilation unit to index, in priority order: the host's project files first,
+        // then the `git`/`path` library sources — so on a fully-qualified-name clash a project type
+        // wins over a library type (`by_fqn` keeps the first insert). Every pass below walks this
+        // list and then `stubs`; the *first* pass interleaves the classpath between them, which is
+        // what puts a real `.class` ahead of a stub of the same name.
         let units: Vec<(FileId, &FileFacts, ItemOrigin)> = project
             .iter()
             .map(|(file, facts)| (*file, *facts, ItemOrigin::Project))
@@ -915,10 +959,10 @@ impl ProjectIndex {
                     .iter()
                     .map(|(file, facts)| (*file, *facts, ItemOrigin::Source)),
             )
-            .chain(
-                stub.iter()
-                    .map(|(file, facts)| (*file, *facts, ItemOrigin::Stdlib)),
-            )
+            .collect();
+        let stubs: Vec<(FileId, &FileFacts, ItemOrigin)> = stub
+            .iter()
+            .map(|(file, facts)| (*file, *facts, ItemOrigin::Stdlib))
             .collect();
 
         // First pass: package, imports, and type declarations.
@@ -927,6 +971,12 @@ impl ProjectIndex {
         }
         // Classpath `.class` files (already lowered to self-contained data) registered like source
         // types. Their reserved `FileId`s sit just below the stub block so they never collide.
+        //
+        // Registered *before* the stubs, and that order is the whole priority rule between them: a
+        // stub is signature-only and deliberately partial (`crate::stdlib`), a classpath type is the
+        // complete declared member set of a real class, and `ItemOrigin::Classpath` already says so.
+        // With the stubs first, indexing a real JDK left `java.lang.System` resolving to a stub that
+        // does not declare `lineSeparator`, and `println(Object)` binding to `println(String)`.
         let classfile_block_start = u32::MAX - stub.len() as u32 - 1;
         let classfiles: Vec<(FileId, &crate::classpath::ClassfileClass)> = classes
             .iter()
@@ -938,6 +988,9 @@ impl ProjectIndex {
         for &(file, class) in &classfiles {
             yielder.tick().await;
             classfile_owners.push(index.collect_classfile_type(file, class, sources));
+        }
+        for &(file, facts, origin) in &stubs {
+            index.register_file_types(file, facts, origin).await;
         }
         // Index each type's declaration site, so a same-file type reference (which resolves
         // file-locally, not through the project) can be mapped back to its item for find-references.
@@ -952,8 +1005,9 @@ impl ProjectIndex {
             index.decl_to_item.insert(key, id);
         }
         // Second pass: members and project-internal inheritance. It runs after every type is indexed
-        // so a supertype declared later (or in another file / stub) still resolves.
-        for &(file, facts, _) in &units {
+        // so a supertype declared later (or in another file / stub) still resolves. Order is
+        // immaterial here — unlike the first pass, this one resolves against a complete `by_fqn`.
+        for &(file, facts, _) in units.iter().chain(&stubs) {
             index.register_file_members(file, facts).await;
         }
         // The same second pass for classpath types, now that every type (project, stub, classpath) is
@@ -1040,6 +1094,7 @@ impl ProjectIndex {
                 supertypes.push(Supertype {
                     id,
                     args: Vec::new(),
+                    implicit: false,
                 });
             }
             // The same for a `record` and `java.lang.Record`, which is also where `equals`,
@@ -1051,8 +1106,10 @@ impl ProjectIndex {
                 supertypes.push(Supertype {
                     id,
                     args: Vec::new(),
+                    implicit: false,
                 });
             }
+            self.push_implicit_object(owner, file, &mut supertypes);
             // A lambda item's one member is the interface method it implements. Only its *name* and arity
             // matter here — a dispatch built on subtyping looks the member up by those, and a backend makes
             // the descriptor itself. Done after the supertypes resolve, because the interface is one of them.
@@ -1073,6 +1130,7 @@ impl ProjectIndex {
                     owner,
                     name: shape.name.clone(),
                     kind: DefKind::Method,
+                    type_params: Vec::new(),
                     file,
                     // Nothing declares it, so there is no name range to point at.
                     name_range: 0..0,
@@ -1120,11 +1178,61 @@ impl ProjectIndex {
                 TypeResolution::Project(id) => supertypes.push(Supertype {
                     id,
                     args: args.clone(),
+                    implicit: false,
                 }),
                 TypeResolution::External | TypeResolution::Unresolved => has_external = true,
             }
         }
         (supertypes, has_external)
+    }
+
+    /// Appends the implicit `java.lang.Object` edge to a reference type's resolved `supertypes`.
+    ///
+    /// Java gives every class, enum, record, and interface `Object`'s members, and no source writes
+    /// the clause — so like the `java.lang.Enum` / `java.lang.Record` edges above there is nothing
+    /// for [`resolve_supertypes`](Self::resolve_supertypes) to have resolved. Without it
+    /// `x.toString()` binds to nothing on a plain `class`, and `Object o = new Foo();` is a
+    /// mismatch as soon as `Object` is a classpath type rather than a (leniently demoted) stub.
+    ///
+    /// Silently does nothing when `java.lang.Object` is not indexed at all — no stubs, no
+    /// classpath. That is deliberate and is *not* an external supertype: `has_external_supertype`
+    /// is computed from the clauses the source wrote, and marking every type as having an unknown
+    /// supertype would suppress every "no member" conclusion in the workspace, which is the same
+    /// damage this edge is being careful to avoid in `method_set_complete`.
+    ///
+    /// An interface gets the edge too. JLS §9.2 says an interface with no `extends` has no
+    /// *superinterface*, but its member set implicitly declares `Object`'s public **instance
+    /// methods** and every interface-typed value is an `Object`; [`implicit`](Supertype::implicit)
+    /// is what records that the edge is not a written `extends`.
+    ///
+    /// "Public instance methods" is the whole of what §9.2 gives it, and the member walks enforce
+    /// that half rather than this one — see [`interface_declares`](Self::interface_declares). The
+    /// edge is a *supertype* relation, which is true of the whole of `Object`; which of its members
+    /// an interface declares is a different question, and answering it here would also have to
+    /// answer it for the subtyping and `instanceof` the same edge carries.
+    fn push_implicit_object(&self, owner: ItemId, file: FileId, supertypes: &mut Vec<Supertype>) {
+        if !matches!(
+            self.items[owner.0 as usize].kind,
+            DefKind::Class | DefKind::Interface | DefKind::Enum | DefKind::Record
+        ) {
+            return;
+        }
+        // `Object` is the one type that does not extend it.
+        if self.items[owner.0 as usize].fqn.as_str() == OBJECT_FQN {
+            return;
+        }
+        let TypeResolution::Project(id) = self.resolve_qualified(file, OBJECT_FQN) else {
+            return;
+        };
+        // A written `extends Object`, or a classpath type whose `super_class` already named it.
+        if supertypes.iter().any(|sup| sup.id == id) {
+            return;
+        }
+        supertypes.push(Supertype {
+            id,
+            args: Vec::new(),
+            implicit: true,
+        });
     }
 
     /// Registers a classpath type (first pass): pushes its [`Item`] and a per-file [`FileMeta`], and
@@ -1150,7 +1258,8 @@ impl ProjectIndex {
             // A real-source go-to-definition target, when this type's library source is indexed.
             source_location: sources.type_location(&class.fqn),
         });
-        // A project or stub type of the same name wins (first insert).
+        // A project or library-source type of the same name wins (first insert); a *stub* does not,
+        // because the stubs are registered after this pass.
         self.by_fqn.entry(class.fqn.clone()).or_insert(id);
         // Each classpath type gets its own pseudo-file with empty imports: every captured type name is
         // emitted fully-qualified, so it resolves through `resolve_qualified` without an import context.
@@ -1185,6 +1294,7 @@ impl ProjectIndex {
                     owner,
                     name: member.name.clone(),
                     kind: member.kind,
+                    type_params: member.type_params.clone(),
                     file,
                     name_range: 0..0,
                     ty: member.ty.clone(),
@@ -1201,7 +1311,12 @@ impl ProjectIndex {
                 },
             );
         }
-        let (supertypes, has_external) = self.resolve_supertypes(file, &class.supertypes);
+        let (mut supertypes, has_external) = self.resolve_supertypes(file, &class.supertypes);
+        // A `.class` file names `java/lang/Object` in its `super_class`, so this is usually a
+        // duplicate the helper declines to add. It is not always: an *interface* class file has
+        // `super_class` = `java/lang/Object` per JVMS §4.1 but `ClasspathLower` reads its supertypes
+        // from the generic `ClassSignature` when one is present, which lists only superinterfaces.
+        self.push_implicit_object(owner, file, &mut supertypes);
         let item = &mut self.items[owner.0 as usize];
         item.supertypes = supertypes;
         item.has_external_supertype = has_external;
@@ -1406,7 +1521,7 @@ impl ProjectIndex {
     /// the import lookup. A constructor has no value type and yields [`Ty::Unknown`].
     pub fn resolved_member_ty(&self, id: MemberId) -> Ty {
         let member = self.member(id);
-        self.member_type_to_ty(member.file, member.owner, &member.ty)
+        self.member_type_to_ty(member.file, member.owner, Some(id), &member.ty)
     }
 
     /// A method's or constructor's formal parameter types, in declaration order, resolved like
@@ -1416,7 +1531,7 @@ impl ProjectIndex {
         member
             .params
             .iter()
-            .map(|param| self.member_type_to_ty(member.file, member.owner, &param.ty))
+            .map(|param| self.member_type_to_ty(member.file, member.owner, Some(id), &param.ty))
             .collect()
     }
 
@@ -1483,6 +1598,40 @@ impl ProjectIndex {
         self.item(owner).type_params.iter().any(|p| p.name == name)
     }
 
+    /// Whether `name` is one of *method* `member`'s own declared type parameters
+    /// (`static <E> E pick(E, E)` → `E`). The sibling of [`is_type_param`](Self::is_type_param), and
+    /// asked first wherever both are in scope, because a method's parameter shadows its class's.
+    pub(crate) fn is_member_type_param(&self, member: MemberId, name: &str) -> bool {
+        self.member(member)
+            .type_params
+            .iter()
+            .any(|p| p.name == name)
+    }
+
+    /// What type variable `name` erases to in the scope `(owner, member)`: its first declared bound,
+    /// or `None` for an unbounded one (which erases to `java.lang.Object`).
+    ///
+    /// JLS §4.6: the erasure of a type variable is the erasure of its leftmost bound. A backend that
+    /// answers `Object` for `<E extends Number>` produces a descriptor javac does not — self
+    /// consistent within one compilation, and a `NoSuchMethodError` against a caller compiled
+    /// separately. Resolved in the member's own declaring file, so the bound's name sees the imports
+    /// it was written under.
+    pub fn type_var_bound(
+        &self,
+        owner: ItemId,
+        member: Option<MemberId>,
+        name: &str,
+    ) -> Option<Ty> {
+        let (declared, file) = member
+            .filter(|&id| self.is_member_type_param(id, name))
+            .map_or_else(
+                || (&self.item(owner).type_params, self.item(owner).file),
+                |id| (&self.member(id).type_params, self.member(id).file),
+            );
+        let bound = declared.iter().find(|p| p.name == name)?.bounds.first()?;
+        Some(self.member_type_to_ty(file, owner, member, bound))
+    }
+
     /// Resolves a member named `name` in name-space `namespace` (value for a field / enum constant,
     /// method for a method / constructor) on type `owner`, searching the type itself and then its
     /// project-internal supertypes.
@@ -1498,9 +1647,45 @@ impl ProjectIndex {
     ) -> Option<MemberId> {
         // The type's own members win over inherited ones — the walk reaches `current`'s
         // supertypes only after `declared_member` returns `None`.
+        let on_interface = self.declares_object_publics_only(owner);
         self.walk_supertypes(owner, |current| {
             self.declared_member(current, name, namespace)
+                .filter(|&id| !on_interface || self.interface_declares(id))
         })
+    }
+
+    /// Whether members reached from `owner` have to be filtered by JLS §9.2 — i.e. whether `owner`
+    /// is an interface.
+    ///
+    /// The predicate is on the *type asked*, not on the path a walk took to `Object`. Threading it
+    /// down the walk instead would answer differently depending on which edge arrived first: `class
+    /// C implements I {}` reaches `Object` through its own implicit edge *and* through `I`'s, and C
+    /// genuinely has `clone()`.
+    fn declares_object_publics_only(&self, owner: ItemId) -> bool {
+        matches!(
+            self.items[owner.0 as usize].kind,
+            DefKind::Interface | DefKind::AnnotationType
+        )
+    }
+
+    /// Whether an interface really declares `member`, for a member reached from an interface.
+    ///
+    /// The implicit [`java.lang.Object`](Supertype::implicit) edge stands for JLS §9.2: an interface
+    /// with no direct superinterface implicitly declares abstract methods corresponding to
+    /// `Object`'s **public instance methods**, and nothing else of `Object`'s is a member of it.
+    /// `clone()` and `finalize()` are `protected`, and `Object()` is a constructor an interface
+    /// cannot have. Answering them made completion offer a call javac rejects, and let
+    /// `interface I { int clone(); }` (JLS §9.2 — legal, and impossible to implement) reach the
+    /// bridge writer as an override.
+    ///
+    /// Only `Object`'s members are filtered. Every other supertype of an interface is a
+    /// superinterface, whose members it does declare.
+    fn interface_declares(&self, member: MemberId) -> bool {
+        let member = &self.members[member.0 as usize];
+        if self.items[member.owner.0 as usize].fqn.as_str() != OBJECT_FQN {
+            return true;
+        }
+        member.kind == DefKind::Method && member.modifiers.is_public && !member.modifiers.is_static
     }
 
     /// Every member named `name` in name-space `namespace` reachable from `owner` (the type and its
@@ -1514,12 +1699,16 @@ impl ProjectIndex {
         namespace: Namespace,
     ) -> Vec<MemberId> {
         let mut out = Vec::new();
+        let on_interface = self.declares_object_publics_only(owner);
         // Always returning `None` walks the whole (cycle-guarded) chain, accumulating into `out`.
         self.walk_supertypes(owner, |current| {
             if let Some(ids) = self.members_by_owner.get(&current) {
                 for &id in ids {
                     let member = &self.members[id.0 as usize];
-                    if member.name == name && member.kind.namespace() == namespace {
+                    if member.name == name
+                        && member.kind.namespace() == namespace
+                        && (!on_interface || self.interface_declares(id))
+                    {
                         out.push(id);
                     }
                 }
@@ -1537,9 +1726,14 @@ impl ProjectIndex {
     /// its own de-duplication policy. A member of an external supertype is not reachable and absent.
     pub fn members_of(&self, owner: ItemId) -> Vec<MemberId> {
         let mut out = Vec::new();
+        let on_interface = self.declares_object_publics_only(owner);
         self.walk_supertypes(owner, |current| {
             if let Some(ids) = self.members_by_owner.get(&current) {
-                out.extend_from_slice(ids);
+                out.extend(
+                    ids.iter()
+                        .copied()
+                        .filter(|&id| !on_interface || self.interface_declares(id)),
+                );
             }
             None::<()>
         });
@@ -1555,15 +1749,61 @@ impl ProjectIndex {
     /// or when the walk reaches a standard-library *stub* type, whose member set is deliberately
     /// partial (the common members only) — so a stub-owned or stub-inherited overload set is treated
     /// as incomplete, never yielding a "no overload" conclusion.
+    ///
+    /// The implicit [`java.lang.Object`](Supertype::implicit) edge is not walked through. Every
+    /// reference type has one, so counting it would reach the (stub) `Object` from *every* type and
+    /// make this predicate universally `false` — silencing the whole check rather than guarding it.
+    /// Skipping it is sound rather than merely convenient: the early return above already answers
+    /// `false` for every name `Object` declares, so an edge to `Object` can contribute no overload
+    /// this walk would otherwise have missed.
     pub fn method_set_complete(&self, owner: ItemId, name: &str) -> bool {
         if Self::is_object_method(name) {
             return false;
         }
-        self.walk_supertypes(owner, |current| {
-            let item = &self.items[current.0 as usize];
-            (item.origin == ItemOrigin::Stdlib || item.has_external_supertype).then_some(())
-        })
+        self.walk_supertypes_stateful(
+            owner,
+            false,
+            |current, &via_implicit| {
+                let item = &self.items[current.0 as usize];
+                (!via_implicit
+                    && (item.origin == ItemOrigin::Stdlib || item.has_external_supertype))
+                    .then_some(())
+            },
+            |_, &via_implicit, sup| via_implicit || sup.implicit,
+        )
         .is_none()
+    }
+
+    /// The class `super` names inside `owner`: its first indexed supertype that is a *class*.
+    ///
+    /// `None` for an interface, for a type whose only supertypes are interfaces, and for one whose
+    /// superclass is not indexed at all. Shared by every question `super` asks — which constructor
+    /// `super(..)` reaches, which type `super.f()` looks its member up on, which class a
+    /// `super.`-qualified `invokespecial` names as its owner, and which struct a wasm layout
+    /// inherits from — because they are the same rule, and having been written more than once is how
+    /// they drifted.
+    ///
+    /// The rule is stated **positively**. Asking which supertype is `kind != Interface` is not the
+    /// same question: an `@interface` is [`DefKind::AnnotationType`], which the rest of the
+    /// workspace treats *as* an interface, so the negative filter follows one as a superclass —
+    /// `@interface Marker {} class C implements Marker {}` answered `Marker`, and `super(...)` then
+    /// searched a member set with no constructor in it while the emitted `super_class` said
+    /// `java.lang.Object`. An `enum` counts: a constant with a body is a subclass of one, and it is
+    /// the only way a declaration that is not a `class` appears here at all.
+    ///
+    /// After the implicit `java.lang.Object` edge this answers for a class with no `extends` too,
+    /// which is what makes `super.toString()` resolve.
+    pub fn superclass_of(&self, owner: ItemId) -> Option<ItemId> {
+        self.item(owner)
+            .supertypes
+            .iter()
+            .map(|supertype| supertype.id)
+            .find(|&id| {
+                matches!(
+                    self.item(id).kind,
+                    DefKind::Class | DefKind::Enum | DefKind::Record
+                )
+            })
     }
 
     /// Whether project type `s` is `t` or a transitive subtype of it, walking `s`'s indexed
@@ -1633,19 +1873,16 @@ impl SourceLocations {
             let next_enclosing = if ProjectIndex::type_decl_kind(node.kind()).is_some()
                 && let Some(name_tok) = Collect::first_ident_token(&node)
             {
-                let fqn = ProjectIndex::build_fqn(package, enclosing.as_deref(), name_tok.text());
+                let name = jals_syntax::decoded_ident(&name_tok);
+                let fqn = ProjectIndex::build_fqn(package, enclosing.as_deref(), &name);
                 self.types
                     .entry(fqn.clone())
                     .or_insert_with(|| (file, Collect::byte_range(&name_tok)));
                 // Library sources are never `cfg`-filtered (they are navigation-only and a
                 // dependency's own feature selection does not reach this seam), so the empty map.
-                for member in ProjectIndex::members_of_decl(
-                    ItemId(0),
-                    file,
-                    &node,
-                    name_tok.text(),
-                    &CfgMap::default(),
-                ) {
+                for member in
+                    ProjectIndex::members_of_decl(ItemId(0), file, &node, &name, &CfgMap::default())
+                {
                     let loc = (member.file, member.name_range.clone());
                     self.members
                         .entry((fqn.clone(), member.name.clone(), member.params.len()))
@@ -1794,20 +2031,15 @@ impl ProjectIndex {
             let next_enclosing = if let Some(kind) = Self::type_decl_kind(node.kind())
                 && let Some(name_tok) = Collect::first_ident_token(&node)
             {
-                let fqn = Self::build_fqn(package, enclosing.as_deref(), name_tok.text());
+                let name = jals_syntax::decoded_ident(&name_tok);
+                let fqn = Self::build_fqn(package, enclosing.as_deref(), &name);
                 out.push(RawType {
                     fqn: fqn.clone(),
                     kind,
                     name_range: Collect::byte_range(&name_tok),
                     type_params: Self::type_params_of(&node),
                     // Placeholder owner/file, fixed up when these facts are folded into an index.
-                    members: Self::members_of_decl(
-                        ItemId(0),
-                        FileId(0),
-                        &node,
-                        name_tok.text(),
-                        cfg,
-                    ),
+                    members: Self::members_of_decl(ItemId(0), FileId(0), &node, &name, cfg),
                     raw_supertypes: Self::raw_supertypes_of(&node),
                 });
                 Some(alloc::rc::Rc::<str>::from(fqn.as_str()))
@@ -1852,8 +2084,13 @@ impl ProjectIndex {
         // struct-update) only the fields that apply to its member kind.
         let new_member = |name_tok: &SyntaxToken, kind: DefKind, ty: MemberType| Member {
             owner,
-            name: name_tok.text().to_owned(),
+            // The *decoded* spelling (JLS §3.3): a member declared `int \u0061;` is named `a`, and
+            // the raw text reached the constant pool as the field's own name.
+            name: jals_syntax::decoded_ident(name_tok).into_owned(),
             kind,
+            // Overridden by the method / constructor arms, which read the declaration's own
+            // `<...>`; every other member kind cannot declare one.
+            type_params: Vec::new(),
             file,
             name_range: Collect::byte_range(name_tok),
             ty,
@@ -1873,10 +2110,11 @@ impl ProjectIndex {
                 FIELD_DECL => {
                     if let Some(field) = ast::FieldDecl::cast(member.clone()) {
                         let ty = MemberType::of(field.ty());
-                        // An interface field is implicitly `public static final` (JLS §9.3); only
-                        // `static` changes how it is reached.
+                        // An interface field is implicitly `public static final` (JLS §9.3);
+                        // `static` changes how it is reached, and `public` is what JLS §9.2 acts on.
                         let mut modifiers = MemberModifiers::of(&member);
                         modifiers.is_static |= in_interface;
+                        modifiers.is_public |= in_interface;
                         for name in field.names() {
                             members.push(Member {
                                 modifiers,
@@ -1892,11 +2130,20 @@ impl ProjectIndex {
                         );
                         let (params, varargs) = Self::params_of(&member);
                         let throws = Self::throws_of(&member);
+                        // An interface method is implicitly `public` (JLS §9.4), which is the bit
+                        // §9.2 reads back when it decides which of `Object`'s members an interface
+                        // implicitly declares.
+                        let mut modifiers = MemberModifiers::of(&member);
+                        modifiers.is_public |= in_interface;
                         members.push(Member {
-                            modifiers: MemberModifiers::of(&member),
+                            modifiers,
                             params,
                             varargs,
                             throws,
+                            // The declaration's own `<...>`, which `type_params_of` reads off any
+                            // node carrying a `TypeParams` child — a method declaration as much as
+                            // a type declaration.
+                            type_params: Self::type_params_of(&member),
                             ..new_member(&name, DefKind::Method, ty)
                         });
                     }
@@ -1910,6 +2157,7 @@ impl ProjectIndex {
                             params,
                             varargs,
                             throws,
+                            type_params: Self::type_params_of(&member),
                             ..new_member(&name, DefKind::Constructor, MemberType::Unknown)
                         });
                     }
@@ -1927,6 +2175,7 @@ impl ProjectIndex {
                             modifiers: MemberModifiers {
                                 is_static: true,
                                 is_private: false,
+                                is_public: true,
                             },
                             ..new_member(&name, DefKind::EnumConstant, ty)
                         });
@@ -1988,14 +2237,17 @@ impl ProjectIndex {
                     modifiers: MemberModifiers {
                         is_static: false,
                         is_private: true,
+                        is_public: false,
                     },
                     ..new_member(name, DefKind::Field, ty.clone())
                 });
-                if !declared_accessors.iter().any(|have| have == name.text()) {
+                let decoded = jals_syntax::decoded_ident(name).into_owned();
+                if !declared_accessors.contains(&decoded) {
                     members.push(Member {
                         owner,
-                        name: name.text().to_owned(),
+                        name: decoded,
                         kind: DefKind::Method,
+                        type_params: Vec::new(),
                         file,
                         // No *declaration* range: the field above owns the header's, and two members
                         // sharing one would collide in the declaration-site map, where first wins.
@@ -2017,6 +2269,7 @@ impl ProjectIndex {
                     owner,
                     name: owner_simple.to_owned(),
                     kind: DefKind::Constructor,
+                    type_params: Vec::new(),
                     file,
                     name_range: 0..0,
                     ty: MemberType::Unknown,
@@ -2024,7 +2277,7 @@ impl ProjectIndex {
                     params: components
                         .iter()
                         .map(|(name, ty)| Param {
-                            name: Some(name.text().to_owned()),
+                            name: Some(jals_syntax::decoded_ident(name).into_owned()),
                             ty: ty.clone(),
                         })
                         .collect(),
@@ -2061,6 +2314,7 @@ impl ProjectIndex {
                 owner,
                 name: name.to_owned(),
                 kind: DefKind::Method,
+                type_params: Vec::new(),
                 file,
                 // Nothing declares them, so there is no name range to point at — which is also what
                 // keeps `member_by_decl` from ever finding one.
@@ -2069,6 +2323,7 @@ impl ProjectIndex {
                 modifiers: MemberModifiers {
                     is_static: true,
                     is_private: false,
+                    is_public: true,
                 },
                 params,
                 varargs: false,
@@ -2404,11 +2659,19 @@ mod tests {
 
         assert_eq!(summary(&built), summary(&assembled));
         // Sanity: the cross-file supertype actually resolved, so the comparison is not vacuous.
+        // `p.Base` is the written `extends`; the second edge is the implicit `java.lang.Object`,
+        // which the indexed stubs supply.
         let (_, sub) = built
             .items()
             .find(|(_, item)| item.fqn.to_string() == "p.Sub")
             .expect("Sub is indexed");
-        assert_eq!(sub.supertypes.len(), 1, "Sub extends the project type Base");
+        let written: Vec<&str> = sub
+            .supertypes
+            .iter()
+            .filter(|sup| !sup.implicit)
+            .map(|sup| built.item(sup.id).fqn.as_str())
+            .collect();
+        assert_eq!(written, ["p.Base"], "Sub extends the project type Base");
     }
 
     /// Extraction is a pure function of the tree, so a cached fact is a valid stand-in for a fresh one.

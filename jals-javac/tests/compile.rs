@@ -5126,3 +5126,491 @@ public class Box implements Holder<String> {
 "#;
     assert_eq!(run(source, "Box"), "string:x\nint:7\n");
 }
+
+/// The descriptors a class emits, as `name descriptor` pairs — what a separately compiled caller
+/// links against, and the one thing the JVM's verifier cannot judge from a single compilation.
+fn descriptors(source: &str, internal_name: &str) -> Vec<String> {
+    let classes = compile(source).expect("compile");
+    let class = classes
+        .iter()
+        .find(|class| class.internal_name == internal_name)
+        .unwrap_or_else(|| panic!("no class `{internal_name}`"));
+    let parsed =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(class.bytes.as_slice()))
+            .expect("reparse");
+    let pool = &parsed.constant_pool;
+    parsed
+        .methods
+        .iter()
+        .map(|method| {
+            format!(
+                "{} {}",
+                pool.utf8(method.name_index).expect("name"),
+                pool.utf8(method.descriptor_index).expect("descriptor")
+            )
+        })
+        .collect()
+}
+
+/// A type variable erases to its leftmost bound (JLS §4.6), not to `Object`.
+///
+/// Answering `Object` for `<E extends Number>` is self-consistent within one compilation — the
+/// declaration and its call sites agree, so the verifier is satisfied — and disagrees with every
+/// caller compiled separately, which is a `NoSuchMethodError` rather than an imprecision. That is
+/// why this asserts the descriptor *text* and not that the class loads.
+#[test]
+fn a_bounded_method_type_parameter_erases_to_its_bound() {
+    let emitted = descriptors(
+        "public class B { static <E extends Number> E pick(E a, E b) { return a; } }",
+        "B",
+    );
+    assert!(
+        emitted
+            .contains(&"pick (Ljava/lang/Number;Ljava/lang/Number;)Ljava/lang/Number;".to_owned()),
+        "got {emitted:?}"
+    );
+}
+
+/// An *unbounded* one still erases to `Object` — the bound is what changes the answer, not the fact
+/// that the parameter belongs to the method.
+#[test]
+fn an_unbounded_method_type_parameter_still_erases_to_object() {
+    let emitted = descriptors(
+        "public class B { static <U> U plain(U a) { return a; } }",
+        "B",
+    );
+    assert!(
+        emitted.contains(&"plain (Ljava/lang/Object;)Ljava/lang/Object;".to_owned()),
+        "got {emitted:?}"
+    );
+}
+
+/// The same rule for a *class*'s type parameter, which the index has always recorded — the erasure
+/// simply never read its bound.
+#[test]
+fn a_bounded_class_type_parameter_erases_to_its_bound() {
+    let emitted = descriptors(
+        "public class Box<T extends Number> { T held; T get() { return held; } void put(T v) { held = v; } }",
+        "Box",
+    );
+    assert!(
+        emitted.contains(&"get ()Ljava/lang/Number;".to_owned()),
+        "got {emitted:?}"
+    );
+    assert!(
+        emitted.contains(&"put (Ljava/lang/Number;)V".to_owned()),
+        "got {emitted:?}"
+    );
+}
+
+/// A bound that names the variable it bounds must not send the erasure round forever.
+///
+/// `<T extends Comparable<T>>` is ordinary Java and terminates because the head is erased and the
+/// arguments dropped; `<T extends U, U extends Number>` walks one step further. This crate never
+/// checks, so it can also be handed a cyclic bound — which is what the depth limit is for.
+#[test]
+fn a_self_referential_bound_terminates() {
+    let emitted = descriptors(
+        "public class B { static <T extends Comparable<T>> T max(T a, T b) { return a; } }",
+        "B",
+    );
+    assert!(
+        emitted.contains(
+            &"max (Ljava/lang/Comparable;Ljava/lang/Comparable;)Ljava/lang/Comparable;".to_owned()
+        ),
+        "got {emitted:?}"
+    );
+    let chained = descriptors(
+        "public class B { static <T extends U, U extends Number> T thread(T a) { return a; } }",
+        "B",
+    );
+    assert!(
+        chained.contains(&"thread (Ljava/lang/Number;)Ljava/lang/Number;".to_owned()),
+        "got {chained:?}"
+    );
+}
+
+/// An unchecked call narrows its argument, because the descriptor no longer lies about the slot.
+///
+/// `EnumMap<K extends Enum<K>, V>.put` takes a `java/lang/Enum` once `K` erases to its bound. Handing
+/// it a value the JVM knows only as `Object` — which a raw use does — is legal Java and rejected by
+/// the verifier unless the `checkcast` javac emits is there too. Before the bound was read, the
+/// descriptor said `put(Object, Object)`: no cast was needed because the call named a method
+/// `EnumMap` does not have, so this verified and would have thrown `NoSuchMethodError`.
+#[test]
+fn an_unchecked_argument_is_cast_to_the_erased_parameter() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Raw {
+    interface Slot<K extends Number> {
+        String take(K key);
+    }
+
+    static class Cell implements Slot<Integer> {
+        public String take(Integer key) { return "took " + key; }
+    }
+
+    public static void main(String[] args) {
+        Object[] values = { Integer.valueOf(7) };
+        Slot raw = new Cell();
+        System.out.println(raw.take(values[0]));
+    }
+}
+"#;
+    assert_eq!(run(source, "Raw"), "took 7\n");
+}
+
+/// The narrowing fires only in the `Object`-to-narrower direction, and both guards matter.
+///
+/// A value the erasure already types as something else must not acquire a cast — that would turn a
+/// compile-time gap into a `ClassCastException` — and neither must one whose slot is `Object`, where
+/// there is nothing to narrow to. Run rather than inspected: a wrong cast is not a malformed class
+/// file, so only executing it says anything.
+#[test]
+fn a_matching_argument_gets_no_cast() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Keep {
+    static String widen(Number n) { return "n" + n; }
+
+    static String anything(Object o) { return "o" + o; }
+
+    public static void main(String[] args) {
+        Object opaque = Integer.valueOf(3);
+        System.out.println(widen(Integer.valueOf(1)) + anything(opaque));
+    }
+}
+"#;
+    assert_eq!(run(source, "Keep"), "n1o3\n");
+}
+
+/// `super.f()` is `invokespecial`, and only running it can say so.
+///
+/// The two instructions differ in nothing a class-file reader would flag: same owner, same name,
+/// same descriptor. What separates them is that `invokevirtual` looks the method up in the receiver's
+/// own table and finds the *override* — so an override calling `super.f()` calls itself until the
+/// stack runs out. A `StackOverflowError` is the observation.
+#[test]
+fn a_super_call_is_invokespecial() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Sup {
+    static class A {
+        String describe() { return "A"; }
+    }
+
+    static class B extends A {
+        String describe() { return "B<" + super.describe() + ">"; }
+    }
+
+    public static void main(String[] args) {
+        System.out.println(new B().describe());
+    }
+}
+"#;
+    assert_eq!(run(source, "Sup"), "B<A>\n");
+}
+
+/// `super.x` reads the *hidden* field, which a `getfield` against the superclass's own owner does
+/// for free — the constant pool entry names where the field is declared.
+#[test]
+fn a_super_field_reads_the_hidden_one() {
+    if !java_available() {
+        return;
+    }
+    let source = r"
+public class Hid {
+    static class A {
+        int x = 1;
+    }
+
+    static class B extends A {
+        int x = 2;
+        int both() { return x * 10 + super.x; }
+    }
+
+    public static void main(String[] args) {
+        System.out.println(new B().both());
+    }
+}
+";
+    assert_eq!(run(source, "Hid"), "21\n");
+}
+
+/// A type-variable bound the index cannot *name* erases to `Object` rather than refusing.
+///
+/// Every other unresolved type is a value the caller wrote and the descriptor has to spell, so
+/// refusing is right there. A bound is a fact about the *index*, and the index is routinely partial:
+/// `Runnable`, `Cloneable`, `Comparator`, and every `java.util.function` type are absent from the
+/// embedded stubs, which is the only configuration this crate's own tests and the playground index.
+/// Refusing therefore made `<T extends Runnable>` uncompilable outright — including the class-level
+/// form, which compiled before any bound was read at all.
+#[test]
+fn a_bound_the_index_cannot_name_erases_to_object() {
+    let method = descriptors(
+        "public class D { static <T extends Runnable> T r(T a) { return a; } }",
+        "D",
+    );
+    assert!(
+        method.contains(&"r (Ljava/lang/Object;)Ljava/lang/Object;".to_owned()),
+        "got {method:?}"
+    );
+    let class_level = descriptors(
+        "public class F<T extends Runnable> { T held; T get() { return held; } }",
+        "F",
+    );
+    assert!(
+        class_level.contains(&"get ()Ljava/lang/Object;".to_owned()),
+        "got {class_level:?}"
+    );
+}
+
+/// A varargs call narrows what it packs, not only the fixed parameters before it.
+///
+/// Two shapes, and the second is the harder failure. A trailing element is `aastore`d into an array
+/// whose component erases to the parameter's bound, so a value the JVM knows only as `Object` fails
+/// the *store*: an `ArrayStoreException` raised inside the packing where javac's `checkcast` throws
+/// `ClassCastException` at the call. The uncast form throws `ArrayStoreException` instead, which
+/// this catch does not name, so it escapes `main` and the JVM exits non-zero. And a lone array
+/// argument passes straight through (JLS §15.12.4.2) onto the stack, where an
+/// `[Ljava/lang/Object;` against a descriptor spelling `[LRawVar$Base;` is a `VerifyError` and the
+/// class never loads at all. Same rule as
+/// [`an_unchecked_argument_is_cast_to_the_erased_parameter`], asked of an array.
+#[test]
+fn a_varargs_call_is_cast_to_the_erased_parameter() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class RawVar {
+    static class Base {}
+
+    static class Holder<K extends Base> {
+        String all(K... keys) { return "n=" + keys.length; }
+    }
+
+    public static void main(String[] args) {
+        Object[] wrong = { "not a Base" };
+        Base[] real = { new Base(), new Base() };
+        Object[] right = real;
+        Holder raw = new Holder();
+        try {
+            raw.all(wrong[0]);
+            System.out.println("no throw");
+        } catch (ClassCastException e) {
+            System.out.println("cce");
+        }
+        System.out.println(raw.all(right));
+    }
+}
+"#;
+    assert_eq!(run(source, "RawVar"), "cce\nn=2\n");
+}
+
+/// A bridge casts an *array* parameter too, which is every varargs and every `T[]`.
+///
+/// The cast was emitted only when both the erased and the target parameter were class types, so an
+/// array parameter went through untouched and the bridge failed the verifier the moment its class
+/// was loaded — `Type '[LArrBridge$Base;' is not assignable to '[LArrBridge$Leaf;'`. A `checkcast`
+/// to an array names the array's own descriptor as its class, which is the whole difference.
+#[test]
+fn a_bridge_casts_an_array_parameter() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class ArrBridge {
+    static class Base {}
+
+    static class Leaf extends Base {}
+
+    interface Slot<K extends Base> {
+        String take(K... keys);
+    }
+
+    static class Cell implements Slot<Leaf> {
+        public String take(Leaf... keys) { return "n=" + keys.length; }
+    }
+
+    public static void main(String[] args) {
+        Cell cell = new Cell();
+        System.out.println(cell.take(new Leaf(), new Leaf()));
+    }
+}
+"#;
+    assert_eq!(run(source, "ArrBridge"), "n=2\n");
+}
+
+/// A parameter that is a bounded type variable is an *overload*, and gets no bridge.
+///
+/// Once such a variable erases to its bound rather than to `Object`, the descriptor differs from a
+/// same-name, same-arity inherited method's — and the override rule could not decide, so the bridge
+/// writer kept its leniency and wrote one. javac writes none, because neither method overrides the
+/// other: `((Object) new C<Integer>()).equals("hello")` returns `false` under javac and threw
+/// `ClassCastException` here, and the sibling shape sent `((B) c).f("s")` into `C` instead of `B`.
+#[test]
+fn a_bounded_type_variable_parameter_gets_no_bridge() {
+    let inherited_from_object = descriptors(
+        "public class C<T extends Number> { public boolean equals(T other) { return true; } }",
+        "C",
+    );
+    assert_eq!(
+        inherited_from_object
+            .iter()
+            .filter(|emitted| emitted.starts_with("equals "))
+            .collect::<Vec<_>>(),
+        ["equals (Ljava/lang/Number;)Z"],
+        "got {inherited_from_object:?}"
+    );
+    let inherited_from_a_class = descriptors(
+        "class B { void f(Object x) {} } public class C<T extends Number> extends B { void f(T x) {} }",
+        "C",
+    );
+    assert_eq!(
+        inherited_from_a_class
+            .iter()
+            .filter(|emitted| emitted.starts_with("f "))
+            .collect::<Vec<_>>(),
+        ["f (Ljava/lang/Number;)V"],
+        "got {inherited_from_a_class:?}"
+    );
+}
+
+/// …and one whose parameter is a variable the *supertype* supplied still gets its bridge.
+///
+/// The discriminator is which side the variable is on. `I<T>.f(T)` implemented by `C<U extends
+/// Number>.f(U)` is a genuine override whose erasures differ, so the `f(Object)` bridge is what makes
+/// a call through the interface reach it at all — refusing every type-variable parameter would have
+/// turned this into an `AbstractMethodError`, which only running it says.
+#[test]
+fn an_override_of_a_generic_supertype_keeps_its_bridge() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class Keep2 {
+    interface I<T> {
+        String f(T x);
+    }
+
+    static class C<U extends Number> implements I<U> {
+        public String f(U x) { return "f" + x; }
+    }
+
+    public static void main(String[] args) {
+        I raw = new C<Integer>();
+        System.out.println(raw.f(Integer.valueOf(3)));
+    }
+}
+"#;
+    assert_eq!(run(source, "Keep2"), "f3\n");
+}
+
+/// A `super.` call names the **direct superclass**, whatever type the member walk found it on.
+///
+/// JVMS §6.5 lets `invokespecial` name only the direct superclass or a *direct* superinterface, and
+/// the member walk routinely finds neither: a `default` method inherited *through* the superclass
+/// resolves to the interface that declares it, which is not one of `C`'s own. The class file that
+/// produced was refused at load — "interface method to invoke is not in a direct superinterface" —
+/// so the only observation is running it. javac names the superclass here, and so does this.
+#[test]
+fn a_super_call_names_the_direct_superclass() {
+    if !java_available() {
+        return;
+    }
+    let source = r#"
+public class SupIface {
+    interface I {
+        default String f() { return "I"; }
+    }
+
+    static class B implements I {}
+
+    static class C extends B {
+        String g() { return "C<" + super.f() + ">"; }
+    }
+
+    public static void main(String[] args) {
+        System.out.println(new C().g());
+    }
+}
+"#;
+    assert_eq!(run(source, "SupIface"), "C<I>\n");
+}
+
+/// `super.x = 5` and `super.x += 5` lower, which needs the receiver answered where the *write* path
+/// passes.
+///
+/// A store goes `Place::resolve` → `Place::field` → `Expr::lower` → `Expr::name`, and that chain has
+/// no receiver branch of its own: the one the read path grew special-cased `this` only, so a `super`
+/// write reported `Unresolved("super")` while `super.x` read fine. Which `x` is written is the
+/// hiding rule (JLS §15.11.2), which the `Fieldref`'s owner already carries.
+#[test]
+fn a_super_field_is_written_as_well_as_read() {
+    if !java_available() {
+        return;
+    }
+    let source = r"
+public class HidW {
+    static class A {
+        int x = 1;
+    }
+
+    static class B extends A {
+        int x = 2;
+
+        int set() {
+            super.x = 5;
+            super.x += 3;
+            return x * 100 + super.x;
+        }
+    }
+
+    public static void main(String[] args) {
+        System.out.println(new B().set());
+    }
+}
+";
+    assert_eq!(run(source, "HidW"), "208\n");
+}
+
+/// A name written through a JLS §3.3 escape is the *same* name as its plain spelling.
+///
+/// The tree keeps the source's own spelling — that is what makes the parse lossless — so an
+/// identifier's identity has to come from the decoded text instead. Reading the raw one made
+/// `a` a different name from `a` everywhere that keys on token text: one declaration and one
+/// use of the same variable did not resolve to each other, and the field the class file declared was
+/// literally named `a`, which no separately compiled reader can find.
+#[test]
+fn an_escaped_identifier_is_the_name_it_spells() {
+    let emitted = descriptors(
+        "public class Esc { int \\u0061 = 1; int \\u0067et() { return a; } }",
+        "Esc",
+    );
+    assert!(
+        emitted.contains(&"get ()I".to_owned()),
+        "the method is named `get`, got {emitted:?}"
+    );
+    let fields = {
+        let classes =
+            compile("public class Esc { int \\u0061 = 1; int \\u0067et() { return a; } }")
+                .expect("compile");
+        let parsed = jals_exec::block_on_inline(jals_classfile::ClassFile::read(
+            classes[0].bytes.as_slice(),
+        ))
+        .expect("reparse");
+        let pool = &parsed.constant_pool;
+        parsed
+            .fields
+            .iter()
+            .map(|field| pool.utf8(field.name_index).expect("name").into_owned())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(fields, ["a"], "the field is named `a`");
+}

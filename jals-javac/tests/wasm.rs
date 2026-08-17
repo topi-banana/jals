@@ -2861,3 +2861,43 @@ public class LocalDecl {
 ";
     assert_invoke(&[source], "run", &[], "1785321");
 }
+
+/// `super.f()` names the superclass's body, and `super.x` the field it hides.
+///
+/// The fact is `Facts::is_super`, which lives in the shared layer for exactly this reason: the JVM
+/// lowering read it and this one did not, so `super.f()` compiled on one backend and returned
+/// `WasmError::Unresolved("super")` on the other — one source fact with two answers, which is the
+/// drift `facts` exists to prevent. Letting the `ref.test` chain select instead would be worse than
+/// the error: it picks by *runtime* type, so an override calling `super.f()` would call itself.
+#[test]
+fn a_super_call_reaches_the_superclass_body() {
+    let source = r"
+public class Sup {
+    static class A {
+        int x = 1;
+
+        int f() {
+            return 10;
+        }
+    }
+
+    static class B extends A {
+        int x = 2;
+
+        int f() {
+            return 20;
+        }
+
+        int both() {
+            return super.f() + f() + super.x + x;
+        }
+    }
+
+    public static int run() {
+        return new B().both();
+    }
+}
+";
+    // 10 + 20 + 1 + 2.
+    assert_invoke(&[source], "run", &[], "33");
+}

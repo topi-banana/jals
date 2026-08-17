@@ -190,11 +190,33 @@ it got, because one number over a compiler says nothing about what is missing:
 | lowered | `Compile::file` produced class files rather than a `LowerError` |
 | re-read | `jals-classfile` reads back what the assembler wrote |
 | **verified** | a real JVM **linked** the class: the bytecode verifier accepted it |
+| descriptor-equal | every method's descriptor is one javac gave the same name |
+| *descriptors-unjudged* | not a rung: javac's own class files for the case could not be read, so nothing was compared |
 
-The last rung is the point. The assembler computes its own `max_stack`, `max_locals` and
-`StackMapTable`, and `jals-classfile` reads back whatever those say — so a frame describing the
-wrong type round-trips perfectly and is still a class no JVM will load. Only the verifier has an
-opinion, and it is the authority.
+`verified` is what this harness was built for. The assembler computes its own `max_stack`,
+`max_locals` and `StackMapTable`, and `jals-classfile` reads back whatever those say — so a frame
+describing the wrong type round-trips perfectly and is still a class no JVM will load. Only the
+verifier has an opinion, and it is the authority.
+
+`descriptor-equal` is the rung the verifier structurally cannot reach. It judges one compilation at
+a time, and every case here is a single file, so an erasure the declaration and its call sites get
+*equally* wrong is self-consistent and links cleanly — `<T extends Comparable<T>> void f(T)` emitted
+as `f(Ljava/lang/Object;)` passes every rung below. Catching that needs a second opinion, and the
+corpus already holds one beside every case. It is a **rung, not a defect**: the bytes load and run,
+so `--strict` does not fail on one. And it is narrower than "compiled the way javac did" — where
+both compilers declared a method of the same name, they must agree on what it takes and returns,
+which is all a separately-compiled caller links against. Types jals did not emit, members javac has
+and jals does not, access flags, and attributes are all out of scope.
+
+It also has a third answer, `descriptors-unjudged`, and it exists because the comparison can fail
+to *happen*: javac's own `expected/` class files are read through this workspace's own reader, so a
+`.class` it refuses, a constant-pool entry it cannot resolve, or a directory a partial generation
+run left empty all mean nothing was compared. Folding that into "agreed" made the rung fail **open**
+— and open is the top rung, so a corpus problem was scored as "jals agrees with javac", per
+construct family (a whole package shares its `expected/` output), and invisibly: no bucket, no
+`--list-failures` entry, no effect on `--strict`. A case that lands there counts as `verified`, is
+not counted as `descriptor-equal`, and is a corpus problem rather than a defect — the same treatment
+`read-error` gets for a source the harness could not read.
 
 ```sh
 git submodule update --init --depth 1 jals-tests/sources/openjdk
@@ -224,10 +246,9 @@ rather than left to fail, since scoring a file whose purpose is to be rejected w
 this harness into a checker.
 
 Each case is `<Base>.java` beside a `<Base>.expected/` directory holding javac's own class files.
-Nothing reads `expected/` yet; it is written now because a future run-equivalence rung needs it
-and regenerating the corpus to obtain it later costs the whole generation pass. The corpus is a
-derivative of GPL'd OpenJDK sources, so like the four formatter corpora it is **generated locally
-and gitignored, never committed**.
+That directory is both what makes a `.java` under the root a case at all and what the
+`descriptor-equal` rung reads. The corpus is a derivative of GPL'd OpenJDK sources, so like the four
+formatter corpora it is **generated locally and gitignored, never committed**.
 
 ### The classpath is a real JDK's
 
@@ -248,10 +269,24 @@ syntax error on a file that is valid Java by construction. `--strict` exits non-
 a regression into a wrong class file fails a build while the long tail of unimplemented syntax
 does not.
 
-CI leaves `--strict` off: known defects are still open (a nested `new` passing the wrong enclosing
-instance, `this$0` stored after `super()`, and two `jals-syntax` gaps), so the report is a
-measurement rather than a gate. Turning it on is what would make it one, and that is a decision to
-take once the list is empty.
+CI leaves `--strict` off: known defects are still open, so the report is a measurement rather than a
+gate. Turning it on is what would make it one, and that is a decision to take once the list is
+empty. What is open, by family:
+
+- a nested `new` passing the wrong enclosing instance, and `this$0` read or stored before
+  `super()` — which JEP 447's statements-before-`super()` reaches from a second direction;
+- a value whose *erasure* is not narrowed back where the slot is narrower than `Object`. The
+  argument direction is handled; a `return` of an erased value, and a receiver reached through one,
+  are not — which is most of what `generics/inference` fails on.
+
+The parser is no longer among them: every file in the corpus parses, so `parsed` is 100% and a
+syntax error there would now be a regression rather than a known gap.
+
+Expect the list to *change* as the rate rises, and not always to shrink. A file blocked at
+`lowered` never reaches the verifier, so fixing what blocked it does not only move it up the
+ladder — it can move it into the defect list, exposing a backend bug that was always there. Reading
+a bigger defect count as a regression is therefore wrong on its own; what says whether a change
+regressed is which cases entered and left, and the ladder alongside them.
 
 ### Version pin
 

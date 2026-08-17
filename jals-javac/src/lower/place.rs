@@ -97,8 +97,9 @@ impl Place {
                 context.facts().member_of_def(id)
             }
             // Nothing in the file declared it, which an *inherited* field never is.
-            None => Facts::name_token(name.syntax())
-                .and_then(|token| Expr::inherited_field(token.text(), context)),
+            None => Facts::name_token(name.syntax()).and_then(|token| {
+                Expr::inherited_field(&jals_syntax::decoded_ident(&token), context)
+            }),
         };
         let member = member.ok_or_else(text)?;
         let (owner, field, descriptor) = Expr::field_ref(member, context)?;

@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use jals_classfile::ClassFile;
-use jals_hir::{FileAnalysis, FileId, Namespace, ProjectIndex, SourceLocations};
+use jals_hir::{FileAnalysis, FileId, ItemOrigin, Namespace, ProjectIndex, SourceLocations};
 use jals_syntax::SyntaxNode;
 use jals_syntax::ast::{self, AstNode};
 
@@ -229,4 +229,56 @@ fn classpath_member_navigates_to_library_source() {
     assert_eq!(file, lib);
     let want = BOX_SOURCE.find("get(").expect("get decl in source");
     assert_eq!(range, want..want + 3);
+}
+
+/// `java.lang.Object` from a class file, for the priority tests below.
+fn java_lang_object() -> ClassFile {
+    let path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/JavaLangObject.class");
+    jals_exec::block_on_inline(ClassFile::read(
+        std::fs::read(path)
+            .expect("read JavaLangObject.class")
+            .as_slice(),
+    ))
+    .expect("parse JavaLangObject.class")
+}
+
+/// An index over `src` with both the stubs and `classfiles` folded in.
+fn index_with_stdlib_and_classpath(src: &str, classfiles: &[ClassFile]) -> ProjectIndex {
+    let node = parse(src);
+    let lowered = jals_exec::block_on_inline(ProjectIndex::lower_classpath(classfiles));
+    jals_exec::block_on_inline(
+        ProjectIndex::builder(&[(FileId(0), node)])
+            .with_stdlib()
+            .with_classpath(&lowered)
+            .build(),
+    )
+}
+
+/// A real `.class` outranks the embedded stub of the same fully-qualified name.
+///
+/// The stubs are ~58 signature-only types kept for a host with no classpath at all; where a real
+/// one exists it is strictly better, and `ItemOrigin::Classpath` already documents that its member
+/// set is *complete* while a stub's is deliberately partial. With the stubs winning, indexing a
+/// real JDK resolved `java.lang.Object` to the stub and the classpath was decoded for nothing.
+#[test]
+fn a_classpath_type_outranks_a_stub_of_the_same_name() {
+    let index =
+        index_with_stdlib_and_classpath("class C {}", std::slice::from_ref(&java_lang_object()));
+    let object = index
+        .item_by_fqn("java.lang.Object")
+        .expect("java.lang.Object is indexed");
+    assert_eq!(index.item(object).origin, ItemOrigin::Classpath);
+}
+
+/// The project still outranks the classpath: a source type is the one the host can edit, and a jar
+/// holding a stale copy of it must not shadow what is on disk.
+#[test]
+fn a_project_type_still_outranks_a_classpath_type_of_the_same_name() {
+    let index = index_with_stdlib_and_classpath(
+        "public class Box<T> { public T get() { return null; } }",
+        std::slice::from_ref(&box_classfile()),
+    );
+    let box_id = index.item_by_fqn("Box").expect("Box is indexed");
+    assert_eq!(index.item(box_id).origin, ItemOrigin::Project);
 }

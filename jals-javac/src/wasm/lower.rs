@@ -3023,7 +3023,7 @@ impl Lowering<'_> {
         continuing: bool,
         insn: &mut Insn,
     ) -> Result<()> {
-        let label = label.map(|token| token.text().to_owned());
+        let label = label.map(|token| jals_syntax::decoded_ident(&token).into_owned());
         let target = self
             .loops
             .iter()
@@ -3091,9 +3091,14 @@ impl Lowering<'_> {
                     .ok_or(WasmError::Unsupported("an empty parenthesis"))?;
                 self.expr(&inner, insn)
             }
-            // `this` parses as a name reference but carries no identifier token, so nothing
-            // resolves it as a name; it is always local 0.
-            ast::Expr::NameRef(_) if Facts::is_this(expr.syntax()) => {
+            // `this` and `super` both parse as a name reference carrying no identifier token, so
+            // nothing resolves either as a name; both are local 0. What `super` changes is which
+            // *body* a call reaches and which declaration a field access names, and both of those are
+            // settled elsewhere — the host's collector types the value by its struct, and a
+            // subclass's struct is a declared subtype of its superclass's.
+            ast::Expr::NameRef(_)
+                if Facts::is_this(expr.syntax()) || Facts::is_super(expr.syntax()) =>
+            {
                 let owner = self
                     .owner
                     .ok_or(WasmError::Unsupported("`this` in a `static` method"))?;
@@ -3407,7 +3412,7 @@ impl Lowering<'_> {
     /// supertype's fields first, so the slot the inherited member lands in is the enclosing type's own.
     fn inherited_field(&self, node: &SyntaxNode) -> Option<MemberId> {
         let name = Facts::name_token(node)?;
-        Hierarchy::of(self.index).inherited_field(self.owner?, name.text())
+        Hierarchy::of(self.index).inherited_field(self.owner?, &jals_syntax::decoded_ident(&name))
     }
 
     /// `{1, 2, 3}`, whose elements are written rather than defaulted.
@@ -4754,7 +4759,17 @@ impl Lowering<'_> {
         let is_static = info.modifiers.is_static;
 
         let arguments: Vec<ast::Expr> = call.args().into_iter().flat_map(|l| l.args()).collect();
-        let overriders = if is_static {
+        // A `super.` qualifier names one body in particular — the superclass's — so the call is not
+        // dispatched at all. The same fact from the same place as the JVM lowering's `invokespecial`:
+        // `Facts::is_super` sits in the shared layer so the two backends cannot answer differently,
+        // and letting the `ref.test` chain select by *runtime* type here is how an override calling
+        // `super.f()` would call itself.
+        let super_qualified = matches!(
+            call.callee(),
+            Some(ast::Expr::FieldAccess(ref access))
+                if access.receiver().is_some_and(|r| Facts::is_super(r.syntax()))
+        );
+        let overriders = if is_static || super_qualified {
             Vec::new()
         } else {
             self.overriders(member)

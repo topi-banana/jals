@@ -25,20 +25,33 @@ use crate::syntax_kind::SyntaxKind::{
 use crate::syntax_kind::SyntaxKind::{MODIFIERS, NON_SEALED_KW};
 
 impl QualifiedName {
-    /// The full dotted text as written (without surrounding trivia), e.g. `a.b.c` or `a.b.*`.
+    /// The full dotted name, e.g. `a.b.c` or `a.b.*` — each segment with its JLS §3.3 escapes
+    /// resolved.
+    ///
+    /// Composed from the decoded segments rather than from the node's text, because this is the name
+    /// a package, an import, or a qualified type *is*: `import a.b.\u0043;` imports `a.b.C`, and
+    /// matching it against the declaration of `C` needs both spelled the language's way. The
+    /// wildcard is re-added because it is punctuation of the import, not a segment.
     pub fn text(&self) -> String {
-        AstSupport::non_trivia_text(&self.syntax)
+        let mut out = self.segments().join(".");
+        if self.is_wildcard() {
+            if !out.is_empty() {
+                out.push('.');
+            }
+            out.push('*');
+        }
+        out
     }
 
-    /// The dotted segments in source order (`a.b.C` → `["a", "b", "C"]`). The trailing wildcard
-    /// `*` of an on-demand import is not a segment.
+    /// The dotted segments in source order (`a.b.C` → `["a", "b", "C"]`), decoded. The trailing
+    /// wildcard `*` of an on-demand import is not a segment.
     fn segments(&self) -> Vec<String> {
         AstSupport::ident_tokens(&self.syntax)
-            .map(|t| t.text().to_owned())
+            .map(|t| crate::decoded_ident(&t).into_owned())
             .collect()
     }
 
-    /// The last (simple) segment (`import a.b.Foo;` → `Foo`). `None` for a wildcard import
+    /// The last (simple) segment (`import a.b.Foo;` → `Foo`), decoded. `None` for a wildcard import
     /// (`a.b.*`), which names no single type.
     pub fn last_segment(&self) -> Option<String> {
         if self.is_wildcard() {
@@ -46,7 +59,7 @@ impl QualifiedName {
         }
         AstSupport::ident_tokens(&self.syntax)
             .last()
-            .map(|t| t.text().to_owned())
+            .map(|t| crate::decoded_ident(&t).into_owned())
     }
 
     /// The qualifier (package) part: everything before the simple name (`a.b.C` → `a.b`), or the
@@ -118,9 +131,11 @@ impl Type {
         AstSupport::ident_tokens(&self.syntax).last()
     }
 
-    /// The text of [`simple_name_token`](Type::simple_name_token): `a.b.C` → `C`.
+    /// The text of [`simple_name_token`](Type::simple_name_token): `a.b.C` → `C`, with its JLS §3.3
+    /// escapes resolved — this names a type rather than rendering one.
     pub fn simple_name(&self) -> Option<String> {
-        self.simple_name_token().map(|t| t.text().to_owned())
+        self.simple_name_token()
+            .map(|t| crate::decoded_ident(&t).into_owned())
     }
 
     /// Whether the type name is qualified, i.e. a dotted reference type (`a.b.C`).
@@ -134,12 +149,14 @@ impl Type {
     /// The qualified name text of a reference type, with type arguments and array dimensions
     /// removed (`java.util.List<String>[]` → `java.util.List`). `None` for a non-reference type.
     pub fn qualified_text(&self) -> Option<String> {
+        // Decoded, like every other name accessor here: the dots are punctuation and the segments
+        // are identifiers, so an escape inside one changes which type is named.
         let text: String = self
             .syntax
             .children_with_tokens()
             .filter_map(rowan::NodeOrToken::into_token)
             .filter(|t| matches!(t.kind(), IDENT | DOT))
-            .map(|t| t.text().to_owned())
+            .map(|t| crate::decoded_ident(&t).into_owned())
             .collect();
         (!text.is_empty()).then_some(text)
     }

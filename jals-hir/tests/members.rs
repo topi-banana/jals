@@ -265,3 +265,140 @@ fn a_new_binds_to_the_constructor_its_arguments_select() {
         new_target(src, "new Pair(1.5)")
     );
 }
+
+/// Every reference type is a subtype of `java.lang.Object`, however it was declared.
+///
+/// Java writes the edge for you and the source never spells it, so there is no `extends` clause for
+/// the index to have resolved — which left `class Foo {}` with an empty supertype chain and
+/// `is_subtype(Foo, Object)` answering `false`. An interface is included deliberately: JLS §9.2
+/// gives it no *superinterface*, but every interface-typed value is still an `Object`.
+#[test]
+fn every_reference_type_is_a_subtype_of_object() {
+    let src = "
+        class Plain {}
+        interface Iface {}
+        enum Color { RED }
+        record Point(int x, int y) {}
+        class Holder { Object make() { return new Object() {}; } }
+    ";
+    let fixture = Fixture::new(src);
+    let index = &fixture.index;
+    let object = index
+        .item_by_fqn("java.lang.Object")
+        .expect("the stubs declare java.lang.Object");
+    for name in ["Plain", "Iface", "Color", "Point", "Holder"] {
+        let id = index
+            .item_by_fqn(name)
+            .unwrap_or_else(|| panic!("`{name}` is indexed"));
+        assert!(index.is_subtype(id, object), "`{name}` is not an Object");
+    }
+    // The anonymous class too — it has no name to look up, so find it by its enclosing declaration.
+    let anonymous = index
+        .items()
+        .find(|(_, item)| {
+            item.fqn.to_string().starts_with("Holder.") || item.fqn.to_string() == "Holder$1"
+        })
+        .map(|(id, _)| id);
+    if let Some(id) = anonymous {
+        assert!(
+            index.is_subtype(id, object),
+            "the anonymous class is not an Object"
+        );
+    }
+}
+
+/// `Object` does not extend itself, and a written `extends Object` is not doubled.
+#[test]
+fn the_implicit_object_edge_is_added_exactly_once() {
+    let fixture = Fixture::new("class Written extends Object {}");
+    let index = &fixture.index;
+    let object = index
+        .item_by_fqn("java.lang.Object")
+        .expect("the stubs declare java.lang.Object");
+    assert!(
+        index.item(object).supertypes.is_empty(),
+        "Object must not be its own supertype"
+    );
+    let written = index.item_by_fqn("Written").expect("Written is indexed");
+    let to_object: Vec<bool> = index
+        .item(written)
+        .supertypes
+        .iter()
+        .filter(|sup| sup.id == object)
+        .map(|sup| sup.implicit)
+        .collect();
+    assert_eq!(
+        to_object,
+        [false],
+        "a written `extends Object` stays the one edge, and stays non-implicit"
+    );
+}
+
+/// With no stubs and no classpath there is no `java.lang.Object` to point at, and the absence must
+/// stay an absence: marking the type as having an *external* supertype instead would suppress every
+/// "no member" conclusion in the workspace.
+#[test]
+fn the_implicit_object_edge_is_absent_without_an_indexed_object() {
+    let node = jals_exec::block_on_inline(jals_syntax::Parse::parse("class Foo {}")).syntax();
+    let index = jals_exec::block_on_inline(ProjectIndex::builder(&[(FileId(0), node)]).build());
+    let foo = index.item_by_fqn("Foo").expect("Foo is indexed");
+    assert!(index.item(foo).supertypes.is_empty());
+    assert!(
+        index.method_set_complete(foo, "anything"),
+        "an unindexed Object is not an external supertype"
+    );
+}
+
+/// `super.f()` binds to the *overridden* member, not to the override.
+///
+/// That is the whole reason `super` is not given the enclosing type as its receiver: the enclosing
+/// type's member set starts with the override, so answering the lookup from there would make
+/// `super.f()` call itself. Its lookup starts at the superclass, and `resolve_member`'s walk begins
+/// at the item it is handed — which is exactly right, because the superclass's own `f` is what
+/// `super.f()` names.
+#[test]
+fn super_dot_method_binds_to_the_superclass_override() {
+    let src = "
+        class A { int f() { return 1; } }
+        class B extends A { int f() { return 2; } int g() { return super.f(); } }
+    ";
+    let fixture = Fixture::new(src);
+    let index = &fixture.index;
+    let a = index.item_by_fqn("A").expect("A is indexed");
+    let target = call_target(src, "super.f()");
+    assert_eq!(target, "A.f()", "got {target}");
+    let _ = a;
+}
+
+/// A field is *hidden* rather than overridden (JLS §15.11.2), and `super.x` names the hidden one.
+#[test]
+fn super_dot_field_binds_to_the_hidden_field() {
+    let src = "
+        class A { int x = 1; }
+        class B extends A { int x = 2; int g() { return super.x; } }
+    ";
+    let fixture = Fixture::new(src);
+    let semantics = fixture.semantics();
+    let typed = jals_exec::block_on_inline(semantics.typed());
+    let access = fixture
+        .node
+        .descendants()
+        .filter_map(jals_syntax::ast::FieldAccess::cast)
+        .find(|fa| fa.syntax().text().to_string().trim() == "super.x")
+        .expect("super.x");
+    let range = access.syntax().text_range();
+    let id = typed
+        .field_target_of(usize::from(range.start())..usize::from(range.end()))
+        .expect("super.x binds to a field");
+    let owner = fixture.index.item(fixture.index.member(id).owner);
+    assert_eq!(owner.fqn.to_string(), "A", "super.x is A's hidden field");
+}
+
+/// The join between the implicit `java.lang.Object` edge and the `super` receiver: a class with no
+/// `extends` still has a superclass to look `toString` up on.
+#[test]
+fn super_dot_object_method_resolves_after_the_implicit_edge() {
+    let src = "class C { public String toString() { return super.toString(); } }";
+    let target = call_target(src, "super.toString()");
+    assert_eq!(target, "java.lang.Object.toString()", "got {target}");
+}
