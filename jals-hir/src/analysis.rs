@@ -128,11 +128,20 @@ impl FileAnalysis {
         self.resolved.occurrences(id, include_declaration)
     }
 
-    /// Every definition that no reference resolves to.
+    /// Every definition nothing in this file can be denoting.
     ///
-    /// The raw signal for unused-binding diagnostics; a consumer narrows it to the kinds it cares
-    /// about. An unreferenced field or method is not necessarily unused — it may be used from
-    /// another file — so callers filter by kind.
+    /// The raw signal for unused-binding diagnostics, and a deliberate **over-approximation of
+    /// use**: a definition is withheld not only when a reference resolves to it, but also when it
+    /// is in the method name-space and any call spells its name (the scope chain binds a call to
+    /// *an* overload rather than to the one the arguments select), and when it is a kind a member
+    /// access could name and its name is spelled where the file-local pass cannot bind it
+    /// (`this.x`, `Outer.Inner`, `X.class`, `@Anno`, the ambiguous-name qualifier of JLS §6.5.2,
+    /// and anything inside a `cfg`-disabled host). "Unused" is a negative, and the only direction
+    /// it may err in is silence.
+    ///
+    /// Still only *file-local*: an unreferenced field or method may be used from another file, so
+    /// a consumer narrows it to the kinds — and the visibility ([`Def::is_private`]) — whose answer
+    /// one file completes.
     pub fn unused_defs(&self) -> impl Iterator<Item = &Def> {
         self.resolved.unused_defs()
     }

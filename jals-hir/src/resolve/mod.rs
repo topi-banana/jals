@@ -14,7 +14,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use hashbrown::HashSet;
-use jals_syntax::SyntaxKind::{CALL_EXPR, FIELD_ACCESS, METHOD_REF_EXPR};
+use jals_syntax::SyntaxKind::{CALL_EXPR, CLASS_LITERAL, FIELD_ACCESS, METHOD_REF_EXPR};
 use jals_syntax::ast::{self, AstNode};
 use jals_syntax::cfg::CfgMap;
 use jals_syntax::{SyntaxNode, SyntaxToken};
@@ -35,8 +35,11 @@ pub(crate) struct Resolved {
     pub references: Vec<Reference>,
     /// Simple names the file *mentions* where the file-local pass cannot bind them to a
     /// definition: the right-hand name of a member access (`recv.name`) or a method reference
-    /// (`recv::name`), every segment of a qualified type name (`Outer.Inner`), and every segment of
-    /// an annotation's name (`@Anno`). Each is stored decoded, like a [`Def`]'s name.
+    /// (`recv::name`), the left-hand name of a class literal (`X.class`), every segment of a
+    /// qualified type name (`Outer.Inner`), every segment of an annotation's name (`@Anno`), and
+    /// every identifier inside a `cfg`-disabled host — which binds nothing but still *spells* the
+    /// names of declarations that are themselves enabled. Each is stored decoded, like a [`Def`]'s
+    /// name.
     ///
     /// This is deliberately **not** resolution. A mention names no definition and two unrelated
     /// declarations may share one; nothing here binds anything, and no [`Reference`] is recorded
@@ -370,7 +373,14 @@ impl Resolver {
         // type used solely to qualify a static member resolves to nothing — which is why the name
         // is also recorded as a mention, and why `UUID`'s `private static class Holder` is not
         // read as unused for being reached only through `Holder.numberGenerator`.
-        if matches!(parent, Some(FIELD_ACCESS | METHOD_REF_EXPR)) {
+        //
+        // `Holder.class` is the same shape with the verdict already settled: a class literal's
+        // left-hand side is a *type* and nothing else (JLS §15.8.2), and the grammar spells a bare
+        // one as a `NAME_REF` — so the value-namespace lookup above can only miss, and without the
+        // mention every `private` nested type reached solely through `X.class` reads as dead.
+        if matches!(parent, Some(FIELD_ACCESS | METHOD_REF_EXPR | CLASS_LITERAL))
+            && !self.mentions.contains(&name)
+        {
             self.mentions.insert(name.clone());
         }
         self.raw_refs.push(RawRef {
@@ -421,8 +431,43 @@ impl Resolver {
     /// token of the one node passed in.
     fn record_mentions(&mut self, node: &SyntaxNode) {
         for tok in Collect::direct_ident_tokens(node) {
+            self.mention(&jals_syntax::decoded_ident(&tok));
+        }
+    }
+
+    /// Records one already-decoded name in [`Resolved::mentions`].
+    ///
+    /// The membership probe is not an optimization detail: `decoded_ident` borrows for a name
+    /// carrying no escape, so `into_owned()` allocates on *every* occurrence, and the same handful
+    /// of receivers (`System`, `Objects`, `this`-qualified fields) is spelled hundreds of times in
+    /// one file. Probing first allocates once per distinct name instead of once per occurrence, on
+    /// a pass that runs per keystroke.
+    fn mention(&mut self, name: &str) {
+        if !self.mentions.contains(name) {
             self.mentions
-                .insert(jals_syntax::decoded_ident(&tok).into_owned());
+                .insert(alloc::string::ToString::to_string(name));
+        }
+    }
+
+    /// Records every `IDENT` anywhere under a `cfg`-disabled `node` as a mention.
+    ///
+    /// The host itself contributes no definition, no scope and no reference — the code will not be
+    /// compiled, so nothing in it may *bind*. But "unused" is a negative over the whole file, and
+    /// the declaration a disabled host names is usually **not** disabled: it serves the other
+    /// feature set, where the same file does use it. Dropping the host whole would make every
+    /// `private` member reached only from behind a flag read as dead, and the fix the diagnostic
+    /// asks for would break the build the flag turns on. That is the same argument
+    /// [`unused_imports`](crate::FileAnalysis::unused_imports) makes for reading an import's
+    /// evidence off the token stream, and this is where the binding analyses get it: a mention is
+    /// exactly the shape of evidence that says "somewhere in this file, someone spells this" while
+    /// binding nothing.
+    pub(super) fn record_disabled_mentions(&mut self, node: &SyntaxNode) {
+        for tok in node
+            .descendants_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .filter(|tok| tok.kind() == jals_syntax::SyntaxKind::IDENT)
+        {
+            self.mention(&jals_syntax::decoded_ident(&tok));
         }
     }
 

@@ -268,9 +268,10 @@ filesystem reads into portable interfaces.
   **wording** of every semantic diagnostic belongs to the `jals-lint` rule that reports it,
   alongside the rule name and the `jalslint.toml` key. A negative fact — "nothing uses this" —
   over-approximates *use*: a member name spelled where the file-local pass cannot bind it
-  (`this.x`, `Outer.Inner`, `@Anno`, the ambiguous-name qualifier of JLS §6.5.2) counts as a use,
-  and a method's evidence is its **name** rather than its declaration, because the scope chain
-  binds a call to *an* overload rather than to the one the arguments select.
+  (`this.x`, `Outer.Inner`, `X.class`, `@Anno`, the ambiguous-name qualifier of JLS §6.5.2, and
+  anything inside a `cfg`-disabled host — which binds nothing but serves the *other* feature set)
+  counts as a use, and a method's evidence is its **name** rather than its declaration, because the
+  scope chain binds a call to *an* overload rather than to the one the arguments select.
 - `jals-classfile`, `jals-hir`, `jals-syntax`, `jals-fmt`, `jals-lint`, `jals-decompile`: portable
   domain crates; do not add host filesystem APIs. `jals-fmt` has **one layout engine** — a port of
   google-java-format's greedy `computeBreaks` over a GJF-shaped `Doc`/`Level`/`Break` IR — and

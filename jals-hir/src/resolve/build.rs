@@ -7,9 +7,10 @@
 use jals_syntax::SyntaxKind::{
     ANNOTATION, ANNOTATION_TYPE_DECL, BLOCK, CATCH_CLAUSE, CLASS_BODY, CLASS_DECL,
     CONSTRUCTOR_DECL, ENUM_CONSTANT, ENUM_DECL, FIELD_ACCESS, FIELD_DECL, FOR_EACH_STMT, FOR_STMT,
-    INTERFACE_DECL, LAMBDA_EXPR, LOCAL_VAR_DECL, METHOD_DECL, METHOD_REF_EXPR, NAME_REF, NEW_EXPR,
-    PARAM, PARAM_LIST, RECORD_COMPONENT, RECORD_DECL, RECORD_HEADER, SWITCH_EXPR, SWITCH_GROUP,
-    SWITCH_LABEL, SWITCH_RULE, SWITCH_STMT, TRY_STMT, TYPE, TYPE_PARAM, TYPE_PARAMS, TYPE_PATTERN,
+    INTERFACE_DECL, LAMBDA_EXPR, LOCAL_VAR_DECL, METHOD_DECL, METHOD_REF_EXPR, MODIFIERS, NAME_REF,
+    NEW_EXPR, PARAM, PARAM_LIST, RECORD_COMPONENT, RECORD_DECL, RECORD_HEADER, SWITCH_EXPR,
+    SWITCH_GROUP, SWITCH_LABEL, SWITCH_RULE, SWITCH_STMT, TRY_STMT, TYPE, TYPE_PARAM, TYPE_PARAMS,
+    TYPE_PATTERN,
 };
 use jals_syntax::SyntaxNode;
 use jals_syntax::ast::{
@@ -39,10 +40,13 @@ impl Resolver {
     /// The per-node dispatch behind [`Resolver::build`].
     async fn build_impl(&mut self, node: &SyntaxNode, scope: ScopeId) {
         self.tick().await;
-        // A `cfg`-disabled host contributes nothing: no definition, no scope, and — because every
+        // A `cfg`-disabled host binds nothing: no definition, no scope, and — because every
         // recursion re-enters through here — no reference from anywhere inside it (Rust parity
-        // with the compile frontend blanking the whole host).
+        // with the compile frontend blanking the whole host). Its names are still *spelled*
+        // though, and the declaration they name is usually enabled, so they are kept as mentions:
+        // see [`record_disabled_mentions`](super::Resolver::record_disabled_mentions).
         if self.cfg.disables_node(node) {
+            self.record_disabled_mentions(node);
             return;
         }
         match node.kind() {
@@ -225,6 +229,12 @@ impl Resolver {
         if let Some(tok) = Collect::first_ident_token(node) {
             self.add_def(fs, DefKind::Local, &tok, node);
         }
+        // The declaration's own modifiers — where an annotation on the loop variable lives — are
+        // walked like any other child, so `for (@Marker String s : xs)` mentions `Marker`. Without
+        // this the annotation type it names has no trace in the analysis at all.
+        for modifiers in node.children().filter(|c| c.kind() == MODIFIERS) {
+            self.build(&modifiers, fs).await;
+        }
         // The element type is a type reference (`for (Foo f : ...)`); it does not see the variable.
         if let Some(ty) = fe.ty() {
             self.build(ty.syntax(), fs).await;
@@ -326,10 +336,12 @@ impl Resolver {
                 if let Some(tok) = Collect::first_ident_token(p.syntax()) {
                     self.add_def(ls, DefKind::LambdaParam, &tok, p.syntax());
                 }
-                // An explicitly-typed parameter (`(Foo f) -> ...`) contributes a type reference.
-                for ty in p.syntax().children().filter(|c| c.kind() == TYPE) {
-                    self.build(&ty, ls).await;
-                }
+                // Every child but the name token: an explicitly-typed parameter
+                // (`(Foo f) -> ...`) contributes a type reference, and the annotations a parameter
+                // may carry — in its `MODIFIERS` child or as direct `ANNOTATION` children —
+                // contribute the mentions that keep the annotation type they name from reading as
+                // unused. The name itself is a token, not a node, so it is not revisited here.
+                self.build_children(p.syntax(), ls).await;
             }
         }
         if let Some(b) = lambda.block_body() {

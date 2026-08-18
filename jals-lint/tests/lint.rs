@@ -432,6 +432,29 @@ fn a_private_type_used_as_a_static_qualifier_is_not_flagged() {
 }
 
 #[test]
+fn a_private_type_named_only_by_a_class_literal_is_not_flagged() {
+    // `Inner.class` is the last position where a bare name denotes a *type* (JLS §15.8.2), and the
+    // grammar spells it as a plain `NAME_REF` — so the value-namespace lookup can only miss and the
+    // mention is the whole evidence. Without it every `private` nested type reached through
+    // `X.class` (a logger key, a Mixin target, a reflective lookup) reads as dead.
+    check(
+        "class Foo { private static class Inner {} Object m() { return Inner.class; } }",
+        expect![""],
+    );
+}
+
+#[test]
+fn an_annotation_written_on_a_binding_the_grammar_nests_is_not_flagged() {
+    // A for-each variable and a lambda parameter park their annotations in a `MODIFIERS` child that
+    // neither shape used to recurse, so the annotation type they name had no trace in the analysis
+    // at all — and a `private` one then read as unused.
+    check(
+        "class Foo { private @interface M {} void m(java.util.List<String> xs) { for (@M String s : xs) { g(s); } r((@M String t) -> t); } void g(String s) { System.out.println(s); } void r(Object o) { System.out.println(o); } }",
+        expect![""],
+    );
+}
+
+#[test]
 fn a_private_constructor_is_not_flagged() {
     // `new Foo()` records a reference to the *type*, never to the constructor, so non-resolution
     // here is silence rather than evidence — and a private constructor is also how a utility class
@@ -864,6 +887,18 @@ fn an_import_used_only_inside_a_disabled_host_is_not_flagged() {
     // stream, which no `cfg` map touches. Reporting it with the flag off would ask for a deletion
     // that breaks the build the flag turns on.
     let src = "import java.util.List;\n#[cfg(feature = \"x\")]\nclass Gated { List<String> l; }\n";
+    assert_eq!(lint_with_cfg(src, &[]), "");
+    assert_eq!(lint_with_cfg(src, &["x"]), "");
+}
+
+#[test]
+fn a_member_used_only_inside_a_disabled_host_is_not_flagged() {
+    // The mirror of `an_import_used_only_inside_a_disabled_host_is_not_flagged`, and the same
+    // argument: the declaration is *not* disabled, so it serves the other feature set, where the
+    // same file does use it. Reporting it with the flag off asks for a deletion that breaks the
+    // build the flag turns on. The resolver still binds nothing inside the host — the name is kept
+    // as a mention, which is evidence without being resolution.
+    let src = "class C {\n    private int f;\n    private void helper() {}\n    #[cfg(feature = \"x\")]\n    void m() { helper(); f = 1; }\n}";
     assert_eq!(lint_with_cfg(src, &[]), "");
     assert_eq!(lint_with_cfg(src, &["x"]), "");
 }
