@@ -276,11 +276,37 @@ impl Cli {
             }
         }
 
+        self.print_descriptor_findings(report);
         self.print_counts("what stopped the rest:", &report.buckets());
         self.print_counts(
             "why javac declined the out-of-scope files:",
             &report.skip_reasons(),
         );
+    }
+
+    /// The descriptor rung's cases, one per line rather than bucketed.
+    ///
+    /// Each row names a different method of a different class, so the bucket the gap list would put
+    /// them in carries nothing a reader could work from. `--limit` bounds the listing the same way it
+    /// bounds the gaps.
+    fn print_descriptor_findings(&self, report: &CompileReport) {
+        let findings = report.descriptor_findings();
+        if findings.is_empty() || self.limit == 0 {
+            return;
+        }
+        println!(
+            "  {} case(s) the descriptor rung stopped — the bytes link, but a separately-compiled \
+             caller would not:",
+            findings.len()
+        );
+        for result in findings.iter().take(self.limit) {
+            println!(
+                "    {:<20} {}  {}",
+                result.outcome.label(),
+                result.rel.display(),
+                result.outcome.detail().unwrap_or_default(),
+            );
+        }
     }
 
     /// One `--limit`-bounded count-and-message list, printed only when there is something in it.

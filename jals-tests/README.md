@@ -191,7 +191,7 @@ it got, because one number over a compiler says nothing about what is missing:
 | re-read | `jals-classfile` reads back what the assembler wrote |
 | **verified** | a real JVM **linked** the class: the bytecode verifier accepted it |
 | descriptor-equal | every method's descriptor is one javac gave the same name |
-| *descriptors-unjudged* | not a rung: javac's own class files for the case could not be read, so nothing was compared |
+| *descriptors-unjudged* | not a rung: nothing was compared, and the outcome says which of three reasons |
 
 `verified` is what this harness was built for. The assembler computes its own `max_stack`,
 `max_locals` and `StackMapTable`, and `jals-classfile` reads back whatever those say — so a frame
@@ -209,14 +209,29 @@ which is all a separately-compiled caller links against. Types jals did not emit
 and jals does not, access flags, and attributes are all out of scope.
 
 It also has a third answer, `descriptors-unjudged`, and it exists because the comparison can fail
-to *happen*: javac's own `expected/` class files are read through this workspace's own reader, so a
-`.class` it refuses, a constant-pool entry it cannot resolve, or a directory a partial generation
-run left empty all mean nothing was compared. Folding that into "agreed" made the rung fail **open**
-— and open is the top rung, so a corpus problem was scored as "jals agrees with javac", per
-construct family (a whole package shares its `expected/` output), and invisibly: no bucket, no
-`--list-failures` entry, no effect on `--strict`. A case that lands there counts as `verified`, is
-not counted as `descriptor-equal`, and is a corpus problem rather than a defect — the same treatment
-`read-error` gets for a source the harness could not read.
+to *happen*. Folding that into "agreed" made the rung fail **open** — and open is the top rung, so
+nothing-compared was scored as "jals agrees with javac", per construct family (a whole package
+shares its `expected/` output), and invisibly: no bucket, no `--list-failures` entry, no effect on
+`--strict`. A case that lands there counts as `verified` and not as `descriptor-equal`, and is never
+a defect — the same treatment `read-error` gets for a source the harness could not read.
+
+The outcome carries **which** of three reasons, because they are not one finding and only the first
+is about the corpus:
+
+| reason | what it means |
+| --- | --- |
+| the class files could not be read | javac's own `expected/` output is read through this workspace's own reader, so a `.class` it refuses or a directory a partial generation run left empty means there was nothing to read |
+| jals emitted no type javac also named | both compilers produced class files and named none of them the same — a disagreement about *names*, which is a finding of its own and not one about descriptors |
+| neither compiler declares a method the other does | an annotation interface, a marker interface, a `package-info`: javac's class file declares no method, so there is nothing to agree about |
+
+The distinction is not cosmetic. Every one of these used to print "javac's own class files for the
+case could not be read", which sent a reader to the corpus generator for something the compiler
+decided — and of the thirty cases in the current run, **none** is an unreadable class file.
+
+Both this and `descriptor-equal`'s failures are listed **per case** rather than bucketed. A bucket
+exists to bundle failures of one shape, and these have none in common: each names a different method
+of a different class, so eliding the names leaves one row saying `a descriptor javac spells
+differently` forty-seven times over. `--limit` bounds the listing the way it bounds the gaps.
 
 ```sh
 git submodule update --init --depth 1 jals-tests/sources/openjdk
@@ -273,11 +288,19 @@ CI leaves `--strict` off: known defects are still open, so the report is a measu
 gate. Turning it on is what would make it one, and that is a decision to take once the list is
 empty. What is open, by family:
 
-- a nested `new` passing the wrong enclosing instance, and `this$0` read or stored before
-  `super()` — which JEP 447's statements-before-`super()` reaches from a second direction;
-- a value whose *erasure* is not narrowed back where the slot is narrower than `Object`. The
-  argument direction is handled; a `return` of an erased value, and a receiver reached through one,
-  are not — which is most of what `generics/inference` fails on.
+- **statements before `super()`** (JEP 447). A constructor that runs code before its delegation
+  leaves `this` as `uninitializedThis` across it, and the frame at the `invokespecial` says the
+  class is already initialised. Reading a *parameter* while `this` is uninitialized is handled; the
+  frame across an intervening statement is not.
+- **an overload selected against a classpath type**, where the candidates differ only in a
+  parameter this analysis cannot order — `PrintStream(String)` against `PrintStream(OutputStream)`,
+  `StringBuffer` against `String`. The wrong choice is a wrong `invokespecial` argument rather than
+  a diagnostic.
+- **an inferred type the analysis does not compute**: a `return` whose value comes from an
+  inference this crate does not run (`generics/inference`), and a multi-catch parameter, whose type
+  is the *lub* of its arms rather than the first of them.
+- **the assembler's own frames**: a `StackMapTable` offset that does not land on an instruction, and
+  one method whose control flow runs off the end.
 
 The parser is no longer among them: every file in the corpus parses, so `parsed` is 100% and a
 syntax error there would now be a regression rather than a known gap.

@@ -315,3 +315,145 @@ fn a_method_type_parameter_shadows_the_enclosing_class() {
         "the method's `T` is unbounded; the class's bound is not its own"
     );
 }
+
+/// A declarator's own array brackets belong to the *name*, not to the declaration's type.
+///
+/// `int a[], b;` is one written type and two different member types (JLS §10.2). Reading only the
+/// `TYPE` node captured both as `int`, and a field's type is not a spelling detail: `a.length` and
+/// `a[0]` are then errors against a type the source never wrote, and the class file spells the
+/// field `I` where javac spells it `[I`.
+#[test]
+fn a_c_style_declarator_carries_its_own_dimensions() {
+    let sources = ["class T { int a[], b; String s[][]; int[] mixed[]; }"];
+    let (_nodes, index) = build(&sources);
+    let t = item(&index, &sources, 0, "T");
+    let field = |name: &str| index.member(index.resolve_member(t, name, Namespace::Value).unwrap());
+
+    let primitive = |dims| MemberType::Primitive {
+        keyword: "int".into(),
+        dims,
+    };
+    assert_eq!(field("a").ty, primitive(1));
+    // The second declarator wrote no brackets, so it is not an array — which is the whole reason
+    // the count has to be per name.
+    assert_eq!(field("b").ty, primitive(0));
+    assert_eq!(
+        field("s").ty,
+        MemberType::Named {
+            name: "String".into(),
+            qualified: None,
+            dims: 2,
+            args: Vec::new(),
+        }
+    );
+    // Legal, and the two halves add: `int[] mixed[]` is an `int[][]`.
+    assert_eq!(field("mixed").ty, primitive(2));
+}
+
+/// A parameter and a return type take the same brackets, in the two places Java puts them.
+///
+/// This is what a *descriptor* is made of, so a caller compiled separately links against it:
+/// `void m(int xs[])` is `([I)V` and `int m()[]` returns `[I`.
+#[test]
+fn c_style_dimensions_reach_parameters_and_return_types() {
+    let sources = [
+        "class T { void m(int xs[], String a[][]) {} int r()[] { return null; } int[] q()[] { return null; } }",
+    ];
+    let (_nodes, index) = build(&sources);
+    let t = item(&index, &sources, 0, "T");
+    let method =
+        |name: &str| index.member(index.resolve_member(t, name, Namespace::Method).unwrap());
+
+    let params = &method("m").params;
+    assert_eq!(
+        params[0].ty,
+        MemberType::Primitive {
+            keyword: "int".into(),
+            dims: 1
+        }
+    );
+    assert_eq!(
+        params[1].ty,
+        MemberType::Named {
+            name: "String".into(),
+            qualified: None,
+            dims: 2,
+            args: Vec::new(),
+        }
+    );
+    // The return brackets sit *after* the parameter list, so they are in neither the return `TYPE`
+    // node nor on a declarator name.
+    assert_eq!(
+        method("r").ty,
+        MemberType::Primitive {
+            keyword: "int".into(),
+            dims: 1
+        }
+    );
+    assert_eq!(
+        method("q").ty,
+        MemberType::Primitive {
+            keyword: "int".into(),
+            dims: 2
+        }
+    );
+}
+
+/// A functional interface is the one with a single *abstract* method (JLS §9.8), which is not the
+/// same as "declares one method".
+///
+/// No JDK functional interface declares one method: `Function` has `apply` beside `compose`,
+/// `andThen`, and `identity`. Counting declarations refused every lambda written against the
+/// standard library.
+#[test]
+fn a_functional_interface_is_counted_by_abstract_methods() {
+    let sources = ["interface Fn { \
+           String apply(String s); \
+           default Fn andThen(Fn next) { return null; } \
+           static Fn identity() { return null; } \
+           private String helper() { return null; } \
+         }
+         interface TwoAbstract { void a(); void b(); }
+         interface NoAbstract { default void a() {} }
+         class NotAnInterface { void only() {} }"];
+    let (_nodes, index) = build(&sources);
+    let of = |name: &str| index.functional_member(item(&index, &sources, 0, name));
+
+    let apply = of("Fn").expect("`apply` is the single abstract method");
+    assert_eq!(index.member(apply).name, "apply");
+    assert!(of("TwoAbstract").is_none());
+    assert!(of("NoAbstract").is_none());
+    // A class's method is not abstract, so a class is never functional — which the old rule got
+    // right only by accident, having no abstract bit to read.
+    assert!(of("NotAnInterface").is_none());
+}
+
+/// JLS §9.8 does not count a method override-equivalent to a public instance method of `Object`.
+///
+/// `Comparator` is the shape: it redeclares `equals(Object)` beside `compare`, and every
+/// implementation already has one from `Object`. The exclusion is narrower than "a method `Object`
+/// declares" — `clone` and `finalize` are `protected`, so an interface declaring one really does
+/// have that abstract method.
+#[test]
+fn object_s_public_methods_do_not_count_toward_the_single_abstract_method() {
+    let sources = [
+        "interface Cmp { int compare(String a, String b); boolean equals(Object o); }
+         interface Named { String toString(); int hashCode(); void run(); }
+         interface Cloner { int clone(); }
+         interface OnlyObject { boolean equals(Object o); }",
+    ];
+    let (_nodes, index) = build(&sources);
+    let of = |name: &str| {
+        index
+            .functional_member(item(&index, &sources, 0, name))
+            .map(|id| index.member(id).name.clone())
+    };
+
+    assert_eq!(of("Cmp").as_deref(), Some("compare"));
+    assert_eq!(of("Named").as_deref(), Some("run"));
+    // `clone()` is `protected` on `Object`, so §9.8 excludes nothing here: this interface has one
+    // abstract method and it is `clone`.
+    assert_eq!(of("Cloner").as_deref(), Some("clone"));
+    // And an interface whose only abstract method *is* excluded has none left.
+    assert!(of("OnlyObject").is_none());
+}

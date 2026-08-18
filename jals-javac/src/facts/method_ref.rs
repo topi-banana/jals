@@ -127,8 +127,7 @@ impl Facts<'_> {
             .ok_or(FactError::Unsupported(
                 "a method reference with no target type",
             ))?;
-        let interface_method = self
-            .hierarchy()
+        let interface_method = index
             .functional_member(interface)
             .ok_or(FactError::Unsupported("a target with no single method"))?;
         let arity = index.member(interface_method).params.len();

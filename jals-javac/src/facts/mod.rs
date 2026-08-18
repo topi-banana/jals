@@ -122,11 +122,6 @@ impl<'a> Facts<'a> {
         self.typed.file()
     }
 
-    /// The index-only facts, for a question this file's contents do not bear on.
-    const fn hierarchy(self) -> Hierarchy<'a> {
-        Hierarchy::of(self.typed.index())
-    }
-
     /// The file's syntax tree.
     const fn root(self) -> &'a SyntaxNode {
         self.typed.root()

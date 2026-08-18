@@ -44,7 +44,13 @@ impl Slots {
             // `this` occupies slot 0 of every instance method and constructor.
             next: u16::from(!is_static),
         };
-        for param in params.into_iter().flat_map(ast::ParamList::params) {
+        for param in params
+            .into_iter()
+            .flat_map(ast::ParamList::params)
+            // A receiver parameter (`void m(Foo this)`) occupies no slot: it *is* slot 0, which is
+            // already accounted for above (JLS §8.4.1).
+            .filter(|param| !param.is_receiver())
+        {
             let width = Self::width(context, param.syntax());
             if let Some(id) = context.facts().def_at(param.syntax()) {
                 slots.entries.push((id, slots.next));
@@ -68,7 +74,13 @@ impl Slots {
             entries: Vec::new(),
             next: 1 + synthetic,
         };
-        for param in params.into_iter().flat_map(ast::ParamList::params) {
+        for param in params
+            .into_iter()
+            .flat_map(ast::ParamList::params)
+            // A receiver parameter (`void m(Foo this)`) occupies no slot: it *is* slot 0, which is
+            // already accounted for above (JLS §8.4.1).
+            .filter(|param| !param.is_receiver())
+        {
             let width = Self::width(context, param.syntax());
             if let Some(id) = context.facts().def_at(param.syntax()) {
                 slots.entries.push((id, slots.next));

@@ -27,6 +27,7 @@ use alloc::string::String;
 
 pub use rowan::ast::{AstChildren, AstNode, AstPtr, SyntaxNodePtr};
 
+pub use ext::Declarators;
 pub use generated::*;
 
 use crate::language::{SyntaxNode, SyntaxToken};

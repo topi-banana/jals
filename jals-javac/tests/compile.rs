@@ -5614,3 +5614,396 @@ fn an_escaped_identifier_is_the_name_it_spells() {
     };
     assert_eq!(fields, ["a"], "the field is named `a`");
 }
+
+/// A C-style array declarator reaches the *descriptor*, which is the half no verifier can catch.
+///
+/// `void m(int xs[])` is `([I)V`. Emitting it as `(I)V` links perfectly inside one compilation —
+/// the declaration and its call sites are equally wrong — and is a `NoSuchMethodError` for anything
+/// compiled separately. `public static void main(String argc[])` is the shape that matters: spelled
+/// `(Ljava/lang/String;)V`, the JVM does not find `main` at all.
+#[test]
+fn a_c_style_array_declarator_reaches_the_descriptor() {
+    let source = "
+public class Dims {
+    static int f1[];
+    static int[] mixed[];
+    static void m1(int xs[]) {}
+    static void m2(String a[][], int b[]) {}
+    static int m3()[] { return null; }
+    public static void main(String argc[]) {
+        int v[] = new int[3];
+        System.out.println(v.length);
+    }
+}
+";
+    let classes = compile(source).expect("compile");
+    let class = jals_exec::block_on_inline(jals_classfile::ClassFile::read(
+        classes
+            .iter()
+            .find(|class| class.internal_name == "Dims")
+            .expect("the class")
+            .bytes
+            .as_slice(),
+    ))
+    .expect("reparse");
+    let pool = &class.constant_pool;
+    let utf8 = |index| pool.utf8(index).expect("utf8").into_owned();
+
+    let fields: Vec<(String, String)> = class
+        .fields
+        .iter()
+        .map(|field| (utf8(field.name_index), utf8(field.descriptor_index)))
+        .collect();
+    assert_eq!(
+        fields,
+        [
+            ("f1".to_owned(), "[I".to_owned()),
+            ("mixed".to_owned(), "[[I".to_owned()),
+        ]
+    );
+
+    let methods: Vec<(String, String)> = class
+        .methods
+        .iter()
+        .map(|method| (utf8(method.name_index), utf8(method.descriptor_index)))
+        .collect();
+    for (name, descriptor) in [
+        ("m1", "([I)V"),
+        ("m2", "([[Ljava/lang/String;[I)V"),
+        ("m3", "()[I"),
+        ("main", "([Ljava/lang/String;)V"),
+    ] {
+        assert!(
+            methods.contains(&(name.to_owned(), descriptor.to_owned())),
+            "{name} should be {descriptor}, got {methods:?}"
+        );
+    }
+
+    if !java_available() {
+        return;
+    }
+    // And the local's own brackets: `v.length` only resolves if `v` is an `int[]` in the body too.
+    assert_eq!(run(source, "Dims").trim(), "3");
+}
+
+/// A lambda converts to an interface's single *abstract* method, past its `default` and `static`
+/// ones.
+///
+/// The shape every JDK functional interface has: `Function` declares `apply` beside `compose`,
+/// `andThen`, and `identity`. Counting declarations rather than abstract methods refused all of
+/// them, so no lambda written against the standard library lowered at all.
+#[test]
+fn a_lambda_converts_past_default_and_static_interface_methods() {
+    let source = "
+public class Sam {
+    interface Fn {
+        String apply(String s);
+        default Fn andThen(Fn next) { return null; }
+        static Fn upper() { return s -> s; }
+        private String unused() { return null; }
+    }
+    // JLS 9.8: a method override-equivalent to a public instance method of `Object` does not count.
+    interface Cmp {
+        int compare(String a, String b);
+        boolean equals(Object o);
+    }
+    public static void main(String[] args) {
+        Fn f = s -> s + \"!\";
+        Cmp c = (a, b) -> a.length() - b.length();
+        System.out.println(f.apply(\"hi\"));
+        System.out.println(c.compare(\"aa\", \"b\"));
+    }
+}
+";
+    // Lowering at all is the claim: with the old rule both interfaces were "no single method".
+    compile(source).expect("compile");
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Sam").trim(), "hi!\n1".trim());
+}
+
+/// A value the JVM knows only as `Object` is cast down at a `return`, not just at an argument.
+///
+/// `<T> T pick(T x)` erases to `(Ljava/lang/Object;)Ljava/lang/Object;`, so returning its result
+/// where the method declares `Exception[]` is an `areturn` the verifier rejects — "Bad return type:
+/// 'java/lang/Object' is not assignable to '[Ljava/lang/Exception;'". The source is legal, the
+/// descriptor is right, and javac emits a `checkcast` in exactly this place. The array target is the
+/// shape the argument-side rule could not express: `Object` against `[LException;` is not a pair of
+/// arrays.
+#[test]
+fn an_erased_value_is_cast_at_a_return() {
+    let source = "
+public class Erased {
+    static <T> T pick(T x) { return x; }
+    static String[] arrays(String[] xs) { return pick(xs); }
+    static String classes(String s) { return pick(s); }
+    public static void main(String[] args) {
+        System.out.println(arrays(new String[] { \"a\", \"b\" }).length);
+        System.out.println(classes(\"hi\"));
+    }
+}
+";
+    if !java_available() {
+        // The claim is a verifier's; without one this test is checking that it compiles.
+        compile(source).expect("compile");
+        return;
+    }
+    assert_eq!(run(source, "Erased").trim(), "2\nhi");
+}
+
+/// And a value that already matches, or is genuinely something else, gets no cast.
+///
+/// Only the `Object`-to-narrower direction: papering over a real mismatch with a `checkcast` turns
+/// a compile-time gap into a `ClassCastException` at run time.
+#[test]
+fn a_matching_value_is_not_cast_on_the_way_out() {
+    let source = "
+public class NoCast {
+    static String same(String s) { return s; }
+    static Object widen(String s) { return s; }
+    public static void main(String[] args) {
+        System.out.println(same(\"a\") + widen(\"b\"));
+    }
+}
+";
+    let classes = compile(source).expect("compile");
+    let class = jals_exec::block_on_inline(jals_classfile::ClassFile::read(
+        classes
+            .iter()
+            .find(|class| class.internal_name == "NoCast")
+            .expect("the class")
+            .bytes
+            .as_slice(),
+    ))
+    .expect("reparse");
+    // `checkcast` is 0xc0; neither method should carry one.
+    let pool = &class.constant_pool;
+    for method in &class.methods {
+        let name = pool.utf8(method.name_index).expect("utf8").into_owned();
+        if name != "same" && name != "widen" {
+            continue;
+        }
+        let code = method
+            .attributes
+            .iter()
+            .find_map(|attribute| match &attribute.body {
+                jals_classfile::AttributeBody::Code(code) => Some(code),
+                _ => None,
+            })
+            .expect("a body");
+        assert!(
+            !code.code.iter().any(|instruction| matches!(
+                instruction,
+                jals_classfile::Instruction::CheckCast(_)
+            )),
+            "`{name}` should carry no checkcast"
+        );
+    }
+}
+
+/// An enclosing instance is the one the *target* is declared inside, reached from wherever the
+/// creation is written.
+///
+/// Two shapes, both of which produced a class file no JVM loads:
+///
+/// - `new Inner2().new Nested()` where two inner classes both declare a `Nested`. The qualified
+///   creation names a member of the *qualifier's* type (JLS §15.9.1); resolving it by scope emitted
+///   the other class's constructor with an `Inner2` beneath it.
+/// - `class Local` declared inside an anonymous class body. Its enclosing type is the anonymous
+///   class, and the walk out to a named declaration skipped past it — so `Local`'s constructor took
+///   the file's outer class while every `new Local()` in the body pushed the anonymous `this`.
+#[test]
+fn an_enclosing_instance_is_the_targets_own() {
+    let source = "
+public class Nest {
+    boolean reached = false;
+    class Inner1 { class Nested { int id() { return 1; } } }
+    class Inner2 { class Nested { int id() { return 2; } } }
+    int qualified() { return new Inner2().new Nested().id(); }
+    void anonymous() {
+        new Object() {
+            class Local {{ reached = true; }}
+            { new Local(); }
+        };
+    }
+    public static void main(String[] args) {
+        Nest n = new Nest();
+        System.out.println(n.qualified());
+        n.anonymous();
+        System.out.println(n.reached);
+    }
+}
+";
+    if !java_available() {
+        compile(source).expect("compile");
+        return;
+    }
+    assert_eq!(run(source, "Nest").trim(), "2\ntrue");
+}
+
+/// Before `super(...)` returns, `this` is `uninitializedThis` and almost nothing may be read off it.
+///
+/// Both of these are ordinary Java that produced a class file no JVM loads:
+///
+/// - `class Sub extends Outer { Sub() { super(i); } }` — `i` is the *enclosing* instance's field,
+///   not an inherited one, and the enclosing instance is a constructor parameter at that point. The
+///   walk stopped at `this` (`Sub` really is a subtype of the field's owner) and emitted a `getfield`
+///   on `uninitializedThis`.
+/// - `super(new Object() {{ use(x); }})` where `x` is a captured local. The capture lives in a
+///   synthetic field the prologue has not written yet, so its value is still in the parameter it
+///   arrived in — which is where javac reads it too.
+///
+/// The `super(...)` call itself is the one instruction `uninitializedThis` may be the receiver of,
+/// so the delegation keeps loading slot 0 while its arguments do not.
+#[test]
+fn a_constructor_reads_its_parameters_before_super_returns() {
+    let source = "
+public class Early {
+    // Package-private, not `private`: reading a private outer field from an inner class needs the
+    // nestmate attributes this compiler does not emit yet, which is a different gap.
+    int i = 41;
+    Early(int seed) { System.out.println(seed); }
+    class Sub extends Early {
+        Sub() { super(i + 1); }
+    }
+    static String seen = \"\";
+    // Kept off `println(Object)`: this harness indexes the embedded stubs, whose `println` set is
+    // not the real one, and overload selection there is a different gap.
+    static class Holder { Holder(Object o) { seen = o.toString(); } }
+    static void capturing(final char x) {
+        class Sub2 extends Holder {
+            Sub2(final char y) {
+                super(new Object() {
+                    public String toString() { return \"\" + x + y; }
+                });
+            }
+        }
+        new Sub2('K');
+    }
+    public static void main(String[] args) {
+        new Early(1).new Sub();
+        capturing('O');
+        System.out.println(seen);
+    }
+}
+";
+    if !java_available() {
+        compile(source).expect("compile");
+        return;
+    }
+    assert_eq!(run(source, "Early").trim(), "1\n42\nOK");
+}
+
+/// A receiver parameter is not a parameter (JLS §8.4.1), and a synthetic name the source already
+/// used is not the synthetic's to take.
+///
+/// `void m(Recv this)` is `()V`: the declaration exists to carry type annotations onto the receiver.
+/// Counting it made the method one parameter wide, so `m()` matched nothing and the descriptor javac
+/// writes was not the one emitted.
+///
+/// `enum E { a; E[] $VALUES; }` is legal — the name is reserved by convention only — and emitting the
+/// synthetic array anyway declared the field twice, which is a `ClassFormatError` at load. javac
+/// appends a `$` until the name is free.
+#[test]
+fn a_receiver_parameter_and_a_taken_synthetic_name() {
+    let source = "
+public class Recv {
+    int seed = 7;
+    int read(Recv this) { return seed; }
+    int plus(Recv this, int n) { return seed + n; }
+    enum E {
+        a, b;
+        E[] $VALUES = null;
+    }
+    public static void main(String[] args) {
+        Recv r = new Recv();
+        System.out.println(r.read());
+        System.out.println(r.plus(3));
+        System.out.println(E.values().length);
+    }
+}
+";
+    let classes = compile(source).expect("compile");
+    let read = |name: &str| {
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(
+            classes
+                .iter()
+                .find(|class| class.internal_name == name)
+                .unwrap_or_else(|| panic!("{name} is emitted"))
+                .bytes
+                .as_slice(),
+        ))
+        .expect("reparse")
+    };
+    let class = read("Recv");
+    let pool = &class.constant_pool;
+    let methods: Vec<(String, String)> = class
+        .methods
+        .iter()
+        .map(|method| {
+            (
+                pool.utf8(method.name_index).expect("utf8").into_owned(),
+                pool.utf8(method.descriptor_index)
+                    .expect("utf8")
+                    .into_owned(),
+            )
+        })
+        .collect();
+    assert!(
+        methods.contains(&("read".to_owned(), "()I".to_owned())),
+        "{methods:?}"
+    );
+    assert!(
+        methods.contains(&("plus".to_owned(), "(I)I".to_owned())),
+        "{methods:?}"
+    );
+
+    // The declared `$VALUES` keeps its name; the synthetic one steps aside, as javac's does.
+    let class = read("Recv$E");
+    let pool = &class.constant_pool;
+    let fields: Vec<String> = class
+        .fields
+        .iter()
+        .map(|field| pool.utf8(field.name_index).expect("utf8").into_owned())
+        .collect();
+    assert!(fields.contains(&"$VALUES".to_owned()), "{fields:?}");
+    assert!(fields.contains(&"$VALUES$".to_owned()), "{fields:?}");
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Recv").trim(), "7\n10\n2");
+}
+
+/// A lambda written as an argument, and a lambda whose parameter is the target's type argument.
+///
+/// Two halves of the same thing. The argument position is a target type (JLS §15.12.2) — the
+/// largest single blocker there was, because `xs.forEach(x -> ...)` is the ordinary shape of modern
+/// Java and had no type at all. And the parameter's type is the interface's *substituted* one:
+/// `Fn<String, String>` binds it to `String`, and the synthetic method the backend emits has to
+/// spell it that way too or its frame disagrees with its own instructions.
+#[test]
+fn a_lambda_is_typed_by_the_argument_it_is_written_as() {
+    let source = "
+public class Target {
+    interface Fn<T, R> { R apply(T t); }
+    interface IntFn { int apply(int n); }
+    static String call(Fn<String, String> f) { return f.apply(\"a\"); }
+    static int call(int n, IntFn f) { return f.apply(n); }
+    public static void main(String[] args) {
+        System.out.println(call(s -> s + s));
+        System.out.println(call(3, x -> x * 2));
+        // A cast is a target type written outright, and a conditional passes its own to both arms.
+        IntFn cast = (IntFn) x -> x + 1;
+        IntFn arm = args.length == 0 ? x -> x + 10 : x -> x - 10;
+        System.out.println(cast.apply(1) + arm.apply(1));
+    }
+}
+";
+    if !java_available() {
+        compile(source).expect("compile");
+        return;
+    }
+    assert_eq!(run(source, "Target").trim(), "aa\n6\n13");
+}

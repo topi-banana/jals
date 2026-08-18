@@ -475,3 +475,221 @@ fn snapshot_switch_expression() {
         "]],
     );
 }
+
+// --- Member lookup on a receiver that declares no members ------------------------------------
+
+/// JLS §4.4: a type variable's members are its *bound's*.
+///
+/// `<T extends CharSequence> int len(T t) { return t.length(); }` is ordinary Java. A lookup on the
+/// variable itself finds nothing at all, which is the largest share of "did not resolve to an
+/// indexed member".
+#[test]
+fn a_type_variables_members_are_its_bounds() {
+    let src = "class Box { \
+                 interface Seq { int size(); } \
+                 static <T extends Seq> int len(T t) { return t.size(); } \
+                 static <U> int any(U u) { return 0; } \
+               }";
+    assert_eq!(expr_ty(src, "t.size()"), "int");
+    // An unbounded variable is `Object`'s member set, and nothing in this project declares `size`
+    // there, so the lookup answers nothing rather than the bound's answer.
+    let src = "class Box { static <U> int len(U u) { return u.size(); } }";
+    assert_eq!(expr_ty(src, "u.size()"), "?");
+}
+
+/// JLS §10.7: an array has `Object`'s members, a `length` field, and a `clone()` returning the
+/// array type.
+///
+/// `clone()` is the one no declaration can state — `Object.clone()` returns `Object`, and typing
+/// `xs.clone()` that way makes `int[] ys = xs.clone();` a mismatch against a conversion Java does
+/// not require.
+#[test]
+fn an_arrays_clone_returns_the_array_type() {
+    let src = "class A { int[] copy(int[] xs) { return xs.clone(); } int n(int[] xs) { return xs.length; } }";
+    assert_eq!(expr_ty(src, "xs.clone()"), "int[]");
+    assert_eq!(expr_ty(src, "xs.length"), "int");
+    let src = "class A { String[][] copy(String[][] xs) { return xs.clone(); } }";
+    assert_eq!(expr_ty(src, "xs.clone()"), "String[][]");
+}
+
+/// JLS §7.5.3/§7.5.4: a `static` import binds a bare name to a member of the type it names.
+///
+/// `import static p.Math2.max;` makes `max(1, 2)` a call, and nothing else in the file says so — a
+/// bare call is looked up on the enclosing type, which declares no `max`.
+#[test]
+fn a_static_import_binds_a_bare_name() {
+    let owner = "package p; public class Math2 { public static int max(int a, int b) { return a; } \
+                 public static final String NAME = \"m\"; }";
+    let single = "import static p.Math2.max; \
+                  class Use { int m() { return max(1, 2); } }";
+    let on_demand = "import static p.Math2.*; \
+                     class Use { int m() { return max(1, 2); } String s() { return NAME; } }";
+    let unrelated = "class Use { int m() { return max(1, 2); } }";
+
+    for (src, expected) in [
+        (single, "int"),
+        (on_demand, "int"),
+        // No import, so the enclosing type still answers — and it declares no `max`.
+        (unrelated, "?"),
+    ] {
+        let nodes = [
+            (FileId(0), parse(owner)),
+            (FileId(1), parse(&alloc_src(src))),
+        ];
+        let index = jals_exec::block_on_inline(ProjectIndex::builder(&nodes).build());
+        let analysis = jals_exec::block_on_inline(FileAnalysis::of(&nodes[1].1));
+        let semantics = analysis.in_project(&index, FileId(1));
+        let typed = jals_exec::block_on_inline(semantics.typed());
+        let call = nodes[1]
+            .1
+            .descendants()
+            .filter_map(ast::Expr::cast)
+            .find(|e| e.syntax().text().to_string().trim() == "max(1, 2)")
+            .expect("the call");
+        assert_eq!(
+            type_at(typed, call.syntax()).unwrap().to_string(),
+            expected,
+            "in: {src}"
+        );
+    }
+}
+
+/// A static-imported *field* takes the same route as a method, after the same implicit `this`.
+#[test]
+fn a_static_import_binds_a_bare_field() {
+    let owner = "package p; public class K { public static final String NAME = \"k\"; }";
+    let use_src = "import static p.K.NAME; class Use { String s() { return NAME; } }";
+    let nodes = [(FileId(0), parse(owner)), (FileId(1), parse(use_src))];
+    let index = jals_exec::block_on_inline(ProjectIndex::builder(&nodes).build());
+    let analysis = jals_exec::block_on_inline(FileAnalysis::of(&nodes[1].1));
+    let semantics = analysis.in_project(&index, FileId(1));
+    let typed = jals_exec::block_on_inline(semantics.typed());
+    let name = nodes[1]
+        .1
+        .descendants()
+        .filter_map(ast::Expr::cast)
+        .find(|e| e.syntax().text().to_string().trim() == "NAME")
+        .expect("the reference");
+    assert_eq!(type_at(typed, name.syntax()).unwrap().to_string(), "String");
+}
+
+/// Identity, so the loop above reads as three sources rather than three formats.
+fn alloc_src(src: &str) -> String {
+    src.to_owned()
+}
+
+/// JLS §15.9.1: a qualified `new` looks its type up as a member of the qualifier's type.
+///
+/// `new Inner2().new InnerMost()` in a class that has both an `Inner1.InnerMost` and an
+/// `Inner2.InnerMost` resolved to whichever the ordinary scope rules found first — and a lowering
+/// then emitted the *other* class's constructor, with the qualifier beneath it, which no verifier
+/// accepts.
+#[test]
+fn a_qualified_new_resolves_against_its_qualifier() {
+    let src = "class Q { \
+                 class Inner1 { class Nested { } } \
+                 class Inner2 { class Nested { } } \
+                 Object a() { return new Inner1().new Nested(); } \
+                 Object b() { return new Inner2().new Nested(); } \
+               }";
+    assert_eq!(expr_ty(src, "new Inner1().new Nested()"), "Nested");
+    let fixture = Fixture::new(src);
+    let semantics = fixture.semantics();
+    let typed = jals_exec::block_on_inline(semantics.typed());
+    // Same simple name, two different items: what the qualifier decides.
+    let ids: Vec<String> = ["new Inner1().new Nested()", "new Inner2().new Nested()"]
+        .into_iter()
+        .map(|text| {
+            let expr = fixture
+                .node
+                .descendants()
+                .filter_map(ast::Expr::cast)
+                .find(|e| e.syntax().text().to_string().trim() == text)
+                .expect("the creation");
+            let ty = type_at(typed, expr.syntax()).expect("a type");
+            let id = ty.project_id().expect("an indexed type");
+            fixture.index.item(id).fqn.to_string()
+        })
+        .collect();
+    assert_eq!(ids, ["Q.Inner1.Nested", "Q.Inner2.Nested"]);
+}
+
+// --- Target typing (JLS §15.12.2, §15.16, §15.25) ---------------------------------------------
+
+/// A lambda takes its type from the *context*, and an argument is one of them.
+///
+/// `call(x -> x + 1)` was the largest single blocker: the lambda had no type, so neither did the
+/// call, and a backend was told "the type of a value could not be inferred" for the most ordinary
+/// shape in modern Java. The overload is selected from the arguments that are pertinent to
+/// applicability (a lambda is not one), and the chosen signature then supplies the type.
+#[test]
+fn an_argument_is_a_target_type() {
+    let src = "class C { \
+                 interface Fn { int apply(int n); } \
+                 static int call(Fn f) { return f.apply(1); } \
+                 static int use() { return call(x -> x + 1); } \
+               }";
+    assert_eq!(expr_ty(src, "x -> x + 1"), "Fn");
+    // And the parameter takes its type from the interface, which is what lets the body infer.
+    assert_eq!(def_ty(src, "x"), "int");
+}
+
+/// A cast is a target type written outright (JLS §15.16), and a conditional passes its own through
+/// to both arms (JLS §15.25).
+#[test]
+fn a_cast_and_a_conditional_carry_a_target_type() {
+    let src = "class C { \
+                 interface Fn { int apply(int n); } \
+                 static Object cast() { return (Fn) x -> x + 1; } \
+                 static Fn arms(boolean b) { return b ? x -> x + 1 : y -> y - 1; } \
+               }";
+    assert_eq!(expr_ty(src, "x -> x + 1"), "Fn");
+    assert_eq!(expr_ty(src, "y -> y - 1"), "Fn");
+}
+
+/// The overload is selected before the poly argument is typed, which is the order JLS §15.12.2
+/// gives — an argument that is not pertinent to applicability cannot be what selects the method
+/// that types it.
+#[test]
+fn a_poly_argument_does_not_select_the_overload() {
+    let src = "class C { \
+                 interface Fn { int apply(int n); } \
+                 static int call(String s, Fn f) { return 0; } \
+                 static int call(int n, Fn f) { return 1; } \
+                 static int use() { return call(\"a\", x -> x); } \
+               }";
+    // Selected by the `String` argument, so the lambda's target is that overload's parameter.
+    assert_eq!(expr_ty(src, "x -> x"), "Fn");
+}
+
+/// A lambda's parameter is the *substituted* type, not the interface's own variable.
+///
+/// `Function<String, String> f = s -> …` binds `s` to `String`. Left as the interface's `T` it
+/// erases to `Object`, so the body could reach no member of a `String` and the synthetic method the
+/// backend emits disagreed with its own instructions.
+#[test]
+fn a_lambda_parameter_takes_the_targets_type_argument() {
+    let src = "class C { \
+                 interface Fn<T, R> { R apply(T t); } \
+                 static void use() { Fn<String, String> f = s -> s; } \
+               }";
+    assert_eq!(def_ty(src, "s"), "String");
+}
+
+/// A call's type is the *selected* overload's return type, not the first member of that name.
+///
+/// The two answers were computed separately — the value's type by a name lookup in pass 2, the
+/// member a backend invokes by overload selection in pass 3 — and a name with two return types is
+/// where they disagreed. `int b = call(3, f);` beside a `String call(String)` was typed `String`,
+/// which is a store instruction for a type the value does not have.
+#[test]
+fn a_calls_type_is_the_selected_overloads() {
+    let src = "class C { \
+                 interface Fn { int apply(int n); } \
+                 static String call(String s) { return s; } \
+                 static int call(int n, Fn f) { return f.apply(n); } \
+                 static void use() { int b = call(3, x -> x * 2); String s = call(\"a\"); } \
+               }";
+    assert_eq!(expr_ty(src, "call(3, x -> x * 2)"), "int");
+    assert_eq!(expr_ty(src, "call(\"a\")"), "String");
+}

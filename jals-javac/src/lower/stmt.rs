@@ -668,6 +668,10 @@ impl Stmt {
         // whose body returns an `int`.
         let returns = emit.returns().clone();
         Expr::lower_as(&value, &returns, context, emit)?;
+        // And cast down to it when the value's own erasure is `Object`: `<T> T pick(..)` returned
+        // where the method declares `Exception[]` is legal source, a right descriptor, and an
+        // `areturn` the verifier rejects. javac emits the same `checkcast`.
+        Expr::narrow_erased(&value, &returns, context, emit)?;
         let ty = emit.asm.stack_top().ok_or(LowerError::Unsupported(
             "a `return` whose value left nothing on the stack",
         ))?;

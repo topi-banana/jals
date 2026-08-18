@@ -241,8 +241,11 @@ ParamList =
 // Also used for lambda parameters, where the modifiers and type may be
 // absent. A receiver parameter uses `this`, an unnamed parameter `_`.
 // A type-use annotation may precede the varargs `...` (`String @A ...`).
+// A named parameter is a declarator, so it may carry C-style dimensions of
+// its own (`int xs[]`), which count toward the method's descriptor.
 Param =
   modifiers:Modifiers? ty:Type? Annotation* '...'? (name:'ident' | 'this' | '_')
+  ('[' ']')*
 
 // ===== Types =====
 

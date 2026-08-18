@@ -113,18 +113,6 @@ impl<'a> Hierarchy<'a> {
         None
     }
 
-    /// The one method a functional interface declares, or `None` when it declares none or several.
-    pub(crate) fn functional_member(self, item: ItemId) -> Option<MemberId> {
-        let mut methods = self
-            .index
-            .own_members(item)
-            .iter()
-            .copied()
-            .filter(|&id| self.index.member(id).kind == DefKind::Method);
-        let only = methods.next()?;
-        methods.next().is_none().then_some(only)
-    }
-
     /// Whether `own` overrides `inherited`.
     pub(crate) fn overrides(self, own: MemberId, inherited: MemberId) -> Overrides {
         let (a, b) = (self.index.member(own), self.index.member(inherited));

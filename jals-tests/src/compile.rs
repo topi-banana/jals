@@ -257,8 +257,8 @@ pub enum Outcome {
     /// Linking failed for a reason that is not about this class file's shape (a type it references
     /// is not on the harness's classpath). The bytes were not judged either way.
     Unlinkable(String),
-    /// The JVM linked every emitted class and the descriptor rung could not be *judged*: javac's
-    /// own class files for the case could not be read, so no `(name, descriptor)` pair was compared.
+    /// The JVM linked every emitted class and the descriptor rung could not be *judged*: no
+    /// `(name, descriptor)` pair was compared, for the reason carried.
     ///
     /// Its own outcome rather than a pass, because the rung fails **open** otherwise and open is the
     /// top rung — a corpus or class-file-reader problem would be scored as "jals agrees with javac"
@@ -266,7 +266,7 @@ pub enum Outcome {
     /// `expected/` output. "Nothing compared" and "everything agreed" have to be distinguishable, so
     /// the count of compared pairs is what separates them. Kept apart from every *finding*, exactly
     /// as [`ReadError`](Self::ReadError) is: this says nothing about the compiler.
-    DescriptorsUnjudged,
+    DescriptorsUnjudged(Unjudged),
     /// The class files were emitted but the JVM stage did not run (`--no-verify`, or no JVM).
     Unverified,
     /// Lowering succeeded but produced no class file at all, so there is nothing for a JVM to
@@ -292,7 +292,7 @@ impl Outcome {
         match self {
             Self::Verified => "descriptor-equal",
             Self::DescriptorMismatch(_) => "verified",
-            Self::DescriptorsUnjudged => "descriptors-unjudged",
+            Self::DescriptorsUnjudged(_) => "descriptors-unjudged",
             Self::Rejected(_) => "jvm-rejected",
             Self::Unlinkable(_) => "unlinkable",
             Self::Unverified => "unverified",
@@ -324,7 +324,7 @@ impl Outcome {
     const fn verified(&self) -> bool {
         matches!(
             self,
-            Self::Verified | Self::DescriptorMismatch(_) | Self::DescriptorsUnjudged
+            Self::Verified | Self::DescriptorMismatch(_) | Self::DescriptorsUnjudged(_)
         )
     }
 
@@ -360,7 +360,7 @@ impl Outcome {
             Self::Verified => 9,
             // Not rungs at all: one is a case the harness never saw the source of, the other one it
             // could not read javac's answer for. Both are corpus problems.
-            Self::DescriptorsUnjudged => 10,
+            Self::DescriptorsUnjudged(_) => 10,
             Self::ReadError => 11,
         }
     }
@@ -372,12 +372,10 @@ impl Outcome {
             | Self::Unlinkable(message)
             | Self::LowerError(message)
             | Self::DescriptorMismatch(message) => Some(message),
-            // Fixed rather than carried: there is nothing case-specific to say, and a bucket is the
-            // only place a reader would otherwise see that the rung was not judged at all — which is
-            // half of what makes it distinct from agreement.
-            Self::DescriptorsUnjudged => {
-                Some("javac's own class files for the case could not be read")
-            }
+            // Fixed per reason rather than carried per case: nothing here is case-specific, and a
+            // bucket is the only place a reader would otherwise see that the rung was not judged at
+            // all — which is half of what makes it distinct from agreement.
+            Self::DescriptorsUnjudged(reason) => Some(reason.detail()),
             _ => None,
         }
     }
@@ -400,6 +398,44 @@ impl Outcome {
         };
         let tail = rest.rsplit_once('`').map_or("", |(_, tail)| tail);
         Some(format!("{head}`…`{tail}"))
+    }
+}
+
+/// Why the descriptor rung compared nothing for a case that linked.
+///
+/// Three distinct situations wore one sentence — "javac's own class files for the case could not be
+/// read" — and only the first of them is that. An annotation interface declares no method at all,
+/// so javac's class file has none for jals's to agree with; an implicitly-declared class
+/// (`NestedEnum.java`) is named after its *file* by javac, so a case where jals spells the type
+/// differently offers no type to compare within. Reporting either as an unreadable class file sends
+/// a reader to the corpus generator for something the compiler decided, which is the opposite of
+/// what this rung's listing is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unjudged {
+    /// The case's `expected/` directory yielded no class file this workspace's reader could read —
+    /// the corpus problem the rung was originally guarding against.
+    Unreadable,
+    /// javac's class files read, but jals emitted no type javac also named. The two compilers
+    /// disagree about the *names*, which is a finding of its own and not one about descriptors.
+    NoSharedType,
+    /// Both compilers named a type, and neither declares a method the other also declares — an
+    /// annotation interface, a marker interface, a `package-info`. Nothing to compare, and nothing
+    /// wrong.
+    NoSharedMethod,
+}
+
+impl Unjudged {
+    /// The sentence printed beside the case, which is the whole of what this outcome says.
+    const fn detail(self) -> &'static str {
+        match self {
+            Self::Unreadable => "javac's own class files for the case could not be read",
+            Self::NoSharedType => {
+                "jals emitted no type javac also named, so no descriptor was compared"
+            }
+            Self::NoSharedMethod => {
+                "neither compiler declares a method the other does, so no descriptor was compared"
+            }
+        }
     }
 }
 
@@ -452,7 +488,7 @@ enum Descriptors {
     /// The first method jals emitted whose descriptor javac did not give that name.
     Disagreed(String),
     /// No `(name, descriptor)` pair was compared, so the rung has no answer for this case.
-    Unjudged,
+    Unjudged(Unjudged),
 }
 
 /// A file the generator kept out of the corpus, and why.
@@ -595,6 +631,27 @@ impl CompileReport {
             .collect()
     }
 
+    /// Every case the descriptor rung stopped — a descriptor javac spells differently, or one it
+    /// could not be judged on at all — worst rung first.
+    ///
+    /// Listed **per case**, unlike a gap, because a bucket exists to bundle failures of one shape and
+    /// these have none in common: each one names a different method of a different class. Eliding the
+    /// names (which is what [`Outcome::bucket`] does to keep a gap list readable) leaves one row
+    /// saying `a descriptor javac spells differently` forty-seven times over — a count with nothing
+    /// in it to act on. A reader working the rung needs the class, the method, and both spellings,
+    /// which is exactly what the outcome's detail already carries.
+    pub fn descriptor_findings(&self) -> Vec<&CaseResult> {
+        self.results
+            .iter()
+            .filter(|result| {
+                matches!(
+                    result.outcome,
+                    Outcome::DescriptorMismatch(_) | Outcome::DescriptorsUnjudged(_)
+                )
+            })
+            .collect()
+    }
+
     /// The failure messages, most frequent first, with source snippets elided.
     pub fn buckets(&self) -> Vec<(String, usize)> {
         Self::tally(
@@ -638,7 +695,7 @@ impl CompileReport {
             result.outcome = match &result.descriptors {
                 Descriptors::Agreed => Outcome::Verified,
                 Descriptors::Disagreed(message) => Outcome::DescriptorMismatch(message.clone()),
-                Descriptors::Unjudged => Outcome::DescriptorsUnjudged,
+                Descriptors::Unjudged(reason) => Outcome::DescriptorsUnjudged(*reason),
             };
         }
     }
@@ -671,6 +728,7 @@ impl CompileReport {
         }
         for report in reports {
             report.push_violations(&mut out, limit);
+            report.push_descriptor_findings(&mut out, limit);
             let buckets = report.buckets();
             report.push_details(
                 &mut out,
@@ -740,6 +798,29 @@ impl CompileReport {
         }
     }
 
+    /// The descriptor rung's own cases, collapsed like a gap listing but written out one per row.
+    fn push_descriptor_findings(&self, out: &mut String, limit: usize) {
+        let findings = self.descriptor_findings();
+        if findings.is_empty() || limit == 0 {
+            return;
+        }
+        out.push_str(&format!(
+            "\n<details><summary>{}: {} case(s) the descriptor rung stopped</summary>\n\n",
+            self.name,
+            findings.len()
+        ));
+        out.push_str("| outcome | case | detail |\n| --- | --- | --- |\n");
+        for result in findings.iter().take(limit) {
+            out.push_str(&format!(
+                "| {} | `{}` | {} |\n",
+                result.outcome.label(),
+                result.rel.display(),
+                result.outcome.detail().unwrap_or("—"),
+            ));
+        }
+        out.push_str("\n</details>\n");
+    }
+
     /// One collapsed count-and-message table, skipped when there is nothing to put in it.
     fn push_details(
         &self,
@@ -769,7 +850,7 @@ impl CaseResult {
     /// Never panics: a panic anywhere in the pipeline is caught and reported as
     /// [`Outcome::Panicked`], since catching invariant violations is the whole point.
     fn of(case: &Case, classpath: &LoweredClasspath, verifier: Option<&Verifier>) -> Self {
-        let mut descriptors = Descriptors::Unjudged;
+        let mut descriptors = Descriptors::Unjudged(Unjudged::Unreadable);
         let outcome = Self::compile(&case.path, classpath, verifier, &mut descriptors);
         Self {
             rel: case.rel.clone(),
@@ -798,13 +879,19 @@ impl CaseResult {
         classes: &[jals_javac::lower::CompiledClass],
     ) -> Descriptors {
         let expected = Self::expected_signatures(&Case::expected_dir(source));
+        if expected.is_empty() {
+            return Descriptors::Unjudged(Unjudged::Unreadable);
+        }
         // What was actually compared, which is the whole difference between "nothing to compare"
-        // and "everything agreed".
+        // and "everything agreed" — and, one level up, whether the two compilers even named the
+        // same type.
         let mut compared = 0usize;
+        let mut shared_types = 0usize;
         for class in classes {
             let Some(javac) = expected.get(&class.internal_name) else {
                 continue;
             };
+            shared_types += 1;
             let Some(ours) = Self::signatures(&class.bytes) else {
                 continue;
             };
@@ -833,7 +920,11 @@ impl CaseResult {
             }
         }
         if compared == 0 {
-            return Descriptors::Unjudged;
+            return Descriptors::Unjudged(if shared_types == 0 {
+                Unjudged::NoSharedType
+            } else {
+                Unjudged::NoSharedMethod
+            });
         }
         Descriptors::Agreed
     }
@@ -904,7 +995,7 @@ impl CaseResult {
         let Ok(source) = std::fs::read_to_string(path) else {
             return Outcome::ReadError;
         };
-        let mut found = Descriptors::Unjudged;
+        let mut found = Descriptors::Unjudged(Unjudged::Unreadable);
         let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
             let parse = jals_exec::block_on_inline(jals_syntax::Parse::parse(&source));
             if !parse.errors().is_empty() {
@@ -1050,15 +1141,43 @@ mod tests {
     /// problem rather than a defect, so `--strict` ignores it exactly as it ignores a `ReadError`.
     #[test]
     fn unjudged_descriptors_are_not_agreement() {
-        assert!(Outcome::DescriptorsUnjudged.verified());
-        assert!(!Outcome::DescriptorsUnjudged.descriptor_equal());
-        assert!(!Outcome::DescriptorsUnjudged.is_invariant_violation());
-        assert_eq!(Outcome::DescriptorsUnjudged.label(), "descriptors-unjudged");
+        let unjudged = Outcome::DescriptorsUnjudged(Unjudged::Unreadable);
+        assert!(unjudged.verified());
+        assert!(!unjudged.descriptor_equal());
+        assert!(!unjudged.is_invariant_violation());
+        assert_eq!(unjudged.label(), "descriptors-unjudged");
         // And it is *visible*: half of what separates it from agreement is that a reader can see
         // the rung went unjudged, which is the bucket.
         assert_eq!(
-            Outcome::DescriptorsUnjudged.bucket().as_deref(),
+            unjudged.bucket().as_deref(),
             Some("javac's own class files for the case could not be read")
+        );
+    }
+
+    /// Each reason the rung goes unjudged says its own thing, because only one of the three is the
+    /// corpus problem the sentence used to claim for all of them.
+    #[test]
+    fn each_unjudged_reason_says_which_one_it_is() {
+        let details: Vec<&str> = [
+            Unjudged::Unreadable,
+            Unjudged::NoSharedType,
+            Unjudged::NoSharedMethod,
+        ]
+        .into_iter()
+        .map(Unjudged::detail)
+        .collect();
+        assert_eq!(
+            details,
+            [
+                "javac's own class files for the case could not be read",
+                "jals emitted no type javac also named, so no descriptor was compared",
+                "neither compiler declares a method the other does, so no descriptor was compared",
+            ]
+        );
+        // And the reason is what the outcome prints, so the listing shows which one it was.
+        assert_eq!(
+            Outcome::DescriptorsUnjudged(Unjudged::NoSharedMethod).detail(),
+            Some(Unjudged::NoSharedMethod.detail())
         );
     }
 
@@ -1073,7 +1192,10 @@ mod tests {
         };
         let mut results = vec![
             case(Outcome::Verified, Descriptors::Agreed),
-            case(Outcome::Verified, Descriptors::Unjudged),
+            case(
+                Outcome::Verified,
+                Descriptors::Unjudged(Unjudged::Unreadable),
+            ),
             case(
                 Outcome::Verified,
                 Descriptors::Disagreed("`A.f` is `()V`".to_owned()),
@@ -1103,7 +1225,7 @@ mod tests {
             rel: PathBuf::from("A.java"),
             outcome,
             // Already applied: `Report::new` folds this into the outcome before anything reads it.
-            descriptors: Descriptors::Unjudged,
+            descriptors: Descriptors::Unjudged(Unjudged::Unreadable),
         }
     }
 

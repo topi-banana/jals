@@ -1590,7 +1590,11 @@ impl Body {
             });
         }
         if let Some(params) = method.node.children().find_map(ast::ParamList::cast) {
-            for param in params.params() {
+            // A receiver parameter (`void m(Foo this)`) declares no local: JLS §8.4.1 gives it no
+            // slot, and the function's own type comes from `resolved_param_tys`, which does not
+            // count it either. Declaring one here would put every later parameter one slot past
+            // where the signature says it is.
+            for param in params.params().filter(|param| !param.is_receiver()) {
                 let ty = lowering.declare_param(param.syntax())?;
                 let _ = ty;
             }

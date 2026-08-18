@@ -925,9 +925,12 @@ impl Compile {
             let item = expr::Expr::type_of(lambda, &context)?
                 .project_id()
                 .ok_or(LowerError::Unsupported("a lambda with no target type"))?;
-            let member = Self::functional_member(item, &context).ok_or(LowerError::Unsupported(
-                "a lambda target with no single method",
-            ))?;
+            let member = context
+                .index
+                .functional_member(item)
+                .ok_or(LowerError::Unsupported(
+                    "a lambda target with no single method",
+                ))?;
             let name = context.index.member(member).name.clone();
             let descriptor = MethodDescriptor::to_string(&Descriptor::method_descriptor(
                 member,
@@ -952,8 +955,19 @@ impl Compile {
             for &id in &captured {
                 prefix.push_str(&Self::capture_descriptor(id, &context)?);
             }
+            // The body is lowered against the parameters' *inferred* types — `s -> s.length()`
+            // against `Function<String, String>` reads `s` as a `String` — so the synthetic method
+            // has to spell them that way too. The interface's own descriptor is erased
+            // (`(Ljava/lang/Object;)Ljava/lang/Object;`), and emitting the body under it left the
+            // frame calling `s` an `Object` while every instruction in it assumed a `String`.
+            //
+            // That specialised shape is exactly `LambdaMetafactory`'s `instantiatedMethodType`: the
+            // first bootstrap argument stays the interface's erased `samMethodType`, and the
+            // metafactory inserts the casts between them. Passing the erased shape for both is what
+            // this used to do, and it is only right when the two coincide.
+            let instantiated = Self::lambda_shape(&decl, &descriptor, &context);
             let synthetic_descriptor =
-                alloc::format!("({prefix}{}", descriptor.trim_start_matches('('));
+                alloc::format!("({prefix}{}", instantiated.trim_start_matches('('));
 
             // The synthetic method takes the interface's descriptor with the captures prepended, which is
             // also what seeds its initial locals. The assembler borrows the pool for as long as it lives,
@@ -1015,8 +1029,9 @@ impl Compile {
                 attributes: alloc::vec![code],
             });
 
-            // `metafactory` is handed the interface's shape, a handle to the body, and the shape again — the
-            // two `MethodType`s differ only where generics erase, which this does not model.
+            // `metafactory` is handed the interface's erased shape, a handle to the body, and the
+            // shape the call site is specialised to. The last two differ from the first exactly
+            // where generics erase.
             let handle = pool
                 .method_handle_index(
                     6,
@@ -1029,12 +1044,15 @@ impl Compile {
             let shape = pool
                 .method_type_index(&descriptor)
                 .ok_or(AsmError::PoolFull)?;
+            let specialised = pool
+                .method_type_index(&instantiated)
+                .ok_or(AsmError::PoolFull)?;
             let bootstrap = pool
                 .method_handle_index(6, METAFACTORY, "metafactory", METAFACTORY_DESCRIPTOR, false)
                 .ok_or(AsmError::PoolFull)?;
             bootstraps.push(jals_classfile::BootstrapMethod {
                 bootstrap_method_ref: bootstrap,
-                bootstrap_arguments: alloc::vec![shape, handle, shape],
+                bootstrap_arguments: alloc::vec![shape, handle, specialised],
             });
             let index = u16::try_from(bootstraps.len() - 1).map_err(|_| AsmError::PoolFull)?;
             let span = Facts::span(lambda);
@@ -1049,6 +1067,46 @@ impl Compile {
             );
         }
         Ok((context, out, bootstraps))
+    }
+
+    /// The shape a lambda's body is actually compiled to: the interface method's descriptor with each
+    /// parameter replaced by the type the analysis gave that binding.
+    ///
+    /// `LambdaMetafactory`'s `instantiatedMethodType`. The interface's own descriptor is erased, and
+    /// a body written against `Function<String, String>` reads its parameter as a `String` — so a
+    /// method emitted under the erased shape has a frame that disagrees with its own instructions.
+    ///
+    /// The *return* stays the interface's. A widening `areturn` needs no help, and asking for the
+    /// substituted return would need the target's type arguments threaded down here for no gain.
+    /// Anything the analysis could not type, or a parameter count the two do not agree on, falls
+    /// back to the erased descriptor whole: a specialisation this cannot compute is one the
+    /// metafactory must not be told about.
+    fn lambda_shape(decl: &ast::LambdaExpr, erased: &str, context: &Context<'_>) -> String {
+        let Ok(parsed) = jals_classfile::MethodDescriptor::parse(erased) else {
+            return erased.to_owned();
+        };
+        let params: Vec<ast::Param> = decl
+            .params()
+            .into_iter()
+            .flat_map(|list| list.params())
+            .collect();
+        if params.len() != parsed.params.len() {
+            return erased.to_owned();
+        }
+        let mut out = String::from("(");
+        for (param, erased) in params.iter().zip(&parsed.params) {
+            let written = context.facts().def_at(param.syntax()).map_or_else(
+                || erased.to_string(),
+                |id| {
+                    Descriptor::descriptor_of(context.typed.type_of_def(id), context.index)
+                        .map_or_else(|_| erased.to_string(), |ty| ty.to_string())
+                },
+            );
+            out.push_str(&written);
+        }
+        out.push(')');
+        out.push_str(&parsed.return_type.to_string());
+        out
     }
 
     /// A `Type::method` reference: the call site it needs, and the `BootstrapMethods` entry that links it.
@@ -1200,18 +1258,6 @@ impl Compile {
                 bootstrap_arguments: alloc::vec![shape, handle, shape],
             },
         ))
-    }
-
-    /// The one method a functional interface declares, or `None` when it declares none or several.
-    fn functional_member(item: ItemId, context: &Context<'_>) -> Option<jals_hir::MemberId> {
-        let mut methods = context
-            .index
-            .own_members(item)
-            .iter()
-            .copied()
-            .filter(|&id| context.index.member(id).kind == DefKind::Method);
-        let only = methods.next()?;
-        methods.next().is_none().then_some(only)
     }
 
     /// Every class in the file `node` belongs to that holds an enclosing instance, mapped to the class
@@ -1463,6 +1509,12 @@ impl Compile {
         // anonymous subclass of the `enum` — and it has no name to key an item on, which is the
         // report that comes out below rather than a walk that skips past it to the `enum` and
         // silently names the wrong enclosing class.
+        //
+        // An **anonymous class body** is in it for the same reason and was missing: a class declared
+        // inside `new Object() { class Local {} }` is `Local` of the *anonymous* class, not of the
+        // file's outer one. Walking past it named `Outer` as the enclosing type, so `Local`'s
+        // constructor took an `Outer` while every `new Local()` inside the body pushed the anonymous
+        // `this` — a class file the JVM refuses at the first creation.
         let declaration = node
             .ancestors()
             .skip(1)
@@ -1475,20 +1527,36 @@ impl Compile {
                         | ANNOTATION_TYPE_DECL
                         | RECORD_DECL
                         | jals_syntax::SyntaxKind::ENUM_CONSTANT
-                )
+                ) || Self::is_anonymous_body(ancestor)
             })
             .ok_or(LowerError::Unsupported(
                 "an inner class with no enclosing type",
             ))?;
-        let name = ast::Decl::name_token_of(&declaration)
-            .ok_or(LowerError::Unsupported("an enclosing type with no name"))?;
-        let item = index
-            .item_by_decl(file, usize::from(name.text_range().start()))
-            .ok_or_else(|| LowerError::Unresolved(name.text().into()))?;
+        // An anonymous class has no name, so its item is keyed on where its `new` starts — the same
+        // key `inner_classes_of` uses, because the two have to agree about which item this is.
+        let item = if Self::is_anonymous_body(&declaration) {
+            index
+                .item_by_decl(file, usize::from(declaration.text_range().start()))
+                .ok_or(LowerError::Unsupported(
+                    "an anonymous enclosing class that is not indexed",
+                ))?
+        } else {
+            let name = ast::Decl::name_token_of(&declaration)
+                .ok_or(LowerError::Unsupported("an enclosing type with no name"))?;
+            index
+                .item_by_decl(file, usize::from(name.text_range().start()))
+                .ok_or_else(|| LowerError::Unresolved(name.text().into()))?
+        };
         Ok(Enclosing {
             item,
             name: Descriptor::internal_name_of(item, index),
         })
+    }
+
+    /// Whether `node` is a `new` that carries a class body — an anonymous class declaration.
+    fn is_anonymous_body(node: &SyntaxNode) -> bool {
+        node.kind() == jals_syntax::SyntaxKind::NEW_EXPR
+            && node.children().any(|child| child.kind() == CLASS_BODY)
     }
 
     /// The synthetic field an inner class holds its enclosing instance in.
@@ -1902,14 +1970,21 @@ impl Compile {
         let params = node.children().find_map(ast::ParamList::cast);
         let mut asm = Assembler::new(pool, Receiver::Constructor(&context.this_class), &text)?;
         let slots = Slots::for_constructor(context, params.as_ref(), synthetic);
-        let mut emit = Emit::new(&mut asm, slots, jals_hir::Ty::Void, true);
+        let capture_slots = Self::capture_slots_of(context, &slots)?;
+        let mut emit =
+            Emit::new(&mut asm, slots, jals_hir::Ty::Void, true).with_capture_slots(capture_slots);
         match &delegation {
             // `this(…)` and `super(…)` each replace part of what the prologue emits, and running
             // both would run that part twice (JLS §8.8.7). `this(…)` replaces all of it — the
             // constructor it delegates to has already run the field initialisers — while `super(…)`
             // replaces only the `super()` call, so the initialisers still follow it.
             Some(call) => {
-                expr::Expr::lower(&ast::Expr::Call(call.clone()), context, &mut emit)?;
+                // `this` is `uninitializedThis` until this call returns, so the arguments cannot
+                // read a synthetic field off it — the values are still in the parameters they
+                // arrived in.
+                emit.while_uninitialized(|emit| {
+                    expr::Expr::lower(&ast::Expr::Call(call.clone()), context, emit)
+                })?;
                 if !Facts::delegates_to(call, jals_syntax::SyntaxKind::THIS_KW) {
                     Self::initializers(context, &mut emit, members, false)?;
                 }
@@ -2824,7 +2899,9 @@ impl Compile {
         let descriptor_index = pool.utf8_index(&text).ok_or(AsmError::PoolFull)?;
         let mut asm = Assembler::new(pool, Receiver::Constructor(&context.this_class), &text)?;
         let slots = Slots::for_constructor(context, None, synthetic);
-        let mut emit = Emit::new(&mut asm, slots, jals_hir::Ty::Void, true);
+        let capture_slots = Self::capture_slots_of(context, &slots)?;
+        let mut emit =
+            Emit::new(&mut asm, slots, jals_hir::Ty::Void, true).with_capture_slots(capture_slots);
         Self::prologue(
             context, &mut emit, super_name, super_item, members, forwarded,
         )?;
@@ -2861,6 +2938,7 @@ impl Compile {
     ) -> Result<()> {
         let descriptor = alloc::format!("L{internal_name};");
         let array = alloc::format!("[{descriptor}");
+        let values = Self::values_field(members);
         for constant in constants {
             let name = constant
                 .name()
@@ -2884,7 +2962,7 @@ impl Compile {
                     | FieldAccessFlags::FINAL
                     | FieldAccessFlags::SYNTHETIC,
             ),
-            name_index: pool.utf8_index(VALUES).ok_or(AsmError::PoolFull)?,
+            name_index: pool.utf8_index(&values).ok_or(AsmError::PoolFull)?,
             descriptor_index: pool.utf8_index(&array).ok_or(AsmError::PoolFull)?,
             attributes: Vec::new(),
         });
@@ -2931,7 +3009,7 @@ impl Compile {
             .utf8_index(&values_descriptor)
             .ok_or(AsmError::PoolFull)?;
         let mut asm = Assembler::new(pool, Receiver::Static, &values_descriptor)?;
-        asm.get_static(internal_name, VALUES, &array)?;
+        asm.get_static(internal_name, &values, &array)?;
         asm.invoke_virtual(&array, "clone", "()Ljava/lang/Object;")?;
         asm.check_cast(&array)?;
         let returned = asm.stack_top().ok_or(AsmError::StackUnderflow)?;
@@ -3043,7 +3121,7 @@ impl Compile {
         // An `enum`'s constants are built *first*, because a `static` initialiser below them may read
         // one and JLS §12.4.2 runs them in that order.
         if !constants.is_empty() {
-            Self::enum_constants(constants, internal_name, context, &mut emit)?;
+            Self::enum_constants(constants, internal_name, members, context, &mut emit)?;
         }
         Self::initializers(context, &mut emit, members, true)?;
         if asm.reachable() {
@@ -3057,6 +3135,26 @@ impl Compile {
         }))
     }
 
+    /// The name the synthetic constants array takes, which is `$VALUES` unless the source used it.
+    ///
+    /// `enum SynthValues { red; SynthValues[] $VALUES = null; }` is legal Java — the name is only
+    /// reserved by convention — and emitting the synthetic one anyway declared the field twice, which
+    /// is a `ClassFormatError` at load. javac appends a `$` until the name is free, so this does.
+    fn values_field(members: &[SyntaxNode]) -> String {
+        let declared: Vec<String> = members
+            .iter()
+            .filter(|member| member.kind() == FIELD_DECL)
+            .filter_map(|member| ast::FieldDecl::cast(member.clone()))
+            .flat_map(|field| field.names().collect::<Vec<_>>())
+            .map(|name| jals_syntax::decoded_ident(&name).into_owned())
+            .collect();
+        let mut name = VALUES.to_owned();
+        while declared.contains(&name) {
+            name.push('$');
+        }
+        name
+    }
+
     /// Build every `enum` constant, then the `$VALUES` array holding them in declaration order.
     ///
     /// The ordinal *is* the declaration position: it is what `ordinal()` returns, what a `switch` over
@@ -3065,6 +3163,7 @@ impl Compile {
     fn enum_constants(
         constants: &[ast::EnumConstant],
         internal_name: &str,
+        members: &[SyntaxNode],
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
     ) -> Result<()> {
@@ -3132,9 +3231,11 @@ impl Compile {
             emit.asm.get_static(internal_name, &name, &descriptor)?;
             emit.asm.array_store(&descriptor)?;
         }
-        Ok(emit
-            .asm
-            .put_static(internal_name, VALUES, &alloc::format!("[{descriptor}"))?)
+        Ok(emit.asm.put_static(
+            internal_name,
+            &Self::values_field(members),
+            &alloc::format!("[{descriptor}"),
+        )?)
     }
 
     /// `$assertionsDisabled = !Foo.class.desiredAssertionStatus();`
@@ -3239,6 +3340,25 @@ impl Compile {
 
     /// `super()` followed by every instance field's initialiser — what a constructor runs before
     /// its own body, and the reason a field initialiser is not a statement anywhere in the source.
+    /// Where each of this class's captures arrives in a constructor: after every declared parameter,
+    /// at its own width.
+    ///
+    /// Worked out before anything runs, so a temporary declared mid-body cannot move it — and in one
+    /// place, because two readers depend on it agreeing: the prologue that stores each capture into
+    /// its field, and the argument lowering that has to read one *before* `super(...)` has done so.
+    fn capture_slots_of(
+        context: &Context<'_>,
+        slots: &Slots,
+    ) -> Result<Vec<(jals_hir::DefId, u16)>> {
+        let mut out = Vec::new();
+        let mut slot = slots.next_free();
+        for &captured in context.captured_here() {
+            out.push((captured, slot));
+            slot += Slots::descriptor_width(&Self::capture_descriptor(captured, context)?);
+        }
+        Ok(out)
+    }
+
     fn prologue(
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
@@ -3306,16 +3426,15 @@ impl Compile {
                 &alloc::format!("L{};", enclosing.name),
             )?;
         }
-        // Each capture's parameter sits after every declared one, and the widths are what say where.
-        let mut slot = emit.slots.next_free();
-        for &captured in context.captured_here() {
+        // Each capture's parameter sits after every declared one; where exactly is `Emit`'s answer,
+        // shared with the argument lowering that has to read one before `super(...)` has run.
+        for (captured, slot) in emit.capture_slots().to_vec() {
             let name = Self::capture_field(captured, context);
             let descriptor = Self::capture_descriptor(captured, context)?;
             emit.asm.load(0)?;
             emit.asm.load(slot)?;
             emit.asm
                 .put_field(&context.this_class, &name, &descriptor)?;
-            slot += Slots::descriptor_width(&descriptor);
         }
         Self::initializers(context, emit, members, false)
     }

@@ -462,11 +462,10 @@ impl Expr {
                     emit.asm.load(slot)?;
                     return Ok(());
                 }
-                // A captured local is not a local *here*: it lives in a synthetic field the constructor
-                // filled.
-                if let Some(read) = Self::captured_read(id, context)? {
-                    emit.load_this()?;
-                    emit.asm.get_field(&context.this_class, &read.0, &read.1)?;
+                // A captured local is not a local *here*: it lives in a synthetic field the
+                // constructor filled — or, before `super(...)` has filled it, in the parameter it
+                // arrived in.
+                if Self::load_captured(id, context, emit)? {
                     return Ok(());
                 }
                 context.facts().member_of_def(id)
@@ -507,10 +506,27 @@ impl Expr {
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
     ) -> Result<()> {
-        emit.load_this()?;
-        let mut item = context.this_item;
-        let mut name = context.this_class.clone();
-        let mut enclosing = context.encloses.clone();
+        // Before `super(...)` has run there is no `this` to start from: the verifier accepts no
+        // `getfield` on `uninitializedThis`, and `this$0` is unset until the prologue writes it. The
+        // enclosing instance is a *parameter* there (slot 1), and starting from it is also the right
+        // answer for `class Sub extends Outer { Sub() { super(i); } }`, where the walk would
+        // otherwise stop at `this` because `Sub` really is a subtype of the field's owner — and `i`
+        // is the enclosing instance's, not an inherited one.
+        let (mut item, mut name, mut enclosing) = if emit.uninitialized_this() {
+            let enclosing = context.encloses.clone().ok_or(LowerError::Unsupported(
+                "an unqualified member before `super(...)` with no enclosing instance",
+            ))?;
+            emit.asm.load(1)?;
+            let next = context.inner.get(&enclosing.item).cloned();
+            (enclosing.item, enclosing.name, next)
+        } else {
+            emit.load_this()?;
+            (
+                context.this_item,
+                context.this_class.clone(),
+                context.encloses.clone(),
+            )
+        };
         while !context.index.is_subtype(item, owner) {
             let Some(next) = enclosing else {
                 // Every enclosing instance in reach has been walked and none of them owns the
@@ -528,6 +544,31 @@ impl Expr {
             name = next.name;
         }
         Ok(())
+    }
+
+    /// Push a captured local's value, answering whether `id` is one of this class's captures at all.
+    ///
+    /// Two places hold it and which one depends on *when*. After the constructor's prologue it is a
+    /// synthetic field, read through `this`. Before `super(...)` has run, `this` is
+    /// `uninitializedThis` — the verifier accepts no `getfield` on it, and the field is unset anyway
+    /// — so the value comes from the parameter it arrived in. That is the shape
+    /// `super(new Object() {{ use(x); }})` takes, where `x` is the enclosing method's local: javac
+    /// reads the parameter there too.
+    fn load_captured(id: DefId, context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<bool> {
+        if emit.uninitialized_this()
+            && context.captures_local(id)
+            && let Some(slot) = emit.capture_slot(id)
+        {
+            emit.asm.load(slot)?;
+            return Ok(true);
+        }
+        let Some((field, descriptor)) = Self::captured_read(id, context)? else {
+            return Ok(false);
+        };
+        emit.load_this()?;
+        emit.asm
+            .get_field(&context.this_class, &field, &descriptor)?;
+        Ok(true)
     }
 
     /// The `(field, descriptor)` a captured local is read through, or `None` when `id` is not one of the
@@ -736,6 +777,10 @@ impl Expr {
                 Some(ast::Expr::FieldAccess(access)) => {
                     Self::lower(&Self::inner(access.receiver())?, context, emit)?;
                 }
+                // A `this(...)` / `super(...)` delegation receives the object being constructed
+                // itself. It is the one call `uninitializedThis` may be the receiver of, and the
+                // walk below would answer with an enclosing instance instead.
+                _ if constructor => emit.load_this()?,
                 // A bare call in an instance method is an implicit receiver — `this` for its own and
                 // inherited methods, the enclosing instance for an enclosing class's.
                 _ => Self::load_unqualified_receiver(info.owner, context, emit)?,
@@ -782,8 +827,12 @@ impl Expr {
     /// The same rule holds one array level down, and has to: a varargs parameter's *whole array*
     /// arrives this way too (`raw.all(objectArray)` against `all(K...)`), and pushing an
     /// `[Ljava/lang/Object;` where the descriptor says `[LBase;` is a `VerifyError` rather than a
-    /// run-time surprise.
-    fn narrow_erased(
+    /// run-time surprise. A bare `Object` reaching an *array* slot is the same gap once more: every
+    /// array is an `Object`, so `<T> T pick(..)` handed to a `[LException;` needs the cast too.
+    ///
+    /// A `return` takes the same treatment against the method's declared return type, which is the
+    /// only other slot whose descriptor the source does not write at the point of use.
+    pub(crate) fn narrow_erased(
         argument: &ast::Expr,
         declared: &Ty,
         context: &Context<'_>,
@@ -825,6 +874,10 @@ impl Expr {
             (Object(actual), Object(target)) => {
                 actual == OBJECT_INTERNAL_NAME && target != OBJECT_INTERNAL_NAME
             }
+            // Every array type is an `Object` too, so a `T` erased to `Object` reaching a slot
+            // spelled `[LException;` is the same gap one level up — and the one shape a caller
+            // cannot express as a pair of arrays, because the actual side has no component at all.
+            (Object(actual), Array(_)) => actual == OBJECT_INTERNAL_NAME,
             _ => false,
         }
     }
@@ -1048,10 +1101,15 @@ impl Expr {
         // The constructor consumes one reference and returns nothing, so the expression's own value
         // has to be a second copy — made *before* the arguments go on top of it.
         emit.asm.dup()?;
-        if enclosing.is_some() {
+        if let Some(enclosing) = &enclosing {
             match new.qualifier() {
                 Some(qualifier) => Self::lower(&qualifier, context, emit)?,
-                None => emit.asm.load(0)?,
+                // Not `this`: the class being compiled need not be the one the target is declared
+                // in. `new One(null)` written inside an anonymous class inside `One` passes the
+                // *enclosing method's* instance, which this class reaches through `this$0` — pushing
+                // `this` there is `Type 'Outer$One$1' is not assignable to 'Outer'`. The walk is the
+                // one an unqualified member access already takes, and for the same reason.
+                None => Self::load_unqualified_receiver(enclosing.item, context, emit)?,
             }
         }
         let varargs = selected.is_some_and(|member| context.index.member(member).varargs);
@@ -1061,11 +1119,7 @@ impl Expr {
         for &id in &captured {
             if let Some(slot) = emit.slots.slot_of(id) {
                 emit.asm.load(slot)?;
-            } else if let Some((field, field_descriptor)) = Self::captured_read(id, context)? {
-                emit.load_this()?;
-                emit.asm
-                    .get_field(&context.this_class, &field, &field_descriptor)?;
-            } else {
+            } else if !Self::load_captured(id, context, emit)? {
                 return Err(unresolved());
             }
         }
