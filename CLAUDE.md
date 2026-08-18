@@ -263,9 +263,14 @@ filesystem reads into portable interfaces.
   holding a step, and the steps are not separately orderable. `TypedFile` is the witness that the
   inference has run, and therefore the only place types are readable without an `await` — which is
   what keeps `jals-javac`'s lowering synchronous. `jals-hir` states *facts* (`DeadIf`,
-  `UnreportedException`, `TypeMismatch` with its `MismatchKind`, `UnresolvedType`); the **wording**
-  of every semantic diagnostic belongs to the `jals-lint` rule that reports it, alongside the rule
-  name and the `jalslint.toml` key.
+  `UnreportedException`, `TypeMismatch` with its `MismatchKind`, `UnresolvedType`, `UnusedImport`,
+  and the `unused_defs` a `Def`'s `is_private` / `is_annotated` let a consumer narrow); the
+  **wording** of every semantic diagnostic belongs to the `jals-lint` rule that reports it,
+  alongside the rule name and the `jalslint.toml` key. A negative fact — "nothing uses this" —
+  over-approximates *use*: a member name spelled where the file-local pass cannot bind it
+  (`this.x`, `Outer.Inner`, `@Anno`, the ambiguous-name qualifier of JLS §6.5.2) counts as a use,
+  and a method's evidence is its **name** rather than its declaration, because the scope chain
+  binds a call to *an* overload rather than to the one the arguments select.
 - `jals-classfile`, `jals-hir`, `jals-syntax`, `jals-fmt`, `jals-lint`, `jals-decompile`: portable
   domain crates; do not add host filesystem APIs. `jals-fmt` has **one layout engine** — a port of
   google-java-format's greedy `computeBreaks` over a GJF-shaped `Doc`/`Level`/`Break` IR — and

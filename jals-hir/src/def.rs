@@ -66,6 +66,29 @@ pub enum DefKind {
 }
 
 impl DefKind {
+    /// Whether a *member access* (`recv.name`), a method reference (`recv::name`), or a qualified
+    /// type name (`Outer.Inner`) could denote a definition of this kind.
+    ///
+    /// The file-local pass binds none of those three — each needs a type it has not got — so for
+    /// these kinds "no reference resolved to it" is not on its own evidence of disuse. This is what
+    /// [`unused_defs`](crate::FileAnalysis::unused_defs) consults the file's *mentions* for; a
+    /// local, a parameter, or a type parameter is reachable only by a simple name and needs no
+    /// such second opinion.
+    pub const fn is_member(self) -> bool {
+        matches!(
+            self,
+            Self::Field
+                | Self::Method
+                | Self::Constructor
+                | Self::EnumConstant
+                | Self::Class
+                | Self::Interface
+                | Self::Enum
+                | Self::Record
+                | Self::AnnotationType
+        )
+    }
+
     /// The name-space this kind of definition occupies.
     pub const fn namespace(self) -> Namespace {
         match self {
@@ -100,6 +123,23 @@ pub struct Def {
     /// The byte range of the declaring identifier token (not the whole declaration). This is the
     /// go-to-definition target and the span an "unused binding" diagnostic points at.
     pub name_range: Range<usize>,
+    /// Whether the declaration is written `private`.
+    ///
+    /// The one access level worth recording here, because it is the one that makes a *file-local*
+    /// answer complete: a `private` member is nameable only from within its own top-level class,
+    /// which is one file, so this resolution has seen every use there can be. Every wider access
+    /// level leaves the question to a project-wide pass. Always `false` for a kind that carries no
+    /// modifiers at all (a local, a lambda parameter, a pattern variable).
+    pub is_private: bool,
+    /// Whether the declaration carries at least one annotation.
+    ///
+    /// Recorded because an annotated declaration is routinely reached by something no source names:
+    /// `@Inject` / `@Autowired` / `@Mock` write a field a framework alone assigns, and it is spelled
+    /// exactly like a field nobody uses. The annotation is therefore evidence *against* reading
+    /// non-use as disuse. Both shapes count: the `MODIFIERS` child most declarations park their
+    /// annotations in, and the direct `ANNOTATION` children a type parameter, an enum constant, and
+    /// a parameter's type-use position write instead.
+    pub is_annotated: bool,
     /// The scope this definition is visible in.
     pub(crate) scope: ScopeId,
 }

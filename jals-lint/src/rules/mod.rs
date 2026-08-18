@@ -28,7 +28,7 @@ mod module_import;
 mod naming;
 mod type_mismatch;
 mod unreported_exception;
-mod unused_local;
+mod unused;
 mod wildcard_import;
 
 /// A potential problem reported by a rule, before it is tagged with a rule name / severity.
@@ -174,7 +174,7 @@ pub(crate) struct RuleMeta {
     /// noise: a recovered declaration gets a wrong type, and every value written into it then looks
     /// incompatible. It is *not* "needs the project index" — the driver already withholds the project
     /// from a broken parse, which silences every [`Checker::Semantic`] rule on its own — and it is
-    /// *not* "reads the resolution": `unused-local` and `constant-condition` do, but a missing
+    /// *not* "reads the resolution": `unused` and `constant-condition` do, but a missing
     /// reference and a literal condition both survive recovery, so they keep reporting.
     ///
     /// Set on `type-mismatch` alone, the one rule that still reports without an index and so is not
@@ -195,7 +195,7 @@ pub(crate) const RULES: &[RuleMeta] = &[
     grouped_import::RULE,
     attribute::RULE,
     constant_condition::RULE,
-    unused_local::RULE,
+    unused::RULE,
     type_mismatch::RULE,
     unreported_exception::RULE,
     cannot_resolve::RULE,

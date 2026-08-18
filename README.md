@@ -28,9 +28,9 @@ build front end (`jals build` / `run` / `clean` / `init`) wraps the JDK's `javac
   rustfmt-on `remove-nested-parens` and `force-switch-arm`, and import sort (sequence, not
   multiset). An output that fails that check is discarded and the input handed back untouched — and
   the run *says* so, because a file that was refused is byte-identical to one that needed nothing.
-- **A linter with real semantics.** Beyond syntactic checks, `jals lint` catches unused
-  locals, type mismatches, unreported checked exceptions, and dead conditionals, using name
-  resolution and type inference over the CST — not just pattern matching.
+- **A linter with real semantics.** Beyond syntactic checks, `jals lint` catches unused bindings,
+  members and imports, type mismatches, unreported checked exceptions, and dead conditionals, using
+  name resolution and type inference over the CST — not just pattern matching.
 - **Cargo-style Java builds.** A `jals.toml` manifest — the Java analogue of `Cargo.toml` —
   drives `jals build` / `run` / `clean` / `init`. Optional Rhai scripts run before `javac`, using
   bounded storage-only APIs to generate sources and augment flags, classpaths, and environments.
@@ -53,7 +53,7 @@ build front end (`jals build` / `run` / `clean` / `init`) wraps the JDK's `javac
 | [`jals-editor`](jals-editor)         | Protocol-neutral editor semantics (definition, references, hover, completion, signature help, and highlights) plus UTF-8 byte/UTF-16 coordinate conversion, shared by the LSP and browser playground.                                                                                                                                                                                                               |
 | [`jals-syntax`](jals-syntax)         | A lossless Java lexer and an error-resilient CST parser (`rowan`), plus a typed AST layer over the CST. The shared foundation for every other tool.                                                                                                                                                                                                                                                                 |
 | [`jals-fmt`](jals-fmt)               | **WIP (rewrite in progress).** A Wadler/Prettier-style pretty-printer driven by the `jals-syntax` CST — currently a no-op that returns its input unchanged.                                                                                                                                                                                                                                                         |
-| [`jals-lint`](jals-lint)             | The linter (`jals lint` via `jals-cli`): a rule registry over the CST plus `jals-hir` — unused locals, type mismatches, unreported exceptions, dead (constant) conditionals, and feature-gated preview-feature checks.                                                                                                                                                                                              |
+| [`jals-lint`](jals-lint)             | The linter (`jals lint` via `jals-cli`): a rule registry over the CST plus `jals-hir` — unused bindings/members/imports, type mismatches, unreported exceptions, dead (constant) conditionals, and feature-gated preview-feature checks.                                                                                                                                                                                              |
 | [`jals-hir`](jals-hir)               | Name resolution, a cross-file project type index, and type inference/checking over the CST — the semantic foundation the linter and LSP build on. Also bridges in external types from a compiled classpath.                                                                                                                                                                                                         |
 | [`jals-classfile`](jals-classfile)   | A complete, byte-exact read/write model of the JVM `.class` file format (JVMS ch. 4).                                                                                                                                                                                                                                                                                                                               |
 | [`jals-decompile`](jals-decompile)   | Reconstructs readable Java from a parsed `.class` file: type/signature rendering, initializers, declared `throws`, and (incrementally) full method-body decompilation from bytecode.                                                                                                                                                                                                                                |
@@ -243,10 +243,11 @@ jals lint src/Main.java src/Util.java
 jals lint src/
 ```
 
-`jals lint` checks unresolvable type names, unused locals, type mismatches, unreported checked
-exceptions, dead (constant-condition) branches, and feature-gated preview features, using name
-resolution and type inference (`jals-hir`) — not just pattern matching over the syntax tree. Every
-check is a named rule, so any of them (`cannot-resolve` included) can be re-levelled or switched off.
+`jals lint` checks unresolvable type names, unused bindings, unused `private` members and unused
+imports, type mismatches, unreported checked exceptions, dead (constant-condition) branches, and
+feature-gated preview features, using name resolution and type inference (`jals-hir`) — not just
+pattern matching over the syntax tree. Every check is a named rule, so any of them
+(`cannot-resolve` included) can be re-levelled or switched off.
 If a `jals.toml` manifest is discovered, its `[build] classpath` and `[dependencies]` are resolved so
 types from external libraries are understood too. Configure via `jalslint.toml` (discovered the same
 way as `jalsfmt.toml`).

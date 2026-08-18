@@ -1549,10 +1549,7 @@ mod tests {
             let diags = project
                 .diagnostics(&parse, &jals_config::lint::Config::default())
                 .await;
-            assert!(
-                diags.iter().any(|d| d.code == Some("unused-local")),
-                "{diags:?}"
-            );
+            assert!(diags.iter().any(|d| d.code == Some("unused")), "{diags:?}");
         });
     }
 

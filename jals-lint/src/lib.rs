@@ -311,7 +311,7 @@ mod tests {
     #[test]
     fn a_broken_parse_keeps_the_resolution_rules() {
         // The other half of `needs_clean_parse`, and the half that is easy to get wrong: the
-        // criterion is *findings derived from type inference*, not *reads `Resolved`*. `unused-local`
+        // criterion is *findings derived from type inference*, not *reads `Resolved`*. `unused`
         // and `constant-condition` both read it, and both keep reporting on a recovered tree —
         // a binding nothing refers to and a literal condition are not artefacts of recovery.
         let src = "class C { void m() { int unused = 1; if (true) { a(); } } void n( {}\n";
@@ -322,7 +322,7 @@ mod tests {
             &Config::default(),
         ));
         assert!(
-            out.diagnostics.iter().any(|d| d.rule == "unused-local"),
+            out.diagnostics.iter().any(|d| d.rule == "unused"),
             "a binding nothing refers to survives recovery: {:?}",
             out.diagnostics
         );
@@ -342,7 +342,7 @@ mod tests {
         // this tree and must go on being shared rather than resolved a second time.
         //
         // Observed the same way `a_supplied_resolution_is_the_one_the_rules_read` does — by handing
-        // over an analysis of a *different* tree, where the binding is used. `unused-local` reads
+        // over an analysis of a *different* tree, where the binding is used. `unused` reads
         // only the analysis, so if the request's is still consumed the rule falls silent; if the
         // engine resolved the broken tree itself, it would fire.
         let broken = block_on_inline(jals_syntax::Parse::parse(
@@ -363,7 +363,7 @@ mod tests {
             block_on_inline(LintOutput::lint(LintRequest::new(&broken), &cfg))
                 .diagnostics
                 .iter()
-                .any(|d| d.rule == "unused-local"),
+                .any(|d| d.rule == "unused"),
             "the fixture must be unused when the engine analyses it itself"
         );
         let out = block_on_inline(LintOutput::lint(
@@ -374,7 +374,7 @@ mod tests {
             &cfg,
         ));
         assert!(
-            out.diagnostics.iter().all(|d| d.rule != "unused-local"),
+            out.diagnostics.iter().all(|d| d.rule != "unused"),
             "a broken parse withholds the project, not the caller's analysis: {:?}",
             out.diagnostics
         );
@@ -426,7 +426,7 @@ mod tests {
     #[test]
     fn a_supplied_resolution_is_the_one_the_rules_read() {
         // Equivalence alone would also hold if the field were ignored, so this pins that it is
-        // actually consumed: `unused-local` reads only `Resolved` (never the tree), so handing it a
+        // actually consumed: `unused` reads only `Resolved` (never the tree), so handing it a
         // resolution where the binding *is* used silences it over a tree where it is not.
         //
         // Deliberately breaking the documented "same parse" precondition is the whole point — it is
@@ -449,7 +449,7 @@ mod tests {
             block_on_inline(LintOutput::lint(LintRequest::new(&unused), &cfg))
                 .diagnostics
                 .iter()
-                .any(|d| d.rule == "unused-local"),
+                .any(|d| d.rule == "unused"),
             "the fixture must be unused when the engine resolves it itself"
         );
         assert!(
@@ -462,7 +462,7 @@ mod tests {
             ))
             .diagnostics
             .iter()
-            .all(|d| d.rule != "unused-local"),
+            .all(|d| d.rule != "unused"),
             "the supplied resolution must be the one the rules read"
         );
     }
@@ -471,7 +471,7 @@ mod tests {
     fn an_index_catches_project_subtyping() {
         // `Base` is not assignable to `Sub`. Reference subtyping resolves only against a project
         // index, so the file-local `lint_source` cannot see this, but a request carrying one can.
-        // A field initializer keeps `unused-local` out of the way, isolating `type-mismatch`.
+        // A field initializer keeps `unused` out of the way, isolating `type-mismatch`.
         let src = "class Base {} class Sub extends Base {} class C { Sub f = new Base(); }";
         let cfg = Config::default();
         let parse = block_on_inline(jals_syntax::Parse::parse(src));

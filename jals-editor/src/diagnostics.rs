@@ -265,7 +265,7 @@ mod tests {
     #[test]
     fn unused_local_is_unnecessary_in_place() {
         let diags = assemble_local("class C { void m() { int unused = 1; } }\n");
-        let unused = with_code(&diags, "unused-local");
+        let unused = with_code(&diags, "unused");
         assert_eq!(unused.len(), 1, "one flagged warning, no extra diagnostic");
         assert_eq!(unused[0].severity, DiagnosticSeverity::Warning);
         assert!(unused[0].unnecessary);
