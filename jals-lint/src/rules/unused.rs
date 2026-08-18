@@ -24,6 +24,12 @@
 //! - The **serialization** members are called by `ObjectOutputStream`/`ObjectInputStream` through
 //!   reflection, by name, and are `private` precisely so nothing else calls them.
 //!
+//! A fifth exclusion is the author's own to make: a name beginning with `_` says the binding is
+//! deliberately unused where the syntax still demands one. It is honoured for the locally-scoped
+//! kinds only — on a `private` member a leading `_` is a naming *style* rather than a statement of
+//! intent, and reading it as one would drop the finding for every codebase that spells its fields
+//! that way. An import is not this file's name to choose at all.
+//!
 //! `@Override` / interface-implementation parameters remain a known source of false positives —
 //! the signature is not the method's to choose — so suppress the rule via `jalslint.toml` where
 //! that matters.
@@ -110,12 +116,12 @@ impl Unused {
     /// else yields `None`. See the module docs for why each absent kind is absent.
     fn subject(def: &Def) -> Option<&'static str> {
         match def.kind {
-            DefKind::Local => Some("local variable"),
-            DefKind::Param => Some("parameter"),
-            DefKind::LambdaParam => Some("lambda parameter"),
-            DefKind::TypeParam => Some("type parameter"),
-            DefKind::CatchParam => Some("exception parameter"),
-            DefKind::PatternVar => Some("pattern variable"),
+            DefKind::Local => Self::local_subject(def, "local variable"),
+            DefKind::Param => Self::local_subject(def, "parameter"),
+            DefKind::LambdaParam => Self::local_subject(def, "lambda parameter"),
+            DefKind::TypeParam => Self::local_subject(def, "type parameter"),
+            DefKind::CatchParam => Self::local_subject(def, "exception parameter"),
+            DefKind::PatternVar => Self::local_subject(def, "pattern variable"),
             DefKind::Field => Self::member_subject(def, "private field"),
             DefKind::Method => Self::member_subject(def, "private method"),
             DefKind::Class => Self::member_subject(def, "private class"),
@@ -125,6 +131,19 @@ impl Unused {
             DefKind::AnnotationType => Self::member_subject(def, "private annotation type"),
             DefKind::Resource | DefKind::Constructor | DefKind::EnumConstant => None,
         }
+    }
+
+    /// `subject` for a binding one file scopes, `None` when its own name opts out.
+    ///
+    /// A leading `_` is the established way to write a name the author is required to give and
+    /// does not intend to use — an `@Override` parameter, a `catch` clause whose exception is
+    /// genuinely ignored — so honouring it costs a diagnostic nobody could act on. It is confined
+    /// to these kinds for the reason the module docs give; `naming-convention` already leaves a
+    /// name that does not start with an ASCII letter alone, so the opt-out trades no warning for
+    /// another. Java 22's unnamed variable (`_` on its own) binds nothing and reaches no [`Def`],
+    /// so this only ever decides `_name`.
+    fn local_subject(def: &Def, subject: &'static str) -> Option<&'static str> {
+        (!def.name.starts_with('_')).then_some(subject)
     }
 
     /// `subject` for a member whose disuse this file is entitled to report, `None` otherwise.

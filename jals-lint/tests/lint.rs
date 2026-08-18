@@ -263,6 +263,17 @@ fn unnamed_local_ok() {
 }
 
 #[test]
+fn an_underscore_prefixed_binding_is_not_flagged() {
+    // A leading `_` is how an author writes a name the syntax demands and the code does not want:
+    // the parameter of an `@Override`, an exception that is genuinely ignored. Every kind one file
+    // scopes honours it, so no line here is reported.
+    check(
+        "class Foo { void m(int _p) { int _x = 1; try { g(); } catch (Exception _e) { /* ignored */ } } void g() {} }",
+        expect![""],
+    );
+}
+
+#[test]
 fn multi_declarator_only_unused_flagged() {
     check(
         "class Foo { int m() { int a = 1, b = 2; return a; } }",
@@ -341,6 +352,20 @@ fn unused_private_members_flagged() {
             unused:24..25: unused private field `f`
             unused:40..41: unused private method `m`
             unused:61..66: unused private class `Inner`
+        "]],
+    );
+}
+
+#[test]
+fn an_underscore_prefixed_private_member_is_still_flagged() {
+    // The `_` opt-out stops at the kinds one file scopes. On a member the prefix is a naming
+    // *style* — a whole codebase spells its private fields that way — so honouring it here would
+    // drop the finding rather than record an intention.
+    check(
+        "class Foo { private int _f; private void _m() {} }",
+        expect![[r"
+            unused:24..26: unused private field `_f`
+            unused:41..43: unused private method `_m`
         "]],
     );
 }

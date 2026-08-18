@@ -247,7 +247,9 @@ jals lint src/
 imports, type mismatches, unreported checked exceptions, dead (constant-condition) branches, and
 feature-gated preview features, using name resolution and type inference (`jals-hir`) — not just
 pattern matching over the syntax tree. Every check is a named rule, so any of them
-(`cannot-resolve` included) can be re-levelled or switched off.
+(`cannot-resolve` included) can be re-levelled or switched off. A locally scoped binding whose name
+starts with `_` is exempt from the unused check — that is how to spell a name the syntax demands and
+the code does not want, such as the unused parameter of an `@Override`.
 If a `jals.toml` manifest is discovered, its `[build] classpath` and `[dependencies]` are resolved so
 types from external libraries are understood too. Configure via `jalslint.toml` (discovered the same
 way as `jalsfmt.toml`).
