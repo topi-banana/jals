@@ -190,17 +190,18 @@ impl Resolved {
     /// unreferenced field or method may be used from another file, so a consumer narrows it to the
     /// kinds — and the visibility ([`Def::is_private`]) — whose answer one file completes.
     pub fn unused_defs(&self) -> impl Iterator<Item = &Def> {
-        let referenced: HashSet<DefId> = self
-            .references
-            .iter()
-            .filter_map(|r| r.resolution.def_id())
-            .collect();
-        let called: HashSet<&str> = self
-            .references
-            .iter()
-            .filter(|r| r.namespace == Namespace::Method)
-            .map(|r| r.name.as_str())
-            .collect();
+        // One pass, two indexes: the references are walked once and each is filed under whichever
+        // of the two tests it can answer.
+        let mut referenced: HashSet<DefId> = HashSet::new();
+        let mut called: HashSet<&str> = HashSet::new();
+        for reference in &self.references {
+            if let Some(id) = reference.resolution.def_id() {
+                referenced.insert(id);
+            }
+            if reference.namespace == Namespace::Method {
+                called.insert(reference.name.as_str());
+            }
+        }
         // One early return per bullet above, in the order they cost.
         self.defs.iter().filter(move |def| {
             if referenced.contains(&def.id) {

@@ -64,16 +64,21 @@ impl Collect {
     /// A declaration with neither — a pattern variable, a lambda parameter written bare — yields
     /// the default, which is the honest answer rather than a missing one.
     pub(crate) fn decl_facts(node: &SyntaxNode) -> DeclFacts {
-        fn annotates(owner: &SyntaxNode) -> bool {
-            owner.children().any(|child| child.kind() == ANNOTATION)
+        let mut facts = DeclFacts::default();
+        // One walk of the child list, not one per question: this runs for every definition the
+        // resolver registers, which is a four-figure count on a large file.
+        for child in node.children() {
+            match child.kind() {
+                ANNOTATION => facts.is_annotated = true,
+                MODIFIERS => {
+                    facts.is_private |=
+                        Self::direct_tokens(&child).any(|token| token.kind() == PRIVATE_KW);
+                    facts.is_annotated |= child.children().any(|inner| inner.kind() == ANNOTATION);
+                }
+                _ => {}
+            }
         }
-        let modifiers = node.children().find(|child| child.kind() == MODIFIERS);
-        DeclFacts {
-            is_private: modifiers.as_ref().is_some_and(|modifiers| {
-                Self::direct_tokens(modifiers).any(|token| token.kind() == PRIVATE_KW)
-            }),
-            is_annotated: annotates(node) || modifiers.as_ref().is_some_and(annotates),
-        }
+        facts
     }
 
     /// The byte span of `node` with the trivia rowan parks inside it trimmed off both ends.
