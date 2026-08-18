@@ -288,11 +288,19 @@ CI leaves `--strict` off: known defects are still open, so the report is a measu
 gate. Turning it on is what would make it one, and that is a decision to take once the list is
 empty. What is open, by family:
 
-- a nested `new` passing the wrong enclosing instance, and `this$0` read or stored before
-  `super()` — which JEP 447's statements-before-`super()` reaches from a second direction;
-- a value whose *erasure* is not narrowed back where the slot is narrower than `Object`. The
-  argument direction is handled; a `return` of an erased value, and a receiver reached through one,
-  are not — which is most of what `generics/inference` fails on.
+- **statements before `super()`** (JEP 447). A constructor that runs code before its delegation
+  leaves `this` as `uninitializedThis` across it, and the frame at the `invokespecial` says the
+  class is already initialised. Reading a *parameter* while `this` is uninitialized is handled; the
+  frame across an intervening statement is not.
+- **an overload selected against a classpath type**, where the candidates differ only in a
+  parameter this analysis cannot order — `PrintStream(String)` against `PrintStream(OutputStream)`,
+  `StringBuffer` against `String`. The wrong choice is a wrong `invokespecial` argument rather than
+  a diagnostic.
+- **an inferred type the analysis does not compute**: a `return` whose value comes from an
+  inference this crate does not run (`generics/inference`), and a multi-catch parameter, whose type
+  is the *lub* of its arms rather than the first of them.
+- **the assembler's own frames**: a `StackMapTable` offset that does not land on an instruction, and
+  one method whose control flow runs off the end.
 
 The parser is no longer among them: every file in the corpus parses, so `parsed` is 100% and a
 syntax error there would now be a regression rather than a known gap.
