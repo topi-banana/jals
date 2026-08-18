@@ -494,6 +494,17 @@ fn unused_static_import_flagged() {
 }
 
 #[test]
+fn an_import_spelled_with_an_escape_in_a_comment_is_not_flagged() {
+    // JLS §3.3 resolves `\\uXXXX` before the lexer even recognizes a comment, so `\\u0053et` in a
+    // Javadoc reference *is* `Set`. The identifier walk decodes; the comment walk must too, or the
+    // asymmetry reports an import the documentation names.
+    check(
+        "import java.util.Set;\n/** see {@link \\u0053et} */\nclass Foo {}",
+        expect![""],
+    );
+}
+
+#[test]
 fn a_wildcard_import_is_never_reported_as_unused() {
     // An on-demand import names no single type, so nothing can be looked for; `wildcard-import` is
     // the rule with something to say about it.

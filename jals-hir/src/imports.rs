@@ -43,54 +43,79 @@ pub struct UnusedImport {
     pub is_static: bool,
 }
 
-/// The names a file spells anywhere, in any position — the set an import is checked against.
-struct Used(HashSet<String>);
+/// The simple names of the file's imports that the file itself never spells.
+///
+/// Phrased as what is *left over* rather than as what is used, because the question only ever has
+/// a handful of needles and the haystack is the whole token stream: narrowing a set the size of
+/// the import list costs nothing per token and lets the walk stop the moment the last needle is
+/// found, where collecting every name the file spells allocates one `String` per identifier
+/// occurrence and per comment word — tens of thousands on a large file, on a pass that runs per
+/// keystroke.
+struct Unspelled(HashSet<String>);
 
-impl Used {
-    /// Collects every identifier the file spells outside its own import declarations, plus the
-    /// identifier-shaped words of every comment.
+impl Unspelled {
+    /// Removes from `wanted` every name the file spells outside its own import declarations, and
+    /// every identifier-shaped word of every comment.
     ///
-    /// Two walks, because the two exclusions differ. An import must not count as a use of itself —
-    /// that is the whole question — so the identifier walk skips the declaration whole, which is
-    /// also what removes a static import's member name and every package segment beside it. The
-    /// comment walk skips nothing: a Javadoc `{@link Foo}` is the entire reason plenty of imports
-    /// exist, and a `// keep Foo` written between two imports is the same claim spelled less
-    /// formally — rowan parks that comment inside the import that follows it, which the first walk
-    /// has just stepped over.
-    async fn collect(root: &SyntaxNode) -> Self {
-        let mut names = HashSet::new();
+    /// Two exclusions, one walk. An import must not count as a use of itself — that is the whole
+    /// question — so an `IMPORT_DECL` contributes no identifiers, which is also what removes a
+    /// static import's member name and every package segment beside it. Its *comments* still
+    /// count: a Javadoc `{@link Foo}` is the entire reason plenty of imports exist, and a
+    /// `// keep Foo` written between two imports is the same claim spelled less formally — rowan
+    /// parks that comment inside the import that follows it.
+    async fn narrow(root: &SyntaxNode, mut wanted: HashSet<String>) -> Self {
         let mut yielder = jals_exec::Yielder::new();
-        // An import declaration is a direct child of the source file, so skipping the node is the
-        // whole exclusion.
-        for node in root.children().filter(|node| node.kind() != IMPORT_DECL) {
-            for token in Self::tokens(&node).filter(|token| token.kind() == IDENT) {
+        // An import declaration is a direct child of the source file, so the node is the whole
+        // exclusion; a stray direct token of the file is not one, and counts like any other name.
+        for element in root.children_with_tokens() {
+            let imported = element
+                .as_node()
+                .is_some_and(|node| node.kind() == IMPORT_DECL);
+            for token in Self::tokens(&element) {
+                // Ticked per *traversed* token rather than per matching one: a long run of
+                // literals or punctuation must not spend the amortized budget on nothing.
                 yielder.tick().await;
+                if wanted.is_empty() {
+                    return Self(wanted);
+                }
                 // The *decoded* spelling (JLS §3.3), like a `Def`'s name: `\u0053et` and `Set` are
                 // one name, and an import matched against the raw text would miss the escaped use.
-                names.insert(jals_syntax::decoded_ident(&token).into_owned());
+                // §3.3 runs before the lexer even recognizes a comment, so a Javadoc reference
+                // written with an escape is decoded too.
+                let text = jals_syntax::decoded_ident(&token);
+                if token.kind() == IDENT {
+                    if !imported {
+                        wanted.remove(text.as_ref());
+                    }
+                } else if token.kind().is_trivia() {
+                    for word in text
+                        .split(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == '$'))
+                        .filter(|word| !word.is_empty())
+                    {
+                        wanted.remove(word);
+                    }
+                }
             }
         }
-        for token in Self::tokens(root).filter(|token| token.kind().is_trivia()) {
-            yielder.tick().await;
-            names.extend(
-                token
-                    .text()
-                    .split(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == '$'))
-                    .filter(|word| !word.is_empty())
-                    .map(String::from),
-            );
-        }
-        Self(names)
+        Self(wanted)
     }
 
-    /// Every token under `node`, in source order.
-    fn tokens(node: &SyntaxNode) -> impl Iterator<Item = SyntaxToken> {
-        node.descendants_with_tokens()
-            .filter_map(SyntaxElement::into_token)
+    /// Every token under `element`, in source order — the element itself when it is a token.
+    fn tokens(element: &SyntaxElement) -> impl Iterator<Item = SyntaxToken> + use<> {
+        let (node, token) = match element {
+            SyntaxElement::Node(node) => (Some(node.clone()), None),
+            SyntaxElement::Token(token) => (None, Some(token.clone())),
+        };
+        node.into_iter()
+            .flat_map(|node| {
+                node.descendants_with_tokens()
+                    .filter_map(SyntaxElement::into_token)
+            })
+            .chain(token)
     }
 
-    /// Whether `name` appears anywhere in the file.
-    fn spells(&self, name: &str) -> bool {
+    /// Whether the file never spells `name`.
+    fn never_spelled(&self, name: &str) -> bool {
         self.0.contains(name)
     }
 }
@@ -106,9 +131,11 @@ impl crate::analysis::FileAnalysis {
         let Some(source) = ast::SourceFile::cast(root.clone()) else {
             return Vec::new();
         };
-        let used = Used::collect(root).await;
         let mut yielder = jals_exec::Yielder::new();
-        let mut out = Vec::new();
+        // The candidates first, and the token walk only if there are any: a file whose imports are
+        // all on-demand or module ones — or which has none at all — has nothing to look for, and
+        // walking every token of it to find that out is the whole cost of the analysis.
+        let mut candidates: Vec<(UnusedImport, String)> = Vec::new();
         for import in source.imports() {
             yielder.tick().await;
             // A module import (`import module java.base;`) names neither a type nor a member, so no
@@ -121,39 +148,60 @@ impl crate::analysis::FileAnalysis {
             };
             let is_static = import.is_static();
             // A jals grouped import is several imports sharing a prefix, and they are used
-            // independently: each member is checked, and reported, on its own.
+            // independently: each member is checked, and reported, on its own. Everything after the
+            // simple name is the same for both shapes, so only the candidates differ.
+            let mut members: Vec<(Range<usize>, String, Option<String>)> = Vec::new();
             if let Some(group) = import.group() {
                 let prefix = name.text();
-                for member in group.members() {
-                    let Some(simple) = member.last_segment() else {
-                        continue; // an on-demand member (`{concurrent.*}`) names no single type.
-                    };
-                    if used.spells(&simple) {
-                        continue;
-                    }
-                    out.push(UnusedImport {
-                        range: Collect::significant_span(member.syntax()),
-                        name: alloc::format!("{prefix}.{}", member.text()),
+                members.extend(group.members().map(|member| {
+                    (
+                        Collect::significant_span(member.syntax()),
+                        alloc::format!("{prefix}.{}", member.text()),
+                        // `None` for an on-demand member (`{concurrent.*}`), which names no
+                        // single type.
+                        member.last_segment(),
+                    )
+                }));
+            } else {
+                // The simple name is the last segment either way: a single-type import binds the
+                // type, and a static import binds the member, and both are what the source then
+                // spells. `None` for an on-demand import (`a.b.*`).
+                members.push((
+                    Collect::significant_span(import.syntax()),
+                    name.text(),
+                    name.last_segment(),
+                ));
+            }
+            for (range, name, simple) in members {
+                let Some(simple) = simple else {
+                    continue;
+                };
+                candidates.push((
+                    UnusedImport {
+                        range,
+                        name,
                         is_static,
-                    });
-                }
-                continue;
+                    },
+                    simple,
+                ));
             }
-            // The simple name is the last segment either way: a single-type import binds the type,
-            // and a static import binds the member, and both are what the source then spells.
-            let Some(simple) = name.last_segment() else {
-                continue; // an on-demand import (`a.b.*`) names no single type.
-            };
-            if used.spells(&simple) {
-                continue;
-            }
-            out.push(UnusedImport {
-                range: Collect::significant_span(import.syntax()),
-                name: name.text(),
-                is_static,
-            });
         }
-        out
+        if candidates.is_empty() {
+            return Vec::new();
+        }
+        let unspelled = Unspelled::narrow(
+            root,
+            candidates
+                .iter()
+                .map(|(_, simple)| simple.clone())
+                .collect(),
+        )
+        .await;
+        candidates
+            .into_iter()
+            .filter(|(_, simple)| unspelled.never_spelled(simple))
+            .map(|(import, _)| import)
+            .collect()
     }
 }
 
