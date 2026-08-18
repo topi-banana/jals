@@ -46,8 +46,8 @@ fn wildcard_import_flagged() {
 
 #[test]
 fn specific_import_ok() {
-    // The file uses what it imports: an import nothing spells is `unused`'s finding, not this
-    // rule's, and the fixture keeps the two apart.
+    // The file uses what it imports: an import nothing spells is `unused-imports`' finding, not
+    // this rule's, and the fixture keeps the two apart.
     check(
         "import java.util.List;\nclass Foo { List<String> l = null; }",
         expect![""],
@@ -87,13 +87,13 @@ fn grouped_import_without_a_wildcard_member_ok() {
 #[test]
 fn empty_catch_flagged() {
     // Two independent findings over one clause, and both are true: the block handles nothing, and
-    // the parameter it declares is never read. `unused` is what names the fix Java 22 added for
-    // the second half — write the parameter `_`.
+    // the parameter it declares is never read. `unused-variables` is what names the fix Java 22
+    // added for the second half — write the parameter `_`.
     check(
         "class Foo { void m() { try { x(); } catch (Exception e) {} } }",
         expect![[r"
             empty-catch:35..58: empty catch block swallows the exception; handle it or add a comment explaining why
-            unused:53..54: unused exception parameter `e`
+            unused-variables:53..54: unused exception parameter `e`
         "]],
     );
 }
@@ -236,14 +236,14 @@ fn naming_clean_ok() {
     );
 }
 
-// ===== unused =====
+// ===== unused-variables =====
 
 #[test]
 fn unused_local_flagged() {
     check(
         "class Foo { void m() { int x = 1; } }",
         expect![[r"
-        unused:27..28: unused local variable `x`
+        unused-variables:27..28: unused local variable `x`
     "]],
     );
 }
@@ -278,7 +278,7 @@ fn multi_declarator_only_unused_flagged() {
     check(
         "class Foo { int m() { int a = 1, b = 2; return a; } }",
         expect![[r"
-            unused:33..34: unused local variable `b`
+            unused-variables:33..34: unused local variable `b`
         "]],
     );
 }
@@ -288,7 +288,7 @@ fn unused_parameter_of_bodied_method_flagged() {
     check(
         "class Foo { void m(int p) {} }",
         expect![[r"
-        unused:23..24: unused parameter `p`
+        unused-variables:23..24: unused parameter `p`
     "]],
     );
 }
@@ -306,7 +306,7 @@ fn unused_lambda_parameter_flagged() {
     check(
         "class Foo { void m() { run(x -> 1); } }",
         expect![[r"
-            unused:27..28: unused lambda parameter `x`
+            unused-variables:27..28: unused lambda parameter `x`
         "]],
     );
 }
@@ -316,7 +316,7 @@ fn unused_type_parameter_flagged() {
     check(
         "class Foo { <T> void m() {} }",
         expect![[r"
-            unused:13..14: unused type parameter `T`
+            unused-variables:13..14: unused type parameter `T`
         "]],
     );
 }
@@ -326,8 +326,8 @@ fn unused_exception_and_pattern_parameters_flagged() {
     check(
         "class Foo { void m(Object o) { try { g(); } catch (Exception e) { /* handled */ } if (o instanceof String s) {} } void g() {} }",
         expect![[r"
-            unused:61..62: unused exception parameter `e`
-            unused:106..107: unused pattern variable `s`
+            unused-variables:61..62: unused exception parameter `e`
+            unused-variables:106..107: unused pattern variable `s`
         "]],
     );
 }
@@ -342,16 +342,16 @@ fn a_resource_is_never_flagged() {
     );
 }
 
-// ===== unused: private members =====
+// ===== dead-code =====
 
 #[test]
 fn unused_private_members_flagged() {
     check(
         "class Foo { private int f; private void m() {} private class Inner {} }",
         expect![[r"
-            unused:24..25: unused private field `f`
-            unused:40..41: unused private method `m`
-            unused:61..66: unused private class `Inner`
+            dead-code:24..25: unused private field `f`
+            dead-code:40..41: unused private method `m`
+            dead-code:61..66: unused private class `Inner`
         "]],
     );
 }
@@ -364,8 +364,8 @@ fn an_underscore_prefixed_private_member_is_still_flagged() {
     check(
         "class Foo { private int _f; private void _m() {} }",
         expect![[r"
-            unused:24..26: unused private field `_f`
-            unused:41..43: unused private method `_m`
+            dead-code:24..26: unused private field `_f`
+            dead-code:41..43: unused private method `_m`
         "]],
     );
 }
@@ -439,14 +439,14 @@ fn a_private_constructor_is_not_flagged() {
     check("class Foo { private Foo() {} }", expect![""]);
 }
 
-// ===== unused: imports =====
+// ===== unused-imports =====
 
 #[test]
 fn unused_import_flagged() {
     check(
         "import java.util.List;\nimport java.util.Map;\nclass Foo { List<String> l = null; }",
         expect![[r"
-            unused:23..44: unused import `java.util.Map`
+            unused-imports:23..44: unused import `java.util.Map`
         "]],
     );
 }
@@ -465,7 +465,7 @@ fn unused_static_import_flagged() {
     check(
         "import static java.lang.Math.max;\nclass Foo {}",
         expect![[r"
-            unused:0..33: unused static import `java.lang.Math.max`
+            unused-imports:0..33: unused static import `java.lang.Math.max`
         "]],
     );
 }
@@ -498,6 +498,21 @@ fn allow_suppresses_a_rule() {
 }
 
 #[test]
+fn the_three_unused_rules_are_suppressed_independently() {
+    // The whole reason one `unused` rule became three named after their `rustc` counterparts: a
+    // project that cannot drop a parameter it does not get to name still wants to hear about a
+    // `private` member and an import nothing reaches. Allowing one must silence only that one.
+    let src = "import java.util.Map;\nclass Foo { private int f; void m(int p) {} }";
+    let mut config = Config::default();
+    config
+        .rules
+        .insert("unused-variables".to_owned(), Severity::Allow);
+    let out = jals_exec::block_on_inline(LintOutput::lint_source(src, &config));
+    let rules: Vec<_> = out.diagnostics.iter().map(|d| d.rule).collect();
+    assert_eq!(rules, ["unused-imports", "dead-code"], "{out:?}");
+}
+
+#[test]
 fn severity_is_resolved_from_config() {
     let mut config = Config::default();
     config
@@ -512,7 +527,7 @@ fn severity_is_resolved_from_config() {
 
 #[test]
 fn type_mismatch_narrowing_flagged() {
-    // A field initializer (a package-private field is not subject to `unused`, isolating this
+    // A field initializer (a package-private field is not subject to `dead-code`, isolating this
     // rule).
     check(
         "class C { int x = 1.0; }",
@@ -837,7 +852,7 @@ fn findings_inside_a_disabled_host_are_dropped() {
     assert_eq!(lint_with_cfg(src, &[]), "");
     let on = lint_with_cfg(src, &["x"]);
     assert!(
-        on.contains("unused") && on.contains("empty-catch"),
+        on.contains("unused-variables") && on.contains("empty-catch"),
         "expected both rules with the feature on: {on}"
     );
 }

@@ -535,7 +535,7 @@ mod tests {
 
         let unused = diags
             .iter()
-            .find(|d| d.code == Some(NumberOrString::String("unused".to_owned())))
+            .find(|d| d.code == Some(NumberOrString::String("unused-variables".to_owned())))
             .expect("an unused diagnostic");
         assert_eq!(unused.severity, Some(DiagnosticSeverity::WARNING));
         assert_eq!(unused.source.as_deref(), Some("jals"));

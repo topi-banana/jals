@@ -11,8 +11,8 @@ use alloc::vec::Vec;
 use core::ops::Range;
 
 use jals_config::Feature;
-use jals_exec::LocalBoxFuture;
-use jals_hir::{FileAnalysis, FileSemantics};
+use jals_exec::{LocalBoxFuture, Yielder};
+use jals_hir::{Def, FileAnalysis, FileSemantics};
 use jals_syntax::{SyntaxNode, SyntaxToken};
 
 use crate::diagnostic::Severity;
@@ -21,6 +21,7 @@ mod attribute;
 mod cannot_resolve;
 mod compact_source_file;
 mod constant_condition;
+mod dead_code;
 mod empty_catch;
 mod grouped_import;
 mod missing_braces;
@@ -28,7 +29,8 @@ mod module_import;
 mod naming;
 mod type_mismatch;
 mod unreported_exception;
-mod unused;
+mod unused_imports;
+mod unused_variables;
 mod wildcard_import;
 
 /// A potential problem reported by a rule, before it is tagged with a rule name / severity.
@@ -65,6 +67,19 @@ impl Finding {
         Self {
             range,
             message: message.into(),
+            ..Self::default()
+        }
+    }
+
+    /// A finding whose own range is unnecessary code — an unused binding's name, an unused import
+    /// declaration — so a consumer fades it in place. What every `unused`-group finding has in
+    /// common: each points at something that could simply go. Reached from [`UnusedDefs`] for the
+    /// two binding rules and directly by `unused-imports`.
+    fn unnecessary_at(range: Range<usize>, message: String) -> Self {
+        Self {
+            range,
+            message,
+            unnecessary: true,
             ..Self::default()
         }
     }
@@ -111,6 +126,40 @@ impl FeatureGate {
                 )
             },
         )
+    }
+}
+
+/// Shared walk over `jals-hir`'s unused-binding signal ([`FileAnalysis::unused_defs`]) for the two
+/// rules that split it: `unused-variables` takes the bindings one file scopes, `dead-code` the
+/// `private` members. They are two rules so that they suppress independently (each rule's module
+/// docs say why), not because they ask different questions — so the walk and the sentence around
+/// the name live here, and a rule contributes only its own naming policy: a `subject` that names
+/// the kinds it reports and answers `None` for every kind that is not its.
+struct UnusedDefs;
+
+impl UnusedDefs {
+    /// Every unused [`Def`] `subject` names, ranged over the binding's own name. Also the
+    /// table-edge shim: the async body is boxed once per file here, so a rule's entry in
+    /// [`RULES`] is `subject` and nothing else.
+    fn findings(
+        analysis: &FileAnalysis,
+        subject: fn(&Def) -> Option<&'static str>,
+    ) -> LocalBoxFuture<'_, Vec<Finding>> {
+        alloc::boxed::Box::pin(async move {
+            let mut yielder = Yielder::new();
+            let mut out = Vec::new();
+            for def in analysis.unused_defs() {
+                yielder.tick().await;
+                let Some(subject) = subject(def) else {
+                    continue;
+                };
+                out.push(Finding::unnecessary_at(
+                    def.name_range.clone(),
+                    format!("unused {subject} `{}`", def.name),
+                ));
+            }
+            out
+        })
     }
 }
 
@@ -174,7 +223,7 @@ pub(crate) struct RuleMeta {
     /// noise: a recovered declaration gets a wrong type, and every value written into it then looks
     /// incompatible. It is *not* "needs the project index" — the driver already withholds the project
     /// from a broken parse, which silences every [`Checker::Semantic`] rule on its own — and it is
-    /// *not* "reads the resolution": `unused` and `constant-condition` do, but a missing
+    /// *not* "reads the resolution": `unused-variables` and `constant-condition` do, but a missing
     /// reference and a literal condition both survive recovery, so they keep reporting.
     ///
     /// Set on `type-mismatch` alone, the one rule that still reports without an index and so is not
@@ -195,7 +244,9 @@ pub(crate) const RULES: &[RuleMeta] = &[
     grouped_import::RULE,
     attribute::RULE,
     constant_condition::RULE,
-    unused::RULE,
+    unused_variables::RULE,
+    unused_imports::RULE,
+    dead_code::RULE,
     type_mismatch::RULE,
     unreported_exception::RULE,
     cannot_resolve::RULE,

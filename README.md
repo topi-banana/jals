@@ -243,16 +243,23 @@ jals lint src/Main.java src/Util.java
 jals lint src/
 ```
 
-`jals lint` checks unresolvable type names, unused bindings, unused `private` members and unused
-imports, type mismatches, unreported checked exceptions, dead (constant-condition) branches, and
-feature-gated preview features, using name resolution and type inference (`jals-hir`) — not just
-pattern matching over the syntax tree. Every check is a named rule, so any of them
-(`cannot-resolve` included) can be re-levelled or switched off. A locally scoped binding whose name
-starts with `_` is exempt from the unused check — that is how to spell a name the syntax demands and
-the code does not want, such as the unused parameter of an `@Override`.
+`jals lint` checks unresolvable type names, unused bindings (`unused-variables`), unused `private`
+members (`dead-code`) and unused imports (`unused-imports`), type mismatches, unreported checked
+exceptions, dead (constant-condition) branches, and feature-gated preview features, using name
+resolution and type inference (`jals-hir`) — not just pattern matching over the syntax tree. Every
+check is a named rule, so any of them (`cannot-resolve` included) can be re-levelled or switched
+off — the three unused checks are three such rules, named after their `rustc` counterparts, so each
+is re-levelled on its own. A locally scoped binding whose name starts with `_` is exempt from
+`unused-variables` — that is how to spell a name the syntax demands and the code does not want, such
+as the unused parameter of an `@Override`.
 If a `jals.toml` manifest is discovered, its `[build] classpath` and `[dependencies]` are resolved so
 types from external libraries are understood too. Configure via `jalslint.toml` (discovered the same
 way as `jalsfmt.toml`).
+
+> The single `unused` rule was split into `unused-variables`, `unused-imports` and `dead-code`. A
+> `jalslint.toml` still spelling `[rules] unused` now matches no rule — the key is silently ignored,
+> so replace it with whichever of the three it was meant to level. A suppression written for an
+> unavoidable parameter is `unused-variables`.
 
 ### Run the language server
 

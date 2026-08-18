@@ -1,4 +1,4 @@
-//! `unused` analysis for import declarations: an import whose name the file never spells.
+//! `unused-imports` analysis for import declarations: an import whose name the file never spells.
 //!
 //! An import is not a binding — nothing declares it and no [`Def`](crate::Def) stands for it — so
 //! it is answered here rather than by the resolver: an import is used when the simple name it

@@ -1,6 +1,6 @@
 # Mixin fixes an injector's signature: an `@Inject` handler takes the `CallbackInfo` whether or not
-# it cancels or reads a return value, so `unused` would flag a parameter the method cannot
-# drop. That is the `@Override`-shaped false positive the rule's own documentation says to suppress
-# through this file.
+# it cancels or reads a return value, so `unused-variables` would flag a parameter the method
+# cannot drop. That is the `@Override`-shaped false positive the rule's own documentation says to
+# suppress through this file.
 [rules]
-unused = "allow"
+unused-variables = "allow"
