@@ -5975,3 +5975,35 @@ public class Recv {
     }
     assert_eq!(run(source, "Recv").trim(), "7\n10\n2");
 }
+
+/// A lambda written as an argument, and a lambda whose parameter is the target's type argument.
+///
+/// Two halves of the same thing. The argument position is a target type (JLS §15.12.2) — the
+/// largest single blocker there was, because `xs.forEach(x -> ...)` is the ordinary shape of modern
+/// Java and had no type at all. And the parameter's type is the interface's *substituted* one:
+/// `Fn<String, String>` binds it to `String`, and the synthetic method the backend emits has to
+/// spell it that way too or its frame disagrees with its own instructions.
+#[test]
+fn a_lambda_is_typed_by_the_argument_it_is_written_as() {
+    let source = "
+public class Target {
+    interface Fn<T, R> { R apply(T t); }
+    interface IntFn { int apply(int n); }
+    static String call(Fn<String, String> f) { return f.apply(\"a\"); }
+    static int call(int n, IntFn f) { return f.apply(n); }
+    public static void main(String[] args) {
+        System.out.println(call(s -> s + s));
+        System.out.println(call(3, x -> x * 2));
+        // A cast is a target type written outright, and a conditional passes its own to both arms.
+        IntFn cast = (IntFn) x -> x + 1;
+        IntFn arm = args.length == 0 ? x -> x + 10 : x -> x - 10;
+        System.out.println(cast.apply(1) + arm.apply(1));
+    }
+}
+";
+    if !java_available() {
+        compile(source).expect("compile");
+        return;
+    }
+    assert_eq!(run(source, "Target").trim(), "aa\n6\n13");
+}

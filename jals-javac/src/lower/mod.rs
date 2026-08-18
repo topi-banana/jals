@@ -955,8 +955,19 @@ impl Compile {
             for &id in &captured {
                 prefix.push_str(&Self::capture_descriptor(id, &context)?);
             }
+            // The body is lowered against the parameters' *inferred* types — `s -> s.length()`
+            // against `Function<String, String>` reads `s` as a `String` — so the synthetic method
+            // has to spell them that way too. The interface's own descriptor is erased
+            // (`(Ljava/lang/Object;)Ljava/lang/Object;`), and emitting the body under it left the
+            // frame calling `s` an `Object` while every instruction in it assumed a `String`.
+            //
+            // That specialised shape is exactly `LambdaMetafactory`'s `instantiatedMethodType`: the
+            // first bootstrap argument stays the interface's erased `samMethodType`, and the
+            // metafactory inserts the casts between them. Passing the erased shape for both is what
+            // this used to do, and it is only right when the two coincide.
+            let instantiated = Self::lambda_shape(&decl, &descriptor, &context);
             let synthetic_descriptor =
-                alloc::format!("({prefix}{}", descriptor.trim_start_matches('('));
+                alloc::format!("({prefix}{}", instantiated.trim_start_matches('('));
 
             // The synthetic method takes the interface's descriptor with the captures prepended, which is
             // also what seeds its initial locals. The assembler borrows the pool for as long as it lives,
@@ -1018,8 +1029,9 @@ impl Compile {
                 attributes: alloc::vec![code],
             });
 
-            // `metafactory` is handed the interface's shape, a handle to the body, and the shape again — the
-            // two `MethodType`s differ only where generics erase, which this does not model.
+            // `metafactory` is handed the interface's erased shape, a handle to the body, and the
+            // shape the call site is specialised to. The last two differ from the first exactly
+            // where generics erase.
             let handle = pool
                 .method_handle_index(
                     6,
@@ -1032,12 +1044,15 @@ impl Compile {
             let shape = pool
                 .method_type_index(&descriptor)
                 .ok_or(AsmError::PoolFull)?;
+            let specialised = pool
+                .method_type_index(&instantiated)
+                .ok_or(AsmError::PoolFull)?;
             let bootstrap = pool
                 .method_handle_index(6, METAFACTORY, "metafactory", METAFACTORY_DESCRIPTOR, false)
                 .ok_or(AsmError::PoolFull)?;
             bootstraps.push(jals_classfile::BootstrapMethod {
                 bootstrap_method_ref: bootstrap,
-                bootstrap_arguments: alloc::vec![shape, handle, shape],
+                bootstrap_arguments: alloc::vec![shape, handle, specialised],
             });
             let index = u16::try_from(bootstraps.len() - 1).map_err(|_| AsmError::PoolFull)?;
             let span = Facts::span(lambda);
@@ -1052,6 +1067,46 @@ impl Compile {
             );
         }
         Ok((context, out, bootstraps))
+    }
+
+    /// The shape a lambda's body is actually compiled to: the interface method's descriptor with each
+    /// parameter replaced by the type the analysis gave that binding.
+    ///
+    /// `LambdaMetafactory`'s `instantiatedMethodType`. The interface's own descriptor is erased, and
+    /// a body written against `Function<String, String>` reads its parameter as a `String` — so a
+    /// method emitted under the erased shape has a frame that disagrees with its own instructions.
+    ///
+    /// The *return* stays the interface's. A widening `areturn` needs no help, and asking for the
+    /// substituted return would need the target's type arguments threaded down here for no gain.
+    /// Anything the analysis could not type, or a parameter count the two do not agree on, falls
+    /// back to the erased descriptor whole: a specialisation this cannot compute is one the
+    /// metafactory must not be told about.
+    fn lambda_shape(decl: &ast::LambdaExpr, erased: &str, context: &Context<'_>) -> String {
+        let Ok(parsed) = jals_classfile::MethodDescriptor::parse(erased) else {
+            return erased.to_owned();
+        };
+        let params: Vec<ast::Param> = decl
+            .params()
+            .into_iter()
+            .flat_map(|list| list.params())
+            .collect();
+        if params.len() != parsed.params.len() {
+            return erased.to_owned();
+        }
+        let mut out = String::from("(");
+        for (param, erased) in params.iter().zip(&parsed.params) {
+            let written = context.facts().def_at(param.syntax()).map_or_else(
+                || erased.to_string(),
+                |id| {
+                    Descriptor::descriptor_of(context.typed.type_of_def(id), context.index)
+                        .map_or_else(|_| erased.to_string(), |ty| ty.to_string())
+                },
+            );
+            out.push_str(&written);
+        }
+        out.push(')');
+        out.push_str(&parsed.return_type.to_string());
+        out
     }
 
     /// A `Type::method` reference: the call site it needs, and the `BootstrapMethods` entry that links it.

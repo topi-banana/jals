@@ -613,3 +613,83 @@ fn a_qualified_new_resolves_against_its_qualifier() {
         .collect();
     assert_eq!(ids, ["Q.Inner1.Nested", "Q.Inner2.Nested"]);
 }
+
+// --- Target typing (JLS §15.12.2, §15.16, §15.25) ---------------------------------------------
+
+/// A lambda takes its type from the *context*, and an argument is one of them.
+///
+/// `call(x -> x + 1)` was the largest single blocker: the lambda had no type, so neither did the
+/// call, and a backend was told "the type of a value could not be inferred" for the most ordinary
+/// shape in modern Java. The overload is selected from the arguments that are pertinent to
+/// applicability (a lambda is not one), and the chosen signature then supplies the type.
+#[test]
+fn an_argument_is_a_target_type() {
+    let src = "class C { \
+                 interface Fn { int apply(int n); } \
+                 static int call(Fn f) { return f.apply(1); } \
+                 static int use() { return call(x -> x + 1); } \
+               }";
+    assert_eq!(expr_ty(src, "x -> x + 1"), "Fn");
+    // And the parameter takes its type from the interface, which is what lets the body infer.
+    assert_eq!(def_ty(src, "x"), "int");
+}
+
+/// A cast is a target type written outright (JLS §15.16), and a conditional passes its own through
+/// to both arms (JLS §15.25).
+#[test]
+fn a_cast_and_a_conditional_carry_a_target_type() {
+    let src = "class C { \
+                 interface Fn { int apply(int n); } \
+                 static Object cast() { return (Fn) x -> x + 1; } \
+                 static Fn arms(boolean b) { return b ? x -> x + 1 : y -> y - 1; } \
+               }";
+    assert_eq!(expr_ty(src, "x -> x + 1"), "Fn");
+    assert_eq!(expr_ty(src, "y -> y - 1"), "Fn");
+}
+
+/// The overload is selected before the poly argument is typed, which is the order JLS §15.12.2
+/// gives — an argument that is not pertinent to applicability cannot be what selects the method
+/// that types it.
+#[test]
+fn a_poly_argument_does_not_select_the_overload() {
+    let src = "class C { \
+                 interface Fn { int apply(int n); } \
+                 static int call(String s, Fn f) { return 0; } \
+                 static int call(int n, Fn f) { return 1; } \
+                 static int use() { return call(\"a\", x -> x); } \
+               }";
+    // Selected by the `String` argument, so the lambda's target is that overload's parameter.
+    assert_eq!(expr_ty(src, "x -> x"), "Fn");
+}
+
+/// A lambda's parameter is the *substituted* type, not the interface's own variable.
+///
+/// `Function<String, String> f = s -> …` binds `s` to `String`. Left as the interface's `T` it
+/// erases to `Object`, so the body could reach no member of a `String` and the synthetic method the
+/// backend emits disagreed with its own instructions.
+#[test]
+fn a_lambda_parameter_takes_the_targets_type_argument() {
+    let src = "class C { \
+                 interface Fn<T, R> { R apply(T t); } \
+                 static void use() { Fn<String, String> f = s -> s; } \
+               }";
+    assert_eq!(def_ty(src, "s"), "String");
+}
+
+/// A call's type is the *selected* overload's return type, not the first member of that name.
+///
+/// The two answers were computed separately — the value's type by a name lookup in pass 2, the
+/// member a backend invokes by overload selection in pass 3 — and a name with two return types is
+/// where they disagreed. `int b = call(3, f);` beside a `String call(String)` was typed `String`,
+/// which is a store instruction for a type the value does not have.
+#[test]
+fn a_calls_type_is_the_selected_overloads() {
+    let src = "class C { \
+                 interface Fn { int apply(int n); } \
+                 static String call(String s) { return s; } \
+                 static int call(int n, Fn f) { return f.apply(n); } \
+                 static void use() { int b = call(3, x -> x * 2); String s = call(\"a\"); } \
+               }";
+    assert_eq!(expr_ty(src, "call(3, x -> x * 2)"), "int");
+    assert_eq!(expr_ty(src, "call(\"a\")"), "String");
+}

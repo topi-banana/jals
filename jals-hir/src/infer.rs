@@ -33,13 +33,14 @@ use hashbrown::{HashMap, HashSet};
 use jals_exec::Yielder;
 
 use jals_syntax::SyntaxKind::{
-    AMP, AMP_AMP, ASSIGNMENT_EXPR, BANG, BANG_EQ, BOOLEAN_KW, BYTE_KW, CALL_EXPR, CARET,
-    CATCH_CLAUSE, CHAR_KW, CHAR_LITERAL, COMMA, CONSTRUCTOR_DECL, DOT, DOUBLE_KW, ELLIPSIS, EQ,
-    EQ_EQ, FALSE_KW, FIELD_ACCESS, FIELD_DECL, FLOAT_KW, FLOAT_LITERAL, FOR_EACH_STMT, GT, IDENT,
-    INSTANCEOF_KW, INT_KW, INT_LITERAL, LAMBDA_EXPR, LBRACK, LOCAL_VAR_DECL, LONG_KW, LSHIFT, LT,
-    LT_EQ, METHOD_DECL, MINUS, NEW_EXPR, NULL_KW, PARAM, PERCENT, PIPE, PIPE_PIPE, PLUS,
-    RECORD_COMPONENT, RESOURCE, RETURN_STMT, SHORT_KW, SLASH, STAR, STRING_LITERAL, SUPER_KW,
-    TEXT_BLOCK, THIS_KW, TILDE, TRUE_KW, TYPE_PATTERN, VAR_KW, VOID_KW,
+    AMP, AMP_AMP, ARG_LIST, ASSIGNMENT_EXPR, BANG, BANG_EQ, BOOLEAN_KW, BYTE_KW, CALL_EXPR, CARET,
+    CAST_EXPR, CATCH_CLAUSE, CHAR_KW, CHAR_LITERAL, COMMA, CONSTRUCTOR_DECL, DOT, DOUBLE_KW,
+    ELLIPSIS, EQ, EQ_EQ, FALSE_KW, FIELD_ACCESS, FIELD_DECL, FLOAT_KW, FLOAT_LITERAL,
+    FOR_EACH_STMT, GT, IDENT, INSTANCEOF_KW, INT_KW, INT_LITERAL, LAMBDA_EXPR, LBRACK,
+    LOCAL_VAR_DECL, LONG_KW, LSHIFT, LT, LT_EQ, METHOD_DECL, MINUS, NEW_EXPR, NULL_KW, PARAM,
+    PERCENT, PIPE, PIPE_PIPE, PLUS, RECORD_COMPONENT, RESOURCE, RETURN_STMT, SHORT_KW, SLASH, STAR,
+    STRING_LITERAL, SUPER_KW, TERNARY_EXPR, TEXT_BLOCK, THIS_KW, TILDE, TRUE_KW, TYPE_PATTERN,
+    VAR_KW, VOID_KW,
 };
 use jals_syntax::ast::{self, AstNode};
 use jals_syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
@@ -699,6 +700,21 @@ impl TypeInference {
             .find_map(ast::ArgList::cast)
             .map(|list| list.args().collect())
             .unwrap_or_default();
+        self.resolve_constructor(owner, &args, index)
+    }
+
+    /// Which of `owner`'s constructors `args` select.
+    ///
+    /// Split out from [`resolve_new`](Self::resolve_new) because the owner is not always the `new`'s
+    /// *inferred* type: while the inference is still running, a `new`'s own type is not in the memo
+    /// yet — its arguments are its children and are typed first — and target typing an argument has
+    /// to select the constructor before then.
+    fn resolve_constructor(
+        &self,
+        owner: ItemId,
+        args: &[ast::Expr],
+        index: &ProjectIndex,
+    ) -> Option<MemberId> {
         let candidates: Vec<MemberId> = index
             .own_members(owner)
             .iter()
@@ -875,8 +891,14 @@ struct Inferer<'a> {
     /// `reference range start -> index into resolved.references`, for resolving a type name and for
     /// looking a name reference's definition up cheaply.
     ref_by_start: HashMap<usize, usize>,
-    def_types: Vec<Ty>,
-    expr_by_span: HashMap<(usize, usize), Ty>,
+    /// The inference being built.
+    ///
+    /// Held as the finished type rather than as loose maps so that selecting a call's overload —
+    /// which is `TypeInference`'s, and must stay one implementation — can be asked *while* the
+    /// inference is still running. Target typing needs exactly that: a lambda argument's type is the
+    /// parameter type of the method the call selects, and the call is selected from the arguments
+    /// that are pertinent to applicability (JLS §15.12.2), which the memo already holds.
+    inference: TypeInference,
 }
 
 impl<'a> Inferer<'a> {
@@ -902,8 +924,12 @@ impl<'a> Inferer<'a> {
             project,
             def_by_name_start,
             ref_by_start,
-            def_types: vec![Ty::Unknown; resolved.defs.len()],
-            expr_by_span: HashMap::new(),
+            inference: TypeInference {
+                def_types: vec![Ty::Unknown; resolved.defs.len()],
+                expr_by_span: HashMap::new(),
+                call_targets: HashMap::new(),
+                field_targets: HashMap::new(),
+            },
         }
     }
 
@@ -915,12 +941,7 @@ impl<'a> Inferer<'a> {
         self.collect_pattern_components(&root).await;
         self.infer_in(&root).await;
         let project = self.project;
-        let mut inference = TypeInference {
-            def_types: self.def_types,
-            expr_by_span: self.expr_by_span,
-            call_targets: HashMap::new(),
-            field_targets: HashMap::new(),
-        };
+        let mut inference = self.inference;
         // Pass 3, once every expression has a type: selecting a call's overload weighs its
         // arguments, so it cannot run while those arguments are still being inferred.
         if let Some((index, file)) = project {
@@ -1046,8 +1067,23 @@ impl<'a> Inferer<'a> {
         let mut yielder = Yielder::new();
         for lambda in root.descendants().filter(|n| n.kind() == LAMBDA_EXPR) {
             yielder.tick().await;
-            let Some(item) = self.target_ty(&lambda).project_id() else {
+            let target = self.target_ty(&lambda);
+            let Some(item) = target.project_id() else {
                 continue;
+            };
+            // The target's own type arguments: `Function<String, String>` binds `T` to `String`, and
+            // the parameter's declared type is the interface's `T`. Without this the binding is a
+            // type variable that erases to `Object`, and a body written against a `String` — every
+            // JDK functional interface is generic, so this is the ordinary case rather than a
+            // refinement.
+            let arguments = target.type_arguments().to_vec();
+            let declared = index.item(item).type_params.clone();
+            let bind = move |owner: ItemId, member: Option<MemberId>, name: &str| {
+                if member.is_some() || owner != item {
+                    return None;
+                }
+                let position = declared.iter().position(|param| param.name == name)?;
+                arguments.get(position).cloned()
             };
             // One *abstract* method, or this is no functional interface and there is nothing to take
             // a shape from. Asked of the index rather than counted here: the rule is JLS §9.8's and
@@ -1072,7 +1108,9 @@ impl<'a> Inferer<'a> {
                 let Some(param) = params.get(position) else {
                     continue;
                 };
-                let ty = index.member_type_to_ty(file, owner, Some(method), &param.ty);
+                let ty = index
+                    .member_type_to_ty(file, owner, Some(method), &param.ty)
+                    .substitute(&bind);
                 self.set_def_type(usize::from(name.text_range().start()), ty);
             }
         }
@@ -1080,7 +1118,7 @@ impl<'a> Inferer<'a> {
 
     fn set_def_type(&mut self, name_start: usize, ty: Ty) {
         if let Some(&id) = self.def_by_name_start.get(&name_start) {
-            self.def_types[id.0 as usize] = ty;
+            self.inference.def_types[id.0 as usize] = ty;
         }
     }
 
@@ -1112,7 +1150,7 @@ impl<'a> Inferer<'a> {
                 let r = node.text_range();
                 let span = (usize::from(r.start()), usize::from(r.end()));
                 let ty = self.compute_expr_ty(&expr);
-                self.expr_by_span.insert(span, ty);
+                self.inference.expr_by_span.insert(span, ty);
             } else if matches!(node.kind(), LOCAL_VAR_DECL | RESOURCE) {
                 self.fill_var_binding(&node);
             }
@@ -1205,13 +1243,97 @@ impl<'a> Inferer<'a> {
                         .map(|ty| self.ty_of_opt_type(Some(&ty)))
                 })
                 .unwrap_or(Ty::Unknown),
+            // `(Fn) x -> x + 1`: a cast is a target type written outright (JLS §15.16).
+            CAST_EXPR => self.ty_of_opt_type(parent.children().find_map(ast::Type::cast).as_ref()),
+            // A conditional is itself a poly expression (JLS §15.25): each arm is converted to
+            // whatever the conditional as a whole is being converted to, so the target passes
+            // straight through. The condition is not an arm and takes nothing from this — it is a
+            // `boolean` either way.
+            TERNARY_EXPR => self.target_ty(&parent),
+            // An argument is converted to the parameter of the method the call selects.
+            ARG_LIST => self.argument_target_ty(node, &parent),
             _ => Ty::Unknown,
         }
     }
 
+    /// The parameter type an argument is being converted to (JLS §15.12.2).
+    ///
+    /// The order matters and is the specification's. A lambda, a method reference, and a conditional
+    /// over them are **not pertinent to applicability**, so the overload is selected from the *other*
+    /// arguments first and the chosen signature then supplies their types. That is what breaks the
+    /// circle — an argument's type would otherwise be needed to select the method that supplies it.
+    ///
+    /// Selection is `TypeInference`'s, asked here while the inference is still running, because a
+    /// second implementation of "which overload" is free to disagree with the first and the
+    /// disagreement surfaces as a `NoSuchMethodError` rather than a diagnostic. An argument it has
+    /// not typed yet is treated as applicable rather than as blocking, which is exactly the
+    /// "not pertinent" rule falling out of the existing selection.
+    fn argument_target_ty(&self, node: &SyntaxNode, list: &SyntaxNode) -> Ty {
+        let Some((index, file)) = self.project else {
+            return Ty::Unknown;
+        };
+        let Some(call) = list.parent() else {
+            return Ty::Unknown;
+        };
+        let Some(position) = list
+            .children()
+            .filter(|child| ast::Expr::can_cast(child.kind()))
+            .position(|child| &child == node)
+        else {
+            return Ty::Unknown;
+        };
+        let selected = match call.kind() {
+            CALL_EXPR => ast::CallExpr::cast(call).and_then(|call| {
+                self.inference
+                    .resolve_call(&call, index, file)
+                    .and_then(|resolution| resolution.selected)
+                    .or_else(|| {
+                        self.inference
+                            .resolve_explicit_constructor(&call, index, file)
+                    })
+            }),
+            // A `new`'s own type is not in the memo yet — its arguments are its children, and they
+            // are typed first — so the written type answers instead of the inferred one.
+            NEW_EXPR => ast::NewExpr::cast(call).and_then(|new| {
+                let owner = self.new_ty(&new).project_id()?;
+                let args: Vec<ast::Expr> = new
+                    .args()
+                    .map(|list| list.args().collect())
+                    .unwrap_or_default();
+                self.inference.resolve_constructor(owner, &args, index)
+            }),
+            _ => None,
+        };
+        let Some(selected) = selected else {
+            return Ty::Unknown;
+        };
+        let info = index.member(selected);
+        // A varargs tail is converted to the *element* type, not to the array the descriptor names.
+        // Past the fixed parameters, a varargs tail is still the last one's — and a method flagged
+        // varargs with no parameter at all is malformed input, which this crate answers rather than
+        // panics on.
+        let declared = match info.params.get(position) {
+            Some(param) => &param.ty,
+            None if info.varargs => match info.params.last() {
+                Some(param) => &param.ty,
+                None => return Ty::Unknown,
+            },
+            None => return Ty::Unknown,
+        };
+        let ty = index.member_type_to_ty(info.file, info.owner, Some(selected), declared);
+        if info.varargs
+            && position + 1 >= info.params.len()
+            && let Ty::Array(element) = ty
+        {
+            return *element;
+        }
+        ty
+    }
+
     fn expr_ty(&self, node: &SyntaxNode) -> Ty {
         let r = node.text_range();
-        self.expr_by_span
+        self.inference
+            .expr_by_span
             .get(&(usize::from(r.start()), usize::from(r.end())))
             .cloned()
             .unwrap_or(Ty::Unknown)
@@ -1246,7 +1368,7 @@ impl<'a> Inferer<'a> {
         if let Some(&ri) = self.ref_by_start.get(&Collect::token_start(&tok))
             && let Resolution::Def(id) = self.resolved.references[ri].resolution
         {
-            return self.def_types[id.0 as usize].clone();
+            return self.inference.def_types[id.0 as usize].clone();
         }
         // Nothing in the file declared it, which an **inherited** field never is: name resolution is
         // file-local and a superclass's field may not even be in this file. So the name is looked up on
@@ -1589,6 +1711,27 @@ impl<'a> Inferer<'a> {
     /// the method up on the receiver's type; a bare call `method()` looks it up on the enclosing
     /// type (an implicit `this`). Only project types resolve — everything else is [`Ty::Unknown`].
     fn call_ty(&self, call: &ast::CallExpr) -> Ty {
+        // The *selected* overload's return type. Looking the callee up by name alone answered with
+        // whichever member of that name the walk met first, so `call(3, f)` beside a
+        // `String call(String)` was typed `String` — and the value then met a `store` for the type
+        // it really had. Selection is `TypeInference`'s, the same answer a backend reads from
+        // `call_target_of`, so the two cannot drift.
+        if let Some((index, file)) = self.project
+            && let Some(resolution) = self.inference.resolve_call(call, index, file)
+            && let Some(selected) = resolution.selected
+        {
+            // The receiver's own type arguments, which is what a generic member's type is
+            // substituted with. A bare call has none: the enclosing type is used raw, exactly as
+            // the fallback below uses it.
+            let arguments = match call.callee() {
+                Some(ast::Expr::FieldAccess(access)) => access
+                    .receiver()
+                    .map(|receiver| self.expr_ty(receiver.syntax()).type_arguments().to_vec())
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            return index.selected_member_ty(resolution.owner, &arguments, selected);
+        }
         match call.callee() {
             Some(ast::Expr::FieldAccess(fa)) => self.field_access_member_ty(&fa, Namespace::Method),
             Some(ast::Expr::NameRef(n)) => {
@@ -1882,6 +2025,35 @@ impl ProjectIndex {
                 let file = self.item(current).file;
                 // A supertype's type arguments belong to the `extends` clause, not to any member,
                 // so `None` is the scope: `class Sub extends Base<T>` threads the *class's* `T`.
+                sup.args
+                    .iter()
+                    .map(|mt| self.subst_ty(current, None, args, file, mt))
+                    .collect()
+            },
+        )
+        .unwrap_or(Ty::Unknown)
+    }
+
+    /// The type of an already-*selected* member, with the receiver's type arguments bound.
+    ///
+    /// [`member_ty_substituted`](Self::member_ty_substituted) looks the member up by name, which is
+    /// the right answer only where the name is not overloaded: `String call(String)` and
+    /// `int call(int, Fn)` are two members of one name, and the by-name walk typed a call to the
+    /// second with the first's return type. Overload selection has already chosen one, so the
+    /// substitution is done into *that* one — the same walk, stopping at the type that declares it.
+    fn selected_member_ty(&self, receiver: ItemId, receiver_args: &[Ty], member: MemberId) -> Ty {
+        let declaring = self.member(member).owner;
+        self.walk_supertypes_stateful(
+            receiver,
+            receiver_args.to_vec(),
+            |current, args| {
+                (current == declaring).then(|| {
+                    let info = self.member(member);
+                    self.subst_member_ty(current, member, args, info.file, &info.ty)
+                })
+            },
+            |current, args, sup| {
+                let file = self.item(current).file;
                 sup.args
                     .iter()
                     .map(|mt| self.subst_ty(current, None, args, file, mt))

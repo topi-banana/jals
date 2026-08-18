@@ -268,6 +268,18 @@ impl Ty {
         }
     }
 
+    /// The type arguments written on a class type (`Function<String, String>` → `[String, String]`);
+    /// empty for every other type and for a raw use.
+    ///
+    /// What binds a generic type's parameters to a use of it — a lambda's parameter types come from
+    /// the functional interface's declaration and mean nothing until these are substituted in.
+    pub(crate) fn type_arguments(&self) -> &[Self] {
+        match self {
+            Self::Class(class) => class.args(),
+            _ => &[],
+        }
+    }
+
     /// The indexed project type's id, if this is one ([`ClassTy::Project`]).
     pub const fn project_id(&self) -> Option<ItemId> {
         match self {
