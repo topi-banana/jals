@@ -74,7 +74,7 @@ impl DefKind {
     /// [`unused_defs`](crate::FileAnalysis::unused_defs) consults the file's *mentions* for; a
     /// local, a parameter, or a type parameter is reachable only by a simple name and needs no
     /// such second opinion.
-    pub const fn is_member(self) -> bool {
+    pub(crate) const fn is_member(self) -> bool {
         matches!(
             self,
             Self::Field
