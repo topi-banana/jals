@@ -462,7 +462,7 @@ impl Resolver {
     /// evidence off the token stream, and this is where the binding analyses get it: a mention is
     /// exactly the shape of evidence that says "somewhere in this file, someone spells this" while
     /// binding nothing.
-    pub(super) fn record_disabled_mentions(&mut self, node: &SyntaxNode) {
+    fn record_disabled_mentions(&mut self, node: &SyntaxNode) {
         for tok in node
             .descendants_with_tokens()
             .filter_map(jals_syntax::SyntaxElement::into_token)
