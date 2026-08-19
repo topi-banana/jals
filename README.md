@@ -256,10 +256,10 @@ If a `jals.toml` manifest is discovered, its `[build] classpath` and `[dependenc
 types from external libraries are understood too. Configure via `jalslint.toml` (discovered the same
 way as `jalsfmt.toml`).
 
-> The single `unused` rule was split into `unused-variables`, `unused-imports` and `dead-code`. A
-> `jalslint.toml` still spelling `[rules] unused` now matches no rule — the key is silently ignored,
-> so replace it with whichever of the three it was meant to level. A suppression written for an
-> unavoidable parameter is `unused-variables`.
+> The single `unused-local` rule was split into `unused-variables`, `unused-imports` and
+> `dead-code`. A `jalslint.toml` still spelling `[rules] unused-local` now matches no rule — the key
+> is silently ignored, so replace it with whichever of the three it was meant to level. A
+> suppression written for an unavoidable parameter is `unused-variables`.
 
 ### Run the language server
 
