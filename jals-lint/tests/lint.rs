@@ -1,8 +1,8 @@
 use std::fmt::Write;
 
 use expect_test::{Expect, expect};
-use jals_config::lint::Config;
-use jals_config::{Feature, FeatureSet, Severity};
+use jals_config::lint::{AnnotatedMembers, BracePolicy, Config, ConsoleStreams};
+use jals_config::{Feature, FeatureSet, LintLevel};
 use jals_lint::{LintOutput, LintRequest};
 
 /// Render the diagnostics of a default-config lint run as one line each:
@@ -516,14 +516,274 @@ fn a_wildcard_import_is_never_reported_as_unused() {
     );
 }
 
+// ===== collapsible-if =====
+
+#[test]
+fn collapsible_if_flagged() {
+    check(
+        "class C { void m(boolean a, boolean b) { if (a) { if (b) { m(a, b); } } } }",
+        expect![[r"
+            collapsible-if:45..46: this `if` only guards another `if`; join the two conditions with `&&`
+        "]],
+    );
+}
+
+#[test]
+fn a_brace_less_nested_if_is_still_collapsible() {
+    let out = lint("class C { void m(boolean a, boolean b) { if (a) if (b) m(a, b); } }");
+    assert!(out.contains("collapsible-if"), "{out}");
+}
+
+#[test]
+fn an_if_with_an_else_is_not_collapsible() {
+    // Neither an `else` on the outer `if` (the branches are not the same branch) …
+    let out = lint(
+        "class C { void m(boolean a, boolean b) { if (a) { if (b) { m(a, b); } } else { m(b, a); } } }",
+    );
+    assert!(!out.contains("collapsible-if"), "{out}");
+    // … nor one on the inner.
+    let out = lint(
+        "class C { void m(boolean a, boolean b) { if (a) { if (b) { m(a, b); } else { m(b, a); } } } }",
+    );
+    assert!(!out.contains("collapsible-if"), "{out}");
+}
+
+#[test]
+fn an_else_if_is_eligible_as_the_outer_if() {
+    // `else if (b) { if (a) … }` collapses to `else if (b && a)` exactly as a free-standing one
+    // does. What the chain rules out is the `if` above it, and an outer `if` with an `else` has
+    // two branches — so it is already excluded, once, by the `else` test.
+    let out = lint(
+        "class C { void m(boolean a, boolean b) { if (a) { m(a, b); } else if (b) { if (a) { m(b, a); } } } }",
+    );
+    assert_eq!(out.matches("collapsible-if").count(), 1, "{out}");
+}
+
+#[test]
+fn a_statement_or_comment_beside_the_inner_if_keeps_the_nesting() {
+    let out = lint(
+        "class C { void m(boolean a, boolean b) { if (a) { m(a, b); if (b) { m(b, a); } } } }",
+    );
+    assert!(!out.contains("collapsible-if"), "{out}");
+    let out = lint(
+        "class C { void m(boolean a, boolean b) { if (a) { /* why */ if (b) { m(b, a); } } } }",
+    );
+    assert!(!out.contains("collapsible-if"), "{out}");
+}
+
+// ===== boxed-primitive-constructor =====
+
+#[test]
+fn boxed_primitive_constructor_flagged() {
+    check(
+        "class C { Object o = new Integer(1); }",
+        expect![[r"
+            boxed-primitive-constructor:20..35: `new Integer(…)` always allocates; use `Integer.valueOf(…)`
+        "]],
+    );
+}
+
+#[test]
+fn a_qualified_wrapper_constructor_is_flagged_too() {
+    let out = lint("class C { Object o = new java.lang.Double(1.0); }");
+    assert!(out.contains("boxed-primitive-constructor"), "{out}");
+}
+
+#[test]
+fn a_non_wrapper_and_an_anonymous_subclass_are_not_flagged() {
+    let out = lint("class C { Object o = new Object(); Object p = new Integer(1) {}; }");
+    assert!(!out.contains("boxed-primitive-constructor"), "{out}");
+}
+
+#[test]
+fn a_wrapper_used_as_a_type_argument_or_an_array_element_is_not_flagged() {
+    // The shape half of real Java is written in. The name has to be the *constructed* type, which
+    // is `Type::simple_name` — the last top-level `IDENT` — and not the last `IDENT` anywhere in
+    // the type's subtree, which is the type argument.
+    let out = lint(
+        "class C {\n  Object a = new java.util.ArrayList<Integer>();\n  Object b = new java.util.HashMap<String, Long>();\n  Object c = new Integer[10];\n}",
+    );
+    assert!(!out.contains("boxed-primitive-constructor"), "{out}");
+}
+
+// ===== empty-javadoc =====
+
+#[test]
+fn empty_javadoc_flagged() {
+    check(
+        "/***/\nclass C {}",
+        expect![[r"
+            empty-javadoc:0..5: empty Javadoc comment; document the declaration or remove the comment
+        "]],
+    );
+}
+
+#[test]
+fn a_javadoc_with_prose_and_a_plain_block_comment_are_not_flagged() {
+    let out = lint("/** Something. */\nclass C {}\n/* */\nclass D {}");
+    assert!(!out.contains("empty-javadoc"), "{out}");
+}
+
+// ===== print-to-console =====
+
+#[test]
+fn print_to_console_is_off_by_default() {
+    // Every `[restriction]` rule is: a restriction nobody asked for is not a finding.
+    let out = lint("class C { void m() { System.out.println(\"x\"); } }");
+    assert!(!out.contains("print-to-console"), "{out}");
+}
+
+#[test]
+fn print_to_console_reports_the_configured_streams() {
+    let src = "class C { void m() { System.out.println(\"o\"); System.err.println(\"e\"); } }";
+    let mut config = Config::default();
+    config.restriction.print_to_console.level = LintLevel::Warn;
+    let both = jals_exec::block_on_inline(LintOutput::lint_source(src, &config));
+    assert_eq!(both.diagnostics.len(), 2, "{both:?}");
+
+    // clippy spells this as two lints a config can enable in any combination; one key with three
+    // values reaches every reachable state and no unreachable one.
+    config.restriction.print_to_console.options.streams = ConsoleStreams::Stderr;
+    let err_only = jals_exec::block_on_inline(LintOutput::lint_source(src, &config));
+    let messages: Vec<&str> = err_only
+        .diagnostics
+        .iter()
+        .map(|d| d.message.as_str())
+        .collect();
+    assert_eq!(messages.len(), 1, "{err_only:?}");
+    assert!(messages[0].contains("System.err"), "{messages:?}");
+}
+
+// ===== rule options =====
+
+#[test]
+fn a_table_form_key_configures_the_rule_it_names() {
+    // The whole point of the schema change: a level and an option in one key, and an option key
+    // that does not have to restate the level it did not choose.
+    let config: Config = toml::from_str(
+        "[style]\nwildcard-import = { level = \"error\", static-imports = \"allow\" }\n",
+    )
+    .unwrap();
+    let out = jals_exec::block_on_inline(LintOutput::lint_source(
+        "import java.util.*;\nimport static java.lang.Math.*;",
+        &config,
+    ));
+    assert_eq!(
+        out.diagnostics.len(),
+        1,
+        "the static wildcard is exempt: {out:?}"
+    );
+    assert_eq!(out.diagnostics[0].severity, LintLevel::Error);
+}
+
+#[test]
+fn missing_braces_multi_line_accepts_a_one_line_guard() {
+    // The `if` is itself on its own line, which is where the naive reading of the statement's
+    // `text_range` goes wrong: rowan parks the *preceding* newline inside the statement, so a
+    // window measured from there contains a newline for every guard clause in the file.
+    let mut config = Config::default();
+    config.style.missing_braces.options.policy = BracePolicy::MultiLine;
+    let src = "class C {\n  int m(int x) {\n    if (x > 0) return 1;\n    if (x < 0)\n      return -1;\n    return 0;\n  }\n}\n";
+    let out = jals_exec::block_on_inline(LintOutput::lint_source(src, &config));
+    let braces = out
+        .diagnostics
+        .iter()
+        .filter(|d| d.rule == "missing-braces")
+        .count();
+    assert_eq!(
+        braces, 1,
+        "only the body that left its keyword's line: {out:?}"
+    );
+    // …and `always` still reports both, so the option is what made the difference.
+    let out = jals_exec::block_on_inline(LintOutput::lint_source(src, &Config::default()));
+    assert_eq!(
+        out.diagnostics
+            .iter()
+            .filter(|d| d.rule == "missing-braces")
+            .count(),
+        2,
+        "{out:?}"
+    );
+}
+
+#[test]
+fn empty_catch_honours_an_allowed_name() {
+    let mut config = Config::default();
+    config
+        .suspicious
+        .empty_catch
+        .options
+        .allowed_names
+        .push("ignored".to_owned());
+    let src = "class C { void m() { try { hashCode(); } catch (RuntimeException ignored) {} } }";
+    let out = jals_exec::block_on_inline(LintOutput::lint_source(src, &config));
+    assert!(
+        out.diagnostics.iter().all(|d| d.rule != "empty-catch"),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn unused_variables_honours_the_configured_prefix() {
+    let src = "class C { void m() { int _a = 0; int ignore_b = 1; } }";
+    let mut config = Config::default();
+    config.unused.unused_variables.options.ignore_prefix = "ignore_".to_owned();
+    let out = jals_exec::block_on_inline(LintOutput::lint_source(src, &config));
+    let names: Vec<&str> = out
+        .diagnostics
+        .iter()
+        .filter(|d| d.rule == "unused-variables")
+        .map(|d| d.message.as_str())
+        .collect();
+    assert_eq!(
+        names.len(),
+        1,
+        "the prefix moved, so `_a` is now reported: {out:?}"
+    );
+    assert!(names[0].contains("_a"), "{names:?}");
+}
+
+#[test]
+fn dead_code_can_be_told_that_annotations_do_not_inject() {
+    let src = "class C { @Deprecated private int f; }";
+    let mut config = Config::default();
+    assert!(
+        jals_exec::block_on_inline(LintOutput::lint_source(src, &config))
+            .diagnostics
+            .is_empty()
+    );
+    config.unused.dead_code.options.annotated = AnnotatedMembers::Report;
+    let out = jals_exec::block_on_inline(LintOutput::lint_source(src, &config));
+    assert!(
+        out.diagnostics.iter().any(|d| d.rule == "dead-code"),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn an_unknown_key_is_reported_rather_than_dropped_or_fatal() {
+    // The migration hazard the schema takes on deliberately: a `jalslint.toml` written against the
+    // flat `[rules]` table still loads, every key it got right still applies, and the one it got
+    // wrong is named instead of silently doing nothing.
+    let config: Config = toml::from_str(
+        "[rules]\nwildcard-import = \"allow\"\n\n[style]\nmissing-braces = \"error\"\n",
+    )
+    .unwrap();
+    assert_eq!(config.unknown_keys(), ["rules"]);
+    assert_eq!(config.style.missing_braces.level, LintLevel::Error);
+    assert_eq!(
+        config.style.wildcard_import.level,
+        LintLevel::Warn,
+        "the stale key configured nothing"
+    );
+}
+
 // ===== configuration =====
 
 #[test]
 fn allow_suppresses_a_rule() {
     let mut config = Config::default();
-    config
-        .rules
-        .insert("wildcard-import".to_owned(), Severity::Allow);
+    config.style.wildcard_import.level = LintLevel::Allow;
     let out = jals_exec::block_on_inline(LintOutput::lint_source("import java.util.*;", &config));
     assert!(
         out.diagnostics.is_empty(),
@@ -538,9 +798,7 @@ fn the_three_unused_rules_are_suppressed_independently() {
     // `private` member and an import nothing reaches. Allowing one must silence only that one.
     let src = "import java.util.Map;\nclass Foo { private int f; void m(int p) {} }";
     let mut config = Config::default();
-    config
-        .rules
-        .insert("unused-variables".to_owned(), Severity::Allow);
+    config.unused.unused_variables.level = LintLevel::Allow;
     let out = jals_exec::block_on_inline(LintOutput::lint_source(src, &config));
     let rules: Vec<_> = out.diagnostics.iter().map(|d| d.rule).collect();
     assert_eq!(rules, ["unused-imports", "dead-code"], "{out:?}");
@@ -549,12 +807,10 @@ fn the_three_unused_rules_are_suppressed_independently() {
 #[test]
 fn severity_is_resolved_from_config() {
     let mut config = Config::default();
-    config
-        .rules
-        .insert("wildcard-import".to_owned(), Severity::Error);
+    config.style.wildcard_import.level = LintLevel::Error;
     let out = jals_exec::block_on_inline(LintOutput::lint_source("import java.util.*;", &config));
     assert_eq!(out.diagnostics.len(), 1);
-    assert_eq!(out.diagnostics[0].severity, Severity::Error);
+    assert_eq!(out.diagnostics[0].severity, LintLevel::Error);
 }
 
 // ===== type-mismatch =====
@@ -594,10 +850,7 @@ fn type_mismatch_return_flagged() {
 /// (the host injects this from the manifest), rendered like [`lint`]. An empty list models a
 /// manifest that declares no features, which leaves every gate off.
 fn lint_with_features(src: &str, features: &[Feature]) -> String {
-    let config = Config {
-        features: FeatureSet::resolve(features),
-        ..Default::default()
-    };
+    let config = Config::default().with_features(FeatureSet::resolve(features));
     render(&jals_exec::block_on_inline(LintOutput::lint_source(
         src, &config,
     )))
@@ -655,13 +908,8 @@ fn compact_source_file_class_member_main_ok_on_java24() {
 
 #[test]
 fn compact_source_file_respects_allow_config() {
-    let mut config = Config {
-        features: FeatureSet::resolve(&[Feature::Java24]),
-        ..Default::default()
-    };
-    config
-        .rules
-        .insert("compact-source-file".to_owned(), Severity::Allow);
+    let mut config = Config::default().with_features(FeatureSet::resolve(&[Feature::Java24]));
+    config.compatibility.compact_source_file.level = LintLevel::Allow;
     let out = jals_exec::block_on_inline(LintOutput::lint_source("void main() {}", &config));
     assert!(
         out.diagnostics
@@ -722,13 +970,8 @@ fn ordinary_import_not_flagged_on_java24() {
 
 #[test]
 fn module_import_respects_allow_config() {
-    let mut config = Config {
-        features: FeatureSet::resolve(&[Feature::Java24]),
-        ..Default::default()
-    };
-    config
-        .rules
-        .insert("module-import".to_owned(), Severity::Allow);
+    let mut config = Config::default().with_features(FeatureSet::resolve(&[Feature::Java24]));
+    config.compatibility.module_import.level = LintLevel::Allow;
     let out =
         jals_exec::block_on_inline(LintOutput::lint_source("import module java.base;", &config));
     assert!(
@@ -858,10 +1101,7 @@ fn java_annotation_is_not_an_attribute() {
 /// how a host wires the two: `Feature::Attributes` in the config's `FeatureSet`, and the file's
 /// `CfgMap` computed against the resolved build-feature names.
 fn lint_with_cfg(src: &str, build_features: &[&str]) -> String {
-    let config = Config {
-        features: FeatureSet::resolve(&[Feature::Attributes]),
-        ..Default::default()
-    };
+    let config = Config::default().with_features(FeatureSet::resolve(&[Feature::Attributes]));
     let parse = jals_exec::block_on_inline(jals_syntax::Parse::parse(src));
     let features = build_features
         .iter()

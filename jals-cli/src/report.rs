@@ -101,6 +101,22 @@ impl Reporter {
         }
     }
 
+    /// Announce the `jalslint.toml` keys this jals does not define.
+    ///
+    /// An unknown key is **kept**, so one stale name cannot stop the rest of the file from being
+    /// read (`jals_config::lint::UnknownKeys` gives the reason). Keeping it silently would be the
+    /// other failure — a rule the file plainly configures, doing nothing — so it is said out loud
+    /// here, on the CLI's plain `warning:` convention: the key has no source span, and it belongs
+    /// to the run rather than to any reported file.
+    ///
+    /// Deliberately not a finding: it does not set the exit code, because the file being linted is
+    /// not the file with the problem.
+    pub(crate) fn report_unknown_lint_keys(label: &str, keys: &[String]) {
+        for key in keys {
+            eprintln!("warning: {label}: unknown lint key `{key}`");
+        }
+    }
+
     /// Announce a migrated native formatter config on stderr, with any note it carried.
     ///
     /// Not an `ariadne` report: these have no source span to point at, and they belong to the run

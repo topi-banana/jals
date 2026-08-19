@@ -11,16 +11,16 @@
 
 use alloc::vec::Vec;
 
-use jals_config::Feature;
+use jals_config::{Category, Feature};
 use jals_syntax::SyntaxNode;
 use jals_syntax::ast::{AstNode, Decl, SourceFile};
 
-use crate::diagnostic::Severity;
 use crate::rules::{Checker, RuleMeta};
 
 pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "compact-source-file",
-    default: Severity::Error,
+    category: Category::Compatibility,
+    level: |config| config.compatibility.compact_source_file.level,
     needs_clean_parse: false,
     check: Checker::Gated {
         feature: Feature::CompactSourceFiles,

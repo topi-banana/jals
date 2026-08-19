@@ -16,12 +16,15 @@ use alloc::format;
 use jals_exec::LocalBoxFuture;
 use jals_hir::{FileAnalysis, FileSemantics};
 
-use crate::diagnostic::Severity;
+use jals_config::Category;
+use jals_config::lint::Config;
+
 use crate::rules::{Checker, Finding, RuleMeta};
 
 pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "unreported-exception",
-    default: Severity::Warn,
+    category: Category::Correctness,
+    level: |config| config.correctness.unreported_exception.level,
     needs_clean_parse: false,
     check: Checker::Semantic(UnreportedExceptionRule::check),
 };
@@ -35,6 +38,7 @@ impl UnreportedExceptionRule {
     fn check<'a>(
         analysis: &'a FileAnalysis,
         project: Option<&'a FileSemantics<'a>>,
+        _config: &'a Config,
     ) -> LocalBoxFuture<'a, Vec<Finding>> {
         alloc::boxed::Box::pin(Self::check_impl(analysis, project))
     }

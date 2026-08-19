@@ -212,10 +212,9 @@ mod tests {
         // project's resolved feature set as `config.features`.
         block_on_inline(async {
             let text = "void main() {}\n";
-            let mut config = Config {
-                features: jals_config::FeatureSet::resolve(&[jals_config::Feature::Java24]),
-                ..Default::default()
-            };
+            let mut config = Config::default().with_features(jals_config::FeatureSet::resolve(&[
+                jals_config::Feature::Java24,
+            ]));
             let parse = jals_syntax::Parse::parse(text).await;
             let diags = FileDiagnostics::assemble(&parse, None, &config, None).await;
             let gated = with_code(&diags, "compact-source-file");
@@ -325,18 +324,14 @@ mod tests {
     #[test]
     fn type_mismatch_respects_allow_config() {
         let mut config = Config::default();
-        config
-            .rules
-            .insert("type-mismatch".to_owned(), jals_config::Severity::Allow);
+        config.correctness.type_mismatch.level = jals_config::LintLevel::Allow;
         assert!(with_code(&assemble_indexed(SUBTYPING_SRC, &config), "type-mismatch").is_empty());
     }
 
     #[test]
     fn type_mismatch_severity_override_escalates() {
         let mut config = Config::default();
-        config
-            .rules
-            .insert("type-mismatch".to_owned(), jals_config::Severity::Error);
+        config.correctness.type_mismatch.level = jals_config::LintLevel::Error;
         let diags = assemble_indexed(SUBTYPING_SRC, &config);
         assert_eq!(
             with_code(&diags, "type-mismatch")[0].severity,

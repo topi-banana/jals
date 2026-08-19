@@ -16,12 +16,15 @@ use alloc::vec::Vec;
 use jals_exec::LocalBoxFuture;
 use jals_hir::FileAnalysis;
 
-use crate::diagnostic::Severity;
+use jals_config::Category;
+use jals_config::lint::Config;
+
 use crate::rules::{Checker, Finding, RuleMeta};
 
 pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "unused-imports",
-    default: Severity::Warn,
+    category: Category::Unused,
+    level: |config| config.unused.unused_imports.level,
     needs_clean_parse: false,
     check: Checker::Analyzed(UnusedImports::check),
 };
@@ -31,7 +34,10 @@ struct UnusedImports;
 
 impl UnusedImports {
     /// The table-edge shim: boxes the async rule body once per file.
-    fn check(analysis: &FileAnalysis) -> LocalBoxFuture<'_, Vec<Finding>> {
+    fn check<'a>(
+        analysis: &'a FileAnalysis,
+        _config: &'a Config,
+    ) -> LocalBoxFuture<'a, Vec<Finding>> {
         alloc::boxed::Box::pin(Self::check_impl(analysis))
     }
 

@@ -1,7 +1,7 @@
 //! The presented severity of a diagnostic.
 //!
-//! The counterpart to [`lint::Severity`](crate::lint::Severity): that one is *configured* — what a
-//! `jalslint.toml` sets a rule to — while this one is *presented*, what a destination draws. They
+//! The counterpart to [`lint::LintLevel`](crate::lint::LintLevel): that one is *configured* — what
+//! a `jalslint.toml` sets a rule to — while this one is *presented*, what a destination draws. They
 //! are not the same vocabulary, which is why `Allow` has no arm here (a rule set to `Allow` never
 //! reaches a destination) and `Hint` has no arm there (nothing configures a `cfg`-disabled region).
 //!
@@ -24,15 +24,16 @@ pub enum DiagnosticSeverity {
     Hint,
 }
 
-/// The presentation severity for a lint finding's configured severity.
+/// The presentation severity for a lint finding's configured level.
 ///
-/// `Allow` rules are skipped inside the engine and never reach a destination; the arm exists so the
-/// match is exhaustive without a wildcard that would swallow a future variant.
-impl From<crate::lint::Severity> for DiagnosticSeverity {
-    fn from(severity: crate::lint::Severity) -> Self {
-        match severity {
-            crate::lint::Severity::Error => Self::Error,
-            crate::lint::Severity::Warn | crate::lint::Severity::Allow => Self::Warning,
+/// `Allow` rules are skipped inside the engine and never reach a destination, so its arm is
+/// unreachable by construction; it is written out rather than left to a wildcard so that a future
+/// [`LintLevel`](crate::lint::LintLevel) variant has to be placed here instead of being swallowed.
+impl From<crate::lint::LintLevel> for DiagnosticSeverity {
+    fn from(level: crate::lint::LintLevel) -> Self {
+        match level {
+            crate::lint::LintLevel::Error => Self::Error,
+            crate::lint::LintLevel::Warn | crate::lint::LintLevel::Allow => Self::Warning,
         }
     }
 }

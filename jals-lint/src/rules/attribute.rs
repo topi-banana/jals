@@ -10,15 +10,15 @@
 
 use alloc::vec::Vec;
 
-use jals_config::Feature;
+use jals_config::{Category, Feature};
 use jals_syntax::{SyntaxKind, SyntaxNode};
 
-use crate::diagnostic::Severity;
 use crate::rules::{Checker, RuleMeta};
 
 pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "attribute",
-    default: Severity::Error,
+    category: Category::Compatibility,
+    level: |config| config.compatibility.attribute.level,
     needs_clean_parse: false,
     check: Checker::Gated {
         feature: Feature::Attributes,

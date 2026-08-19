@@ -4,8 +4,9 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-# The linter configuration (`Config`) and the `Severity` value type live in `jals-config`, the shared
-# config-model crate; `jals-lint` lints with them and re-exports `Severity` through `diagnostic`.
+# The linter configuration (`Config`) and the `LintLevel` value type live in `jals-config`, the
+# shared config-model crate; `jals-lint` lints with them and re-exports `LintLevel` through
+# `diagnostic`.
 jals-config.workspace = true
 jals-exec.workspace = true
 jals-hir.workspace = true
@@ -14,6 +15,13 @@ jals-syntax.workspace = true
 [dev-dependencies]
 expect-test = "1.5"
 proptest.workspace = true
+# `tests/registry.rs` walks the serialized `jalslint.toml` schema rather than a list of keys, so a
+# rule or an option added later is covered the moment it exists. `toml` cannot render (no `display`
+# feature, by workspace policy), so the walk goes through JSON.
+serde_json.workspace = true
+# `tests/lint.rs` parses a `jalslint.toml` fragment where the point of the test is the *spelling* —
+# the table form of a rule key, and a stale key surviving the file.
+toml.workspace = true
 
 [lints]
 workspace = true

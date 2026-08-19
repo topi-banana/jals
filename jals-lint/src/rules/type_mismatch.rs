@@ -20,12 +20,15 @@ use alloc::string::ToString;
 use jals_exec::LocalBoxFuture;
 use jals_hir::{FileAnalysis, FileSemantics, MismatchKind};
 
-use crate::diagnostic::Severity;
+use jals_config::Category;
+use jals_config::lint::Config;
+
 use crate::rules::{Checker, Finding, RuleMeta};
 
 pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "type-mismatch",
-    default: Severity::Warn,
+    category: Category::Correctness,
+    level: |config| config.correctness.type_mismatch.level,
     // Every finding here comes from type inference; see `RuleMeta::needs_clean_parse`.
     needs_clean_parse: true,
     check: Checker::Semantic(TypeMismatch::check),
@@ -39,6 +42,7 @@ impl TypeMismatch {
     fn check<'a>(
         analysis: &'a FileAnalysis,
         project: Option<&'a FileSemantics<'a>>,
+        _config: &'a Config,
     ) -> LocalBoxFuture<'a, Vec<Finding>> {
         alloc::boxed::Box::pin(Self::check_impl(analysis, project))
     }

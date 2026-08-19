@@ -1950,6 +1950,44 @@ fn lint_reports_one_file_once_when_a_root_and_a_file_inside_it_are_both_named() 
     );
 }
 
+/// A `jalslint.toml` key this jals does not define is kept, and said out loud.
+///
+/// Both halves matter and they pull against each other. Rejecting the file would make one stale
+/// name silence every *other* rule it configures; ignoring it silently would make a key the file
+/// plainly writes do nothing with no way to find out. So the run loads, the good keys apply, and
+/// the bad ones are named — against the file that wrote them, and without setting the exit code,
+/// because the file being linted is not the file with the problem.
+#[test]
+fn lint_reports_an_unknown_config_key_without_failing_the_run() {
+    let dir = project("[package]\nname = \"stale\"\n");
+    std::fs::write(
+        dir.path().join("jalslint.toml"),
+        // The flat `[rules]` table the sectioned schema replaced, plus a rule that never existed.
+        "[rules]\nwildcard-import = \"allow\"\n\n[style]\nno-such-rule = \"warn\"\n",
+    )
+    .unwrap();
+    let source = example_source(
+        dir.path(),
+        "Stale",
+        "package com.example;\npublic class Stale {}\n",
+    );
+
+    let (stdout, stderr, code) = run_full(&["lint", source.to_str().unwrap()]);
+    assert_eq!(code, 0, "an unknown key is not a finding: {stdout}{stderr}");
+    assert!(
+        stderr.contains("unknown lint key `rules`"),
+        "the stale table is named: {stdout}{stderr}"
+    );
+    assert!(
+        stderr.contains("unknown lint key `style.no-such-rule`"),
+        "the stale rule is named, section-qualified: {stdout}{stderr}"
+    );
+    assert!(
+        stderr.contains("jalslint.toml"),
+        "named against the file that wrote it: {stdout}{stderr}"
+    );
+}
+
 /// One run spans directories with different `jalslint.toml` files.
 ///
 /// The config is discovered per reported file, from that file's own directory upward, so a nested
@@ -1962,7 +2000,7 @@ fn lint_discovers_a_jalslint_config_per_reported_file() {
     // The project's own config switches the rule off …
     std::fs::write(
         dir.path().join("jalslint.toml"),
-        "[rules]\nwildcard-import = \"allow\"\n",
+        "[style]\nwildcard-import = \"allow\"\n",
     )
     .unwrap();
     let quiet = example_source(
@@ -1975,7 +2013,7 @@ fn lint_discovers_a_jalslint_config_per_reported_file() {
     std::fs::create_dir_all(&nested).unwrap();
     std::fs::write(
         nested.join("jalslint.toml"),
-        "[rules]\nwildcard-import = \"warn\"\n",
+        "[style]\nwildcard-import = \"warn\"\n",
     )
     .unwrap();
     let loud = nested.join("Loud.java");
