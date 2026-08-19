@@ -85,6 +85,44 @@ Three properties are worth stating, because each replaced something worse:
   playground read `Config::unknown_keys` nowhere yet, so a stale key is still silent there. Wiring
   those two is follow-up work, not a property this schema fails to provide.
 
+### In-source suppression: `@SuppressWarnings`
+
+A `jalslint.toml` levels a rule for a whole directory tree. `@SuppressWarnings` levels it for one
+declaration, which is the granularity the one wrong call site needs.
+
+```java
+@SuppressWarnings("unused-variables")          // one rule
+@SuppressWarnings("unused")                    // a whole section
+@SuppressWarnings({"unused", "complexity"})    // several
+@SuppressWarnings(value = "all")               // every rule; javac's spelling
+```
+
+A name is a **rule name**, a **section name**, or `all` — and all three are read off the registry
+rather than a list kept beside it, so a rule or a section added later is suppressible the day it
+lands. That is also where this gets its Java compatibility for free: javac's
+`@SuppressWarnings("unused")` and jals's `[unused]` section are the same word, so the annotation a
+codebase already carries silences all three `[unused]` rules without being rewritten.
+
+A suppression covers **what its declaration contains** — the whole significant span, the annotation
+included — so one on a type reaches a finding several levels down. Nesting needs no innermost-wins
+rule: `@SuppressWarnings` has no negative form, so there is nothing an inner one could take back.
+
+A name none of the three vocabularies knows is **ignored silently**. `"unchecked"`, `"rawtypes"`,
+`"serial"`, an IntelliJ inspection id — a real Java corpus is full of names addressed to other tools,
+and JLS §9.6.4.5 leaves an unrecognized one to the compiler's discretion.
+
+Three things it deliberately does not do:
+
+- **`unused-imports` cannot be suppressed in source.** Java does not allow `@SuppressWarnings` on an
+  import declaration, and imports sit outside the type declaration that could carry one. The
+  `jalslint.toml` key is the answer; a file-level jals syntax would be a second suppression language.
+- **The match is syntactic**, on the annotation's last segment, so a user-defined
+  `com.acme.SuppressWarnings` matches too. Resolving the annotation type would make the suppression
+  map depend on the file's analysis — which the engine computes lazily, *after* rules start running.
+- **The `cfg` diagnostic is out of reach.** Not by a rule-name test but by construction: it is added
+  after suppression has already been applied, because it is the failure the compile frontend rejects
+  a build with rather than a judgement about the code.
+
 ### Options are values, never absent keys
 
 Where a rule has a choice, it is an enum with every reachable state named, and no unreachable one.
@@ -95,9 +133,15 @@ config can enable in any combination, including the combination neither of them 
 ### There is no level ladder below `allow` or above `error`
 
 rustc has four levels; jals has three. `deny` and `forbid` differ from each other only in whether an
-**in-source** attribute may override them, and jals has no in-source suppression to override with —
-see the roadmap below. A fourth level whose whole meaning is a mechanism that does not exist would
-behave exactly like `error` and read as though it did not.
+**in-source** suppression may override them — which jals now has, so the distinction is at last
+*expressible*. It still does not belong on this ladder: whether a diagnostic can be suppressed is a
+different axis from how loudly it speaks, and folding the two into one would tie the only value
+carrying the first to the loudest value of the second, leaving no way to write an unsuppressible
+warning or a suppressible error.
+
+Exactly one diagnostic must not be suppressible today — the `cfg` one above — and it is out of reach
+structurally, by living outside the rule table, not by sitting at a level. `forbid` is the open
+question a second such diagnostic would reopen.
 
 ## Roadmap: the rustc / clippy port
 
@@ -127,14 +171,20 @@ Ten of today's nineteen rules have **no** rustc or clippy ancestor and are jals'
 `[correctness]` rules that are Java semantics rustc has no analogue for, and `constant-condition`,
 `empty-catch` and `missing-braces`.
 
-### Prerequisite: in-source suppression
+### Prerequisite: in-source suppression — **done**
 
-jals has none today — a rule is levelled in `jalslint.toml` and nowhere else. A large part of the
-`N` bucket is only usable with it (`allow-attributes-without-reason`,
-`unfulfilled-lint-expectations`, and every rule whose false positives a project must silence one site
-at a time), and `@SuppressWarnings` is what Java spells it with. **This is the first item on the
-roadmap**, ahead of any individual rule, and it is what would make a `deny` / `forbid` distinction
-mean something.
+This was the first item on the roadmap, ahead of any individual rule, because a large part of the
+`N` bucket is only usable with it: every rule whose false positives a project must silence one site
+at a time, plus the two rows that are *about* suppression (`allow-attributes-without-reason`,
+`unfulfilled-lint-expectations`). Java spells it `@SuppressWarnings`, and jals reads it — see
+[In-source suppression](#in-source-suppression-suppresswarnings) above for the vocabulary and the
+two limits it keeps.
+
+The two rows that are about suppression stay in `N`, as rules rather than as parts of the mechanism.
+`unfulfilled-suppression` in particular needs a decision this mechanism has not made: rustc's
+`unfulfilled_lint_expectations` fires for `#[expect]` and never for `#[allow]`, Java has no `expect`,
+and reporting a `@SuppressWarnings` that suppressed nothing would strengthen allow-semantics into
+expect-semantics.
 
 ### The 286 planned rules, by section
 
@@ -485,3 +535,6 @@ mean something.
   config it passes down, and identically whichever entry point is used.
 - **Nothing inside a `cfg`-disabled region is reported.** The code will not be compiled, so findings
   there are noise; one geometric pass covers every rule at once.
+- **A `@SuppressWarnings` covers what its declaration contains, and the engine decides that** — one
+  place, before a finding becomes a diagnostic, so it reaches every rule and every host identically
+  and the fixed `cfg` diagnostic is outside it by construction.

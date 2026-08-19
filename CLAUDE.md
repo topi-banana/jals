@@ -292,7 +292,18 @@ filesystem reads into portable interfaces.
   is the config key and the diagnostic's `rule` field**, unique across sections. The engine emits
   exactly one diagnostic outside the table — `cfg`, a structurally malformed attribute — and it is
   fixed at `error` because it is the failure the compile frontend rejects a build with, not a
-  judgement. Two ledgers hold the crate's claims: `tests/registry.rs` joins the registry against the
+  judgement. In-source suppression is `@SuppressWarnings`, read from the CST and applied where a
+  finding *becomes* a diagnostic rather than as a post-pass: a suppression names a rule **or the
+  section it is configured under**, and a `Diagnostic` carries no `Category`, so filtering afterwards
+  would recover one through a second path. The vocabulary (`all`, a rule name, a section name) is
+  derived from the registry and `Category::ALL`, so a rule added later is suppressible the day it
+  lands and there is no second list — which is also how javac's `@SuppressWarnings("unused")` silences
+  the whole `[unused]` section for free. Running before the `cfg` errors are appended is what makes
+  that one diagnostic unsuppressible *structurally* instead of by a rule-name test. Two limits are
+  documented rather than solved: Java allows no annotation on an `import`, so `unused-imports` is
+  config-only, and the name match is syntactic on the annotation's last segment, because resolving
+  the annotation type would make the map depend on the analysis the rules have not run yet. Two
+  ledgers hold the crate's claims: `tests/registry.rs` joins the registry against the
   serialized schema in both directions, pins the default level set, and sweeps every schema option
   off its default requiring the linter to notice; `tests/inventory.rs` holds
   `inventory-rustc.tsv` / `inventory-clippy.tsv` — every rustc and clippy lint, in one of six
