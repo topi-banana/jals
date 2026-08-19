@@ -58,6 +58,7 @@ mod analysis;
 mod classpath;
 mod dead_if;
 mod def;
+mod imports;
 mod infer;
 mod project;
 mod reference;
@@ -70,6 +71,7 @@ mod ty;
 pub use analysis::{FileAnalysis, FileSemantics, TypedFile};
 pub use dead_if::DeadIf;
 pub use def::{Def, DefId, DefKind, Namespace};
+pub use imports::UnusedImport;
 pub use infer::{Completion, MismatchKind, Signature, SignatureHelp, TypeMismatch};
 pub use project::{
     FileFacts, FileId, Fqn, Item, ItemId, ItemOrigin, LoweredClasspath, Member, MemberId,

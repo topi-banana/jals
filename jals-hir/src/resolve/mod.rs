@@ -14,7 +14,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use hashbrown::HashSet;
-use jals_syntax::SyntaxKind::CALL_EXPR;
+use jals_syntax::SyntaxKind::{CALL_EXPR, CLASS_LITERAL, FIELD_ACCESS, METHOD_REF_EXPR};
 use jals_syntax::ast::{self, AstNode};
 use jals_syntax::cfg::CfgMap;
 use jals_syntax::{SyntaxNode, SyntaxToken};
@@ -33,6 +33,22 @@ pub(crate) struct Resolved {
     pub scopes: Vec<Scope>,
     /// Every examined reference, sorted by start offset.
     pub references: Vec<Reference>,
+    /// Simple names the file *mentions* where the file-local pass cannot bind them to a
+    /// definition: the right-hand name of a member access (`recv.name`) or a method reference
+    /// (`recv::name`), the left-hand name of a class literal (`X.class`), every segment of a
+    /// qualified type name (`Outer.Inner`), every segment of an annotation's name (`@Anno`), and
+    /// every identifier inside a `cfg`-disabled host — which binds nothing but still *spells* the
+    /// names of declarations that are themselves enabled. Each is stored decoded, like a [`Def`]'s
+    /// name.
+    ///
+    /// This is deliberately **not** resolution. A mention names no definition and two unrelated
+    /// declarations may share one; nothing here binds anything, and no [`Reference`] is recorded
+    /// for it. It exists because "unused" is a *negative*, and a negative needs to have looked
+    /// everywhere: a member or a nested type whose name is mentioned somewhere the resolver cannot
+    /// follow might be exactly the one meant, so its non-resolution is not evidence of disuse.
+    /// Over-approximating the set trades a false negative for never a false positive, which is the
+    /// only direction an unused diagnostic may err in.
+    pub mentions: HashSet<String>,
 }
 
 impl Resolved {
@@ -155,20 +171,47 @@ impl Resolved {
         ranges
     }
 
-    /// Every definition that no reference resolves to.
+    /// Every definition nothing in this file can be denoting.
     ///
-    /// This is the raw signal for unused-binding diagnostics; a consumer narrows it to the kinds it
-    /// cares about (e.g. local variables). Note that an unreferenced field or method is not
-    /// necessarily unused — it may be used from another file — so callers should filter by kind.
+    /// A use can look three ways, and a definition has to survive all three to be reported:
+    ///
+    /// - No recorded reference *resolves* to it.
+    /// - If it lives in the [method name-space](Namespace::Method), no call spells its name either.
+    ///   A method is overloadable and the scope chain binds a call to *a* declaration of the name
+    ///   rather than to the overload the arguments select — that needs types this pass has not got
+    ///   — so the name is the finest granularity it honestly has. Without this, eight of
+    ///   `java.util.Arrays`' nine `binarySearch0` overloads read as unused because the one call
+    ///   landed on the ninth.
+    /// - If it is a [kind a member access could name](DefKind::is_member), its name is not among
+    ///   the file's [mentions](Self::mentions). Without this, `this.x` and `Outer.Inner` are
+    ///   invisible here and every field, method, and nested type they name reads as unused.
+    ///
+    /// This is the raw signal for unused-binding diagnostics, and still only *file-local*: an
+    /// unreferenced field or method may be used from another file, so a consumer narrows it to the
+    /// kinds — and the visibility ([`Def::is_private`]) — whose answer one file completes.
     pub fn unused_defs(&self) -> impl Iterator<Item = &Def> {
-        let referenced: HashSet<DefId> = self
-            .references
-            .iter()
-            .filter_map(|r| r.resolution.def_id())
-            .collect();
-        self.defs
-            .iter()
-            .filter(move |d| !referenced.contains(&d.id))
+        // One pass, two indexes: the references are walked once and each is filed under whichever
+        // of the two tests it can answer.
+        let mut referenced: HashSet<DefId> = HashSet::new();
+        let mut called: HashSet<&str> = HashSet::new();
+        for reference in &self.references {
+            if let Some(id) = reference.resolution.def_id() {
+                referenced.insert(id);
+            }
+            if reference.namespace == Namespace::Method {
+                called.insert(reference.name.as_str());
+            }
+        }
+        // One early return per bullet above, in the order they cost.
+        self.defs.iter().filter(move |def| {
+            if referenced.contains(&def.id) {
+                return false;
+            }
+            if def.kind.namespace() == Namespace::Method && called.contains(def.name.as_str()) {
+                return false;
+            }
+            !def.kind.is_member() || !self.mentions.contains(def.name.as_str())
+        })
     }
 }
 
@@ -191,6 +234,8 @@ pub(crate) struct Resolver {
     defs: Vec<Def>,
     scopes: Vec<Scope>,
     raw_refs: Vec<RawRef>,
+    /// The names collected for [`Resolved::mentions`].
+    mentions: HashSet<String>,
     /// Amortized-yield countdown for the pass-1 walk (a field, not a local `Yielder`, because the
     /// walk is recursive — every visited node shares the one budget).
     yield_left: u32,
@@ -223,6 +268,7 @@ impl Resolver {
             defs: Vec::new(),
             scopes: vec![file_scope],
             raw_refs: Vec::new(),
+            mentions: HashSet::new(),
             yield_left: jals_exec::Yielder::DEFAULT_PERIOD,
         }
     }
@@ -259,6 +305,7 @@ impl Resolver {
             defs: self.defs,
             scopes: self.scopes,
             references,
+            mentions: self.mentions,
         }
     }
 
@@ -275,9 +322,21 @@ impl Resolver {
         id
     }
 
-    /// Registers a definition named by `name_tok` in `scope`, and returns its id.
-    fn add_def(&mut self, scope: ScopeId, kind: DefKind, name_tok: &SyntaxToken) -> DefId {
+    /// Registers a definition named by `name_tok` and declared by `decl` in `scope`, and returns
+    /// its id.
+    ///
+    /// `decl` is the declaring node rather than the name token's parent, because the two differ
+    /// where it matters: `int a, b;` is one `FIELD_DECL` binding two names, and both are `private`
+    /// exactly when the one declaration is.
+    fn add_def(
+        &mut self,
+        scope: ScopeId,
+        kind: DefKind,
+        name_tok: &SyntaxToken,
+        decl: &SyntaxNode,
+    ) -> DefId {
         let id = DefId(self.defs.len() as u32);
+        let facts = Collect::decl_facts(decl);
         self.defs.push(Def {
             id,
             kind,
@@ -285,6 +344,8 @@ impl Resolver {
             // definition on the raw text made it a different name from every plain-spelled use.
             name: jals_syntax::decoded_ident(name_tok).into_owned(),
             name_range: Collect::byte_range(name_tok),
+            is_private: facts.is_private,
+            is_annotated: facts.is_annotated,
             scope,
         });
         self.scopes[scope.0 as usize].defs.push(id);
@@ -300,14 +361,32 @@ impl Resolver {
         let Some(tok) = Collect::first_ident_token(node) else {
             return;
         };
-        let namespace = if node.parent().map(|p| p.kind()) == Some(CALL_EXPR) {
+        let parent = node.parent().map(|p| p.kind());
+        let namespace = if parent == Some(CALL_EXPR) {
             Namespace::Method
         } else {
             Namespace::Value
         };
+        let name = jals_syntax::decoded_ident(&tok).into_owned();
+        // A name in *qualifier* position (`Holder.numberGenerator`, `Holder::get`) is what JLS
+        // §6.5.2 calls an ambiguous name: it denotes a variable, or a type, or a package, and only
+        // reclassification decides which. This pass looks it up as a value and stops there, so a
+        // type used solely to qualify a static member resolves to nothing — which is why the name
+        // is also recorded as a mention, and why `UUID`'s `private static class Holder` is not
+        // read as unused for being reached only through `Holder.numberGenerator`.
+        //
+        // `Holder.class` is the same shape with the verdict already settled: a class literal's
+        // left-hand side is a *type* and nothing else (JLS §15.8.2), and the grammar spells a bare
+        // one as a `NAME_REF` — so the value-namespace lookup above can only miss, and without the
+        // mention every `private` nested type reached solely through `X.class` reads as dead.
+        if matches!(parent, Some(FIELD_ACCESS | METHOD_REF_EXPR | CLASS_LITERAL))
+            && !self.mentions.contains(&name)
+        {
+            self.mentions.insert(name.clone());
+        }
         self.raw_refs.push(RawRef {
             range: Collect::byte_range(&tok),
-            name: jals_syntax::decoded_ident(&tok).into_owned(),
+            name,
             namespace,
             scope,
             qualified: None,
@@ -330,6 +409,12 @@ impl Resolver {
         };
         // The full dotted text only for a qualified type (`a.b.C`); a bare name has no `.`.
         let qualified = ty.qualified_text().filter(|q| q.contains('.'));
+        // Every segment of a qualified name is a mention: the reference below carries only the
+        // simple name `C`, so without this an `Outer` that `Outer.Inner` names — a nested type, or
+        // the import that made the prefix nameable — has no trace in the analysis at all.
+        if qualified.is_some() {
+            self.record_mentions(node);
+        }
         self.raw_refs.push(RawRef {
             range: Collect::byte_range(&tok),
             name: jals_syntax::decoded_ident(&tok).into_owned(),
@@ -337,6 +422,68 @@ impl Resolver {
             scope,
             qualified,
         });
+    }
+
+    /// Records every `IDENT` directly under `node` in [`Resolved::mentions`], decoded.
+    ///
+    /// Direct tokens only, which is what makes one call fit all four mention shapes: a member
+    /// access and a method reference keep the member name as their own token while the receiver is
+    /// a child *node*, and a qualified name or an annotation name spells every segment as a direct
+    /// token of the one node passed in.
+    fn record_mentions(&mut self, node: &SyntaxNode) {
+        for tok in Collect::direct_ident_tokens(node) {
+            self.mention(&jals_syntax::decoded_ident(&tok));
+        }
+    }
+
+    /// Records one already-decoded name in [`Resolved::mentions`].
+    ///
+    /// The membership probe is not an optimization detail: `decoded_ident` borrows for a name
+    /// carrying no escape, so `into_owned()` allocates on *every* occurrence, and the same handful
+    /// of receivers (`System`, `Objects`, `this`-qualified fields) is spelled hundreds of times in
+    /// one file. Probing first allocates once per distinct name instead of once per occurrence, on
+    /// a pass that runs per keystroke.
+    fn mention(&mut self, name: &str) {
+        if !self.mentions.contains(name) {
+            self.mentions
+                .insert(alloc::string::ToString::to_string(name));
+        }
+    }
+
+    /// Records every `IDENT` anywhere under a `cfg`-disabled `node` as a mention.
+    ///
+    /// The host itself contributes no definition, no scope and no reference — the code will not be
+    /// compiled, so nothing in it may *bind*. But "unused" is a negative over the whole file, and
+    /// the declaration a disabled host names is usually **not** disabled: it serves the other
+    /// feature set, where the same file does use it. Dropping the host whole would make every
+    /// `private` member reached only from behind a flag read as dead, and the fix the diagnostic
+    /// asks for would break the build the flag turns on. That is the same argument
+    /// [`unused_imports`](crate::FileAnalysis::unused_imports) makes for reading an import's
+    /// evidence off the token stream, and this is where the binding analyses get it: a mention is
+    /// exactly the shape of evidence that says "somewhere in this file, someone spells this" while
+    /// binding nothing.
+    fn record_disabled_mentions(&mut self, node: &SyntaxNode) {
+        for tok in node
+            .descendants_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .filter(|tok| tok.kind() == jals_syntax::SyntaxKind::IDENT)
+        {
+            self.mention(&jals_syntax::decoded_ident(&tok));
+        }
+    }
+
+    /// Records an annotation's name segments as mentions.
+    ///
+    /// An annotation names a type, and the file-local pass records no reference for it: a `TYPE`
+    /// node is what [`record_type_ref`](Self::record_type_ref) reads, and `@Anno` has a
+    /// `QUALIFIED_NAME` instead. Recording it as a *mention* rather than as a reference keeps that
+    /// gap out of the unused analyses without also handing the project layer a type reference it
+    /// would then have to resolve — which would change what `cannot-resolve` reports, a separate
+    /// question from this one.
+    fn record_annotation_mention(&mut self, node: &SyntaxNode) {
+        if let Some(name) = ast::Annotation::cast(node.clone()).and_then(|a| a.name()) {
+            self.record_mentions(name.syntax());
+        }
     }
 
     /// Looks `name` up from `scope` outward, in name-space `ns`.

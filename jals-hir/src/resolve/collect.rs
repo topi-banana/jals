@@ -7,8 +7,18 @@
 use alloc::vec::Vec;
 use core::ops::Range;
 
-use jals_syntax::SyntaxKind::{IDENT, TYPE_PATTERN};
+use jals_syntax::SyntaxKind::{ANNOTATION, IDENT, MODIFIERS, PRIVATE_KW, TYPE_PATTERN};
 use jals_syntax::{SyntaxElement, SyntaxNode, SyntaxToken};
+
+/// What a declaration node says about itself beyond the name it binds — the two facts
+/// [`Def`](crate::Def) carries so a consumer need not walk back to the CST for them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DeclFacts {
+    /// The declaration is written `private`.
+    pub is_private: bool,
+    /// At least one annotation is written on the declaration.
+    pub is_annotated: bool,
+}
 
 /// Namespace for the CST token/range extraction helpers shared across the resolver, the project
 /// index, and inference.
@@ -44,6 +54,50 @@ impl Collect {
             .filter(|n| n.kind() == TYPE_PATTERN)
             .filter_map(|n| Self::first_ident_token(&n))
             .collect()
+    }
+
+    /// What the declaration `node` says about itself: `private`, and whether anything annotates it.
+    ///
+    /// Two shapes carry an annotation and the grammar keeps them apart, so both are read: most
+    /// declarations park theirs inside the `MODIFIERS` child, while a type parameter, an enum
+    /// constant, and a parameter's type-use position write them as direct `ANNOTATION` children.
+    /// A declaration with neither — a pattern variable, a lambda parameter written bare — yields
+    /// the default, which is the honest answer rather than a missing one.
+    pub(crate) fn decl_facts(node: &SyntaxNode) -> DeclFacts {
+        let mut facts = DeclFacts::default();
+        // One walk of the child list, not one per question: this runs for every definition the
+        // resolver registers, which is a four-figure count on a large file.
+        for child in node.children() {
+            match child.kind() {
+                ANNOTATION => facts.is_annotated = true,
+                MODIFIERS => {
+                    facts.is_private |=
+                        Self::direct_tokens(&child).any(|token| token.kind() == PRIVATE_KW);
+                    facts.is_annotated |= child.children().any(|inner| inner.kind() == ANNOTATION);
+                }
+                _ => {}
+            }
+        }
+        facts
+    }
+
+    /// The byte span of `node` with the trivia rowan parks inside it trimmed off both ends.
+    ///
+    /// This CST attaches the trivia between two siblings to the *following* node, so a declaration's
+    /// own range starts at the newline before it and a diagnostic drawn over it would underline the
+    /// blank line above rather than the code. A node holding no significant token at all (error
+    /// recovery) keeps its whole span: there is nothing better to point at.
+    pub(crate) fn significant_span(node: &SyntaxNode) -> Range<usize> {
+        let mut tokens = node
+            .descendants_with_tokens()
+            .filter_map(SyntaxElement::into_token)
+            .filter(|token| !token.kind().is_trivia())
+            .map(|token| token.text_range());
+        let Some(first) = tokens.next() else {
+            return Self::node_span(node);
+        };
+        let last = tokens.last().unwrap_or(first);
+        usize::from(first.start())..usize::from(last.end())
     }
 
     /// The byte range of `token` in the source.

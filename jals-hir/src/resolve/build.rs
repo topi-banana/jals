@@ -5,11 +5,12 @@
 //! records the `NAME_REF`s it meets (deeper resolution happens in pass 2).
 
 use jals_syntax::SyntaxKind::{
-    ANNOTATION_TYPE_DECL, BLOCK, CATCH_CLAUSE, CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL,
-    ENUM_CONSTANT, ENUM_DECL, FIELD_DECL, FOR_EACH_STMT, FOR_STMT, INTERFACE_DECL, LAMBDA_EXPR,
-    LOCAL_VAR_DECL, METHOD_DECL, NAME_REF, NEW_EXPR, PARAM, PARAM_LIST, RECORD_COMPONENT,
-    RECORD_DECL, RECORD_HEADER, SWITCH_EXPR, SWITCH_GROUP, SWITCH_LABEL, SWITCH_RULE, SWITCH_STMT,
-    TRY_STMT, TYPE, TYPE_PARAM, TYPE_PARAMS, TYPE_PATTERN,
+    ANNOTATION, ANNOTATION_TYPE_DECL, BLOCK, CATCH_CLAUSE, CLASS_BODY, CLASS_DECL,
+    CONSTRUCTOR_DECL, ENUM_CONSTANT, ENUM_DECL, FIELD_ACCESS, FIELD_DECL, FOR_EACH_STMT, FOR_STMT,
+    INTERFACE_DECL, LAMBDA_EXPR, LOCAL_VAR_DECL, METHOD_DECL, METHOD_REF_EXPR, MODIFIERS, NAME_REF,
+    NEW_EXPR, PARAM, PARAM_LIST, RECORD_COMPONENT, RECORD_DECL, RECORD_HEADER, SWITCH_EXPR,
+    SWITCH_GROUP, SWITCH_LABEL, SWITCH_RULE, SWITCH_STMT, TRY_STMT, TYPE, TYPE_PARAM, TYPE_PARAMS,
+    TYPE_PATTERN,
 };
 use jals_syntax::SyntaxNode;
 use jals_syntax::ast::{
@@ -39,10 +40,13 @@ impl Resolver {
     /// The per-node dispatch behind [`Resolver::build`].
     async fn build_impl(&mut self, node: &SyntaxNode, scope: ScopeId) {
         self.tick().await;
-        // A `cfg`-disabled host contributes nothing: no definition, no scope, and — because every
+        // A `cfg`-disabled host binds nothing: no definition, no scope, and — because every
         // recursion re-enters through here — no reference from anywhere inside it (Rust parity
-        // with the compile frontend blanking the whole host).
+        // with the compile frontend blanking the whole host). Its names are still *spelled*
+        // though, and the declaration they name is usually enabled, so they are kept as mentions:
+        // see [`record_disabled_mentions`](super::Resolver::record_disabled_mentions).
         if self.cfg.disables_node(node) {
+            self.record_disabled_mentions(node);
             return;
         }
         match node.kind() {
@@ -53,7 +57,7 @@ impl Resolver {
             FIELD_DECL => {
                 if let Some(field) = FieldDecl::cast(node.clone()) {
                     for tok in field.names() {
-                        self.add_def(scope, DefKind::Field, &tok);
+                        self.add_def(scope, DefKind::Field, &tok, node);
                     }
                 }
                 self.build_children(node, scope).await;
@@ -61,7 +65,7 @@ impl Resolver {
             LOCAL_VAR_DECL => {
                 if let Some(local) = LocalVarDecl::cast(node.clone()) {
                     for tok in local.names() {
-                        self.add_def(scope, DefKind::Local, &tok);
+                        self.add_def(scope, DefKind::Local, &tok, node);
                     }
                 }
                 self.build_children(node, scope).await;
@@ -80,7 +84,7 @@ impl Resolver {
                 if let Some(tok) = Collect::direct_ident_tokens(node).next()
                     && !in_label
                 {
-                    self.add_def(scope, DefKind::PatternVar, &tok);
+                    self.add_def(scope, DefKind::PatternVar, &tok, node);
                 }
                 self.build_children(node, scope).await;
             }
@@ -110,6 +114,18 @@ impl Resolver {
                 }
             }
             NAME_REF => self.record_ref(scope, node),
+            // `recv.name` and `recv::name`: the member name needs the receiver's *type* to bind,
+            // which no file-local pass has. It is recorded as a mention rather than dropped, so a
+            // member of that name is not then read as unused; the receiver is a child node and
+            // recurses below like any other expression.
+            FIELD_ACCESS | METHOD_REF_EXPR => {
+                self.record_mentions(node);
+                self.build_children(node, scope).await;
+            }
+            ANNOTATION => {
+                self.record_annotation_mention(node);
+                self.build_children(node, scope).await;
+            }
             TYPE => {
                 // A type-name occurrence is a Type-namespace reference. Recurse so that nested type
                 // arguments (`List<Foo>` — the inner `Foo`) are recorded as their own references.
@@ -137,7 +153,7 @@ impl Resolver {
         };
         // The type's own name lives in the *enclosing* scope, visible to its siblings.
         if let Some(tok) = Collect::first_ident_token(node) {
-            self.add_def(scope, kind, &tok);
+            self.add_def(scope, kind, &tok, node);
         }
         let ts = self.new_scope(ScopeKind::Type, scope, node);
         self.register_type_params(node, ts);
@@ -145,7 +161,7 @@ impl Resolver {
         if let Some(header) = node.children().find(|c| c.kind() == RECORD_HEADER) {
             for comp in header.children().filter(|c| c.kind() == RECORD_COMPONENT) {
                 if let Some(tok) = Collect::first_ident_token(&comp) {
-                    self.add_def(ts, DefKind::Field, &tok);
+                    self.add_def(ts, DefKind::Field, &tok, &comp);
                 }
             }
         }
@@ -159,7 +175,7 @@ impl Resolver {
             DefKind::Method
         };
         if let Some(tok) = Collect::first_ident_token(node) {
-            self.add_def(scope, kind, &tok);
+            self.add_def(scope, kind, &tok, node);
         }
         let ms = self.new_scope(ScopeKind::Method, scope, node);
         self.register_type_params(node, ms);
@@ -169,7 +185,7 @@ impl Resolver {
         if has_body && let Some(plist) = node.children().find(|c| c.kind() == PARAM_LIST) {
             for p in plist.children().filter(|c| c.kind() == PARAM) {
                 if let Some(tok) = Collect::first_ident_token(&p) {
-                    self.add_def(ms, DefKind::Param, &tok);
+                    self.add_def(ms, DefKind::Param, &tok, &p);
                 }
             }
         }
@@ -180,7 +196,7 @@ impl Resolver {
         if let Some(tps) = node.children().find(|c| c.kind() == TYPE_PARAMS) {
             for tp in tps.children().filter(|c| c.kind() == TYPE_PARAM) {
                 if let Some(tok) = Collect::first_ident_token(&tp) {
-                    self.add_def(scope, DefKind::TypeParam, &tok);
+                    self.add_def(scope, DefKind::TypeParam, &tok, &tp);
                 }
             }
         }
@@ -188,7 +204,7 @@ impl Resolver {
 
     async fn build_enum_constant(&mut self, node: &SyntaxNode, scope: ScopeId) {
         if let Some(tok) = Collect::first_ident_token(node) {
-            self.add_def(scope, DefKind::EnumConstant, &tok);
+            self.add_def(scope, DefKind::EnumConstant, &tok, node);
         }
         for child in node.children() {
             if child.kind() == CLASS_BODY {
@@ -211,7 +227,13 @@ impl Resolver {
             return;
         };
         if let Some(tok) = Collect::first_ident_token(node) {
-            self.add_def(fs, DefKind::Local, &tok);
+            self.add_def(fs, DefKind::Local, &tok, node);
+        }
+        // The declaration's own modifiers — where an annotation on the loop variable lives — are
+        // walked like any other child, so `for (@Marker String s : xs)` mentions `Marker`. Without
+        // this the annotation type it names has no trace in the analysis at all.
+        for modifiers in node.children().filter(|c| c.kind() == MODIFIERS) {
+            self.build(&modifiers, fs).await;
         }
         // The element type is a type reference (`for (Foo f : ...)`); it does not see the variable.
         if let Some(ty) = fe.ty() {
@@ -251,7 +273,7 @@ impl Resolver {
         let rs = self.new_scope(ScopeKind::Resources, scope, res.syntax());
         for r in res.resources() {
             if let Some(tok) = Resource::cast(r.syntax().clone()).and_then(|r| r.binding()) {
-                self.add_def(rs, DefKind::Resource, &tok);
+                self.add_def(rs, DefKind::Resource, &tok, r.syntax());
             }
             // A resource initializer can reference resources declared before it (sequential).
             self.build_children(r.syntax(), rs).await;
@@ -265,7 +287,7 @@ impl Resolver {
             return;
         };
         if let Some(tok) = catch.binding() {
-            self.add_def(cs, DefKind::CatchParam, &tok);
+            self.add_def(cs, DefKind::CatchParam, &tok, node);
         }
         // Recurse every child node (the caught type(s) and the block) in the catch scope; the
         // binding is a bare token, not a node, so it is not revisited here. This records the
@@ -293,7 +315,7 @@ impl Resolver {
                     let ss = self.new_scope(ScopeKind::Switch, scope, &child);
                     for label in child.children().filter(|c| c.kind() == SWITCH_LABEL) {
                         for tok in Collect::pattern_var_tokens(&label) {
-                            self.add_def(ss, DefKind::PatternVar, &tok);
+                            self.add_def(ss, DefKind::PatternVar, &tok, &label);
                         }
                     }
                     // Guard and body resolve in the switch scope, seeing the pattern variables.
@@ -312,12 +334,14 @@ impl Resolver {
         if let Some(params) = lambda.params() {
             for p in params.params() {
                 if let Some(tok) = Collect::first_ident_token(p.syntax()) {
-                    self.add_def(ls, DefKind::LambdaParam, &tok);
+                    self.add_def(ls, DefKind::LambdaParam, &tok, p.syntax());
                 }
-                // An explicitly-typed parameter (`(Foo f) -> ...`) contributes a type reference.
-                for ty in p.syntax().children().filter(|c| c.kind() == TYPE) {
-                    self.build(&ty, ls).await;
-                }
+                // Every child but the name token: an explicitly-typed parameter
+                // (`(Foo f) -> ...`) contributes a type reference, and the annotations a parameter
+                // may carry — in its `MODIFIERS` child or as direct `ANNOTATION` children —
+                // contribute the mentions that keep the annotation type they name from reading as
+                // unused. The name itself is a token, not a node, so it is not revisited here.
+                self.build_children(p.syntax(), ls).await;
             }
         }
         if let Some(b) = lambda.block_body() {
