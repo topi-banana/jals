@@ -41,6 +41,14 @@ fn javaish() -> impl Strategy<Value = String> {
             Just("1"),
             Just("// c\n"),
             Just("/* b */"),
+            // The suppression vocabulary, shredded like everything else here: the extractor walks
+            // annotations before any analysis runs, so an unclosed argument list or an annotation
+            // with no declaration after it reaches it as readily as a well-formed one.
+            Just("@SuppressWarnings"),
+            Just("@java.lang.SuppressWarnings"),
+            Just("value"),
+            Just("\"unused\""),
+            Just("\"all\""),
             Just("\n"),
             Just(" "),
         ],

@@ -7,6 +7,9 @@
 # A rule's value is its level ("allow" / "warn" / "error"), or a table of that level and the rule's
 # own options. `level` is the reserved key inside the table form, and it may be omitted — a table
 # that sets only options keeps the rule's built-in level rather than restating it.
+#
+# This file levels a rule for the whole tree below it. One declaration opts out in source with
+# `@SuppressWarnings`, naming a rule ("unused-variables"), a section ("unused") or "all".
 
 # The code is wrong: it does not resolve, or it contradicts its own types.
 [correctness]

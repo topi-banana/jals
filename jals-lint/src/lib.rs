@@ -23,11 +23,18 @@
 //! gives its key, and a `jalslint.toml` may set any rule to `allow` / `warn` / `error` and
 //! configure whatever options the rule takes. [`RuleInfo::all`] enumerates the whole registry. Rules are
 //! read-only and never modify the source.
+//!
+//! A config levels a rule for a whole directory tree; `@SuppressWarnings` levels it for one
+//! declaration. It is read here, from the CST alone, and applied as each rule's findings are
+//! stamped — so it reaches every rule and every host at once, and the one diagnostic outside the
+//! rule table (`cfg`) is out of its reach by construction. The vocabulary and its two documented
+//! limits are in [`suppress`]'s module docs.
 
 extern crate alloc;
 
 mod diagnostic;
 mod rules;
+mod suppress;
 
 use alloc::vec::Vec;
 use core::cell::OnceCell;
@@ -39,6 +46,7 @@ use jals_syntax::cfg::CfgMap;
 use jals_syntax::{Parse, SyntaxNode};
 
 use rules::{Checker, FeatureGate, Finding};
+use suppress::SuppressionMap;
 
 pub use diagnostic::{Diagnostic, LintOutput};
 
@@ -166,6 +174,13 @@ impl LintOutput {
     /// run at all, which covers the one rule that still reports file-locally. The caller's
     /// *analysis* is kept either way: it is the analysis of this tree, broken or not.
     ///
+    /// In-source suppression is applied where a finding becomes a diagnostic, and deliberately not
+    /// as a post-pass beside the `cfg` one: a `@SuppressWarnings` names a rule *or* the section it
+    /// is configured under, and a [`Diagnostic`] carries no category, so filtering afterwards would
+    /// have to recover one through a second path. Running before the `cfg` errors are appended is
+    /// what makes the fixed `cfg` diagnostic unsuppressible structurally rather than by a
+    /// rule-name test.
+    ///
     /// The `cfg` map applies twice: resolution skips disabled hosts (so resolution-based rules
     /// never see a disabled definition), and a post-pass drops any finding whose range lands
     /// inside a disabled host (covering the syntactic rules, which walk the raw CST). Note the
@@ -182,6 +197,7 @@ impl LintOutput {
         let supplied = file.map(FileSemantics::analysis);
         let project = if clean { file } else { None };
         let analysis = OnceCell::new();
+        let suppressions = OnceCell::new();
         let mut diagnostics = Vec::new();
         for rule in rules::RULES {
             let severity = (rule.level)(config);
@@ -225,6 +241,16 @@ impl LintOutput {
                 }
             };
             for finding in findings {
+                // In-source suppression, and the reason it is here rather than in the post-pass
+                // below: a `@SuppressWarnings` names a rule *or the section it is configured
+                // under*, and a `Diagnostic` deliberately carries no category, so filtering
+                // afterwards would mean looking the rule up again through a second path.
+                if Self::suppressions_once(&suppressions, root)
+                    .await
+                    .suppresses(rule, &finding.range)
+                {
+                    continue;
+                }
                 diagnostics.push(Diagnostic::new(rule, severity, finding));
             }
         }
@@ -259,6 +285,20 @@ impl LintOutput {
     /// per open file, and resolving again here would do identical work a second time on every
     /// keystroke. It is the caller's obligation that it matches `root` and `cfg`
     /// ([`LintRequest::file`]); the cell is only the fallback for a caller that has none.
+    /// The file's `@SuppressWarnings` map, computed at most once per lint and only once a rule has
+    /// something to report — a configuration whose enabled rules all come back empty never walks
+    /// the tree for it. Same async-once shape as [`analysis_once`](Self::analysis_once), and benign
+    /// for the same reason: the walk is pure.
+    async fn suppressions_once<'c>(
+        cell: &'c OnceCell<SuppressionMap>,
+        root: &SyntaxNode,
+    ) -> &'c SuppressionMap {
+        if cell.get().is_none() {
+            let _ = cell.set(SuppressionMap::compute(root).await);
+        }
+        cell.get().expect("the cell was just filled")
+    }
+
     async fn analysis_once<'c>(
         cell: &'c OnceCell<FileAnalysis>,
         supplied: Option<&'c FileAnalysis>,

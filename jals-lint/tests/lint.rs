@@ -1170,3 +1170,171 @@ fn cfg_none_still_lints_everything() {
     let out = lint(src);
     assert!(out.contains("empty-catch"), "{out}");
 }
+
+// ===== in-source suppression (`@SuppressWarnings`) =====
+
+#[test]
+fn suppression_by_rule_name() {
+    // The narrowest spelling: the name the diagnostic carries, which is also the `jalslint.toml`
+    // key — so a reported finding names the string that silences it, in the config *and* here.
+    check(
+        "class C { void m() { int unused = 1; if (true) { g(); } } void g() {} }",
+        expect![[r"
+            unused-variables:25..31: unused local variable `unused`
+            constant-condition:41..45: `if` condition is always true
+        "]],
+    );
+    check(
+        "class C { @SuppressWarnings(\"unused-variables\") void m() { int unused = 1; if (true) { g(); } } void g() {} }",
+        expect![[r"
+            constant-condition:79..83: `if` condition is always true
+        "]],
+    );
+}
+
+#[test]
+fn suppression_by_section_name() {
+    // A section name suppresses every rule configured under it. This is the compatibility that
+    // matters most: javac's `@SuppressWarnings("unused")` and jals's `[unused]` section are the
+    // same word, so the annotation a Java codebase already carries silences the section — here
+    // both `unused-variables` and `dead-code`, which are two rules and one defect class.
+    let src = "class C { private int dead; void m() { int unused = 1; } }";
+    check(
+        src,
+        expect![[r"
+            dead-code:22..26: unused private field `dead`
+            unused-variables:43..49: unused local variable `unused`
+        "]],
+    );
+    check(
+        "@SuppressWarnings(\"unused\") class C { private int dead; void m() { int unused = 1; } }",
+        expect![""],
+    );
+}
+
+#[test]
+fn all_suppresses_every_rule() {
+    // javac's catch-all, and the one name that is neither a rule nor a section.
+    check(
+        "@SuppressWarnings(\"all\") class C { private int dead; void m() { int unused = 1; if (true) { g(); } } void g() {} }",
+        expect![""],
+    );
+}
+
+#[test]
+fn the_array_and_value_spellings_suppress() {
+    // The three legal argument shapes reach the same map; `tests/../src/suppress.rs` pins the
+    // extraction, and this pins that each one actually silences.
+    let bare = "class C { void m() { int unused = 1; if (true) { g(); } } void g() {} }";
+    assert!(!lint(bare).is_empty(), "the fixture must lint");
+    for annotation in [
+        "@SuppressWarnings({\"unused-variables\", \"constant-condition\"})",
+        "@SuppressWarnings(value = \"all\")",
+        "@SuppressWarnings(value = {\"unused\", \"suspicious\"})",
+    ] {
+        assert_eq!(
+            lint(&format!("{annotation} {bare}")),
+            "",
+            "`{annotation}` suppressed nothing"
+        );
+    }
+}
+
+#[test]
+fn a_suppression_covers_what_the_declaration_contains() {
+    // Containment, over the host's whole significant span: one annotation on the type silences a
+    // finding several levels down. Nesting needs no innermost-wins rule — `@SuppressWarnings` has
+    // no negative form, so there is nothing an inner annotation could take back.
+    check(
+        "@SuppressWarnings(\"unused-variables\")\nclass C { class Inner { void m() { int unused = 1; } } }",
+        expect![""],
+    );
+    // …and it covers only what it contains: the sibling method keeps its finding.
+    check(
+        "class C {\n  @SuppressWarnings(\"unused-variables\")\n  void m() { int a = 1; }\n  void n() { int b = 2; }\n}",
+        expect![[r"
+            unused-variables:93..94: unused local variable `b`
+        "]],
+    );
+}
+
+#[test]
+fn an_unknown_suppression_name_changes_nothing() {
+    // `unchecked`, `rawtypes`, `serial`, an IntelliJ inspection id: a real Java corpus is full of
+    // names addressed to other tools, and JLS §9.6.4.5 leaves an unrecognized one to the
+    // compiler's discretion. Ignoring it silently is that discretion — reporting it would make
+    // every ported codebase noisy about annotations javac accepts.
+    let src = "class C { @SuppressWarnings(\"unchecked\") void m() { int unused = 1; } }";
+    check(
+        src,
+        expect![[r"
+            unused-variables:56..62: unused local variable `unused`
+        "]],
+    );
+}
+
+#[test]
+fn a_qualified_suppress_warnings_suppresses() {
+    // `@java.lang.SuppressWarnings` is the same annotation, and the match is on the last segment.
+    check(
+        "class C { @java.lang.SuppressWarnings(\"unused\") void m() { int unused = 1; } }",
+        expect![""],
+    );
+}
+
+#[test]
+fn an_import_cannot_be_suppressed_in_source() {
+    // A stated limitation rather than a gap to fill. Java does not allow `@SuppressWarnings` on an
+    // import declaration, and imports sit outside the type declaration that could carry one — so
+    // even `"all"` on the class leaves `unused-imports` reporting. The `jalslint.toml` key is the
+    // answer; a file-level jals syntax would be a second suppression language.
+    check(
+        "import java.util.List;\n@SuppressWarnings(\"all\")\nclass C {}\n",
+        expect![[r"
+            unused-imports:0..22: unused import `java.util.List`
+        "]],
+    );
+}
+
+#[test]
+fn suppression_is_the_only_path_left_when_annotated_members_are_reported() {
+    // `dead-code` answers this question twice over, and the two must not be confused. By default
+    // *any* annotation exempts a private member (`AnnotatedMembers::Skip`: `@Inject` and friends
+    // reach a member without naming it), so a `@SuppressWarnings` there is not what silences it.
+    // A project that sets `annotated = "report"` has turned that reading off — and then suppression
+    // is the only thing left, which is the configuration where this map is load-bearing for the
+    // rule.
+    let src = "class C { @SuppressWarnings(\"dead-code\") private int f; }";
+    let mut config = Config::default();
+    config.unused.dead_code.options.annotated = AnnotatedMembers::Report;
+    let out = jals_exec::block_on_inline(LintOutput::lint_source(src, &config));
+    assert!(
+        out.diagnostics.iter().all(|d| d.rule != "dead-code"),
+        "the suppression must survive `annotated = \"report\"`: {out:?}"
+    );
+    // …and without it the same configuration reports, so the fixture really is testing the
+    // suppression rather than an exemption that was going to apply anyway.
+    let out = jals_exec::block_on_inline(LintOutput::lint_source(
+        "class C { @Deprecated private int f; }",
+        &config,
+    ));
+    assert!(
+        out.diagnostics.iter().any(|d| d.rule == "dead-code"),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn a_structural_attribute_error_is_not_suppressible() {
+    // The one diagnostic outside the rule table. A malformed attribute is the failure the compile
+    // frontend rejects a build with, not a judgement about the code, so it is fixed at `error` and
+    // has no `jalslint.toml` key — and by the same argument no `@SuppressWarnings` reaches it.
+    // Structural rather than a `rule == "cfg"` test: the filter runs before the `cfg` errors are
+    // added at all.
+    let src = "class C {\n  @SuppressWarnings(\"all\")\n  void m() {\n    #[nope]\n    int x = 1;\n  }\n}";
+    let out = lint_with_cfg(src, &[]);
+    assert!(
+        out.contains("cfg:") && out.contains("unknown attribute `nope`"),
+        "the fixed `cfg` diagnostic must survive `all`: {out}"
+    );
+}

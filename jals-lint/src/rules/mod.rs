@@ -135,8 +135,9 @@ impl FeatureGate {
     }
 }
 
-/// The byte range a node's **significant** tokens span, for the three rules that need a node's
-/// extent rather than its subtree.
+/// The byte range a node's **significant** tokens span, for the rules that need a node's extent
+/// rather than its subtree — and for the suppression map, which ranges an annotated declaration
+/// the same way.
 ///
 /// The two are not the same, and the difference is a bug the first time each rule meets it: rowan
 /// parks a node's leading trivia *inside* the node, so a statement written on its own line begins,
@@ -148,7 +149,7 @@ pub(crate) struct Significant;
 impl Significant {
     /// `node`'s first significant token's start through its last significant token's end, or
     /// `None` when it holds no significant token at all (error recovery).
-    fn range(node: &SyntaxNode) -> Option<Range<usize>> {
+    pub(crate) fn range(node: &SyntaxNode) -> Option<Range<usize>> {
         let mut ranges = node
             .descendants_with_tokens()
             .filter_map(jals_syntax::SyntaxElement::into_token)

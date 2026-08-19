@@ -42,11 +42,17 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// destination draws. [`Allow`](Self::Allow) is why they are two types: it is a level and not a
 /// severity, because a rule set to it never runs and so never reaches a destination.
 ///
-/// There are three levels and not rustc's four: `deny` and `forbid` differ from each other only in
-/// whether an **in-source** attribute may override them, and jals has no in-source suppression to
-/// override with (`jals-lint/README.md` § Roadmap records that as planned work). A fourth level
-/// whose whole meaning is a mechanism that does not exist would be a level that behaves exactly
-/// like [`Error`](Self::Error) and reads as though it did not.
+/// There are three levels and not rustc's four. `deny` and `forbid` differ from each other only in
+/// whether an **in-source** suppression may override them, which jals now has — `@SuppressWarnings`,
+/// read by `jals-lint` — so the distinction is at last *expressible*. It still does not belong on
+/// this ladder: whether a diagnostic can be suppressed is a different axis from how loudly it
+/// speaks, and folding it in would tie the only value that carries it to the loudest severity, so a
+/// project could not have an unsuppressible warning or a suppressible error.
+///
+/// Exactly one diagnostic must not be suppressible today — a structurally malformed `#[cfg(…)]`,
+/// which is the failure the compile frontend rejects a build with rather than a judgement about the
+/// code — and it is out of reach *structurally*, by living outside the rule table entirely, not by
+/// sitting at a level. `forbid` is the open question a second such diagnostic would reopen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LintLevel {
