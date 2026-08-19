@@ -53,7 +53,7 @@ build front end (`jals build` / `run` / `clean` / `init`) wraps the JDK's `javac
 | [`jals-editor`](jals-editor)         | Protocol-neutral editor semantics (definition, references, hover, completion, signature help, and highlights) plus UTF-8 byte/UTF-16 coordinate conversion, shared by the LSP and browser playground.                                                                                                                                                                                                               |
 | [`jals-syntax`](jals-syntax)         | A lossless Java lexer and an error-resilient CST parser (`rowan`), plus a typed AST layer over the CST. The shared foundation for every other tool.                                                                                                                                                                                                                                                                 |
 | [`jals-fmt`](jals-fmt)               | **WIP (rewrite in progress).** A Wadler/Prettier-style pretty-printer driven by the `jals-syntax` CST — currently a no-op that returns its input unchanged.                                                                                                                                                                                                                                                         |
-| [`jals-lint`](jals-lint)             | The linter (`jals lint` via `jals-cli`): a rule registry over the CST plus `jals-hir` — unused bindings/members/imports, type mismatches, unreported exceptions, dead (constant) conditionals, and feature-gated preview-feature checks.                                                                                                                                                                                              |
+| [`jals-lint`](jals-lint)             | The linter (`jals lint` via `jals-cli`): a rule registry over the CST plus `jals-hir` — 19 rules in 10 defect-class sections, each configured by name in `jalslint.toml`. Its ledger places every rustc and clippy lint against a jals rule or a stated reason not to have one.                                                                                                                                                                                              |
 | [`jals-hir`](jals-hir)               | Name resolution, a cross-file project type index, and type inference/checking over the CST — the semantic foundation the linter and LSP build on. Also bridges in external types from a compiled classpath.                                                                                                                                                                                                         |
 | [`jals-classfile`](jals-classfile)   | A complete, byte-exact read/write model of the JVM `.class` file format (JVMS ch. 4).                                                                                                                                                                                                                                                                                                                               |
 | [`jals-decompile`](jals-decompile)   | Reconstructs readable Java from a parsed `.class` file: type/signature rendering, initializers, declared `throws`, and (incrementally) full method-body decompilation from bytecode.                                                                                                                                                                                                                                |
@@ -243,23 +243,42 @@ jals lint src/Main.java src/Util.java
 jals lint src/
 ```
 
-`jals lint` checks unresolvable type names, unused bindings (`unused-variables`), unused `private`
-members (`dead-code`) and unused imports (`unused-imports`), type mismatches, unreported checked
-exceptions, dead (constant-condition) branches, and feature-gated preview features, using name
-resolution and type inference (`jals-hir`) — not just pattern matching over the syntax tree. Every
-check is a named rule, so any of them (`cannot-resolve` included) can be re-levelled or switched
-off — the three unused checks are three such rules, named after their `rustc` counterparts, so each
-is re-levelled on its own. A locally scoped binding whose name starts with `_` is exempt from
-`unused-variables` — that is how to spell a name the syntax demands and the code does not want, such
-as the unused parameter of an `@Override`.
+`jals lint` runs **19 rules in 10 sections**, using name resolution and type inference
+(`jals-hir`) — not just pattern matching over the syntax tree: unresolvable names, type mismatches
+and unreported checked exceptions (`[correctness]`); feature-gated preview and dialect syntax
+(`[compatibility]`); dead constant-condition branches and silently swallowed exceptions
+(`[suspicious]`); unused bindings, imports and `private` members (`[unused]`); and the
+`[complexity]` / `[performance]` / `[style]` / `[naming]` / `[documentation]` / `[restriction]`
+rules. Every check is a named rule, so any of them (`cannot-resolve` included) can be re-levelled or
+switched off. A locally scoped binding whose name starts with `_` is exempt from `unused-variables` —
+that is how to spell a name the syntax demands and the code does not want, such as the unused
+parameter of an `@Override`.
 If a `jals.toml` manifest is discovered, its `[build] classpath` and `[dependencies]` are resolved so
-types from external libraries are understood too. Configure via `jalslint.toml` (discovered the same
-way as `jalsfmt.toml`).
+types from external libraries are understood too.
 
-> The single `unused-local` rule was split into `unused-variables`, `unused-imports` and
-> `dead-code`. A `jalslint.toml` still spelling `[rules] unused-local` now matches no rule — the key
-> is silently ignored, so replace it with whichever of the three it was meant to level. A
-> suppression written for an unavoidable parameter is `unused-variables`.
+Configure via `jalslint.toml` (discovered the same way as `jalsfmt.toml`). A rule's value is its
+level, or a table of that level and the rule's own options:
+
+```toml
+[unused]
+dead-code = "allow"
+
+[style]
+missing-braces = { level = "warn", policy = "multi-line" }
+```
+
+[`jals-lint/README.md`](jals-lint/README.md) is the rule list, the configuration reference, and the
+roadmap for porting the rest of rustc's and clippy's lints;
+[`jals-lint/MAPPING-rustc-clippy.md`](jals-lint/MAPPING-rustc-clippy.md) is the ledger that places
+every one of their 1,059 lints.
+
+> **`jalslint.toml` changed shape.** The flat `[rules]` table is gone: a rule is now written under
+> the section of the defect class it reports, so `[rules] wildcard-import = "allow"` becomes
+> `[style] wildcard-import = "allow"`. A key this jals does not define is **kept, not rejected** —
+> one stale name must not stop the rest of the file from loading — and `jals lint` prints
+> `warning: <file>: unknown lint key <key>` for each, so nothing goes quiet. The older
+> `[rules] unused-local` split into `unused-variables`, `unused-imports` and `dead-code`; a
+> suppression written for an unavoidable parameter is `[unused] unused-variables`.
 
 ### Run the language server
 

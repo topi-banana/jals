@@ -66,12 +66,26 @@ filesystem reads into portable interfaces.
 - `jals-storage`: typed keys, immutable revisions, transactions, overlays, cache, memory/native
   adapters. Only `native.rs` may use `std::path`/`std::fs`.
 - `jals-config`: pure schemas and revision-aware config discovery over `ProjectView`, plus the
-  shared severity vocabulary — the configured `Severity` and the presented `DiagnosticSeverity` —
+  shared severity vocabulary — the configured `LintLevel` and the presented `DiagnosticSeverity` —
   so a crate that produces diagnostics states how they present without depending on an editor.
   `jals-editor` and `jals-project` both assemble diagnostics, neither depends on the other, and
   this is the only crate they share; before it lived here, a terminal and a browser had each
   written the same `ProjectDiagnosticSeverity` table two crates apart. `jals-editor` re-exports
   the name, so a host still spells it `jals_editor::DiagnosticSeverity`.
+  `lint::Config` is **sections of typed rule keys**, not a `BTreeMap<String, Severity>`: one section
+  per rule `Category` — a *defect class*, so every rule is in exactly one — and one field per rule,
+  declared by the `lint_section!` macro. Three consequences are load-bearing. A rule's built-in level
+  is the value its section's `Default` gives its key and lives **only** there, so `jals-lint`'s
+  `RuleMeta` carries `fn(&Config) -> LintLevel` rather than a copy. A rule key deserializes as a
+  *patch* (`LintPatch`), so `[naming.naming-convention] fields = "any"` keeps the built-in level
+  instead of restating it — which is why `Deserialize` is written out rather than derived. And an
+  unrecognized key is recorded in `UnknownKeys` rather than rejected, because `deny_unknown_fields`
+  would let one stale name stop every *other* rule in the file from loading; `Config::unknown_keys`
+  is how a host reports what it kept. An option is always a value with every reachable state named —
+  never an `Option<bool>`, and never two exclusive rules a config could ask for both of (clippy's
+  `print_stdout`/`print_stderr` are one `streams` key). `Lint<O>`'s serialized *shape* follows the
+  options **type** (`LintOptions::HAS_KEYS`) and not the values, which is what lets
+  `jals-lint/tests/registry.rs` find every option by walking one serialized config.
 - `jals-classpath`: resolution over project bytes and cache artifacts. The in-house zip reader is
   isolated in `zip.rs` behind `archive` (portable, `no_std`, over the async io seam; also a
   stored-only writer for jar remap/merge; the `zip` crate is a dev-only fixture oracle). `jar.rs`
@@ -272,6 +286,19 @@ filesystem reads into portable interfaces.
   anything inside a `cfg`-disabled host — which binds nothing but serves the *other* feature set)
   counts as a use, and a method's evidence is its **name** rather than its declaration, because the
   scope chain binds a call to *an* overload rather than to the one the arguments select.
+- `jals-lint`: the rule engine. A rule is a name, a `Category` (the `jalslint.toml` section it is
+  configured under), a level accessor into `jals_config::lint`, and a checker; `RuleInfo::all()`
+  publishes the registry so a consumer enumerates rules instead of restating them. **The rule name
+  is the config key and the diagnostic's `rule` field**, unique across sections. The engine emits
+  exactly one diagnostic outside the table — `cfg`, a structurally malformed attribute — and it is
+  fixed at `error` because it is the failure the compile frontend rejects a build with, not a
+  judgement. Two ledgers hold the crate's claims: `tests/registry.rs` joins the registry against the
+  serialized schema in both directions, pins the default level set, and sweeps every schema option
+  off its default requiring the linter to notice; `tests/inventory.rs` holds
+  `inventory-rustc.tsv` / `inventory-clippy.tsv` — every rustc and clippy lint, in one of six
+  buckets — against that same registry (`jals-lint/MAPPING-rustc-clippy.md` is the prose,
+  `jals-lint/README.md` the roadmap). A new rule therefore lands in three places at once: the
+  section that declares its key, the `RULES` table, and whichever ledger row now maps onto it.
 - `jals-classfile`, `jals-hir`, `jals-syntax`, `jals-fmt`, `jals-lint`, `jals-decompile`: portable
   domain crates; do not add host filesystem APIs. `jals-fmt` has **one layout engine** — a port of
   google-java-format's greedy `computeBreaks` over a GJF-shaped `Doc`/`Level`/`Break` IR — and

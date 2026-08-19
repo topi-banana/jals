@@ -1,0 +1,832 @@
+# clippy lint inventory — the complete `clippy-driver -Whelp` set.
+#
+# Extracted mechanically on 2026-08-19 from the toolchain this repository builds with:
+#   rustc 1.97.1 (8bab26f4f 2026-07-14) / clippy 0.1.97 (8bab26f4f6 2026-07-14)
+#   $ clippy-driver -Whelp        # "Lint checks loaded by this crate" — 815 lints
+#
+# The extraction point is fixed so the table can be re-derived; `jals-lint/MAPPING-rustc-clippy.md`
+# is the prose that explains the buckets, and `jals-lint/tests/inventory.rs` is what keeps this file
+# and the linter's own registry in step.
+#
+# Columns: lint <TAB> clippy group <TAB> clippy default <TAB> bucket <TAB> jals rule <TAB> note
+#   bucket: M = 実装済みの jals rule に写る       N = 移植可能・未実装（roadmap）
+#           R = Rust 固有（構文名指し）           X = Rust 固有（機構レベル）
+#           D = 意図的に不採用（note に理由）     C = lint ではない（driver / lint 機構 / cargo）
+#   jals rule: M / N のみ。同じ名前が複数行に出るのは多対一の写像で、正しい。
+#   note:      D の理由。N では、その jals rule が **既に実装済み** で、この行が既存 rule の
+#              拡張であることを示す `既存 rule の拡張`。ほかの bucket では空。
+absolute-paths	restriction	allow	N	absolute-type-name	
+alloc-instead-of-core	restriction	allow	R		
+allow-attributes	restriction	allow	C		
+allow-attributes-without-reason	restriction	allow	N	suppression-without-reason	
+arbitrary-source-item-ordering	restriction	allow	N	member-ordering	
+arithmetic-side-effects	restriction	allow	N	arithmetic-overflow-risk	
+assertions-on-result-states	restriction	allow	R		
+assigning-clones	pedantic	allow	R		
+as-conversions	restriction	allow	N	cast-conversion	
+as-pointer-underscore	restriction	allow	R		
+as-ptr-cast-mut	nursery	allow	R		
+as-underscore	restriction	allow	R		
+big-endian-bytes	restriction	allow	N	byte-order	
+bool-to-int-with-if	pedantic	allow	N	bool-to-int-with-if	
+borrow-as-ptr	pedantic	allow	R		
+branches-sharing-code	nursery	allow	N	branches-sharing-code	
+cargo-common-metadata	cargo	allow	C		
+case-sensitive-file-extension-comparisons	pedantic	allow	N	case-sensitive-extension-check	
+cast-lossless	pedantic	allow	N	redundant-cast	
+cast-possible-truncation	pedantic	allow	N	narrowing-cast	
+cast-possible-wrap	pedantic	allow	R		
+cast-precision-loss	pedantic	allow	N	narrowing-cast	
+cast-ptr-alignment	pedantic	allow	R		
+cast-sign-loss	pedantic	allow	R		
+cfg-not-test	restriction	allow	N	cfg-not-test	
+checked-conversions	pedantic	allow	N	manual-exact-conversion	
+clear-with-drain	nursery	allow	R		
+cloned-instead-of-copied	pedantic	allow	R		
+clone-on-ref-ptr	restriction	allow	R		
+coerce-container-to-any	nursery	allow	R		
+cognitive-complexity	restriction	allow	N	cognitive-complexity	
+collapsible-else-if	pedantic	allow	N	collapsible-else-if	
+collection-is-never-read	nursery	allow	N	collection-never-read	
+comparison-chain	pedantic	allow	N	comparison-chain	
+copy-iterator	pedantic	allow	R		
+create-dir	restriction	allow	N	create-dir-not-recursive	
+dbg-macro	restriction	allow	N	debug-print	
+debug-assert-with-mut-call	nursery	allow	N	assert-with-side-effect	
+decimal-bitwise-operands	pedantic	allow	N	decimal-bitwise-operand	
+decimal-literal-representation	restriction	allow	N	decimal-bitwise-operand	
+default-numeric-fallback	restriction	allow	R		
+default-trait-access	pedantic	allow	R		
+default-union-representation	restriction	allow	R		
+deref-by-slicing	restriction	allow	R		
+derive-partial-eq-without-eq	nursery	allow	R		
+disallowed-script-idents	restriction	allow	N	non-ascii-identifier	
+doc-broken-link	pedantic	allow	N	broken-javadoc-link	
+doc-comment-double-space-linebreaks	pedantic	allow	R		
+doc-include-without-cfg	restriction	allow	R		
+doc-link-code	nursery	allow	R		
+doc-link-with-quotes	pedantic	allow	R		
+doc-markdown	pedantic	allow	D		Javadoc は HTML であって markdown ではなく、記法違反という概念がない
+doc-paragraphs-missing-punctuation	restriction	allow	N	javadoc-punctuation	
+duration-suboptimal-units	pedantic	allow	N	duration-unit	
+elidable-lifetime-names	pedantic	allow	R		
+else-if-without-else	restriction	allow	N	else-if-without-else	
+empty-drop	restriction	allow	R		
+empty-enums	pedantic	allow	N	empty-enum	
+empty-enum-variants-with-brackets	restriction	allow	N	empty-parens-on-enum-constant	
+empty-structs-with-brackets	restriction	allow	D		Java の空クラス本体 `{}` は必須構文で、省略形が存在しない
+enum-glob-use	pedantic	allow	M	wildcard-import	
+equatable-if-let	nursery	allow	R		
+error-impl-error	restriction	allow	N	exception-naming	
+exhaustive-enums	restriction	allow	R		
+exhaustive-structs	restriction	allow	R		
+exit	restriction	allow	N	system-exit	
+expect-used	restriction	allow	R		
+explicit-deref-methods	pedantic	allow	R		
+explicit-into-iter-loop	pedantic	allow	R		
+explicit-iter-loop	pedantic	allow	R		
+expl-impl-clone-on-copy	pedantic	allow	R		
+fallible-impl-from	nursery	allow	R		
+field-scoped-visibility-modifiers	restriction	allow	N	non-private-field	
+filetype-is-file	restriction	allow	N	filetype-is-file	
+filter-map-next	pedantic	allow	R		
+flat-map-option	pedantic	allow	R		
+float-arithmetic	restriction	allow	N	float-arithmetic	
+float-cmp	pedantic	allow	N	float-equality	
+float-cmp-const	restriction	allow	N	float-equality	
+fn-params-excessive-bools	pedantic	allow	N	excessive-booleans	
+fn-to-numeric-cast-any	restriction	allow	R		
+format-collect	pedantic	allow	D		`map(...).collect(joining())` は Java の慣用形で、置き換え先がない
+format-push-string	pedantic	allow	N	format-then-append	
+from-iter-instead-of-collect	pedantic	allow	R		
+future-not-send	nursery	allow	R		
+get-unwrap	restriction	allow	R		
+host-endian-bytes	restriction	allow	N	byte-order	
+if-not-else	pedantic	allow	N	negated-if-condition	
+if-then-some-else-none	restriction	allow	R		
+ignored-unit-patterns	pedantic	allow	R		
+ignore-without-reason	pedantic	allow	N	disabled-test-without-reason	
+implicit-clone	pedantic	allow	R		
+implicit-hasher	pedantic	allow	R		
+implicit-return	restriction	allow	R		
+impl-trait-in-params	restriction	allow	R		
+imprecise-flops	nursery	allow	N	imprecise-float-op	
+inconsistent-struct-constructor	pedantic	allow	R		
+indexing-slicing	restriction	allow	N	indexing	
+index-refutable-slice	pedantic	allow	R		
+inefficient-to-string	pedantic	allow	N	redundant-to-string	
+infinite-loop	restriction	allow	N	infinite-loop	
+inline-always	pedantic	allow	R		
+inline-asm-x86-att-syntax	restriction	allow	R		
+inline-asm-x86-intel-syntax	restriction	allow	R		
+inline-modules	restriction	allow	R		
+inline-trait-bounds	restriction	allow	R		
+integer-division	restriction	allow	N	integer-division	
+integer-division-remainder-used	restriction	allow	N	integer-division	
+into-iter-without-iter	pedantic	allow	R		
+invalid-upcast-comparisons	pedantic	allow	N	absurd-comparison	
+ip-constant	pedantic	allow	N	hardcoded-loopback-address	
+items-after-statements	pedantic	allow	D		Java のローカルクラス/初期化ブロックは文の間に書くのが通常で、位置に規約がない
+iter-filter-is-ok	pedantic	allow	R		
+iter-filter-is-some	pedantic	allow	R		
+iter-not-returning-iterator	pedantic	allow	N	iterator-method-not-returning-iterator	
+iter-on-empty-collections	nursery	allow	R		
+iter-on-single-items	nursery	allow	R		
+iter-over-hash-type	restriction	allow	N	iterate-unordered-collection	
+iter-without-into-iter	pedantic	allow	N	should-implement-interface	
+iter-with-drain	nursery	allow	R		
+large-digit-groups	pedantic	allow	N	inconsistent-digit-grouping	
+large-futures	pedantic	allow	R		
+large-include-file	restriction	allow	R		
+large-stack-arrays	pedantic	allow	R		
+large-stack-frames	nursery	allow	R		
+large-types-passed-by-value	pedantic	allow	R		
+let-underscore-must-use	restriction	allow	R		
+let-underscore-untyped	restriction	allow	R		
+linkedlist	pedantic	allow	N	discouraged-collection	
+literal-string-with-formatting-args	nursery	allow	N	literal-with-format-args	
+little-endian-bytes	restriction	allow	N	byte-order	
+lossy-float-literal	restriction	allow	N	excessive-float-precision	
+macro-use-imports	pedantic	allow	R		
+manual-assert	pedantic	allow	N	manual-assert	
+manual-assert-eq	pedantic	allow	N	boolean-assert-comparison	
+manual-ilog2	pedantic	allow	N	manual-ilog2	
+manual-instant-elapsed	pedantic	allow	N	manual-elapsed	
+manual-is-power-of-two	pedantic	allow	N	manual-is-power-of-two	
+manual-is-variant-and	pedantic	allow	R		
+manual-let-else	pedantic	allow	R		
+manual-midpoint	pedantic	allow	N	manual-midpoint	
+manual-string-new	pedantic	allow	N	manual-empty-string	
+many-single-char-names	pedantic	allow	N	many-single-char-names	
+map-err-ignore	restriction	allow	N	exception-cause-dropped	
+map-unwrap-or	pedantic	allow	R		
+map-with-unused-argument-over-ranges	restriction	allow	R		
+match-bool	pedantic	allow	R		
+match-same-arms	pedantic	allow	N	identical-switch-arms	
+match-wildcard-for-single-variants	pedantic	allow	N	wildcard-for-single-case	
+match-wild-err-arm	pedantic	allow	R		
+maybe-infinite-iter	pedantic	allow	R		
+mem-forget	restriction	allow	R		
+min-ident-chars	restriction	allow	N	min-identifier-length	
+mismatching-type-param-order	pedantic	allow	N	mismatched-type-parameter-order	
+missing-asserts-for-indexing	restriction	allow	N	indexing	
+missing-assert-message	restriction	allow	N	assert-without-message	
+missing-const-for-fn	nursery	allow	R		
+missing-docs-in-private-items	restriction	allow	N	missing-javadoc	
+missing-errors-doc	pedantic	allow	N	missing-javadoc-tag	
+missing-fields-in-debug	pedantic	allow	D		`toString` の内容は規約でなく、フィールドの網羅を求める根拠がない
+missing-inline-in-public-items	restriction	allow	R		
+missing-panics-doc	pedantic	allow	N	missing-javadoc-tag	
+missing-trait-methods	restriction	allow	N	unimplemented-default-method	
+mixed-read-write-in-expression	restriction	allow	N	mixed-read-write	
+module-name-repetitions	restriction	allow	D		Java のパッケージ名を型名に繰り返すのは `com.example.user.UserService` のように通常の命名
+modulo-arithmetic	restriction	allow	N	modulo-arithmetic	
+mod-module-files	restriction	allow	R		
+multiple-crate-versions	cargo	allow	C		
+multiple-inherent-impl	restriction	allow	R		
+multiple-unsafe-ops-per-block	restriction	allow	R		
+must-use-candidate	pedantic	allow	R		
+mutex-atomic	restriction	allow	N	mutex-for-atomic	
+mutex-integer	restriction	allow	N	mutex-for-atomic	
+mut-mut	pedantic	allow	R		
+naive-bytecount	pedantic	allow	D		Java に `bytecount` に当たる最適化 API がなく、置き換え先がない
+needless-bitwise-bool	pedantic	allow	N	bitwise-boolean-operator	
+needless-collect	nursery	allow	N	needless-collect	
+needless-continue	pedantic	allow	N	needless-continue	
+needless-for-each	pedantic	allow	N	needless-for-each	
+needless-pass-by-ref-mut	nursery	allow	R		
+needless-pass-by-value	pedantic	allow	R		
+needless-raw-strings	restriction	allow	N	unnecessary-text-block	
+needless-raw-string-hashes	pedantic	allow	N	unnecessary-text-block	
+needless-type-cast	nursery	allow	N	redundant-cast	
+negative-feature-names	cargo	allow	C		
+nonminimal-bool	pedantic	allow	N	nonminimal-boolean	
+nonstandard-macro-braces	nursery	allow	R		
+non-ascii-literal	restriction	allow	N	non-ascii-literal	
+non-send-fields-in-send-ty	nursery	allow	R		
+non-std-lazy-statics	pedantic	allow	R		
+non-zero-suggestions	restriction	allow	R		
+no-effect-underscore-binding	pedantic	allow	N	no-effect-statement	
+no-mangle-with-rust-abi	pedantic	allow	R		
+option-as-ref-cloned	pedantic	allow	R		
+option-if-let-else	nursery	allow	R		
+option-option	pedantic	allow	R		
+or-fun-call	nursery	allow	N	eager-argument-evaluation	
+overly-complex-bool-expr	pedantic	allow	N	nonminimal-boolean	
+panic	restriction	allow	N	bare-runtime-exception	
+panic-in-result-fn	restriction	allow	R		
+partial-pub-fields	restriction	allow	N	non-private-field	
+pathbuf-init-then-push	restriction	allow	D		Java の `Path.of(a, b, c)` は可変長引数で、段階的 `resolve` は別用途
+path-buf-push-overwrite	nursery	allow	N	absolute-path-resolve	
+pattern-type-mismatch	restriction	allow	R		
+pointer-format	restriction	allow	R		
+precedence-bits	restriction	allow	N	unclear-precedence	
+print-stderr	restriction	allow	M	print-to-console	
+print-stdout	restriction	allow	M	print-to-console	
+ptr-as-ptr	pedantic	allow	R		
+ptr-cast-constness	pedantic	allow	R		
+ptr-offset-by-literal	pedantic	allow	R		
+pub-underscore-fields	pedantic	allow	N	public-underscore-field	
+pub-use	restriction	allow	R		
+pub-without-shorthand	restriction	allow	R		
+pub-with-shorthand	restriction	allow	R		
+question-mark-used	restriction	allow	R		
+range-minus-one	pedantic	allow	R		
+range-plus-one	pedantic	allow	R		
+rc-buffer	restriction	allow	R		
+rc-mutex	restriction	allow	R		
+read-zero-byte-vec	nursery	allow	N	read-into-empty-array	
+redundant-clone	nursery	allow	D		Java の防御的コピーは意図であり、不要と判定する根拠が構文に現れない
+redundant-closure-for-method-calls	pedantic	allow	N	redundant-lambda	
+redundant-else	pedantic	allow	N	redundant-else	
+redundant-feature-names	cargo	allow	C		
+redundant-pub-crate	nursery	allow	R		
+redundant-test-prefix	restriction	allow	N	redundant-test-prefix	
+redundant-type-annotations	restriction	allow	N	redundant-type-annotation	
+ref-as-ptr	pedantic	allow	R		
+ref-binding-to-reference	pedantic	allow	R		
+ref-option	pedantic	allow	R		
+ref-option-ref	pedantic	allow	R		
+ref-patterns	restriction	allow	R		
+renamed-function-params	restriction	allow	N	renamed-override-parameter	
+rest-pat-in-fully-bound-structs	restriction	allow	R		
+return-and-then	restriction	allow	R		
+return-self-not-must-use	pedantic	allow	R		
+same-functions-in-if-condition	pedantic	allow	N	duplicate-if-condition	
+same-length-and-capacity	pedantic	allow	R		
+same-name-method	restriction	allow	N	same-name-method	
+search-is-some	nursery	allow	N	manual-contains	
+self-named-module-files	restriction	allow	R		
+self-only-used-in-recursion	pedantic	allow	N	only-used-in-recursion	
+semicolon-if-nothing-returned	pedantic	allow	R		
+semicolon-inside-block	restriction	allow	R		
+semicolon-outside-block	restriction	allow	R		
+separated-literal-suffix	restriction	allow	R		
+set-contains-or-insert	nursery	allow	N	map-contains-then-put	
+shadow-reuse	restriction	allow	N	shadowed-name	
+shadow-same	restriction	allow	N	shadowed-name	
+shadow-unrelated	restriction	allow	N	shadowed-name	
+should-panic-without-expect	pedantic	allow	D		JUnit の `assertThrows` は例外型を必須にしており、同じ穴が空かない
+significant-drop-in-scrutinee	nursery	allow	R		
+significant-drop-tightening	nursery	allow	R		
+similar-names	pedantic	allow	N	similar-names	
+single-call-fn	restriction	allow	N	single-call-method	
+single-char-lifetime-names	restriction	allow	R		
+single-char-pattern	pedantic	allow	N	single-char-string-argument	
+single-match-else	pedantic	allow	R		
+single-option-map	nursery	allow	R		
+stable-sort-primitive	pedantic	allow	D		Java のプリミティブ配列 `Arrays.sort` は既に不安定ソートで、選び直す余地がない
+std-instead-of-alloc	restriction	allow	R		
+std-instead-of-core	restriction	allow	R		
+string-add	restriction	allow	N	string-concatenation	
+string-add-assign	pedantic	allow	N	string-concat-in-loop	
+string-lit-as-bytes	nursery	allow	R		
+string-lit-chars-any	restriction	allow	D		Java の同型は `"ab".indexOf(c) >= 0` で、既にそれが最短形
+string-slice	restriction	allow	N	string-substring	
+struct-excessive-bools	pedantic	allow	N	excessive-booleans	
+struct-field-names	pedantic	allow	N	field-name-repetition	
+str-split-at-newline	pedantic	allow	N	split-at-newline	
+str-to-string	restriction	allow	R		
+suboptimal-flops	nursery	allow	N	imprecise-float-op	
+suspicious-operation-groupings	nursery	allow	N	suspicious-operand	
+suspicious-xor-used-as-pow	restriction	allow	N	xor-used-as-power	
+tests-outside-test-module	restriction	allow	R		
+todo	restriction	allow	N	unimplemented-stub	
+too-long-first-doc-paragraph	nursery	allow	N	long-javadoc-summary	
+too-many-lines	pedantic	allow	N	too-many-lines	
+trailing-empty-array	nursery	allow	R		
+trait-duplication-in-bounds	nursery	allow	N	duplicate-type-bound	
+transmute-ptr-to-ptr	pedantic	allow	R		
+transmute-undefined-repr	nursery	allow	R		
+trivially-copy-pass-by-ref	pedantic	allow	R		
+trivial-regex	nursery	allow	N	trivial-regex	
+try-err	restriction	allow	R		
+tuple-array-conversions	nursery	allow	R		
+type-repetition-in-bounds	nursery	allow	N	duplicate-type-bound	
+unchecked-time-subtraction	pedantic	allow	R		
+undocumented-unsafe-blocks	restriction	allow	R		
+unicode-not-nfc	pedantic	allow	N	suspicious-unicode-literal	
+unimplemented	restriction	allow	N	unimplemented-stub	
+uninhabited-references	nursery	allow	R		
+uninlined-format-args	pedantic	allow	R		
+unnecessary-box-returns	pedantic	allow	R		
+unnecessary-debug-formatting	pedantic	allow	R		
+unnecessary-join	pedantic	allow	N	unnecessary-join	
+unnecessary-literal-bound	pedantic	allow	R		
+unnecessary-safety-comment	restriction	allow	R		
+unnecessary-safety-doc	restriction	allow	R		
+unnecessary-self-imports	restriction	allow	R		
+unnecessary-semicolon	pedantic	allow	N	redundant-semicolon	
+unnecessary-struct-initialization	nursery	allow	R		
+unnecessary-trailing-comma	pedantic	allow	D		Java の配列初期化子/列挙定数の末尾カンマは慣用形で、jals-fmt が扱う
+unnecessary-wraps	pedantic	allow	R		
+unneeded-field-pattern	restriction	allow	R		
+unnested-or-patterns	pedantic	allow	R		
+unreachable	restriction	allow	N	unimplemented-stub	
+unreadable-literal	pedantic	allow	N	unreadable-literal	
+unsafe-derive-deserialize	pedantic	allow	R		
+unseparated-literal-suffix	restriction	allow	R		
+unused-async	pedantic	allow	R		
+unused-peekable	nursery	allow	R		
+unused-result-ok	restriction	allow	R		
+unused-rounding	nursery	allow	N	unused-rounding	
+unused-self	pedantic	allow	N	unused-this	
+unused-trait-names	restriction	allow	R		
+unwrap-in-result	restriction	allow	R		
+unwrap-used	restriction	allow	R		
+used-underscore-binding	pedantic	allow	N	used-underscore-binding	
+used-underscore-items	pedantic	allow	N	used-underscore-binding	
+useless-let-if-seq	nursery	allow	N	needless-late-init	
+use-debug	restriction	allow	R		
+use-self	nursery	allow	R		
+verbose-bit-mask	pedantic	allow	N	verbose-bit-mask	
+verbose-file-reads	restriction	allow	N	verbose-file-read	
+volatile-composites	nursery	allow	R		
+while-float	nursery	allow	N	while-float	
+wildcard-dependencies	cargo	allow	C		
+wildcard-enum-match-arm	restriction	allow	N	wildcard-switch-arm	
+wildcard-imports	pedantic	allow	M	wildcard-import	
+zero-sized-map-values	pedantic	allow	R		
+almost-complete-range	suspicious	warn	R		
+arc-with-non-send-sync	suspicious	warn	R		
+assertions-on-constants	style	warn	N	constant-assertion	
+assign-op-pattern	style	warn	N	manual-assign-op	
+await-holding-invalid-type	suspicious	warn	R		
+await-holding-lock	suspicious	warn	R		
+await-holding-refcell-ref	suspicious	warn	R		
+bind-instead-of-map	complexity	warn	R		
+blanket-clippy-restriction-lints	suspicious	warn	C		
+blocks-in-conditions	style	warn	R		
+bool-assert-comparison	style	warn	N	boolean-assert-comparison	
+bool-comparison	complexity	warn	N	boolean-comparison	
+borrowed-box	complexity	warn	R		
+borrow-deref-ref	complexity	warn	R		
+borrow-interior-mutable-const	style	warn	N	mutable-constant	
+boxed-local	perf	warn	R		
+box-collection	perf	warn	R		
+box-default	style	warn	M	boxed-primitive-constructor	
+builtin-type-shadow	style	warn	N	builtin-type-shadow	
+bytes-count-to-len	complexity	warn	N	manual-length	
+bytes-nth	style	warn	R		
+byte-char-slices	style	warn	R		
+cast-abs-to-unsigned	suspicious	warn	R		
+cast-enum-constructor	suspicious	warn	R		
+cast-enum-truncation	suspicious	warn	R		
+cast-nan-to-int	suspicious	warn	N	nan-cast	
+cast-slice-from-raw-parts	suspicious	warn	R		
+chars-last-cmp	style	warn	N	manual-affix-check	
+chars-next-cmp	style	warn	N	manual-affix-check	
+char-lit-as-u8	complexity	warn	N	char-cast-truncation	
+cloned-ref-to-slice-refs	perf	warn	R		
+clone-on-copy	complexity	warn	R		
+cmp-null	style	warn	D		Java で null 比較は `== null` が唯一の書き方であり、置き換え先がない
+cmp-owned	perf	warn	N	needless-string-allocation	
+collapsible-if	style	warn	M	collapsible-if	
+collapsible-match	style	warn	N	collapsible-if	既存 rule の拡張
+collapsible-str-replace	perf	warn	N	collapsible-replace	
+comparison-to-empty	style	warn	N	manual-is-empty	
+confusing-method-to-numeric-cast	suspicious	warn	R		
+const-is-empty	suspicious	warn	N	constant-condition	既存 rule の拡張
+crate-in-macro-def	suspicious	warn	R		
+crosspointer-transmute	suspicious	warn	R		
+declare-interior-mutable-const	suspicious	warn	N	mutable-constant	
+default-constructed-unit-structs	complexity	warn	R		
+default-instead-of-iter-empty	style	warn	R		
+deprecated-cfg-attr	complexity	warn	R		
+deprecated-clippy-cfg-attr	suspicious	warn	C		
+deref-addrof	complexity	warn	R		
+derivable-impls	complexity	warn	R		
+disallowed-fields	style	warn	N	disallowed-field	
+disallowed-macros	style	warn	R		
+disallowed-methods	style	warn	N	disallowed-method	
+disallowed-names	style	warn	N	disallowed-name	
+disallowed-types	style	warn	N	disallowed-type	
+diverging-sub-expression	complexity	warn	R		
+doc-lazy-continuation	style	warn	R		
+doc-nested-refdefs	suspicious	warn	R		
+doc-overindented-list-items	style	warn	R		
+doc-suspicious-footnotes	suspicious	warn	R		
+double-comparisons	complexity	warn	N	redundant-comparison	
+double-ended-iterator-last	perf	warn	R		
+double-must-use	style	warn	R		
+double-parens	complexity	warn	N	double-parens	
+drain-collect	perf	warn	R		
+drop-non-drop	suspicious	warn	R		
+duplicated-attributes	suspicious	warn	N	duplicate-annotation	
+duplicate-mod	suspicious	warn	R		
+duplicate-underscore-argument	style	warn	N	confusable-parameter-names	
+duration-subsec	complexity	warn	N	manual-duration-part	
+empty-docs	suspicious	warn	M	empty-javadoc	
+empty-line-after-doc-comments	suspicious	warn	N	detached-javadoc	
+empty-line-after-outer-attr	suspicious	warn	N	detached-attribute	
+empty-loop	suspicious	warn	N	empty-loop	
+enum-variant-names	style	warn	N	enum-constant-names	
+err-expect	style	warn	R		
+excessive-nesting	complexity	warn	N	excessive-nesting	
+excessive-precision	style	warn	N	excessive-float-precision	
+expect-fun-call	perf	warn	N	eager-argument-evaluation	
+explicit-auto-deref	complexity	warn	R		
+explicit-counter-loop	complexity	warn	N	manual-for-each	
+explicit-write	complexity	warn	R		
+extend-with-drain	perf	warn	R		
+extra-unused-lifetimes	complexity	warn	R		
+extra-unused-type-parameters	complexity	warn	M	unused-variables	
+field-reassign-with-default	style	warn	D		Java には初期化子付き構築式がなく、生成後の setter 呼び出しは通常の書き方
+filter-map-bool-then	style	warn	R		
+filter-map-identity	complexity	warn	R		
+filter-next	complexity	warn	D		Java Stream に `find(pred)` はなく、`filter().findFirst()` が唯一の書き方
+flat-map-identity	complexity	warn	R		
+float-equality-without-abs	suspicious	warn	N	float-equality	
+fn-to-numeric-cast	style	warn	R		
+fn-to-numeric-cast-with-truncation	style	warn	R		
+forget-non-drop	suspicious	warn	R		
+format-in-format-args	perf	warn	N	nested-format	
+for-kv-map	style	warn	N	map-key-set-lookup	
+four-forward-slashes	suspicious	warn	R		
+from-over-into	style	warn	R		
+from-raw-with-void-ptr	suspicious	warn	R		
+from-str-radix-10	style	warn	N	redundant-radix	
+get-first	style	warn	N	manual-get-first	
+get-last-with-len	complexity	warn	N	manual-get-last	
+identity-op	complexity	warn	N	identity-operation	
+if-same-then-else	style	warn	N	identical-branches	
+implicit-saturating-add	style	warn	R		
+implicit-saturating-sub	style	warn	R		
+implied-bounds-in-impls	complexity	warn	R		
+incompatible-msrv	suspicious	warn	N	unavailable-api	
+inconsistent-digit-grouping	style	warn	N	inconsistent-digit-grouping	
+ineffective-open-options	suspicious	warn	R		
+infallible-destructuring-match	style	warn	R		
+infallible-try-from	suspicious	warn	R		
+inherent-to-string	style	warn	R		
+init-numbered-fields	style	warn	R		
+inspect-for-each	complexity	warn	R		
+into-iter-on-ref	style	warn	R		
+int-plus-one	complexity	warn	N	int-plus-one	
+io-other-error	style	warn	R		
+is-digit-ascii-radix	style	warn	N	redundant-radix	
+items-after-test-module	style	warn	R		
+iter-cloned-collect	style	warn	R		
+iter-count	complexity	warn	N	manual-length	
+iter-kv-map	complexity	warn	N	map-key-set-lookup	
+iter-next-slice	style	warn	R		
+iter-nth	style	warn	N	manual-list-index	
+iter-nth-zero	style	warn	N	manual-list-index	
+iter-out-of-bounds	suspicious	warn	R		
+iter-overeager-cloned	perf	warn	R		
+iter-skip-next	style	warn	N	manual-list-index	
+join-absolute-paths	suspicious	warn	N	absolute-path-resolve	
+just-underscores-and-digits	style	warn	N	uninformative-name	
+large-const-arrays	perf	warn	R		
+large-enum-variant	perf	warn	R		
+legacy-numeric-constants	style	warn	N	legacy-api	
+len-without-is-empty	style	warn	N	size-without-is-empty	
+len-zero	style	warn	N	manual-is-empty	
+let-and-return	style	warn	N	let-and-return	
+let-underscore-future	suspicious	warn	R		
+let-unit-value	style	warn	R		
+let-with-type-underscore	complexity	warn	R		
+lines-filter-map-ok	suspicious	warn	R		
+macro-metavars-in-unsafe	suspicious	warn	R		
+main-recursion	style	warn	N	unconditional-recursion	
+manual-abs-diff	complexity	warn	N	manual-abs-diff	
+manual-async-fn	style	warn	R		
+manual-bits	style	warn	N	manual-bit-count	
+manual-checked-ops	complexity	warn	D		Java に `checked_*` に当たる API がなく、ゼロ検査は正しい書き方のまま
+manual-clamp	complexity	warn	N	manual-clamp	
+manual-clear	perf	warn	D		`truncate` に当たる API が Java の `List` になく、対応する誤用形が存在しない
+manual-contains	perf	warn	N	manual-contains	
+manual-c-str-literals	complexity	warn	R		
+manual-dangling-ptr	style	warn	R		
+manual-div-ceil	complexity	warn	N	manual-div-ceil	
+manual-filter	complexity	warn	R		
+manual-filter-map	complexity	warn	R		
+manual-find	complexity	warn	R		
+manual-find-map	complexity	warn	R		
+manual-flatten	complexity	warn	R		
+manual-hash-one	complexity	warn	R		
+manual-ignore-case-cmp	perf	warn	N	manual-ignore-case-compare	
+manual-inspect	complexity	warn	R		
+manual-is-ascii-check	style	warn	N	manual-ascii-check	
+manual-is-finite	style	warn	N	manual-is-finite	
+manual-is-infinite	style	warn	N	manual-is-finite	
+manual-is-multiple-of	complexity	warn	D		`x % n == 0` は Java の慣用形で、置き換え先の API がない
+manual-main-separator-str	complexity	warn	D		Java は `File.separator`（文字列）と `separatorChar` を両方公開しており、誤用形が存在しない
+manual-map	style	warn	R		
+manual-memcpy	perf	warn	N	manual-array-copy	
+manual-next-back	style	warn	R		
+manual-non-exhaustive	style	warn	R		
+manual-noop-waker	complexity	warn	R		
+manual-ok-err	complexity	warn	R		
+manual-ok-or	style	warn	R		
+manual-option-as-slice	complexity	warn	R		
+manual-option-zip	complexity	warn	R		
+manual-pattern-char-comparison	style	warn	D		Java の同型は正規表現文字クラスで、置き換えが読みやすさを損なう
+manual-pop-if	complexity	warn	R		
+manual-range-contains	style	warn	D		Java 標準に区間型がなく、置き換え先が存在しない
+manual-range-patterns	complexity	warn	R		
+manual-rem-euclid	complexity	warn	N	manual-floor-mod	
+manual-repeat-n	style	warn	R		
+manual-retain	perf	warn	N	manual-retain	
+manual-rotate	style	warn	N	manual-rotate	
+manual-saturating-arithmetic	style	warn	D		Java に飽和演算がない（`Math.addExact` は例外を投げる別物）
+manual-slice-fill	style	warn	N	manual-array-fill	
+manual-slice-size-calculation	complexity	warn	R		
+manual-split-once	complexity	warn	D		Java の `split(re, 2)` が既にその形であり、置き換え先がない
+manual-strip	complexity	warn	D		Java に `stripPrefix`/`stripSuffix` に当たる API がない
+manual-str-repeat	perf	warn	N	manual-string-repeat	
+manual-swap	complexity	warn	N	manual-collection-swap	
+manual-take	complexity	warn	R		
+manual-try-fold	perf	warn	R		
+manual-unwrap-or	complexity	warn	R		
+manual-unwrap-or-default	suspicious	warn	R		
+manual-while-let-some	style	warn	D		`while (!q.isEmpty()) { q.poll(); }` は Java の慣用形で、置き換え先がない
+map-all-any-identity	complexity	warn	R		
+map-clone	style	warn	R		
+map-collect-result-unit	style	warn	R		
+map-entry	perf	warn	N	map-contains-then-put	
+map-flatten	complexity	warn	R		
+map-identity	complexity	warn	R		
+match-as-ref	complexity	warn	R		
+match-like-matches-macro	style	warn	R		
+match-overlapping-arm	style	warn	N	unreachable-case	
+match-ref-pats	style	warn	R		
+match-result-ok	style	warn	R		
+match-single-binding	complexity	warn	R		
+mem-replace-option-with-none	style	warn	R		
+mem-replace-option-with-some	style	warn	R		
+mem-replace-with-default	style	warn	R		
+misnamed-getters	suspicious	warn	N	misnamed-getter	
+misrefactored-assign-op	suspicious	warn	N	misrefactored-assign-op	
+missing-const-for-thread-local	perf	warn	R		
+missing-enforced-import-renames	style	warn	R		
+missing-safety-doc	style	warn	N	missing-javadoc-tag	
+missing-spin-loop	perf	warn	N	busy-wait	
+missing-transmute-annotations	suspicious	warn	R		
+mixed-attributes-style	style	warn	R		
+mixed-case-hex-literals	style	warn	D		jals-fmt の `[literals] hex-case` が既に正規化する。lint が重ねて言う理由がない
+module-inception	style	warn	R		
+multiple-bound-locations	style	warn	R		
+multi-assignments	suspicious	warn	N	chained-assignment	
+must-use-unit	style	warn	R		
+mutable-key-type	suspicious	warn	N	mutable-map-key	
+mut-mutex-lock	style	warn	R		
+mut-range-bound	suspicious	warn	R		
+needless-arbitrary-self-type	complexity	warn	R		
+needless-as-bytes	complexity	warn	D		Java の `getBytes().length` は符号化に依存し `length()` と一致しない。置換は不健全
+needless-bool	complexity	warn	N	needless-boolean-branch	
+needless-bool-assign	complexity	warn	N	needless-boolean-branch	
+needless-borrow	style	warn	R		
+needless-borrowed-reference	complexity	warn	R		
+needless-borrows-for-generic-args	style	warn	R		
+needless-character-iteration	suspicious	warn	R		
+needless-doctest-main	style	warn	R		
+needless-else	style	warn	N	empty-else	
+needless-ifs	complexity	warn	N	empty-if	
+needless-late-init	style	warn	N	needless-late-init	
+needless-lifetimes	complexity	warn	R		
+needless-match	complexity	warn	R		
+needless-maybe-sized	suspicious	warn	R		
+needless-option-as-deref	complexity	warn	R		
+needless-option-take	complexity	warn	R		
+needless-parens-on-range-literals	style	warn	R		
+needless-pub-self	style	warn	R		
+needless-question-mark	complexity	warn	R		
+needless-range-loop	style	warn	N	manual-for-each	
+needless-return	style	warn	N	needless-return	
+needless-return-with-question-mark	style	warn	R		
+needless-splitn	complexity	warn	D		Java の `split` の limit は挙動（末尾空要素）を変えるので冗長ではない
+needless-update	complexity	warn	R		
+neg-cmp-op-on-partial-ord	complexity	warn	N	negated-float-comparison	
+neg-multiply	style	warn	N	negation-by-multiply	
+new-ret-no-self	style	warn	R		
+new-without-default	style	warn	R		
+non-canonical-clone-impl	suspicious	warn	R		
+non-canonical-partial-ord-impl	suspicious	warn	N	inconsistent-compare-to	
+non-minimal-cfg	style	warn	N	non-minimal-cfg	
+no-effect	complexity	warn	N	no-effect-statement	
+no-effect-replace	suspicious	warn	N	no-op-method-call	
+obfuscated-if-else	style	warn	R		
+octal-escapes	suspicious	warn	N	octal-escape	
+ok-expect	style	warn	R		
+only-used-in-recursion	complexity	warn	N	only-used-in-recursion	
+option-as-ref-deref	complexity	warn	R		
+option-filter-map	complexity	warn	R		
+option-map-or-none	style	warn	R		
+option-map-unit-fn	complexity	warn	R		
+op-ref	style	warn	R		
+or-then-unwrap	complexity	warn	R		
+owned-cow	style	warn	R		
+partialeq-ne-impl	complexity	warn	R		
+partialeq-to-none	style	warn	R		
+path-ends-with-ext	suspicious	warn	N	path-extension-check	
+permissions-set-readonly-false	suspicious	warn	R		
+pointers-in-nomem-asm-block	suspicious	warn	R		
+possible-missing-else	suspicious	warn	N	possible-missing-else	
+precedence	complexity	warn	N	unclear-precedence	
+println-empty-string	style	warn	N	empty-println	
+print-in-format-impl	suspicious	warn	N	print-in-to-string	
+print-literal	style	warn	R		
+print-with-newline	style	warn	N	print-with-newline	
+ptr-arg	style	warn	R		
+ptr-eq	style	warn	N	reference-equality	
+ptr-offset-with-cast	complexity	warn	R		
+question-mark	style	warn	R		
+range-zip-with-len	complexity	warn	R		
+rc-clone-in-vec-init	suspicious	warn	R		
+readonly-write-lock	perf	warn	N	readonly-write-lock	
+redundant-allocation	perf	warn	R		
+redundant-async-block	complexity	warn	R		
+redundant-as-str	complexity	warn	R		
+redundant-at-rest-pattern	complexity	warn	R		
+redundant-closure	style	warn	N	redundant-lambda	
+redundant-closure-call	complexity	warn	N	immediately-invoked-lambda	
+redundant-field-names	style	warn	R		
+redundant-guards	complexity	warn	N	redundant-case-guard	
+redundant-iter-cloned	perf	warn	R		
+redundant-locals	suspicious	warn	R		
+redundant-pattern	style	warn	R		
+redundant-pattern-matching	style	warn	N	redundant-instanceof	
+redundant-slicing	complexity	warn	N	redundant-substring	
+redundant-static-lifetimes	style	warn	R		
+regex-creation-in-loops	perf	warn	N	pattern-compile-in-loop	
+repeat-once	complexity	warn	N	repeat-once	
+repeat-vec-with-capacity	suspicious	warn	R		
+replace-box	perf	warn	R		
+repr-packed-without-abi	suspicious	warn	R		
+reserve-after-initialization	complexity	warn	N	missing-collection-capacity	
+result-filter-map	complexity	warn	R		
+result-large-err	perf	warn	R		
+result-map-or-into-option	style	warn	R		
+result-map-unit-fn	complexity	warn	R		
+result-unit-err	style	warn	R		
+same-item-push	style	warn	N	same-item-added-in-loop	
+seek-from-current	complexity	warn	R		
+seek-to-start-instead-of-rewind	complexity	warn	R		
+self-named-constructors	style	warn	R		
+short-circuit-statement	complexity	warn	R		
+should-implement-trait	style	warn	N	should-implement-interface	
+single-char-add-str	style	warn	N	single-char-append	
+single-component-path-imports	style	warn	N	redundant-import	
+single-element-loop	complexity	warn	N	single-element-loop	
+single-match	style	warn	R		
+single-range-in-vec-init	suspicious	warn	R		
+size-of-ref	suspicious	warn	R		
+skip-while-next	complexity	warn	R		
+sliced-string-as-bytes	perf	warn	R		
+slow-vector-initialization	perf	warn	N	missing-collection-capacity	
+some-filter	complexity	warn	R		
+string-extend-chars	style	warn	R		
+string-from-utf8-as-bytes	complexity	warn	N	redundant-string-bytes-roundtrip	
+strlen-on-c-strings	complexity	warn	R		
+suspicious-arithmetic-impl	suspicious	warn	R		
+suspicious-assignment-formatting	suspicious	warn	N	suspicious-formatting	
+suspicious-command-arg-space	suspicious	warn	N	command-arg-space	
+suspicious-doc-comments	suspicious	warn	R		
+suspicious-else-formatting	suspicious	warn	N	suspicious-formatting	
+suspicious-map	suspicious	warn	R		
+suspicious-open-options	suspicious	warn	R		
+suspicious-op-assign-impl	suspicious	warn	R		
+suspicious-to-owned	suspicious	warn	R		
+suspicious-unary-op-formatting	suspicious	warn	N	suspicious-formatting	
+swap-ptr-to-ref	suspicious	warn	R		
+swap-with-temporary	complexity	warn	R		
+tabs-in-doc-comments	style	warn	N	tab-in-javadoc	
+temporary-assignment	complexity	warn	R		
+test-attr-in-doctest	suspicious	warn	R		
+too-many-arguments	complexity	warn	N	too-many-arguments	
+toplevel-ref-arg	style	warn	R		
+to-digit-is-some	style	warn	N	manual-ascii-check	
+to-string-in-format-args	perf	warn	N	redundant-to-string	
+to-string-trait-impl	style	warn	R		
+transmutes-expressible-as-ptr-casts	complexity	warn	R		
+transmute-bytes-to-str	complexity	warn	R		
+transmute-int-to-bool	complexity	warn	R		
+transmute-int-to-non-zero	complexity	warn	R		
+transmute-ptr-to-ref	complexity	warn	R		
+trim-split-whitespace	style	warn	N	redundant-trim	
+type-complexity	complexity	warn	N	type-complexity	
+type-id-on-box	suspicious	warn	R		
+unbuffered-bytes	perf	warn	N	unbuffered-stream-read	
+unconditional-recursion	suspicious	warn	N	unconditional-recursion	
+unit-arg	complexity	warn	R		
+unnecessary-cast	complexity	warn	N	redundant-cast	
+unnecessary-clippy-cfg	suspicious	warn	C		
+unnecessary-fallible-conversions	style	warn	R		
+unnecessary-filter-map	complexity	warn	R		
+unnecessary-find-map	complexity	warn	R		
+unnecessary-first-then-check	complexity	warn	N	manual-is-empty	
+unnecessary-fold	style	warn	N	unnecessary-fold	
+unnecessary-get-then-check	suspicious	warn	N	redundant-lookup	
+unnecessary-lazy-evaluations	style	warn	N	unnecessary-lazy-evaluation	
+unnecessary-literal-unwrap	complexity	warn	R		
+unnecessary-map-on-constructor	complexity	warn	R		
+unnecessary-map-or	style	warn	R		
+unnecessary-min-or-max	complexity	warn	N	unnecessary-min-max	
+unnecessary-mut-passed	style	warn	R		
+unnecessary-operation	complexity	warn	N	no-effect-statement	
+unnecessary-option-map-or-else	suspicious	warn	R		
+unnecessary-owned-empty-strings	style	warn	N	needless-string-allocation	
+unnecessary-result-map-or-else	suspicious	warn	R		
+unnecessary-sort-by	complexity	warn	N	unnecessary-sort-comparator	
+unnecessary-to-owned	perf	warn	N	needless-string-allocation	
+unnecessary-unwrap	complexity	warn	R		
+unneeded-struct-pattern	style	warn	R		
+unneeded-wildcard-pattern	complexity	warn	R		
+unsafe-removed-from-name	style	warn	R		
+unused-enumerate-index	style	warn	N	manual-for-each	
+unused-format-specs	complexity	warn	N	unused-format-specifier	
+unused-unit	style	warn	R		
+unusual-byte-groupings	style	warn	N	inconsistent-digit-grouping	
+unwrap-or-default	style	warn	R		
+upper-case-acronyms	style	warn	N	upper-case-acronym	
+useless-asref	complexity	warn	R		
+useless-borrows-in-formatting	perf	warn	R		
+useless-concat	complexity	warn	R		
+useless-conversion	complexity	warn	N	no-op-method-call	
+useless-format	complexity	warn	N	useless-format	
+useless-nonzero-new-unchecked	complexity	warn	R		
+useless-transmute	complexity	warn	R		
+useless-vec	perf	warn	R		
+vec-box	complexity	warn	R		
+vec-init-then-push	perf	warn	N	manual-collection-literal	
+waker-clone-wake	perf	warn	R		
+while-let-loop	complexity	warn	R		
+while-let-on-iterator	style	warn	N	manual-iterator-loop	
+wildcard-in-or-patterns	complexity	warn	R		
+writeln-empty-string	style	warn	N	empty-println	
+write-literal	style	warn	R		
+write-with-newline	style	warn	N	print-with-newline	
+wrong-self-convention	style	warn	R		
+zero-divided-by-zero	complexity	warn	N	zero-divided-by-zero	
+zero-prefixed-literal	complexity	warn	N	octal-literal	
+zero-ptr	style	warn	R		
+zero-repeat-side-effects	suspicious	warn	R		
+zombie-processes	suspicious	warn	N	unwaited-process	
+absurd-extreme-comparisons	correctness	deny	N	absurd-comparison	
+almost-swapped	correctness	deny	N	almost-swapped	
+approx-constant	correctness	deny	N	approximate-constant	
+async-yields-async	correctness	deny	R		
+bad-bit-mask	correctness	deny	N	bad-bit-mask	
+cast-slice-different-sizes	correctness	deny	R		
+char-indices-as-byte-indices	correctness	deny	N	code-point-index-confusion	
+deprecated-semver	correctness	deny	D		Java の `@Deprecated(since=)` は自由文字列で、semver を検査する根拠がない
+derived-hash-with-manual-eq	correctness	deny	N	equals-hashcode-pair	
+derive-ord-xor-partial-ord	correctness	deny	N	inconsistent-compare-to	
+eager-transmute	correctness	deny	R		
+enum-clike-unportable-variant	correctness	deny	R		
+eq-op	correctness	deny	N	identical-operands	
+erasing-op	correctness	deny	N	erasing-operation	
+ifs-same-cond	correctness	deny	N	duplicate-if-condition	
+if-let-mutex	correctness	deny	R		
+impl-hash-borrow-with-str-and-bytes	correctness	deny	R		
+impossible-comparisons	correctness	deny	N	impossible-comparison	
+ineffective-bit-mask	correctness	deny	N	bad-bit-mask	
+infinite-iter	correctness	deny	R		
+inherent-to-string-shadow-display	correctness	deny	R		
+inline-fn-without-body	correctness	deny	R		
+invalid-regex	correctness	deny	N	invalid-regex	
+inverted-saturating-sub	correctness	deny	R		
+invisible-characters	correctness	deny	N	suspicious-unicode-literal	
+iterator-step-by-zero	correctness	deny	R		
+iter-next-loop	correctness	deny	R		
+iter-skip-zero	correctness	deny	R		
+let-underscore-lock	correctness	deny	R		
+lint-groups-priority	correctness	deny	C		
+match-str-case-mismatch	correctness	deny	N	case-mismatch-switch	
+mem-replace-with-uninit	correctness	deny	R		
+min-max	correctness	deny	N	constant-clamp	
+mistyped-literal-suffixes	correctness	deny	N	mistyped-literal-suffix	
+modulo-one	correctness	deny	N	modulo-one	
+mut-from-ref	correctness	deny	R		
+never-loop	correctness	deny	N	never-loop	
+nonsensical-open-options	correctness	deny	R		
+non-octal-unix-permissions	correctness	deny	R		
+not-unsafe-ptr-arg-deref	correctness	deny	R		
+option-env-unwrap	correctness	deny	R		
+out-of-bounds-indexing	correctness	deny	N	unconditional-exception	
+panicking-overflow-checks	correctness	deny	R		
+panicking-unwrap	correctness	deny	R		
+possible-missing-comma	correctness	deny	N	possible-missing-comma	
+read-line-without-trim	correctness	deny	D		Java の `BufferedReader.readLine` は改行を含まないので同じ罠が起きない
+recursive-format-impl	correctness	deny	N	unconditional-recursion	
+redundant-comparisons	correctness	deny	N	redundant-comparison	
+reversed-empty-ranges	correctness	deny	N	reversed-range	
+self-assignment	correctness	deny	N	self-assignment	
+serde-api-misuse	correctness	deny	R		
+size-of-in-element-count	correctness	deny	R		
+suspicious-splitn	correctness	deny	D		Java の `split(re, 0)` は既定動作であって誤用ではない
+transmute-null-to-fn	correctness	deny	R		
+transmuting-null	correctness	deny	R		
+uninit-assumed-init	correctness	deny	R		
+uninit-vec	correctness	deny	R		
+unit-cmp	correctness	deny	R		
+unit-hash	correctness	deny	R		
+unit-return-expecting-ord	correctness	deny	R		
+unsound-collection-transmute	correctness	deny	R		
+unused-io-amount	correctness	deny	N	unused-io-amount	
+useless-attribute	correctness	deny	R		
+vec-resize-to-zero	correctness	deny	R		
+while-immutable-condition	correctness	deny	N	infinite-while	
+wrong-transmute	correctness	deny	R		
+zst-offset	correctness	deny	R		

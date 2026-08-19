@@ -1,0 +1,261 @@
+# rustc built-in lint inventory — the complete `rustc -Whelp` set.
+#
+# Extracted mechanically on 2026-08-19 from the toolchain this repository builds with:
+#   rustc 1.97.1 (8bab26f4f 2026-07-14) / clippy 0.1.97 (8bab26f4f6 2026-07-14)
+#   $ clippy-driver -Whelp        # "Lint checks provided by rustc" — 244 lints
+#
+# The extraction point is fixed so the table can be re-derived; `jals-lint/MAPPING-rustc-clippy.md`
+# is the prose that explains the buckets, and `jals-lint/tests/inventory.rs` is what keeps this file
+# and the linter's own registry in step.
+#
+# Columns: lint <TAB> rustc default <TAB> bucket <TAB> jals rule <TAB> note
+#   bucket: M = 実装済みの jals rule に写る       N = 移植可能・未実装（roadmap）
+#           R = Rust 固有（構文名指し）           X = Rust 固有（機構レベル）
+#           D = 意図的に不採用（note に理由）     C = lint ではない（driver / lint 機構 / cargo）
+#   jals rule: M / N のみ。同じ名前が複数行に出るのは多対一の写像で、正しい。
+#   note:      D の理由。N では、その jals rule が **既に実装済み** で、この行が既存 rule の
+#              拡張であることを示す `既存 rule の拡張`。ほかの bucket では空。
+absolute-paths-not-starting-with-crate	allow	R		
+ambiguous-negative-literals	allow	R		
+closure-returning-async-block	allow	R		
+dead-code-pub-in-binary	allow	N	unused-public-member	
+deprecated-in-future	allow	N	deprecated-for-removal	
+deprecated-llvm-intrinsic	allow	X		
+deprecated-safe-2024	allow	X		
+deref-into-dyn-supertrait	allow	R		
+edition-2024-expr-fragment-specifier	allow	X		
+elided-lifetimes-in-paths	allow	R		
+explicit-outlives-requirements	allow	R		
+ffi-unwind-calls	allow	R		
+fuzzy-provenance-casts	allow	R		
+if-let-rescope	allow	X		
+impl-trait-overcaptures	allow	R		
+impl-trait-redundant-captures	allow	R		
+keyword-idents-2018	allow	N	restricted-identifier	
+keyword-idents-2024	allow	N	restricted-identifier	
+let-underscore-drop	allow	R		
+linker-info	allow	C		
+lossy-provenance-casts	allow	R		
+macro-use-extern-crate	allow	R		
+meta-variable-misuse	allow	R		
+missing-copy-implementations	allow	R		
+missing-debug-implementations	allow	D		Java の既定 toString は常に存在し、全型への override は慣習でない
+missing-docs	allow	N	missing-javadoc	
+missing-unsafe-on-extern	allow	R		
+multiple-supertrait-upcastable	allow	R		
+must-not-suspend	allow	R		
+non-ascii-idents	allow	N	non-ascii-identifier	
+non-exhaustive-omitted-patterns	allow	N	non-exhaustive-switch	
+redundant-imports	allow	N	redundant-import	
+redundant-lifetimes	allow	R		
+resolving-to-items-shadowing-supertrait-items	allow	R		
+rust-2021-incompatible-closure-captures	allow	X		
+rust-2021-incompatible-or-patterns	allow	X		
+rust-2021-prefixes-incompatible-syntax	allow	X		
+rust-2021-prelude-collisions	allow	X		
+rust-2024-guarded-string-incompatible-syntax	allow	X		
+rust-2024-incompatible-pat	allow	X		
+rust-2024-prelude-collisions	allow	X		
+shadowing-supertrait-items	allow	R		
+single-use-lifetimes	allow	R		
+tail-expr-drop-order	allow	R		
+trivial-casts	allow	N	redundant-cast	
+trivial-numeric-casts	allow	N	redundant-cast	
+unit-bindings	allow	R		
+unnameable-types	allow	N	inaccessible-type-in-signature	
+unqualified-local-imports	allow	R		
+unreachable-pub	allow	N	unreachable-visibility	
+unsafe-attr-outside-unsafe	allow	R		
+unsafe-code	allow	R		
+unsafe-op-in-unsafe-fn	allow	R		
+unstable-features	allow	X		
+unused-crate-dependencies	allow	N	unused-dependency	
+unused-extern-crates	allow	R		
+unused-import-braces	allow	N	unnecessary-import-group	
+unused-lifetimes	allow	R		
+unused-macro-rules	allow	R		
+unused-qualifications	allow	N	unnecessary-qualification	
+unused-results	allow	N	unused-return-value	
+variant-size-differences	allow	R		
+aarch64-softfloat-neon	warn	X		
+ambiguous-derive-helpers	warn	R		
+ambiguous-glob-imported-traits	warn	N	ambiguous-wildcard-import	
+ambiguous-glob-reexports	warn	R		
+ambiguous-import-visibilities	warn	R		
+ambiguous-panic-imports	warn	R		
+ambiguous-wide-pointer-comparisons	warn	R		
+anonymous-parameters	warn	X		
+array-into-iter	warn	R		
+asm-sub-register	warn	R		
+async-fn-in-trait	warn	R		
+bad-asm-style	warn	R		
+bare-trait-objects	warn	R		
+boxed-slice-into-iter	warn	R		
+break-with-label-and-loop	warn	R		
+clashing-extern-declarations	warn	R		
+coherence-leak-check	warn	R		
+confusable-idents	warn	N	confusable-identifier	
+const-evaluatable-unchecked	warn	R		
+const-item-interior-mutations	warn	N	mutable-constant	
+const-item-mutation	warn	R		
+dangling-pointers-from-locals	warn	R		
+dangling-pointers-from-temporaries	warn	R		
+dead-code	warn	M	dead-code	
+deprecated	warn	N	deprecated-api	
+deprecated-where-clause-location	warn	R		
+double-negations	warn	N	double-negation	
+dropping-copy-types	warn	R		
+dropping-references	warn	R		
+drop-bounds	warn	R		
+duplicate-macro-attributes	warn	R		
+dyn-drop	warn	R		
+ellipsis-inclusive-range-patterns	warn	R		
+exported-private-dependencies	warn	N	inaccessible-type-in-signature	
+float-literal-f32-fallback	warn	R		
+forbidden-lint-groups	warn	C		
+forgetting-copy-types	warn	R		
+forgetting-references	warn	R		
+for-loops-over-fallibles	warn	R		
+function-casts-as-integer	warn	R		
+function-item-references	warn	R		
+hidden-glob-reexports	warn	R		
+improper-ctypes	warn	R		
+improper-ctypes-definitions	warn	R		
+improper-gpu-kernel-arg	warn	X		
+incomplete-features	warn	X		
+inline-no-sanitize	warn	X		
+integer-to-ptr-transmutes	warn	R		
+internal-eq-trait-method-impls	warn	R		
+internal-features	warn	X		
+invalid-doc-attributes	warn	N	malformed-javadoc	
+invalid-from-utf8	warn	R		
+invalid-nan-comparisons	warn	N	nan-comparison	
+invalid-value	warn	R		
+irrefutable-let-patterns	warn	N	irrefutable-pattern	
+large-assignments	warn	X		
+late-bound-lifetime-arguments	warn	R		
+linker-messages	warn	C		
+malformed-diagnostic-attributes	warn	R		
+malformed-diagnostic-format-literals	warn	R		
+map-unit-fn	warn	R		
+mismatched-lifetime-syntaxes	warn	R		
+misplaced-diagnostic-attributes	warn	R		
+missing-abi	warn	R		
+missing-gpu-kernel-export-name	warn	X		
+mixed-script-confusables	warn	N	confusable-identifier	
+named-arguments-used-positionally	warn	R		
+non-camel-case-types	warn	M	naming-convention	
+non-contiguous-range-endpoints	warn	R		
+non-fmt-panics	warn	R		
+non-local-definitions	warn	R		
+non-shorthand-field-patterns	warn	R		
+non-snake-case	warn	M	naming-convention	
+non-upper-case-globals	warn	M	naming-convention	
+noop-method-call	warn	N	no-op-method-call	
+no-mangle-generic-items	warn	R		
+opaque-hidden-inferred-bound	warn	R		
+overlapping-range-endpoints	warn	R		
+path-statements	warn	R		
+private-bounds	warn	N	inaccessible-type-in-signature	
+private-interfaces	warn	N	inaccessible-type-in-signature	
+ptr-to-integer-transmute-in-consts	warn	R		
+redundant-semicolons	warn	N	redundant-semicolon	
+refining-impl-trait-internal	warn	R		
+refining-impl-trait-reachable	warn	R		
+renamed-and-removed-lints	warn	C		
+repr-c-enums-larger-than-int	warn	R		
+rtsan-nonblocking-async	warn	X		
+self-constructor-from-outer-item	warn	R		
+special-module-name	warn	R		
+stable-features	warn	X		
+static-mut-refs	warn	R		
+suspicious-double-ref-op	warn	R		
+tail-call-track-caller	warn	R		
+trivial-bounds	warn	R		
+type-alias-bounds	warn	R		
+tyvar-behind-raw-pointer	warn	R		
+uncommon-codepoints	warn	N	confusable-identifier	
+unconditional-recursion	warn	N	unconditional-recursion	
+uncovered-param-in-projection	warn	R		
+unexpected-cfgs	warn	M	cfg	
+unfulfilled-lint-expectations	warn	N	unfulfilled-suppression	
+ungated-async-fn-track-caller	warn	X		
+unknown-diagnostic-attributes	warn	R		
+unknown-lints	warn	C		
+unnameable-test-items	warn	R		
+unnecessary-transmutes	warn	R		
+unpredictable-function-pointer-comparisons	warn	R		
+unreachable-cfg-select-predicates	warn	R		
+unreachable-code	warn	N	unreachable-code	
+unreachable-patterns	warn	N	unreachable-case	
+unstable-name-collisions	warn	X		
+unstable-syntax-pre-expansion	warn	X		
+unsupported-calling-conventions	warn	X		
+unused-allocation	warn	R		
+unused-assignments	warn	N	unused-assignment	
+unused-associated-type-bounds	warn	R		
+unused-attributes	warn	N	unused-attribute	
+unused-braces	warn	N	unnecessary-block	
+unused-comparisons	warn	N	type-range-comparison	
+unused-doc-comments	warn	N	misplaced-javadoc	
+unused-features	warn	X		
+unused-imports	warn	M	unused-imports	
+unused-labels	warn	N	unused-label	
+unused-macros	warn	R		
+unused-must-use	warn	N	unused-return-value	
+unused-mut	warn	R		
+unused-parens	warn	N	unnecessary-parens	
+unused-unsafe	warn	R		
+unused-variables	warn	M	unused-variables	
+unused-visibilities	warn	R		
+useless-ptr-null-checks	warn	R		
+uses-power-alignment	warn	X		
+warnings	warn	C		
+while-true	warn	D		`while (true)` は Java 唯一の無限ループ表現。constant-condition が意図的に除外している
+ambiguous-associated-items	deny	R		
+ambiguous-glob-imports	deny	N	ambiguous-wildcard-import	
+arithmetic-overflow	deny	N	constant-overflow	
+binary-asm-labels	deny	R		
+bindings-with-variant-name	deny	R		
+conflicting-repr-hints	deny	R		
+dangerous-implicit-autorefs	deny	R		
+default-overrides-default-fields	deny	R		
+dependency-on-unit-never-type-fallback	deny	R		
+deref-nullptr	deny	R		
+duplicate-features	deny	X		
+elided-lifetimes-in-associated-constant	deny	R		
+enum-intrinsics-non-enums	deny	R		
+explicit-builtin-cfgs-in-flags	deny	X		
+ill-formed-attribute-input	deny	M	cfg	
+incomplete-include	deny	R		
+ineffective-unstable-trait-impl	deny	R		
+invalid-atomic-ordering	deny	R		
+invalid-from-utf8-unchecked	deny	R		
+invalid-macro-export-arguments	deny	R		
+invalid-null-arguments	deny	N	null-argument	
+invalid-reference-casting	deny	R		
+invalid-type-param-default	deny	R		
+legacy-derive-helpers	deny	R		
+let-underscore-lock	deny	R		
+long-running-const-eval	deny	X		
+macro-expanded-macro-exports-accessed-by-absolute-paths	deny	R		
+mutable-transmutes	deny	R		
+named-asm-labels	deny	R		
+never-type-fallback-flowing-into-unsafe	deny	R		
+no-mangle-const-items	deny	R		
+out-of-scope-macro-calls	deny	R		
+overflowing-literals	deny	D		javac 自身が拒否する。lint が言い直しても何も足さない
+patterns-in-fns-without-body	deny	R		
+proc-macro-derive-resolution-fallback	deny	R		
+pub-use-of-private-extern-crate	deny	R		
+repr-transparent-non-zst-fields	deny	R		
+semicolon-in-expressions-from-macros	deny	R		
+test-unstable-lint	deny	C		
+text-direction-codepoint-in-comment	deny	N	bidirectional-text	
+text-direction-codepoint-in-literal	deny	N	bidirectional-text	
+unconditional-panic	deny	N	unconditional-exception	
+undropped-manually-drops	deny	R		
+uninhabited-static	deny	R		
+unknown-crate-types	deny	X		
+useless-deprecated	deny	D		`@Deprecated` の無効な位置は javac の -Xlint:dep-ann が既に扱い、jals が二重に言う価値がない
+varargs-without-pattern	deny	R		
