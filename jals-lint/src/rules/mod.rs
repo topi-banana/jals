@@ -75,12 +75,10 @@ impl Finding {
     /// declaration — so a consumer fades it in place. What every `unused`-group finding has in
     /// common: each points at something that could simply go. Reached from [`UnusedDefs`] for the
     /// two binding rules and directly by `unused-imports`.
-    fn unnecessary_at(range: Range<usize>, message: String) -> Self {
+    fn unnecessary_at(range: Range<usize>, message: impl Into<String>) -> Self {
         Self {
-            range,
-            message,
             unnecessary: true,
-            ..Self::default()
+            ..Self::at_range(range, message)
         }
     }
 
