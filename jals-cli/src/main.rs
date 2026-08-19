@@ -494,6 +494,9 @@ impl LintArgs {
         let workspace = jals_editor::Workspace::load(project.storage, project.layout).await;
 
         let mut any_finding = false;
+        // A key this jals does not define is kept rather than rejected, so it has to be said out
+        // loud once per run — not once per file, since one config governs a whole directory.
+        let mut reported_configs = HashSet::new();
         for target in &targets {
             // A named file must be analysable: the caller asked for it by name. The workspace
             // silently skips a file it cannot read or decode, so this is where both failures
@@ -507,7 +510,17 @@ impl LintArgs {
             // Looked up per file, so one run can span directories with different `jalslint.toml`.
             // The feature set is deliberately not set here: the workspace folds in the project's
             // own, exactly as it does for the language server and the playground.
-            let config = discovery.for_dir(&target.config_dir)?;
+            let (config_path, config) = discovery.discover(&target.config_dir)?;
+            // Named against the file that wrote the key, not the file being linted, and once per
+            // config rather than once per file it governs.
+            if let Some(path) = config_path
+                && reported_configs.insert(path.clone())
+            {
+                Reporter::report_unknown_lint_keys(
+                    &path.display().to_string(),
+                    &config.unknown_keys(),
+                );
+            }
             // The one policy — syntax errors, `cfg` hints, and the rule engine, in one order —
             // reached through the same seam the other two hosts reach it through. What a broken
             // tree suppresses is decided inside the engine, so no host restates it.
@@ -2142,23 +2155,34 @@ impl<C: DiscoverableConfig + Clone + Default> HostConfigs<C> {
     /// The config governing `dir`: the explicit override, the memoized or seeded config of the
     /// discovered root, or the default when no ancestor carries `C::FILE_NAME`.
     fn for_dir(&mut self, dir: &Path) -> Result<C> {
+        Ok(self.discover(dir)?.1)
+    }
+
+    /// [`for_dir`](Self::for_dir), plus **which file** answered.
+    ///
+    /// The path is `None` when no file did — an explicit `--config`, a seeded config, or the
+    /// default. A caller that reports something about the config's *content* needs it: naming the
+    /// directory that asked would name the file being linted, which is not the file with the
+    /// problem.
+    fn discover(&mut self, dir: &Path) -> Result<(Option<PathBuf>, C)> {
         if let Some(config) = &self.explicit {
-            return Ok(config.clone());
+            return Ok((None, config.clone()));
         }
         // Nearest first, so an authored config always beats one seeded further up.
         let start = App::canonical_path(dir);
         let Some(root) = start.ancestors().find(|candidate| {
             self.by_root.contains_key(*candidate) || candidate.join(C::FILE_NAME).is_file()
         }) else {
-            return Ok(C::default());
+            return Ok((None, C::default()));
         };
+        let path = root.join(C::FILE_NAME);
         if let Some(config) = self.by_root.get(root) {
-            return Ok(config.clone());
+            return Ok((path.is_file().then_some(path), config.clone()));
         }
-        let config: C = App::load_config(&root.join(C::FILE_NAME))
+        let config: C = App::load_config(&path)
             .with_context(|| format!("discovering config from {}", dir.display()))?;
         self.by_root.insert(root.to_path_buf(), config.clone());
-        Ok(config)
+        Ok((Some(path), config))
     }
 }
 

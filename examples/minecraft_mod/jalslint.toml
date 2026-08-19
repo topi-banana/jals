@@ -2,5 +2,5 @@
 # it cancels or reads a return value, so `unused-variables` would flag a parameter the method
 # cannot drop. That is the `@Override`-shaped false positive the rule's own documentation says to
 # suppress through this file.
-[rules]
+[unused]
 unused-variables = "allow"

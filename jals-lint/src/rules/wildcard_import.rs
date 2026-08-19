@@ -1,19 +1,27 @@
 //! `wildcard-import`: flag star imports such as `import java.util.*;`, including the ones a jals
 //! grouped import spells as a member (`import java.util.{concurrent.*};`).
+//!
+//! `import static a.B.*;` is reported too by default, and
+//! [`static_imports`](jals_config::lint::WildcardImport::static_imports) exempts it: a static
+//! wildcard is how a test file pulls in an assertion DSL, which is a project policy rather than an
+//! oversight. It is one key and not a second rule because the two answers are exclusive — a static
+//! wildcard is either reported or it is not, and two rules would let a config ask for both.
 
 use alloc::vec::Vec;
-use core::ops::Range;
 
 use jals_exec::{LocalBoxFuture, Yielder};
 use jals_syntax::SyntaxKind;
 use jals_syntax::ast::{AstNode, ImportDecl, QualifiedName};
 
-use crate::diagnostic::Severity;
-use crate::rules::{Checker, Finding, RuleMeta};
+use jals_config::Category;
+use jals_config::lint::{Config, StaticWildcard};
+
+use crate::rules::{Checker, Finding, RuleMeta, Significant};
 
 pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "wildcard-import",
-    default: Severity::Warn,
+    category: Category::Style,
+    level: |config| config.style.wildcard_import.level,
     needs_clean_parse: false,
     check: Checker::Syntactic(WildcardImport::check),
 };
@@ -25,11 +33,16 @@ impl WildcardImport {
     const MESSAGE: &'static str = "avoid wildcard imports; import the specific types you use";
 
     /// The table-edge shim: boxes the async rule body once per file.
-    fn check(root: &jals_syntax::SyntaxNode) -> LocalBoxFuture<'_, Vec<Finding>> {
-        alloc::boxed::Box::pin(Self::check_impl(root))
+    fn check<'a>(
+        root: &'a jals_syntax::SyntaxNode,
+        config: &'a Config,
+    ) -> LocalBoxFuture<'a, Vec<Finding>> {
+        alloc::boxed::Box::pin(Self::check_impl(root, config))
     }
 
-    async fn check_impl(root: &jals_syntax::SyntaxNode) -> Vec<Finding> {
+    async fn check_impl(root: &jals_syntax::SyntaxNode, config: &Config) -> Vec<Finding> {
+        let exempt_static =
+            config.style.wildcard_import.options.static_imports == StaticWildcard::Allow;
         let mut yielder = Yielder::new();
         let mut out = Vec::new();
         for node in root.descendants() {
@@ -40,6 +53,11 @@ impl WildcardImport {
             let Some(import) = ImportDecl::cast(node) else {
                 continue;
             };
+            // `import static a.B.*;` — the whole declaration is static, so the exemption covers
+            // its grouped members too.
+            if exempt_static && import.is_static() {
+                continue;
+            }
             if let Some(name) = import.name()
                 && name.is_wildcard()
             {
@@ -54,27 +72,12 @@ impl WildcardImport {
             if let Some(group) = import.group() {
                 for member in group.members().filter(QualifiedName::is_wildcard) {
                     out.extend(
-                        Self::significant_range(member.syntax())
+                        Significant::range(member.syntax())
                             .map(|range| Finding::at_range(range, Self::MESSAGE)),
                     );
                 }
             }
         }
         out
-    }
-
-    /// A node's byte range without the trivia rowan parks inside it. A grouped import's member
-    /// node starts at the space after the preceding comma (`{HashMap,·concurrent.*}`), and a
-    /// diagnostic that began one column early would underline that space instead of the name.
-    /// `None` for a node holding no significant token at all (error recovery).
-    fn significant_range(node: &jals_syntax::SyntaxNode) -> Option<Range<usize>> {
-        let mut tokens = node
-            .descendants_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .filter(|token| !token.kind().is_trivia())
-            .map(|token| token.text_range());
-        let first = tokens.next()?;
-        let last = tokens.last().unwrap_or(first);
-        Some(usize::from(first.start())..usize::from(last.end()))
     }
 }

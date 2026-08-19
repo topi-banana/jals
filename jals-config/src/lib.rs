@@ -19,7 +19,7 @@
 //! [`Manifest`].
 //!
 //! One thing here is not a file schema: the **severity vocabulary**. The configured
-//! [`Severity`](lint::Severity) has always lived here, and the presented [`DiagnosticSeverity`]
+//! [`LintLevel`](lint::LintLevel) has always lived here, and the presented [`DiagnosticSeverity`]
 //! joins it, so that a crate which produces diagnostics can state how they present without
 //! depending on an editor. `jals-editor` and `jals-project` both produce diagnostics and neither
 //! depends on the other; this is the only crate they share.
@@ -35,7 +35,7 @@ pub mod manifest;
 pub mod toolchain;
 
 pub use diagnostic::DiagnosticSeverity;
-pub use lint::Severity;
+pub use lint::{Category, LintLevel};
 pub use loader::{ConfigError, DiscoverableConfig};
 pub use manifest::MANAGED_REMAP_ROOT;
 pub use manifest::{

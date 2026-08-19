@@ -1,12 +1,19 @@
-//! `naming-convention`: flag declarations whose name breaks the conventional Java casing.
+//! `naming-convention`: flag declarations whose name breaks the project's naming table.
 //!
-//! - Type declarations (class / interface / enum / record / annotation type) → `UpperCamelCase`.
-//! - Methods → `lowerCamelCase`.
-//! - Parameters and local variables → `lowerCamelCase`.
-//! - Fields → `lowerCamelCase`, unless `static final` (a constant) → `UPPER_SNAKE_CASE`.
+//! One rule with one key per kind of declaration ([`NamingConvention`]), defaulting to the
+//! conventional Java casing: types `UpperCamelCase`, methods / fields / parameters / locals
+//! `lowerCamelCase`, and a `static final` field — Java's spelling of a constant —
+//! `SCREAMING_SNAKE_CASE`. A kind is exempted by setting it to [`Case::Any`], which is a value and
+//! not an absent key, so the table stays total and this rule never has to interpret a missing
+//! entry.
 //!
-//! Constructors and enum constants are intentionally not checked. Only plain ASCII identifiers
-//! are checked; names with `$` or non-ASCII letters are left alone to avoid false positives.
+//! Constructors and enum constants are not checked at all, and neither is a configuration
+//! question. A constructor's name *is* its type's, so a wrong case is already reported once,
+//! against the type; and both `SCREAMING_SNAKE_CASE` and `UpperCamelCase` enum constants are
+//! attested across the ecosystem, so neither is a convention to enforce.
+//!
+//! Only plain ASCII identifiers are checked; names with `$` or non-ASCII letters are left alone to
+//! avoid false positives.
 
 use alloc::format;
 use alloc::vec::Vec;
@@ -19,12 +26,15 @@ use jals_syntax::{SyntaxElement, SyntaxNode, SyntaxToken};
 
 use jals_exec::{LocalBoxFuture, Yielder};
 
-use crate::diagnostic::Severity;
+use jals_config::Category;
+use jals_config::lint::{Case, Config};
+
 use crate::rules::{Checker, Finding, RuleMeta};
 
 pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "naming-convention",
-    default: Severity::Warn,
+    category: Category::Naming,
+    level: |config| config.naming.naming_convention.level,
     needs_clean_parse: false,
     check: Checker::Syntactic(NamingConvention::check),
 };
@@ -34,11 +44,12 @@ struct NamingConvention;
 
 impl NamingConvention {
     /// The table-edge shim: boxes the async rule body once per file.
-    fn check(root: &SyntaxNode) -> LocalBoxFuture<'_, Vec<Finding>> {
-        alloc::boxed::Box::pin(Self::check_impl(root))
+    fn check<'a>(root: &'a SyntaxNode, config: &'a Config) -> LocalBoxFuture<'a, Vec<Finding>> {
+        alloc::boxed::Box::pin(Self::check_impl(root, config))
     }
 
-    async fn check_impl(root: &SyntaxNode) -> Vec<Finding> {
+    async fn check_impl(root: &SyntaxNode, config: &Config) -> Vec<Finding> {
+        let table = &config.naming.naming_convention.options;
         let mut yielder = Yielder::new();
         let mut out = Vec::new();
         for node in root.descendants() {
@@ -46,24 +57,29 @@ impl NamingConvention {
             match node.kind() {
                 CLASS_DECL | INTERFACE_DECL | ENUM_DECL | RECORD_DECL | ANNOTATION_TYPE_DECL => {
                     if let Some(tok) = Self::first_name_ident(&node) {
-                        Self::push_if_bad(&tok, Case::Pascal, "type", &mut out);
+                        Self::push_if_bad(&tok, table.types, "type", &mut out);
                     }
                 }
                 METHOD_DECL => {
                     if let Some(tok) = Self::first_name_ident(&node) {
-                        Self::push_if_bad(&tok, Case::Camel, "method", &mut out);
+                        Self::push_if_bad(&tok, table.methods, "method", &mut out);
                     }
                 }
-                PARAM | LOCAL_VAR_DECL => {
+                PARAM => {
                     for tok in Self::name_idents(&node) {
-                        Self::push_if_bad(&tok, Case::Camel, "variable", &mut out);
+                        Self::push_if_bad(&tok, table.parameters, "parameter", &mut out);
+                    }
+                }
+                LOCAL_VAR_DECL => {
+                    for tok in Self::name_idents(&node) {
+                        Self::push_if_bad(&tok, table.locals, "local variable", &mut out);
                     }
                 }
                 FIELD_DECL => {
                     let (case, what) = if Self::is_constant_field(&node) {
-                        (Case::Screaming, "constant")
+                        (table.constants, "constant")
                     } else {
-                        (Case::Camel, "field")
+                        (table.fields, "field")
                     };
                     for tok in Self::name_idents(&node) {
                         Self::push_if_bad(&tok, case, what, &mut out);
@@ -77,12 +93,16 @@ impl NamingConvention {
 
     fn push_if_bad(tok: &SyntaxToken, case: Case, what: &str, out: &mut Vec<Finding>) {
         let name = tok.text();
-        if !Self::is_checkable(name) || case.accepts(name) {
+        let Some(label) = Expected::label(case) else {
+            // `Case::Any` — this kind is not checked at all.
+            return;
+        };
+        if !Self::is_checkable(name) || Expected::accepts(case, name) {
             return;
         }
         out.push(Finding::at_token(
             tok,
-            format!("{what} name `{name}` should be {}", case.label()),
+            format!("{what} name `{name}` should be {label}"),
         ));
     }
 
@@ -124,39 +144,40 @@ impl NamingConvention {
     }
 }
 
-/// The expected casing for a kind of name.
-#[derive(Clone, Copy)]
-enum Case {
-    /// `UpperCamelCase`.
-    Pascal,
-    /// `lowerCamelCase`.
-    Camel,
-    /// `UPPER_SNAKE_CASE`.
-    Screaming,
-}
+/// What a configured [`Case`] accepts, and what it is called in a diagnostic.
+///
+/// The predicate lives here rather than on the config enum because it is the rule's reading of the
+/// convention, not part of the schema — `jals-config` stays a data model with no behaviour.
+struct Expected;
 
-impl Case {
-    fn accepts(self, name: &str) -> bool {
-        match self {
-            Self::Pascal => {
+impl Expected {
+    /// Whether `name` is spelled in `case`. [`Case::Any`] accepts everything, but the caller has
+    /// already stood down on it via [`label`](Self::label), so this is never asked.
+    fn accepts(case: Case, name: &str) -> bool {
+        match case {
+            Case::UpperCamelCase => {
                 name.chars().next().is_some_and(|c| c.is_ascii_uppercase()) && !name.contains('_')
             }
-            Self::Camel => {
+            Case::LowerCamelCase => {
                 name.chars().next().is_some_and(|c| c.is_ascii_lowercase()) && !name.contains('_')
             }
-            Self::Screaming => {
+            Case::ScreamingSnakeCase => {
                 name.chars()
                     .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
                     && name.chars().any(|c| c.is_ascii_uppercase())
             }
+            Case::Any => true,
         }
     }
 
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Pascal => "UpperCamelCase",
-            Self::Camel => "lowerCamelCase",
-            Self::Screaming => "UPPER_SNAKE_CASE",
+    /// How `case` is named in a diagnostic, or `None` for [`Case::Any`] — which is also how the
+    /// caller learns the kind is exempt, so the two facts cannot disagree.
+    const fn label(case: Case) -> Option<&'static str> {
+        match case {
+            Case::UpperCamelCase => Some("UpperCamelCase"),
+            Case::LowerCamelCase => Some("lowerCamelCase"),
+            Case::ScreamingSnakeCase => Some("UPPER_SNAKE_CASE"),
+            Case::Any => None,
         }
     }
 }

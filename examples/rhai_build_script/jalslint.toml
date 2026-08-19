@@ -2,5 +2,5 @@
 # program reads it. This one prints what the build script generated and takes no arguments, so
 # `unused-variables` would flag a parameter the example cannot drop — the suppression the rule's
 # own documentation prescribes for a signature it does not get to choose.
-[rules]
+[unused]
 unused-variables = "allow"

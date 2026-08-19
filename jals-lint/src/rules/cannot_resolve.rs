@@ -11,9 +11,9 @@
 //! It is index-aware: with no project index (the file-local path) it reports nothing, since deciding
 //! that a name is nameable from nowhere needs the whole project's type table.
 //!
-//! Unlike every other rule here this one defaults to [`Severity::Error`]: an unresolvable name is
-//! not a style question. It is a configuration key like any other, so a project that indexes only
-//! part of its sources can still set it to `allow`.
+//! It is the one rule that defaults to [`LintLevel::Error`](jals_config::LintLevel::Error): an
+//! unresolvable name is not a style question. It is a `[correctness]` key like any other, so a
+//! project that indexes only part of its sources can still set it to `allow`.
 
 use alloc::vec::Vec;
 
@@ -22,12 +22,15 @@ use alloc::format;
 use jals_exec::LocalBoxFuture;
 use jals_hir::{FileAnalysis, FileSemantics};
 
-use crate::diagnostic::Severity;
+use jals_config::Category;
+use jals_config::lint::Config;
+
 use crate::rules::{Checker, Finding, RuleMeta};
 
 pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "cannot-resolve",
-    default: Severity::Error,
+    category: Category::Correctness,
+    level: |config| config.correctness.cannot_resolve.level,
     needs_clean_parse: false,
     check: Checker::Semantic(CannotResolve::check),
 };
@@ -40,6 +43,7 @@ impl CannotResolve {
     fn check<'a>(
         analysis: &'a FileAnalysis,
         project: Option<&'a FileSemantics<'a>>,
+        _config: &'a Config,
     ) -> LocalBoxFuture<'a, Vec<Finding>> {
         alloc::boxed::Box::pin(Self::check_impl(analysis, project))
     }

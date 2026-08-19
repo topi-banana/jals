@@ -15,20 +15,27 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::ops::Range;
 
-use crate::rules::Finding;
+use crate::rules::{Finding, RuleMeta};
 
-/// How serious a lint finding is, re-exported from the shared config crate. Doubles as the per-rule
+/// What a rule does when it fires, re-exported from the shared config crate. It *is* the per-rule
 /// configuration value ([`jalslint.toml`](jals_config::lint::Config)): a rule set to
-/// [`Allow`](Severity::Allow) is disabled and never runs.
-pub use jals_config::Severity;
+/// [`Allow`](LintLevel::Allow) is disabled and never runs.
+pub use jals_config::LintLevel;
 
 /// A single lint diagnostic: a rule firing at a byte range in the source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
     /// The name of the rule that produced this diagnostic (kebab-case, e.g. `wildcard-import`).
+    /// It is also the rule's key inside its `jalslint.toml` section, so a reported finding names
+    /// what silences it.
+    /// A rule's [`Category`](jals_config::Category) — the section it is configured under — is
+    /// deliberately **not** carried here. No destination draws it, and a copy on every diagnostic
+    /// would be a second place the section lives; a host that wants it looks the rule name up in
+    /// [`RuleInfo::all`](crate::RuleInfo::all), which is the registry that already answers.
     pub rule: &'static str,
-    /// The resolved severity for this diagnostic.
-    pub severity: Severity,
+    /// The resolved level for this diagnostic. Never [`Allow`](LintLevel::Allow): the engine skips
+    /// a rule set to it.
+    pub severity: LintLevel,
     /// Human-readable message.
     pub message: String,
     /// Byte range in the original source.
@@ -44,11 +51,11 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
-    /// Build a diagnostic from a rule's [`Finding`], stamping it with the rule name and the
-    /// severity resolved from configuration.
-    pub(crate) fn new(rule: &'static str, severity: Severity, finding: Finding) -> Self {
+    /// Build a diagnostic from a rule's [`Finding`], stamping it with the rule's identity and the
+    /// level resolved from configuration.
+    pub(crate) fn new(rule: &RuleMeta, severity: LintLevel, finding: Finding) -> Self {
         Self {
-            rule,
+            rule: rule.name,
             severity,
             message: finding.message,
             range: finding.range,

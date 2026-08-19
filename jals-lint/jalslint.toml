@@ -1,0 +1,64 @@
+# jals-lint configuration — the frequently-touched keys, with their built-in values.
+#
+# Every key is optional; an omitted key, or an omitted whole section, leaves the rule at the level
+# shown here. The complete schema is `jals_config::lint`, one module per section, and
+# `jals-lint/README.md` is the rule list.
+#
+# A rule's value is its level ("allow" / "warn" / "error"), or a table of that level and the rule's
+# own options. `level` is the reserved key inside the table form, and it may be omitted — a table
+# that sets only options keeps the rule's built-in level rather than restating it.
+
+# The code is wrong: it does not resolve, or it contradicts its own types.
+[correctness]
+cannot-resolve = "error"
+type-mismatch = "warn"
+unreported-exception = "warn"
+
+# The code is legal here and not everywhere it has to run. Every rule is gated on the project's
+# `[package] features`, so a plain Java project only ever sees the jals dialect rules.
+[compatibility]
+compact-source-file = "error"
+module-import = "error"
+grouped-import = "error"
+attribute = "error"
+
+# The code compiles and is probably not what was meant.
+[suspicious]
+constant-condition = "warn"
+empty-catch = { level = "warn", commented = "accept", allowed-names = [] }
+
+# Something is declared and nothing reads it.
+[unused]
+unused-variables = { level = "warn", ignore-prefix = "_" }
+unused-imports = "warn"
+dead-code = { level = "warn", annotated = "skip" }
+
+# The same meaning is available in a simpler form.
+[complexity]
+collapsible-if = "warn"
+
+# The same meaning is available in a cheaper form.
+[performance]
+boxed-primitive-constructor = "warn"
+
+# Correct code written unconventionally.
+[style]
+wildcard-import = { level = "warn", static-imports = "report" }
+missing-braces = { level = "warn", policy = "always" }
+
+# One rule, one key per kind of declaration. Set a kind to "any" to stop checking it.
+[naming.naming-convention]
+types = "upper-camel-case"
+methods = "lower-camel-case"
+fields = "lower-camel-case"
+constants = "screaming-snake-case"
+parameters = "lower-camel-case"
+locals = "lower-camel-case"
+
+# Javadoc that is absent, empty, or out of step with its declaration.
+[documentation]
+empty-javadoc = "warn"
+
+# Correct, idiomatic, fast code a project has chosen to ban anyway. Always "allow" by default.
+[restriction]
+print-to-console = { level = "allow", streams = "both" }

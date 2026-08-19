@@ -18,9 +18,11 @@
 //! rather than by a caller editing the config it passes down — and identically whichever entry point
 //! is used, since a policy that varied by entry point would be two rules free to drift.
 //!
-//! Each rule has a kebab-case name and a built-in default [`Severity`]; a `jalslint.toml` may
-//! override any rule's severity, including `allow` to disable it. Rules are read-only and never
-//! modify the source.
+//! Each rule has a kebab-case name and lives in one `jalslint.toml` **section**, which is the
+//! defect class it reports ([`Category`]); its built-in level is the value that section's schema
+//! gives its key, and a `jalslint.toml` may set any rule to `allow` / `warn` / `error` and
+//! configure whatever options the rule takes. [`RuleInfo::all`] enumerates the whole registry. Rules are
+//! read-only and never modify the source.
 
 extern crate alloc;
 
@@ -30,8 +32,8 @@ mod rules;
 use alloc::vec::Vec;
 use core::cell::OnceCell;
 
-use jals_config::Severity;
 use jals_config::lint::Config;
+use jals_config::{Category, LintLevel};
 use jals_hir::{FileAnalysis, FileSemantics};
 use jals_syntax::cfg::CfgMap;
 use jals_syntax::{Parse, SyntaxNode};
@@ -39,6 +41,38 @@ use jals_syntax::{Parse, SyntaxNode};
 use rules::{Checker, FeatureGate, Finding};
 
 pub use diagnostic::{Diagnostic, LintOutput};
+
+/// One rule's identity, as the registry publishes it.
+///
+/// The linter's own table, readable from outside so a consumer — `jals lint --list`, the ledger
+/// test in `jals-lint/tests/registry.rs`, a future config language server — can enumerate the
+/// rules instead of restating them. `default_level` is derived by applying the rule's accessor to
+/// [`Config::default`], so it is the schema's value and cannot disagree with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuleInfo {
+    /// The rule's kebab-case name, which is also its key inside `category`'s section.
+    pub name: &'static str,
+    /// The `jalslint.toml` section the rule is configured under.
+    pub category: Category,
+    /// The level the rule fires at when nothing configures it.
+    pub default_level: LintLevel,
+}
+
+impl RuleInfo {
+    /// Every rule the linter implements, in the order the sections are declared on the config.
+    ///
+    /// The registry is the answer to "what does jals lint check?", and it is data rather than
+    /// prose, so `jals-lint/README.md`'s table and `jals-lint/MAPPING-rustc-clippy.md`'s ledger
+    /// are both checkable against it.
+    pub fn all() -> impl Iterator<Item = Self> {
+        let defaults = Config::default();
+        rules::RULES.iter().map(move |rule| Self {
+            name: rule.name,
+            category: rule.category,
+            default_level: (rule.level)(&defaults),
+        })
+    }
+}
 
 /// Everything one lint run reads about the file, apart from the configuration.
 ///
@@ -150,19 +184,24 @@ impl LintOutput {
         let analysis = OnceCell::new();
         let mut diagnostics = Vec::new();
         for rule in rules::RULES {
-            let severity = config.severity(rule.name, rule.default);
-            if severity == Severity::Allow || (rule.needs_clean_parse && !clean) {
+            let severity = (rule.level)(config);
+            if severity == LintLevel::Allow || (rule.needs_clean_parse && !clean) {
                 continue;
             }
             let findings = match rule.check {
-                Checker::Syntactic(check) => check(root).await,
+                Checker::Syntactic(check) => check(root, config).await,
                 Checker::Analyzed(check) => {
-                    check(Self::analysis_once(&analysis, supplied, root, cfg).await).await
+                    check(
+                        Self::analysis_once(&analysis, supplied, root, cfg).await,
+                        config,
+                    )
+                    .await
                 }
                 Checker::Semantic(check) => {
                     check(
                         Self::analysis_once(&analysis, supplied, root, cfg).await,
                         project,
+                        config,
                     )
                     .await
                 }
@@ -186,7 +225,7 @@ impl LintOutput {
                 }
             };
             for finding in findings {
-                diagnostics.push(Diagnostic::new(rule.name, severity, finding));
+                diagnostics.push(Diagnostic::new(rule, severity, finding));
             }
         }
         // Nothing inside a `cfg`-disabled host is reported: the code will not be compiled, so
@@ -200,7 +239,7 @@ impl LintOutput {
             for error in cfg.errors() {
                 diagnostics.push(Diagnostic {
                     rule: "cfg",
-                    severity: Severity::Error,
+                    severity: LintLevel::Error,
                     message: error.kind.message(),
                     range: usize::from(error.range.start())..usize::from(error.range.end()),
                     unnecessary: false,
@@ -622,7 +661,7 @@ mod tests {
         assert_eq!(found[0].message, "cannot resolve symbol `Nope`");
         // An unresolvable name is not a style question, so it is an error by default — the one rule
         // here that is.
-        assert_eq!(found[0].severity, Severity::Error);
+        assert_eq!(found[0].severity, LintLevel::Error);
     }
 
     #[test]
@@ -631,9 +670,7 @@ mod tests {
         // rule, so a project that indexes only part of its sources can turn it off.
         let src = "package a; class Bar { Nope n; }";
         let mut config = Config::default();
-        config
-            .rules
-            .insert("cannot-resolve".to_owned(), Severity::Allow);
+        config.correctness.cannot_resolve.level = LintLevel::Allow;
         assert!(
             indexed(src, &config)
                 .iter()
@@ -642,15 +679,13 @@ mod tests {
         );
 
         let mut config = Config::default();
-        config
-            .rules
-            .insert("cannot-resolve".to_owned(), Severity::Warn);
+        config.correctness.cannot_resolve.level = LintLevel::Warn;
         let found: Vec<_> = indexed(src, &config)
             .into_iter()
             .filter(|d| d.rule == "cannot-resolve")
             .collect();
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].severity, Severity::Warn);
+        assert_eq!(found[0].severity, LintLevel::Warn);
     }
 
     #[test]

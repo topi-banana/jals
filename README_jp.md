@@ -54,7 +54,7 @@ linter・language server（LSP）を提供しており、いずれも名前解�
 | [`jals-editor`](jals-editor)         | definition・references・hover・completion・signature help・highlight の protocol-neutral な意味論と、UTF-8 バイト／UTF-16 座標変換。LSP とブラウザ playground で共有します。                                                                                                                                                                                    |
 | [`jals-syntax`](jals-syntax)         | 無損失な Java lexer とエラー耐性のある CST parser（`rowan`）、および CST 上の型付き AST 層。すべてのツールの共通基盤です。                                                                                                                                                                                                                                      |
 | [`jals-fmt`](jals-fmt)               | **WIP（作り直し中）。** `jals-syntax` の CST を入力とする Wadler/Prettier 方式の pretty-printer。現状は入力をそのまま返す no-op。                                                                                                                                                                                                                               |
-| [`jals-lint`](jals-lint)             | linter（`jals-cli` 経由の `jals lint`）。CST と `jals-hir` に基づくルールレジストリで、未使用のローカル変数・型不一致・報告されていない例外・定数条件による到達不能分岐・`[package] features` に応じたプレビュー機能チェックを行います。                                                                                                                        |
+| [`jals-lint`](jals-lint)             | linter（`jals-cli` 経由の `jals lint`）。CST と `jals-hir` に基づくルールレジストリで、欠陥クラス別の 10 section・19 rule を `jalslint.toml` から名前で設定します。rustc/clippy の全 lint を jals rule か「採らない理由」に対応付けた台帳を持ちます。                                                                                                                        |
 | [`jals-hir`](jals-hir)               | CST 上での名前解決・ファイル横断の型インデックス・型推論/型検査。linter と LSP が拠り所とするセマンティック層で、コンパイル済み classpath からの外部型の橋渡しも行います。                                                                                                                                                                                      |
 | [`jals-classfile`](jals-classfile)   | JVM の `.class` ファイル形式（JVMS 第 4 章）を完全にバイト一致で読み書きするモデル。                                                                                                                                                                                                                                                                            |
 | [`jals-decompile`](jals-decompile)   | パース済みの `.class` から読める Java を再構築します。型/シグネチャのレンダリング、初期化子、宣言された `throws`、そして（段階的に）バイトコードからのメソッド本体の完全な逆コンパイル。                                                                                                                                                                        |
@@ -243,11 +243,37 @@ jals lint src/Main.java src/Util.java
 jals lint src/
 ```
 
-`jals lint` は未使用のローカル変数・型不一致・報告されていない検査例外・定数条件による到達不能
-分岐、`[package] features` に応じたプレビュー機能を、名前解決と型推論（`jals-hir`）を使って検出します。単なる
-構文木上のパターンマッチではありません。`jals.toml` マニフェストが見つかれば、その `[build]
-classpath` と `[dependencies]` も解決されるため、外部ライブラリの型も理解されます。設定は
-`jalslint.toml`（`jalsfmt.toml` と同じ方法で探索されます）で行います。
+`jals lint` は **10 section・19 rule** を、名前解決と型推論（`jals-hir`）を使って検出します。単なる
+構文木上のパターンマッチではありません。解決できない名前・型不一致・報告されていない検査例外
+（`[correctness]`）、`[package] features` に応じたプレビュー機能と方言構文（`[compatibility]`）、
+定数条件による到達不能分岐と握り潰された例外（`[suspicious]`）、未使用の束縛・import・`private`
+メンバ（`[unused]`）、そして `[complexity]` / `[performance]` / `[style]` / `[naming]` /
+`[documentation]` / `[restriction]` の各 rule です。すべて名前付きの rule なので、`cannot-resolve`
+を含めどれでも severity 変更・無効化ができます。`jals.toml` マニフェストが見つかれば、その `[build]
+classpath` と `[dependencies]` も解決されるため、外部ライブラリの型も理解されます。
+
+設定は `jalslint.toml`（`jalsfmt.toml` と同じ方法で探索されます）で行います。rule の値は level か、
+level と rule 固有の option をまとめた table です。
+
+```toml
+[unused]
+dead-code = "allow"
+
+[style]
+missing-braces = { level = "warn", policy = "multi-line" }
+```
+
+rule 一覧・設定リファレンス・rustc/clippy の残りの lint を移植する roadmap は
+[`jals-lint/README.md`](jals-lint/README.md) に、両ツールの全 1,059 lint を分類した台帳は
+[`jals-lint/MAPPING-rustc-clippy.md`](jals-lint/MAPPING-rustc-clippy.md) にあります。
+
+> **`jalslint.toml` の形が変わりました。** フラットな `[rules]` table は無くなり、rule はそれが
+> 報告する欠陥クラスの section の下に書きます（`[rules] wildcard-import = "allow"` →
+> `[style] wildcard-import = "allow"`）。この jals が定義していない key は**拒否せず保持**され
+> ます — 古い名前 1 つでファイル全体が読めなくなってはいけないからです — が、黙って消えることも
+> なく、`jals lint` が `warning: <file>: unknown lint key <key>` を出します。かつての
+> `[rules] unused-local` は `unused-variables` / `unused-imports` / `dead-code` に分割済みで、
+> 避けようのない引数のための抑制は `[unused] unused-variables` です。
 
 ### language server を起動する
 

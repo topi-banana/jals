@@ -1,32 +1,40 @@
 //! The lint rules and the registry that drives them.
 //!
-//! Each rule is a pure function `fn(&SyntaxNode) -> Vec<Finding>` paired with metadata
-//! ([`RuleMeta`]): a kebab-case name and a built-in default [`Severity`]. The library walks the
-//! parsed CST, runs every enabled rule, and stamps each [`Finding`] with the rule name and the
-//! severity resolved from configuration. Rules never mutate the tree and never panic.
+//! Each rule is a pure checker paired with metadata ([`RuleMeta`]): a kebab-case name, the
+//! [`Category`] whose `jalslint.toml` section declares it, and an accessor that reads its
+//! configured [`LintLevel`] out of that section. The library walks the parsed CST, runs every
+//! enabled rule, and stamps each [`Finding`] with the rule name and the level. Rules never mutate
+//! the tree and never panic.
+//!
+//! **A rule's built-in level is not written here.** It is the value the section's [`Default`] impl
+//! in `jals_config::lint` gives the rule's key, and [`RuleMeta::level`] reads whatever the config
+//! holds — so the default has one home and cannot drift from the schema that documents it.
 
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::ops::Range;
 
-use jals_config::Feature;
+use jals_config::lint::Config;
+use jals_config::{Category, Feature, LintLevel};
 use jals_exec::{LocalBoxFuture, Yielder};
 use jals_hir::{Def, FileAnalysis, FileSemantics};
 use jals_syntax::{SyntaxNode, SyntaxToken};
 
-use crate::diagnostic::Severity;
-
 mod attribute;
+mod boxed_primitive_constructor;
 mod cannot_resolve;
+mod collapsible_if;
 mod compact_source_file;
 mod constant_condition;
 mod dead_code;
 mod empty_catch;
+mod empty_javadoc;
 mod grouped_import;
 mod missing_braces;
 mod module_import;
 mod naming;
+mod print_to_console;
 mod type_mismatch;
 mod unreported_exception;
 mod unused_imports;
@@ -127,6 +135,31 @@ impl FeatureGate {
     }
 }
 
+/// The byte range a node's **significant** tokens span, for the three rules that need a node's
+/// extent rather than its subtree.
+///
+/// The two are not the same, and the difference is a bug the first time each rule meets it: rowan
+/// parks a node's leading trivia *inside* the node, so a statement written on its own line begins,
+/// as far as `text_range` is concerned, at the newline that ended the previous one. A rule reading
+/// that range then sees a newline every rule-relevant construct has, and a comment written before a
+/// node reads as a comment inside it.
+pub(crate) struct Significant;
+
+impl Significant {
+    /// `node`'s first significant token's start through its last significant token's end, or
+    /// `None` when it holds no significant token at all (error recovery).
+    fn range(node: &SyntaxNode) -> Option<Range<usize>> {
+        let mut ranges = node
+            .descendants_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .filter(|token| !token.kind().is_trivia())
+            .map(|token| token.text_range());
+        let first = ranges.next()?;
+        let last = ranges.last().unwrap_or(first);
+        Some(usize::from(first.start())..usize::from(last.end()))
+    }
+}
+
 /// Shared walk over `jals-hir`'s unused-binding signal ([`FileAnalysis::unused_defs`]) for the two
 /// rules that split it: `unused-variables` takes the bindings one file scopes, `dead-code` the
 /// `private` members. They are two rules so that they suppress independently (each rule's module
@@ -139,16 +172,17 @@ impl UnusedDefs {
     /// Every unused [`Def`] `subject` names, ranged over the binding's own name. Also the
     /// table-edge shim: the async body is boxed once per file here, so a rule's entry in
     /// [`RULES`] is `subject` and nothing else.
-    fn findings(
-        analysis: &FileAnalysis,
-        subject: fn(&Def) -> Option<&'static str>,
-    ) -> LocalBoxFuture<'_, Vec<Finding>> {
+    fn findings<'a>(
+        analysis: &'a FileAnalysis,
+        config: &'a Config,
+        subject: fn(&Def, &Config) -> Option<&'static str>,
+    ) -> LocalBoxFuture<'a, Vec<Finding>> {
         alloc::boxed::Box::pin(async move {
             let mut yielder = Yielder::new();
             let mut out = Vec::new();
             for def in analysis.unused_defs() {
                 yielder.tick().await;
-                let Some(subject) = subject(def) else {
+                let Some(subject) = subject(def, config) else {
                     continue;
                 };
                 out.push(Finding::unnecessary_at(
@@ -176,10 +210,10 @@ impl UnusedDefs {
 #[derive(Clone, Copy)]
 pub(crate) enum Checker {
     /// A pure syntactic rule: given the CST root, return every finding.
-    Syntactic(for<'a> fn(&'a SyntaxNode) -> LocalBoxFuture<'a, Vec<Finding>>),
+    Syntactic(for<'a> fn(&'a SyntaxNode, &'a Config) -> LocalBoxFuture<'a, Vec<Finding>>),
     /// A rule over the file's own analysis: its name resolution, and the analyses that need no
-    /// project. The root comes with it, so this takes one argument rather than two.
-    Analyzed(for<'a> fn(&'a FileAnalysis) -> LocalBoxFuture<'a, Vec<Finding>>),
+    /// project. The root comes with it, so this takes the analysis rather than the root.
+    Analyzed(for<'a> fn(&'a FileAnalysis, &'a Config) -> LocalBoxFuture<'a, Vec<Finding>>),
     /// A rule that additionally reads the project when the caller supplied one: it resolves
     /// reference types across files and may run type inference. With `None` it either reports
     /// nothing (`cannot-resolve`, `unreported-exception`) or falls back to the file-local analysis
@@ -188,6 +222,7 @@ pub(crate) enum Checker {
         for<'a> fn(
             &'a FileAnalysis,
             Option<&'a FileSemantics<'a>>,
+            &'a Config,
         ) -> LocalBoxFuture<'a, Vec<Finding>>,
     ),
     /// A syntactic rule gated on the project's language [`FeatureSet`](jals_config::FeatureSet): it
@@ -209,12 +244,25 @@ pub(crate) enum Checker {
     },
 }
 
-/// A rule: its identity and its checker.
+/// A rule: its identity, where it is configured, and its checker.
 pub(crate) struct RuleMeta {
-    /// Stable kebab-case name, used as the config key and shown in diagnostics.
+    /// Stable kebab-case name. It is both the key inside the rule's `jalslint.toml` section and
+    /// the name every [`Diagnostic`](crate::Diagnostic) it produces carries, so a reported finding
+    /// names the key that silences it. Unique across sections
+    /// (`jals-lint/tests/registry.rs`).
     pub name: &'static str,
-    /// Severity used when the rule is not configured.
-    pub default: Severity,
+    /// The defect class this rule reports, which is also the section it is configured under. See
+    /// `jals_config::lint`'s module docs for why the vocabulary is defect classes rather than
+    /// clippy's groups.
+    pub category: Category,
+    /// The rule's configured level, read out of its own section.
+    ///
+    /// An accessor and not a stored default: the built-in level is the one the section's
+    /// [`Default`] gives this key, so a second copy here would be a second thing to keep in step
+    /// with the schema. Applying `Config::default()` to this is therefore *the* built-in level,
+    /// which is what [`crate::rules()`] reports and what pins the default set in
+    /// `jals-lint/tests/registry.rs`.
+    pub level: fn(&Config) -> LintLevel,
     /// Whether this rule must not run at all when the file has syntax errors.
     ///
     /// The criterion is **findings derived from type inference**, which a half-parsed tree turns into
@@ -231,21 +279,35 @@ pub(crate) struct RuleMeta {
     pub check: Checker,
 }
 
-/// Every rule, in a stable order.
+/// Every rule, grouped by [`Category`] in the order the sections are declared on the config.
 pub(crate) const RULES: &[RuleMeta] = &[
-    naming::RULE,
-    wildcard_import::RULE,
-    empty_catch::RULE,
-    missing_braces::RULE,
+    // [correctness]
+    cannot_resolve::RULE,
+    type_mismatch::RULE,
+    unreported_exception::RULE,
+    // [compatibility]
     compact_source_file::RULE,
     module_import::RULE,
     grouped_import::RULE,
     attribute::RULE,
+    // [suspicious]
     constant_condition::RULE,
+    empty_catch::RULE,
+    // [unused]
     unused_variables::RULE,
     unused_imports::RULE,
     dead_code::RULE,
-    type_mismatch::RULE,
-    unreported_exception::RULE,
-    cannot_resolve::RULE,
+    // [complexity]
+    collapsible_if::RULE,
+    // [performance]
+    boxed_primitive_constructor::RULE,
+    // [style]
+    wildcard_import::RULE,
+    missing_braces::RULE,
+    // [naming]
+    naming::RULE,
+    // [documentation]
+    empty_javadoc::RULE,
+    // [restriction]
+    print_to_console::RULE,
 ];

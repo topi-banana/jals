@@ -10,16 +10,16 @@
 
 use alloc::vec::Vec;
 
-use jals_config::Feature;
+use jals_config::{Category, Feature};
 use jals_syntax::SyntaxNode;
 use jals_syntax::ast::{AstNode, SourceFile};
 
-use crate::diagnostic::Severity;
 use crate::rules::{Checker, RuleMeta};
 
 pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "module-import",
-    default: Severity::Error,
+    category: Category::Compatibility,
+    level: |config| config.compatibility.module_import.level,
     needs_clean_parse: false,
     check: Checker::Gated {
         feature: Feature::ModuleImports,

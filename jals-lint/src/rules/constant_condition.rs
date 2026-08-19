@@ -16,12 +16,15 @@ use alloc::format;
 use jals_exec::LocalBoxFuture;
 use jals_hir::FileAnalysis;
 
-use crate::diagnostic::Severity;
+use jals_config::Category;
+use jals_config::lint::Config;
+
 use crate::rules::{Checker, Finding, RuleMeta};
 
 pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "constant-condition",
-    default: Severity::Warn,
+    category: Category::Suspicious,
+    level: |config| config.suspicious.constant_condition.level,
     needs_clean_parse: false,
     check: Checker::Analyzed(ConstantCondition::check),
 };
@@ -31,7 +34,10 @@ struct ConstantCondition;
 
 impl ConstantCondition {
     /// The table-edge shim: boxes the async rule body once per file.
-    fn check(analysis: &FileAnalysis) -> LocalBoxFuture<'_, Vec<Finding>> {
+    fn check<'a>(
+        analysis: &'a FileAnalysis,
+        _config: &'a Config,
+    ) -> LocalBoxFuture<'a, Vec<Finding>> {
         alloc::boxed::Box::pin(Self::check_impl(analysis))
     }
 

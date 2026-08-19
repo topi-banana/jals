@@ -1168,6 +1168,7 @@ dependencies = [
  "jals-exec",
  "jals-storage",
  "serde",
+ "serde_json",
  "toml",
 ]
 
@@ -1262,6 +1263,8 @@ dependencies = [
  "jals-hir",
  "jals-syntax",
  "proptest",
+ "serde_json",
+ "toml",
 ]
 
 [[package]]

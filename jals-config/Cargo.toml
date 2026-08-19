@@ -12,5 +12,11 @@ jals-storage.workspace = true
 serde = { workspace = true, features = ["derive"] }
 toml.workspace = true
 
+[dev-dependencies]
+# The schema tests walk the serialized shape of a config rather than its Rust fields, so a key that
+# only exists as a struct member cannot pass them. `toml` cannot render (no `display` feature, by
+# workspace policy), so the walk goes through JSON.
+serde_json.workspace = true
+
 [lints]
 workspace = true

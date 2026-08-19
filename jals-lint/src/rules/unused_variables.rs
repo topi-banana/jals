@@ -16,27 +16,35 @@
 //! - A **resource** (`try (var in = open())`) exists for its `close()`. The declaration *is* the
 //!   use, and the syntax makes the name mandatory, so flagging one asks for a change that cannot
 //!   be made.
-//! - A name beginning with `_` is the author's own opt-out: it says the binding is deliberately
-//!   unused where the syntax still demands one — an `@Override` parameter, a `catch` clause whose
-//!   exception is genuinely ignored. It is honoured here and not on a `private` member, where a
-//!   leading `_` is a naming *style* rather than a statement of intent (`dead-code`'s module docs
-//!   give that reason in full).
+//! - A name beginning with the configured prefix — `_` out of the box
+//!   ([`UnusedVariables::ignore_prefix`]) — is the author's own opt-out: it says the binding is
+//!   deliberately unused where the syntax still demands one, as in an `@Override` parameter or a
+//!   `catch` clause whose exception is genuinely ignored. It is honoured here and not on a
+//!   `private` member, where a leading `_` is a naming *style* rather than a statement of intent
+//!   (`dead-code`'s module docs give that reason in full). An empty prefix turns the opt-out off
+//!   rather than exempting everything: a prefix every name carries would silence the whole rule,
+//!   which `level = "allow"` already says more plainly.
 //!
 //! `@Override` / interface-implementation parameters remain a known source of false positives —
-//! the signature is not the method's to choose — so suppress the rule via `jalslint.toml` where
-//! that matters.
+//! the signature is not the method's to choose — so rename them with the opt-out prefix, or set
+//! `[unused] unused-variables = "allow"` where that is not practical.
 
 use alloc::vec::Vec;
 
 use jals_exec::LocalBoxFuture;
 use jals_hir::{Def, DefKind, FileAnalysis};
 
-use crate::diagnostic::Severity;
+use jals_config::Category;
+use jals_config::lint::Config;
+
+use jals_config::lint::UnusedVariables as Options;
+
 use crate::rules::{Checker, Finding, RuleMeta, UnusedDefs};
 
 pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "unused-variables",
-    default: Severity::Warn,
+    category: Category::Unused,
+    level: |config| config.unused.unused_variables.level,
     needs_clean_parse: false,
     check: Checker::Analyzed(UnusedVariables::check),
 };
@@ -47,8 +55,11 @@ struct UnusedVariables;
 impl UnusedVariables {
     /// The table edge: [`UnusedDefs`] walks the signal, [`subject`](Self::subject) is this rule's
     /// share of it.
-    fn check(analysis: &FileAnalysis) -> LocalBoxFuture<'_, Vec<Finding>> {
-        UnusedDefs::findings(analysis, Self::subject)
+    fn check<'a>(
+        analysis: &'a FileAnalysis,
+        config: &'a Config,
+    ) -> LocalBoxFuture<'a, Vec<Finding>> {
+        UnusedDefs::findings(analysis, config, Self::subject)
     }
 
     /// How to name `def` in the diagnostic, or `None` when this rule does not report its kind.
@@ -59,7 +70,7 @@ impl UnusedVariables {
     /// than silently ignored. Java 22's unnamed variable (`_` on its own) binds nothing and reaches
     /// no [`Def`], so the opt-out only ever decides `_name`; `naming-convention` already leaves a
     /// name that does not start with an ASCII letter alone, so it trades no warning for another.
-    fn subject(def: &Def) -> Option<&'static str> {
+    fn subject(def: &Def, config: &Config) -> Option<&'static str> {
         let subject = match def.kind {
             DefKind::Local => "local variable",
             DefKind::Param => "parameter",
@@ -78,6 +89,8 @@ impl UnusedVariables {
             | DefKind::AnnotationType
             | DefKind::EnumConstant => return None,
         };
-        (!def.name.starts_with('_')).then_some(subject)
+        let Options { ignore_prefix } = &config.unused.unused_variables.options;
+        let opted_out = !ignore_prefix.is_empty() && def.name.starts_with(ignore_prefix.as_str());
+        (!opted_out).then_some(subject)
     }
 }
