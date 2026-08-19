@@ -148,7 +148,7 @@ pub(crate) struct Significant;
 impl Significant {
     /// `node`'s first significant token's start through its last significant token's end, or
     /// `None` when it holds no significant token at all (error recovery).
-    pub(crate) fn range(node: &SyntaxNode) -> Option<Range<usize>> {
+    fn range(node: &SyntaxNode) -> Option<Range<usize>> {
         let mut ranges = node
             .descendants_with_tokens()
             .filter_map(jals_syntax::SyntaxElement::into_token)

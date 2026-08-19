@@ -91,9 +91,11 @@ macro_rules! lint_section {
                 pub $field: $crate::lint::Lint<$options>,
             )*
             /// Keys written under this section that the schema does not define. Recorded, not
-            /// rejected — [`UnknownKeys`](crate::lint::UnknownKeys) says why.
+            /// rejected — [`UnknownKeys`](crate::lint::UnknownKeys) says why — and read only
+            /// through [`Config::unknown_keys`](crate::lint::Config::unknown_keys), which is where
+            /// the section name that makes a bare key actionable is added.
             #[serde(skip)]
-            pub unknown: $crate::lint::UnknownKeys,
+            pub(crate) unknown: $crate::lint::UnknownKeys,
         }
 
         impl $section {
@@ -179,8 +181,10 @@ pub use compatibility::Compatibility;
 pub use complexity::Complexity;
 pub use correctness::Correctness;
 pub use documentation::Documentation;
-pub(crate) use level::LintPatch;
-pub use level::{Lint, LintLevel, LintOptions, NoOptions, UnknownKeys};
+pub use level::{Lint, LintLevel, NoOptions, UnknownKeys};
+// Neither is part of the public surface. `LintPatch` is a deserialization detail, and the sections
+// are closed, so nothing outside this crate can have an options type to implement `LintOptions` for.
+pub(crate) use level::{LintOptions, LintPatch};
 pub use naming::{Case, Naming, NamingConvention};
 pub use performance::Performance;
 pub use restriction::{ConsoleStreams, PrintToConsole, Restriction};

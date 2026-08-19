@@ -60,7 +60,8 @@ pub enum LintLevel {
 
 impl LintLevel {
     /// The lowercase name (`"allow"` / `"warn"` / `"error"`) — the spelling a `jalslint.toml` uses.
-    pub const fn as_str(self) -> &'static str {
+    /// Private: a consumer reads the same spelling through [`Display`](core::fmt::Display).
+    const fn as_str(self) -> &'static str {
         match self {
             Self::Allow => "allow",
             Self::Warn => "warn",
@@ -117,8 +118,8 @@ pub struct Lint<O = NoOptions> {
 
 impl<O: Default> Lint<O> {
     /// The rule at `level` with default options — how a section's [`Default`] declares a rule's
-    /// built-in level.
-    pub fn at(level: LintLevel) -> Self {
+    /// built-in level, and the only caller. A consumer builds one from its two public fields.
+    pub(crate) fn at(level: LintLevel) -> Self {
         Self {
             level,
             options: O::default(),
@@ -275,12 +276,11 @@ impl UnknownKeys {
     }
 
     /// The recorded keys, in sorted order.
-    pub fn iter(&self) -> impl Iterator<Item = &str> {
+    ///
+    /// Crate-private, with [`Config::unknown_keys`](crate::lint::Config::unknown_keys) as the whole
+    /// public surface: a section records a *bare* key and only the config knows which section it
+    /// was under, so a consumer reading one section's set would get names it cannot act on.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &str> {
         self.0.iter().map(String::as_str)
-    }
-
-    /// Whether the file wrote nothing this schema does not define.
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
     }
 }
