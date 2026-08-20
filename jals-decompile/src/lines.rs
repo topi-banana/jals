@@ -9,10 +9,12 @@
 
 use jals_classfile::{AttributeBody, CodeAttribute, LineNumberEntry};
 
-/// Namespace for the `LineNumberTable` readers.
-pub(crate) struct Lines;
+pub(crate) use api::{line_at, table};
 
-impl Lines {
+/// Namespace for the `LineNumberTable` readers.
+mod api {
+    use super::{AttributeBody, CodeAttribute, LineNumberEntry};
+
     /// The method `Code`'s `LineNumberTable`, or `None`. Present unless the class was compiled with
     /// `-g:none`: `javac` emits it by default (it is what a stack trace's line numbers come from),
     /// so it survives in published jars that carry no `LocalVariableTable`.
@@ -37,7 +39,7 @@ impl Lines {
 
 #[cfg(test)]
 mod tests {
-    use super::Lines;
+    use super::api;
     use jals_classfile::LineNumberEntry;
 
     fn entry(start_pc: u16, line_number: u16) -> LineNumberEntry {
@@ -51,25 +53,25 @@ mod tests {
     fn a_line_covers_offsets_up_to_the_next_entry() {
         // A `for`'s table, as `javac` emits it: the update jumps back to the header's line.
         let table = [entry(0, 3), entry(7, 4), entry(11, 3), entry(17, 6)];
-        assert_eq!(Lines::line_at(&table, 0), Some(3));
+        assert_eq!(api::line_at(&table, 0), Some(3));
         // pc 2 has no entry of its own — it is still covered by the one at pc 0.
-        assert_eq!(Lines::line_at(&table, 2), Some(3));
-        assert_eq!(Lines::line_at(&table, 7), Some(4));
-        assert_eq!(Lines::line_at(&table, 11), Some(3));
-        assert_eq!(Lines::line_at(&table, 20), Some(6));
+        assert_eq!(api::line_at(&table, 2), Some(3));
+        assert_eq!(api::line_at(&table, 7), Some(4));
+        assert_eq!(api::line_at(&table, 11), Some(3));
+        assert_eq!(api::line_at(&table, 20), Some(6));
     }
 
     #[test]
     fn an_offset_before_the_first_entry_has_no_line() {
-        assert_eq!(Lines::line_at(&[entry(4, 9)], 0), None);
-        assert_eq!(Lines::line_at(&[], 0), None);
+        assert_eq!(api::line_at(&[entry(4, 9)], 0), None);
+        assert_eq!(api::line_at(&[], 0), None);
     }
 
     #[test]
     fn an_unsorted_table_still_resolves() {
         // §4.7.12 does not require ascending `start_pc`, so the scan must not assume it.
         let table = [entry(11, 3), entry(0, 3), entry(7, 4)];
-        assert_eq!(Lines::line_at(&table, 9), Some(4));
-        assert_eq!(Lines::line_at(&table, 11), Some(3));
+        assert_eq!(api::line_at(&table, 9), Some(4));
+        assert_eq!(api::line_at(&table, 11), Some(3));
     }
 }

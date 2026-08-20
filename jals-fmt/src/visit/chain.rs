@@ -258,7 +258,7 @@ impl Ctx<'_> {
             prefixes.push(links.len() - 1);
             return prefixes;
         }
-        if let Some(at) = TypePrefix::length(links) {
+        if let Some(at) = api::length(links) {
             prefixes.push(at);
         }
         // With no second call to align under, `myField.foo()` reads better whole than split.
@@ -597,15 +597,6 @@ impl Ctx<'_> {
     }
 }
 
-/// google-java-format's `TypeNameClassifier`: how long a leading run of a dotted name reads as a
-/// type rather than as a sequence of dereferences.
-///
-/// The whole judgement is Java's case conventions — `com.google.ClassName.InnerClass.CONSTANT` is
-/// a name, `list.builder.add` is three dereferences — so it is a state machine over four case
-/// formats and nothing else. It is a heuristic in google-java-format too, and reproducing it
-/// exactly is the only way to reproduce where chains break.
-struct TypePrefix;
-
 /// The case format of one identifier.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Case {
@@ -634,9 +625,18 @@ enum Parse {
     Ambiguous,
 }
 
-impl TypePrefix {
+/// google-java-format's `TypeNameClassifier`: how long a leading run of a dotted name reads as a
+/// type rather than as a sequence of dereferences.
+///
+/// The whole judgement is Java's case conventions — `com.google.ClassName.InnerClass.CONSTANT` is
+/// a name, `list.builder.add` is three dereferences — so it is a state machine over four case
+/// formats and nothing else. It is a heuristic in google-java-format too, and reproducing it
+/// exactly is the only way to reproduce where chains break.
+pub(crate) mod api {
+    use super::{Case, Link, Parse};
+
     /// The index of the last link of the type-shaped prefix, if there is one.
-    fn length(links: &[Link]) -> Option<usize> {
+    pub(super) fn length(links: &[Link]) -> Option<usize> {
         let mut state = Parse::Start;
         let mut found = None;
         for (at, link) in links.iter().enumerate() {
@@ -645,7 +645,7 @@ impl TypePrefix {
             let Some(name) = link.simple.as_ref() else {
                 break;
             };
-            state = Self::next(state, Self::case(name.text()));
+            state = next(state, case(name.text()));
             match state {
                 Parse::Reject => break,
                 Parse::Type | Parse::Member => found = Some(at),
@@ -661,7 +661,7 @@ impl TypePrefix {
     }
 
     /// The classifier's transition function.
-    const fn next(state: Parse, case: Case) -> Parse {
+    pub(super) const fn next(state: Parse, case: Case) -> Parse {
         match state {
             Parse::Start => match case {
                 // An `UpperCamel` later would make this a class, so hold the judgement.
@@ -684,7 +684,7 @@ impl TypePrefix {
     }
 
     /// Classify an identifier's case format, ignoring everything that is not a letter.
-    fn case(name: &str) -> Case {
+    pub(super) fn case(name: &str) -> Case {
         let mut first_upper = false;
         let mut has_upper = false;
         let mut has_lower = false;

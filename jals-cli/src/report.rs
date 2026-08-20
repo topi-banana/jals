@@ -15,17 +15,25 @@ const BOLD: &str = "\x1b[1m";
 const RED: &str = "\x1b[31m";
 const GREEN: &str = "\x1b[32m";
 
+pub(crate) use api::{
+    print_diff, report_format_fallback, report_format_warnings, report_lint, report_migration,
+    report_project, report_unknown_lint_keys,
+};
+
 /// Terminal rendering for the CLI: rustfmt-style diffs on stdout and `ariadne`
 /// diagnostics on stderr. A stateless namespace over the free-standing renderers.
-pub(crate) struct Reporter;
+mod api {
+    use super::{
+        BOLD, ChangeTag, DiagnosticSeverity, Doc, FileDiagnostic, FormatOutput, GREEN, IsTerminal,
+        ProjectAnchor, ProjectDiagnostic, RED, RESET, TextDiff, Write,
+    };
 
-impl Reporter {
     /// Whether ANSI color should be emitted to `stream` (a TTY with `NO_COLOR` unset).
-    fn color_for(stream_is_tty: bool) -> bool {
+    pub(super) fn color_for(stream_is_tty: bool) -> bool {
         stream_is_tty && std::env::var_os("NO_COLOR").is_none()
     }
 
-    fn paint(text: &str, code: &str, color: bool) -> String {
+    pub(super) fn paint(text: &str, code: &str, color: bool) -> String {
         if color {
             format!("{code}{text}{RESET}")
         } else {
@@ -39,24 +47,24 @@ impl Reporter {
         if original == formatted {
             return;
         }
-        let color = Self::color_for(std::io::stdout().is_terminal());
+        let color = color_for(std::io::stdout().is_terminal());
         let diff = TextDiff::from_lines(original, formatted);
         let mut out = std::io::stdout().lock();
         for group in diff.grouped_ops(3) {
             // 1-based line in the original where this hunk starts, à la rustfmt.
             let start = group.first().map_or(0, |op| op.old_range().start) + 1;
             let header = format!("Diff in {label} at line {start}:");
-            let _ = writeln!(out, "{}", Self::paint(&header, BOLD, color));
+            let _ = writeln!(out, "{}", paint(&header, BOLD, color));
             for op in &group {
                 for change in diff.iter_changes(op) {
                     let value = change.value();
                     let line = value.strip_suffix('\n').unwrap_or(value);
                     let _ = match change.tag() {
                         ChangeTag::Delete => {
-                            writeln!(out, "{}", Self::paint(&format!("-{line}"), RED, color))
+                            writeln!(out, "{}", paint(&format!("-{line}"), RED, color))
                         }
                         ChangeTag::Insert => {
-                            writeln!(out, "{}", Self::paint(&format!("+{line}"), GREEN, color))
+                            writeln!(out, "{}", paint(&format!("+{line}"), GREEN, color))
                         }
                         ChangeTag::Equal => writeln!(out, " {line}"),
                     };
@@ -156,7 +164,7 @@ impl Reporter {
     /// exactly as a lint finding does. Everything else has no span in this project's tree — a
     /// dependency failure names a node, not a file here — so it follows the CLI's plain
     /// `error:` / `warning:` / `note:` convention, the same rule
-    /// [`report_format_warnings`](Self::report_format_warnings) applies to a range-less warning.
+    /// [`report_format_warnings`](report_format_warnings) applies to a range-less warning.
     ///
     /// This host reads [`ProjectDiagnostic::span`] rather than `placement_in`: a terminal line can
     /// say "no location", so a diagnostic that has none gets none. Pointing `ariadne` at the head
@@ -211,7 +219,7 @@ impl<'a> Doc<'a> {
     fn new(label: &'a str, src: &'a str) -> Self {
         Self {
             cache: (label, Source::from(src)),
-            use_color: Reporter::color_for(std::io::stderr().is_terminal()),
+            use_color: api::color_for(std::io::stderr().is_terminal()),
         }
     }
 

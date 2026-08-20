@@ -18,7 +18,7 @@
 //! - An **annotated** private member is routinely assigned or invoked by something no source names
 //!   — `@Inject`, `@Autowired`, `@Mock` — and is spelled exactly like one nobody uses. A project
 //!   whose annotations never inject turns that exemption off with
-//!   [`DeadCode::annotated`](jals_config::lint::DeadCode::annotated).
+//!   [`api::annotated`](jals_config::lint::DeadCode::annotated).
 //! - The **serialization** members are called by `ObjectOutputStream`/`ObjectInputStream` through
 //!   reflection, by name, and are `private` precisely so nothing else calls them.
 //!
@@ -36,25 +36,29 @@ use jals_config::lint::Config;
 
 use jals_config::lint::AnnotatedMembers;
 
-use crate::rules::{Checker, Finding, RuleMeta, UnusedDefs};
+use crate::rules::unused_defs;
+use crate::rules::{Checker, Finding, RuleMeta};
 
 pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "dead-code",
     category: Category::Unused,
     level: |config| config.unused.dead_code.level,
     needs_clean_parse: false,
-    check: Checker::Analyzed(DeadCode::check),
+    check: Checker::Analyzed(api::check),
 };
 
 /// The `dead-code` rule.
-struct DeadCode;
+mod api {
+    use super::{
+        AnnotatedMembers, Config, Def, DefKind, FileAnalysis, Finding, LocalBoxFuture, Vec,
+        unused_defs,
+    };
 
-impl DeadCode {
     /// The members `java.io.Serializable` reaches by name, through reflection, rather than through
     /// a call site any analysis could see (JLS-adjacent: `java.io.ObjectOutputStream` /
     /// `ObjectInputStream` specify these by signature). Declaring them `private` is what the
     /// serialization contract asks for, so their non-use is the contract being honoured.
-    const SERIALIZATION_MEMBERS: &'static [&'static str] = &[
+    const SERIALIZATION_MEMBERS: &[&str] = &[
         "serialVersionUID",
         "serialPersistentFields",
         "writeObject",
@@ -64,13 +68,13 @@ impl DeadCode {
         "readResolve",
     ];
 
-    /// The table edge: [`UnusedDefs`] walks the signal, [`subject`](Self::subject) is this rule's
+    /// The table edge: [`UnusedDefs`] walks the signal, [`subject`](subject) is this rule's
     /// share of it.
-    fn check<'a>(
+    pub(crate) fn check<'a>(
         analysis: &'a FileAnalysis,
         config: &'a Config,
     ) -> LocalBoxFuture<'a, Vec<Finding>> {
-        UnusedDefs::findings(analysis, config, Self::subject)
+        unused_defs::findings(analysis, config, subject)
     }
 
     /// How to name `def` in the diagnostic, or `None` when this rule does not report its kind.
@@ -86,7 +90,7 @@ impl DeadCode {
     /// Two gates on the kinds that remain. The member must be `private`, because anything wider is
     /// another file's question; and nothing must be reaching it without naming it, which is what an
     /// annotation and a serialization member each say in their own way.
-    fn subject(def: &Def, config: &Config) -> Option<&'static str> {
+    pub(crate) fn subject(def: &Def, config: &Config) -> Option<&'static str> {
         let subject = match def.kind {
             DefKind::Field => "private field",
             DefKind::Method => "private method",
@@ -110,7 +114,7 @@ impl DeadCode {
             AnnotatedMembers::Skip
         );
         let reached_unnamed = (def.is_annotated && annotated_injects)
-            || Self::SERIALIZATION_MEMBERS.contains(&def.name.as_str());
+            || SERIALIZATION_MEMBERS.contains(&def.name.as_str());
         (def.is_private && !reached_unnamed).then_some(subject)
     }
 }

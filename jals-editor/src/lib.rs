@@ -8,33 +8,32 @@
 
 extern crate alloc;
 
-mod diagnostics;
+pub mod diagnostics;
 mod document;
 mod editor;
-mod folding;
+pub mod folding;
 mod host;
-mod outline;
-mod queries;
-mod selection;
-mod semantic;
+pub mod outline;
+pub mod queries;
+pub mod selection;
+pub mod semantic;
 mod workspace;
 
-pub use diagnostics::{FileDiagnostic, FileDiagnostics};
+pub use diagnostics::FileDiagnostic;
 pub use document::Document;
 pub use editor::Editor;
-pub use folding::{Fold, FoldKind, Folds};
+pub use folding::{Fold, FoldKind};
 pub use host::{EditorHost, FoldingHost, SelectionHost, SemanticTokensHost};
 /// Re-exported so a host that only knows the editor still spells the presented severity
 /// `jals_editor::DiagnosticSeverity`. It lives in `jals-config` because `jals-project` assembles
 /// diagnostics too, and the two crates share nothing else.
 pub use jals_config::DiagnosticSeverity;
-pub use outline::{Outline, OutlineNode};
+pub use outline::OutlineNode;
 pub use queries::{
-    Completion, CompletionKind, FileRange, Highlight, HighlightKind, Ident, ProjectQueries,
-    QueryFile, SignatureHelpUtf16, SignatureUtf16,
+    Completion, CompletionKind, FileRange, Highlight, HighlightKind, ProjectQueries, QueryFile,
+    SignatureHelpUtf16, SignatureUtf16,
 };
-pub use selection::SelectionChains;
-pub use semantic::{SemanticToken, SemanticTokenKind, SemanticTokens};
+pub use semantic::{SemanticToken, SemanticTokenKind};
 pub use workspace::{ProjectLayout, SingleFileProject, Workspace};
 
 pub(crate) use ranges::{byte_range, sat_text_size};

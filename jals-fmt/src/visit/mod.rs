@@ -35,6 +35,9 @@ mod stmt;
 mod ty;
 mod unit;
 
+use crate::javadoc;
+use crate::passes::literals;
+use crate::passes::off_on;
 use alloc::borrow::ToOwned;
 use alloc::boxed::Box;
 use alloc::collections::BTreeSet;
@@ -47,12 +50,8 @@ use text_size::TextRange;
 
 use crate::comments::{Comment, CommentMap};
 use crate::ir::Indent;
-use crate::javadoc::CommentFormatter;
 use crate::ops::Ops;
-use crate::passes::{LiteralRewrite, OffOn};
 use crate::style::Style;
-
-pub(crate) use spacing::Spacing;
 
 /// The emission context threaded through the whole lowering walk.
 pub(crate) struct Ctx<'a> {
@@ -310,7 +309,7 @@ impl<'a> Ctx<'a> {
         self.emit_leading(tok);
         if !self.spaced
             && let Some(previous) = &self.previous
-            && Spacing::between(previous, tok, self.style)
+            && spacing::between(previous, tok, self.style)
         {
             self.ops.space();
         }
@@ -327,7 +326,7 @@ impl<'a> Ctx<'a> {
             );
             self.spaced = true;
         }
-        let text = LiteralRewrite::apply(tok.text(), tok.kind(), self.style.cfg.literals);
+        let text = literals::apply(tok.text(), tok.kind(), self.style.cfg.literals);
         self.ops.token(&text);
         self.header_seen = true;
         self.spaced = false;
@@ -479,7 +478,7 @@ impl<'a> Ctx<'a> {
                 let space = self
                     .previous
                     .as_ref()
-                    .is_some_and(|previous| Spacing::between(previous, tok, self.style));
+                    .is_some_and(|previous| spacing::between(previous, tok, self.style));
                 self.ops.brk(
                     crate::ir::FillMode::Unified,
                     Self::flat_space(space),
@@ -610,7 +609,7 @@ impl<'a> Ctx<'a> {
     /// own would tear the expression across three lines if it applied there.
     fn emit_comment(&mut self, comment: &Comment, own_line: bool) {
         let is_header = !self.header_seen && !Self::documents_a_declaration(comment);
-        let text = CommentFormatter::render(
+        let text = javadoc::render(
             &comment.text,
             comment.kind,
             self.indent,
@@ -663,7 +662,7 @@ impl<'a> Ctx<'a> {
     /// Whether `tok` falls in a disabled region — emitting the region verbatim the first time,
     /// and suppressing everything afterwards until the region ends.
     fn in_disabled_region(&mut self, tok: &SyntaxToken) -> bool {
-        let Some(at) = OffOn::region_at(&self.disabled, tok.text_range().start()) else {
+        let Some(at) = off_on::region_at(&self.disabled, tok.text_range().start()) else {
             if self.ops.is_suppressed() {
                 self.ops.set_suppressed(false);
                 // The region's last line may be a `//` comment, which would swallow whatever
@@ -704,7 +703,7 @@ impl<'a> Ctx<'a> {
             SyntaxElement::Node(node) => Self::first_token(node)?,
             SyntaxElement::Token(tok) => tok.clone(),
         };
-        OffOn::region_at(&self.disabled, first.text_range().start())
+        off_on::region_at(&self.disabled, first.text_range().start())
     }
 
     /// Emit a disabled region verbatim, or skip it when it is already out.

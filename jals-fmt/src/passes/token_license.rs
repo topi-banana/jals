@@ -23,9 +23,9 @@
 //!
 //! - [`License::is_group_trailing_comma`] — used by `visit::Ctx::visit_import_group` to decide which
 //!   comma to drop, and by [`License::lane`] to decide which comma may be missing.
-//! - [`StringWrapper::sites`](super::StringWrapper::sites) — used by `StringWrapper::plan` to decide
+//! - [`string_wrapper::sites`](super::StringWrapper::sites) — used by `string_wrapper::plan` to decide
 //!   which node to re-split, and by [`Sites`] to decide which `PLUS` is a string `+`.
-//! - [`LiteralRewrite::KINDS`] — used by `LiteralRewrite::apply` to decide which token it may
+//! - [`literals::KINDS`] — used by `literals::apply` to decide which token it may
 //!   respell, and by that operation's row to say which kinds it claims.
 //!
 //! Two implementations of "which comma" is exactly how the defect above arose. With one, the check
@@ -36,6 +36,8 @@
 //! and `[imports] reorder-modifiers`. The fourth — `[imports] remove-unused` — *could* share one;
 //! see [`Effect::RemovesSubtrees`].
 
+use crate::passes::literals;
+use crate::passes::string_wrapper;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -43,9 +45,6 @@ use jals_config::fmt::{Config, ForceBraces, ImportGranularity, ImportOrder};
 use jals_syntax::ast::{AstNode, ImportGroup};
 use jals_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 use text_size::{TextRange, TextSize};
-
-use super::StringWrapper;
-use super::literals::LiteralRewrite;
 
 /// Where a token has to sit for an effect to reach it.
 ///
@@ -58,7 +57,7 @@ pub(crate) enum Site {
     TrailingGroupComma,
     /// A parenthesis of a `PAREN_EXPR` whose whole content is another `PAREN_EXPR`.
     RedundantParen,
-    /// Inside a node [`StringWrapper::sites`](super::StringWrapper::sites) reports.
+    /// Inside a node [`string_wrapper::sites`](super::StringWrapper::sites) reports.
     ///
     /// **How wide this really is**: `sites` is the pass's *eligibility* test, and it applies no
     /// `overflows` filter — that is `plan`'s, one step later. So nearly every string literal in the
@@ -132,7 +131,7 @@ pub(crate) enum Effect {
     ///
     /// What is missing is **evidence, not mechanism**. The narrowing has the same shape as
     /// [`Site::Reflow`]: a per-tree payload threaded into [`License::lane`], here backed by
-    /// `UnusedImports::used_names`, which would make this the fourth row whose pass and check share
+    /// `unused_imports::used_names`, which would make this the fourth row whose pass and check share
     /// one predicate. What blocks it is that tightening can turn an output the formatter accepts
     /// today into a silent fallback, and the golden corpora that would show that are uninitialized
     /// submodules whose harness asserts nothing — so there is no way to tell a fixed hole from a new
@@ -372,13 +371,13 @@ pub(crate) const OPERATIONS: [Operation; 10] = [
     Operation {
         id: "[literals] numeric rewrites",
         gate: Some("[literals]"),
-        enabled: |cfg| LiteralRewrite::is_active(cfg.literals),
-        // The kinds `LiteralRewrite::apply` gates on, read from the pass rather than restated:
+        enabled: |cfg| literals::is_active(cfg.literals),
+        // The kinds `literals::apply` gates on, read from the pass rather than restated:
         // a rewrite over a kind this row does not name is the original defect again. Dropping
         // *every* kind's text — which is what a single by-kind flag did — made a renamed
         // identifier invisible too.
         effect: Effect::Respells {
-            kinds: LiteralRewrite::KINDS,
+            kinds: literals::KINDS,
             content: None,
         },
     },
@@ -425,7 +424,7 @@ const _: () = assert!(
 ///
 /// Computed once per tree rather than per token: deciding purity per token would re-walk each `+`
 /// chain for every token in it, which is quadratic on a generated concatenation and allocates every
-/// time. [`StringWrapper::sites`](super::StringWrapper::sites) yields outermost nodes in source
+/// time. [`string_wrapper::sites`](super::StringWrapper::sites) yields outermost nodes in source
 /// order, so the ranges are sorted and disjoint and a containment test is a binary search.
 pub(crate) struct Sites {
     ranges: Vec<TextRange>,
@@ -439,7 +438,7 @@ impl Sites {
         // An empty site list falls straight out of the normal path — `[].join(..)` is `""` — so
         // "what is an empty `Sites`" is not a second construction to keep in step.
         let sites = if license.reflows() {
-            StringWrapper::sites(root)
+            string_wrapper::sites(root)
         } else {
             Vec::new()
         };

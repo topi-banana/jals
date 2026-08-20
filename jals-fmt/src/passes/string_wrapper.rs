@@ -16,7 +16,7 @@
 //! # It does add tokens
 //!
 //! A lone literal too long for its line **is** split into a concatenation of its own, which adds
-//! `+` operators the source never had ([`plan`](StringWrapper::plan)'s `LITERAL` arm).
+//! `+` operators the source never had ([`plan`](api::plan)'s `LITERAL` arm).
 //! Re-chunking a chain can also return fewer pieces than it took, so the `STRING_LITERAL` count
 //! moves in both directions too. This is therefore not a rearrangement, and the `+`/string-piece
 //! multiset is *not* preserved — a claim this header used to make, and one `DESIGN.md` §10 recorded
@@ -28,28 +28,30 @@
 //!
 //! # What it will not do
 //!
-//! Reach outside a site. [`sites`](StringWrapper::sites) is the single definition of which node this
+//! Reach outside a site. [`sites`](api::sites) is the single definition of which node this
 //! pass may touch, and the fail-safe licenses exactly those, so an arithmetic `+` — or a `+` in a
 //! chain with a non-literal operand — is still held to exact equality.
 //!
 //! Reach into a formatter-disabled region either. Being the *last* stage means being the last one
 //! able to break `@formatter:off`, and unlike every other stage this one does not run through
-//! [`Ctx`](crate::visit::Ctx), so it needs [`OffOn`] of its own ([`plan`](StringWrapper::plan)).
+//! [`Ctx`](crate::visit::Ctx), so it needs [`OffOn`] of its own ([`plan`](api::plan)).
 
+use crate::ir;
+use crate::passes::off_on;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use jals_syntax::{SyntaxElement, SyntaxKind, SyntaxNode};
 use text_size::TextRange;
 
-use crate::ir::Width;
-use crate::passes::OffOn;
 use crate::style::Style;
 
-/// Re-wraps over-long string concatenations.
-pub(crate) struct StringWrapper;
+pub(crate) use api::{candidate, sites, text_block_content};
 
-impl StringWrapper {
+/// Re-wraps over-long string concatenations.
+pub(crate) mod api {
+    use super::{String, Style, SyntaxElement, SyntaxKind, SyntaxNode, TextRange, Vec, ir, off_on};
+
     /// The re-wrapped text, or `None` when nothing applies.
     ///
     /// The caller **must** run the candidate back through the formatter and keep it only if it
@@ -59,11 +61,11 @@ impl StringWrapper {
             return None;
         }
         let parse = jals_syntax::Parse::parse(formatted).await;
-        let edits = Self::plan(&parse.syntax(), formatted, style);
+        let edits = plan(&parse.syntax(), formatted, style);
         if edits.is_empty() {
             return None;
         }
-        Some(Self::splice(formatted, &edits))
+        Some(splice(formatted, &edits))
     }
 
     /// Re-indent every text block to the line it starts on — `indentTextBlocks`.
@@ -72,7 +74,7 @@ impl StringWrapper {
     /// moving the declaration that holds it changes what its content means. Stripping the
     /// incidental whitespace and re-adding the line's own indentation is what keeps the string
     /// the author wrote while letting the layout move.
-    fn text_block_edits(root: &SyntaxNode, src: &str) -> Vec<(TextRange, String)> {
+    pub(crate) fn text_block_edits(root: &SyntaxNode, src: &str) -> Vec<(TextRange, String)> {
         let mut edits = Vec::new();
         for tok in root
             .descendants_with_tokens()
@@ -84,7 +86,7 @@ impl StringWrapper {
                 .rfind('\n')
                 .map_or(0, |at| at + 1);
             let text = &src[start..end];
-            let Some(indented) = Self::reindent_text_block(text) else {
+            let Some(indented) = reindent_text_block(text) else {
                 continue;
             };
             if indented != text {
@@ -99,7 +101,7 @@ impl StringWrapper {
     }
 
     /// The re-indented form of a text block, measured from the start of its opening line.
-    fn reindent_text_block(text: &str) -> Option<String> {
+    pub(crate) fn reindent_text_block(text: &str) -> Option<String> {
         let leading = text.find(|ch: char| !ch.is_whitespace())?;
         let mut initial = text.split('\n');
         let first = initial.next()?;
@@ -107,7 +109,7 @@ impl StringWrapper {
         if body.is_empty() {
             return None;
         }
-        let body_owned = Self::strip_indent(&body);
+        let body_owned = strip_indent(&body);
         let stripped = &body_owned;
         let last_initial = body.last()?.trim_end().chars().count();
         let last_stripped = stripped.last()?.trim_end().chars().count();
@@ -151,7 +153,7 @@ impl StringWrapper {
     /// The common indentation is the least of every non-blank line's *and* of the last line,
     /// blank or not — that last line is the closing delimiter, and it is what an author moves to
     /// choose the block's margin.
-    fn strip_indent(lines: &[&str]) -> Vec<String> {
+    pub(crate) fn strip_indent(lines: &[&str]) -> Vec<String> {
         // Counted in *characters*, as `String.stripIndent` does. Bytes would let a line indented
         // with a multi-byte space and one indented with an ASCII space agree on a cut that falls
         // inside a character.
@@ -177,7 +179,7 @@ impl StringWrapper {
 
     /// What a text block *says*, with its incidental whitespace removed.
     ///
-    /// [`reindent_text_block`](Self::reindent_text_block) rewrites that whitespace, so the token's
+    /// [`reindent_text_block`](reindent_text_block) rewrites that whitespace, so the token's
     /// text is not comparable across the pass — but what the block spells is, and
     /// [`TokenBudget`](super::TokenBudget) checks it the way it checks a reflowed concatenation.
     pub(crate) fn text_block_content(text: &str) -> String {
@@ -189,7 +191,7 @@ impl StringWrapper {
         if body.is_empty() {
             return first.into();
         }
-        let mut stripped = Self::strip_indent(&body);
+        let mut stripped = strip_indent(&body);
         if let Some(last) = stripped.last_mut() {
             *last = last
                 .strip_suffix("\"\"\"")
@@ -202,7 +204,7 @@ impl StringWrapper {
 
     /// Every node this pass may re-split, in source order, with the pieces it is built from.
     ///
-    /// This is [`plan`](Self::plan)'s own eligibility test, lifted so that
+    /// This is [`plan`](plan)'s own eligibility test, lifted so that
     /// [`TokenBudget`](super::TokenBudget) licenses exactly the nodes the pass can touch. The two
     /// cannot disagree about which `+` is a string `+`, because there is one predicate — and that
     /// disagreement is the shape of defect this seam exists to make impossible.
@@ -214,18 +216,18 @@ impl StringWrapper {
                 node.parent()
                     .is_none_or(|parent| parent.kind() != SyntaxKind::BINARY_EXPR)
             })
-            .filter_map(|node| Self::site_pieces(&node).map(|pieces| (node, pieces)))
+            .filter_map(|node| site_pieces(&node).map(|pieces| (node, pieces)))
             .collect()
     }
 
     /// The pieces `node` is built from, or `None` when it is not a site.
-    fn site_pieces(node: &SyntaxNode) -> Option<Vec<String>> {
+    pub(crate) fn site_pieces(node: &SyntaxNode) -> Option<Vec<String>> {
         match node.kind() {
-            SyntaxKind::BINARY_EXPR => Self::concatenation(node),
+            SyntaxKind::BINARY_EXPR => concatenation(node),
             // A single literal too long for its line is split into a concatenation of its own —
             // this is the case `reflow-long-strings` mostly exists for, and the one place in the
             // crate where `+` operators are added.
-            SyntaxKind::LITERAL => Self::literal_body(node).map(|body| alloc::vec![body]),
+            SyntaxKind::LITERAL => literal_body(node).map(|body| alloc::vec![body]),
             _ => None,
         }
     }
@@ -235,19 +237,19 @@ impl StringWrapper {
     /// **Not guaranteed non-overlapping.** A text-block edit's range reaches back to the start of the
     /// block's opening line, so it can cover a concatenation site that shares that line; the two
     /// families are otherwise disjoint, since a `TEXT_BLOCK` is never a site
-    /// ([`literal_body`](Self::literal_body) demands a `STRING_LITERAL`). Sorting decides which of
-    /// such a pair comes first, and [`splice`](Self::splice) drops the other rather than corrupt the
+    /// ([`literal_body`](literal_body) demands a `STRING_LITERAL`). Sorting decides which of
+    /// such a pair comes first, and [`splice`](splice) drops the other rather than corrupt the
     /// file — so the cost is one re-indent or one rewrap not happening, on a shape the formatter has
     /// already put on separate lines by the time this pass runs.
     ///
     /// What the sort *does* fix is that the survivor used to be decided by collection order rather
     /// than position: a concatenation earlier in the file than any text block was dropped for no
     /// other reason.
-    fn plan(root: &SyntaxNode, src: &str, style: &Style) -> Vec<(TextRange, String)> {
-        let mut edits = Self::text_block_edits(root, src);
-        for (node, pieces) in Self::sites(root) {
+    pub(crate) fn plan(root: &SyntaxNode, src: &str, style: &Style) -> Vec<(TextRange, String)> {
+        let mut edits = text_block_edits(root, src);
+        for (node, pieces) in sites(root) {
             let range = node.text_range();
-            if !Self::overflows(src, range, style) {
+            if !overflows(src, range, style) {
                 continue;
             }
             // The node's range starts at its leading trivia; the column that matters is where
@@ -257,12 +259,12 @@ impl StringWrapper {
                 .filter_map(SyntaxElement::into_token)
                 .find(|tok| !tok.kind().is_trivia())
                 .map_or_else(|| range.start(), |tok| tok.text_range().start());
-            let column = Self::column_of(src, usize::from(start));
+            let column = column_of(src, usize::from(start));
             // What follows the concatenation on its line — the `);` of `foo("…");` — has to
             // fit after the last chunk, so the last line's budget answers for it.
             let end = usize::from(range.end());
             let trailing = src[end..].find('\n').map_or(src.len() - end, |at| at);
-            if let Some(text) = Self::rewrap(&pieces, column, trailing, style) {
+            if let Some(text) = rewrap(&pieces, column, trailing, style) {
                 edits.push((range, text));
             }
         }
@@ -274,8 +276,8 @@ impl StringWrapper {
         // A formatter-disabled region has to survive byte-identical, and this is L4 — the last stage
         // that can still write into one. `OffOn` reaches the lowering walk through `Ctx`, which this
         // pass runs *after* and over re-parsed text, so the veto has to be applied here as well.
-        let disabled = OffOn::scan(root, style);
-        edits.retain(|(range, _)| !Self::disabled(&disabled, *range));
+        let disabled = off_on::scan(root, style);
+        edits.retain(|(range, _)| !self::disabled(&disabled, *range));
         edits
     }
 
@@ -284,13 +286,13 @@ impl StringWrapper {
     /// Any overlap at all disqualifies the edit, not just containment: an edit that starts outside a
     /// region and ends inside it would rewrite the region's opening just as surely.
     ///
-    /// The regions are a *veto* over [`sites`](Self::sites), deliberately not folded into it. `sites`
+    /// The regions are a *veto* over [`sites`](sites), deliberately not folded into it. `sites`
     /// is the predicate the fail-safe shares, and it answers over one tree; a disabled region is a
     /// property of the run's config, and the input's regions and the output's live in different
     /// coordinates. Keeping it here leaves the license **wider** than the pass, which is the safe
     /// direction — a pass that changes less than it is licensed to can never trip the fail-safe,
     /// whereas a license narrower than the pass is exactly the defect the table was written to fix.
-    fn disabled(regions: &[TextRange], range: TextRange) -> bool {
+    pub(crate) fn disabled(regions: &[TextRange], range: TextRange) -> bool {
         regions.iter().any(|region| {
             region
                 .intersect(range)
@@ -303,16 +305,16 @@ impl StringWrapper {
     /// "Pure" means every leaf is a `STRING_LITERAL` and every operator is `+`. A chain with a
     /// non-literal operand cannot be re-split without changing evaluation, and a text block
     /// carries its own layout, so both are refused.
-    fn concatenation(node: &SyntaxNode) -> Option<Vec<String>> {
+    pub(crate) fn concatenation(node: &SyntaxNode) -> Option<Vec<String>> {
         let mut pieces = Vec::new();
-        if !Self::collect(node, &mut pieces) || pieces.len() < 2 {
+        if !collect(node, &mut pieces) || pieces.len() < 2 {
             return None;
         }
         Some(pieces)
     }
 
     /// Walk a `+` chain, pushing each literal's body. Returns whether the chain stayed pure.
-    fn collect(node: &SyntaxNode, out: &mut Vec<String>) -> bool {
+    pub(crate) fn collect(node: &SyntaxNode, out: &mut Vec<String>) -> bool {
         for child in node.children_with_tokens() {
             match child {
                 SyntaxElement::Token(tok) if tok.kind().is_trivia() => {}
@@ -320,12 +322,12 @@ impl StringWrapper {
                 SyntaxElement::Token(_) => return false,
                 SyntaxElement::Node(child) => match child.kind() {
                     SyntaxKind::BINARY_EXPR => {
-                        if !Self::collect(&child, out) {
+                        if !collect(&child, out) {
                             return false;
                         }
                     }
                     SyntaxKind::LITERAL => {
-                        let Some(body) = Self::literal_body(&child) else {
+                        let Some(body) = literal_body(&child) else {
                             return false;
                         };
                         out.push(body);
@@ -338,7 +340,7 @@ impl StringWrapper {
     }
 
     /// The text between a string literal's quotes, or `None` for anything that is not one.
-    fn literal_body(node: &SyntaxNode) -> Option<String> {
+    pub(crate) fn literal_body(node: &SyntaxNode) -> Option<String> {
         let tok = node
             .children_with_tokens()
             .filter_map(SyntaxElement::into_token)
@@ -351,9 +353,9 @@ impl StringWrapper {
     }
 
     /// The column a byte offset sits at.
-    fn column_of(src: &str, offset: usize) -> usize {
+    pub(crate) fn column_of(src: &str, offset: usize) -> usize {
         let start = src[..offset].rfind('\n').map_or(0, |at| at + 1);
-        Width::utf16(&src[start..offset])
+        ir::utf16(&src[start..offset])
     }
 
     /// Whether the concatenation is worth touching: one of the lines it occupies is over the
@@ -363,13 +365,13 @@ impl StringWrapper {
     /// pieces — a generated table of `"\u0000\u0000…"` rows, say — is under the limit on every
     /// line and google-java-format leaves it exactly as written: its `LongStringsAndTextBlockScanner`
     /// only collects a literal whose own line runs past the column limit.
-    fn overflows(src: &str, range: TextRange, style: &Style) -> bool {
+    pub(crate) fn overflows(src: &str, range: TextRange, style: &Style) -> bool {
         let (start, end) = (usize::from(range.start()), usize::from(range.end()));
         let from = src[..start].rfind('\n').map_or(0, |at| at + 1);
         let to = src[end..].find('\n').map_or(src.len(), |at| end + at);
         src[from..to]
             .split('\n')
-            .any(|line| Width::utf16(line) > style.max_width())
+            .any(|line| ir::utf16(line) > style.max_width())
     }
 
     /// Re-chunk the pieces so each one fits a continuation line.
@@ -382,7 +384,12 @@ impl StringWrapper {
     ///
     /// Returns `None` when the budget is too small to make progress — a deeply indented
     /// concatenation with a narrow limit — rather than emitting one character per line.
-    fn rewrap(pieces: &[String], column: usize, trailing: usize, style: &Style) -> Option<String> {
+    pub(crate) fn rewrap(
+        pieces: &[String],
+        column: usize,
+        trailing: usize,
+        style: &Style,
+    ) -> Option<String> {
         // The first chunk starts where the literal already is and pays only for its quotes; a
         // continuation line pays for its indent and for `+ ` on top of that
         // (`width -= 6` in google-java-format's `reflow`, for its four-column indent).
@@ -393,7 +400,7 @@ impl StringWrapper {
         }
 
         let joined: String = pieces.concat();
-        let chunks = Self::split(&joined, first, budget, trailing);
+        let chunks = split(&joined, first, budget, trailing);
         // Nothing to gain when the re-split reproduces the pieces it started from.
         if chunks.len() < 2 || chunks == pieces {
             return None;
@@ -413,12 +420,12 @@ impl StringWrapper {
 
     /// Split a literal body into chunks of at most `budget` columns, breaking after a space where
     /// possible and never inside an escape sequence.
-    fn split(body: &str, first: usize, rest: usize, trailing: usize) -> Vec<String> {
+    pub(crate) fn split(body: &str, first: usize, rest: usize, trailing: usize) -> Vec<String> {
         let mut chunks = Vec::new();
         let mut current = String::new();
         let mut width = 0usize;
         let mut last_space: Option<usize> = None;
-        let total = Width::utf16(body);
+        let total = ir::utf16(body);
         let mut consumed = 0usize;
 
         let mut chars = body.chars().peekable();
@@ -451,7 +458,7 @@ impl StringWrapper {
             if c == ' ' {
                 last_space = Some(current.len());
             }
-            let unit_width = Width::utf16(&unit);
+            let unit_width = ir::utf16(&unit);
             let mut budget = if chunks.is_empty() { first } else { rest };
             // Once what is left fits, this is the last chunk and it shares its line with whatever
             // follows the concatenation.
@@ -462,10 +469,10 @@ impl StringWrapper {
                 match last_space {
                     Some(at) if at > 0 => {
                         let tail = current.split_off(at);
-                        consumed += Width::utf16(&current);
+                        consumed += ir::utf16(&current);
                         chunks.push(core::mem::take(&mut current));
                         current = tail;
-                        width = Width::utf16(&current);
+                        width = ir::utf16(&current);
                     }
                     _ => {
                         consumed += width;
@@ -486,7 +493,7 @@ impl StringWrapper {
     }
 
     /// Apply non-overlapping replacements to `src`.
-    fn splice(src: &str, edits: &[(TextRange, String)]) -> String {
+    pub(crate) fn splice(src: &str, edits: &[(TextRange, String)]) -> String {
         let mut out = String::with_capacity(src.len());
         let mut at = 0usize;
         for (range, text) in edits {
@@ -510,7 +517,7 @@ impl StringWrapper {
 mod tests {
     use jals_config::fmt::Config;
 
-    use super::StringWrapper;
+    use super::api;
     use crate::style::Style;
 
     /// A literal past the column limit, and the `class` wrapper to hold it.
@@ -531,7 +538,7 @@ mod tests {
         cfg.wrapping.reflow_long_strings = true;
         cfg.layout.formatter_tags = tags;
         let (style, _) = Style::reify(&cfg, src, jals_config::FeatureSet::default());
-        jals_exec::block_on_inline(StringWrapper::candidate(src, &style))
+        jals_exec::block_on_inline(api::candidate(src, &style))
     }
 
     #[test]
@@ -560,7 +567,7 @@ mod tests {
 
     #[test]
     fn the_region_is_only_spared_while_formatter_tags_is_on() {
-        // `OffOn::scan` returns nothing when the rule is off, so the marker is an ordinary comment
+        // `off_on::scan` returns nothing when the rule is off, so the marker is an ordinary comment
         // and the literal inside it is an ordinary site. Pins the veto to the rule that means it.
         assert!(
             candidate(&in_disabled_region(), false).is_some(),

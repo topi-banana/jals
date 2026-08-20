@@ -9,12 +9,16 @@ use core::fmt::Write;
 
 use jals_classfile::FieldType;
 
-use crate::types::JavaType;
+use crate::types;
+
+pub(crate) use api::{
+    char_code_unit, class_literal, double_literal, float_literal, string_literal,
+};
 
 /// Namespace for rendering constant-pool constants as valid Java literals.
-pub(crate) struct Literal;
+mod api {
+    use super::{FieldType, String, ToOwned, Write, format, types};
 
-impl Literal {
     /// Render a `float` constant as a valid Java literal (finite values get an `f` suffix; NaN /
     /// infinity map to the `Float` constants).
     pub(crate) fn float_literal(v: f32) -> String {
@@ -48,12 +52,12 @@ impl Literal {
     }
 
     /// Render a `char` constant as an escaped Java character literal (quotes included).
-    fn char_literal(c: char) -> String {
+    pub(crate) fn char_literal(c: char) -> String {
         let mut out = String::from("'");
         if c == '\'' {
             out.push_str("\\'");
         } else {
-            Self::push_escaped(c, &mut out);
+            push_escaped(c, &mut out);
         }
         out.push('\'');
         out
@@ -63,7 +67,7 @@ impl Literal {
     /// so preserve those with an explicit Java cast instead of inventing a character literal.
     pub(crate) fn char_code_unit(value: i64) -> Option<String> {
         let value = u32::from(u16::try_from(value).ok()?);
-        Some(char::from_u32(value).map_or_else(|| format!("(char) {value}"), Self::char_literal))
+        Some(char::from_u32(value).map_or_else(|| format!("(char) {value}"), char_literal))
     }
 
     /// Render a `String` constant as an escaped Java string literal (quotes included).
@@ -74,7 +78,7 @@ impl Literal {
             if c == '"' {
                 out.push_str("\\\"");
             } else {
-                Self::push_escaped(c, &mut out);
+                push_escaped(c, &mut out);
             }
         }
         out.push('"');
@@ -84,7 +88,7 @@ impl Literal {
     /// Push one character of a `char` / `String` literal body, applying the escapes the two kinds
     /// share (`\\`, `\n`, `\r`, `\t`, `\b`, `\f`, and `\uXXXX` for any other control character).
     /// The delimiting quote character each kind must additionally escape is the caller's job.
-    fn push_escaped(c: char, out: &mut String) {
+    pub(crate) fn push_escaped(c: char, out: &mut String) {
         match c {
             '\\' => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),
@@ -102,7 +106,7 @@ impl Literal {
     /// Render a `Class` constant as a Java class literal (`[Ljava/lang/String;` →
     /// `java.lang.String[].class`).
     pub(crate) fn class_literal(ty: &FieldType) -> String {
-        let rendered_type = JavaType::render_field_type(ty);
+        let rendered_type = types::render_field_type(ty);
         format!("{rendered_type}.class")
     }
 }
@@ -113,45 +117,39 @@ mod tests {
 
     #[test]
     fn float_and_double_specials_are_valid_java() {
-        assert_eq!(Literal::float_literal(1.5), "1.5f");
-        assert_eq!(Literal::float_literal(1.0), "1f");
-        assert_eq!(Literal::float_literal(f32::NAN), "Float.NaN");
+        assert_eq!(api::float_literal(1.5), "1.5f");
+        assert_eq!(api::float_literal(1.0), "1f");
+        assert_eq!(api::float_literal(f32::NAN), "Float.NaN");
+        assert_eq!(api::float_literal(f32::INFINITY), "Float.POSITIVE_INFINITY");
+        assert_eq!(api::double_literal(2.5), "2.5d");
         assert_eq!(
-            Literal::float_literal(f32::INFINITY),
-            "Float.POSITIVE_INFINITY"
-        );
-        assert_eq!(Literal::double_literal(2.5), "2.5d");
-        assert_eq!(
-            Literal::double_literal(f64::NEG_INFINITY),
+            api::double_literal(f64::NEG_INFINITY),
             "Double.NEGATIVE_INFINITY"
         );
     }
 
     #[test]
     fn strings_are_escaped() {
-        assert_eq!(Literal::string_literal("a\"b\\c\n"), "\"a\\\"b\\\\c\\n\"");
-        assert_eq!(Literal::string_literal("\u{01}"), "\"\\u0001\"");
+        assert_eq!(api::string_literal("a\"b\\c\n"), "\"a\\\"b\\\\c\\n\"");
+        assert_eq!(api::string_literal("\u{01}"), "\"\\u0001\"");
     }
 
     #[test]
     fn char_code_units_preserve_surrogates() {
-        assert_eq!(Literal::char_code_unit(65).as_deref(), Some("'A'"));
-        assert_eq!(
-            Literal::char_code_unit(0xD800).as_deref(),
-            Some("(char) 55296")
-        );
-        assert_eq!(Literal::char_code_unit(-1), None);
-        assert_eq!(Literal::char_code_unit(0x1_0000), None);
+        assert_eq!(api::char_code_unit(65).as_deref(), Some("'A'"));
+        assert_eq!(api::char_code_unit(0xD800).as_deref(), Some("(char) 55296"));
+        assert_eq!(api::char_code_unit(-1), None);
+        assert_eq!(api::char_code_unit(0x1_0000), None);
     }
 
     #[test]
     fn class_literals_render_objects_and_arrays() {
         assert_eq!(
-            Literal::class_literal(&FieldType::Object("java/lang/String".into())),
+            api::class_literal(&FieldType::Object("java/lang/String".into())),
             "java.lang.String.class"
         );
         assert_eq!(
-            Literal::class_literal(&FieldType::Object("I".into())),
+            api::class_literal(&FieldType::Object("I".into())),
             "I.class"
         );
         for (descriptor, expected) in [
@@ -160,7 +158,7 @@ mod tests {
             ("[[Ljava/lang/String;", "java.lang.String[][].class"),
         ] {
             let ty = FieldType::parse(descriptor).expect("valid array descriptor");
-            assert_eq!(Literal::class_literal(&ty), expected);
+            assert_eq!(api::class_literal(&ty), expected);
         }
     }
 }

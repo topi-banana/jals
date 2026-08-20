@@ -4,9 +4,8 @@
 //! distinct native values can never collapse before the projection decides. The vocabularies come
 //! from `DefaultCodeFormatterConstants`' own javadoc (`- possible values:` on each option).
 
+use crate::import::serde_kv;
 use serde::{Deserialize, Deserializer};
-
-use super::super::serde_kv::Kv;
 
 /// `tabulation.char` — what an indentation level is made of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -159,6 +158,6 @@ impl Alignment {
     where
         D: Deserializer<'de>,
     {
-        Ok(Kv::opt_number(deserializer)?.map(Self))
+        Ok(serde_kv::opt_number(deserializer)?.map(Self))
     }
 }

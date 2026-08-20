@@ -172,7 +172,7 @@ impl<S: SourceBackend, C: CacheBackend, H: EditorHost> Editor<S, C, H> {
 
     /// The locations a rename at `position` in `path` rewrites, or `None` when the symbol is not
     /// renamable / nothing would change. The host validates the new name
-    /// ([`crate::Ident::is_valid_java_identifier`]) and shapes the edit.
+    /// ([`crate::queries::is_valid_java_identifier`]) and shapes the edit.
     pub async fn rename_targets(
         &self,
         path: &FileKey,

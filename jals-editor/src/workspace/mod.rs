@@ -15,6 +15,9 @@
 
 mod file_id;
 
+use crate::diagnostics;
+use crate::outline;
+use crate::semantic;
 use alloc::borrow::ToOwned;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
@@ -31,8 +34,7 @@ use jals_syntax::cfg::CfgMap;
 
 use crate::document::Document;
 use crate::{
-    Completion, FileDiagnostic, FileDiagnostics, Highlight, Outline, OutlineNode, ProjectQueries,
-    QueryFile, SemanticToken, SemanticTokens,
+    Completion, FileDiagnostic, Highlight, OutlineNode, ProjectQueries, QueryFile, SemanticToken,
 };
 use file_id::WorkspaceFileId;
 
@@ -847,8 +849,7 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
     pub(crate) async fn semantic_tokens(&self, file: FileId) -> Vec<SemanticToken> {
         match self.project_file(file) {
             Some(source) => {
-                SemanticTokens::classify(&source.doc.parse.syntax(), Some((&self.index, file)))
-                    .await
+                semantic::classify(&source.doc.parse.syntax(), Some((&self.index, file))).await
             }
             None => Vec::new(),
         }
@@ -858,7 +859,7 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
     /// synchronous read.
     pub(crate) fn outline(&self, file: FileId) -> Vec<OutlineNode> {
         self.project_file(file)
-            .map(|source| Outline::of(&source.doc.parse.syntax()))
+            .map(|source| outline::of(&source.doc.parse.syntax()))
             .unwrap_or_default()
     }
 
@@ -903,7 +904,7 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
         let cfg = self.cfg_of(source);
         // One binding for the whole run, so the rules that need types share one inference.
         let semantics = source.analysis(cfg).await.in_project(&self.index, file);
-        FileDiagnostics::assemble(&source.doc.parse, Some(&semantics), &config, Some(cfg)).await
+        diagnostics::assemble(&source.doc.parse, Some(&semantics), &config, Some(cfg)).await
     }
 
     /// prepareRename for the cursor at `offset` in `file`: the byte range of the identifier under
@@ -916,7 +917,7 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
     /// The occurrence set a rename of the symbol at `offset` in `file` rewrites — project-wide
     /// for a project type, within the file for a file-local binding — or `None` if the cursor is
     /// on no renamable symbol or there is nothing to change. The host validates the new name
-    /// ([`crate::Ident::is_valid_java_identifier`]) and shapes the edit.
+    /// ([`crate::queries::is_valid_java_identifier`]) and shapes the edit.
     pub(crate) async fn rename_targets(
         &self,
         file: FileId,
@@ -979,7 +980,7 @@ impl SingleFileProject {
         parse: &Parse,
         config: &jals_config::lint::Config,
     ) -> Vec<FileDiagnostic> {
-        FileDiagnostics::assemble(
+        diagnostics::assemble(
             parse,
             Some(&self.analysis.in_project(&self.index, Self::FILE)),
             config,

@@ -21,9 +21,10 @@
 use std::fmt;
 
 use jals_build::{
-    BackendAbsence, BackendOptions, BackendRequest, BackendSelection, BackendSource, RunTarget,
+    BackendAbsence, BackendOptions, BackendRequest, BackendSelection, BackendSource,
+    resolve_run_target,
 };
-use jals_classpath::JarPackage;
+use jals_classpath::write_jar;
 use jals_config::{BackendKind, Manifest};
 use jals_frontend::{FrontendSelection, IrFile};
 use jals_storage::{ArtifactCache, MemoryCache, RelativePath};
@@ -115,10 +116,12 @@ impl fmt::Display for CompileFailure {
     }
 }
 
-/// Namespace for compiling the in-browser workspace.
-pub struct Compile;
+pub use api::workspace;
 
-impl Compile {
+/// Namespace for compiling the in-browser workspace.
+mod api {
+    use super::*;
+
     /// Compile `files` with the backend `manifest` selects, in this process.
     ///
     /// `files` are `(project-relative path, text)` — every indexed Java file, generated sources
@@ -146,7 +149,7 @@ impl Compile {
             return Err(CompileFailure::NoSources);
         }
 
-        let sources = Self::lower(manifest, files).await?;
+        let sources = lower(manifest, files).await?;
         let options = BackendOptions::from_manifest(manifest);
         let request = BackendRequest {
             tree: &sources,
@@ -183,10 +186,9 @@ impl Compile {
 
         // A project that declares no entry point still packages — as a library jar. Refusing here
         // would make `[run] main-class` a compile-time requirement it has never been.
-        let main_class = RunTarget::resolve(manifest, None).ok();
-        let name = Self::jar_file_name(manifest);
-        let bytes =
-            JarPackage::write(&outcome.artifacts, main_class).map_err(CompileFailure::Package)?;
+        let main_class = resolve_run_target(manifest, None).ok();
+        let name = jar_file_name(manifest);
+        let bytes = write_jar(&outcome.artifacts, main_class).map_err(CompileFailure::Package)?;
         let summary = match main_class {
             Some(main_class) => format!(
                 "packaged {} class file(s) into {name} (Main-Class: {main_class})",
@@ -210,7 +212,7 @@ impl Compile {
     /// The published keys are looked up again rather than the input bytes reused: `BackendSource`
     /// carries the frontend's `CacheKey` as provenance, and reading the content back through it is
     /// what makes "the backend only ever sees frontend output" structural instead of assumed.
-    async fn lower(
+    pub(crate) async fn lower(
         manifest: &Manifest,
         files: &[(String, String)],
     ) -> Result<Vec<BackendSource>, CompileFailure> {
@@ -266,7 +268,7 @@ impl Compile {
     ///
     /// The value becomes an `<a download>` attribute, so a name carrying a separator or a leading dot
     /// falls back rather than being sanitized into something the user did not write.
-    fn jar_file_name(manifest: &Manifest) -> String {
+    pub(crate) fn jar_file_name(manifest: &Manifest) -> String {
         manifest
             .package
             .name
@@ -341,7 +343,7 @@ mod tests {
             files.push(generated.clone());
             files.sort();
             assert!(
-                block_on_inline(Compile::workspace(&manifest, &files)).is_ok(),
+                block_on_inline(api::workspace(&manifest, &files)).is_ok(),
                 "`{backend}` must compile alongside the generated class"
             );
         }
@@ -361,7 +363,7 @@ mod tests {
             "[package]\nname = \"demo\"\n",
             "[build]\nbackend = { type = \"javac\" }\n",
         ] {
-            let error = block_on_inline(Compile::workspace(&manifest(source), &subset_sources()))
+            let error = block_on_inline(api::workspace(&manifest(source), &subset_sources()))
                 .err()
                 .expect("javac cannot run here");
             assert!(
@@ -393,7 +395,7 @@ mod tests {
              [build]\nbackend = { type = \"jals\" }\n\n\
              [run]\nmain-class = \"com.example.Main\"\n",
         );
-        let artifact = block_on_inline(Compile::workspace(&manifest, &subset_sources()))
+        let artifact = block_on_inline(api::workspace(&manifest, &subset_sources()))
             .expect("the subset compiles");
         assert_eq!(artifact.name, "demo.jar");
         assert!(artifact.bytes.starts_with(b"PK\x03\x04"), "not a zip");
@@ -408,7 +410,7 @@ mod tests {
     #[test]
     fn the_wasm_backend_yields_one_module() {
         let manifest = manifest("[build]\nbackend = { type = \"jals-wasm\" }\n");
-        let artifact = block_on_inline(Compile::workspace(&manifest, &subset_sources()))
+        let artifact = block_on_inline(api::workspace(&manifest, &subset_sources()))
             .expect("the subset compiles");
         assert_eq!(artifact.name, "project.wasm");
         assert!(artifact.bytes.starts_with(b"\0asm"), "not a wasm module");
@@ -428,8 +430,8 @@ mod tests {
             .iter()
             .map(|(path, text)| ((*path).to_owned(), (*text).to_owned()))
             .collect();
-        let artifact = block_on_inline(Compile::workspace(&manifest, &files))
-            .expect("the seed project compiles");
+        let artifact =
+            block_on_inline(api::workspace(&manifest, &files)).expect("the seed project compiles");
         assert_eq!(artifact.name, "seed.jar");
         assert!(artifact.bytes.starts_with(b"PK\x03\x04"), "not a zip");
     }
@@ -439,7 +441,7 @@ mod tests {
     fn an_unrepresentable_path_is_rejected_rather_than_panicking() {
         let manifest = manifest("[build]\nbackend = { type = \"jals\" }\n");
         let files = vec![("a/../b.java".to_owned(), "class B {}\n".to_owned())];
-        let error = block_on_inline(Compile::workspace(&manifest, &files))
+        let error = block_on_inline(api::workspace(&manifest, &files))
             .err()
             .expect("the path is not project-relative");
         assert!(matches!(error, CompileFailure::InvalidPath(_)), "{error}");
@@ -450,14 +452,10 @@ mod tests {
     fn an_unsafe_package_name_falls_back_to_a_neutral_jar_name() {
         for name in ["../escape", "with/slash", ".hidden", ""] {
             let manifest = manifest(&format!("[package]\nname = \"{name}\"\n"));
-            assert_eq!(
-                Compile::jar_file_name(&manifest),
-                FALLBACK_JAR,
-                "for `{name}`"
-            );
+            assert_eq!(api::jar_file_name(&manifest), FALLBACK_JAR, "for `{name}`");
         }
         assert_eq!(
-            Compile::jar_file_name(&manifest("[package]\nname = \"my-app_1.0\"\n")),
+            api::jar_file_name(&manifest("[package]\nname = \"my-app_1.0\"\n")),
             "my-app_1.0.jar"
         );
     }
@@ -468,10 +466,8 @@ mod tests {
         let manifest =
             manifest("[package]\nname = \"demo\"\n\n[build]\nbackend = { type = \"jals\" }\n");
         let sources = subset_sources();
-        let first =
-            block_on_inline(Compile::workspace(&manifest, &sources)).expect("first compile");
-        let second =
-            block_on_inline(Compile::workspace(&manifest, &sources)).expect("second compile");
+        let first = block_on_inline(api::workspace(&manifest, &sources)).expect("first compile");
+        let second = block_on_inline(api::workspace(&manifest, &sources)).expect("second compile");
         assert_eq!(first.bytes, second.bytes);
     }
 }

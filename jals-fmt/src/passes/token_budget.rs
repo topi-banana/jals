@@ -18,6 +18,8 @@
 //!
 //! The new-syntax-error half of the check is unconditional: no rule may make a file stop parsing.
 
+use crate::passes::import_granularity;
+use crate::passes::string_wrapper;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -26,7 +28,6 @@ use jals_syntax::ast::{AstNode, ImportDecl};
 use jals_syntax::{SyntaxElement, SyntaxKind, SyntaxNode};
 
 use super::token_license::{Content, Lane, License, Sites};
-use super::{ImportNames, StringWrapper};
 
 /// A significant-token multiset, keyed by the lane that answers for each token.
 ///
@@ -48,7 +49,7 @@ struct Ledger {
 
 impl Ledger {
     /// Reduce `root` under `license`.
-    fn of(root: &SyntaxNode, license: License) -> Self {
+    pub(crate) fn of(root: &SyntaxNode, license: License) -> Self {
         let sites = Sites::of(root, license);
         let mut flat = Budget::new();
         for tok in root
@@ -94,11 +95,11 @@ impl Ledger {
     ///
     /// The one thing re-indenting a text block may not change: what it spells once its incidental
     /// whitespace is stripped.
-    fn text_block_content(root: &SyntaxNode) -> String {
+    pub(crate) fn text_block_content(root: &SyntaxNode) -> String {
         root.descendants_with_tokens()
             .filter_map(SyntaxElement::into_token)
             .filter(|tok| tok.kind() == SyntaxKind::TEXT_BLOCK)
-            .map(|tok| StringWrapper::text_block_content(tok.text()))
+            .map(|tok| string_wrapper::text_block_content(tok.text()))
             .collect::<Vec<_>>()
             .join("\u{1}")
     }
@@ -110,18 +111,18 @@ impl Ledger {
     /// mis-rebuilt prefix visible. `static` is part of the entry: `import static a.B;` and
     /// `import a.B;` are different declarations, and a re-granulation must not turn one into the
     /// other.
-    fn imported_names(root: &SyntaxNode) -> Vec<String> {
+    pub(crate) fn imported_names(root: &SyntaxNode) -> Vec<String> {
         let mut names: Vec<String> = root
             .descendants()
             .filter_map(ImportDecl::cast)
-            .flat_map(|decl| ImportNames::of(&decl))
+            .flat_map(|decl| import_granularity::import_names::of(&decl))
             .collect();
         names.sort_unstable();
         names
     }
 
     /// Whether `after` is a rendering of `self` that `license` authorizes.
-    fn covers(&self, after: &Self, license: License) -> bool {
+    pub(crate) fn covers(&self, after: &Self, license: License) -> bool {
         // Both key sets are walked, so a key present on only one side is judged rather than
         // skipped.
         for key in self.flat.keys().chain(after.flat.keys()) {
@@ -157,7 +158,7 @@ impl Ledger {
     }
 
     /// Whether every entry of `part` appears in `whole` at least as often. Both must be sorted.
-    fn is_submultiset(part: &[String], whole: &[String]) -> bool {
+    pub(crate) fn is_submultiset(part: &[String], whole: &[String]) -> bool {
         let mut rest = whole;
         for name in part {
             match rest.iter().position(|candidate| candidate == name) {
@@ -170,9 +171,9 @@ impl Ledger {
 }
 
 /// Verifies that a formatted output still accounts for its input.
-pub(crate) struct TokenBudget;
+pub(crate) mod budget {
+    use super::{Ledger, License, SyntaxNode};
 
-impl TokenBudget {
     /// Whether `formatted` is a rendering of `src` that `license` authorizes.
     pub(crate) async fn accepts(
         src: &str,
@@ -199,48 +200,48 @@ impl TokenBudget {
 
 #[cfg(test)]
 mod tests {
+    use super::budget;
     use jals_config::fmt::{Config, ForceBraces, HexLiteralCase};
 
-    use super::TokenBudget;
     use crate::style::Style;
 
-    /// One `accepts` call, spelled the way [`Formatter::run`](crate::passes::Formatter) spells it.
-    struct Verdict;
+    /// One `accepts` call, spelled the way [`pipeline::run`](crate::passes::Formatter) spells it.
+    pub(crate) mod verdict {
+        use super::*;
 
-    impl Verdict {
         /// Whether `formatted` is an acceptable rendering of `src` under `config`.
-        fn of(src: &str, formatted: &str, config: &Config) -> bool {
+        pub(crate) fn of(src: &str, formatted: &str, config: &Config) -> bool {
             jals_exec::block_on_inline(async {
                 let (style, _) = Style::reify(config, src, jals_config::FeatureSet::default());
                 let parse = jals_syntax::Parse::parse(src).await;
                 let errors = parse.errors().len();
-                TokenBudget::accepts(src, &parse.syntax(), errors, formatted, style.license).await
+                budget::accepts(src, &parse.syntax(), errors, formatted, style.license).await
             })
         }
 
         /// A config with only `braces.force-do-while` moved off its default.
-        fn only_force_do_while() -> Config {
+        pub(crate) fn only_force_do_while() -> Config {
             let mut cfg = Config::default();
             cfg.braces.force_do_while = ForceBraces::Always;
             cfg
         }
 
         /// A config with only `imports.remove-unused` moved off its default.
-        fn removing_unused_imports() -> Config {
+        pub(crate) fn removing_unused_imports() -> Config {
             let mut cfg = Config::default();
             cfg.imports.remove_unused = true;
             cfg
         }
 
         /// A config with only `[literals] hex-case` moved off its default.
-        fn respelling_literals() -> Config {
+        pub(crate) fn respelling_literals() -> Config {
             let mut cfg = Config::default();
             cfg.literals.hex_case = HexLiteralCase::Upper;
             cfg
         }
 
         /// A config with only `wrapping.reflow-long-strings` moved off its default.
-        fn reflowing_strings() -> Config {
+        pub(crate) fn reflowing_strings() -> Config {
             let mut cfg = Config::default();
             cfg.wrapping.reflow_long_strings = true;
             cfg
@@ -250,8 +251,8 @@ mod tests {
     // ===== Unconditional halves: no config can waive these =====
 
     #[test]
-    fn an_output_that_stopped_parsing_is_never_acceptable() {
-        assert!(!Verdict::of(
+    pub(crate) fn an_output_that_stopped_parsing_is_never_acceptable() {
+        assert!(!verdict::of(
             "class A { int x; }",
             "class A { int x;",
             &Config::default(),
@@ -259,20 +260,20 @@ mod tests {
     }
 
     #[test]
-    fn emptying_a_nonempty_file_is_never_acceptable() {
-        assert!(!Verdict::of("class A {}", "", &Config::default()));
+    pub(crate) fn emptying_a_nonempty_file_is_never_acceptable() {
+        assert!(!verdict::of("class A {}", "", &Config::default()));
     }
 
     #[test]
-    fn an_empty_input_may_stay_empty() {
-        assert!(Verdict::of("", "", &Config::default()));
+    pub(crate) fn an_empty_input_may_stay_empty() {
+        assert!(verdict::of("", "", &Config::default()));
     }
 
     // ===== `DESIGN.md` §20 R0.1 / R0.3: reordering is multiset-neutral =====
 
     #[test]
-    fn reordering_imports_is_accepted_because_the_check_is_a_multiset() {
-        assert!(Verdict::of(
+    pub(crate) fn reordering_imports_is_accepted_because_the_check_is_a_multiset() {
+        assert!(verdict::of(
             "import b.C;\nimport a.B;\nclass A {}\n",
             "import a.B;\nimport b.C;\nclass A {}\n",
             &Config::default(),
@@ -280,8 +281,8 @@ mod tests {
     }
 
     #[test]
-    fn reordering_modifiers_is_accepted_for_the_same_reason() {
-        assert!(Verdict::of(
+    pub(crate) fn reordering_modifiers_is_accepted_for_the_same_reason() {
+        assert!(verdict::of(
             "class A { final static public int X = 1; }",
             "class A { public static final int X = 1; }",
             &Config::default(),
@@ -289,8 +290,8 @@ mod tests {
     }
 
     #[test]
-    fn a_token_lost_under_the_default_config_is_rejected() {
-        assert!(!Verdict::of(
+    pub(crate) fn a_token_lost_under_the_default_config_is_rejected() {
+        assert!(!verdict::of(
             "class A { int x; int y; }",
             "class A { int x; }",
             &Config::default(),
@@ -300,17 +301,17 @@ mod tests {
     // ===== `[literals]`: compare by kind, since a literal's text may change =====
 
     #[test]
-    fn a_respelled_hex_literal_is_accepted_when_literals_is_active() {
-        assert!(Verdict::of(
+    pub(crate) fn a_respelled_hex_literal_is_accepted_when_literals_is_active() {
+        assert!(verdict::of(
             "class A { int x = 0xff; }",
             "class A { int x = 0xFF; }",
-            &Verdict::respelling_literals(),
+            &verdict::respelling_literals(),
         ));
     }
 
     #[test]
-    fn the_same_respelling_is_rejected_when_literals_is_preserve() {
-        assert!(!Verdict::of(
+    pub(crate) fn the_same_respelling_is_rejected_when_literals_is_preserve() {
+        assert!(!verdict::of(
             "class A { int x = 0xff; }",
             "class A { int x = 0xFF; }",
             &Config::default(),
@@ -318,98 +319,98 @@ mod tests {
     }
 
     #[test]
-    fn a_renamed_identifier_is_rejected_even_when_literals_is_active() {
-        // The guard for scoping the respelling to the two kinds `LiteralRewrite::apply` can touch.
+    pub(crate) fn a_renamed_identifier_is_rejected_even_when_literals_is_active() {
+        // The guard for scoping the respelling to the two kinds `literals::apply` can touch.
         // A single by-kind flag for the whole file made *every* token's spelling unverifiable the
         // moment any `[literals]` rule was switched on, so a renamed identifier went unnoticed.
-        assert!(!Verdict::of(
+        assert!(!verdict::of(
             "class A { int counted = 0xff; }",
             "class A { int renamed = 0xff; }",
-            &Verdict::respelling_literals(),
+            &verdict::respelling_literals(),
         ));
     }
 
     #[test]
-    fn a_respelled_string_is_rejected_even_when_literals_is_active() {
+    pub(crate) fn a_respelled_string_is_rejected_even_when_literals_is_active() {
         // Same scoping, the other kind a whole-file flag used to blind: no row licenses a string's
         // spelling unless a reflow is on, and then only what it *spells* may survive re-cutting.
-        assert!(!Verdict::of(
+        assert!(!verdict::of(
             "class A { String s = \"a\"; int x = 0xff; }",
             "class A { String s = \"b\"; int x = 0xFF; }",
-            &Verdict::respelling_literals(),
+            &verdict::respelling_literals(),
         ));
     }
 
     #[test]
-    fn a_text_block_that_vanished_is_rejected_even_under_reflow() {
+    pub(crate) fn a_text_block_that_vanished_is_rejected_even_under_reflow() {
         // `reflow-long-strings` licenses re-indenting a text block, not losing one. Folding the
         // re-indent into the rewrap's row took `TEXT_BLOCK` out of the count altogether, leaving a
         // whole-file content string as the only witness; as its own respelling row the count is
         // checked again.
-        assert!(!Verdict::of(
+        assert!(!verdict::of(
             "class A { String a = \"\"\"\n    x\n    \"\"\"; String b = \"\"\"\n    x\n    \"\"\"; }",
             "class A { String a = \"\"\"\n    x\n    \"\"\"; String b = \"\"; }",
-            &Verdict::reflowing_strings(),
+            &verdict::reflowing_strings(),
         ));
     }
 
     #[test]
-    fn a_literal_that_became_another_kind_is_rejected_even_by_kind() {
-        assert!(!Verdict::of(
+    pub(crate) fn a_literal_that_became_another_kind_is_rejected_even_by_kind() {
+        assert!(!verdict::of(
             "class A { int x = 1; }",
             "class A { int x = \"s\"; }",
-            &Verdict::respelling_literals(),
+            &verdict::respelling_literals(),
         ));
     }
 
     // ===== `DESIGN.md` §20 R0.2: unused-import removal deletes declarations =====
 
     #[test]
-    fn remove_unused_accepts_a_dropped_import() {
-        assert!(Verdict::of(
+    pub(crate) fn remove_unused_accepts_a_dropped_import() {
+        assert!(verdict::of(
             "import a.B;\nclass A {}\n",
             "class A {}\n",
-            &Verdict::removing_unused_imports(),
+            &verdict::removing_unused_imports(),
         ));
     }
 
     #[test]
-    fn remove_unused_still_rejects_a_token_lost_outside_the_import_block() {
-        assert!(!Verdict::of(
+    pub(crate) fn remove_unused_still_rejects_a_token_lost_outside_the_import_block() {
+        assert!(!verdict::of(
             "import a.B;\nclass A { int x; int y; }\n",
             "import a.B;\nclass A { int x; }\n",
-            &Verdict::removing_unused_imports(),
+            &verdict::removing_unused_imports(),
         ));
     }
 
     // ===== `[braces] force-*`: the only rule that adds tokens =====
 
     #[test]
-    fn force_do_while_alone_accepts_the_braces_it_inserts() {
+    pub(crate) fn force_do_while_alone_accepts_the_braces_it_inserts() {
         // The guard for `forces_braces`' four-way OR. The invariant properties used to read
         // `force_if` alone, so a profile that set only this key held the formatter to an allowance
         // it does not have; they read the license now, and this is what keeps the license honest.
-        assert!(Verdict::of(
+        assert!(verdict::of(
             "class A { void m() { do x(); while (c); } }",
             "class A { void m() { do { x(); } while (c); } }",
-            &Verdict::only_force_do_while(),
+            &verdict::only_force_do_while(),
         ));
     }
 
     #[test]
-    fn a_brace_is_still_never_allowed_to_go_missing() {
-        assert!(!Verdict::of(
+    pub(crate) fn a_brace_is_still_never_allowed_to_go_missing() {
+        assert!(!verdict::of(
             "class A { void m() { do { x(); } while (c); } }",
             "class A { void m() { do x(); while (c); } }",
-            &Verdict::only_force_do_while(),
+            &verdict::only_force_do_while(),
         ));
     }
 
     #[test]
-    fn extra_braces_are_rejected_when_no_force_rule_is_on() {
+    pub(crate) fn extra_braces_are_rejected_when_no_force_rule_is_on() {
         let mut cfg = Config::default();
         cfg.braces.force_switch_arm = jals_config::fmt::ForceBraces::Never;
-        assert!(!Verdict::of(
+        assert!(!verdict::of(
             "class A { void m() { do x(); while (c); } }",
             "class A { void m() { do { x(); } while (c); } }",
             &cfg,
@@ -419,26 +420,26 @@ mod tests {
     // ===== `DESIGN.md` §20 R4.1: a reflow re-cuts the pieces, so content is compared =====
 
     #[test]
-    fn reflow_accepts_a_concatenation_re_split_at_other_boundaries() {
-        assert!(Verdict::of(
+    pub(crate) fn reflow_accepts_a_concatenation_re_split_at_other_boundaries() {
+        assert!(verdict::of(
             "class A { String s = \"ab\" + \"c\"; }",
             "class A { String s = \"a\" + \"bc\"; }",
-            &Verdict::reflowing_strings(),
+            &verdict::reflowing_strings(),
         ));
     }
 
     #[test]
-    fn reflow_rejects_a_concatenation_whose_content_changed() {
-        assert!(!Verdict::of(
+    pub(crate) fn reflow_rejects_a_concatenation_whose_content_changed() {
+        assert!(!verdict::of(
             "class A { String s = \"ab\" + \"c\"; }",
             "class A { String s = \"a\" + \"bd\"; }",
-            &Verdict::reflowing_strings(),
+            &verdict::reflowing_strings(),
         ));
     }
 
     #[test]
-    fn the_same_re_split_is_rejected_when_reflow_is_off() {
-        assert!(!Verdict::of(
+    pub(crate) fn the_same_re_split_is_rejected_when_reflow_is_off() {
+        assert!(!verdict::of(
             "class A { String s = \"ab\" + \"c\"; }",
             "class A { String s = \"a\" + \"bc\"; }",
             &Config::default(),
@@ -448,14 +449,14 @@ mod tests {
     // ===== The dialect's grouped-import trailing comma =====
 
     #[test]
-    fn the_dialect_comma_drop_is_licensed_under_every_config() {
+    pub(crate) fn the_dialect_comma_drop_is_licensed_under_every_config() {
         // `visit/dialect.rs` drops this comma unconditionally, so the row that licenses it is
         // unconditional too. Before the row existed the fail-safe rejected the drop and the whole
         // file came back unformatted — and only under the *default* config, because
         // `imports.remove-unused` happened to waive the import block when it was on.
-        for cfg in [Config::default(), Verdict::removing_unused_imports()] {
+        for cfg in [Config::default(), verdict::removing_unused_imports()] {
             assert!(
-                Verdict::of(
+                verdict::of(
                     "import a.{B,};\nclass A {}\n",
                     "import a.{B};\nclass A {}\n",
                     &cfg,
@@ -466,10 +467,10 @@ mod tests {
     }
 
     #[test]
-    fn the_comma_licence_does_not_reach_a_comma_outside_a_grouped_import() {
+    pub(crate) fn the_comma_licence_does_not_reach_a_comma_outside_a_grouped_import() {
         // The site predicate is what keeps the allowance from spreading. An argument list's comma
         // is not a grouped import's trailing comma, whatever the config says.
-        assert!(!Verdict::of(
+        assert!(!verdict::of(
             "class A { void m() { f(1, 2); } }",
             "class A { void m() { f(1 2); } }",
             &Config::default(),
@@ -477,10 +478,10 @@ mod tests {
     }
 
     #[test]
-    fn a_separator_comma_may_never_go_missing() {
+    pub(crate) fn a_separator_comma_may_never_go_missing() {
         // The guard against a filter greedy enough to eat a separator once the trailing comma is
         // licensed.
-        assert!(!Verdict::of(
+        assert!(!verdict::of(
             "import a.{B, C};\nclass A {}\n",
             "import a.{B C};\nclass A {}\n",
             &Config::default(),

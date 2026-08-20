@@ -4,11 +4,12 @@
 //! module to `wasm-tools` (the specification's own validator) and to `wasmtime` (an engine), which
 //! together are the only authority on whether the bytes mean what the compiler intended.
 
+use jals_javac::wasm;
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 
 use jals_hir::{FileAnalysis, FileId, FileSemantics, ProjectIndex, TypedFile};
-use jals_javac::wasm::{CompileWasm, WasmError};
+use jals_javac::wasm::WasmError;
 use jals_syntax::SyntaxNode;
 
 /// Whether `name` is on this host. A missing engine is a missing *oracle*, not a broken compiler,
@@ -56,7 +57,7 @@ fn compile(sources: &[&str]) -> Result<Vec<u8>, WasmError> {
         .iter()
         .map(|binding| jals_exec::block_on_inline(binding.typed()))
         .collect();
-    CompileWasm::project(&inputs, &index)
+    wasm::project(&inputs, &index)
 }
 
 /// `wasm-tools validate` is the specification's own answer to "is this a module".
@@ -1583,7 +1584,7 @@ fn the_enum_shapes_that_need_more_are_reported() {
 /// A type inside an `enum` constant's body reports that its owner has no name.
 ///
 /// The JVM backend's twin (`a_type_in_an_enum_constant_body_has_no_enclosing_name`) covers the same
-/// shape through `Compile::enclosing_name`; this one reaches `Layout::owner_of` through `is_inner`,
+/// shape through `lower::enclosing_name`; this one reaches `Layout::owner_of` through `is_inner`,
 /// which takes `parent().parent()` of a nested class and so lands on the `ENUM_CONSTANT`. That is
 /// not one of the seven forms `ast::Decl` casts, so it has no name to key the layout on.
 ///

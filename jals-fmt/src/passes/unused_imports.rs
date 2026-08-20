@@ -27,10 +27,14 @@ use alloc::string::String;
 use jals_syntax::ast::{AstNode, ImportDecl};
 use jals_syntax::{SyntaxElement, SyntaxKind, SyntaxNode};
 
-/// The used-name set of a compilation unit.
-pub(crate) struct UnusedImports;
+pub(crate) use api::{is_used, used_names};
 
-impl UnusedImports {
+/// The used-name set of a compilation unit.
+pub(crate) mod api {
+    use super::{
+        AstNode, BTreeSet, ImportDecl, String, SyntaxElement, SyntaxKind, SyntaxNode, ToOwned,
+    };
+
     /// Every simple name that appears outside an `import` declaration.
     pub(crate) async fn used_names(root: &SyntaxNode) -> BTreeSet<String> {
         let mut used = BTreeSet::new();
@@ -46,11 +50,11 @@ impl UnusedImports {
                 // javac says the same thing by collecting `IdentifierTree` and not the identifier
                 // half of a `MemberSelectTree`.
                 SyntaxKind::IDENT => {
-                    if !Self::inside_import(&tok) && !Self::follows_dot(&tok) {
+                    if !inside_import(&tok) && !follows_dot(&tok) {
                         used.insert(tok.text().into());
                     }
                 }
-                SyntaxKind::DOC_COMMENT => Self::collect_javadoc_names(tok.text(), &mut used),
+                SyntaxKind::DOC_COMMENT => collect_javadoc_names(tok.text(), &mut used),
                 _ => {}
             }
         }
@@ -59,13 +63,13 @@ impl UnusedImports {
 
     /// Whether a token sits inside an `import` declaration, whose own names must not count as
     /// uses — otherwise every import would keep itself alive.
-    fn inside_import(tok: &jals_syntax::SyntaxToken) -> bool {
+    pub(crate) fn inside_import(tok: &jals_syntax::SyntaxToken) -> bool {
         tok.parent_ancestors()
             .any(|node| node.kind() == SyntaxKind::IMPORT_DECL)
     }
 
     /// Whether the token directly before `tok` is a selector dot.
-    fn follows_dot(tok: &jals_syntax::SyntaxToken) -> bool {
+    pub(crate) fn follows_dot(tok: &jals_syntax::SyntaxToken) -> bool {
         let mut cursor = tok.prev_token();
         while let Some(previous) = cursor {
             if !previous.kind().is_trivia() {
@@ -82,7 +86,7 @@ impl UnusedImports {
     /// a reference like `Foo#bar(Baz)`. Every identifier-shaped run in the rest of that line
     /// counts, which over-approximates — and over-approximating is the safe direction, since the
     /// cost is keeping an import that could have gone.
-    fn collect_javadoc_names(text: &str, used: &mut BTreeSet<String>) {
+    pub(crate) fn collect_javadoc_names(text: &str, used: &mut BTreeSet<String>) {
         /// The block tags whose argument is a type reference. These start a line. `@param` is
         /// not one: its argument names a parameter, and its description is prose that would keep
         /// an import alive for mentioning its name in passing.
@@ -95,7 +99,7 @@ impl UnusedImports {
         for line in text.lines() {
             let trimmed = line.trim_start().trim_start_matches('*').trim_start();
             if let Some(tag) = BLOCK_TAGS.iter().find(|tag| trimmed.starts_with(**tag)) {
-                Self::collect_names(&trimmed[tag.len()..], used);
+                collect_names(&trimmed[tag.len()..], used);
             }
             joined.push_str(trimmed);
             joined.push(' ');
@@ -113,7 +117,7 @@ impl UnusedImports {
             };
             let body = &tail[tag.len()..];
             let end = body.find('}').unwrap_or(body.len());
-            Self::collect_names(&body[..end], used);
+            collect_names(&body[..end], used);
             rest = &body[end..];
         }
     }
@@ -123,8 +127,8 @@ impl UnusedImports {
     /// This over-approximates — a reference is `Foo#bar(Baz)`, and every component of it counts —
     /// and over-approximating is the safe direction, since the cost is keeping an import that
     /// could have gone.
-    fn collect_names(text: &str, used: &mut BTreeSet<String>) {
-        for word in text.split(|c: char| !Self::is_name_char(c)) {
+    pub(crate) fn collect_names(text: &str, used: &mut BTreeSet<String>) {
+        for word in text.split(|c: char| !is_name_char(c)) {
             if !word.is_empty() && word.chars().next().is_some_and(char::is_alphabetic) {
                 used.insert(word.into());
             }
@@ -132,7 +136,7 @@ impl UnusedImports {
     }
 
     /// Whether `c` can appear in a Java identifier.
-    fn is_name_char(c: char) -> bool {
+    pub(crate) fn is_name_char(c: char) -> bool {
         c.is_alphanumeric() || c == '_' || c == '$'
     }
 
@@ -157,9 +161,8 @@ impl UnusedImports {
         // A static import's qualifier is the *type*, not a package, so "already in scope" does
         // not apply to it.
         if !decl.is_static()
-            && let Some(qualifier) = Self::qualifier(&name)
-            && (qualifier == "java.lang"
-                || Self::package(decl).as_deref() == Some(qualifier.as_str()))
+            && let Some(qualifier) = qualifier(&name)
+            && (qualifier == "java.lang" || package(decl).as_deref() == Some(qualifier.as_str()))
         {
             return false;
         }
@@ -180,14 +183,14 @@ impl UnusedImports {
     }
 
     /// A qualified name's leading components, dotted — everything before the last one.
-    fn qualifier(name: &jals_syntax::ast::QualifiedName) -> Option<String> {
-        let dotted = Self::dotted(name.syntax());
+    pub(crate) fn qualifier(name: &jals_syntax::ast::QualifiedName) -> Option<String> {
+        let dotted = dotted(name.syntax());
         let at = dotted.rfind('.')?;
         Some(dotted[..at].into())
     }
 
     /// The compilation unit's package name, or `None` for the unnamed package.
-    fn package(decl: &ImportDecl) -> Option<String> {
+    pub(crate) fn package(decl: &ImportDecl) -> Option<String> {
         let root = decl.syntax().ancestors().last()?;
         let package = root
             .children()
@@ -195,11 +198,11 @@ impl UnusedImports {
         let name = package
             .children()
             .find(|child| child.kind() == SyntaxKind::QUALIFIED_NAME)?;
-        Some(Self::dotted(&name))
+        Some(dotted(&name))
     }
 
     /// A node's significant token text, concatenated.
-    fn dotted(node: &SyntaxNode) -> String {
+    pub(crate) fn dotted(node: &SyntaxNode) -> String {
         node.descendants_with_tokens()
             .filter_map(SyntaxElement::into_token)
             .filter(|tok| !tok.kind().is_trivia())

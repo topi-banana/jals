@@ -12,11 +12,15 @@ use core::ops::Range;
 use jals_syntax::{SyntaxElement, SyntaxNode};
 use text_size::TextRange;
 
-/// Computes selection-expansion chains.
-pub struct SelectionChains;
+pub use api::at;
 
-impl SelectionChains {
-    /// The nested-range chain at `offset`, innermost first: the covering token (if any), then
+/// Computes selection-expansion chains.
+mod api {
+    use super::{Range, SyntaxElement, SyntaxNode, TextRange, Vec};
+
+    /// The nested-range chain at `offset`, innermost first.
+    ///
+    /// The covering token (if any), then
     /// each of its ancestor nodes out to the root, collapsed so equal ranges don't repeat.
     /// `offset` past EOF is clamped. The result always holds at least the root's range.
     pub fn at(root: &SyntaxNode, offset: usize) -> Vec<Range<usize>> {
@@ -51,7 +55,7 @@ mod tests {
 
     fn chain_at(text: &str, offset: usize) -> Vec<Range<usize>> {
         let parse = jals_exec::block_on_inline(jals_syntax::Parse::parse(text));
-        SelectionChains::at(&parse.syntax(), offset)
+        api::at(&parse.syntax(), offset)
     }
 
     #[test]

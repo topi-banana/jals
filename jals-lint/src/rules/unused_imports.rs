@@ -26,22 +26,22 @@ pub(crate) const RULE: RuleMeta = RuleMeta {
     category: Category::Unused,
     level: |config| config.unused.unused_imports.level,
     needs_clean_parse: false,
-    check: Checker::Analyzed(UnusedImports::check),
+    check: Checker::Analyzed(api::check),
 };
 
 /// The `unused-imports` rule.
-struct UnusedImports;
+mod api {
+    use super::{Config, FileAnalysis, Finding, LocalBoxFuture, Vec, format};
 
-impl UnusedImports {
     /// The table-edge shim: boxes the async rule body once per file.
-    fn check<'a>(
+    pub(crate) fn check<'a>(
         analysis: &'a FileAnalysis,
         _config: &'a Config,
     ) -> LocalBoxFuture<'a, Vec<Finding>> {
-        alloc::boxed::Box::pin(Self::check_impl(analysis))
+        alloc::boxed::Box::pin(check_impl(analysis))
     }
 
-    async fn check_impl(analysis: &FileAnalysis) -> Vec<Finding> {
+    pub(crate) async fn check_impl(analysis: &FileAnalysis) -> Vec<Finding> {
         let mut out = Vec::new();
         for import in analysis.unused_imports().await {
             let modifier = if import.is_static { "static " } else { "" };

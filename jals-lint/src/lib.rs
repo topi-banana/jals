@@ -36,6 +36,7 @@ mod diagnostic;
 mod rules;
 mod suppress;
 
+use crate::rules::feature_gate;
 use alloc::vec::Vec;
 use core::cell::OnceCell;
 
@@ -45,7 +46,7 @@ use jals_hir::{FileAnalysis, FileSemantics};
 use jals_syntax::cfg::CfgMap;
 use jals_syntax::{Parse, SyntaxNode};
 
-use rules::{Checker, FeatureGate, Finding};
+use rules::{Checker, Finding};
 use suppress::SuppressionMap;
 
 pub use diagnostic::{Diagnostic, LintOutput};
@@ -232,7 +233,7 @@ impl LintOutput {
                     if config.features.permits(feature) {
                         Vec::new()
                     } else {
-                        let message = FeatureGate::preview_message(feature, subject);
+                        let message = feature_gate::preview_message(feature, subject);
                         find(root)
                             .iter()
                             .map(|node| Finding::at_node(node, message.clone()))

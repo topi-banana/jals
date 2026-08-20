@@ -16,31 +16,38 @@ use jals_syntax::ast::{AstNode, ImportDecl, QualifiedName};
 use jals_config::Category;
 use jals_config::lint::{Config, StaticWildcard};
 
-use crate::rules::{Checker, Finding, RuleMeta, Significant};
+use crate::rules::significant;
+use crate::rules::{Checker, Finding, RuleMeta};
 
 pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "wildcard-import",
     category: Category::Style,
     level: |config| config.style.wildcard_import.level,
     needs_clean_parse: false,
-    check: Checker::Syntactic(WildcardImport::check),
+    check: Checker::Syntactic(api::check),
 };
 
 /// The `wildcard-import` rule.
-struct WildcardImport;
+mod api {
+    use super::{
+        AstNode, Config, Finding, ImportDecl, LocalBoxFuture, QualifiedName, StaticWildcard,
+        SyntaxKind, Vec, Yielder, significant,
+    };
 
-impl WildcardImport {
-    const MESSAGE: &'static str = "avoid wildcard imports; import the specific types you use";
+    const MESSAGE: &str = "avoid wildcard imports; import the specific types you use";
 
     /// The table-edge shim: boxes the async rule body once per file.
-    fn check<'a>(
+    pub(crate) fn check<'a>(
         root: &'a jals_syntax::SyntaxNode,
         config: &'a Config,
     ) -> LocalBoxFuture<'a, Vec<Finding>> {
-        alloc::boxed::Box::pin(Self::check_impl(root, config))
+        alloc::boxed::Box::pin(check_impl(root, config))
     }
 
-    async fn check_impl(root: &jals_syntax::SyntaxNode, config: &Config) -> Vec<Finding> {
+    pub(crate) async fn check_impl(
+        root: &jals_syntax::SyntaxNode,
+        config: &Config,
+    ) -> Vec<Finding> {
         let exempt_static =
             config.style.wildcard_import.options.static_imports == StaticWildcard::Allow;
         let mut yielder = Yielder::new();
@@ -61,7 +68,7 @@ impl WildcardImport {
             if let Some(name) = import.name()
                 && name.is_wildcard()
             {
-                out.push(Finding::at_node(import.syntax(), Self::MESSAGE));
+                out.push(Finding::at_node(import.syntax(), MESSAGE));
             }
             // A jals grouped import hides its wildcards one level down: in
             // `import java.util.{concurrent.*};` the declaration's own name is the shared prefix
@@ -72,8 +79,8 @@ impl WildcardImport {
             if let Some(group) = import.group() {
                 for member in group.members().filter(QualifiedName::is_wildcard) {
                     out.extend(
-                        Significant::range(member.syntax())
-                            .map(|range| Finding::at_range(range, Self::MESSAGE)),
+                        significant::range(member.syntax())
+                            .map(|range| Finding::at_range(range, MESSAGE)),
                     );
                 }
             }

@@ -13,7 +13,7 @@
 //!
 //! - **`>` is not one token.** The lexer emits `>` singly and the parser fuses runs of them, so
 //!   `>>`, `>=`, and `>>>=` arrive as several adjacent tokens. They have to be emitted tight or
-//!   the operator changes meaning; [`Spacing::fused`] catches exactly that case by requiring
+//!   the operator changes meaning; [`api::fused`] catches exactly that case by requiring
 //!   source adjacency and a shared parent.
 //! - **`<` and `>` wear two hats.** Inside `TYPE_ARGS` / `TYPE_PARAMS` they are delimiters and
 //!   obey `within-angle-brackets`; inside an expression they are relational operators. The parent
@@ -24,23 +24,25 @@ use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxToken};
 
 use crate::style::Style;
 
-/// The inter-token spacing decision.
-pub(crate) struct Spacing;
+pub(crate) use api::{between, fused};
 
-impl Spacing {
+/// The inter-token spacing decision.
+pub(crate) mod api {
+    use super::{S, SpacingRules, Style, SyntaxElement, SyntaxToken};
+
     /// Whether a space separates `prev` from `next`.
     pub(crate) fn between(prev: &SyntaxToken, next: &SyntaxToken, style: &Style) -> bool {
         let rules = &style.cfg.spacing;
-        if Self::fused(prev, next) {
+        if fused(prev, next) {
             return false;
         }
         let (pk, nk) = (prev.kind(), next.kind());
-        let (pp, np) = (Self::parent(prev), Self::parent(next));
+        let (pp, np) = (parent(prev), parent(next));
 
         // Two operators written against each other would spell a third: `+ + +x` is three unary
         // pluses, `+++x` is `++` applied to `+x`. Separating them is not a `[spacing]` decision —
         // it is what keeps the output's token stream the input's.
-        if Self::glues(prev.text(), next.text()) || Self::runs_together(prev.text(), next.text()) {
+        if glues(prev.text(), next.text()) || runs_together(prev.text(), next.text()) {
             return true;
         }
 
@@ -56,7 +58,7 @@ impl Spacing {
         // A dimension marker hugs the type it follows — `int...`, `String[]` — except behind a
         // type annotation, where gluing them would read as one name: `Object @Nullable ... xs`,
         // `new String @A [] {}`.
-        if matches!(nk, S::ELLIPSIS | S::LBRACK) && Self::ends_annotation(prev) {
+        if matches!(nk, S::ELLIPSIS | S::LBRACK) && ends_annotation(prev) {
             return true;
         }
         if nk == S::ELLIPSIS {
@@ -72,7 +74,7 @@ impl Spacing {
         // An annotation and what it annotates are two words however the annotation ended:
         // `@A(0x43) String`, not `@A(0x43)String`. Asked before the delimiter rules, which would
         // otherwise read that `)` as a call's and hug the name to it.
-        if (Self::is_word(nk) || nk == S::QUESTION) && Self::ends_annotation(prev) {
+        if (is_word(nk) || nk == S::QUESTION) && ends_annotation(prev) {
             return true;
         }
 
@@ -82,32 +84,32 @@ impl Spacing {
             return false;
         }
 
-        if let Some(space) = Self::delimiters(pk, nk, pp, np, rules) {
+        if let Some(space) = delimiters(pk, nk, pp, np, rules) {
             return space;
         }
         // An annotation opening after a word or a closing delimiter needs separating —
         // `public @interface`, `@Foo(1) @Bar`. Checked after the delimiter rules so
         // `(@NonNull String x)` still hugs its parenthesis.
         if nk == S::AT {
-            return Self::is_word(pk) || matches!(pk, S::RPAREN | S::RBRACK | S::GT);
+            return is_word(pk) || matches!(pk, S::RPAREN | S::RBRACK | S::GT);
         }
-        if let Some(space) = Self::separators(prev, next, pp, np, rules) {
+        if let Some(space) = separators(prev, next, pp, np, rules) {
             return space;
         }
-        if let Some(space) = Self::angles(prev, next, pp, np, rules) {
+        if let Some(space) = angles(prev, next, pp, np, rules) {
             return space;
         }
-        if let Some(space) = Self::operators(prev, next, pp, np, rules) {
+        if let Some(space) = operators(prev, next, pp, np, rules) {
             return space;
         }
 
         // Everything left is a pair of words — two identifiers, a keyword and a name, a type and
         // a variable — which always need separating.
-        Self::is_word(pk) && Self::is_word(nk)
+        is_word(pk) && is_word(nk)
     }
 
     /// The node kind a token hangs off, or `SOURCE_FILE` for the impossible orphan case.
-    fn parent(tok: &SyntaxToken) -> S {
+    pub(crate) fn parent(tok: &SyntaxToken) -> S {
         tok.parent().map_or(S::SOURCE_FILE, |node| node.kind())
     }
 
@@ -117,7 +119,7 @@ impl Spacing {
     /// A type annotation is the one thing that separates from the `[` or `...` behind it
     /// (`Object @Nullable ... xs`, `new String @A [] {}`), because gluing them would read as one
     /// name. Everywhere else those brackets hug.
-    fn ends_annotation(tok: &SyntaxToken) -> bool {
+    pub(crate) fn ends_annotation(tok: &SyntaxToken) -> bool {
         tok.parent_ancestors()
             .find(|node| node.kind() == S::ANNOTATION)
             .is_some_and(|anno| anno.text_range().end() == tok.text_range().end())
@@ -125,7 +127,7 @@ impl Spacing {
 
     /// Whether `tok` closes a type-argument list that a call or a method reference wrote before
     /// the name it invokes.
-    fn qualifies_a_name(tok: &SyntaxToken) -> bool {
+    pub(crate) fn qualifies_a_name(tok: &SyntaxToken) -> bool {
         tok.parent().is_some_and(|args| {
             args.kind() == S::TYPE_ARGS
                 && args.parent().is_some_and(|owner| {
@@ -139,9 +141,9 @@ impl Spacing {
 
     /// Whether writing `prev` against `next` would re-lex as a different token.
     ///
-    /// The `>` family is the deliberate exception and is handled by [`Spacing::fused`], which
+    /// The `>` family is the deliberate exception and is handled by [`api::fused`], which
     /// requires the two to have been adjacent in the source.
-    fn glues(prev: &str, next: &str) -> bool {
+    pub(crate) fn glues(prev: &str, next: &str) -> bool {
         let (Some(last), Some(first)) = (prev.chars().last(), next.chars().next()) else {
             return false;
         };
@@ -159,7 +161,7 @@ impl Spacing {
 
     /// Whether gluing `prev` to `next` would run two word tokens into one.
     ///
-    /// [`glues`](Self::glues)' case for words rather than punctuation, and mandatory for the same
+    /// [`glues`](glues)' case for words rather than punctuation, and mandatory for the same
     /// reason: `label instanceof String` written tight is the single identifier
     /// `labelinstanceofString`, which is three tokens becoming one — a loss the fail-safe answers
     /// by returning the whole file unformatted.
@@ -173,7 +175,7 @@ impl Spacing {
     /// Word characters rather than token kinds, because the question is about the rendered text: a
     /// literal ends in `"` or a digit, punctuation ends in a symbol, and only two identifier-shaped
     /// edges can merge.
-    fn runs_together(prev: &str, next: &str) -> bool {
+    pub(crate) fn runs_together(prev: &str, next: &str) -> bool {
         let word = |ch: char| ch.is_alphanumeric() || ch == '_' || ch == '$';
         let (Some(last), Some(first)) = (prev.chars().last(), next.chars().next()) else {
             return false;
@@ -189,7 +191,7 @@ impl Spacing {
         clippy::suspicious_operation_groupings,
         reason = "`prev.end() == next.start()` is source adjacency, not a mismatched pair"
     )]
-    pub(super) fn fused(prev: &SyntaxToken, next: &SyntaxToken) -> bool {
+    pub(crate) fn fused(prev: &SyntaxToken, next: &SyntaxToken) -> bool {
         prev.kind() == S::GT
             && matches!(next.kind(), S::GT | S::EQ)
             && prev.text_range().end() == next.text_range().start()
@@ -197,7 +199,7 @@ impl Spacing {
     }
 
     /// Whether a token is word-like, so that two of them in a row must be separated.
-    fn is_word(kind: S) -> bool {
+    pub(crate) fn is_word(kind: S) -> bool {
         matches!(
             kind,
             S::IDENT
@@ -207,12 +209,12 @@ impl Spacing {
                 | S::CHAR_LITERAL
                 | S::STRING_LITERAL
                 | S::TEXT_BLOCK
-        ) || Self::is_keyword(kind)
+        ) || is_keyword(kind)
     }
 
     /// Whether a token is a keyword — everything between the first and last keyword kind, plus
     /// the three literal keywords and the context-sensitive ones the parser promotes.
-    fn is_keyword(kind: S) -> bool {
+    pub(crate) fn is_keyword(kind: S) -> bool {
         (S::ABSTRACT_KW..=S::WHILE_KW).contains(&kind)
             || matches!(kind, S::TRUE_KW | S::FALSE_KW | S::NULL_KW)
             || (S::VAR_KW..=S::WITH_KW).contains(&kind)
@@ -222,7 +224,7 @@ impl Spacing {
     // ===== Bracketing =====
 
     /// Parentheses, brackets, and braces.
-    fn delimiters(pk: S, nk: S, pp: S, np: S, rules: &SpacingRules) -> Option<bool> {
+    pub(crate) fn delimiters(pk: S, nk: S, pp: S, np: S, rules: &SpacingRules) -> Option<bool> {
         match (pk, nk) {
             // An empty pair gets its own rule, since `f()` and `f( )` are a different decision
             // from `f(a)` and `f( a )`.
@@ -230,20 +232,20 @@ impl Spacing {
             (S::LBRACE, S::RBRACE) => Some(rules.within_empty_braces),
             (S::LBRACK, S::RBRACK) => Some(false),
 
-            (S::LPAREN, _) => Some(Self::within_parens(pp, rules)),
+            (S::LPAREN, _) => Some(within_parens(pp, rules)),
             // A resource list may end with its separator (`try (X x = x; )`). That trailing `;`
             // is still a separator, so it keeps its after-space rather than hugging the `)`.
             (S::SEMICOLON, S::RPAREN) if np == S::RESOURCE_LIST => Some(rules.after_semicolon),
-            (_, S::RPAREN) => Some(Self::within_parens(np, rules)),
+            (_, S::RPAREN) => Some(within_parens(np, rules)),
             (S::LBRACK, _) => Some(pp == S::INDEX_EXPR && rules.within_brackets),
             (_, S::RBRACK) => Some(np == S::INDEX_EXPR && rules.within_brackets),
             // A dimension's `[` hugs what it indexes, except behind a type annotation —
-            // see [`Spacing::ends_annotation`].
+            // see [`api::ends_annotation`].
             (_, S::LBRACK) => Some(false),
             // `String[][] xs` — an array type's `]` is followed by the name it declares. Only a
             // word is separated, so `a[0] = 1` still reaches the assignment rule and `a[0].b`
             // still hugs its selector.
-            (S::RBRACK, _) if Self::is_word(nk) => Some(true),
+            (S::RBRACK, _) if is_word(nk) => Some(true),
 
             // A cast's `)` is followed by the value it converts, parenthesized or not.
             (S::RPAREN, _) if pp == S::CAST_EXPR => Some(rules.after_type_cast),
@@ -251,10 +253,8 @@ impl Spacing {
             // A word before it still separates (`return (T) x`); anything else is the previous
             // token's business, so this falls through to the operator rules rather than
             // answering `false` and silencing them (`a && (b)`).
-            (_, S::LPAREN) => {
-                Self::before_parens(np, rules).or_else(|| Self::is_word(pk).then_some(true))
-            }
-            (_, S::LBRACE) => Some(Self::before_brace(pk, np, rules)),
+            (_, S::LPAREN) => before_parens(np, rules).or_else(|| is_word(pk).then_some(true)),
+            (_, S::LBRACE) => Some(before_brace(pk, np, rules)),
             (S::LBRACE, _) => Some(pp == S::ARRAY_INIT && rules.within_array_initializer_braces),
             (_, S::RBRACE) => Some(np == S::ARRAY_INIT && rules.within_array_initializer_braces),
 
@@ -267,7 +267,7 @@ impl Spacing {
     }
 
     /// The `within-*-parentheses` rule for a parenthesis owned by `parent`.
-    const fn within_parens(parent: S, rules: &SpacingRules) -> bool {
+    pub(crate) const fn within_parens(parent: S, rules: &SpacingRules) -> bool {
         match parent {
             S::ARG_LIST => rules.within_method_call_parentheses,
             S::PARAM_LIST | S::LAMBDA_PARAMS => rules.within_method_parentheses,
@@ -292,9 +292,9 @@ impl Spacing {
     /// when no rule owns that parenthesis.
     ///
     /// `None` is not "no space": it is "nobody configured this one", which is what lets
-    /// [`Spacing::separated_paren`] answer for a cast's or a group's parenthesis without
+    /// [`api::separated_paren`] answer for a cast's or a group's parenthesis without
     /// overriding a rule that did have an opinion.
-    const fn before_parens(parent: S, rules: &SpacingRules) -> Option<bool> {
+    pub(crate) const fn before_parens(parent: S, rules: &SpacingRules) -> Option<bool> {
         Some(match parent {
             S::ARG_LIST => rules.before_method_call_parentheses,
             S::PARAM_LIST => rules.before_method_parentheses,
@@ -326,7 +326,7 @@ impl Spacing {
     /// `before-array-initializer-left-brace` and the assignment operator's spacing. Either asking
     /// for a space is enough — `int[] xs ={1}` is not what
     /// `around-assignment-operators = true` means.
-    fn before_brace(previous: S, parent: S, rules: &SpacingRules) -> bool {
+    pub(crate) fn before_brace(previous: S, parent: S, rules: &SpacingRules) -> bool {
         if parent != S::ARRAY_INIT {
             return rules.before_left_brace;
         }
@@ -337,7 +337,7 @@ impl Spacing {
     // ===== Punctuation =====
 
     /// Commas, semicolons, colons, and the ternary `?`.
-    fn separators(
+    pub(crate) fn separators(
         prev: &SyntaxToken,
         next: &SyntaxToken,
         pp: S,
@@ -358,15 +358,15 @@ impl Spacing {
             (_, S::QUESTION) if np == S::TERNARY_EXPR => Some(rules.before_ternary_question),
             (S::QUESTION, _) if pp == S::TERNARY_EXPR => Some(rules.after_ternary_question),
             // A wildcard's bound is a word after the `?`: `<? extends Tree>`.
-            (S::QUESTION, _) => Some(Self::is_word(next.kind())),
-            (_, S::COLON) => Some(Self::before_colon(np, rules)),
-            (S::COLON, _) => Some(Self::after_colon(pp, rules)),
+            (S::QUESTION, _) => Some(is_word(next.kind())),
+            (_, S::COLON) => Some(before_colon(np, rules)),
+            (S::COLON, _) => Some(after_colon(pp, rules)),
             _ => None,
         }
     }
 
     /// Java's five colon contexts genuinely disagree across vendors, so each keeps its own pair.
-    const fn before_colon(parent: S, rules: &SpacingRules) -> bool {
+    pub(crate) const fn before_colon(parent: S, rules: &SpacingRules) -> bool {
         match parent {
             S::TERNARY_EXPR => rules.before_ternary_colon,
             S::FOR_EACH_STMT => rules.before_foreach_colon,
@@ -379,7 +379,7 @@ impl Spacing {
     }
 
     /// The `after-*-colon` half of the same five.
-    const fn after_colon(parent: S, rules: &SpacingRules) -> bool {
+    pub(crate) const fn after_colon(parent: S, rules: &SpacingRules) -> bool {
         match parent {
             S::TERNARY_EXPR => rules.after_ternary_colon,
             S::FOR_EACH_STMT => rules.after_foreach_colon,
@@ -393,7 +393,7 @@ impl Spacing {
     // ===== Angle brackets =====
 
     /// `<` and `>` as type-list delimiters, which is decided by the parent, not the token.
-    fn angles(
+    pub(crate) fn angles(
         prev: &SyntaxToken,
         next: &SyntaxToken,
         pp: S,
@@ -413,12 +413,12 @@ impl Spacing {
             (true, false) if pk == S::LT => Some(rules.within_angle_brackets),
             // A closing `>` followed by an operator — `Comparable<T> & Cloneable` — is not an
             // angle-bracket decision at all; let the operator's own rule answer it.
-            (true, false) if Self::operator_rule(nk, np, rules).is_some() => None,
+            (true, false) if operator_rule(nk, np, rules).is_some() => None,
             // A call's explicit type arguments are written against the name they qualify —
             // `List.<String>of()`, `ImmutableList::<String>of` — so that `>` is a selector, not
             // the end of a type.
-            (true, false) if Self::qualifies_a_name(prev) => Some(false),
-            (true, false) => Some(Self::is_word(nk)),
+            (true, false) if qualifies_a_name(prev) => Some(false),
+            (true, false) => Some(is_word(nk)),
             (false, true) if nk == S::GT => Some(rules.within_angle_brackets),
             // A generic method writes its type parameters *before* the return type, so the `<`
             // follows a modifier and has to separate from it: `public static <T, U> …`, and
@@ -426,13 +426,10 @@ impl Spacing {
             // keyword — gluing that one spells `@ForceInline<M>`, an annotation the source never
             // wrote. A list that follows the declared name (`class Foo<T>`) hugs unless
             // `before-type-parameter-list` says otherwise.
-            (false, true)
-                if np == S::TYPE_PARAMS
-                    && (Self::is_keyword(pk) || Self::ends_annotation(prev)) =>
-            {
+            (false, true) if np == S::TYPE_PARAMS && (is_keyword(pk) || ends_annotation(prev)) => {
                 Some(true)
             }
-            (false, true) => Some(pp != S::IDENT && Self::before_angle(np, rules)),
+            (false, true) => Some(pp != S::IDENT && before_angle(np, rules)),
             (false, false) => None,
         }
     }
@@ -440,14 +437,14 @@ impl Spacing {
     /// Whether a `<` opening a type-parameter list takes a space before it.
     ///
     /// Only a declaration's own list has the rule; a type *use* (`Map<K, V>`) always hugs.
-    const fn before_angle(parent: S, rules: &SpacingRules) -> bool {
+    pub(crate) const fn before_angle(parent: S, rules: &SpacingRules) -> bool {
         matches!(parent, S::TYPE_PARAMS) && rules.before_type_parameter_list
     }
 
     // ===== Operators =====
 
     /// Binary, unary, assignment, and arrow operators.
-    fn operators(
+    pub(crate) fn operators(
         prev: &SyntaxToken,
         next: &SyntaxToken,
         pp: S,
@@ -457,30 +454,30 @@ impl Spacing {
         // `around-unary-operator` governs the side facing the *operand* — the right of a prefix
         // `-`, the left of a postfix `++`. The other side belongs to whatever encloses the
         // expression, so consulting the unary rule there would glue `return` to `-1`.
-        let next_prefix = Self::is_prefix_operator(next);
-        if !next_prefix && let Some(space) = Self::operator_rule(next.kind(), np, rules) {
+        let next_prefix = is_prefix_operator(next);
+        if !next_prefix && let Some(space) = operator_rule(next.kind(), np, rules) {
             return Some(space);
         }
-        if !Self::is_postfix_operator(prev)
-            && let Some(space) = Self::operator_rule(prev.kind(), pp, rules)
+        if !is_postfix_operator(prev)
+            && let Some(space) = operator_rule(prev.kind(), pp, rules)
         {
             return Some(space);
         }
         // Nothing else claimed the pair: a word before a prefix operator still separates, which
         // is what keeps `return -1` and `case -1:` readable.
-        (next_prefix && Self::is_word(prev.kind())).then_some(true)
+        (next_prefix && is_word(prev.kind())).then_some(true)
     }
 
     /// Whether `tok` is the operator of a prefix expression — the first significant token of its
     /// `UNARY_EXPR`.
-    fn is_prefix_operator(tok: &SyntaxToken) -> bool {
-        Self::is_edge_operator(tok, S::UNARY_EXPR, true)
+    pub(crate) fn is_prefix_operator(tok: &SyntaxToken) -> bool {
+        is_edge_operator(tok, S::UNARY_EXPR, true)
     }
 
     /// Whether `tok` is the operator of a postfix expression — the last significant token of its
     /// `POSTFIX_EXPR`.
-    fn is_postfix_operator(tok: &SyntaxToken) -> bool {
-        Self::is_edge_operator(tok, S::POSTFIX_EXPR, false)
+    pub(crate) fn is_postfix_operator(tok: &SyntaxToken) -> bool {
+        is_edge_operator(tok, S::POSTFIX_EXPR, false)
     }
 
     /// Whether `tok` is its parent's first (or last) significant token, and that parent is `kind`.
@@ -488,7 +485,7 @@ impl Spacing {
     /// Compared by position among the significant children rather than by text range: a node's
     /// range starts at its leading whitespace, so `assert !x` would make the `!` look like it is
     /// not first.
-    fn is_edge_operator(tok: &SyntaxToken, kind: S, first: bool) -> bool {
+    pub(crate) fn is_edge_operator(tok: &SyntaxToken, kind: S, first: bool) -> bool {
         tok.parent().is_some_and(|node| {
             if node.kind() != kind {
                 return false;
@@ -507,7 +504,7 @@ impl Spacing {
     }
 
     /// The spacing rule an operator token asks for, by class.
-    fn operator_rule(kind: S, parent: S, rules: &SpacingRules) -> Option<bool> {
+    pub(crate) fn operator_rule(kind: S, parent: S, rules: &SpacingRules) -> Option<bool> {
         // A prefix or postfix operator hugs its operand under `around-unary-operator`.
         if matches!(parent, S::UNARY_EXPR | S::POSTFIX_EXPR) {
             return matches!(

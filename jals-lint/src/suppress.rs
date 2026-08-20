@@ -58,7 +58,8 @@ use jals_exec::Yielder;
 use jals_syntax::ast::{Annotation, AnnotationPair, AstNode, Expr, Literal};
 use jals_syntax::{SyntaxKind, SyntaxNode};
 
-use crate::rules::{RuleMeta, Significant};
+use crate::rules::RuleMeta;
+use crate::rules::significant;
 
 /// The annotation that suppresses, by simple name (`java.lang.SuppressWarnings`).
 const SUPPRESS_WARNINGS: &str = "SuppressWarnings";
@@ -126,7 +127,7 @@ impl SuppressionMap {
             if names.is_empty() {
                 continue;
             }
-            let Some(range) = Self::host(&node).as_ref().and_then(Significant::range) else {
+            let Some(range) = Self::host(&node).as_ref().and_then(significant::range) else {
                 continue;
             };
             entries.push(Suppression { range, names });

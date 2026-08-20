@@ -24,15 +24,15 @@ pub(crate) const RULE: RuleMeta = RuleMeta {
     check: Checker::Gated {
         feature: Feature::GroupedImports,
         subject: "grouped imports (`import a.b.{X, Y};`)",
-        find: GroupedImport::find,
+        find: api::find,
     },
 };
 
 /// The `grouped-import` rule.
-struct GroupedImport;
+mod api {
+    use super::{AstNode, SourceFile, SyntaxNode, Vec};
 
-impl GroupedImport {
-    fn find(root: &SyntaxNode) -> Vec<SyntaxNode> {
+    pub(crate) fn find(root: &SyntaxNode) -> Vec<SyntaxNode> {
         // The driver runs this only when `grouped-imports` is disabled and stamps the gate message,
         // so here we just locate the syntax (nothing when the root is not a source file).
         let Some(file) = SourceFile::cast(root.clone()) else {

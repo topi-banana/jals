@@ -19,11 +19,13 @@ use std::path::{Path, PathBuf};
 use rayon::prelude::*;
 use walkdir::WalkDir;
 
+pub use api::{configure_threads, default_sources_dir};
+
 /// Shared CLI-harness setup for the crate's two binaries (`jals-tests` and `jals-golden`),
 /// which run the same worker-pool and source-directory conventions.
-pub struct Harness;
+mod api {
+    use std::path::PathBuf;
 
-impl Harness {
     /// Per-worker stack size. Deeply nested Java (long binary-expression chains,
     /// nested generics) can overflow the default ~2 MiB stack of a recursive-descent
     /// parser (and the formatter), so each worker gets a generous stack.
@@ -32,7 +34,7 @@ impl Harness {
     /// Build the global rayon pool with a large per-worker stack and an optional
     /// `--jobs` thread count.
     pub fn configure_threads(jobs: Option<usize>) -> Result<(), String> {
-        let mut builder = rayon::ThreadPoolBuilder::new().stack_size(Self::WORKER_STACK_SIZE);
+        let mut builder = rayon::ThreadPoolBuilder::new().stack_size(WORKER_STACK_SIZE);
         if let Some(jobs) = jobs {
             builder = builder.num_threads(jobs);
         }

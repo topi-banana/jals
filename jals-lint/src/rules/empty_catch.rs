@@ -23,19 +23,25 @@ pub(crate) const RULE: RuleMeta = RuleMeta {
     category: Category::Suspicious,
     level: |config| config.suspicious.empty_catch.level,
     needs_clean_parse: false,
-    check: Checker::Syntactic(EmptyCatch::check),
+    check: Checker::Syntactic(api::check),
 };
 
 /// The `empty-catch` rule.
-struct EmptyCatch;
+mod api {
+    use super::{
+        AstNode, CatchClause, Config, Finding, IgnoredCatch, LocalBoxFuture, SyntaxElement,
+        SyntaxKind, SyntaxNode, Vec, Yielder,
+    };
 
-impl EmptyCatch {
     /// The table-edge shim: boxes the async rule body once per file.
-    fn check<'a>(root: &'a SyntaxNode, config: &'a Config) -> LocalBoxFuture<'a, Vec<Finding>> {
-        alloc::boxed::Box::pin(Self::check_impl(root, config))
+    pub(crate) fn check<'a>(
+        root: &'a SyntaxNode,
+        config: &'a Config,
+    ) -> LocalBoxFuture<'a, Vec<Finding>> {
+        alloc::boxed::Box::pin(check_impl(root, config))
     }
 
-    async fn check_impl(root: &SyntaxNode, config: &Config) -> Vec<Finding> {
+    pub(crate) async fn check_impl(root: &SyntaxNode, config: &Config) -> Vec<Finding> {
         let options = &config.suspicious.empty_catch.options;
         let mut yielder = Yielder::new();
         let mut out = Vec::new();

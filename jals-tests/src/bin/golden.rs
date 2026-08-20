@@ -10,10 +10,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
-use jals_tests::Harness;
 use jals_tests::golden::{
     Ceiling, GOLDEN_SOURCES, GoldenReport, GoldenSource, Pin, TARGETS, Target,
 };
+use jals_tests::{configure_threads, default_sources_dir};
 
 #[derive(Parser)]
 #[command(
@@ -78,7 +78,7 @@ impl Cli {
     fn run() -> ExitCode {
         let cli = Self::parse();
 
-        if let Err(msg) = Harness::configure_threads(cli.jobs) {
+        if let Err(msg) = configure_threads(cli.jobs) {
             eprintln!("error: {msg}");
             return ExitCode::from(1);
         }
@@ -110,10 +110,7 @@ impl Cli {
             return ExitCode::SUCCESS;
         }
 
-        let sources_dir = cli
-            .root
-            .clone()
-            .unwrap_or_else(Harness::default_sources_dir);
+        let sources_dir = cli.root.clone().unwrap_or_else(default_sources_dir);
 
         let selected: Vec<&str> = if cli.sources.is_empty() {
             GOLDEN_SOURCES.iter().map(|s| s.name).collect()

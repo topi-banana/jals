@@ -79,8 +79,8 @@ use jals_syntax::SyntaxKind::{
 use jals_syntax::ast::{self, AstNode as _};
 use jals_syntax::{SyntaxNode, SyntaxToken};
 
-use crate::desc::{DescError, Descriptor};
-use crate::facts::{Facts, Hierarchy, Literal, Overrides};
+use crate::desc::DescError;
+use crate::facts::{Facts, Hierarchy, Overrides};
 use crate::jvm::{AsmError, Assembler, BinOp, Branch, Compare, Numeric, Receiver};
 use crate::lower::slots::Slots;
 
@@ -258,10 +258,14 @@ impl Lambda {
     }
 }
 
-/// The source-to-class-file lowering.
-pub struct Compile;
+pub use api::file;
 
-impl Compile {
+/// The source-to-class-file lowering.
+mod api {
+    use super::*;
+    use crate::desc;
+    use crate::facts::literal;
+
     /// Compile every top-level type declared in `root` into a class file at `class_version`.
     ///
     /// One class file per declared type is the JVM's own unit, so this returns a list rather than a
@@ -290,7 +294,7 @@ impl Compile {
                     && let Some(item) =
                         index.item_by_decl(file, usize::from(node.text_range().start()))
                 {
-                    out.push(Self::class(&node, item, typed, class_version)?);
+                    out.push(class(&node, item, typed, class_version)?);
                 }
                 continue;
             }
@@ -304,23 +308,23 @@ impl Compile {
             let item = index
                 .item_by_decl(file, usize::from(name.text_range().start()))
                 .ok_or_else(|| LowerError::Unresolved(name.text().into()))?;
-            out.push(Self::class(&node, item, typed, class_version)?);
+            out.push(class(&node, item, typed, class_version)?);
         }
         Ok(out)
     }
 
     /// Compile one type declaration.
-    fn class(
+    pub(crate) fn class(
         node: &SyntaxNode,
         item: ItemId,
         typed: TypedFile<'_>,
         class_version: u16,
     ) -> Result<CompiledClass> {
         let (index, file) = (typed.index(), typed.file());
-        let encloses = Self::holds_enclosing_instance(node, item, index)
-            .then(|| Self::enclosing_of(node, index, file))
+        let encloses = holds_enclosing_instance(node, item, index)
+            .then(|| enclosing_of(node, index, file))
             .transpose()?;
-        let internal_name = Descriptor::internal_name_of(item, index);
+        let internal_name = desc::internal_name_of(item, index);
         // An `@interface` *is* an interface: its members are implicitly `public abstract`, it has no
         // constructor, and `ACC_INTERFACE` is set. `ACC_ANNOTATION` is the only thing on top.
         let is_annotation = index.item(item).kind == DefKind::AnnotationType;
@@ -340,8 +344,8 @@ impl Compile {
                     .filter(|n| n.kind() == jals_syntax::SyntaxKind::ENUM_CONSTANT)
                     .any(|n| n.children().any(|child| child.kind() == CLASS_BODY)),
             encloses: encloses.clone(),
-            inner: Self::inner_classes_of(node, index, file),
-            captures: Self::captures_of(node, Facts::of(typed)),
+            inner: inner_classes_of(node, index, file),
+            captures: captures_of(node, Facts::of(typed)),
             this_item: item,
             lambdas: alloc::collections::BTreeMap::new(),
         };
@@ -360,7 +364,7 @@ impl Compile {
         } else {
             super_item.map_or_else(
                 || "java/lang/Object".to_owned(),
-                |id| Descriptor::internal_name_of(id, index),
+                |id| desc::internal_name_of(id, index),
             )
         };
         let super_class = pool.class_index(&super_name).ok_or(AsmError::PoolFull)?;
@@ -373,7 +377,7 @@ impl Compile {
             if index.item(supertype.id).kind != DefKind::Interface {
                 continue;
             }
-            let name = Descriptor::internal_name_of(supertype.id, index);
+            let name = desc::internal_name_of(supertype.id, index);
             interfaces.push(pool.class_index(&name).ok_or(AsmError::PoolFull)?);
             interface_names.push(name);
         }
@@ -412,7 +416,7 @@ impl Compile {
         let mut methods = Vec::new();
         // Worked out before any body is lowered, because a body cannot add a method to the class it is in.
         let (context, lambda_methods, bootstraps) =
-            Self::synthesise_lambdas(context, &members, &mut pool)?;
+            synthesise_lambdas(context, &members, &mut pool)?;
         methods.extend(lambda_methods);
 
         let mut saw_constructor = false;
@@ -432,16 +436,16 @@ impl Compile {
             // synthetic field *and* an extra parameter on every constructor — so the descriptors the
             // index computed from the declaration would all be one parameter short.
             match member.kind() {
-                FIELD_DECL => Self::field(member, &context, &mut pool, &mut fields)?,
-                METHOD_DECL => methods.push(Self::method(member, &context, &mut pool)?),
+                FIELD_DECL => field(member, &context, &mut pool, &mut fields)?,
+                METHOD_DECL => methods.push(method(member, &context, &mut pool)?),
                 // A record's compact constructor is the canonical one, emitted by `record_members` with
                 // the components as its parameters. Emitting it here would give it `<init>()V` instead.
-                CONSTRUCTOR_DECL if is_record && Self::is_compact_constructor(member) => {
+                CONSTRUCTOR_DECL if is_record && is_compact_constructor(member) => {
                     saw_constructor = true;
                 }
                 CONSTRUCTOR_DECL => {
                     saw_constructor = true;
-                    methods.push(Self::constructor(
+                    methods.push(constructor(
                         member,
                         &context,
                         &mut pool,
@@ -472,8 +476,8 @@ impl Compile {
                 let arity = ast::EnumConstant::cast(node.clone())
                     .and_then(|constant| constant.args())
                     .map_or(0, |list| list.args().count());
-                let mut descriptor = Self::enum_constructor(arity, super_item, &context)?
-                    .map(|member| Descriptor::method_descriptor(member, index, true))
+                let mut descriptor = enum_constructor(arity, super_item, &context)?
+                    .map(|member| desc::method_descriptor(member, index, true))
                     .transpose()?
                     .unwrap_or(MethodDescriptor {
                         params: Vec::new(),
@@ -491,23 +495,23 @@ impl Compile {
                 (node.kind() == jals_syntax::SyntaxKind::NEW_EXPR)
                     .then(|| typed.call_target_of(Facts::span(node)))
                     .flatten()
-                    .map(|member| Descriptor::method_descriptor(member, index, true))
+                    .map(|member| desc::method_descriptor(member, index, true))
                     .transpose()?
             };
-            methods.push(Self::default_constructor(
+            methods.push(default_constructor(
                 &context,
                 &mut pool,
                 &super_name,
                 super_item,
                 &members,
-                Self::access_level(node),
+                access_level(node),
                 forwarded.as_ref(),
             )?);
         }
         // A record's components are declared once, in its header, and every one of them stands for a
         // field, an accessor, and a constructor parameter — none of which the body writes.
         let record_attribute = if is_record {
-            Some(Self::record_members(
+            Some(record_members(
                 node,
                 &context,
                 &mut pool,
@@ -522,7 +526,7 @@ impl Compile {
         // An `enum`'s constants, its `$VALUES`, its constructor, and its two static methods are all
         // synthesised: none of them is written in the source, and every one of them is required.
         if is_enum {
-            Self::enum_members(
+            enum_members(
                 &constants,
                 &context,
                 &mut pool,
@@ -561,13 +565,13 @@ impl Compile {
             });
         }
         if let Some(enclosing) = &encloses {
-            fields.push(Self::enclosing_field(&enclosing.name, &mut pool)?);
+            fields.push(enclosing_field(&enclosing.name, &mut pool)?);
         }
         // One `final synthetic` field per captured local, which is how the class outlives the frame the
         // local lived in.
         for &captured in context.captures.get(&item).into_iter().flatten() {
-            let name = Self::capture_field(captured, &context);
-            let descriptor = Self::capture_descriptor(captured, &context)?;
+            let name = capture_field(captured, &context);
+            let descriptor = capture_descriptor(captured, &context)?;
             fields.push(FieldInfo {
                 access_flags: FieldAccessFlags(
                     FieldAccessFlags::FINAL | FieldAccessFlags::SYNTHETIC,
@@ -581,7 +585,7 @@ impl Compile {
         // when the class is first used. Nothing else runs them — so dropping them produced a class
         // whose `static int n = 5;` read back as 0, which is a silent miscompile rather than a
         // missing feature.
-        if let Some(class_init) = Self::class_initializer(
+        if let Some(class_init) = class_initializer(
             &context,
             &mut pool,
             &members,
@@ -595,15 +599,13 @@ impl Compile {
         // A generic supertype's method is *erased* in its own class file, so an override with a more
         // specific parameter type does not override it at all as far as the JVM is concerned: the two
         // descriptors differ. A bridge carries the erased signature and delegates.
-        Self::bridges(item, &context, &mut pool, &members, &mut methods)?;
+        bridges(item, &context, &mut pool, &members, &mut methods)?;
 
-        let mut nesting = Self::inner_classes(node, &context, &mut pool)?;
+        let mut nesting = inner_classes(node, &context, &mut pool)?;
         // A generic declaration's type parameters survive erasure only in this attribute. Nothing at run
         // time reads it — the JVM links on descriptors — but every reflective reader does, and a class
         // whose `Signature` is missing reports `Box` where the source wrote `Box<T>`.
-        if let Some(signature) =
-            Self::class_signature(node, &context, &super_name, &interface_names)?
-        {
+        if let Some(signature) = class_signature(node, &context, &super_name, &interface_names)? {
             let name_index = pool.utf8_index("Signature").ok_or(AsmError::PoolFull)?;
             let signature_index = pool.utf8_index(&signature).ok_or(AsmError::PoolFull)?;
             nesting.push(jals_classfile::Attribute {
@@ -634,7 +636,7 @@ impl Compile {
         }
 
         let mut class = ClassFile::new(class_version, 0, pool);
-        let mut flags = Self::class_flags(node, is_interface, is_annotation);
+        let mut flags = class_flags(node, is_interface, is_annotation);
         if is_enum {
             // `ACC_ENUM` is what makes `Enum.valueOf` and a `switch` over the type work at run time.
             // `ACC_FINAL` is what an enum with no constant bodies is — one *with* a body has a subclass,
@@ -673,7 +675,7 @@ impl Compile {
     /// `access_flags` — the JVM has nowhere to put either — so this is the only record of what the
     /// source declared, and reflection reads it back from here. `getSimpleName` also comes from here;
     /// without it a nested class reports `Outer$Inner`.
-    fn inner_classes(
+    pub(crate) fn inner_classes(
         node: &SyntaxNode,
         context: &Context<'_>,
         pool: &mut ConstantPool,
@@ -733,10 +735,10 @@ impl Compile {
                 ))?;
 
             let inner_index = pool
-                .class_index(&Descriptor::internal_name_of(item, context.index))
+                .class_index(&desc::internal_name_of(item, context.index))
                 .ok_or(AsmError::PoolFull)?;
             let outer_index = pool
-                .class_index(&Descriptor::internal_name_of(enclosing, context.index))
+                .class_index(&desc::internal_name_of(enclosing, context.index))
                 .ok_or(AsmError::PoolFull)?;
             let name_index = pool
                 .utf8_index(&jals_syntax::decoded_ident(&name))
@@ -745,9 +747,9 @@ impl Compile {
             let kind = context.index.item(item).kind;
             let is_annotation = kind == DefKind::AnnotationType;
             let is_interface = is_annotation || kind == DefKind::Interface;
-            let mut flags = Self::class_flags(declaration, is_interface, is_annotation)
-                & !ClassAccessFlags::SUPER;
-            flags |= Self::access_level(declaration);
+            let mut flags =
+                class_flags(declaration, is_interface, is_annotation) & !ClassAccessFlags::SUPER;
+            flags |= access_level(declaration);
             if Facts::has_modifier(declaration, jals_syntax::SyntaxKind::STATIC_KW) {
                 // `ClassAccessFlags` has no `STATIC`, because a *class* file cannot be static — only
                 // an `InnerClasses` entry records it (JVMS §4.7.6, `ACC_STATIC` = 0x0008).
@@ -763,7 +765,7 @@ impl Compile {
         let name_index = pool.utf8_index("InnerClasses").ok_or(AsmError::PoolFull)?;
         Ok(alloc::vec![jals_classfile::Attribute {
             name_index,
-            body: jals_classfile::AttributeBody::InnerClasses(entries),
+            body: jals_classfile::AttributeBody::InnerClasses(entries)
         }])
     }
 
@@ -778,7 +780,7 @@ impl Compile {
     /// The three constants coincide across `ClassAccessFlags` / `FieldAccessFlags` /
     /// `MethodAccessFlags` (JVMS tables 4.1-B, 4.5-A, 4.6-A), so one function answers for all
     /// three.
-    fn access_level(node: &SyntaxNode) -> u16 {
+    pub(crate) fn access_level(node: &SyntaxNode) -> u16 {
         use jals_syntax::SyntaxKind::{PRIVATE_KW, PROTECTED_KW, PUBLIC_KW};
         if Facts::has_modifier(node, PRIVATE_KW) {
             MethodAccessFlags::PRIVATE
@@ -791,10 +793,10 @@ impl Compile {
         }
     }
 
-    fn class_flags(node: &SyntaxNode, is_interface: bool, is_annotation: bool) -> u16 {
+    pub(crate) fn class_flags(node: &SyntaxNode, is_interface: bool, is_annotation: bool) -> u16 {
         // Only `public` is expressible on a top-level type. `private` / `protected` are nested-type
         // modifiers, and a nested type is reported rather than emitted.
-        let mut flags = Self::access_level(node) & ClassAccessFlags::PUBLIC;
+        let mut flags = access_level(node) & ClassAccessFlags::PUBLIC;
         if is_interface {
             // An interface is implicitly abstract and never has the `super`-call semantics bit.
             flags |= ClassAccessFlags::INTERFACE | ClassAccessFlags::ABSTRACT;
@@ -816,7 +818,7 @@ impl Compile {
     }
 
     /// Every local class in the file `node` belongs to, mapped to the locals it captures.
-    fn captures_of(
+    pub(crate) fn captures_of(
         node: &SyntaxNode,
         facts: Facts<'_>,
     ) -> alloc::collections::BTreeMap<ItemId, alloc::vec::Vec<jals_hir::DefId>> {
@@ -862,13 +864,13 @@ impl Compile {
     }
 
     /// The synthetic field name a captured local gets, as javac names it.
-    fn capture_field(id: jals_hir::DefId, context: &Context<'_>) -> String {
+    pub(crate) fn capture_field(id: jals_hir::DefId, context: &Context<'_>) -> String {
         alloc::format!("val${}", context.typed.analysis().def(id).name)
     }
 
     /// The descriptor of a captured local's type.
-    fn capture_descriptor(id: jals_hir::DefId, context: &Context<'_>) -> Result<String> {
-        Ok(Descriptor::descriptor_of(context.typed.type_of_def(id), context.index)?.to_string())
+    pub(crate) fn capture_descriptor(id: jals_hir::DefId, context: &Context<'_>) -> Result<String> {
+        Ok(desc::descriptor_of(context.typed.type_of_def(id), context.index)?.to_string())
     }
 
     /// Find every lambda in `members`, synthesise the method that holds each body, and build the
@@ -878,7 +880,7 @@ impl Compile {
     /// as leading parameters of both the synthetic method and the call site, and a block body needs the
     /// statement lowering; each is its own step, and reporting beats emitting a call site whose arguments do
     /// not match its handle.
-    fn synthesise_lambdas<'a>(
+    pub(crate) fn synthesise_lambdas<'a>(
         mut context: Context<'a>,
         members: &[SyntaxNode],
         pool: &mut ConstantPool,
@@ -905,7 +907,7 @@ impl Compile {
             // A method reference needs no synthetic method at all: the handle points straight at the method
             // the source named, which is the whole difference between the two forms.
             if lambda.kind() == jals_syntax::SyntaxKind::METHOD_REF_EXPR {
-                let (call, entry) = Self::method_reference(lambda, &context, pool)?;
+                let (call, entry) = method_reference(lambda, &context, pool)?;
                 let index = u16::try_from(bootstraps.len()).map_err(|_| AsmError::PoolFull)?;
                 bootstraps.push(entry);
                 let span = Facts::span(lambda);
@@ -922,7 +924,7 @@ impl Compile {
                 .ok_or(LowerError::Unsupported("a malformed lambda"))?;
 
             // The interface the context asked for, and the one method it declares.
-            let item = expr::Expr::type_of(lambda, &context)?
+            let item = expr::type_of(lambda, &context)?
                 .project_id()
                 .ok_or(LowerError::Unsupported("a lambda with no target type"))?;
             let member = context
@@ -932,12 +934,12 @@ impl Compile {
                     "a lambda target with no single method",
                 ))?;
             let name = context.index.member(member).name.clone();
-            let descriptor = MethodDescriptor::to_string(&Descriptor::method_descriptor(
+            let descriptor = MethodDescriptor::to_string(&desc::method_descriptor(
                 member,
                 context.index,
                 false,
             )?);
-            let interface = Descriptor::internal_name_of(item, context.index);
+            let interface = desc::internal_name_of(item, context.index);
             let returns = context.index.resolved_member_ty(member);
             // Each captured local is a *leading* parameter of the synthetic method and an argument of the
             // call site — leading, because the metafactory prepends the captured values to the interface
@@ -953,7 +955,7 @@ impl Compile {
             // that is chased down, rather than emitted as code the verifier would reject.
             let mut prefix = String::new();
             for &id in &captured {
-                prefix.push_str(&Self::capture_descriptor(id, &context)?);
+                prefix.push_str(&capture_descriptor(id, &context)?);
             }
             // The body is lowered against the parameters' *inferred* types — `s -> s.length()`
             // against `Function<String, String>` reads `s` as a `String` — so the synthetic method
@@ -965,7 +967,7 @@ impl Compile {
             // first bootstrap argument stays the interface's erased `samMethodType`, and the
             // metafactory inserts the casts between them. Passing the erased shape for both is what
             // this used to do, and it is only right when the two coincide.
-            let instantiated = Self::lambda_shape(&decl, &descriptor, &context);
+            let instantiated = lambda_shape(&decl, &descriptor, &context);
             let synthetic_descriptor =
                 alloc::format!("({prefix}{}", instantiated.trim_start_matches('('));
 
@@ -996,10 +998,10 @@ impl Compile {
                         // interface method returns nothing.
                         (Some(value), _) => {
                             if matches!(returns, jals_hir::Ty::Void) {
-                                stmt::Stmt::discarded(&value, &context, &mut emit)?;
+                                stmt::discarded(&value, &context, &mut emit)?;
                                 asm.return_(None)?;
                             } else {
-                                expr::Expr::lower_as(&value, &returns, &context, &mut emit)?;
+                                expr::lower_as(&value, &returns, &context, &mut emit)?;
                                 let top = asm.stack_top().ok_or(LowerError::Unsupported(
                                     "a lambda body with no value",
                                 ))?;
@@ -1008,7 +1010,7 @@ impl Compile {
                         }
                         // A block body returns for itself, except that a `void` one may run off its end.
                         (None, Some(block)) => {
-                            stmt::Stmt::block(&block, &context, &mut emit)?;
+                            stmt::block(&block, &context, &mut emit)?;
                             if matches!(returns, jals_hir::Ty::Void) && asm.reachable() {
                                 asm.return_(None)?;
                             }
@@ -1081,7 +1083,11 @@ impl Compile {
     /// Anything the analysis could not type, or a parameter count the two do not agree on, falls
     /// back to the erased descriptor whole: a specialisation this cannot compute is one the
     /// metafactory must not be told about.
-    fn lambda_shape(decl: &ast::LambdaExpr, erased: &str, context: &Context<'_>) -> String {
+    pub(crate) fn lambda_shape(
+        decl: &ast::LambdaExpr,
+        erased: &str,
+        context: &Context<'_>,
+    ) -> String {
         let Ok(parsed) = jals_classfile::MethodDescriptor::parse(erased) else {
             return erased.to_owned();
         };
@@ -1098,7 +1104,7 @@ impl Compile {
             let written = context.facts().def_at(param.syntax()).map_or_else(
                 || erased.to_string(),
                 |id| {
-                    Descriptor::descriptor_of(context.typed.type_of_def(id), context.index)
+                    desc::descriptor_of(context.typed.type_of_def(id), context.index)
                         .map_or_else(|_| erased.to_string(), |ty| ty.to_string())
                 },
             );
@@ -1113,7 +1119,7 @@ impl Compile {
     ///
     /// Only a reference to a `static` method of a named type. An instance one (`x::m`) captures the receiver,
     /// and a constructor one (`T::new`) needs `newInvokeSpecial` — each is its own kind of handle.
-    fn method_reference(
+    pub(crate) fn method_reference(
         node: &SyntaxNode,
         context: &Context<'_>,
         pool: &mut ConstantPool,
@@ -1128,12 +1134,9 @@ impl Compile {
         let item = reference.interface;
         let member = reference.interface_method;
         let name = context.index.member(member).name.clone();
-        let descriptor = MethodDescriptor::to_string(&Descriptor::method_descriptor(
-            member,
-            context.index,
-            false,
-        )?);
-        let interface = Descriptor::internal_name_of(item, context.index);
+        let descriptor =
+            MethodDescriptor::to_string(&desc::method_descriptor(member, context.index, false)?);
+        let interface = desc::internal_name_of(item, context.index);
 
         let owner_item = reference.owner;
         // A bound reference captures the local it is qualified by; an unbound one is an instance
@@ -1148,18 +1151,15 @@ impl Compile {
         // A constructor reference names `new` rather than a method: the handle is `newInvokeSpecial`
         // on the type's own constructor, and there is nothing to capture.
         if reference.receiver == crate::facts::RefReceiver::Constructs {
-            return Self::constructor_reference(owner_item, member, item, context, pool);
+            return constructor_reference(owner_item, member, item, context, pool);
         }
         let target = reference.target.ok_or(LowerError::Unsupported(
             "a method reference to a method this cannot find",
         ))?;
         let referenced_name = context.index.member(target).name.clone();
-        let owner = Descriptor::internal_name_of(owner_item, context.index);
-        let target_descriptor = MethodDescriptor::to_string(&Descriptor::method_descriptor(
-            target,
-            context.index,
-            false,
-        )?);
+        let owner = desc::internal_name_of(owner_item, context.index);
+        let target_descriptor =
+            MethodDescriptor::to_string(&desc::method_descriptor(target, context.index, false)?);
 
         // 6 is `invokeStatic` and 5 is `invokeVirtual` (JVMS Table 5.4.3.5-A): both a bound reference and an
         // unbound one call the method *on* a receiver — the difference is only where that receiver comes
@@ -1194,7 +1194,7 @@ impl Compile {
     }
 
     /// `T::new`: the handle is `newInvokeSpecial` on the type's own constructor, and nothing is captured.
-    fn constructor_reference(
+    pub(crate) fn constructor_reference(
         owner_item: ItemId,
         member: jals_hir::MemberId,
         target: ItemId,
@@ -1203,14 +1203,11 @@ impl Compile {
     ) -> Result<(Lambda, jals_classfile::BootstrapMethod)> {
         const METAFACTORY: &str = "java/lang/invoke/LambdaMetafactory";
         const METAFACTORY_DESCRIPTOR: &str = "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;";
-        let owner = Descriptor::internal_name_of(owner_item, context.index);
-        let interface = Descriptor::internal_name_of(target, context.index);
+        let owner = desc::internal_name_of(owner_item, context.index);
+        let interface = desc::internal_name_of(target, context.index);
         let name = context.index.member(member).name.clone();
-        let descriptor = MethodDescriptor::to_string(&Descriptor::method_descriptor(
-            member,
-            context.index,
-            false,
-        )?);
+        let descriptor =
+            MethodDescriptor::to_string(&desc::method_descriptor(member, context.index, false)?);
         // A class with no declared constructor has the implicit no-argument one, whose descriptor is fixed.
         let arity = context.index.member(member).params.len();
         let constructor = context
@@ -1223,11 +1220,9 @@ impl Compile {
                 info.kind == DefKind::Constructor && info.params.len() == arity
             });
         let target_descriptor = match constructor {
-            Some(id) => MethodDescriptor::to_string(&Descriptor::method_descriptor(
-                id,
-                context.index,
-                true,
-            )?),
+            Some(id) => {
+                MethodDescriptor::to_string(&desc::method_descriptor(id, context.index, true)?)
+            }
             None if arity == 0 => "()V".to_owned(),
             None => {
                 return Err(LowerError::Unsupported(
@@ -1266,7 +1261,7 @@ impl Compile {
     /// Walked from the file root rather than passed in, because a `new Inner()` may sit in any class in
     /// the file and each is compiled on its own — the creation needs the *target's* shape, not its own.
     ///
-    /// This is the **creation** side of [`Self::holds_enclosing_instance`], and the two have to answer
+    /// This is the **creation** side of [`holds_enclosing_instance`], and the two have to answer
     /// alike: the class being compiled reads it to decide whether its constructors take the enclosing
     /// instance, and a `new` reads this to decide whether to pass one. A disagreement is not a lost
     /// uplevel access but a `NoSuchMethodError` at the first `new` — which is why one predicate
@@ -1274,7 +1269,7 @@ impl Compile {
     ///
     /// Anonymous class bodies are here too, keyed the way the index keys them: on the `new` keyword's
     /// own position, there being no name to key on.
-    fn inner_classes_of(
+    pub(crate) fn inner_classes_of(
         node: &SyntaxNode,
         index: &ProjectIndex,
         file: FileId,
@@ -1297,10 +1292,10 @@ impl Compile {
             let Some(item) = keyed_at.and_then(|at| index.item_by_decl(file, at)) else {
                 continue;
             };
-            if !Self::holds_enclosing_instance(&declaration, item, index) {
+            if !holds_enclosing_instance(&declaration, item, index) {
                 continue;
             }
-            if let Ok(enclosing) = Self::enclosing_of(&declaration, index, file) {
+            if let Ok(enclosing) = enclosing_of(&declaration, index, file) {
                 out.insert(item, enclosing);
             }
         }
@@ -1313,7 +1308,7 @@ impl Compile {
     /// `Holder.put` erases to `put(Object)`. Without a bridge the class has no `put(Object)` at all, so a
     /// call through `Holder` finds nothing to dispatch to — an `AbstractMethodError` at run time, and the
     /// one thing erasure cannot be left to sort out by itself.
-    fn bridges(
+    pub(crate) fn bridges(
         item: ItemId,
         context: &Context<'_>,
         pool: &mut ConstantPool,
@@ -1337,7 +1332,7 @@ impl Compile {
             if context.index.member(own).modifiers.is_static {
                 continue;
             }
-            let own_descriptor = Descriptor::method_descriptor(own, context.index, false)?;
+            let own_descriptor = desc::method_descriptor(own, context.index, false)?;
             let own_text = MethodDescriptor::to_string(&own_descriptor);
             // Every inherited method of the same name and arity: an override of a *generic* one erases
             // differently, and that difference is exactly what needs bridging.
@@ -1352,7 +1347,7 @@ impl Compile {
                 if Hierarchy::of(context.index).overrides(own, inherited) == Overrides::No {
                     continue;
                 }
-                let Ok(descriptor) = Descriptor::method_descriptor(inherited, context.index, false)
+                let Ok(descriptor) = desc::method_descriptor(inherited, context.index, false)
                 else {
                     continue;
                 };
@@ -1369,17 +1364,10 @@ impl Compile {
                 // and impossible to implement) is how it was reached, back when an interface
                 // inherited `Object.clone()`. It no longer does, and this stays: the rule is about
                 // what a bridge can express, not about that one arrival.
-                if !Self::returns_are_bridgeable(&own_descriptor, &descriptor) {
+                if !returns_are_bridgeable(&own_descriptor, &descriptor) {
                     continue;
                 }
-                methods.push(Self::bridge(
-                    context,
-                    pool,
-                    &name,
-                    &text,
-                    &own_text,
-                    &descriptor,
-                )?);
+                methods.push(bridge(context, pool, &name, &text, &own_text, &descriptor)?);
                 break;
             }
         }
@@ -1389,11 +1377,14 @@ impl Compile {
     /// Whether a bridge from `inherited`'s erased descriptor to `own`'s can express the return.
     ///
     /// It can when both are reference types — the narrower one *is* an instance of the wider, so the
-    /// value passes through untouched, which is all [`bridge`](Self::bridge) knows how to do — or
+    /// value passes through untouched, which is all [`bridge`](bridge) knows how to do — or
     /// when the returns already agree and only the parameters needed erasing. A primitive against a
     /// reference is neither: no conversion the JVM would accept is implied by the source, and a
     /// value returned unchanged fails the verifier against the descriptor it was declared under.
-    fn returns_are_bridgeable(own: &MethodDescriptor, inherited: &MethodDescriptor) -> bool {
+    pub(crate) fn returns_are_bridgeable(
+        own: &MethodDescriptor,
+        inherited: &MethodDescriptor,
+    ) -> bool {
         use jals_classfile::{FieldType, ReturnType};
         let reference = |ret: &ReturnType| {
             matches!(
@@ -1406,7 +1397,7 @@ impl Compile {
     }
 
     /// One bridge: take the erased arguments, cast each to what the override declared, and call it.
-    fn bridge(
+    pub(crate) fn bridge(
         context: &Context<'_>,
         pool: &mut ConstantPool,
         name: &str,
@@ -1432,10 +1423,8 @@ impl Compile {
             // `VerifyError` rather than a run-time failure. A `checkcast` to an array names the
             // array's own descriptor as its class, which is what `FieldType`'s `Display` spells.
             if let Some(target) = target_descriptor.params.get(position)
-                && let (Some(narrower), Some(wider)) = (
-                    Descriptor::checkcast_class(target),
-                    Descriptor::checkcast_class(param),
-                )
+                && let (Some(narrower), Some(wider)) =
+                    (desc::checkcast_class(target), desc::checkcast_class(param))
                 && narrower != wider
             {
                 asm.check_cast(&narrower)?;
@@ -1473,9 +1462,13 @@ impl Compile {
     /// through, and the class had no such field, so the access was emitted against `this`.
     ///
     /// Every constructor of such a class takes the enclosing instance as an extra *first* parameter,
-    /// so this answer has to match what a `new` of the class passes — [`Self::inner_classes_of`]
+    /// so this answer has to match what a `new` of the class passes — [`inner_classes_of`]
     /// answers that side and the two ask the same question of the same node.
-    fn holds_enclosing_instance(node: &SyntaxNode, item: ItemId, index: &ProjectIndex) -> bool {
+    pub(crate) fn holds_enclosing_instance(
+        node: &SyntaxNode,
+        item: ItemId,
+        index: &ProjectIndex,
+    ) -> bool {
         if !matches!(index.item(item).kind, DefKind::Class) {
             return false;
         }
@@ -1500,7 +1493,11 @@ impl Compile {
     }
 
     /// The class a nested, local, or anonymous declaration sits inside.
-    fn enclosing_of(node: &SyntaxNode, index: &ProjectIndex, file: FileId) -> Result<Enclosing> {
+    pub(crate) fn enclosing_of(
+        node: &SyntaxNode,
+        index: &ProjectIndex,
+        file: FileId,
+    ) -> Result<Enclosing> {
         // The nearest enclosing *type*, not the parent's parent: a local class's parent chain runs
         // through a block and a method, and an anonymous class's through whatever expression created
         // it. For a class declared directly in another's body the two agree.
@@ -1527,14 +1524,14 @@ impl Compile {
                         | ANNOTATION_TYPE_DECL
                         | RECORD_DECL
                         | jals_syntax::SyntaxKind::ENUM_CONSTANT
-                ) || Self::is_anonymous_body(ancestor)
+                ) || is_anonymous_body(ancestor)
             })
             .ok_or(LowerError::Unsupported(
                 "an inner class with no enclosing type",
             ))?;
         // An anonymous class has no name, so its item is keyed on where its `new` starts — the same
         // key `inner_classes_of` uses, because the two have to agree about which item this is.
-        let item = if Self::is_anonymous_body(&declaration) {
+        let item = if is_anonymous_body(&declaration) {
             index
                 .item_by_decl(file, usize::from(declaration.text_range().start()))
                 .ok_or(LowerError::Unsupported(
@@ -1549,12 +1546,12 @@ impl Compile {
         };
         Ok(Enclosing {
             item,
-            name: Descriptor::internal_name_of(item, index),
+            name: desc::internal_name_of(item, index),
         })
     }
 
     /// Whether `node` is a `new` that carries a class body — an anonymous class declaration.
-    fn is_anonymous_body(node: &SyntaxNode) -> bool {
+    pub(crate) fn is_anonymous_body(node: &SyntaxNode) -> bool {
         node.kind() == jals_syntax::SyntaxKind::NEW_EXPR
             && node.children().any(|child| child.kind() == CLASS_BODY)
     }
@@ -1563,7 +1560,7 @@ impl Compile {
     ///
     /// `final` so nothing can rebind it and `synthetic` because the source never wrote it — which is also
     /// what keeps a reflective reader from listing it among the class's declared fields.
-    fn enclosing_field(enclosing: &str, pool: &mut ConstantPool) -> Result<FieldInfo> {
+    pub(crate) fn enclosing_field(enclosing: &str, pool: &mut ConstantPool) -> Result<FieldInfo> {
         Ok(FieldInfo {
             access_flags: FieldAccessFlags(FieldAccessFlags::FINAL | FieldAccessFlags::SYNTHETIC),
             name_index: pool.utf8_index(OUTER).ok_or(AsmError::PoolFull)?,
@@ -1585,11 +1582,11 @@ impl Compile {
     /// versions 46–60 (JVMS §4.6); from 61 on, strict floating point is the *only* semantics there
     /// is, so dropping the bit changes nothing about the program and setting it would set a bit the
     /// version reserves.
-    fn method_flags(node: &SyntaxNode, in_interface: bool) -> u16 {
+    pub(crate) fn method_flags(node: &SyntaxNode, in_interface: bool) -> u16 {
         use jals_syntax::SyntaxKind::{
             ABSTRACT_KW, FINAL_KW, NATIVE_KW, STATIC_KW, SYNCHRONIZED_KW,
         };
-        let level = match Self::access_level(node) {
+        let level = match access_level(node) {
             0 if in_interface => MethodAccessFlags::PUBLIC,
             level => level,
         };
@@ -1613,9 +1610,9 @@ impl Compile {
     /// keyword list even though their access levels coincide.
     ///
     /// `in_interface` supplies JLS §9.3: an interface field is implicitly `public static final`.
-    fn field_flags(node: &SyntaxNode, in_interface: bool) -> u16 {
+    pub(crate) fn field_flags(node: &SyntaxNode, in_interface: bool) -> u16 {
         use jals_syntax::SyntaxKind::{FINAL_KW, STATIC_KW, TRANSIENT_KW, VOLATILE_KW};
-        let mut flags = match Self::access_level(node) {
+        let mut flags = match access_level(node) {
             0 if in_interface => FieldAccessFlags::PUBLIC,
             level => level,
         };
@@ -1637,7 +1634,7 @@ impl Compile {
 
     /// Emit a field declaration's `field_info`s — one per declarator, since `int a, b;` is one
     /// declaration and two fields.
-    fn field(
+    pub(crate) fn field(
         node: &SyntaxNode,
         context: &Context<'_>,
         pool: &mut ConstantPool,
@@ -1646,19 +1643,17 @@ impl Compile {
         let Some(decl) = ast::FieldDecl::cast(node.clone()) else {
             return Ok(());
         };
-        let vars = Self::type_variables(node);
+        let vars = type_variables(node);
         let written = node.children().find_map(ast::Type::cast);
         // A field whose type mentions a type variable keeps it here: erasure writes the *bound* into the
         // descriptor, so `T value` and `Object value` are the same field without this.
         let signature = match &written {
-            Some(ty) if Self::mentions_variable(ty, &vars) => {
-                Some(Self::type_signature(ty, &vars, context)?)
-            }
+            Some(ty) if mentions_variable(ty, &vars) => Some(type_signature(ty, &vars, context)?),
             _ => None,
         };
         for name in decl.names() {
             let member = context.facts().member_at(&name)?;
-            let descriptor = Descriptor::field_descriptor(member, context.index)?.to_string();
+            let descriptor = desc::field_descriptor(member, context.index)?.to_string();
             let mut attributes = Vec::new();
             if let Some(signature) = &signature {
                 let name_index = pool.utf8_index("Signature").ok_or(AsmError::PoolFull)?;
@@ -1669,7 +1664,7 @@ impl Compile {
                 });
             }
             out.push(FieldInfo {
-                access_flags: FieldAccessFlags(Self::field_flags(node, context.in_interface)),
+                access_flags: FieldAccessFlags(field_flags(node, context.in_interface)),
                 name_index: pool
                     .utf8_index(&jals_syntax::decoded_ident(&name))
                     .ok_or(AsmError::PoolFull)?,
@@ -1680,7 +1675,7 @@ impl Compile {
         Ok(())
     }
 
-    fn method(
+    pub(crate) fn method(
         node: &SyntaxNode,
         context: &Context<'_>,
         pool: &mut ConstantPool,
@@ -1697,10 +1692,10 @@ impl Compile {
         // declares `f`, and the raw text reached the constant pool as the method's own name.
         let name = jals_syntax::decoded_ident(&token).into_owned();
         let member = context.facts().member_at(&token)?;
-        let descriptor = Descriptor::method_descriptor(member, context.index, false)?;
+        let descriptor = desc::method_descriptor(member, context.index, false)?;
         let is_static = context.index.member(member).modifiers.is_static;
 
-        let flags = Self::method_flags(node, context.in_interface);
+        let flags = method_flags(node, context.in_interface);
         let text = MethodDescriptor::to_string(&descriptor);
         let name_index = pool.utf8_index(&name).ok_or(AsmError::PoolFull)?;
         let descriptor_index = pool.utf8_index(&text).ok_or(AsmError::PoolFull)?;
@@ -1715,7 +1710,7 @@ impl Compile {
                 let slots = Slots::new(context, decl.params().as_ref(), is_static);
                 let returns = context.index.resolved_member_ty(member);
                 let mut emit = Emit::new(&mut asm, slots, returns, !is_static);
-                stmt::Stmt::block(&body, context, &mut emit)?;
+                stmt::block(&body, context, &mut emit)?;
                 // A `void` body may simply run off its end; the JVM needs the instruction anyway.
                 // One that already returned on every path does not — and asking the assembler for
                 // an unreachable `return` would be an error, not a no-op.
@@ -1731,7 +1726,7 @@ impl Compile {
         };
         // A method that declares type parameters, or whose signature mentions one in scope, keeps them
         // here: `T first(List<T> xs)` and `Object first(List xs)` are otherwise the same method.
-        if let Some(signature) = Self::method_signature(node, context)? {
+        if let Some(signature) = method_signature(node, context)? {
             let name_index = pool.utf8_index("Signature").ok_or(AsmError::PoolFull)?;
             let signature_index = pool.utf8_index(&signature).ok_or(AsmError::PoolFull)?;
             attributes.push(jals_classfile::Attribute {
@@ -1753,7 +1748,7 @@ impl Compile {
                     .ok_or(LowerError::Unsupported(
                         "an annotation default with no value",
                     ))?;
-            let element = Self::element_value(
+            let element = element_value(
                 &value,
                 &context.index.resolved_member_ty(member),
                 context,
@@ -1798,7 +1793,7 @@ impl Compile {
     /// writes tag `B` over an `Integer` entry, and a reader that trusted the literal would see an `int`
     /// where a `byte` belongs. An enum constant, a class literal, and an array each have their own
     /// encoding, and the tag is what tells a reader which one it is looking at.
-    fn element_value(
+    pub(crate) fn element_value(
         value: &ast::Expr,
         declared: &jals_hir::Ty,
         context: &Context<'_>,
@@ -1823,7 +1818,7 @@ impl Compile {
                 };
                 let mut out = Vec::new();
                 for item in init.syntax().children().filter_map(ast::Expr::cast) {
-                    out.push(Self::element_value(&item, element, context, pool)?);
+                    out.push(element_value(&item, element, context, pool)?);
                 }
                 return Ok(jals_classfile::ElementValue::Array(out));
             }
@@ -1836,7 +1831,7 @@ impl Compile {
                     (None, Some(base)) => context.ty_of_name(base.syntax())?,
                     (None, None) => return Err(unsupported()),
                 };
-                let descriptor = Descriptor::descriptor_of(&named, context.index)?.to_string();
+                let descriptor = desc::descriptor_of(&named, context.index)?.to_string();
                 return Ok(jals_classfile::ElementValue::Class {
                     class_info_index: pool.utf8_index(&descriptor).ok_or(AsmError::PoolFull)?,
                 });
@@ -1845,7 +1840,7 @@ impl Compile {
             // name. The *declared* type says which enum, for the same reason it says which tag.
             ast::Expr::FieldAccess(access) if matches!(declared, Ty::Class(_)) => {
                 let name = access.field().ok_or_else(unsupported)?;
-                let descriptor = Descriptor::descriptor_of(declared, context.index)?.to_string();
+                let descriptor = desc::descriptor_of(declared, context.index)?.to_string();
                 return Ok(jals_classfile::ElementValue::Enum {
                     type_name_index: pool.utf8_index(&descriptor).ok_or(AsmError::PoolFull)?,
                     const_name_index: pool.utf8_index(&name).ok_or(AsmError::PoolFull)?,
@@ -1860,12 +1855,12 @@ impl Compile {
         // The *declared* type decides the tag, so the width each fact reads off the suffix is
         // dropped: `@A(x = 1)` on a `long` element is a `J` whatever the literal was spelled as.
         let integer = || {
-            Literal::integer(&literal)
+            literal::integer(&literal)
                 .map(|(value, _)| value)
                 .map_err(|_| unsupported())
         };
         let floating = || {
-            Literal::floating(&literal)
+            literal::floating(&literal)
                 .map(|(value, _)| value)
                 .map_err(|_| unsupported())
         };
@@ -1874,19 +1869,19 @@ impl Compile {
                 let one = literal == "true";
                 (b'Z', pool.integer_index(i32::from(one)))
             }
-            Ty::Primitive(Primitive::Byte) => (b'B', pool.integer_index(Self::narrow(integer()?))),
-            Ty::Primitive(Primitive::Short) => (b'S', pool.integer_index(Self::narrow(integer()?))),
+            Ty::Primitive(Primitive::Byte) => (b'B', pool.integer_index(narrow(integer()?))),
+            Ty::Primitive(Primitive::Short) => (b'S', pool.integer_index(narrow(integer()?))),
             Ty::Primitive(Primitive::Char) => {
-                let character = Literal::character(&literal).map_err(|_| unsupported())?;
+                let character = literal::character(&literal).map_err(|_| unsupported())?;
                 (b'C', pool.integer_index(character as i32))
             }
-            Ty::Primitive(Primitive::Int) => (b'I', pool.integer_index(Self::narrow(integer()?))),
+            Ty::Primitive(Primitive::Int) => (b'I', pool.integer_index(narrow(integer()?))),
             Ty::Primitive(Primitive::Long) => (b'J', pool.long_index(integer()?)),
             #[allow(clippy::cast_possible_truncation)]
             Ty::Primitive(Primitive::Float) => (b'F', pool.float_index(floating()? as f32)),
             Ty::Primitive(Primitive::Double) => (b'D', pool.double_index(floating()?)),
-            Ty::Class(_) if expr::Expr::is_string(declared, context) => {
-                let text = Literal::text(&literal).map_err(|_| unsupported())?;
+            Ty::Class(_) if expr::is_string(declared, context) => {
+                let text = literal::text(&literal).map_err(|_| unsupported())?;
                 (b's', pool.utf8_index(&text))
             }
             _ => return Err(unsupported()),
@@ -1902,11 +1897,11 @@ impl Compile {
     /// Out of range wraps, which is what a narrowing constant conversion does (JLS §5.2) — and what
     /// `jals-lint` reports, this crate not being the one that checks.
     #[allow(clippy::cast_possible_truncation)]
-    const fn narrow(value: i64) -> i32 {
+    pub(crate) const fn narrow(value: i64) -> i32 {
         value as i32
     }
 
-    fn constructor(
+    pub(crate) fn constructor(
         node: &SyntaxNode,
         context: &Context<'_>,
         pool: &mut ConstantPool,
@@ -1918,7 +1913,7 @@ impl Compile {
             .and_then(|decl| decl.name_token())
             .ok_or(LowerError::Unsupported("a malformed constructor"))?;
         let member = context.facts().member_at(&name_token)?;
-        let mut descriptor = Descriptor::method_descriptor(member, context.index, true)?;
+        let mut descriptor = desc::method_descriptor(member, context.index, true)?;
         // An inner class's constructor takes the enclosing instance first: the index computed the
         // descriptor from the declaration, which does not write it.
         if let Some(enclosing) = &context.encloses {
@@ -1944,7 +1939,7 @@ impl Compile {
         };
         // The captures go *after* every declared parameter, so a declared one keeps its slot.
         for &captured in context.captured_here() {
-            descriptor.params.push(Descriptor::descriptor_of(
+            descriptor.params.push(desc::descriptor_of(
                 context.typed.type_of_def(captured),
                 context.index,
             )?);
@@ -1970,7 +1965,7 @@ impl Compile {
         let params = node.children().find_map(ast::ParamList::cast);
         let mut asm = Assembler::new(pool, Receiver::Constructor(&context.this_class), &text)?;
         let slots = Slots::for_constructor(context, params.as_ref(), synthetic);
-        let capture_slots = Self::capture_slots_of(context, &slots)?;
+        let capture_slots = capture_slots_of(context, &slots)?;
         let mut emit =
             Emit::new(&mut asm, slots, jals_hir::Ty::Void, true).with_capture_slots(capture_slots);
         match &delegation {
@@ -1983,18 +1978,18 @@ impl Compile {
                 // read a synthetic field off it — the values are still in the parameters they
                 // arrived in.
                 emit.while_uninitialized(|emit| {
-                    expr::Expr::lower(&ast::Expr::Call(call.clone()), context, emit)
+                    expr::lower(&ast::Expr::Call(call.clone()), context, emit)
                 })?;
                 if !Facts::delegates_to(call, jals_syntax::SyntaxKind::THIS_KW) {
-                    Self::initializers(context, &mut emit, members, false)?;
+                    initializers(context, &mut emit, members, false)?;
                 }
             }
-            None => Self::prologue(context, &mut emit, super_name, super_item, members, None)?,
+            None => prologue(context, &mut emit, super_name, super_item, members, None)?,
         }
         if let Some(body) = &body {
             // The explicit invocation is the body's first statement, and it has already been emitted.
             for statement in body.stmts().skip(usize::from(delegation.is_some())) {
-                stmt::Stmt::lower(&statement, context, &mut emit)?;
+                stmt::lower(&statement, context, &mut emit)?;
             }
         }
         // A constructor is `void`, so it needs the instruction unless every path already returned.
@@ -2006,9 +2001,9 @@ impl Compile {
             // A constant with a body is a *subclass*, and a subclass cannot reach a `private`
             // constructor without the nestmate attributes this does not emit.
             access_flags: MethodAccessFlags(if context.enum_subclassed {
-                Self::method_flags(node, context.in_interface) & !MethodAccessFlags::PRIVATE
+                method_flags(node, context.in_interface) & !MethodAccessFlags::PRIVATE
             } else {
-                Self::method_flags(node, context.in_interface)
+                method_flags(node, context.in_interface)
             }),
             name_index,
             descriptor_index,
@@ -2022,7 +2017,7 @@ impl Compile {
     /// each superinterface. The supertypes are written in their *erased* form here — a generic supertype
     /// (`class Box<T> extends Holder<T>`) would need the arguments the `extends` clause wrote, and
     /// erasing them loses only what a reflective reader would see, never what the JVM links on.
-    fn class_signature(
+    pub(crate) fn class_signature(
         node: &SyntaxNode,
         context: &Context<'_>,
         super_name: &str,
@@ -2061,8 +2056,8 @@ impl Compile {
                 out.push(':');
                 let erased = context
                     .ty_of_type(bound)
-                    .and_then(|ty| Ok(Descriptor::descriptor_of(&ty, context.index)?.to_string()))
-                    .unwrap_or_else(|_| Self::UNNAMEABLE_BOUND.to_owned());
+                    .and_then(|ty| Ok(desc::descriptor_of(&ty, context.index)?.to_string()))
+                    .unwrap_or_else(|_| UNNAMEABLE_BOUND.to_owned());
                 out.push_str(&erased);
             }
         }
@@ -2077,7 +2072,7 @@ impl Compile {
                 .collect()
         };
         if let Some(ty) = written(jals_syntax::SyntaxKind::EXTENDS_CLAUSE).first() {
-            out.push_str(&Self::type_signature(ty, &vars, context)?);
+            out.push_str(&type_signature(ty, &vars, context)?);
         } else {
             out.push('L');
             out.push_str(super_name);
@@ -2086,7 +2081,7 @@ impl Compile {
         let implemented = written(jals_syntax::SyntaxKind::IMPLEMENTS_CLAUSE);
         if implemented.len() == interface_names.len() {
             for ty in &implemented {
-                out.push_str(&Self::type_signature(ty, &vars, context)?);
+                out.push_str(&type_signature(ty, &vars, context)?);
             }
         } else {
             // An interface the source wrote that the index did not resolve would put the two lists out
@@ -2105,10 +2100,13 @@ impl Compile {
     ///
     /// Its own type parameters first, then each formal parameter, then the result. `throws` is written
     /// only when a thrown type is itself a variable, which is the one case the encoding requires it.
-    fn method_signature(node: &SyntaxNode, context: &Context<'_>) -> Result<Option<String>> {
+    pub(crate) fn method_signature(
+        node: &SyntaxNode,
+        context: &Context<'_>,
+    ) -> Result<Option<String>> {
         let decl = ast::MethodDecl::cast(node.clone())
             .ok_or(LowerError::Unsupported("a malformed method declaration"))?;
-        let vars = Self::type_variables(node);
+        let vars = type_variables(node);
         let own: Vec<ast::TypeParam> = node
             .children()
             .find_map(ast::TypeParams::cast)
@@ -2123,7 +2121,7 @@ impl Compile {
             || parameters
                 .iter()
                 .chain(returns.as_ref())
-                .any(|ty| Self::mentions_variable(ty, &vars));
+                .any(|ty| mentions_variable(ty, &vars));
         if !generic {
             return Ok(None);
         }
@@ -2147,8 +2145,8 @@ impl Compile {
                 for bound in &bounds {
                     out.push(':');
                     out.push_str(
-                        &Self::type_signature(bound, &vars, context)
-                            .unwrap_or_else(|_| Self::UNNAMEABLE_BOUND.to_owned()),
+                        &type_signature(bound, &vars, context)
+                            .unwrap_or_else(|_| UNNAMEABLE_BOUND.to_owned()),
                     );
                 }
             }
@@ -2156,7 +2154,7 @@ impl Compile {
         }
         out.push('(');
         for ty in &parameters {
-            out.push_str(&Self::type_signature(ty, &vars, context)?);
+            out.push_str(&type_signature(ty, &vars, context)?);
         }
         out.push(')');
         match &returns {
@@ -2168,7 +2166,7 @@ impl Compile {
                     .filter_map(jals_syntax::SyntaxElement::into_token)
                     .any(|token| token.kind() == jals_syntax::SyntaxKind::VOID_KW) =>
             {
-                out.push_str(&Self::type_signature(ty, &vars, context)?);
+                out.push_str(&type_signature(ty, &vars, context)?);
             }
             _ => out.push('V'),
         }
@@ -2179,10 +2177,10 @@ impl Compile {
             .filter(|child| child.kind() == jals_syntax::SyntaxKind::THROWS_CLAUSE)
             .flat_map(|clause| clause.children().filter_map(ast::Type::cast))
             .collect();
-        if thrown.iter().any(|ty| Self::mentions_variable(ty, &vars)) {
+        if thrown.iter().any(|ty| mentions_variable(ty, &vars)) {
             for ty in &thrown {
                 out.push('^');
-                out.push_str(&Self::type_signature(ty, &vars, context)?);
+                out.push_str(&type_signature(ty, &vars, context)?);
             }
         }
         Ok(Some(out))
@@ -2190,7 +2188,7 @@ impl Compile {
 
     /// The type-variable names in scope for a member of `node`'s enclosing declaration, plus any the
     /// member itself declares.
-    fn type_variables(member: &SyntaxNode) -> Vec<String> {
+    pub(crate) fn type_variables(member: &SyntaxNode) -> Vec<String> {
         let mut names = Vec::new();
         for ancestor in member.ancestors() {
             if let Some(params) = ancestor.children().find_map(ast::TypeParams::cast) {
@@ -2220,9 +2218,13 @@ impl Compile {
     /// Nothing else in a signature reaches this leniency, and nothing else should: every other
     /// unresolvable type in one is a value the *descriptor* refuses too, so the compile stops there
     /// whatever this writes.
-    const UNNAMEABLE_BOUND: &'static str = "Ljava/lang/Object;";
+    const UNNAMEABLE_BOUND: &str = "Ljava/lang/Object;";
 
-    fn type_signature(ty: &ast::Type, vars: &[String], context: &Context<'_>) -> Result<String> {
+    pub(crate) fn type_signature(
+        ty: &ast::Type,
+        vars: &[String],
+        context: &Context<'_>,
+    ) -> Result<String> {
         use jals_syntax::SyntaxKind::{LBRACK, TYPE_ARGS};
         let dimensions = ty
             .syntax()
@@ -2242,7 +2244,7 @@ impl Compile {
         // Not a variable: the erased descriptor for the name, plus the type *arguments* the source
         // wrote. A reflective reader gets `List<T>` from this where the descriptor alone says `List`.
         let erased = context.ty_of_type(ty)?;
-        let descriptor = Descriptor::descriptor_of(&erased, context.index)?.to_string();
+        let descriptor = desc::descriptor_of(&erased, context.index)?.to_string();
         let name = descriptor.trim_start_matches('[');
         let Some(args) = ty
             .syntax()
@@ -2252,7 +2254,7 @@ impl Compile {
             out.push_str(name);
             return Ok(out);
         };
-        let rendered = Self::argument_signatures(&args, vars, context)?;
+        let rendered = argument_signatures(&args, vars, context)?;
         if rendered.is_empty() || !name.starts_with('L') {
             out.push_str(name);
             return Ok(out);
@@ -2272,7 +2274,7 @@ impl Compile {
     /// A wildcard is *not* wrapped in a type node of its own: its `?`, its `extends` / `super`, and its
     /// bound are all direct children of the argument list. So the list is walked in order rather than
     /// through the typed accessor, which skips the `?` and would render `? extends T` as plain `T`.
-    fn argument_signatures(
+    pub(crate) fn argument_signatures(
         args: &SyntaxNode,
         vars: &[String],
         context: &Context<'_>,
@@ -2305,7 +2307,7 @@ impl Compile {
                     let Some(ty) = ast::Type::cast(node) else {
                         continue;
                     };
-                    let rendered = Self::type_signature(&ty, vars, context)?;
+                    let rendered = type_signature(&ty, vars, context)?;
                     match pending.take() {
                         Some('+') => out.push(alloc::format!("+{rendered}")),
                         Some('-') => out.push(alloc::format!("-{rendered}")),
@@ -2328,7 +2330,7 @@ impl Compile {
 
     /// Whether a written type mentions any of `vars`, which is what decides if a member needs a
     /// `Signature` at all.
-    fn mentions_variable(ty: &ast::Type, vars: &[String]) -> bool {
+    pub(crate) fn mentions_variable(ty: &ast::Type, vars: &[String]) -> bool {
         ty.syntax()
             .descendants_with_tokens()
             .filter_map(jals_syntax::SyntaxElement::into_token)
@@ -2354,7 +2356,7 @@ impl Compile {
     /// `equals`, `hashCode`, and `toString` are **required from the source** here. `java.lang.Record`
     /// declares all three abstract, so a class file that omits any of them loads and then throws
     /// `AbstractMethodError` at the first call — which is why this reports rather than emits nothing.
-    fn record_members(
+    pub(crate) fn record_members(
         node: &SyntaxNode,
         context: &Context<'_>,
         pool: &mut ConstantPool,
@@ -2363,12 +2365,12 @@ impl Compile {
         fields: &mut Vec<FieldInfo>,
         methods: &mut Vec<MethodInfo>,
     ) -> Result<Vec<jals_classfile::RecordComponentInfo>> {
-        let components = Self::record_components(node);
+        let components = record_components(node);
         let mut infos = Vec::with_capacity(components.len());
         let mut descriptors = Vec::with_capacity(components.len());
         for name in &components {
             let member = context.facts().member_at(name)?;
-            let descriptor = Descriptor::field_descriptor(member, context.index)?.to_string();
+            let descriptor = desc::field_descriptor(member, context.index)?.to_string();
             // `private final`, which is what makes a record's state immutable and reachable only
             // through the accessors.
             fields.push(FieldInfo {
@@ -2392,18 +2394,15 @@ impl Compile {
         // A *compact* constructor (`P { … }`, with no parameter list at all) **is** the canonical one:
         // it takes the components implicitly, and the field assignments follow its body. So it is
         // emitted from here rather than from the member loop, which would give it `<init>()V`.
-        let compact = members
-            .iter()
-            .find(|member| Self::is_compact_constructor(member));
-        let declares_canonical =
-            Self::declares_canonical_constructor(context, members, &descriptors)?;
+        let compact = members.iter().find(|member| is_compact_constructor(member));
+        let declares_canonical = declares_canonical_constructor(context, members, &descriptors)?;
         if compact.is_some() || !declares_canonical {
-            methods.push(Self::canonical_constructor(
+            methods.push(canonical_constructor(
                 context,
                 pool,
                 super_name,
                 &descriptors,
-                Self::access_level(node),
+                access_level(node),
                 compact.map(|member| (member, components.as_slice())),
             )?);
         }
@@ -2420,7 +2419,7 @@ impl Compile {
             if declared {
                 continue;
             }
-            methods.push(Self::record_accessor(context, pool, name, descriptor)?);
+            methods.push(record_accessor(context, pool, name, descriptor)?);
         }
         // `java.lang.Record` declares all three abstract, so a record without them loads perfectly and
         // then throws `AbstractMethodError` at the first call. javac derives them through
@@ -2436,13 +2435,13 @@ impl Compile {
             })
         };
         if !declared("equals") {
-            methods.push(Self::record_equals(context, pool, &descriptors)?);
+            methods.push(record_equals(context, pool, &descriptors)?);
         }
         if !declared("hashCode") {
-            methods.push(Self::record_hash(context, pool, &descriptors)?);
+            methods.push(record_hash(context, pool, &descriptors)?);
         }
         if !declared("toString") {
-            methods.push(Self::record_string(context, pool, &descriptors)?);
+            methods.push(record_string(context, pool, &descriptors)?);
         }
         Ok(infos)
     }
@@ -2453,7 +2452,7 @@ impl Compile {
     /// is what makes two `NaN` components equal and `0.0` and `-0.0` different (§8.10.3). A reference
     /// component goes through `Objects.equals`, which is null-safe — `==` would be identity and a bare
     /// `a.equals(b)` would throw on a `null` component.
-    fn record_equals(
+    pub(crate) fn record_equals(
         context: &Context<'_>,
         pool: &mut ConstantPool,
         components: &[(String, String)],
@@ -2533,7 +2532,7 @@ impl Compile {
     ///
     /// §8.10.3 leaves the algorithm unspecified — only that it is derived from the components — so any
     /// consistent one is legal, and this is the one every hand-written `hashCode` uses.
-    fn record_hash(
+    pub(crate) fn record_hash(
         context: &Context<'_>,
         pool: &mut ConstantPool,
         components: &[(String, String)],
@@ -2548,7 +2547,7 @@ impl Compile {
             asm.binary(BinOp::Mul, &VerificationType::Integer)?;
             asm.load(0)?;
             asm.get_field(&owner, name, descriptor)?;
-            Self::component_hash(&mut asm, descriptor)?;
+            component_hash(&mut asm, descriptor)?;
             asm.binary(BinOp::Add, &VerificationType::Integer)?;
         }
         asm.return_(Some(&VerificationType::Integer))?;
@@ -2565,7 +2564,7 @@ impl Compile {
     /// Each primitive gets the reduction its wrapper's `hashCode` uses, because two values that are
     /// `equals` must hash alike: a `long` folds its halves together, and a `float` hashes its *bits* so
     /// that two `NaN`s — which a record's `equals` calls equal — agree.
-    fn component_hash(asm: &mut Assembler<'_>, descriptor: &str) -> Result<()> {
+    pub(crate) fn component_hash(asm: &mut Assembler<'_>, descriptor: &str) -> Result<()> {
         match descriptor.as_bytes() {
             // A `boolean` is already 0 or 1 on the stack, and `Boolean.hashCode` maps those to
             // 1237 and 1231. Multiplying is how the two constants are reached without a branch.
@@ -2576,11 +2575,11 @@ impl Compile {
                 asm.binary(BinOp::Add, &VerificationType::Integer)?;
             }
             [b'B' | b'S' | b'C' | b'I'] => {}
-            [b'J'] => Self::fold_long(asm)?,
+            [b'J'] => fold_long(asm)?,
             [b'F'] => asm.invoke_static("java/lang/Float", "floatToIntBits", "(F)I", false)?,
             [b'D'] => {
                 asm.invoke_static("java/lang/Double", "doubleToLongBits", "(D)J", false)?;
-                Self::fold_long(asm)?;
+                fold_long(asm)?;
             }
             // Null-safe, unlike a bare `hashCode()` call on a component that may be `null`.
             _ => asm.invoke_static(
@@ -2594,7 +2593,7 @@ impl Compile {
     }
 
     /// `(int) (value ^ (value >>> 32))` over the `long` on top: `Long.hashCode`'s own reduction.
-    fn fold_long(asm: &mut Assembler<'_>) -> Result<()> {
+    pub(crate) fn fold_long(asm: &mut Assembler<'_>) -> Result<()> {
         // `dup` on a `long` is `dup2`; `dup_pair` is for two *separate* one-word values.
         asm.dup()?;
         asm.const_int(32)?;
@@ -2607,7 +2606,7 @@ impl Compile {
     /// `toString()`: `Name[a=1, b=2]`, which §8.10.3 *does* specify exactly.
     ///
     /// A `StringBuilder` chain rather than `invokedynamic`, the same way `+` on a `String` lowers.
-    fn record_string(
+    pub(crate) fn record_string(
         context: &Context<'_>,
         pool: &mut ConstantPool,
         components: &[(String, String)],
@@ -2639,7 +2638,7 @@ impl Compile {
             literal.clear();
             asm.load(0)?;
             asm.get_field(&owner, name, descriptor)?;
-            asm.invoke_virtual(BUILDER, "append", &Self::append_descriptor(descriptor))?;
+            asm.invoke_virtual(BUILDER, "append", &append_descriptor(descriptor))?;
         }
         literal.push(']');
         asm.const_string(&literal)?;
@@ -2665,7 +2664,7 @@ impl Compile {
     ///
     /// There is no `append(byte)` or `append(short)`: both widen to `int`, which is what the JVM's
     /// stack already holds them as.
-    fn append_descriptor(descriptor: &str) -> alloc::string::String {
+    pub(crate) fn append_descriptor(descriptor: &str) -> alloc::string::String {
         let parameter = match descriptor.as_bytes() {
             [b'Z'] => "Z",
             [b'C'] => "C",
@@ -2689,7 +2688,7 @@ impl Compile {
     /// Compared as *descriptors*, which is the erasure a class file records — a parameter written
     /// `java.lang.String` and a component written `String` are one type, and a mismatch there would
     /// emit `<init>` twice under one descriptor.
-    fn declares_canonical_constructor(
+    pub(crate) fn declares_canonical_constructor(
         context: &Context<'_>,
         members: &[SyntaxNode],
         components: &[(String, String)],
@@ -2710,10 +2709,8 @@ impl Compile {
             let mut canonical = true;
             for (param, (_, component)) in params.iter().zip(components) {
                 let written = match context.facts().def_at(param.syntax()) {
-                    Some(id) => {
-                        Descriptor::descriptor_of(context.typed.type_of_def(id), context.index)?
-                            .to_string()
-                    }
+                    Some(id) => desc::descriptor_of(context.typed.type_of_def(id), context.index)?
+                        .to_string(),
                     // A parameter with nothing resolved says nothing either way, and the safe
                     // direction is to leave the declared constructor in place: emitting a second
                     // `<init>` under its descriptor is a class file no JVM loads.
@@ -2732,7 +2729,7 @@ impl Compile {
     }
 
     /// The name token of every component in a record's header, in order.
-    fn record_components(node: &SyntaxNode) -> Vec<SyntaxToken> {
+    pub(crate) fn record_components(node: &SyntaxNode) -> Vec<SyntaxToken> {
         node.children()
             .find(|child| child.kind() == jals_syntax::SyntaxKind::RECORD_HEADER)
             .into_iter()
@@ -2750,7 +2747,7 @@ impl Compile {
     /// (JLS §8.10.4.2). So the body is lowered with each component's *definition* bound to the
     /// parameter slot rather than to the field — which is what makes `x = Math.abs(x)` normalise the
     /// argument and what leaves the field still zero for the body's own reads, as Java has it.
-    fn canonical_constructor(
+    pub(crate) fn canonical_constructor(
         context: &Context<'_>,
         pool: &mut ConstantPool,
         super_name: &str,
@@ -2780,7 +2777,7 @@ impl Compile {
         for (position, (_, component)) in components.iter().enumerate() {
             let width = Slots::descriptor_width(component);
             // The definition a body reference to the component's name binds to. Declaring it here is
-            // what puts the *parameter* ahead of the field in `Place::resolve` and in `Expr::name`,
+            // what puts the *parameter* ahead of the field in `Place::resolve` and in `expr::name`,
             // both of which consult the slot map before falling back to a field of the enclosing type.
             let bound = compact
                 .and_then(|(_, names)| names.get(position))
@@ -2812,7 +2809,7 @@ impl Compile {
                 ));
             }
             for statement in body.stmts() {
-                stmt::Stmt::lower(&statement, context, &mut emit)?;
+                stmt::lower(&statement, context, &mut emit)?;
             }
         }
         for ((name, component), slot) in components.iter().zip(placements) {
@@ -2831,7 +2828,7 @@ impl Compile {
 
     /// Whether a member is a record's *compact* constructor: a `CONSTRUCTOR_DECL` with no parameter
     /// list at all, which is the only thing that distinguishes `P { … }` from `P() { … }` in the tree.
-    fn is_compact_constructor(member: &SyntaxNode) -> bool {
+    pub(crate) fn is_compact_constructor(member: &SyntaxNode) -> bool {
         member.kind() == CONSTRUCTOR_DECL
             && !member
                 .children()
@@ -2839,7 +2836,7 @@ impl Compile {
     }
 
     /// One accessor: `return this.name;`.
-    fn record_accessor(
+    pub(crate) fn record_accessor(
         context: &Context<'_>,
         pool: &mut ConstantPool,
         name: &str,
@@ -2867,7 +2864,7 @@ impl Compile {
     /// The constructor a class with none of its own gets. `access` is the *class's* access level,
     /// which JLS §8.8.9 gives the default constructor — a `public` one on a package-private class
     /// would widen the type's reachable surface past what the source wrote.
-    fn default_constructor(
+    pub(crate) fn default_constructor(
         context: &Context<'_>,
         pool: &mut ConstantPool,
         super_name: &str,
@@ -2892,17 +2889,17 @@ impl Compile {
             params.push_str(&written);
         }
         for &captured in context.captured_here() {
-            params.push_str(&Self::capture_descriptor(captured, context)?);
+            params.push_str(&capture_descriptor(captured, context)?);
         }
         let text = alloc::format!("({params})V");
         let name_index = pool.utf8_index("<init>").ok_or(AsmError::PoolFull)?;
         let descriptor_index = pool.utf8_index(&text).ok_or(AsmError::PoolFull)?;
         let mut asm = Assembler::new(pool, Receiver::Constructor(&context.this_class), &text)?;
         let slots = Slots::for_constructor(context, None, synthetic);
-        let capture_slots = Self::capture_slots_of(context, &slots)?;
+        let capture_slots = capture_slots_of(context, &slots)?;
         let mut emit =
             Emit::new(&mut asm, slots, jals_hir::Ty::Void, true).with_capture_slots(capture_slots);
-        Self::prologue(
+        prologue(
             context, &mut emit, super_name, super_item, members, forwarded,
         )?;
         asm.return_(None)?;
@@ -2927,7 +2924,7 @@ impl Compile {
     /// from the declaration, which would leave every one of them two parameters short; a constant with
     /// a **body** is an anonymous subclass, which is a separate class file the enum then cannot be
     /// `final`.
-    fn enum_members(
+    pub(crate) fn enum_members(
         constants: &[ast::EnumConstant],
         context: &Context<'_>,
         pool: &mut ConstantPool,
@@ -2938,7 +2935,7 @@ impl Compile {
     ) -> Result<()> {
         let descriptor = alloc::format!("L{internal_name};");
         let array = alloc::format!("[{descriptor}");
-        let values = Self::values_field(members);
+        let values = values_field(members);
         for constant in constants {
             let name = constant
                 .name()
@@ -2984,7 +2981,7 @@ impl Compile {
             emit.asm.load(1)?;
             emit.asm.load(2)?;
             emit.asm.invoke_special(ENUM, "<init>", ENUM_INIT, false)?;
-            Self::initializers(context, &mut emit, members, false)?;
+            initializers(context, &mut emit, members, false)?;
             asm.return_(None)?;
             let access = if context.enum_subclassed {
                 0
@@ -3052,7 +3049,7 @@ impl Compile {
     /// arity rather than by applicability: a constant's argument list is not an expression the index
     /// resolved a call target for, so there is nothing to read a selection out of. Two constructors of
     /// the same arity are reported instead of guessed at.
-    fn enum_constructor(
+    pub(crate) fn enum_constructor(
         arity: usize,
         owner: ItemId,
         context: &Context<'_>,
@@ -3094,7 +3091,7 @@ impl Compile {
     /// `None` when the type has neither, because an empty `<clinit>` is still a method the JVM loads
     /// and calls. `ACC_STATIC` is required on it from major version 51 (JVMS §2.9.2), and it takes no
     /// access level at all — nothing can name it.
-    fn class_initializer(
+    pub(crate) fn class_initializer(
         context: &Context<'_>,
         pool: &mut ConstantPool,
         members: &[SyntaxNode],
@@ -3106,7 +3103,7 @@ impl Compile {
             && constants.is_empty()
             && !members
                 .iter()
-                .any(|member| Self::initializes(member, context.in_interface, true))
+                .any(|member| initializes(member, context.in_interface, true))
         {
             return Ok(None);
         }
@@ -3116,14 +3113,14 @@ impl Compile {
         let slots = Slots::new(context, None, true);
         let mut emit = Emit::new(&mut asm, slots, jals_hir::Ty::Void, false);
         if asserts {
-            Self::assertion_flag(context, &mut emit)?;
+            assertion_flag(context, &mut emit)?;
         }
         // An `enum`'s constants are built *first*, because a `static` initialiser below them may read
         // one and JLS §12.4.2 runs them in that order.
         if !constants.is_empty() {
-            Self::enum_constants(constants, internal_name, members, context, &mut emit)?;
+            enum_constants(constants, internal_name, members, context, &mut emit)?;
         }
-        Self::initializers(context, &mut emit, members, true)?;
+        initializers(context, &mut emit, members, true)?;
         if asm.reachable() {
             asm.return_(None)?;
         }
@@ -3140,7 +3137,7 @@ impl Compile {
     /// `enum SynthValues { red; SynthValues[] $VALUES = null; }` is legal Java — the name is only
     /// reserved by convention — and emitting the synthetic one anyway declared the field twice, which
     /// is a `ClassFormatError` at load. javac appends a `$` until the name is free, so this does.
-    fn values_field(members: &[SyntaxNode]) -> String {
+    pub(crate) fn values_field(members: &[SyntaxNode]) -> String {
         let declared: Vec<String> = members
             .iter()
             .filter(|member| member.kind() == FIELD_DECL)
@@ -3160,7 +3157,7 @@ impl Compile {
     /// The ordinal *is* the declaration position: it is what `ordinal()` returns, what a `switch` over
     /// the type indexes on, and what `compareTo` orders by. Numbering them any other way would be a
     /// class that verifies and compares wrongly.
-    fn enum_constants(
+    pub(crate) fn enum_constants(
         constants: &[ast::EnumConstant],
         internal_name: &str,
         members: &[SyntaxNode],
@@ -3177,7 +3174,7 @@ impl Compile {
                 .into_iter()
                 .flat_map(|list| list.args())
                 .collect();
-            let selected = Self::enum_constructor(arguments.len(), context.this_item, context)?;
+            let selected = enum_constructor(arguments.len(), context.this_item, context)?;
             // A constant with a body is an instance of its *own* subclass, which is where its
             // overrides live. Its field still has the enum's type, so nothing else changes.
             let built = match context.index.item_by_decl(
@@ -3185,7 +3182,7 @@ impl Compile {
                 usize::from(constant.syntax().text_range().start()),
             ) {
                 Some(item) if constant.body().is_some() => {
-                    Descriptor::internal_name_of(item, context.index)
+                    desc::internal_name_of(item, context.index)
                 }
                 _ => internal_name.to_owned(),
             };
@@ -3202,9 +3199,9 @@ impl Compile {
                 Some(member) => {
                     let params = context.index.resolved_param_tys(member);
                     let varargs = context.index.member(member).varargs;
-                    expr::Expr::arguments(&arguments, &params, varargs, context, emit)?;
+                    expr::arguments(&arguments, &params, varargs, context, emit)?;
                     let mut written =
-                        Descriptor::method_descriptor(member, context.index, true)?.to_string();
+                        desc::method_descriptor(member, context.index, true)?.to_string();
                     written = alloc::format!("(L{STRING};I{}", written.trim_start_matches('('));
                     written
                 }
@@ -3233,7 +3230,7 @@ impl Compile {
         }
         Ok(emit.asm.put_static(
             internal_name,
-            &Self::values_field(members),
+            &values_field(members),
             &alloc::format!("[{descriptor}"),
         )?)
     }
@@ -3243,7 +3240,7 @@ impl Compile {
     /// The first thing `<clinit>` does in a class containing an `assert`. The *negation* is what makes
     /// the guard one branch at each assertion site rather than two — the field is read and the
     /// assertion skipped when it is true.
-    fn assertion_flag(context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
+    pub(crate) fn assertion_flag(context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
         let enabled = emit.asm.label();
         let store = emit.asm.label();
         emit.asm.const_class(&context.this_class)?;
@@ -3264,7 +3261,7 @@ impl Compile {
     }
 
     /// Whether `member` contributes to the class initialiser (`statics`) or to every constructor.
-    fn initializes(member: &SyntaxNode, in_interface: bool, statics: bool) -> bool {
+    pub(crate) fn initializes(member: &SyntaxNode, in_interface: bool, statics: bool) -> bool {
         use jals_syntax::SyntaxKind::{INITIALIZER, STATIC_KW};
         match member.kind() {
             // An interface field is implicitly `static` (JLS §9.3), so it is written without the
@@ -3283,7 +3280,7 @@ impl Compile {
     ///
     /// One walk in source order, because JLS §12.4.2 / §12.5 run them in the order they are written
     /// and a later one may read what an earlier one assigned.
-    fn initializers(
+    pub(crate) fn initializers(
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
         members: &[SyntaxNode],
@@ -3291,14 +3288,14 @@ impl Compile {
     ) -> Result<()> {
         use jals_syntax::SyntaxKind::INITIALIZER;
         for member in members {
-            if !Self::initializes(member, context.in_interface, statics) {
+            if !initializes(member, context.in_interface, statics) {
                 continue;
             }
             if member.kind() == INITIALIZER {
                 let block = ast::Initializer::cast(member.clone())
                     .and_then(|initializer| initializer.block());
                 if let Some(block) = block {
-                    stmt::Stmt::block(&block, context, emit)?;
+                    stmt::block(&block, context, emit)?;
                 }
                 continue;
             }
@@ -3313,13 +3310,13 @@ impl Compile {
                 };
                 let field = context.facts().member_at(&name)?;
                 let ty = context.index.resolved_member_ty(field);
-                let descriptor = Descriptor::descriptor_of(&ty, context.index)?.to_string();
+                let descriptor = desc::descriptor_of(&ty, context.index)?.to_string();
                 if !statics {
                     emit.asm.load(0)?;
                 }
                 // Converted to the field's declared type, which is where `long total = 0;` gets its
                 // `i2l`.
-                expr::Expr::lower_as(&value, &ty, context, emit)?;
+                expr::lower_as(&value, &ty, context, emit)?;
                 if statics {
                     emit.asm.put_static(
                         &context.this_class,
@@ -3346,7 +3343,7 @@ impl Compile {
     /// Worked out before anything runs, so a temporary declared mid-body cannot move it — and in one
     /// place, because two readers depend on it agreeing: the prologue that stores each capture into
     /// its field, and the argument lowering that has to read one *before* `super(...)` has done so.
-    fn capture_slots_of(
+    pub(crate) fn capture_slots_of(
         context: &Context<'_>,
         slots: &Slots,
     ) -> Result<Vec<(jals_hir::DefId, u16)>> {
@@ -3354,12 +3351,12 @@ impl Compile {
         let mut slot = slots.next_free();
         for &captured in context.captured_here() {
             out.push((captured, slot));
-            slot += Slots::descriptor_width(&Self::capture_descriptor(captured, context)?);
+            slot += Slots::descriptor_width(&capture_descriptor(captured, context)?);
         }
         Ok(out)
     }
 
-    fn prologue(
+    pub(crate) fn prologue(
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
         super_name: &str,
@@ -3429,14 +3426,14 @@ impl Compile {
         // Each capture's parameter sits after every declared one; where exactly is `Emit`'s answer,
         // shared with the argument lowering that has to read one before `super(...)` has run.
         for (captured, slot) in emit.capture_slots().to_vec() {
-            let name = Self::capture_field(captured, context);
-            let descriptor = Self::capture_descriptor(captured, context)?;
+            let name = capture_field(captured, context);
+            let descriptor = capture_descriptor(captured, context)?;
             emit.asm.load(0)?;
             emit.asm.load(slot)?;
             emit.asm
                 .put_field(&context.this_class, &name, &descriptor)?;
         }
-        Self::initializers(context, emit, members, false)
+        initializers(context, emit, members, false)
     }
 }
 

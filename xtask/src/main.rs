@@ -26,7 +26,7 @@ fn main() -> ExitCode {
                     other => return usage(&format!("unknown argument `{other}`")),
                 }
             }
-            match codegen::Codegen::run(check) {
+            match codegen::run(check) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(err) => {
                     eprintln!("error: {err:#}");

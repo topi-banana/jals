@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 
 use jals_storage::RelativePath;
 
-use crate::zip::{StoredZip, WriteMember};
+use crate::zip::WriteMember;
 
 /// The manifest's physical line cap, in bytes, counted here *including* the `\r\n` terminator.
 ///
@@ -28,15 +28,17 @@ const MAX_LINE: usize = 72;
 /// Manifest lines end with CRLF, not the host's line ending — the format is not text-mode.
 const EOL: &str = "\r\n";
 
-/// Namespace for packaging compiled classes into a jar.
-pub struct JarPackage;
+pub use api::write;
 
-impl JarPackage {
+/// Namespace for packaging compiled classes into a jar.
+mod api {
+    use super::{EOL, MAX_LINE, RelativePath, String, ToOwned, ToString, Vec, WriteMember, format};
+
     /// The manifest member every jar carries, and the first member this writer emits.
     ///
     /// Private: a caller never supplies this path — it is generated — and the one place a caller
     /// could collide with it names it in the error message instead.
-    const MANIFEST_PATH: &'static str = "META-INF/MANIFEST.MF";
+    pub(super) const MANIFEST_PATH: &str = "META-INF/MANIFEST.MF";
 
     /// Package compiled class files into a deterministic, stored-only jar.
     ///
@@ -59,17 +61,16 @@ impl JarPackage {
     ) -> Result<Vec<u8>, String> {
         let mut members = Vec::with_capacity(entries.len() + 1);
         members.push(WriteMember {
-            name: Self::MANIFEST_PATH.to_owned(),
-            bytes: Self::main_section(main_class).into_bytes(),
+            name: MANIFEST_PATH.to_owned(),
+            bytes: main_section(main_class).into_bytes(),
         });
         for (path, bytes) in entries {
             let name = path.to_string();
             // Caught here rather than left to the writer's duplicate check so the message names the
             // actual cause: the manifest is generated, not something a caller supplies.
-            if name == Self::MANIFEST_PATH {
+            if name == MANIFEST_PATH {
                 return Err(format!(
-                    "`{}` is written by the packager and cannot also be a packaged entry",
-                    Self::MANIFEST_PATH
+                    "`{MANIFEST_PATH}` is written by the packager and cannot also be a packaged entry"
                 ));
             }
             members.push(WriteMember {
@@ -77,18 +78,18 @@ impl JarPackage {
                 bytes: bytes.clone(),
             });
         }
-        StoredZip::write(&members)
+        crate::zip::write(&members)
     }
 
     /// Render the jar manifest's main section.
     ///
     /// `Manifest-Version` comes first because the specification requires the version to be the
     /// main section's first attribute; a blank line terminates the section.
-    fn main_section(main_class: Option<&str>) -> String {
+    pub(crate) fn main_section(main_class: Option<&str>) -> String {
         let mut out = String::new();
-        Self::write_attribute(&mut out, "Manifest-Version", "1.0");
+        write_attribute(&mut out, "Manifest-Version", "1.0");
         if let Some(main_class) = main_class {
-            Self::write_attribute(&mut out, "Main-Class", main_class);
+            write_attribute(&mut out, "Main-Class", main_class);
         }
         out.push_str(EOL);
         out
@@ -102,7 +103,7 @@ impl JarPackage {
     /// crate is `no_std`, so the boundary is walked back by hand. Only a deeply nested `Main-Class`
     /// ever reaches the wrapping path, but an unwrapped over-long line is an invalid manifest, not
     /// a cosmetic issue.
-    fn write_attribute(out: &mut String, name: &str, value: &str) {
+    pub(crate) fn write_attribute(out: &mut String, name: &str, value: &str) {
         let mut line = String::with_capacity(name.len() + 2 + value.len());
         line.push_str(name);
         line.push_str(": ");
@@ -171,7 +172,7 @@ mod tests {
         let mut oracle =
             zip::ZipArchive::new(std::io::Cursor::new(archive)).expect("oracle opens the jar");
         let mut reader = oracle
-            .by_name(JarPackage::MANIFEST_PATH)
+            .by_name(api::MANIFEST_PATH)
             .expect("the jar carries a manifest");
         let mut text = String::new();
         std::io::Read::read_to_string(&mut reader, &mut text).expect("the manifest is text");
@@ -192,13 +193,12 @@ mod tests {
                 b"\xca\xfe\xba\xbegreeter".to_vec(),
             ),
         ];
-        let archive =
-            JarPackage::write(&entries, Some("com.example.Main")).expect("packaging succeeds");
+        let archive = api::write(&entries, Some("com.example.Main")).expect("packaging succeeds");
 
         let directory = block_on_inline(CentralDirectory::parse(&mut Cursor::new(&archive)))
             .expect("the jar parses");
         assert_eq!(directory.members.len(), entries.len() + 1);
-        assert_eq!(directory.members[0].name, JarPackage::MANIFEST_PATH);
+        assert_eq!(directory.members[0].name, api::MANIFEST_PATH);
         // Input order is preserved after the manifest, so the members line up with `entries`.
         for (member, (entry_path, bytes)) in directory.members[1..].iter().zip(&entries) {
             assert_eq!(member.name, entry_path.to_string());
@@ -220,7 +220,7 @@ mod tests {
             fqcn.push_str(".deeply");
         }
         fqcn.push_str(".Main");
-        let archive = JarPackage::write(&[], Some(&fqcn)).expect("packaging succeeds");
+        let archive = api::write(&[], Some(&fqcn)).expect("packaging succeeds");
         let text = manifest_text(&archive);
 
         // Drop the blank line that terminates the main section; what remains is the attributes.
@@ -253,7 +253,7 @@ mod tests {
         // Three-byte characters land astride every candidate split point.
         let value: String = core::iter::repeat_n('あ', 60).collect();
         let mut out = String::new();
-        JarPackage::write_attribute(&mut out, "Main-Class", &value);
+        api::write_attribute(&mut out, "Main-Class", &value);
 
         let mut joined = String::new();
         for (index, line) in out.split_terminator(EOL).enumerate() {
@@ -265,8 +265,8 @@ mod tests {
     /// A project with no entry point still packages — as a library jar, without `Main-Class`.
     #[test]
     fn a_library_jar_omits_main_class() {
-        let archive = JarPackage::write(&[(path("A.class"), b"x".to_vec())], None)
-            .expect("packaging succeeds");
+        let archive =
+            api::write(&[(path("A.class"), b"x".to_vec())], None).expect("packaging succeeds");
         assert_eq!(manifest_text(&archive), "Manifest-Version: 1.0\r\n\r\n");
     }
 
@@ -277,8 +277,8 @@ mod tests {
             (path("com/example/Main.class"), b"main".to_vec()),
             (path("com/example/Greeter.class"), b"greeter".to_vec()),
         ];
-        let first = JarPackage::write(&entries, Some("com.example.Main")).expect("first write");
-        let second = JarPackage::write(&entries, Some("com.example.Main")).expect("second write");
+        let first = api::write(&entries, Some("com.example.Main")).expect("first write");
+        let second = api::write(&entries, Some("com.example.Main")).expect("second write");
         assert_eq!(first, second);
     }
 
@@ -286,10 +286,10 @@ mod tests {
     /// message has to name it rather than surface as a generic duplicate.
     #[test]
     fn an_entry_named_like_the_manifest_is_rejected() {
-        let entries = vec![(path(JarPackage::MANIFEST_PATH), b"forged".to_vec())];
-        let error = JarPackage::write(&entries, None).expect_err("the conflict is reported");
+        let entries = vec![(path(api::MANIFEST_PATH), b"forged".to_vec())];
+        let error = api::write(&entries, None).expect_err("the conflict is reported");
         assert!(
-            error.contains(JarPackage::MANIFEST_PATH),
+            error.contains(api::MANIFEST_PATH),
             "message must name the manifest: {error}"
         );
     }
@@ -302,6 +302,6 @@ mod tests {
             (path("com/example/Main.class"), b"one".to_vec()),
             (path("com/example/Main.class"), b"two".to_vec()),
         ];
-        assert!(JarPackage::write(&entries, None).is_err());
+        assert!(api::write(&entries, None).is_err());
     }
 }

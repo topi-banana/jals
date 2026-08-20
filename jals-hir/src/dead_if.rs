@@ -30,9 +30,9 @@ use jals_syntax::ast::{self, AstNode};
 use jals_syntax::{SyntaxElement, SyntaxNode};
 
 use crate::def::DefId;
-use crate::infer::Cst;
+use crate::infer;
 use crate::resolve::Resolved;
-use crate::resolve::collect::Collect;
+use crate::resolve::collect;
 
 /// An `if` statement whose condition is provably constant.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,7 +52,7 @@ impl DeadIf {
     /// trivia between two siblings to the *following* node, so a branch statement's range would
     /// otherwise start at the space before it).
     fn trimmed_span(node: &SyntaxNode) -> Range<usize> {
-        let full = Collect::node_span(node);
+        let full = collect::node_span(node);
         let start = node
             .descendants_with_tokens()
             .filter_map(SyntaxElement::into_token)
@@ -137,7 +137,7 @@ impl Evaluator<'_> {
             ast::Expr::Paren(p) => self.eval(&p.expr()?),
             ast::Expr::Unary(u) => {
                 let value = self.eval(&u.operand()?)?;
-                match (*Cst::op_kinds(u.syntax()).first()?, value) {
+                match (*infer::op_kinds(u.syntax()).first()?, value) {
                     (BANG, ConstValue::Bool(b)) => Some(ConstValue::Bool(!b)),
                     // Wrapping matches Java two's complement (`-0x8000000000000000L` is `Long.MIN_VALUE`).
                     (MINUS, ConstValue::Int(v)) => Some(ConstValue::Int(v.wrapping_neg())),
@@ -158,7 +158,7 @@ impl Evaluator<'_> {
         // Operator spellings as in `infer`: `>` is `GT`, `>=` is `GT EQ`; `instanceof`, shifts
         // (`GT GT`), arithmetic, and non-short-circuit `&` / `|` / `^` all bail here, before
         // either operand is folded.
-        let value = match Cst::op_kinds(expr.syntax()).as_slice() {
+        let value = match infer::op_kinds(expr.syntax()).as_slice() {
             // Three-valued: one provably-`false` side decides `&&` even if the other side is
             // unknown — short-circuiting affects evaluation, never the value. A deciding lhs
             // skips folding the rhs at all.
@@ -220,10 +220,10 @@ impl Evaluator<'_> {
     fn eval_name(&mut self, name: &ast::NameRef) -> Option<ConstValue> {
         // References are keyed by the identifier *token* start (a `NAME_REF` node may carry
         // leading trivia), exactly as `infer` looks them up.
-        let token = Collect::first_ident_token(name.syntax())?;
+        let token = collect::first_ident_token(name.syntax())?;
         let def_id = self
             .resolved
-            .reference_at(Collect::token_start(&token))?
+            .reference_at(collect::token_start(&token))?
             .resolution
             .def_id()?;
         if self.visiting.contains(&def_id) || self.visiting.len() >= MAX_CONST_CHAIN {
@@ -245,7 +245,7 @@ impl Evaluator<'_> {
 impl Evaluator<'_> {
     /// Every `final` declarator's initializer in the file, keyed by the declaring `IDENT` token start.
     /// Declarators are paired with their initializers by the same walk `infer`'s initializer check
-    /// uses ([`Cst::declarator_initializers`]).
+    /// uses ([`infer::declarator_initializers`]).
     fn final_initializers(root: &SyntaxNode) -> BTreeMap<usize, ast::Expr> {
         let mut decls = BTreeMap::new();
         for node in root.descendants() {
@@ -259,8 +259,8 @@ impl Evaluator<'_> {
             if !is_final {
                 continue;
             }
-            for (name, value) in Cst::declarator_initializers(&node) {
-                decls.insert(Collect::token_start(&name), value);
+            for (name, value) in infer::declarator_initializers(&node) {
+                decls.insert(collect::token_start(&name), value);
             }
         }
         decls

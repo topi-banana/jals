@@ -61,34 +61,42 @@ pub(crate) struct ClassfileMember {
     pub throws: Vec<MemberType>,
 }
 
-/// Namespace for the pure `.class` → [`ClassfileClass`] lowering functions.
-pub(crate) struct ClasspathLower;
+pub(crate) use api::lower;
 
-impl ClasspathLower {
+/// Namespace for the pure `.class` → [`ClassfileClass`] lowering functions.
+mod api {
+    use super::{
+        Attribute, AttributeBody, ClassFile, ClassSignature, ClassTypeSignature, ClassfileClass,
+        ClassfileMember, ConstantPool, Cow, DefKind, FieldAccessFlags, FieldType, Fqn,
+        MemberModifiers, MemberType, MethodAccessFlags, MethodDescriptor, MethodSignature, Param,
+        ResultSignature, ReturnType, ToOwned, TypeArgument, TypeParamDecl, TypeParameter,
+        TypeSignature, Vec, vec,
+    };
+
     /// Lower a class file to its [`ClassfileClass`], or `None` for `module-info` (a module, not a type).
     pub(crate) async fn lower(cf: &ClassFile) -> Option<ClassfileClass> {
         if cf.access_flags.is_module() {
             return None;
         }
         let pool = &cf.constant_pool;
-        let fqn = jals_decompile::JavaType::internal_to_java(&pool.class_name(cf.this_class)?);
-        let class_sig = Self::class_signature(cf, pool);
+        let fqn = jals_decompile::types::internal_to_java(&pool.class_name(cf.this_class)?);
+        let class_sig = class_signature(cf, pool);
         let type_params = class_sig
             .as_ref()
-            .map(|s| Self::lower_type_params(&s.type_parameters))
+            .map(|s| lower_type_params(&s.type_parameters))
             .unwrap_or_default();
-        let supertypes = Self::lower_supertypes(cf, class_sig.as_ref(), pool);
-        let members = Self::lower_members(cf, pool, Fqn::simple_name_of(&fqn)).await;
+        let supertypes = lower_supertypes(cf, class_sig.as_ref(), pool);
+        let members = lower_members(cf, pool, Fqn::simple_name_of(&fqn)).await;
         Some(ClassfileClass {
             fqn,
-            kind: Self::class_kind(cf),
+            kind: class_kind(cf),
             type_params,
             supertypes,
             members,
         })
     }
 
-    fn class_kind(cf: &ClassFile) -> DefKind {
+    pub(crate) fn class_kind(cf: &ClassFile) -> DefKind {
         let flags = cf.access_flags;
         if flags.is_annotation() {
             DefKind::AnnotationType
@@ -107,15 +115,15 @@ impl ClasspathLower {
         }
     }
 
-    fn class_signature(cf: &ClassFile, pool: &ConstantPool) -> Option<ClassSignature> {
-        ClassSignature::parse(&jals_decompile::Attrs::signature_string(
+    pub(crate) fn class_signature(cf: &ClassFile, pool: &ConstantPool) -> Option<ClassSignature> {
+        ClassSignature::parse(&jals_decompile::attrs::signature_string(
             &cf.attributes,
             pool,
         )?)
         .ok()
     }
 
-    fn lower_type_params(params: &[TypeParameter]) -> Vec<TypeParamDecl> {
+    pub(crate) fn lower_type_params(params: &[TypeParameter]) -> Vec<TypeParamDecl> {
         params
             .iter()
             .map(|tp| {
@@ -137,24 +145,24 @@ impl ClasspathLower {
                         .iter()
                         .filter(|t| explicit || !t.is_java_lang_object())
                         .chain(tp.interface_bounds.iter())
-                        .map(Self::type_sig_to_member_type)
+                        .map(type_sig_to_member_type)
                         .collect(),
                 }
             })
             .collect()
     }
 
-    fn lower_supertypes(
+    pub(crate) fn lower_supertypes(
         cf: &ClassFile,
         class_sig: Option<&ClassSignature>,
         pool: &ConstantPool,
     ) -> Vec<MemberType> {
         if let Some(sig) = class_sig {
-            let mut out = vec![Self::class_type_sig_to_member_type(&sig.superclass, 0)];
+            let mut out = vec![class_type_sig_to_member_type(&sig.superclass, 0)];
             out.extend(
                 sig.superinterfaces
                     .iter()
-                    .map(|i| Self::class_type_sig_to_member_type(i, 0)),
+                    .map(|i| class_type_sig_to_member_type(i, 0)),
             );
             return out;
         }
@@ -162,17 +170,17 @@ impl ClasspathLower {
         if cf.super_class != 0
             && let Some(internal) = pool.class_name(cf.super_class)
         {
-            out.push(Self::named_from_internal(&internal));
+            out.push(named_from_internal(&internal));
         }
         for &iface in &cf.interfaces {
             if let Some(internal) = pool.class_name(iface) {
-                out.push(Self::named_from_internal(&internal));
+                out.push(named_from_internal(&internal));
             }
         }
         out
     }
 
-    async fn lower_members(
+    pub(crate) async fn lower_members(
         cf: &ClassFile,
         pool: &ConstantPool,
         owner_simple: &str,
@@ -195,7 +203,7 @@ impl ClasspathLower {
                     // A field is never abstract; the flag does not exist for one.
                     is_abstract: false,
                 },
-                ty: Self::field_member_type(&field.attributes, field.descriptor_index, pool),
+                ty: field_member_type(&field.attributes, field.descriptor_index, pool),
                 params: Vec::new(),
                 varargs: false,
                 throws: Vec::new(),
@@ -209,12 +217,12 @@ impl ClasspathLower {
             if raw_name == "<clinit>" {
                 continue;
             }
-            let (ret, params, varargs, type_params) = Self::method_shape(method, pool);
+            let (ret, params, varargs, type_params) = method_shape(method, pool);
             // The declared checked exceptions (`throws`), from the `Exceptions` attribute, as
             // fully-qualified named types so they resolve without an import context.
-            let throws = jals_decompile::Attrs::declared_throws(method, pool)
+            let throws = jals_decompile::attrs::declared_throws(method, pool)
                 .iter()
-                .map(|fqn| Self::named(fqn, 0, Vec::new()))
+                .map(|fqn| named(fqn, 0, Vec::new()))
                 .collect();
             let (name, kind, ty) = if raw_name == "<init>" {
                 // A constructor's source name is the class's simple name (matches `members_of_decl`).
@@ -248,32 +256,32 @@ impl ClasspathLower {
     }
 
     /// A field's type: from its `Signature` (generic) if present, else its descriptor.
-    fn field_member_type(
+    pub(crate) fn field_member_type(
         attrs: &[Attribute],
         descriptor_index: u16,
         pool: &ConstantPool,
     ) -> MemberType {
-        if let Some(sig) = jals_decompile::Attrs::signature_string(attrs, pool)
+        if let Some(sig) = jals_decompile::attrs::signature_string(attrs, pool)
             && let Ok(ts) = TypeSignature::parse(&sig)
         {
-            return Self::type_sig_to_member_type(&ts);
+            return type_sig_to_member_type(&ts);
         }
         if let Some(desc) = pool.utf8(descriptor_index)
             && let Ok(ft) = FieldType::parse(&desc)
         {
-            return Self::field_type_to_member_type(&ft);
+            return field_type_to_member_type(&ft);
         }
         MemberType::Unknown
     }
 
     /// A method's (return type, parameters, varargs): from its `Signature` (generic) if present, else its
     /// descriptor.
-    fn method_shape(
+    pub(crate) fn method_shape(
         method: &jals_classfile::MethodInfo,
         pool: &ConstantPool,
     ) -> (MemberType, Vec<Param>, bool, Vec<TypeParamDecl>) {
         let varargs = method.access_flags.is_varargs();
-        if let Some(sig) = jals_decompile::Attrs::signature_string(&method.attributes, pool)
+        if let Some(sig) = jals_decompile::attrs::signature_string(&method.attributes, pool)
             && let Ok(ms) = MethodSignature::parse(&sig)
         {
             let params = ms
@@ -281,22 +289,17 @@ impl ClasspathLower {
                 .iter()
                 .map(|p| Param {
                     name: None,
-                    ty: Self::type_sig_to_member_type(p),
+                    ty: type_sig_to_member_type(p),
                 })
                 .collect();
             let ret = match &ms.result {
                 ResultSignature::Void => MemberType::Void,
-                ResultSignature::Type(t) => Self::type_sig_to_member_type(t),
+                ResultSignature::Type(t) => type_sig_to_member_type(t),
             };
             // A generic method's own `<E>` lives only in the `Signature` attribute; the descriptor
             // has already erased it. Without it a bare `E` in this member's types resolves to an
             // external name the index has never heard of.
-            return (
-                ret,
-                params,
-                varargs,
-                Self::lower_type_params(&ms.type_parameters),
-            );
+            return (ret, params, varargs, lower_type_params(&ms.type_parameters));
         }
         if let Some(desc) = pool.utf8(method.descriptor_index)
             && let Ok(md) = MethodDescriptor::parse(&desc)
@@ -306,12 +309,12 @@ impl ClasspathLower {
                 .iter()
                 .map(|p| Param {
                     name: None,
-                    ty: Self::field_type_to_member_type(p),
+                    ty: field_type_to_member_type(p),
                 })
                 .collect();
             let ret = match &md.return_type {
                 ReturnType::Void => MemberType::Void,
-                ReturnType::Type(ft) => Self::field_type_to_member_type(ft),
+                ReturnType::Type(ft) => field_type_to_member_type(ft),
             };
             // No `Signature`: the descriptor is already erased, so there is no type variable left
             // to name.
@@ -322,15 +325,15 @@ impl ClasspathLower {
 
     // --- descriptor / signature → MemberType -----------------------------------------------------
 
-    fn field_type_to_member_type(ft: &FieldType) -> MemberType {
-        let (base, dims) = Self::peel_field_array(ft, 0);
+    pub(crate) fn field_type_to_member_type(ft: &FieldType) -> MemberType {
+        let (base, dims) = peel_field_array(ft, 0);
         match base {
             FieldType::Base(b) => MemberType::Primitive {
                 keyword: b.keyword().to_owned(),
                 dims,
             },
-            FieldType::Object(internal) => Self::named(
-                &jals_decompile::JavaType::internal_to_java(internal),
+            FieldType::Object(internal) => named(
+                &jals_decompile::types::internal_to_java(internal),
                 dims,
                 Vec::new(),
             ),
@@ -338,15 +341,15 @@ impl ClasspathLower {
         }
     }
 
-    fn peel_field_array(ft: &FieldType, dims: u32) -> (&FieldType, u32) {
+    pub(crate) fn peel_field_array(ft: &FieldType, dims: u32) -> (&FieldType, u32) {
         match ft {
-            FieldType::Array(inner) => Self::peel_field_array(inner, dims + 1),
+            FieldType::Array(inner) => peel_field_array(inner, dims + 1),
             other => (other, dims),
         }
     }
 
-    fn type_sig_to_member_type(ts: &TypeSignature) -> MemberType {
-        let (base, dims) = Self::peel_sig_array(ts, 0);
+    pub(crate) fn type_sig_to_member_type(ts: &TypeSignature) -> MemberType {
+        let (base, dims) = peel_sig_array(ts, 0);
         match base {
             TypeSignature::Base(b) => MemberType::Primitive {
                 keyword: b.keyword().to_owned(),
@@ -359,37 +362,37 @@ impl ClasspathLower {
                 dims,
                 args: Vec::new(),
             },
-            TypeSignature::Class(c) => Self::class_type_sig_to_member_type(c, dims),
+            TypeSignature::Class(c) => class_type_sig_to_member_type(c, dims),
             TypeSignature::Array(_) => unreachable!("peeled"),
         }
     }
 
-    fn peel_sig_array(ts: &TypeSignature, dims: u32) -> (&TypeSignature, u32) {
+    pub(crate) fn peel_sig_array(ts: &TypeSignature, dims: u32) -> (&TypeSignature, u32) {
         match ts {
-            TypeSignature::Array(inner) => Self::peel_sig_array(inner, dims + 1),
+            TypeSignature::Array(inner) => peel_sig_array(inner, dims + 1),
             other => (other, dims),
         }
     }
 
-    fn class_type_sig_to_member_type(c: &ClassTypeSignature, dims: u32) -> MemberType {
+    pub(crate) fn class_type_sig_to_member_type(c: &ClassTypeSignature, dims: u32) -> MemberType {
         // Fold the inner-class suffixes into one dotted name; the innermost component carries the args.
-        let mut fqn = jals_decompile::JavaType::internal_to_java(&c.name);
+        let mut fqn = jals_decompile::types::internal_to_java(&c.name);
         let mut args = &c.type_arguments;
         for suffix in &c.suffixes {
             fqn.push('.');
             fqn.push_str(&suffix.name);
             args = &suffix.type_arguments;
         }
-        Self::named(
+        named(
             &fqn,
             dims,
-            args.iter().map(Self::type_arg_to_member_type).collect(),
+            args.iter().map(type_arg_to_member_type).collect(),
         )
     }
 
-    fn type_arg_to_member_type(arg: &TypeArgument) -> MemberType {
+    pub(crate) fn type_arg_to_member_type(arg: &TypeArgument) -> MemberType {
         match arg {
-            TypeArgument::Exact(t) => Self::type_sig_to_member_type(t),
+            TypeArgument::Exact(t) => type_sig_to_member_type(t),
             // Wildcards are not modelled: kept as `Unknown` so positions stay aligned and assignment
             // stays lenient (matches the source path's treatment of `?`).
             TypeArgument::Any | TypeArgument::Extends(_) | TypeArgument::Super(_) => {
@@ -398,16 +401,16 @@ impl ClasspathLower {
         }
     }
 
-    fn named_from_internal(internal: &str) -> MemberType {
-        Self::named(
-            &jals_decompile::JavaType::internal_to_java(internal),
+    pub(crate) fn named_from_internal(internal: &str) -> MemberType {
+        named(
+            &jals_decompile::types::internal_to_java(internal),
             0,
             Vec::new(),
         )
     }
 
     /// Build a fully-qualified [`MemberType::Named`] (the `qualified` form so it resolves without imports).
-    fn named(fqn: &str, dims: u32, args: Vec<MemberType>) -> MemberType {
+    pub(crate) fn named(fqn: &str, dims: u32, args: Vec<MemberType>) -> MemberType {
         MemberType::Named {
             name: Fqn::simple_name_of(fqn).to_owned(),
             qualified: Some(fqn.to_owned()),
@@ -419,17 +422,18 @@ impl ClasspathLower {
 
 #[cfg(test)]
 mod tests {
+    use super::api;
     use alloc::vec::Vec;
 
     use jals_classfile::MethodSignature;
 
-    use super::{ClasspathLower, MemberType};
+    use super::MemberType;
 
     /// The bound names lowered from the type parameters of `signature`, in order.
     fn bounds(signature: &str) -> Vec<Vec<&'static str>> {
         let parsed =
             MethodSignature::parse(signature).expect("a signature javac could have written");
-        ClasspathLower::lower_type_params(&parsed.type_parameters)
+        api::lower_type_params(&parsed.type_parameters)
             .iter()
             .map(|param| {
                 param

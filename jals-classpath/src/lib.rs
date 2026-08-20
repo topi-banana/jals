@@ -30,18 +30,18 @@ mod zip;
 
 pub use io::{Fetcher, NetworkPolicy};
 pub use resolve::{
-    DependencyLocation, DependencyResolver, DependencySpec, ExpectedDigest,
-    ExternalArtifactResolver, ExternalArtifactSpec, ExternalLocator, MappingLocation,
-    MappingResolver, MappingSpec, ResolvedDependencies, ResolvedJar,
+    DependencyLocation, DependencySpec, ExpectedDigest, ExternalArtifactSpec, ExternalLocator,
+    MappingLocation, MappingSpec, ResolvedDependencies, ResolvedJar, dependency_resolver,
+    external_artifact_resolver, mapping_resolver,
 };
 pub use skeleton::{SkeletonGroup, SkeletonMode, Skeletons};
 
 #[cfg(feature = "archive")]
-pub use jar::JarPackage;
+pub use jar::write as write_jar;
 #[cfg(feature = "archive")]
 pub use load::{
     CachedJar, ClasspathCoverage, ClasspathEntry, ClasspathLoad, JarExtraction, SourceTree,
-    SourceTreeExtraction, SourceTreeLimits,
+    SourceTreeLimits, source_tree_extraction,
 };
 #[cfg(feature = "native")]
 pub use native::{NativeProjectPlan, ReqwestFetcher};
@@ -50,7 +50,7 @@ pub use project::{
     MemoryProjectPlan, ProjectInputOptions, ProjectInputPlan, ProjectInputs, SourceFile,
 };
 #[cfg(feature = "archive")]
-pub use remap::{JarMerge, JarRemap, NestedJar, RemapRequest};
+pub use remap::{RemapRequest, jar_merge, jar_remap, nested_jar};
 
 use alloc::string::String;
 use core::fmt;

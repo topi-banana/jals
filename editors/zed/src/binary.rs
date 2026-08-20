@@ -7,7 +7,7 @@ use zed_extension_api::{
     self as zed, LanguageServerId, LanguageServerInstallationStatus, Result, Worktree,
 };
 
-use crate::{cache::ArtifactCache, github::Github, platform::Platform, JALS_BINARY};
+use crate::{cache, github, platform, JALS_BINARY};
 
 /// Resolves the `jals` binary path, remembering the auto-downloaded build for the session.
 pub(crate) struct BinaryResolver {
@@ -40,7 +40,7 @@ impl BinaryResolver {
             return Ok(path);
         }
         if let Some(path) = &self.cached_binary_path {
-            if ArtifactCache::is_file(path) {
+            if cache::is_file(path) {
                 return Ok(path.clone());
             }
         }
@@ -59,12 +59,12 @@ impl BinaryResolver {
             &LanguageServerInstallationStatus::CheckingForUpdate,
         );
 
-        let artifact_name = Platform::artifact_name()?;
-        let downloaded = Github::latest_artifact_id(&artifact_name)
-            .and_then(|artifact_id| ArtifactCache::fetch_artifact(language_server_id, artifact_id));
+        let artifact_name = platform::artifact_name()?;
+        let downloaded = github::latest_artifact_id(&artifact_name)
+            .and_then(|artifact_id| cache::fetch_artifact(language_server_id, artifact_id));
         match downloaded {
             Ok(path) => Ok(path),
-            Err(err) => ArtifactCache::newest_cached_binary().ok_or_else(|| {
+            Err(err) => cache::newest_cached_binary().ok_or_else(|| {
                 format!(
                     "failed to fetch the latest `{artifact_name}` CI artifact ({err}), and no \
                      previously downloaded binary is cached. Install `jals` yourself (e.g. \

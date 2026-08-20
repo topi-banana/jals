@@ -91,7 +91,7 @@ impl FormatOutput {
         let errors = parse.errors().len();
         warnings.extend(parse.errors().iter().map(Warning::from_syntax_error));
 
-        let outcome = passes::Formatter::run(&parse.syntax(), src, errors, &style).await;
+        let outcome = passes::pipeline::run(&parse.syntax(), src, errors, &style).await;
         Self {
             vouched: outcome.vouched(),
             formatted: outcome.text(),

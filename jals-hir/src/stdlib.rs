@@ -415,10 +415,12 @@ public class UncheckedIOException extends RuntimeException {
 }
 ";
 
-/// The embedded standard-library signature stubs.
-pub(crate) struct Stdlib;
+pub(crate) use api::stub_sources;
 
-impl Stdlib {
+/// The embedded standard-library signature stubs.
+mod api {
+    use super::{JAVA_IO, JAVA_LANG, JAVA_UTIL};
+
     /// The embedded stub sources, each a self-contained compilation unit (`java.lang`, `java.util`,
     /// then `java.io`). Later units may reference earlier ones, but build order does not actually
     /// matter (members and supertypes are resolved in a second pass over all units); the list is kept

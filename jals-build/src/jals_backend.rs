@@ -18,8 +18,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use jals_hir::{FileAnalysis, FileId, FileSemantics, ProjectIndex, TypedFile};
-use jals_javac::lower::Compile;
-use jals_javac::wasm::CompileWasm;
+use jals_javac::lower;
+use jals_javac::wasm;
 use jals_storage::{ContentDigest, ProvenanceFold, RelativePath};
 use jals_syntax::{Parse, SyntaxNode};
 
@@ -125,7 +125,7 @@ impl JalsBackend {
             // wasm has no dynamic loading and no classpath, so the whole project is one module
             // rather than one artifact per declared type.
             Target::Wasm => {
-                return match CompileWasm::project(&typed_files, &index) {
+                return match wasm::project(&typed_files, &index) {
                     Ok(module) => match RelativePath::parse("project.wasm") {
                         Ok(path) => BackendOutcome::compiled(alloc::vec![(path, module)]),
                         Err(error) => BackendOutcome::failed(alloc::vec![format!("{error:?}")]),
@@ -137,7 +137,7 @@ impl JalsBackend {
 
         let mut classes = Vec::new();
         for (source, typed) in request.tree.iter().zip(&typed_files) {
-            match Compile::file(*typed, class_version) {
+            match lower::file(*typed, class_version) {
                 Ok(compiled) => {
                     for class in compiled {
                         // A type's internal name is also its output path, `/` separators and all.

@@ -24,9 +24,8 @@ use jals_editor::{Editor, ProjectLayout};
 use jals_exec::Exec;
 use jals_fmt::FormatOutput;
 use jals_hir::LoweredClasspath;
-use jals_project::{
-    BuildTaskHost, ProjectAssembly, ProjectScript, RootBuildScriptError, RootBuildScriptOptions,
-};
+use jals_project::assembly;
+use jals_project::{BuildTaskHost, ProjectScript, RootBuildScriptError, RootBuildScriptOptions};
 use jals_storage::{
     ArtifactCache, CodeTree, DirKey, Entry, FileKey, MemoryCache, MemorySource, MemoryStorage,
 };
@@ -256,7 +255,7 @@ impl Workspace {
                 clear_build_script_outputs(storage, &mut self.build_script_session).await?;
                 ProjectScript::skipped()
             } else {
-                let script = ProjectAssembly::script(
+                let script = assembly::script(
                     &Self::exec(),
                     // Build-task fetches go through the same CORS proxy as dependency
                     // resolution; without it every `tasks.fetch_*` to a non-permissive host

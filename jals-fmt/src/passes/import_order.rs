@@ -22,6 +22,8 @@
 //! google-java-format is `group` with `["static", "*"]` — static first, one blank line between,
 //! ASCII order within — which is Google Java Style §3.3.3.
 
+use crate::passes::import_granularity;
+use crate::passes::unused_imports;
 use alloc::borrow::ToOwned;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -30,8 +32,7 @@ use jals_config::fmt::{ImportGranularity, ImportOrder};
 use jals_syntax::SyntaxNode;
 use jals_syntax::ast::{AstNode, ImportDecl};
 
-use crate::passes::unused_imports::UnusedImports;
-use crate::passes::{Granularity, Unit};
+use crate::passes::Unit;
 use crate::style::Style;
 
 /// One import, with the sort keys the plan needs.
@@ -86,7 +87,7 @@ impl ImportPlan {
 
         let (kept, dropped): (Vec<&ImportDecl>, Vec<&ImportDecl>) = imports
             .iter()
-            .partition(|decl| used.is_none_or(|used| UnusedImports::is_used(decl, used)));
+            .partition(|decl| used.is_none_or(|used| unused_imports::is_used(decl, used)));
         let dropped: Vec<SyntaxNode> = dropped
             .into_iter()
             .map(|decl| decl.syntax().clone())
@@ -147,7 +148,7 @@ impl ImportPlan {
             })
             .collect();
 
-        let (entries, separators) = Granularity::apply(block, cfg.granularity)
+        let (entries, separators) = import_granularity::granularity::apply(block, cfg.granularity)
             .into_iter()
             .unzip();
 

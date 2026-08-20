@@ -15,7 +15,7 @@ mod encode;
 mod insn;
 mod lower;
 
-pub use lower::{CompileWasm, WasmError};
+pub use lower::{WasmError, project};
 
 #[cfg(test)]
 mod tests {

@@ -26,22 +26,22 @@ pub(crate) const RULE: RuleMeta = RuleMeta {
     category: Category::Suspicious,
     level: |config| config.suspicious.constant_condition.level,
     needs_clean_parse: false,
-    check: Checker::Analyzed(ConstantCondition::check),
+    check: Checker::Analyzed(api::check),
 };
 
 /// The `constant-condition` rule.
-struct ConstantCondition;
+mod api {
+    use super::{Config, FileAnalysis, Finding, LocalBoxFuture, String, Vec, format};
 
-impl ConstantCondition {
     /// The table-edge shim: boxes the async rule body once per file.
-    fn check<'a>(
+    pub(crate) fn check<'a>(
         analysis: &'a FileAnalysis,
         _config: &'a Config,
     ) -> LocalBoxFuture<'a, Vec<Finding>> {
-        alloc::boxed::Box::pin(Self::check_impl(analysis))
+        alloc::boxed::Box::pin(check_impl(analysis))
     }
 
-    async fn check_impl(analysis: &FileAnalysis) -> Vec<Finding> {
+    pub(crate) async fn check_impl(analysis: &FileAnalysis) -> Vec<Finding> {
         analysis
             .dead_ifs()
             .await

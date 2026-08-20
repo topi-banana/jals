@@ -14,12 +14,12 @@ use alloc::vec::Vec;
 use serde::{Deserialize, Deserializer};
 
 /// The shared setting-text reader, grouped so it is not a free function.
-struct Raw;
+pub(crate) mod api {
+    use super::{Deserialize, Deserializer, String, ToOwned};
 
-impl Raw {
     /// Read one setting's text, trimmed. Every value type below parses from this, which is what
     /// lets a model keyed by the XML name still read an `.editorconfig`.
-    fn read<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    pub(crate) fn read<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
         Ok(String::deserialize(deserializer)?.trim().to_owned())
     }
 }
@@ -59,7 +59,7 @@ impl IjWrap {
     where
         D: Deserializer<'de>,
     {
-        Ok(Self::parse(&Raw::read(deserializer)?))
+        Ok(Self::parse(&api::read(deserializer)?))
     }
 }
 
@@ -96,7 +96,7 @@ impl IjBraceStyle {
     where
         D: Deserializer<'de>,
     {
-        Ok(Self::parse(&Raw::read(deserializer)?))
+        Ok(Self::parse(&api::read(deserializer)?))
     }
 }
 
@@ -127,7 +127,7 @@ impl IjForceBraces {
     where
         D: Deserializer<'de>,
     {
-        Ok(Self::parse(&Raw::read(deserializer)?))
+        Ok(Self::parse(&api::read(deserializer)?))
     }
 }
 
@@ -201,7 +201,7 @@ impl PackageEntryTable {
     where
         D: Deserializer<'de>,
     {
-        let value = Raw::read(deserializer)?;
+        let value = api::read(deserializer)?;
         Ok(if value.is_empty() {
             None
         } else {

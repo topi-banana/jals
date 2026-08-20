@@ -15,10 +15,10 @@ use alloc::string::{String, ToString as _};
 use jals_hir::Ty;
 use jals_syntax::ast::{self, AstNode as _};
 
-use crate::desc::Descriptor;
+use crate::desc;
 use crate::facts::Facts;
 use crate::jvm::Assembler;
-use crate::lower::expr::Expr;
+use crate::lower::expr;
 use crate::lower::{Context, Emit, LowerError, Result};
 
 /// An assignable location, with the part of its address that lives on the operand stack already
@@ -90,7 +90,7 @@ impl Place {
                     let ty = context.typed.type_of_def(id).clone();
                     return Ok(Self::Local {
                         slot,
-                        descriptor: Descriptor::descriptor_of(&ty, context.index)?.to_string(),
+                        descriptor: desc::descriptor_of(&ty, context.index)?.to_string(),
                         ty,
                     });
                 }
@@ -98,11 +98,11 @@ impl Place {
             }
             // Nothing in the file declared it, which an *inherited* field never is.
             None => Facts::name_token(name.syntax()).and_then(|token| {
-                Expr::inherited_field(&jals_syntax::decoded_ident(&token), context)
+                expr::inherited_field(&jals_syntax::decoded_ident(&token), context)
             }),
         };
         let member = member.ok_or_else(text)?;
-        let (owner, field, descriptor) = Expr::field_ref(member, context)?;
+        let (owner, field, descriptor) = expr::field_ref(member, context)?;
         let ty = context.index.resolved_member_ty(member);
         if context.index.member(member).modifiers.is_static {
             Ok(Self::Static {
@@ -115,7 +115,7 @@ impl Place {
             // The receiver the source left unwritten. It is `this` for this class's own and inherited
             // fields, and the enclosing instance for an enclosing class's; either way it goes on the
             // stack now.
-            Expr::load_unqualified_receiver(context.index.member(member).owner, context, emit)?;
+            expr::load_unqualified_receiver(context.index.member(member).owner, context, emit)?;
             Ok(Self::Field {
                 owner,
                 name: field,
@@ -135,7 +135,7 @@ impl Place {
             .typed
             .field_target_of(Facts::span(access.syntax()))
             .ok_or_else(|| LowerError::Unresolved(access.field().unwrap_or_default()))?;
-        let (owner, name, descriptor) = Expr::field_ref(member, context)?;
+        let (owner, name, descriptor) = expr::field_ref(member, context)?;
         let ty = context.index.resolved_member_ty(member);
         if context.index.member(member).modifiers.is_static {
             return Ok(Self::Static {
@@ -148,7 +148,7 @@ impl Place {
         let receiver = access
             .receiver()
             .ok_or(LowerError::Unsupported("a field access with no receiver"))?;
-        Expr::lower(&receiver, context, emit)?;
+        expr::lower(&receiver, context, emit)?;
         Ok(Self::Field {
             owner,
             name,
@@ -174,13 +174,13 @@ impl Place {
         // The element type comes from the *array's* type rather than from the index expression's,
         // because the index expression is what is being assigned to and may have no recorded type of
         // its own until the assignment gives it one.
-        let Ty::Array(element) = Expr::type_of(array.syntax(), context)? else {
+        let Ty::Array(element) = expr::type_of(array.syntax(), context)? else {
             return Err(LowerError::Unsupported("an index into a non-array"));
         };
-        let descriptor = Descriptor::descriptor_of(&element, context.index)?.to_string();
+        let descriptor = desc::descriptor_of(&element, context.index)?.to_string();
 
-        Expr::lower(&array, context, emit)?;
-        Expr::lower_as(
+        expr::lower(&array, context, emit)?;
+        expr::lower_as(
             &subscript,
             &Ty::Primitive(jals_hir::Primitive::Int),
             context,

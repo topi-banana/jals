@@ -265,9 +265,9 @@ impl CommentMap {
         match tok.kind() {
             SyntaxKind::LINE_COMMENT => (tok.text().trim_end().into(), false),
             SyntaxKind::BLOCK_COMMENT => {
-                let text = ParameterComment::normalize(tok.text(), normalize_parameter_comments)
+                let text = api::normalize(tok.text(), normalize_parameter_comments)
                     .unwrap_or_else(|| tok.text().into());
-                (text, ParameterComment::labels_an_argument(tok.text()))
+                (text, api::labels_an_argument(tok.text()))
             }
             _ => (tok.text().into(), false),
         }
@@ -371,17 +371,17 @@ impl CommentMap {
 /// GJF rewrites it to the canonical `/* name= */` and glues it to that argument. Recognition is
 /// unconditional — such a comment always hugs — but the *rewrite* is gated, because changing a
 /// comment's text is a change the user has to ask for.
-struct ParameterComment;
+pub(crate) mod api {
+    use super::String;
 
-impl ParameterComment {
     /// The canonical form of `text` when it is a parameter-name comment, else `None`.
     ///
     /// When `normalize` is off the text is returned unchanged, so the comment still hugs its
     /// argument but keeps the spelling the author wrote.
-    fn normalize(text: &str, normalize: bool) -> Option<String> {
+    pub(crate) fn normalize(text: &str, normalize: bool) -> Option<String> {
         let body = text.strip_prefix("/*")?.strip_suffix("*/")?;
         let name = body.trim().strip_suffix('=')?.trim_end();
-        if name.is_empty() || !Self::is_identifier(name) {
+        if name.is_empty() || !is_identifier(name) {
             return None;
         }
         if !normalize {
@@ -400,7 +400,7 @@ impl ParameterComment {
     /// (`JavaInput.isParamComment` against `CommentsHelper.PARAMETER_COMMENT`): `/*foo-bar=*/`
     /// hugs the value it labels but is left spelled as the author wrote it, because `foo-bar` is
     /// not a parameter name.
-    fn labels_an_argument(text: &str) -> bool {
+    pub(crate) fn labels_an_argument(text: &str) -> bool {
         let Some(body) = text
             .strip_prefix("/*")
             .and_then(|body| body.strip_suffix("*/"))
@@ -418,7 +418,7 @@ impl ParameterComment {
 
     /// Whether `name` is a plain Java identifier — the label has to name a parameter, and
     /// anything else is prose that must not be rewritten.
-    fn is_identifier(name: &str) -> bool {
+    pub(crate) fn is_identifier(name: &str) -> bool {
         // A varargs parameter is named with its `...`: `PARAMETER_COMMENT`'s `(\Q...\E)?`.
         let name = name.strip_suffix("...").unwrap_or(name);
         let mut chars = name.chars();

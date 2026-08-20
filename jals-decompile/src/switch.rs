@@ -20,7 +20,7 @@ use jals_classfile::{
 
 use crate::expr::Expr;
 use crate::hierarchy::ClassHierarchy;
-use crate::literal::Literal;
+use crate::literal;
 
 /// The prefix of the synthetic ordinal-mapping array `javac` generates for an `enum` switch in the
 /// older, indirection-based lowering (`Outer$1.$SwitchMap$p$Color[c.ordinal()]`).
@@ -42,16 +42,21 @@ impl Labels {
     pub(crate) fn render(&self, key: i32) -> Option<String> {
         match self {
             Self::Int => Some(key.to_string()),
-            Self::Char => Literal::char_code_unit(i64::from(key)),
+            Self::Char => literal::char_code_unit(i64::from(key)),
             Self::Enum(constants) => constants.get(&key).cloned(),
         }
     }
 }
 
-/// Namespace for reading a lowered `switch` selector back to its source form.
-pub(crate) struct Subject;
+pub(crate) use api::recover;
 
-impl Subject {
+/// Namespace for reading a lowered `switch` selector back to its source form.
+mod api {
+    use super::{
+        AttributeBody, BTreeMap, ClassFile, ClassHierarchy, ConstantPool, ConstantPoolEntry, Expr,
+        Instruction, Labels, MethodInfo, SWITCH_MAP_PREFIX, String, format,
+    };
+
     /// Read the selector `expr` — the `int` the switch actually dispatches on, whose last
     /// contributing instruction is `last` — back to the expression and label vocabulary the source
     /// switched on.
@@ -68,11 +73,11 @@ impl Subject {
         // The `$SwitchMap$` lowering reads an ordinal through a synthetic array held by a synthetic
         // class. That class is never rendered into a skeleton, so the plain reading would reference
         // a type that does not exist there — decline instead.
-        if Self::indexes_a_switch_map(&expr) {
+        if indexes_a_switch_map(&expr) {
             return None;
         }
         // `enum`: the selector is `<receiver>.ordinal()`, and the keys are ordinals.
-        if let Some(owner) = last.and_then(|ins| Self::ordinal_call_owner(ins, pool)) {
+        if let Some(owner) = last.and_then(|ins| ordinal_call_owner(ins, pool)) {
             match hierarchy.class(&owner) {
                 // A class that resolves and is *not* an enum simply has an `ordinal()` method of
                 // its own, so this is an ordinary `int` switch — keep the plain reading rather
@@ -84,7 +89,7 @@ impl Subject {
                     let Expr::Call { recv, .. } = expr else {
                         return None;
                     };
-                    let constants = Self::enum_constants(&owner, hierarchy)?;
+                    let constants = enum_constants(&owner, hierarchy)?;
                     return Some((*recv?, Labels::Enum(constants)));
                 }
             }
@@ -93,7 +98,7 @@ impl Subject {
     }
 
     /// Whether the selector reads an element of a `$SwitchMap$…` array.
-    fn indexes_a_switch_map(expr: &Expr) -> bool {
+    pub(crate) fn indexes_a_switch_map(expr: &Expr) -> bool {
         let Expr::Index { array, .. } = expr else {
             return false;
         };
@@ -101,7 +106,7 @@ impl Subject {
     }
 
     /// The owner of `ins` when it is an `invokevirtual …ordinal()I`.
-    fn ordinal_call_owner(ins: &Instruction, pool: &ConstantPool) -> Option<String> {
+    pub(crate) fn ordinal_call_owner(ins: &Instruction, pool: &ConstantPool) -> Option<String> {
         let Instruction::InvokeVirtual(index) = ins else {
             return None;
         };
@@ -134,7 +139,7 @@ impl Subject {
     /// pushed name to equal the field it is stored into is what makes this authoritative rather than
     /// an assumption about emission order: a class whose `<clinit>` does not match that shape
     /// exactly yields `None`, and the method falls back.
-    fn enum_constants(
+    pub(crate) fn enum_constants(
         owner: &str,
         hierarchy: &ClassHierarchy<'_>,
     ) -> Option<BTreeMap<i32, String>> {
@@ -142,7 +147,7 @@ impl Subject {
         if !cf.access_flags.is_enum() {
             return None;
         }
-        let code = Self::clinit_code(cf)?;
+        let code = clinit_code(cf)?;
         let descriptor = format!("L{owner};");
         let pool = &cf.constant_pool;
 
@@ -152,20 +157,20 @@ impl Subject {
         // A complete `(name, ordinal)`, awaiting the `putstatic` that stores the constant.
         let mut pending: Option<(String, i32)> = None;
         for ins in code {
-            if let Some(name) = Self::string_constant(ins, pool) {
+            if let Some(name) = string_constant(ins, pool) {
                 named = Some(name);
                 pending = None;
                 continue;
             }
             if let Some(name) = named.take() {
                 // A name not followed by an ordinal is not a constant initializer.
-                pending = Self::int_constant(ins).map(|ordinal| (name, ordinal));
+                pending = int_constant(ins).map(|ordinal| (name, ordinal));
                 continue;
             }
             let Instruction::PutStatic(index) = ins else {
                 continue;
             };
-            let Some((field, field_descriptor)) = Self::field_ref(*index, owner, pool) else {
+            let Some((field, field_descriptor)) = field_ref(*index, owner, pool) else {
                 continue;
             };
             // `$VALUES` and any other static of a different type are not constants.
@@ -181,7 +186,7 @@ impl Subject {
     }
 
     /// The `Code` of the class initializer.
-    fn clinit_code(cf: &ClassFile) -> Option<&[Instruction]> {
+    pub(crate) fn clinit_code(cf: &ClassFile) -> Option<&[Instruction]> {
         let clinit: &MethodInfo = cf
             .methods
             .iter()
@@ -193,7 +198,11 @@ impl Subject {
     }
 
     /// The `(name, descriptor)` of a `Fieldref` whose owner is `owner`.
-    fn field_ref(index: u16, owner: &str, pool: &ConstantPool) -> Option<(String, String)> {
+    pub(crate) fn field_ref(
+        index: u16,
+        owner: &str,
+        pool: &ConstantPool,
+    ) -> Option<(String, String)> {
         let ConstantPoolEntry::FieldRef {
             class_index,
             name_and_type_index,
@@ -218,7 +227,7 @@ impl Subject {
     }
 
     /// The `String` an `ldc` / `ldc_w` pushes.
-    fn string_constant(ins: &Instruction, pool: &ConstantPool) -> Option<String> {
+    pub(crate) fn string_constant(ins: &Instruction, pool: &ConstantPool) -> Option<String> {
         let index = match ins {
             Instruction::Ldc(i) => u16::from(*i),
             Instruction::LdcW(i) => *i,
@@ -231,7 +240,7 @@ impl Subject {
     }
 
     /// The value an `int`-pushing constant instruction pushes.
-    fn int_constant(ins: &Instruction) -> Option<i32> {
+    pub(crate) fn int_constant(ins: &Instruction) -> Option<i32> {
         match ins {
             Instruction::IconstM1 => Some(-1),
             Instruction::Iconst0 => Some(0),

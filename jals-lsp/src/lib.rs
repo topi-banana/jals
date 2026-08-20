@@ -22,4 +22,4 @@ mod host;
 mod server;
 mod state;
 
-pub use server::Server;
+pub use server::serve;

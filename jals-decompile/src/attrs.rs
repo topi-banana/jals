@@ -1,8 +1,11 @@
-//! Reading the class-file attributes a signature skeleton needs but bytecode analysis does not:
-//! a field's `ConstantValue` initializer, a method's declared checked exceptions (`Exceptions`), and
-//! its real parameter names (`MethodParameters` / `LocalVariableTable`). Every function is total and
-//! conservative — it returns `None`/empty when it cannot produce something a Java parser accepts, so
-//! the caller falls back to a safe form (no initializer, `argN` names) and the output stays valid.
+//! The class-file attributes a signature skeleton needs but bytecode analysis does not.
+//!
+//! A field's `ConstantValue` initializer, a method's declared checked exceptions
+//! (`Exceptions`), and its real parameter names (`MethodParameters` / `LocalVariableTable`).
+//!
+//! Every function is total and conservative — it returns `None`/empty when it cannot produce
+//! something a Java parser accepts, so the caller falls back to a safe form (no initializer, `argN`
+//! names) and the output stays valid.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -14,19 +17,31 @@ use jals_classfile::{
     FieldType, LocalVariableEntry, MethodDescriptor, MethodInfo,
 };
 
-use crate::literal::Literal;
-use crate::types::JavaType;
+use crate::literal;
+use crate::types;
+
+pub use api::{
+    constant_value_initializer, declared_throws, is_java_identifier, parameter_names,
+    signature_string,
+};
+pub(crate) use api::{
+    local_variable, local_variable_at, local_variable_table, parameter_slots, slot_confined_to,
+};
 
 /// Namespace for the class-file attribute readers a signature skeleton needs but bytecode analysis
 /// does not.
-pub struct Attrs;
+mod api {
+    use super::{
+        Attribute, AttributeBody, BaseType, CodeAttribute, ConstantPool, ConstantPoolEntry,
+        FieldInfo, FieldType, LocalVariableEntry, MethodDescriptor, MethodInfo, Range, String,
+        ToString, Vec, format, literal, types,
+    };
 
-impl Attrs {
     /// Whether `s` is a word a Java parser cannot read as a declaration name: one of the 50
     /// reserved keywords, a literal keyword (`true`/`false`/`null`), the bare `_` (reserved since
     /// Java 9), or a restricted/contextual keyword that is unsafe in that position (`var`, `yield`,
     /// `record`, `sealed`, `permits`, `when`).
-    fn is_java_keyword(s: &str) -> bool {
+    pub(crate) fn is_java_keyword(s: &str) -> bool {
         matches!(
             s,
             "_" | "abstract"
@@ -112,7 +127,7 @@ impl Attrs {
             (ConstantPoolEntry::Integer(0), FieldType::Base(BaseType::Boolean)) => "false".into(),
             (ConstantPoolEntry::Integer(1), FieldType::Base(BaseType::Boolean)) => "true".into(),
             (ConstantPoolEntry::Integer(v), FieldType::Base(BaseType::Char)) => {
-                Literal::char_code_unit(i64::from(*v))?
+                literal::char_code_unit(i64::from(*v))?
             }
             (ConstantPoolEntry::Integer(v), FieldType::Base(BaseType::Byte))
                 if i8::try_from(*v).is_ok() =>
@@ -127,15 +142,15 @@ impl Attrs {
             (ConstantPoolEntry::Integer(v), FieldType::Base(BaseType::Int)) => v.to_string(),
             (ConstantPoolEntry::Long(v), FieldType::Base(BaseType::Long)) => format!("{v}L"),
             (ConstantPoolEntry::Float(v), FieldType::Base(BaseType::Float)) => {
-                Literal::float_literal(*v)
+                literal::float_literal(*v)
             }
             (ConstantPoolEntry::Double(v), FieldType::Base(BaseType::Double)) => {
-                Literal::double_literal(*v)
+                literal::double_literal(*v)
             }
             (ConstantPoolEntry::String { string_index }, FieldType::Object(name))
                 if name == "java/lang/String" =>
             {
-                Literal::string_literal(&pool.utf8(*string_index)?)
+                literal::string_literal(&pool.utf8(*string_index)?)
             }
             _ => return None,
         })
@@ -169,13 +184,15 @@ impl Attrs {
             .into_iter()
             .flatten()
             .filter_map(|&idx| pool.class_name(idx))
-            .map(|name| JavaType::internal_to_java(&name))
+            .map(|name| types::internal_to_java(&name))
             .collect()
     }
 
-    /// A method's real source parameter names, in order, or `None` if they cannot be recovered
-    /// confidently (no debug info, a count mismatch, a name that is not a valid identifier, or a
-    /// duplicate name — Java forbids two parameters sharing one name).
+    /// A method's real source parameter names, in order.
+    ///
+    /// `None` when they cannot be recovered confidently: no debug info, a count mismatch, a name
+    /// that is not a valid identifier, or a duplicate name — Java forbids two parameters sharing
+    /// one name.
     ///
     /// `arity` is the number of source parameters the caller renders; the result, when `Some`, has
     /// that length.
@@ -188,13 +205,13 @@ impl Attrs {
         if arity == 0 {
             return Some(Vec::new());
         }
-        Self::params_from_method_parameters(method, pool, arity)
-            .or_else(|| Self::params_from_local_variable_table(method, pool, is_static, arity))
+        params_from_method_parameters(method, pool, arity)
+            .or_else(|| params_from_local_variable_table(method, pool, is_static, arity))
     }
 
     /// Names from the `MethodParameters` attribute (`-parameters`): one entry per parameter, in
     /// order.
-    fn params_from_method_parameters(
+    pub(crate) fn params_from_method_parameters(
         method: &MethodInfo,
         pool: &ConstantPool,
         arity: usize,
@@ -212,7 +229,7 @@ impl Attrs {
                 return None;
             }
             let name = pool.utf8(entry.name_index)?.into_owned();
-            if !Self::is_java_identifier(&name) || names.contains(&name) {
+            if !is_java_identifier(&name) || names.contains(&name) {
                 return None;
             }
             names.push(name);
@@ -222,7 +239,7 @@ impl Attrs {
 
     /// Names from the `Code` attribute's `LocalVariableTable` (`-g`): parameters occupy the first
     /// local slots (slot 0 is `this` for an instance method; a `long`/`double` takes two slots).
-    fn params_from_local_variable_table(
+    pub(crate) fn params_from_local_variable_table(
         method: &MethodInfo,
         pool: &ConstantPool,
         is_static: bool,
@@ -239,15 +256,15 @@ impl Attrs {
             AttributeBody::Code(code) => Some(code),
             _ => None,
         })?;
-        let table = Self::local_variable_table(code)?;
+        let table = local_variable_table(code)?;
         let mut names = Vec::with_capacity(arity);
-        for (slot, _param) in Self::parameter_slots(&params, is_static) {
+        for (slot, _param) in parameter_slots(&params, is_static) {
             let name = table
                 .iter()
                 .find(|e| e.index == slot && e.start_pc == 0)
                 .and_then(|e| pool.utf8(e.name_index))
                 .map(alloc::borrow::Cow::into_owned)?;
-            if !Self::is_java_identifier(&name) || names.contains(&name) {
+            if !is_java_identifier(&name) || names.contains(&name) {
                 return None;
             }
             names.push(name);
@@ -304,7 +321,7 @@ impl Attrs {
         let mut resolved: Option<(String, FieldType)> = None;
         for entry in table.iter().filter(|e| e.index == slot) {
             let name = pool.utf8(entry.name_index)?.into_owned();
-            if !Self::is_java_identifier(&name) {
+            if !is_java_identifier(&name) {
                 return None;
             }
             let descriptor = pool.utf8(entry.descriptor_index)?;
@@ -323,7 +340,7 @@ impl Attrs {
     /// A catch parameter is the one local whose birth offset is known exactly — a handler's entry
     /// `astore` is its first instruction, so the entry starts right after it — and that anchor is
     /// what tells sibling clauses apart. `catch (IOException e)` and `catch (RuntimeException e)`
-    /// routinely share one slot with one entry each, which [`Attrs::local_variable`] reports as an
+    /// routinely share one slot with one entry each, which [`api::local_variable`] reports as an
     /// ambiguous reuse; keying on the start offset picks the right one without loosening that rule
     /// for ordinary locals.
     ///
@@ -343,7 +360,7 @@ impl Attrs {
             .filter(|e| e.index == slot && usize::from(e.start_pc) == start_pc)
         {
             let name = pool.utf8(entry.name_index)?.into_owned();
-            if !Self::is_java_identifier(&name) {
+            if !is_java_identifier(&name) {
                 return None;
             }
             let descriptor = pool.utf8(entry.descriptor_index)?;
@@ -381,12 +398,12 @@ impl Attrs {
         seen
     }
 
-    /// A conservative Java-identifier check, so a recovered name can never break the parse: the
-    /// name must pass the JLS §3.8 identifier spelling *and* not be a keyword. A JVM-legal name
-    /// that Java reserves (`class`, `null`, `var`, …) is rejected, since the caller has a safe
-    /// fallback but no way to escape it.
+    /// A conservative Java-identifier check, so a recovered name can never break the parse: the name must pass the JLS §3.8 identifier spelling *and* not be a keyword.
+    ///
+    /// A JVM-legal name that Java reserves (`class`, `null`, `var`, …) is rejected, since the
+    /// caller has a safe fallback but no way to escape it.
     pub fn is_java_identifier(s: &str) -> bool {
-        if Self::is_java_keyword(s) {
+        if is_java_keyword(s) {
             return false;
         }
         let mut chars = s.chars();
@@ -404,12 +421,12 @@ mod tests {
 
     #[test]
     fn identifier_check_rejects_non_identifiers() {
-        assert!(Attrs::is_java_identifier("name"));
-        assert!(Attrs::is_java_identifier("$1"));
-        assert!(Attrs::is_java_identifier("_x"));
-        assert!(!Attrs::is_java_identifier(""));
-        assert!(!Attrs::is_java_identifier("1x"));
-        assert!(!Attrs::is_java_identifier("a-b"));
+        assert!(api::is_java_identifier("name"));
+        assert!(api::is_java_identifier("$1"));
+        assert!(api::is_java_identifier("_x"));
+        assert!(!api::is_java_identifier(""));
+        assert!(!api::is_java_identifier("1x"));
+        assert!(!api::is_java_identifier("a-b"));
     }
 
     #[test]
@@ -439,7 +456,7 @@ mod tests {
             "permits",
             "when",
         ] {
-            assert!(!Attrs::is_java_identifier(kw), "should reject {kw:?}");
+            assert!(!api::is_java_identifier(kw), "should reject {kw:?}");
         }
     }
 
@@ -457,7 +474,7 @@ mod tests {
             "yieldOnce",
             "permitsAll",
         ] {
-            assert!(Attrs::is_java_identifier(ok), "should accept {ok:?}");
+            assert!(api::is_java_identifier(ok), "should accept {ok:?}");
         }
     }
 }

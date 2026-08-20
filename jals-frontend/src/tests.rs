@@ -14,37 +14,37 @@ use jals_exec::block_on_inline;
 use jals_storage::{ArtifactCache, CacheKey, MemoryCache, RelativePath};
 
 use crate::dialect::{DialectFlags, DialectFrontend};
-use crate::driver::Driver;
+use crate::driver;
 use crate::frontend::Frontend;
 use crate::ir::{FrontendDiagnostic, Ir, IrFile, LoweredFile, LoweredTree};
-use crate::key::FrontendKey;
+use crate::key;
 use crate::selection::FrontendSelection;
 use crate::vanilla::VanillaFrontend;
 
 /// Fixture namespace for these tests.
-struct Fixture;
+mod api {
+    use super::*;
 
-impl Fixture {
-    fn file(path: &str, bytes: &[u8]) -> IrFile {
+    pub(super) fn file(path: &str, bytes: &[u8]) -> IrFile {
         IrFile::new(RelativePath::parse(path).unwrap(), Arc::from(bytes))
     }
 
     /// Two sources, in canonical order.
-    fn sources() -> Vec<IrFile> {
+    pub(super) fn sources() -> Vec<IrFile> {
         let mut files = vec![
-            Self::file("src/main/java/Main.java", b"class Main {}\n"),
-            Self::file("src/main/java/Util.java", b"class Util {}\n"),
+            file("src/main/java/Main.java", b"class Main {}\n"),
+            file("src/main/java/Util.java", b"class Util {}\n"),
         ];
-        FrontendKey::canonical_order(&mut files);
+        key::canonical_order(&mut files);
         files
     }
 }
 
 #[test]
 fn vanilla_emits_every_input_unchanged() {
-    let files = Fixture::sources();
+    let files = api::sources();
     let mut cache = ArtifactCache::new(MemoryCache::default());
-    let lowered = block_on_inline(Driver::lower(&VanillaFrontend, &mut cache, &files)).unwrap();
+    let lowered = block_on_inline(driver::lower(&VanillaFrontend, &mut cache, &files)).unwrap();
 
     assert_eq!(lowered.tree.files().len(), files.len());
     for (input, output) in files.iter().zip(lowered.tree.files()) {
@@ -61,9 +61,9 @@ fn vanilla_emits_every_input_unchanged() {
 /// rather than a silent invalidation that only surfaces as mysteriously cold rebuilds.
 #[test]
 fn frontend_out_key_is_stable() {
-    let files = Fixture::sources();
+    let files = api::sources();
     let mut cache = ArtifactCache::new(MemoryCache::default());
-    let lowered = block_on_inline(Driver::lower(&VanillaFrontend, &mut cache, &files)).unwrap();
+    let lowered = block_on_inline(driver::lower(&VanillaFrontend, &mut cache, &files)).unwrap();
 
     let keys: Vec<_> = lowered
         .tree
@@ -85,9 +85,9 @@ fn frontend_out_key_is_stable() {
 
 #[test]
 fn tree_digest_is_independent_of_construction_order() {
-    let files = Fixture::sources();
+    let files = api::sources();
     let mut cache = ArtifactCache::new(MemoryCache::default());
-    let lowered = block_on_inline(Driver::lower(&VanillaFrontend, &mut cache, &files)).unwrap();
+    let lowered = block_on_inline(driver::lower(&VanillaFrontend, &mut cache, &files)).unwrap();
 
     let mut reversed: Vec<LoweredFile> = lowered.tree.files().to_vec();
     reversed.reverse();
@@ -102,22 +102,19 @@ fn tree_digest_is_independent_of_construction_order() {
 /// machine miss on another.
 #[test]
 fn project_digest_is_independent_of_discovery_order() {
-    let ordered = Fixture::sources();
+    let ordered = api::sources();
     let mut shuffled = ordered.clone();
     shuffled.reverse();
-    FrontendKey::canonical_order(&mut shuffled);
+    key::canonical_order(&mut shuffled);
 
-    assert_eq!(
-        FrontendKey::project(&ordered),
-        FrontendKey::project(&shuffled)
-    );
+    assert_eq!(key::project(&ordered), key::project(&shuffled));
 }
 
 #[test]
 fn tree_manifest_round_trips() {
-    let files = Fixture::sources();
+    let files = api::sources();
     let mut cache = ArtifactCache::new(MemoryCache::default());
-    let lowered = block_on_inline(Driver::lower(&VanillaFrontend, &mut cache, &files)).unwrap();
+    let lowered = block_on_inline(driver::lower(&VanillaFrontend, &mut cache, &files)).unwrap();
 
     let encoded = lowered.tree.encode();
     assert_eq!(LoweredTree::decode(&encoded).unwrap(), lowered.tree);
@@ -125,9 +122,9 @@ fn tree_manifest_round_trips() {
 
 #[test]
 fn a_damaged_manifest_is_rejected_rather_than_misread() {
-    let files = Fixture::sources();
+    let files = api::sources();
     let mut cache = ArtifactCache::new(MemoryCache::default());
-    let lowered = block_on_inline(Driver::lower(&VanillaFrontend, &mut cache, &files)).unwrap();
+    let lowered = block_on_inline(driver::lower(&VanillaFrontend, &mut cache, &files)).unwrap();
 
     let encoded = lowered.tree.encode();
     for cut in 0..encoded.len() {
@@ -167,17 +164,17 @@ fn second_lowering_restores_from_cache_without_running_the_frontend() {
         }
     }
 
-    let files = Fixture::sources();
+    let files = api::sources();
     let mut cache = ArtifactCache::new(MemoryCache::default());
     let frontend = RunsOnce {
         inner: VanillaFrontend,
         runs: Cell::new(0),
     };
 
-    let cold = block_on_inline(Driver::lower(&frontend, &mut cache, &files)).unwrap();
+    let cold = block_on_inline(driver::lower(&frontend, &mut cache, &files)).unwrap();
     assert!(!cold.cached);
 
-    let warm = block_on_inline(Driver::lower(&frontend, &mut cache, &files)).unwrap();
+    let warm = block_on_inline(driver::lower(&frontend, &mut cache, &files)).unwrap();
     assert!(warm.cached);
     assert_eq!(cold.tree, warm.tree);
 }
@@ -186,13 +183,13 @@ fn second_lowering_restores_from_cache_without_running_the_frontend() {
 /// per-file invalidation a frontend earns by declaring `IrLevel::Bytes`.
 #[test]
 fn editing_one_file_leaves_the_other_key_unchanged() {
-    let before = Fixture::sources();
+    let before = api::sources();
     let mut after = before.clone();
-    after[0] = Fixture::file("src/main/java/Main.java", b"class Main { int x; }\n");
+    after[0] = api::file("src/main/java/Main.java", b"class Main { int x; }\n");
 
     let mut cache = ArtifactCache::new(MemoryCache::default());
-    let first = block_on_inline(Driver::lower(&VanillaFrontend, &mut cache, &before)).unwrap();
-    let second = block_on_inline(Driver::lower(&VanillaFrontend, &mut cache, &after)).unwrap();
+    let first = block_on_inline(driver::lower(&VanillaFrontend, &mut cache, &before)).unwrap();
+    let second = block_on_inline(driver::lower(&VanillaFrontend, &mut cache, &after)).unwrap();
 
     let changed = &first.tree.files()[0];
     let changed_after = &second.tree.files()[0];
@@ -216,7 +213,7 @@ mod helpers {
 
     /// Run the dialect frontend (grouped imports on) over one source and return the emitted bytes.
     fn desugar(src: &str) -> Vec<u8> {
-        let files = vec![Fixture::file("src/main/java/Main.java", src.as_bytes())];
+        let files = vec![api::file("src/main/java/Main.java", src.as_bytes())];
         let frontend = DialectFrontend::new(DialectFlags {
             grouped_imports: true,
             ..DialectFlags::default()
@@ -239,7 +236,7 @@ mod helpers {
     /// Run the dialect frontend over a source expected to fail, returning its diagnostics and the
     /// bytes it emitted.
     pub(super) fn desugar_failing(src: &str) -> (Vec<FrontendDiagnostic>, Vec<u8>) {
-        let files = vec![Fixture::file("src/main/java/Main.java", src.as_bytes())];
+        let files = vec![api::file("src/main/java/Main.java", src.as_bytes())];
         let frontend = DialectFrontend::new(DialectFlags {
             grouped_imports: true,
             ..DialectFlags::default()
@@ -430,7 +427,7 @@ mod attr_helpers {
     /// Run the dialect frontend (attributes on, grouped imports off) over one source with the
     /// given enabled build features and return the emitted source.
     pub(super) fn strip(src: &str, features: &[&str]) -> alloc::string::String {
-        let files = vec![Fixture::file("src/main/java/Main.java", src.as_bytes())];
+        let files = vec![api::file("src/main/java/Main.java", src.as_bytes())];
         let frontend = DialectFrontend::new(attr_flags(features));
         let output = block_on_inline(frontend.run(Ir::Bytes { files: &files })).unwrap();
         assert!(
@@ -448,7 +445,7 @@ mod attr_helpers {
         src: &str,
         features: &[&str],
     ) -> (Vec<alloc::string::String>, Vec<u8>) {
-        let files = vec![Fixture::file("src/main/java/Main.java", src.as_bytes())];
+        let files = vec![api::file("src/main/java/Main.java", src.as_bytes())];
         let frontend = DialectFrontend::new(attr_flags(features));
         let output = block_on_inline(frontend.run(Ir::Bytes { files: &files })).unwrap();
         assert!(
@@ -681,7 +678,7 @@ fn cfg_false_grouped_import_is_blanked_not_expanded() {
         grouped_imports: true,
         ..attr_flags(&[])
     });
-    let files = vec![Fixture::file("src/main/java/Main.java", src.as_bytes())];
+    let files = vec![api::file("src/main/java/Main.java", src.as_bytes())];
     let output = block_on_inline(frontend.run(Ir::Bytes { files: &files })).unwrap();
     assert!(!output.has_errors(), "{:?}", output.diagnostics);
     let out = alloc::string::String::from_utf8(output.files.into_iter().next().unwrap().1).unwrap();
@@ -697,7 +694,7 @@ fn grouped_import_and_attribute_rewrite_in_one_pass() {
         grouped_imports: true,
         ..attr_flags(&["x"])
     });
-    let files = vec![Fixture::file("src/main/java/Main.java", src.as_bytes())];
+    let files = vec![api::file("src/main/java/Main.java", src.as_bytes())];
     let output = block_on_inline(frontend.run(Ir::Bytes { files: &files })).unwrap();
     assert!(!output.has_errors(), "{:?}", output.diagnostics);
     let out = alloc::string::String::from_utf8(output.files.into_iter().next().unwrap().1).unwrap();
@@ -743,7 +740,7 @@ fn attributes_off_passes_attribute_syntax_through() {
         grouped_imports: true,
         ..DialectFlags::default()
     });
-    let files = vec![Fixture::file("src/main/java/Main.java", src.as_bytes())];
+    let files = vec![api::file("src/main/java/Main.java", src.as_bytes())];
     let output = block_on_inline(frontend.run(Ir::Bytes { files: &files })).unwrap();
     assert!(!output.has_errors());
     assert_eq!(output.files[0].1, src.as_bytes());
@@ -765,13 +762,13 @@ mod selection_helpers {
         names.iter().map(|name| (*name).to_owned()).collect()
     }
 
-    /// Lower [`Fixture::sources`] through `selection` and return the published keys.
+    /// Lower [`api::sources`] through `selection` and return the published keys.
     ///
     /// The keys — not the emitted bytes — are what a selection has to get right: `caps().id` and
     /// `config_digest()` are folded into every one of them, so two selections that agree on the
     /// output but disagree here silently invalidate a project's whole cache.
     pub(super) fn keys(selection: &FrontendSelection) -> Vec<CacheKey> {
-        keys_of(selection, Fixture::sources())
+        keys_of(selection, api::sources())
     }
 
     pub(super) fn keys_of(selection: &FrontendSelection, files: Vec<IrFile>) -> Vec<CacheKey> {
@@ -864,7 +861,7 @@ fn lowering_imposes_canonical_order_on_its_input() {
     // sorted. The seam sorts, so no caller has an order to get right and a cache entry built on
     // one machine is valid on another.
     let selection = FrontendSelection::vanilla();
-    let ordered = Fixture::sources();
+    let ordered = api::sources();
     let mut shuffled = ordered.clone();
     shuffled.reverse();
 

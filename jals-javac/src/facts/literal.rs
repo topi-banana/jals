@@ -35,10 +35,12 @@ pub(crate) enum Width {
     Long,
 }
 
-/// The value a literal token spells.
-pub(crate) struct Literal;
+pub(crate) use api::{character, floating, integer, text};
 
-impl Literal {
+/// The value a literal token spells.
+mod api {
+    use super::{FactError, Result, String, Width};
+
     /// An integer literal's value and width, in whichever base its prefix names, with `_` separators
     /// removed.
     pub(crate) fn integer(text: &str) -> Result<(i64, Width)> {
@@ -79,7 +81,7 @@ impl Literal {
     /// `trim_end_matches` took every trailing quote, so `"a\""` — whose last two characters are an
     /// escaped quote and the closing one — lost both and compiled to `a`. An unterminated literal the
     /// lexer recovered still yields its text rather than nothing.
-    fn unquote(text: &str) -> &str {
+    pub(crate) fn unquote(text: &str) -> &str {
         let open = text
             .strip_prefix('"')
             .or_else(|| text.strip_prefix('\''))
@@ -95,7 +97,7 @@ impl Literal {
     /// the backslash — the old fallback — turned `A` into `u0041` and `\101` into `101`, which is a
     /// string constant that is simply wrong, in a class file nothing downstream checks.
     pub(crate) fn text(source: &str) -> Result<String> {
-        let inner = Self::unquote(source);
+        let inner = unquote(source);
         let unknown = || FactError::Unsupported("an escape sequence this lowering cannot read");
         let mut out = String::with_capacity(inner.len());
         let mut chars = inner.chars().peekable();
@@ -150,7 +152,7 @@ impl Literal {
 
     /// The single character a `char` literal spells.
     ///
-    /// Delegated to [`text`](Self::text) rather than written again, so an escape that cannot be read
+    /// Delegated to [`text`](text) rather than written again, so an escape that cannot be read
     /// is reported in the *same* words whichever kind of literal held it — a wording both backends'
     /// error types carry verbatim and the integration tests match by exact text.
     ///
@@ -158,7 +160,7 @@ impl Literal {
     /// the JVM annotation element-value folder, and the wasm global and expression paths — and each
     /// invented its own answer for the empty case, two of them silently falling back to a default.
     pub(crate) fn character(text: &str) -> Result<char> {
-        Self::text(text)?
+        self::text(text)?
             .chars()
             .next()
             .ok_or(FactError::Unsupported("an empty character literal"))
@@ -167,7 +169,7 @@ impl Literal {
 
 #[cfg(test)]
 mod tests {
-    use super::{Literal, Width};
+    use super::{Width, api};
     use crate::facts::FactError;
 
     /// These run where the end-to-end tests do not.
@@ -184,13 +186,13 @@ mod tests {
     /// first and falling back to unsigned is what accepts it.
     #[test]
     fn an_integer_literal_is_read_in_the_base_its_prefix_names() {
-        assert_eq!(Literal::integer("10"), Ok((10, Width::Int)));
-        assert_eq!(Literal::integer("0x1F"), Ok((31, Width::Int)));
-        assert_eq!(Literal::integer("0b1010"), Ok((10, Width::Int)));
-        assert_eq!(Literal::integer("017"), Ok((15, Width::Int)));
-        assert_eq!(Literal::integer("1_000_000"), Ok((1_000_000, Width::Int)));
+        assert_eq!(api::integer("10"), Ok((10, Width::Int)));
+        assert_eq!(api::integer("0x1F"), Ok((31, Width::Int)));
+        assert_eq!(api::integer("0b1010"), Ok((10, Width::Int)));
+        assert_eq!(api::integer("017"), Ok((15, Width::Int)));
+        assert_eq!(api::integer("1_000_000"), Ok((1_000_000, Width::Int)));
         assert_eq!(
-            Literal::integer("0x8000_0000_0000_0000L"),
+            api::integer("0x8000_0000_0000_0000L"),
             Ok((i64::MIN, Width::Long))
         );
     }
@@ -204,13 +206,13 @@ mod tests {
     /// this only ever rejects something the lexer should not have produced.
     #[test]
     fn a_suffix_is_stripped_here_and_names_the_width() {
-        assert_eq!(Literal::integer("1L"), Ok((1, Width::Long)));
-        assert_eq!(Literal::integer("1l"), Ok((1, Width::Long)));
-        assert_eq!(Literal::integer("1"), Ok((1, Width::Int)));
-        assert_eq!(Literal::floating("1.5f"), Ok((1.5, true)));
-        assert_eq!(Literal::floating("1.5F"), Ok((1.5, true)));
-        assert_eq!(Literal::floating("1.5"), Ok((1.5, false)));
-        assert_eq!(Literal::floating("1_0.5d"), Ok((10.5, false)));
+        assert_eq!(api::integer("1L"), Ok((1, Width::Long)));
+        assert_eq!(api::integer("1l"), Ok((1, Width::Long)));
+        assert_eq!(api::integer("1"), Ok((1, Width::Int)));
+        assert_eq!(api::floating("1.5f"), Ok((1.5, true)));
+        assert_eq!(api::floating("1.5F"), Ok((1.5, true)));
+        assert_eq!(api::floating("1.5"), Ok((1.5, false)));
+        assert_eq!(api::floating("1_0.5d"), Ok((10.5, false)));
     }
 
     /// Exactly **one** quote comes off each end.
@@ -221,10 +223,10 @@ mod tests {
     /// hands this reader a token it already knows is broken.
     #[test]
     fn exactly_one_quote_comes_off_each_end() {
-        assert_eq!(Literal::text(r#""a\"""#).as_deref(), Ok("a\""));
-        assert_eq!(Literal::text(r#""""#).as_deref(), Ok(""));
-        assert_eq!(Literal::text(r#""ab"#).as_deref(), Ok("ab"));
-        assert_eq!(Literal::text("'a'").as_deref(), Ok("a"));
+        assert_eq!(api::text(r#""a\"""#).as_deref(), Ok("a\""));
+        assert_eq!(api::text(r#""""#).as_deref(), Ok(""));
+        assert_eq!(api::text(r#""ab"#).as_deref(), Ok("ab"));
+        assert_eq!(api::text("'a'").as_deref(), Ok("a"));
     }
 
     /// Every escape family, resolved rather than approximated.
@@ -235,20 +237,20 @@ mod tests {
     /// observable effect until a string constant reaches a class file nothing downstream checks.
     #[test]
     fn every_escape_family_resolves() {
-        assert_eq!(Literal::text(r#""a\nb""#).as_deref(), Ok("a\nb"));
+        assert_eq!(api::text(r#""a\nb""#).as_deref(), Ok("a\nb"));
         assert_eq!(
-            Literal::text(r#""\t\r\b\f\s""#).as_deref(),
+            api::text(r#""\t\r\b\f\s""#).as_deref(),
             Ok("\t\r\u{8}\u{c} ")
         );
-        assert_eq!(Literal::text(r#""\\""#).as_deref(), Ok("\\"));
-        assert_eq!(Literal::text(r"'\''").as_deref(), Ok("'"));
-        assert_eq!(Literal::text(r"'A'").as_deref(), Ok("A"));
-        assert_eq!(Literal::text(r"'\uuu0041'").as_deref(), Ok("A"));
-        assert_eq!(Literal::text(r"'\101'").as_deref(), Ok("A"));
-        assert_eq!(Literal::text(r"'\47'").as_deref(), Ok("'"));
+        assert_eq!(api::text(r#""\\""#).as_deref(), Ok("\\"));
+        assert_eq!(api::text(r"'\''").as_deref(), Ok("'"));
+        assert_eq!(api::text(r"'A'").as_deref(), Ok("A"));
+        assert_eq!(api::text(r"'\uuu0041'").as_deref(), Ok("A"));
+        assert_eq!(api::text(r"'\101'").as_deref(), Ok("A"));
+        assert_eq!(api::text(r"'\47'").as_deref(), Ok("'"));
         // A leading `4` cannot take *two* more digits and stay under `\377`, so `\477` is the two
         // characters `\47` and `7` rather than one escape.
-        assert_eq!(Literal::text(r#""\477""#).as_deref(), Ok("'7"));
+        assert_eq!(api::text(r#""\477""#).as_deref(), Ok("'7"));
     }
 
     /// An escape this does not know is reported, not approximated.
@@ -262,11 +264,11 @@ mod tests {
         let unknown = Err(FactError::Unsupported(
             "an escape sequence this lowering cannot read",
         ));
-        assert_eq!(Literal::text(r#""\q""#), unknown);
+        assert_eq!(api::text(r#""\q""#), unknown);
         // A lone surrogate is a UTF-16 code unit Rust's `char` cannot hold.
-        assert_eq!(Literal::text(r#""\ud800""#), unknown);
+        assert_eq!(api::text(r#""\ud800""#), unknown);
         // Four hex digits are required; `\u00` runs out of literal first.
-        assert_eq!(Literal::text(r#""\u00""#), unknown);
+        assert_eq!(api::text(r#""\u00""#), unknown);
     }
 
     /// A number the reader cannot make sense of is reported rather than approximated, for the same
@@ -274,13 +276,13 @@ mod tests {
     #[test]
     fn an_unreadable_number_is_reported() {
         assert_eq!(
-            Literal::integer("0xZZ"),
+            api::integer("0xZZ"),
             Err(FactError::Unsupported(
                 "an integer literal this lowering cannot read"
             ))
         );
         assert_eq!(
-            Literal::floating("1.2.3"),
+            api::floating("1.2.3"),
             Err(FactError::Unsupported(
                 "a floating-point literal this lowering cannot read"
             ))

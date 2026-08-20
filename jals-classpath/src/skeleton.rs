@@ -33,7 +33,7 @@ use jals_classfile::{
     FieldType, MethodAccessFlags, MethodDescriptor, MethodInfo, MethodSignature, ResultSignature,
     ReturnType, TypeParameter, TypeSignature,
 };
-use jals_decompile::{Attrs, ClassHierarchy, JavaType, MethodBody};
+use jals_decompile::{ClassHierarchy, attrs, body, types};
 use jals_storage::{
     ArtifactCache, CacheBackend, CacheKey, CacheNamespace, ContentDigest, RelativePath,
 };
@@ -341,11 +341,11 @@ impl SkeletonGroup<'_> {
     /// present (so type arguments survive), else from its raw `super_class` / `interfaces` descriptors.
     fn supertypes(cf: &ClassFile, sig: Option<&ClassSignature>) -> (Option<String>, Vec<String>) {
         if let Some(sig) = sig {
-            let superclass = JavaType::render_class_type_sig(&sig.superclass);
+            let superclass = types::render_class_type_sig(&sig.superclass);
             let interfaces = sig
                 .superinterfaces
                 .iter()
-                .map(JavaType::render_class_type_sig)
+                .map(types::render_class_type_sig)
                 .collect();
             return (Some(superclass), interfaces);
         }
@@ -353,12 +353,12 @@ impl SkeletonGroup<'_> {
         let superclass = (cf.super_class != 0)
             .then(|| pool.class_name(cf.super_class))
             .flatten()
-            .map(|name| JavaType::internal_to_java(&name));
+            .map(|name| types::internal_to_java(&name));
         let interfaces = cf
             .interfaces
             .iter()
             .filter_map(|&i| pool.class_name(i))
-            .map(|name| JavaType::internal_to_java(&name))
+            .map(|name| types::internal_to_java(&name))
             .collect();
         (superclass, interfaces)
     }
@@ -397,7 +397,7 @@ impl SkeletonGroup<'_> {
                 .filter(|f| f.access_flags.is_enum())
                 .filter_map(|f| {
                     let name = pool.utf8(f.name_index).map(Cow::into_owned)?;
-                    if !Attrs::is_java_identifier(&name) {
+                    if !attrs::is_java_identifier(&name) {
                         return None;
                     }
                     let args = enum_args.get(&name).map_or("", String::as_str);
@@ -425,13 +425,13 @@ impl SkeletonGroup<'_> {
             let Some(name) = pool.utf8(field.name_index).map(Cow::into_owned) else {
                 continue;
             };
-            if !Attrs::is_java_identifier(&name) {
+            if !attrs::is_java_identifier(&name) {
                 continue;
             }
             let ty = Self::field_type_java(&field.attributes, field.descriptor_index, pool);
             // A `static final` field's compile-time constant becomes its initializer (`= 42`), so a
             // navigated declaration shows the value.
-            let mut init = Attrs::constant_value_initializer(field, pool)
+            let mut init = attrs::constant_value_initializer(field, pool)
                 .map(|value| format!(" = {value}"))
                 .unwrap_or_default();
             // Interface fields must be initialized; when ConstantValue is missing fraudulently,
@@ -462,7 +462,7 @@ impl SkeletonGroup<'_> {
             if raw_name == "<clinit>" {
                 continue;
             }
-            if raw_name != "<init>" && !Attrs::is_java_identifier(&raw_name) {
+            if raw_name != "<init>" && !attrs::is_java_identifier(&raw_name) {
                 continue;
             }
             // javac synthesizes values()/valueOf for enums; declaring them again is an error.
@@ -475,7 +475,7 @@ impl SkeletonGroup<'_> {
 
     /// Render one method or constructor declaration. The signature is followed by its body: `;` for an
     /// `abstract`/`native` method (which holds none), else the method's decompiled body when
-    /// reconstructable ([`jals_decompile::MethodBody::decompile`]), else a safe placeholder
+    /// reconstructable ([`jals_decompile::body::decompile`]), else a safe placeholder
     /// ([`Self::safe_body`]). Recovered source parameter names are used when available.
     async fn render_method(
         out: &mut String,
@@ -489,7 +489,7 @@ impl SkeletonGroup<'_> {
         let pool = &cf.constant_pool;
         let flags = method.access_flags;
         let pieces = MethodPieces::of(method, pool);
-        let names = Attrs::parameter_names(method, pool, flags.is_static(), pieces.params.len())
+        let names = attrs::parameter_names(method, pool, flags.is_static(), pieces.params.len())
             .unwrap_or_else(|| {
                 (0..pieces.params.len())
                     .map(|i| format!("arg{i}"))
@@ -543,7 +543,7 @@ impl SkeletonGroup<'_> {
         if ctx.is_compile() {
             return Self::safe_body(is_ctor, returns_value).to_owned();
         }
-        if let Some(stmts) = MethodBody::decompile(method, cf, names, ctx.hierarchy).await {
+        if let Some(stmts) = body::decompile(method, cf, names, ctx.hierarchy).await {
             return Self::render_body_block(&stmts, pad);
         }
         Self::safe_body(is_ctor, returns_value).to_owned()
@@ -596,15 +596,15 @@ impl SkeletonGroup<'_> {
     /// A field's type, from its generic `Signature` when present, else its descriptor;
     /// `java.lang.Object` if neither parses (never happens for a well-formed class file).
     fn field_type_java(attrs: &[Attribute], descriptor_index: u16, pool: &ConstantPool) -> String {
-        if let Some(sig) = Attrs::signature_string(attrs, pool)
+        if let Some(sig) = attrs::signature_string(attrs, pool)
             && let Ok(ts) = TypeSignature::parse(&sig)
         {
-            return JavaType::render_type_sig(&ts);
+            return types::render_type_sig(&ts);
         }
         if let Some(desc) = pool.utf8(descriptor_index)
             && let Ok(ft) = FieldType::parse(&desc)
         {
-            return JavaType::render_field_type(&ft);
+            return types::render_field_type(&ft);
         }
         "java.lang.Object".to_owned()
     }
@@ -698,9 +698,9 @@ impl SkeletonGroup<'_> {
                 if let Some(class_bound) = &p.class_bound
                     && !class_bound.is_java_lang_object()
                 {
-                    bounds.push(JavaType::render_type_sig(class_bound));
+                    bounds.push(types::render_type_sig(class_bound));
                 }
-                bounds.extend(p.interface_bounds.iter().map(JavaType::render_type_sig));
+                bounds.extend(p.interface_bounds.iter().map(types::render_type_sig));
                 if bounds.is_empty() {
                     p.name.clone()
                 } else {
@@ -713,7 +713,7 @@ impl SkeletonGroup<'_> {
 
     /// The class's generic signature, if it has a parseable `Signature` attribute.
     fn class_signature(cf: &ClassFile) -> Option<ClassSignature> {
-        ClassSignature::parse(&Attrs::signature_string(&cf.attributes, &cf.constant_pool)?).ok()
+        ClassSignature::parse(&attrs::signature_string(&cf.attributes, &cf.constant_pool)?).ok()
     }
 }
 
@@ -920,28 +920,24 @@ impl MethodPieces {
         // A non-generic `throws` clause lives in the `Exceptions` attribute, not the descriptor — and a
         // generic `Signature` omits its throws entirely when no thrown type is generic — so fill it in.
         if pieces.throws.is_empty() {
-            pieces.throws = Attrs::declared_throws(method, pool);
+            pieces.throws = attrs::declared_throws(method, pool);
         }
         pieces
     }
 
     /// The rendered pieces from `method`'s generic `Signature` when present, else its descriptor.
     fn from_signature_or_descriptor(method: &MethodInfo, pool: &ConstantPool) -> Self {
-        if let Some(sig) = Attrs::signature_string(&method.attributes, pool)
+        if let Some(sig) = attrs::signature_string(&method.attributes, pool)
             && let Ok(ms) = MethodSignature::parse(&sig)
         {
             return Self {
                 type_params: ms.type_parameters,
-                params: ms
-                    .parameters
-                    .iter()
-                    .map(JavaType::render_type_sig)
-                    .collect(),
+                params: ms.parameters.iter().map(types::render_type_sig).collect(),
                 ret: match &ms.result {
                     ResultSignature::Void => None,
-                    ResultSignature::Type(t) => Some(JavaType::render_type_sig(t)),
+                    ResultSignature::Type(t) => Some(types::render_type_sig(t)),
                 },
-                throws: ms.throws.iter().map(JavaType::render_throws).collect(),
+                throws: ms.throws.iter().map(types::render_throws).collect(),
             };
         }
         if let Some(desc) = pool.utf8(method.descriptor_index)
@@ -949,10 +945,10 @@ impl MethodPieces {
         {
             return Self {
                 type_params: Vec::new(),
-                params: md.params.iter().map(JavaType::render_field_type).collect(),
+                params: md.params.iter().map(types::render_field_type).collect(),
                 ret: match &md.return_type {
                     ReturnType::Void => None,
-                    ReturnType::Type(ft) => Some(JavaType::render_field_type(ft)),
+                    ReturnType::Type(ft) => Some(types::render_field_type(ft)),
                 },
                 throws: Vec::new(),
             };

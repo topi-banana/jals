@@ -1,5 +1,8 @@
 //! Assembly of classpath inputs from one revisioned project storage aggregate.
 
+use crate::remap::jar_remap;
+use crate::resolve::dependency_resolver;
+use crate::resolve::mapping_resolver;
 use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::vec::Vec;
@@ -15,9 +18,9 @@ use jals_storage::{
 };
 
 use crate::{
-    ClasspathEntry, ClasspathLoad, DependencyLocation, DependencyResolver, DependencySpec,
-    ExternalLocator, Fetcher, JarExtraction, JarRemap, LibrarySource, MappingResolver, MappingSpec,
-    RemapDirection, RemapRequest, SkeletonGroup, Warning, WarningOrigin,
+    ClasspathEntry, ClasspathLoad, DependencyLocation, DependencySpec, ExternalLocator, Fetcher,
+    JarExtraction, LibrarySource, MappingSpec, RemapDirection, RemapRequest, SkeletonGroup,
+    Warning, WarningOrigin,
 };
 
 /// Which inputs an assembly reads out of a plan.
@@ -191,7 +194,7 @@ impl ProjectInputs {
             Editor => (true, true, true, true),
         };
 
-        let resolved = DependencyResolver::resolve(
+        let resolved = dependency_resolver::resolve(
             fetcher,
             &view,
             storage.artifacts_mut(),
@@ -222,7 +225,7 @@ impl ProjectInputs {
                 continue;
             };
             let text =
-                match MappingResolver::text(fetcher, &view, storage.artifacts_mut(), spec).await {
+                match mapping_resolver::text(fetcher, &view, storage.artifacts_mut(), spec).await {
                     Ok(text) => text,
                     Err(warning) => {
                         warnings.push(warning);
@@ -238,7 +241,7 @@ impl ProjectInputs {
                 // classpath, and that is a different caller.
                 hierarchy: &[],
             };
-            match JarRemap::remap(&exec, storage.artifacts_mut(), &jar.key, &request).await {
+            match jar_remap::remap(&exec, storage.artifacts_mut(), &jar.key, &request).await {
                 Ok(key) => {
                     jar.key = key;
                     resolved_jars.push(jar);
@@ -261,7 +264,7 @@ impl ProjectInputs {
 
         let mut library_sources = Vec::new();
         if want_sources {
-            let source_jars = DependencyResolver::resolve(
+            let source_jars = dependency_resolver::resolve(
                 fetcher,
                 &view,
                 storage.artifacts_mut(),

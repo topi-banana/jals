@@ -34,15 +34,17 @@ pub(crate) const RULE: RuleMeta = RuleMeta {
     category: Category::Performance,
     level: |config| config.performance.boxed_primitive_constructor.level,
     needs_clean_parse: false,
-    check: Checker::Syntactic(BoxedPrimitiveConstructor::check),
+    check: Checker::Syntactic(api::check),
 };
 
 /// The `boxed-primitive-constructor` rule.
-struct BoxedPrimitiveConstructor;
+mod api {
+    use super::{
+        AstNode, Config, Finding, LocalBoxFuture, NewExpr, SyntaxNode, Type, Vec, Yielder,
+    };
 
-impl BoxedPrimitiveConstructor {
     /// The eight `java.lang` wrappers, each of which publishes a caching `valueOf`.
-    const WRAPPERS: &'static [&'static str] = &[
+    const WRAPPERS: &[&str] = &[
         "Boolean",
         "Byte",
         "Character",
@@ -54,11 +56,14 @@ impl BoxedPrimitiveConstructor {
     ];
 
     /// The table-edge shim: boxes the async rule body once per file.
-    fn check<'a>(root: &'a SyntaxNode, _config: &'a Config) -> LocalBoxFuture<'a, Vec<Finding>> {
-        alloc::boxed::Box::pin(Self::check_impl(root))
+    pub(crate) fn check<'a>(
+        root: &'a SyntaxNode,
+        _config: &'a Config,
+    ) -> LocalBoxFuture<'a, Vec<Finding>> {
+        alloc::boxed::Box::pin(check_impl(root))
     }
 
-    async fn check_impl(root: &SyntaxNode) -> Vec<Finding> {
+    pub(crate) async fn check_impl(root: &SyntaxNode) -> Vec<Finding> {
         let mut yielder = Yielder::new();
         let mut out = Vec::new();
         for node in root.descendants() {
@@ -73,7 +78,7 @@ impl BoxedPrimitiveConstructor {
             if new.body().is_some() || new.args().is_none() {
                 continue;
             }
-            let Some(wrapper) = new.ty().as_ref().and_then(Self::wrapper_name) else {
+            let Some(wrapper) = new.ty().as_ref().and_then(wrapper_name) else {
                 continue;
             };
             out.push(Finding::at_node(
@@ -87,11 +92,8 @@ impl BoxedPrimitiveConstructor {
     /// The wrapper class `ty` names, if it names one. `java.lang.Integer` and `Integer` answer
     /// alike, and `ArrayList<Integer>` answers `None` — [`Type::simple_name`] takes the last
     /// *top-level* `IDENT`, so a type argument is not the name.
-    fn wrapper_name(ty: &Type) -> Option<&'static str> {
+    pub(crate) fn wrapper_name(ty: &Type) -> Option<&'static str> {
         let name = ty.simple_name()?;
-        Self::WRAPPERS
-            .iter()
-            .copied()
-            .find(|wrapper| *wrapper == name)
+        WRAPPERS.iter().copied().find(|wrapper| *wrapper == name)
     }
 }

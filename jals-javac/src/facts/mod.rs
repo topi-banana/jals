@@ -49,13 +49,12 @@
 
 mod constant;
 mod inherit;
-mod literal;
+pub(crate) mod literal;
 mod method_ref;
 mod switch;
 
 pub(crate) use constant::CaseKey;
 pub(crate) use inherit::{Hierarchy, Overrides};
-pub(crate) use literal::Literal;
 pub(crate) use method_ref::RefReceiver;
 pub(crate) use switch::ArmLabels;
 

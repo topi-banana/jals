@@ -24,26 +24,28 @@ use crate::host::{SymbolNode, Target};
 use crate::monaco::{self, CompletionKindExt, DefKindExt};
 use crate::workspace::Workspace;
 
-/// The Monaco language-feature providers, registered once against the shared [`Workspace`].
-pub struct Providers;
+pub use api::install;
 
-impl Providers {
+/// The Monaco language-feature providers, registered once against the shared [`Workspace`].
+mod api {
+    use super::*;
+
     /// Register every language-feature provider, each backed by `workspace`. Called once, after the
     /// editor exists.
     pub fn install(workspace: Rc<Mutex<Workspace>>) {
-        Self::install_hover(Rc::clone(&workspace));
-        Self::install_completion(Rc::clone(&workspace));
-        Self::install_signature_help(Rc::clone(&workspace));
-        Self::install_document_symbols(Rc::clone(&workspace));
-        Self::install_document_highlight(Rc::clone(&workspace));
-        Self::install_definition(Rc::clone(&workspace));
-        Self::install_references(workspace);
+        install_hover(Rc::clone(&workspace));
+        install_completion(Rc::clone(&workspace));
+        install_signature_help(Rc::clone(&workspace));
+        install_document_symbols(Rc::clone(&workspace));
+        install_document_highlight(Rc::clone(&workspace));
+        install_definition(Rc::clone(&workspace));
+        install_references(workspace);
     }
 
     /// Hand `closure` to `register_with` (the matching `monaco::register_*`) and leak it, so the
     /// once-registered provider stays live for the app's single editor. Centralises the
     /// easy-to-drop `forget()` every installer would otherwise repeat.
-    fn register<T: ?Sized + wasm_bindgen::closure::WasmClosure>(
+    pub(crate) fn register<T: ?Sized + wasm_bindgen::closure::WasmClosure>(
         closure: Closure<T>,
         register_with: impl FnOnce(&js_sys::Function),
     ) {
@@ -55,7 +57,7 @@ impl Providers {
     /// `ws`, wired to its matching `monaco::register_*`. Folds the shared Promise bridging
     /// (`future_to_promise`), the lock-then-sync-then-query sequencing, and `register`/`forget`
     /// that the five position-based installers would otherwise repeat.
-    fn install_pos(
+    pub(crate) fn install_pos(
         ws: Rc<Mutex<Workspace>>,
         body: impl AsyncFn(&Workspace, u32, u32) -> JsValue + 'static,
         register_with: impl FnOnce(&js_sys::Function),
@@ -74,12 +76,12 @@ impl Providers {
                 })
             },
         );
-        Self::register(closure, register_with);
+        register(closure, register_with);
     }
 
     /// Marshal a navigation [`Target`] into a Monaco `Location` payload (shared by go-to-definition
     /// and find-references).
-    fn location(target: &Target) -> JsValue {
+    pub(crate) fn location(target: &Target) -> JsValue {
         monaco::location_result(
             &target.path,
             target.range.start_line,
@@ -89,8 +91,8 @@ impl Providers {
         )
     }
 
-    fn install_hover(ws: Rc<Mutex<Workspace>>) {
-        Self::install_pos(
+    pub(crate) fn install_hover(ws: Rc<Mutex<Workspace>>) {
+        install_pos(
             ws,
             async |ws, line, col| match ws.hover(line, col).await {
                 Some(markdown) => monaco::hover_result(&markdown),
@@ -100,8 +102,8 @@ impl Providers {
         );
     }
 
-    fn install_completion(ws: Rc<Mutex<Workspace>>) {
-        Self::install_pos(
+    pub(crate) fn install_completion(ws: Rc<Mutex<Workspace>>) {
+        install_pos(
             ws,
             async |ws, line, col| {
                 let items = js_sys::Array::new();
@@ -115,8 +117,8 @@ impl Providers {
         );
     }
 
-    fn install_signature_help(ws: Rc<Mutex<Workspace>>) {
-        Self::install_pos(
+    pub(crate) fn install_signature_help(ws: Rc<Mutex<Workspace>>) {
+        install_pos(
             ws,
             async |ws, line, col| match ws.signature_help(line, col).await {
                 Some(help) => {
@@ -140,24 +142,24 @@ impl Providers {
         );
     }
 
-    fn install_document_symbols(ws: Rc<Mutex<Workspace>>) {
+    pub(crate) fn install_document_symbols(ws: Rc<Mutex<Workspace>>) {
         let closure = Closure::<dyn FnMut(String) -> js_sys::Promise>::new(move |text: String| {
             let ws = Rc::clone(&ws);
             future_to_promise(async move {
                 let mut ws = ws.lock().await;
                 ws.sync_active(&text).await;
                 let symbols = ws.document_symbols();
-                Ok(Self::symbols_to_js(&symbols).into())
+                Ok(symbols_to_js(&symbols).into())
             })
         });
-        Self::register(closure, monaco::register_document_symbols);
+        register(closure, monaco::register_document_symbols);
     }
 
     /// Recursively marshal a symbol outline into a Monaco `DocumentSymbol[]`.
-    fn symbols_to_js(nodes: &[SymbolNode]) -> js_sys::Array {
+    pub(crate) fn symbols_to_js(nodes: &[SymbolNode]) -> js_sys::Array {
         let array = js_sys::Array::new();
         for node in nodes {
-            let children = Self::symbols_to_js(&node.children);
+            let children = symbols_to_js(&node.children);
             array.push(&monaco::symbol_node(
                 &node.name,
                 node.kind.symbol_kind(),
@@ -171,8 +173,8 @@ impl Providers {
         array
     }
 
-    fn install_document_highlight(ws: Rc<Mutex<Workspace>>) {
-        Self::install_pos(
+    pub(crate) fn install_document_highlight(ws: Rc<Mutex<Workspace>>) {
+        install_pos(
             ws,
             async |ws, line, col| {
                 let array = js_sys::Array::new();
@@ -191,18 +193,18 @@ impl Providers {
         );
     }
 
-    fn install_definition(ws: Rc<Mutex<Workspace>>) {
-        Self::install_pos(
+    pub(crate) fn install_definition(ws: Rc<Mutex<Workspace>>) {
+        install_pos(
             ws,
             async |ws, line, col| match ws.goto_definition(line, col).await {
-                Some(target) => Self::location(&target),
+                Some(target) => location(&target),
                 None => JsValue::NULL,
             },
             monaco::register_definition,
         );
     }
 
-    fn install_references(ws: Rc<Mutex<Workspace>>) {
+    pub(crate) fn install_references(ws: Rc<Mutex<Workspace>>) {
         let closure = Closure::<dyn FnMut(String, u32, u32, bool) -> js_sys::Promise>::new(
             move |text: String, line: u32, col: u32, include_decl: bool| {
                 let ws = Rc::clone(&ws);
@@ -212,12 +214,12 @@ impl Providers {
                     let targets = ws.references(line, col, include_decl).await;
                     let array = js_sys::Array::new();
                     for target in targets {
-                        array.push(&Self::location(&target));
+                        array.push(&location(&target));
                     }
                     Ok(array.into())
                 })
             },
         );
-        Self::register(closure, monaco::register_references);
+        register(closure, monaco::register_references);
     }
 }

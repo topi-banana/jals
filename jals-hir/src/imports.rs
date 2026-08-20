@@ -27,7 +27,7 @@ use jals_syntax::SyntaxKind::{IDENT, IMPORT_DECL};
 use jals_syntax::ast::{self, AstNode};
 use jals_syntax::{SyntaxElement, SyntaxNode, SyntaxToken};
 
-use crate::resolve::collect::Collect;
+use crate::resolve::collect;
 
 /// An import declaration whose name the file never uses.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,7 +155,7 @@ impl crate::analysis::FileAnalysis {
                 let prefix = name.text();
                 members.extend(group.members().map(|member| {
                     (
-                        Collect::significant_span(member.syntax()),
+                        collect::significant_span(member.syntax()),
                         alloc::format!("{prefix}.{}", member.text()),
                         // `None` for an on-demand member (`{concurrent.*}`), which names no
                         // single type.
@@ -167,7 +167,7 @@ impl crate::analysis::FileAnalysis {
                 // type, and a static import binds the member, and both are what the source then
                 // spells. `None` for an on-demand import (`a.b.*`).
                 members.push((
-                    Collect::significant_span(import.syntax()),
+                    collect::significant_span(import.syntax()),
                     name.text(),
                     name.last_segment(),
                 ));

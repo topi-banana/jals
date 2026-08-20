@@ -43,9 +43,9 @@ use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode};
 /// The predicate `[imports] granularity` rewrites by and [`TokenBudget`](super::TokenBudget)
 /// checks against. Two implementations of "which types does this declaration name" is exactly the
 /// drift `token_license` exists to prevent, so there is one.
-pub(crate) struct ImportNames;
+pub(crate) mod import_names {
+    use super::{AstNode, ImportDecl, S, String, SyntaxElement, SyntaxNode, ToOwned, Vec};
 
-impl ImportNames {
     /// The declarations `decl` desugars to, each spelled `[static ]<fully qualified name>`.
     ///
     /// One entry for a plain import, one per member for a grouped one, and none for a module
@@ -59,14 +59,14 @@ impl ImportNames {
         let Some(name) = decl.name() else {
             return Vec::new();
         };
-        let name = Self::text_of(name.syntax());
+        let name = text_of(name.syntax());
         decl.group().map_or_else(
             || alloc::vec![alloc::format!("{lead}{name}")],
             |group| {
                 group
                     .members()
                     .map(|member| {
-                        let member = Self::text_of(member.syntax());
+                        let member = text_of(member.syntax());
                         alloc::format!("{lead}{name}.{member}")
                     })
                     .collect()
@@ -76,7 +76,7 @@ impl ImportNames {
 
     /// Whether a declaration carries a jals attribute, so re-cutting it would redistribute a
     /// condition rather than a layout.
-    fn is_conditional(decl: &ImportDecl) -> bool {
+    pub(crate) fn is_conditional(decl: &ImportDecl) -> bool {
         decl.syntax()
             .children()
             .any(|child| child.kind() == S::ATTRIBUTE)
@@ -96,13 +96,13 @@ impl ImportNames {
     ///
     /// `None` for a declaration with no prefix to share — an unqualified or wildcard import, or a
     /// module import — which is therefore never merged with anything.
-    fn prefix(decl: &ImportDecl) -> Option<String> {
-        if decl.is_module() || Self::is_conditional(decl) {
+    pub(crate) fn prefix(decl: &ImportDecl) -> Option<String> {
+        if decl.is_module() || is_conditional(decl) {
             return None;
         }
         let name = decl.name()?;
         if decl.group().is_some() {
-            return Some(Self::text_of(name.syntax()));
+            return Some(text_of(name.syntax()));
         }
         if name.is_wildcard() {
             return None;
@@ -151,9 +151,11 @@ impl Unit {
 }
 
 /// The re-granulation of an already-ordered import block.
-pub(crate) struct Granularity;
+pub(crate) mod granularity {
+    use super::{
+        AstNode, ImportDecl, ImportGranularity, String, SyntaxNode, Unit, Vec, import_names,
+    };
 
-impl Granularity {
     /// Re-cut an ordered import block to `granularity`, preserving its order.
     ///
     /// Each input is a declaration with the blank lines that precede it. A unit the cut *adds*
@@ -168,17 +170,17 @@ impl Granularity {
                 .into_iter()
                 .map(|(node, blanks)| (Unit::Whole(node), blanks))
                 .collect(),
-            ImportGranularity::Item => Self::split(block),
-            ImportGranularity::Package => Self::merge(block),
+            ImportGranularity::Item => split(block),
+            ImportGranularity::Package => merge(block),
         }
     }
 
     /// One declaration per member of every grouped import; everything else untouched.
-    fn split(block: Vec<(SyntaxNode, usize)>) -> Vec<(Unit, usize)> {
+    pub(crate) fn split(block: Vec<(SyntaxNode, usize)>) -> Vec<(Unit, usize)> {
         let mut out = Vec::with_capacity(block.len());
         for (node, blanks) in block {
             let members: Vec<SyntaxNode> = ImportDecl::cast(node.clone())
-                .filter(|decl| !ImportNames::is_conditional(decl))
+                .filter(|decl| !import_names::is_conditional(decl))
                 .and_then(|decl| decl.group())
                 .map(|group| {
                     group
@@ -208,7 +210,7 @@ impl Granularity {
     }
 
     /// Maximal runs of adjacent declarations sharing a prefix, joined into one grouped import.
-    fn merge(block: Vec<(SyntaxNode, usize)>) -> Vec<(Unit, usize)> {
+    pub(crate) fn merge(block: Vec<(SyntaxNode, usize)>) -> Vec<(Unit, usize)> {
         let mut out: Vec<(Unit, usize)> = Vec::with_capacity(block.len());
         let mut run: Vec<SyntaxNode> = Vec::new();
         let mut key: Option<(bool, String)> = None;
@@ -216,13 +218,13 @@ impl Granularity {
 
         for (node, blanks) in block {
             let current = ImportDecl::cast(node.clone())
-                .and_then(|decl| ImportNames::prefix(&decl).map(|at| (decl.is_static(), at)));
+                .and_then(|decl| import_names::prefix(&decl).map(|at| (decl.is_static(), at)));
             let joins = blanks == 0 && current.is_some() && key == current && !run.is_empty();
             if joins {
                 run.push(node);
                 continue;
             }
-            Self::flush(&mut out, core::mem::take(&mut run), lead);
+            flush(&mut out, core::mem::take(&mut run), lead);
             if current.is_some() {
                 key = current;
                 lead = blanks;
@@ -232,7 +234,7 @@ impl Granularity {
                 out.push((Unit::Whole(node), blanks));
             }
         }
-        Self::flush(&mut out, run, lead);
+        flush(&mut out, run, lead);
         out
     }
 
@@ -241,7 +243,7 @@ impl Granularity {
     ///
     /// A run of one is deliberately *not* wrapped: `import a.B;` becoming `import a.{B};` adds
     /// braces to say nothing, and would grow a one-member group on every plain import in the file.
-    fn flush(out: &mut Vec<(Unit, usize)>, run: Vec<SyntaxNode>, lead: usize) {
+    pub(crate) fn flush(out: &mut Vec<(Unit, usize)>, run: Vec<SyntaxNode>, lead: usize) {
         match run.len() {
             0 => {}
             1 => out.push((
@@ -254,9 +256,9 @@ impl Granularity {
 }
 
 /// The parts of a declaration a re-granulation emits separately.
-pub(crate) struct Parts;
+pub(crate) mod parts {
+    use super::{AstNode, ImportDecl, QualifiedName, S, String, SyntaxElement, SyntaxNode, Vec};
 
-impl Parts {
     /// The declaration's children up to and including its prefix name — attributes, `import`, the
     /// `static` / `module` keywords, and the [`QualifiedName`].
     pub(crate) fn lead(decl: &SyntaxNode) -> Vec<SyntaxElement> {

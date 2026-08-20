@@ -106,9 +106,9 @@ impl Finding {
 /// `find` only when the guarded [`Feature`] is absent from the project's feature set, and stamps
 /// this message on each flagged node — so a rule need only carry the detector, not the gate or
 /// the message.
-pub(crate) struct FeatureGate;
+pub(crate) mod feature_gate {
+    use super::{Feature, String, format};
 
-impl FeatureGate {
     /// The diagnostic message for a use of the gated `feature`: `subject` names the flagged
     /// construct (a plural noun phrase, [`Checker::Gated`]'s `subject`), the stabilizing release
     /// preset comes from [`Feature::stabilized_in`] — the single place that fact lives — and the
@@ -144,9 +144,9 @@ impl FeatureGate {
 /// as far as `text_range` is concerned, at the newline that ended the previous one. A rule reading
 /// that range then sees a newline every rule-relevant construct has, and a comment written before a
 /// node reads as a comment inside it.
-pub(crate) struct Significant;
+pub(crate) mod significant {
+    use super::{Range, SyntaxNode};
 
-impl Significant {
     /// `node`'s first significant token's start through its last significant token's end, or
     /// `None` when it holds no significant token at all (error recovery).
     pub(crate) fn range(node: &SyntaxNode) -> Option<Range<usize>> {
@@ -167,13 +167,13 @@ impl Significant {
 /// docs say why), not because they ask different questions — so the walk and the sentence around
 /// the name live here, and a rule contributes only its own naming policy: a `subject` that names
 /// the kinds it reports and answers `None` for every kind that is not its.
-struct UnusedDefs;
+pub(crate) mod unused_defs {
+    use super::{Config, Def, FileAnalysis, Finding, LocalBoxFuture, Vec, Yielder, format};
 
-impl UnusedDefs {
     /// Every unused [`Def`] `subject` names, ranged over the binding's own name. Also the
     /// table-edge shim: the async body is boxed once per file here, so a rule's entry in
     /// [`RULES`] is `subject` and nothing else.
-    fn findings<'a>(
+    pub(crate) fn findings<'a>(
         analysis: &'a FileAnalysis,
         config: &'a Config,
         subject: fn(&Def, &Config) -> Option<&'static str>,
@@ -233,7 +233,7 @@ pub(crate) enum Checker {
     /// `[package] features` declared) never fires, while a
     /// [`dialect`](jals_config::Feature::is_dialect) feature fires until it is explicitly listed,
     /// because nothing but jals can report its syntax. The driver builds the shared gate message
-    /// ([`FeatureGate::preview_message`] from `feature` + `subject`) and stamps it on each flagged
+    /// ([`feature_gate::preview_message`] from `feature` + `subject`) and stamps it on each flagged
     /// node, so the detector is pure syntax location.
     Gated {
         /// The language feature this rule guards; its findings are reported only when it is disabled.

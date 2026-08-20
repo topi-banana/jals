@@ -51,10 +51,14 @@ pub struct FileDiagnostic {
     pub unnecessary: bool,
 }
 
-/// Assembles the canonical diagnostics for one file.
-pub struct FileDiagnostics;
+pub use api::assemble;
 
-impl FileDiagnostics {
+/// Assembles the canonical diagnostics for one file.
+mod api {
+    use super::{
+        CfgMap, Config, DiagnosticSeverity, FileDiagnostic, FileSemantics, Parse, ToOwned, Vec,
+    };
+
     /// Assemble `parse`'s diagnostics under `config` (which already carries the project's
     /// resolved feature set), threading the project `index` into the rule engine.
     ///
@@ -152,7 +156,7 @@ mod tests {
     /// Assemble diagnostics for `text` under the default config, with no project index.
     fn assemble_local(text: &str) -> Vec<FileDiagnostic> {
         block_on_inline(async {
-            FileDiagnostics::assemble(
+            api::assemble(
                 &jals_syntax::Parse::parse(text).await,
                 None,
                 &Config::default(),
@@ -172,7 +176,7 @@ mod tests {
                 .await;
             let analysis = jals_hir::FileAnalysis::of(&parse.syntax()).await;
             let semantics = analysis.in_project(&index, FileId(0));
-            FileDiagnostics::assemble(&parse, Some(&semantics), config, None).await
+            api::assemble(&parse, Some(&semantics), config, None).await
         })
     }
 
@@ -216,14 +220,14 @@ mod tests {
                 jals_config::Feature::Java24,
             ]));
             let parse = jals_syntax::Parse::parse(text).await;
-            let diags = FileDiagnostics::assemble(&parse, None, &config, None).await;
+            let diags = api::assemble(&parse, None, &config, None).await;
             let gated = with_code(&diags, "compact-source-file");
             assert_eq!(gated.len(), 1);
             assert_eq!(gated[0].severity, DiagnosticSeverity::Error);
 
             // A `java25` set (or no features at all) allows the syntax: nothing is reported.
             config.features = jals_config::FeatureSet::resolve(&[jals_config::Feature::Java25]);
-            let diags = FileDiagnostics::assemble(&parse, None, &config, None).await;
+            let diags = api::assemble(&parse, None, &config, None).await;
             assert!(with_code(&diags, "compact-source-file").is_empty());
         });
     }
@@ -287,8 +291,7 @@ mod tests {
             .await;
             let analysis = jals_hir::FileAnalysis::of(&parse.syntax()).await;
             let semantics = analysis.in_project(&index, FileId(0));
-            let diags =
-                FileDiagnostics::assemble(&parse, Some(&semantics), &Config::default(), None).await;
+            let diags = api::assemble(&parse, Some(&semantics), &Config::default(), None).await;
             let unresolved = with_code(&diags, "cannot-resolve");
             assert_eq!(unresolved.len(), 1);
             assert_eq!(unresolved[0].message, "cannot resolve symbol `Nope`");

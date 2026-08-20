@@ -55,16 +55,24 @@ impl core::error::Error for DescError {}
 
 type Result<T> = core::result::Result<T, DescError>;
 
-/// Descriptor and internal-name conversions.
-pub struct Descriptor;
+pub(crate) use api::{
+    checkcast_class, class_entry, descriptor_of, field_type_of, internal_name_of,
+};
+pub use api::{field_descriptor, internal_name, method_descriptor};
 
-impl Descriptor {
+/// Descriptor and internal-name conversions.
+mod api {
+    use super::{
+        BaseType, ClassTy, DescError, FieldType, ItemId, MemberId, MethodDescriptor, Primitive,
+        ProjectIndex, Result, ReturnType, String, ToOwned, ToString, Ty, Vec,
+    };
+
     /// A type's internal binary name (`java/lang/String`), from the dotted fully-qualified name the
     /// index holds.
     ///
     /// Every separator becomes `/`. A dotted name alone does not say which of its segments are
     /// packages, so a nested type's `$` cannot be recovered from one —
-    /// [`internal_name_of`](Self::internal_name_of) asks the index instead.
+    /// [`internal_name_of`](internal_name_of) asks the index instead.
     pub fn internal_name(fqn: &str) -> String {
         fqn.replace('.', "/")
     }
@@ -95,18 +103,18 @@ impl Descriptor {
     }
 
     /// The field type a value of `ty` has, erased.
-    fn field_type(ty: &Ty, index: &ProjectIndex) -> Result<FieldType> {
-        Self::field_type_within(ty, index, 0)
+    pub(crate) fn field_type(ty: &Ty, index: &ProjectIndex) -> Result<FieldType> {
+        field_type_within(ty, index, 0)
     }
 
-    /// [`field_type`](Self::field_type), for a lowering that has to compare a value's erasure with a
+    /// [`field_type`](field_type), for a lowering that has to compare a value's erasure with a
     /// slot's — the argument narrowing an unchecked call needs.
     ///
     /// # Errors
-    /// As [`field_type`](Self::field_type): a type this layer cannot name is refused rather than
+    /// As [`field_type`](field_type): a type this layer cannot name is refused rather than
     /// guessed at.
     pub(crate) fn field_type_of(ty: &Ty, index: &ProjectIndex) -> Result<FieldType> {
-        Self::field_type(ty, index)
+        field_type(ty, index)
     }
 
     /// How far a chain of type-variable bounds is followed before answering `Object`.
@@ -117,24 +125,24 @@ impl Descriptor {
     /// conservative answer rather than the stack.
     const BOUND_DEPTH: u8 = 8;
     /// The one type every erasure falls back to.
-    const OBJECT: &'static str = "java/lang/Object";
+    const OBJECT: &str = "java/lang/Object";
 
-    /// [`field_type`](Self::field_type), tracking how many type-variable bounds have been followed.
-    fn field_type_within(ty: &Ty, index: &ProjectIndex, depth: u8) -> Result<FieldType> {
+    /// [`field_type`](field_type), tracking how many type-variable bounds have been followed.
+    pub(crate) fn field_type_within(ty: &Ty, index: &ProjectIndex, depth: u8) -> Result<FieldType> {
         Ok(match ty {
-            Ty::Primitive(primitive) => FieldType::Base(Self::base_type(*primitive)),
-            Ty::Array(element) => FieldType::Array(alloc::boxed::Box::new(
-                Self::field_type_within(element, index, depth)?,
-            )),
+            Ty::Primitive(primitive) => FieldType::Base(base_type(*primitive)),
+            Ty::Array(element) => FieldType::Array(alloc::boxed::Box::new(field_type_within(
+                element, index, depth,
+            )?)),
             Ty::Class(ClassTy::Project { id, .. }) => {
-                FieldType::Object(Self::internal_name_of(*id, index))
+                FieldType::Object(internal_name_of(*id, index))
             }
             Ty::Class(ClassTy::External { name, .. }) => {
                 return Err(DescError::Unresolved(name.clone()));
             }
             // `null` has no type of its own — whatever slot it flows into supplies one, and every
             // such slot is a reference.
-            Ty::Null => FieldType::Object(Self::OBJECT.to_owned()),
+            Ty::Null => FieldType::Object(OBJECT.to_owned()),
             // A type variable erases to its leftmost bound (JLS §4.6), and to `Object` when it
             // declares none. Answering `Object` for a *bounded* one is self-consistent within a
             // single compilation — the declaration and its call sites agree — and disagrees with
@@ -154,11 +162,9 @@ impl Descriptor {
                 member,
                 name,
             } => match index.type_var_bound(*owner, *member, name) {
-                Some(bound) if depth < Self::BOUND_DEPTH => {
-                    Self::field_type_within(&bound, index, depth + 1)
-                        .unwrap_or_else(|_| FieldType::Object(Self::OBJECT.to_owned()))
-                }
-                _ => FieldType::Object(Self::OBJECT.to_owned()),
+                Some(bound) if depth < BOUND_DEPTH => field_type_within(&bound, index, depth + 1)
+                    .unwrap_or_else(|_| FieldType::Object(OBJECT.to_owned())),
+                _ => FieldType::Object(OBJECT.to_owned()),
             },
             Ty::Void => return Err(DescError::Void),
             Ty::Unknown => return Err(DescError::Unknown),
@@ -181,10 +187,10 @@ impl Descriptor {
     }
 
     /// The return descriptor for `ty`, where `void` is legal.
-    fn return_type(ty: &Ty, index: &ProjectIndex) -> Result<ReturnType> {
+    pub(crate) fn return_type(ty: &Ty, index: &ProjectIndex) -> Result<ReturnType> {
         match ty {
             Ty::Void => Ok(ReturnType::Void),
-            other => Ok(ReturnType::Type(Self::field_type(other, index)?)),
+            other => Ok(ReturnType::Type(field_type(other, index)?)),
         }
     }
 
@@ -200,12 +206,12 @@ impl Descriptor {
         let params = index
             .resolved_param_tys(id)
             .iter()
-            .map(|ty| Self::field_type(ty, index))
+            .map(|ty| field_type(ty, index))
             .collect::<Result<Vec<_>>>()?;
         let return_type = if constructor {
             ReturnType::Void
         } else {
-            Self::return_type(&index.resolved_member_ty(id), index)?
+            return_type(&index.resolved_member_ty(id), index)?
         };
         Ok(MethodDescriptor {
             params,
@@ -215,13 +221,13 @@ impl Descriptor {
 
     /// The field descriptor of the member `id`.
     pub fn field_descriptor(id: MemberId, index: &ProjectIndex) -> Result<FieldType> {
-        Self::field_type(&index.resolved_member_ty(id), index)
+        field_type(&index.resolved_member_ty(id), index)
     }
 
     /// The field descriptor of `ty` itself, for a value the index has no member for — an array's
     /// element, a local, or the target of a cast.
     pub(crate) fn descriptor_of(ty: &Ty, index: &ProjectIndex) -> Result<FieldType> {
-        Self::field_type(ty, index)
+        field_type(ty, index)
     }
 
     /// The `Class` entry a `checkcast` / `instanceof` / `anewarray` names for `ty`.
@@ -230,7 +236,7 @@ impl Descriptor {
     /// binary name (`java/lang/String`) and an array by its own *descriptor* (`[Ljava/lang/String;`),
     /// which JVMS §4.4.1 permits precisely so an array type can be named at all.
     pub(crate) fn class_entry(ty: &Ty, index: &ProjectIndex) -> Result<String> {
-        match Self::field_type(ty, index)? {
+        match field_type(ty, index)? {
             FieldType::Object(name) => Ok(name),
             array @ FieldType::Array(_) => {
                 use alloc::string::ToString as _;
@@ -240,7 +246,7 @@ impl Descriptor {
         }
     }
 
-    const fn base_type(primitive: Primitive) -> BaseType {
+    pub(crate) const fn base_type(primitive: Primitive) -> BaseType {
         match primitive {
             Primitive::Boolean => BaseType::Boolean,
             Primitive::Byte => BaseType::Byte,

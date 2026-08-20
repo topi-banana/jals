@@ -5,13 +5,13 @@
 //! Java Style §4.5.1's "break at the highest level first" is exactly this level structure, not a
 //! special case in the engine.
 
+use crate::passes::modifier_order;
 use alloc::vec::Vec;
 
 use jals_config::fmt::{BraceStyle, InlineAnnotations, WrapPolicy};
 use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::ir::{FillMode, Indent};
-use crate::passes::ModifierOrder;
 use crate::visit::Ctx;
 
 impl Ctx<'_> {
@@ -106,7 +106,7 @@ impl Ctx<'_> {
     /// method, and field declarations), while `never` keeps them inline, which is what a
     /// parameter or a local variable wants.
     pub(super) async fn visit_modifiers(&mut self, node: &SyntaxNode) {
-        let ordered = ModifierOrder::plan(node, self.style.cfg.imports.reorder_modifiers);
+        let ordered = modifier_order::plan(node, self.style.cfg.imports.reorder_modifiers);
         let children = ordered.unwrap_or_else(|| Self::children(node));
         let policy = self.annotation_policy(node);
 
@@ -251,7 +251,7 @@ impl Ctx<'_> {
             }
             Some(S::LOCAL_VAR_DECL | S::RESOURCE) => wrapping.variable_annotations,
             // A type-use annotation is inline by definition — it sits in the middle of a type.
-            _ => WrapPolicy::Never,
+            _ => WrapPolicy::Never
         }
     }
 

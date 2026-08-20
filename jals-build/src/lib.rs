@@ -4,9 +4,9 @@
 //! where the sources live, where compiled classes go, which Java release to target, and what is on
 //! the classpath. `Invocation::build` and `Invocation::run` turn a manifest plus already-resolved
 //! inputs into an `Invocation` — a program name and an argument vector for `javac`/`java`.
-//! [`CleanTargets::keys`] resolves the build artifacts to delete (for `jals clean`).
+//! [`clean_target_keys`] resolves the build artifacts to delete (for `jals clean`).
 //! [`InitOptions::scaffold`] goes the other way: it produces the files a brand-new project needs (for
-//! `jals init`). [`RunTarget::resolve`] picks which `main-class` `jals run` should execute, from a
+//! `jals init`). [`resolve_run_target`] picks which `main-class` `jals run` should execute, from a
 //! manifest's `[[bin]]` entries, `[package] default-run`, and `[run] main-class`.
 //!
 //! The core is pure: it never spawns a process or touches the filesystem, mirroring
@@ -71,7 +71,7 @@ pub use backend::{
 };
 #[cfg(feature = "native")]
 pub use builtin::BuiltinToolchain;
-pub use clean::CleanTargets;
+pub use clean::clean_target_keys;
 pub use init::{InitOptions, ScaffoldFile};
 pub use jals_backend::JalsBackend;
 #[cfg(feature = "native")]
@@ -85,7 +85,7 @@ pub use manifest_ext::{ManifestError, ManifestExt};
 pub use request::RunRequest;
 #[cfg(feature = "native")]
 pub use staging::{FRONTEND_OUT_DIR, StagedTree};
-pub use target::{ResolveTargetError, RunTarget};
+pub use target::{ResolveTargetError, resolve_run_target};
 #[cfg(feature = "native")]
 pub(crate) use toolchain::Candidates;
 #[cfg(feature = "native")]

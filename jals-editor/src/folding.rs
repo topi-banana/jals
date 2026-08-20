@@ -40,10 +40,13 @@ pub struct Fold {
     pub kind: FoldKind,
 }
 
+pub use api::of;
 /// Computes a file's folding ranges.
-pub struct Folds;
+mod api {
+    use super::{
+        AstNode, Fold, FoldKind, LineIndex, SourceFile, SyntaxElement, SyntaxKind, SyntaxNode, Vec,
+    };
 
-impl Folds {
     /// Compute the folds of `root` over `text` (the source it was parsed from).
     pub fn of(root: &SyntaxNode, text: &str, index: &LineIndex) -> Vec<Fold> {
         let line_of = |offset: usize| index.position(text, offset).line;
@@ -53,16 +56,12 @@ impl Folds {
         // and of every control-flow statement (if/while/for/try/...) and block-bodied lambda, so
         // matching `BLOCK` covers those without enumerating each statement kind.
         for node in root.descendants() {
-            if Self::is_foldable_body(node.kind()) {
+            if is_foldable_body(node.kind()) {
                 let range = node.text_range();
                 let open = line_of(usize::from(range.start()));
-                let close = line_of(Self::last_offset(range));
+                let close = line_of(last_offset(range));
                 // Fold up to the line *before* the closing brace, keeping it visible.
-                folds.extend(Self::line_fold(
-                    open,
-                    close.saturating_sub(1),
-                    FoldKind::Region,
-                ));
+                folds.extend(line_fold(open, close.saturating_sub(1), FoldKind::Region));
             }
         }
 
@@ -78,8 +77,8 @@ impl Folds {
             ) {
                 let range = token.text_range();
                 let start = line_of(usize::from(range.start()));
-                let end = line_of(Self::last_offset(range));
-                folds.extend(Self::line_fold(start, end, FoldKind::Comment));
+                let end = line_of(last_offset(range));
+                folds.extend(line_fold(start, end, FoldKind::Comment));
             }
         }
 
@@ -91,8 +90,8 @@ impl Folds {
                 && let Some(last) = imports.last()
             {
                 let start = line_of(usize::from(first.syntax().text_range().start()));
-                let end = line_of(Self::last_offset(last.syntax().text_range()));
-                folds.extend(Self::line_fold(start, end, FoldKind::Imports));
+                let end = line_of(last_offset(last.syntax().text_range()));
+                folds.extend(line_fold(start, end, FoldKind::Imports));
             }
         }
 
@@ -100,7 +99,7 @@ impl Folds {
     }
 
     /// The brace-delimited body node kinds we fold.
-    const fn is_foldable_body(kind: SyntaxKind) -> bool {
+    pub(crate) const fn is_foldable_body(kind: SyntaxKind) -> bool {
         use SyntaxKind::{ARRAY_INIT, BLOCK, CLASS_BODY, ENUM_BODY, MODULE_BODY, SWITCH_BLOCK};
         matches!(
             kind,
@@ -109,7 +108,7 @@ impl Folds {
     }
 
     /// Build a line fold, or `None` if it does not span at least two lines.
-    fn line_fold(start_line: u32, end_line: u32, kind: FoldKind) -> Option<Fold> {
+    pub(crate) fn line_fold(start_line: u32, end_line: u32, kind: FoldKind) -> Option<Fold> {
         (start_line < end_line).then_some(Fold {
             start_line,
             end_line,
@@ -119,7 +118,7 @@ impl Folds {
 
     /// Offset of the last byte of `range` (`end` − 1), clamped so an empty range never
     /// underflows. Lands on the closing `}` / `*/` / `;` glyph.
-    fn last_offset(range: text_size::TextRange) -> usize {
+    pub(super) fn last_offset(range: text_size::TextRange) -> usize {
         usize::from(range.end()).saturating_sub(1)
     }
 }
@@ -131,7 +130,7 @@ mod tests {
     /// `(start_line, end_line, kind)` tuples, sorted, for order-independent asserts.
     fn folds(text: &str) -> Vec<(u32, u32, FoldKind)> {
         let parse = jals_exec::block_on_inline(jals_syntax::Parse::parse(text));
-        let mut v: Vec<_> = Folds::of(&parse.syntax(), text, &LineIndex::new(text))
+        let mut v: Vec<_> = api::of(&parse.syntax(), text, &LineIndex::new(text))
             .into_iter()
             .map(|f| (f.start_line, f.end_line, f.kind))
             .collect();

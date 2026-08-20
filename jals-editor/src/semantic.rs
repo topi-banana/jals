@@ -74,22 +74,28 @@ pub struct SemanticToken {
     pub declaration: bool,
 }
 
+pub use api::classify;
 /// Classifies a file's significant tokens.
-pub struct SemanticTokens;
+mod api {
+    use super::{
+        BTreeMap, DefKind, FileId, Namespace, ProjectIndex, SemanticToken, SemanticTokenKind,
+        SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken, TypeResolution, Vec,
+    };
 
-impl SemanticTokens {
-    /// Classify every significant token under `root`, in document order. Whitespace, operators,
+    /// Classify every significant token under `root`, in document order.
+    ///
+    /// Whitespace, operators,
     /// delimiters, and unclassifiable identifiers are skipped. Async because the resolution
     /// pass ([`jals_hir::FileAnalysis::of`]) yields cooperatively.
     pub async fn classify(
         root: &SyntaxNode,
         project: Option<(&ProjectIndex, FileId)>,
     ) -> Vec<SemanticToken> {
-        let by_start = Self::resolution_classes(root, project).await;
+        let by_start = resolution_classes(root, project).await;
         root.descendants_with_tokens()
             .filter_map(SyntaxElement::into_token)
             .filter_map(|token| {
-                let (kind, declaration) = Self::classify_token(&token, &by_start)?;
+                let (kind, declaration) = classify_token(&token, &by_start)?;
                 Some(SemanticToken {
                     range: crate::byte_range(token.text_range()),
                     kind,
@@ -111,7 +117,7 @@ impl SemanticTokens {
     /// offset. A reference the file-local pass left unresolved is placed only when `project`
     /// binds it to a cross-file type (by its declared kind); any other unresolved reference is
     /// omitted, leaving its token to the syntactic fallback.
-    async fn resolution_classes(
+    pub(crate) async fn resolution_classes(
         root: &SyntaxNode,
         project: Option<(&ProjectIndex, FileId)>,
     ) -> BTreeMap<usize, (SemanticTokenKind, bool)> {
@@ -121,7 +127,7 @@ impl SemanticTokens {
             if let Some(id) = reference.resolution.def_id() {
                 by_start.insert(
                     reference.range.start,
-                    (Self::kind_for(analysis.def(id).kind), false),
+                    (kind_for(analysis.def(id).kind), false),
                 );
             } else if let Some((index, file)) = project
                 && reference.namespace == Namespace::Type
@@ -131,22 +137,22 @@ impl SemanticTokens {
                 // declaration's kind, sharper than the syntactic fallback's generic `Type`.
                 by_start.insert(
                     reference.range.start,
-                    (Self::kind_for(index.item(item).kind), false),
+                    (kind_for(index.item(item).kind), false),
                 );
             }
         }
         for def in analysis.defs() {
             by_start
                 .entry(def.name_range.start)
-                .or_insert_with(|| (Self::kind_for(def.kind), true));
+                .or_insert_with(|| (kind_for(def.kind), true));
         }
         by_start
     }
 
     /// The token kind for a resolved binding's [`DefKind`]. Mirrors the declaration-site mapping
-    /// in [`Self::classify_ident_syntactic`], so a declaration classifies the same whether it is
+    /// in [`classify_ident_syntactic`], so a declaration classifies the same whether it is
     /// placed by resolution or syntax.
-    const fn kind_for(kind: DefKind) -> SemanticTokenKind {
+    pub(crate) const fn kind_for(kind: DefKind) -> SemanticTokenKind {
         match kind {
             DefKind::Class | DefKind::Record => SemanticTokenKind::Class,
             DefKind::Interface | DefKind::AnnotationType => SemanticTokenKind::Interface,
@@ -167,7 +173,7 @@ impl SemanticTokens {
     ///
     /// An identifier is taken from `by_start` (name resolution) when present, otherwise
     /// classified syntactically.
-    fn classify_token(
+    pub(crate) fn classify_token(
         token: &SyntaxToken,
         by_start: &BTreeMap<usize, (SemanticTokenKind, bool)>,
     ) -> Option<(SemanticTokenKind, bool)> {
@@ -185,9 +191,9 @@ impl SemanticTokens {
                 by_start
                     .get(&start)
                     .copied()
-                    .or_else(|| Self::classify_ident_syntactic(token))
+                    .or_else(|| classify_ident_syntactic(token))
             }
-            k if Self::is_keyword(k) => Some((SemanticTokenKind::Keyword, false)),
+            k if is_keyword(k) => Some((SemanticTokenKind::Keyword, false)),
             _ => None,
         }
     }
@@ -195,7 +201,9 @@ impl SemanticTokens {
     /// Classify an identifier from the kind of its parent node, falling back to grandparent
     /// context to distinguish a method call from a plain name/field access. The syntactic
     /// fallback for identifiers name resolution cannot place.
-    fn classify_ident_syntactic(token: &SyntaxToken) -> Option<(SemanticTokenKind, bool)> {
+    pub(crate) fn classify_ident_syntactic(
+        token: &SyntaxToken,
+    ) -> Option<(SemanticTokenKind, bool)> {
         use SyntaxKind::{
             ANNOTATION, ANNOTATION_PAIR, ANNOTATION_TYPE_DECL, CALL_EXPR, CATCH_CLAUSE, CLASS_DECL,
             CONSTRUCTOR_DECL, ENUM_CONSTANT, ENUM_DECL, FIELD_ACCESS, FIELD_DECL, INTERFACE_DECL,
@@ -246,7 +254,7 @@ impl SemanticTokens {
 
     /// Whether `kind` is a keyword token — the reserved 50, the literal keywords
     /// (`true`/`false`/`null`), and the contextual keywords the parser promotes from `IDENT`.
-    const fn is_keyword(kind: SyntaxKind) -> bool {
+    pub(crate) const fn is_keyword(kind: SyntaxKind) -> bool {
         use SyntaxKind::{
             ABSTRACT_KW, ASSERT_KW, BOOLEAN_KW, BREAK_KW, BYTE_KW, CASE_KW, CATCH_KW, CHAR_KW,
             CLASS_KW, CONST_KW, CONTINUE_KW, DEFAULT_KW, DO_KW, DOUBLE_KW, ELSE_KW, ENUM_KW,
@@ -342,7 +350,7 @@ mod tests {
     /// Classify `text` with no project index.
     fn classify(text: &str) -> Vec<SemanticToken> {
         block_on_inline(async {
-            SemanticTokens::classify(&jals_syntax::Parse::parse(text).await.syntax(), None).await
+            api::classify(&jals_syntax::Parse::parse(text).await.syntax(), None).await
         })
     }
 
@@ -495,7 +503,7 @@ mod tests {
             let start = main.find("Color").unwrap();
             let root = jals_syntax::Parse::parse(main).await.syntax();
             let kind_at = async |project| {
-                SemanticTokens::classify(&root, project)
+                api::classify(&root, project)
                     .await
                     .into_iter()
                     .find(|t| t.range.start == start)

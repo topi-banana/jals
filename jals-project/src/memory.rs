@@ -20,9 +20,6 @@ use crate::walk::{
     Acquired, DeclaredEntry, DeclaredFile, DeclaredTree, GraphHost, GraphWalk, Opened, Placement,
 };
 
-/// Portable entry point for recursive dependency discovery inside one captured [`CodeTree`].
-pub struct MemoryProjectGraph;
-
 /// The tree every declaration in this graph is addressed against.
 ///
 /// One field, because that is the whole of what a portable host needs to acquire anything: there is
@@ -38,7 +35,15 @@ struct Selected {
     view: ProjectView,
 }
 
-impl MemoryProjectGraph {
+pub(crate) use api::discover;
+
+/// Portable entry point for recursive dependency discovery inside one captured [`CodeTree`].
+mod api {
+    use super::{
+        GraphError, GraphWalk, Manifest, MemoryHost, ProjectView, RelativePath,
+        ResolvedProjectGraph, ToString, Vec,
+    };
+
     /// Discover all path and jar dependencies from one immutable root snapshot.
     ///
     /// Path dependencies select subtrees of `root_view`. Their manifests and scripts see a view
@@ -346,9 +351,7 @@ mod tests {
             ]);
             let root = manifest("[dependencies]\nparent = { path = \"deps/parent\" }\n");
             let mut storage = MemoryStorage::memory(CodeTree::default());
-            let graph = MemoryProjectGraph::discover(&root, &root_view)
-                .await
-                .unwrap();
+            let graph = api::discover(&root, &root_view).await.unwrap();
             assert_eq!(
                 graph
                     .metadata()
@@ -394,12 +397,12 @@ mod tests {
                 ("base/jals.toml", b"[build\n"),
                 ("base/selected/src/S.java", b"class S {}"),
             ]);
-            let graph = MemoryProjectGraph::discover(&root, &absent).await.unwrap();
+            let graph = api::discover(&root, &absent).await.unwrap();
             assert_eq!(graph.metadata().nodes()[0].kind, NodeKind::PlainSource);
 
             let malformed = view(&[("base/selected/jals.toml", b"[build\n")]);
             assert!(matches!(
-                MemoryProjectGraph::discover(&root, &malformed).await,
+                api::discover(&root, &malformed).await,
                 Err(GraphError::MalformedManifest { .. })
             ));
         });
@@ -422,9 +425,7 @@ mod tests {
                 ),
                 ("shared/src/Shared.java", b"class Shared {}"),
             ]);
-            let graph = MemoryProjectGraph::discover(&diamond, &diamond_view)
-                .await
-                .unwrap();
+            let graph = api::discover(&diamond, &diamond_view).await.unwrap();
             assert_eq!(graph.metadata().nodes().len(), 3);
             assert_eq!(graph.metadata().edges().len(), 4);
 
@@ -436,9 +437,7 @@ mod tests {
                     b"[dependencies]\na-again = { path = \"../a\" }\n",
                 ),
             ]);
-            let GraphError::Cycle { chain } = MemoryProjectGraph::discover(&root, &root_view)
-                .await
-                .unwrap_err()
+            let GraphError::Cycle { chain } = api::discover(&root, &root_view).await.unwrap_err()
             else {
                 panic!("expected a cycle");
             };
@@ -451,9 +450,7 @@ mod tests {
             );
 
             let escaped = manifest("[dependencies]\nx = { path = \"../x\" }\n");
-            let graph = MemoryProjectGraph::discover(&escaped, &root_view)
-                .await
-                .unwrap();
+            let graph = api::discover(&escaped, &root_view).await.unwrap();
             assert!(graph.metadata().nodes().is_empty());
             assert_eq!(graph.warnings().len(), 1);
         });
@@ -470,7 +467,7 @@ mod tests {
                 ("lib/sources.jar", b"sources"),
             ]);
             let mut storage = MemoryStorage::memory(CodeTree::default());
-            let graph = MemoryProjectGraph::discover(&root, &root_view)
+            let graph = api::discover(&root, &root_view)
                 .await
                 .unwrap()
                 .preprocess(storage.artifacts_mut(), inert!())
@@ -533,7 +530,7 @@ mod tests {
             environment.insert("HOST_VALUE", "kept");
             let mut storage = MemoryStorage::memory(CodeTree::default());
 
-            MemoryProjectGraph::discover(&root, &root_view)
+            api::discover(&root, &root_view)
                 .await
                 .unwrap()
                 .preprocess(
@@ -572,7 +569,7 @@ mod tests {
                 max_cache_state_size: 1,
                 ..BuildScriptLimits::default()
             };
-            let graph = MemoryProjectGraph::discover(&root, &root_view)
+            let graph = api::discover(&root, &root_view)
                 .await
                 .unwrap()
                 .preprocess(
@@ -609,9 +606,7 @@ mod tests {
             let root = manifest(
                 "[dependencies]\na = { git = \"https://example.invalid/a.git\" }\nb = { git = \"https://example.invalid/b.git\" }\n",
             );
-            let graph = MemoryProjectGraph::discover(&root, &view(&[]))
-                .await
-                .unwrap();
+            let graph = api::discover(&root, &view(&[])).await.unwrap();
             assert!(graph.metadata().nodes().is_empty());
             assert_eq!(
                 graph
@@ -644,7 +639,7 @@ mod tests {
     fn a_transitive_entry_names_the_project_that_declared_it() {
         jals_exec::block_on_inline(async {
             let root = manifest("[dependencies]\ndep = { path = \"dep\" }\n");
-            let graph = MemoryProjectGraph::discover(
+            let graph = api::discover(
                 &root,
                 &view(&[
                     (
@@ -679,7 +674,7 @@ mod tests {
     fn a_transitive_build_entry_names_the_project_that_declared_it() {
         jals_exec::block_on_inline(async {
             let root = manifest("[dependencies]\ndep = { path = \"dep\" }\n");
-            let graph = MemoryProjectGraph::discover(
+            let graph = api::discover(
                 &root,
                 &view(&[(
                     "dep/jals.toml",
@@ -741,7 +736,7 @@ mod tests {
     /// which fires at the start of `preprocess` before any script runs.
     async fn preprocess_error(root: &Manifest, root_view: &ProjectView) -> GraphError {
         let mut storage = MemoryStorage::memory(CodeTree::default());
-        MemoryProjectGraph::discover(root, root_view)
+        api::discover(root, root_view)
             .await
             .unwrap()
             .preprocess(storage.artifacts_mut(), inert!())
@@ -762,7 +757,7 @@ mod tests {
             .resolve_build_features(&selected, false, false)
             .unwrap();
         let mut storage = MemoryStorage::memory(CodeTree::default());
-        MemoryProjectGraph::discover(root, root_view)
+        api::discover(root, root_view)
             .await
             .unwrap()
             .preprocess(
@@ -1022,9 +1017,7 @@ mod tests {
                 ("dep/jals.toml", PROBE_MANIFEST),
                 ("dep/build.rhai", FEATURE_PROBE),
             ]);
-            let error = MemoryProjectGraph::discover(&root, &root_view)
-                .await
-                .unwrap_err();
+            let error = api::discover(&root, &root_view).await.unwrap_err();
             let GraphError::MalformedManifest {
                 location, message, ..
             } = error
@@ -1056,9 +1049,7 @@ mod tests {
                 ("dep/build.rhai", FEATURE_PROBE),
                 ("libs/x.jar", b"not really a jar"),
             ]);
-            let graph = MemoryProjectGraph::discover(&root, &root_view)
-                .await
-                .unwrap();
+            let graph = api::discover(&root, &root_view).await.unwrap();
             let metadata = graph.metadata();
             let edges: Vec<(&str, Vec<&str>)> = metadata
                 .edges()

@@ -31,6 +31,8 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+pub(crate) use api::utf16;
+
 /// Column measurement.
 ///
 /// google-java-format counts columns in **UTF-16 code units** (`String.length()`), not display
@@ -38,26 +40,25 @@ use alloc::vec::Vec;
 /// pre-rewrite formatter used `UnicodeWidthStr::width` and diverged from GJF on every file with a
 /// wide character. This is engine behavior, not a rule — nothing in `Config` switches it
 /// (`DESIGN.md` §2.6, seam list §8.1).
-pub(crate) struct Width;
+pub(crate) mod api {
 
-impl Width {
     /// The sentinel width of something that can never sit on one line: a forced break, a token
     /// holding a newline, a `//` comment. Saturating arithmetic keeps it absorbing, so any level
     /// containing one fails `column + width <= max_width` at every column.
-    const INFINITE: usize = usize::MAX;
+    pub(crate) const INFINITE: usize = usize::MAX;
 
     /// The width of `text` in UTF-16 code units.
     pub(crate) fn utf16(text: &str) -> usize {
         text.chars().map(char::len_utf16).sum()
     }
 
-    /// The width of `text` as a *token*: [`INFINITE`](Self::INFINITE) when it spans lines (a text
+    /// The width of `text` as a *token*: [`INFINITE`](INFINITE) when it spans lines (a text
     /// block, a disabled region), otherwise its UTF-16 width.
-    fn token(text: &str) -> usize {
+    pub(crate) fn token(text: &str) -> usize {
         if text.contains('\n') {
-            Self::INFINITE
+            INFINITE
         } else {
-            Self::utf16(text)
+            utf16(text)
         }
     }
 
@@ -68,9 +69,9 @@ impl Width {
     /// making it infinitely wide. Measuring it as infinite would additionally poison every
     /// enclosing level, so a trailing `// note` on a field would break the field's initializer
     /// onto its own line — a comment changing the layout of the code it annotates.
-    fn tok(text: &str) -> usize {
+    pub(crate) fn tok(text: &str) -> usize {
         text.find('\n')
-            .map_or_else(|| Self::utf16(text), |at| Self::utf16(&text[..at]))
+            .map_or_else(|| utf16(text), |at| utf16(&text[..at]))
     }
 }
 
@@ -91,7 +92,7 @@ pub(crate) enum FillMode {
     /// Fill: this break goes only when the next chunk would not fit. Prettier's `fill`, except
     /// that GJF lets it share a level with [`Unified`](Self::Unified) breaks.
     Independent,
-    /// Always breaks, and makes the level's width [`Width::INFINITE`] so it can never be flat.
+    /// Always breaks, and makes the level's width [`api::INFINITE`] so it can never be flat.
     Forced,
 }
 
@@ -185,12 +186,12 @@ impl Break {
         matches!(self.fill, FillMode::Forced)
     }
 
-    /// The flat width, or [`Width::INFINITE`] when forced (`Break.computeWidth`).
+    /// The flat width, or [`api::INFINITE`] when forced (`Break.computeWidth`).
     fn width(&self) -> usize {
         if self.is_forced() {
-            Width::INFINITE
+            api::INFINITE
         } else {
-            Width::utf16(&self.flat)
+            api::utf16(&self.flat)
         }
     }
 }
@@ -227,7 +228,7 @@ pub(crate) enum Doc {
     /// A group with its own indent.
     Level(Level),
     /// One significant token's text. A text block or a formatter-disabled region arrives here
-    /// with newlines in it, which makes its width [`Width::INFINITE`].
+    /// with newlines in it, which makes its width [`api::INFINITE`].
     Token {
         /// The token text, emitted verbatim.
         text: Box<str>,
@@ -273,10 +274,10 @@ impl Doc {
     pub(crate) fn width(&self) -> usize {
         match self {
             Self::Level(level) => level.width,
-            Self::Token { text } => Width::token(text),
+            Self::Token { text } => api::token(text),
             Self::Break(brk) => brk.width(),
             Self::Space => 1,
-            Self::Tok { text, .. } => Width::tok(text),
+            Self::Tok { text, .. } => api::tok(text),
         }
     }
 
@@ -312,7 +313,7 @@ impl Doc {
                 }
                 other => {
                     let width = other.width();
-                    if width == Width::INFINITE {
+                    if width == api::INFINITE {
                         return total;
                     }
                     total = total.saturating_add(width);

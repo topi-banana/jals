@@ -1,7 +1,7 @@
 //! Portable (`no_std`, `&str`-in) readers for the two non-XML native config formats:
 //! Eclipse's `.settings/org.eclipse.jdt.core.prefs` (a Java *properties* file) and IntelliJ's
 //! `.editorconfig` (an INI-like file). Both lower to a flat `key → value` [`BTreeMap`] that
-//! [`super::serde_kv::Kv::from_pairs`] then turns into a typed model. The XML forms need a real
+//! [`super::serde_kv::from_pairs`] then turns into a typed model. The XML forms need a real
 //! XML reader and live behind the `std` feature in [`super::xml`].
 
 // Native file / product names (EditorConfig, `.editorconfig`, …) appear in the docs as prose.
@@ -16,9 +16,9 @@ use alloc::string::String;
 pub(crate) const ECLIPSE_FORMATTER_PREFIX: &str = "org.eclipse.jdt.core.formatter.";
 
 /// Reader for a Java *properties* file (Eclipse `.prefs`).
-pub(crate) struct Properties;
+pub(crate) mod properties {
+    use super::{BTreeMap, ECLIPSE_FORMATTER_PREFIX, String, ToOwned};
 
-impl Properties {
     /// Parse a properties file, keeping only formatter settings.
     ///
     /// Java properties rules honored for the formatter subset: `#` / `!` line comments, `=` or `:`
@@ -33,18 +33,18 @@ impl Properties {
             if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
                 continue;
             }
-            let Some((key, value)) = Self::split(line) else {
+            let Some((key, value)) = split(line) else {
                 continue;
             };
             if key.starts_with(ECLIPSE_FORMATTER_PREFIX) {
-                out.insert(key.to_owned(), Self::unescape(value));
+                out.insert(key.to_owned(), unescape(value));
             }
         }
         out
     }
 
     /// Split a properties line at its first unescaped `=` or `:`.
-    fn split(line: &str) -> Option<(&str, &str)> {
+    pub(crate) fn split(line: &str) -> Option<(&str, &str)> {
         let mut escaped = false;
         for (i, &b) in line.as_bytes().iter().enumerate() {
             if escaped {
@@ -61,7 +61,7 @@ impl Properties {
     }
 
     /// Decode the `\uXXXX` / `\:` / `\=` / `\\` / `\t` / `\n` escapes a properties value may carry.
-    fn unescape(value: &str) -> String {
+    pub(crate) fn unescape(value: &str) -> String {
         if !value.contains('\\') {
             return value.to_owned();
         }
@@ -94,9 +94,9 @@ impl Properties {
 }
 
 /// Reader for an `.editorconfig` file (IntelliJ's primary form).
-pub(crate) struct EditorConfig;
+pub(crate) mod editor_config {
+    use super::{BTreeMap, String, ToOwned};
 
-impl EditorConfig {
     /// Parse an `.editorconfig`, collecting every property that applies to `*.java` files.
     ///
     /// Sections are glob headers; a property applies to Java when its section matches a `*.java`
@@ -117,10 +117,8 @@ impl EditorConfig {
                 // A trailing comment is not part of the glob. Without this the line fails the
                 // `]` test, falls through, and silently leaves the *previous* section open — so
                 // the next properties land in whichever section came before.
-                let rest = Self::strip_comment(rest);
-                in_java_section = rest
-                    .strip_suffix(']')
-                    .is_some_and(Self::section_matches_java);
+                let rest = strip_comment(rest);
+                in_java_section = rest.strip_suffix(']').is_some_and(section_matches_java);
                 continue;
             }
             if !in_java_section {
@@ -134,7 +132,7 @@ impl EditorConfig {
     }
 
     /// Drop a trailing `#` / `;` comment from a section-header line.
-    fn strip_comment(line: &str) -> &str {
+    pub(crate) fn strip_comment(line: &str) -> &str {
         line.find(['#', ';'])
             .map_or(line, |at| line[..at].trim_end())
     }
@@ -152,13 +150,13 @@ impl EditorConfig {
     ///   directory, and the glob names `xml` as its extension;
     /// - `[*]`, `[**]`, `[src/main/java/**]` match, because they name no extension at all —
     ///   erring toward applying a section jals cannot resolve, which is what `[*]` already does.
-    fn section_matches_java(header: &str) -> bool {
-        Self::names_java(header) || !Self::names_an_extension(header)
+    pub(crate) fn section_matches_java(header: &str) -> bool {
+        names_java(header) || !names_an_extension(header)
     }
 
     /// Whether `java` occurs in `header` as a whole glob segment that is not a directory
     /// component (`*.java`, `*.{java,kt}` — but not `java/**`).
-    fn names_java(header: &str) -> bool {
+    pub(crate) fn names_java(header: &str) -> bool {
         let bytes = header.as_bytes();
         let mut from = 0;
         while let Some(offset) = header[from..].find("java") {
@@ -177,7 +175,7 @@ impl EditorConfig {
 
     /// Whether the header's file-name component names an extension at all — `*.xml` does,
     /// `**` and `src/main/java/**` do not.
-    fn names_an_extension(header: &str) -> bool {
+    pub(crate) fn names_an_extension(header: &str) -> bool {
         header
             .rsplit('/')
             .next()

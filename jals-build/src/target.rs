@@ -1,6 +1,6 @@
 //! Pure resolution of which entry point (`main-class`) `jals run` should execute.
 //!
-//! [`RunTarget::resolve`] maps a [`Manifest`] plus an optional `--bin <name>` selector to the
+//! [`api::resolve`] maps a [`Manifest`] plus an optional `--bin <name>` selector to the
 //! fully-qualified main class to hand to `java`. Like the rest of the crate it touches neither the
 //! filesystem nor a process, so it stays deterministic, unit-testable, and `wasm32`-compatible;
 //! `jals-cli` calls it and feeds the result into [`crate::run_invocation`].
@@ -18,10 +18,12 @@ use core::fmt;
 
 use jals_config::Manifest;
 
-/// Namespace for resolving which entry point (`main-class`) `jals run` should execute.
-pub struct RunTarget;
+pub use api::resolve as resolve_run_target;
 
-impl RunTarget {
+/// Namespace for resolving which entry point (`main-class`) `jals run` should execute.
+mod api {
+    use super::{Manifest, ResolveTargetError, String, ToOwned, Vec};
+
     /// Resolve the fully-qualified main class `jals run` should execute, given an optional `--bin
     /// <name>` selector.
     ///
@@ -88,7 +90,7 @@ impl RunTarget {
     }
 }
 
-/// Why [`RunTarget::resolve`] could not choose a single run target.
+/// Why [`api::resolve`] could not choose a single run target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolveTargetError {
     /// `--bin <name>` (or `default-run`) named a bin that does not exist.
@@ -164,22 +166,19 @@ mod tests {
     fn no_bins_uses_run_main_class() {
         let mut m = Manifest::default();
         m.run.main_class = Some("com.example.Main".to_owned());
-        assert_eq!(RunTarget::resolve(&m, None), Ok("com.example.Main"));
+        assert_eq!(api::resolve(&m, None), Ok("com.example.Main"));
     }
 
     #[test]
     fn no_bins_no_main_class_is_no_target() {
         let m = Manifest::default();
-        assert_eq!(
-            RunTarget::resolve(&m, None),
-            Err(ResolveTargetError::NoTarget)
-        );
+        assert_eq!(api::resolve(&m, None), Err(ResolveTargetError::NoTarget));
     }
 
     #[test]
     fn single_bin_is_unambiguous() {
         let m = manifest_with_bins(vec![bin("only", "com.example.Only")]);
-        assert_eq!(RunTarget::resolve(&m, None), Ok("com.example.Only"));
+        assert_eq!(api::resolve(&m, None), Ok("com.example.Only"));
     }
 
     #[test]
@@ -187,23 +186,23 @@ mod tests {
         // Option A: once any `[[bin]]` exists, `[run] main-class` is ignored for selection.
         let mut m = manifest_with_bins(vec![bin("only", "com.example.Only")]);
         m.run.main_class = Some("com.example.Legacy".to_owned());
-        assert_eq!(RunTarget::resolve(&m, None), Ok("com.example.Only"));
+        assert_eq!(api::resolve(&m, None), Ok("com.example.Only"));
     }
 
     #[test]
     fn explicit_bin_flag_selects() {
         let m = two_bins();
-        assert_eq!(RunTarget::resolve(&m, Some("two")), Ok("com.example.Two"));
+        assert_eq!(api::resolve(&m, Some("two")), Ok("com.example.Two"));
     }
 
     #[test]
     fn unknown_bin_flag_errors() {
         let m = two_bins();
         assert_eq!(
-            RunTarget::resolve(&m, Some("nope")),
+            api::resolve(&m, Some("nope")),
             Err(ResolveTargetError::UnknownBin {
                 name: "nope".to_owned(),
-                available: vec!["one".to_owned(), "two".to_owned()],
+                available: vec!["one".to_owned(), "two".to_owned()]
             })
         );
     }
@@ -212,9 +211,9 @@ mod tests {
     fn multiple_bins_without_default_is_ambiguous() {
         let m = two_bins();
         assert_eq!(
-            RunTarget::resolve(&m, None),
+            api::resolve(&m, None),
             Err(ResolveTargetError::Ambiguous {
-                available: vec!["one".to_owned(), "two".to_owned()],
+                available: vec!["one".to_owned(), "two".to_owned()]
             })
         );
     }
@@ -223,14 +222,14 @@ mod tests {
     fn default_run_selects_among_many() {
         let mut m = two_bins();
         m.package.default_run = Some("two".to_owned());
-        assert_eq!(RunTarget::resolve(&m, None), Ok("com.example.Two"));
+        assert_eq!(api::resolve(&m, None), Ok("com.example.Two"));
     }
 
     #[test]
     fn explicit_bin_overrides_default_run() {
         let mut m = two_bins();
         m.package.default_run = Some("one".to_owned());
-        assert_eq!(RunTarget::resolve(&m, Some("two")), Ok("com.example.Two"));
+        assert_eq!(api::resolve(&m, Some("two")), Ok("com.example.Two"));
     }
 
     #[test]
@@ -243,7 +242,7 @@ mod tests {
         );
         assert!(
             ResolveTargetError::Ambiguous {
-                available: vec!["a".to_owned(), "b".to_owned()],
+                available: vec!["a".to_owned(), "b".to_owned()]
             }
             .to_string()
             .contains("multiple bins")
@@ -251,7 +250,7 @@ mod tests {
         assert!(
             ResolveTargetError::UnknownBin {
                 name: "x".to_owned(),
-                available: vec!["a".to_owned()],
+                available: vec!["a".to_owned()]
             }
             .to_string()
             .contains("no bin named")

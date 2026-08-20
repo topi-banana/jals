@@ -19,10 +19,11 @@ use jals_config::{Feature, FrontendKind, Manifest};
 use jals_storage::{ArtifactCache, CacheBackend};
 
 use crate::dialect::{DialectFlags, DialectFrontend};
-use crate::driver::{Driver, LowerError, Lowered};
+use crate::driver;
+use crate::driver::{LowerError, Lowered};
 use crate::frontend::Frontend;
 use crate::ir::IrFile;
-use crate::key::FrontendKey;
+use crate::key;
 use crate::vanilla::VanillaFrontend;
 
 /// The frontend a project's manifest selects, ready to run.
@@ -90,7 +91,7 @@ impl FrontendSelection {
 
     /// Lower `files` and publish every emitted file into `cache`.
     ///
-    /// Takes the input by value and imposes `FrontendKey::canonical_order` itself. Source
+    /// Takes the input by value and imposes `key::canonical_order` itself. Source
     /// discovery walks a filesystem — or a build script's registration order — neither of which is
     /// sorted, and every digest below this depends on that order, so leaving it to the caller made
     /// a cache entry's portability a documented precondition that three call sites each had to
@@ -100,7 +101,7 @@ impl FrontendSelection {
         cache: &mut ArtifactCache<C>,
         mut files: Vec<IrFile>,
     ) -> Result<Lowered, LowerError> {
-        FrontendKey::canonical_order(&mut files);
-        Driver::lower(self.frontend.as_ref(), cache, &files).await
+        key::canonical_order(&mut files);
+        driver::lower(self.frontend.as_ref(), cache, &files).await
     }
 }
