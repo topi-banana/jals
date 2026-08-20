@@ -2,38 +2,47 @@
 
 Guidance for agents working in this repository.
 
+`README.md` says what `jals` is and how it is used. This file is what a change has to respect: the
+seams, the prohibitions, and the gates. Deeper per-area detail lives in the area's own document —
+`jals-fmt/DESIGN.md`, `jals-lint/README.md`, `jals-build/README.md`, `jals-decompile/README.md`,
+`jals-lsp/README.md`, `jals-tests/README.md`, `jals-playground/DESIGN.md` — and the reasoning
+behind an enforced rule lives in that rule's `note:` block under `.ast-grep/rules/`. Prefer
+following the pointer to restating it here.
+
 ## Architecture
 
-`jals` is a Rust workspace for Java parsing, formatting, linting, semantic analysis, LSP, and a
-Cargo-like build frontend. The lossless `jals-syntax` CST is shared by `jals-fmt`, `jals-hir`,
-`jals-lint`, `jals-editor`, the CLI, the LSP, and the browser playground.
+`jals` is a Rust workspace for Java parsing, formatting, linting, semantic analysis, compilation,
+LSP, and a Cargo-like build frontend. The lossless `jals-syntax` CST is shared by `jals-fmt`,
+`jals-hir`, `jals-lint`, `jals-javac`, `jals-editor`, the CLI, the LSP, and the browser playground.
 
-The workspace is fully async on a deliberately `!Send` execution model:
+### Execution: async, current-thread, deliberately `!Send`
 
 - Every runtime is current-thread (native: tokio current-thread + `LocalSet`; browser:
   `spawn_local`). Futures never cross threads, so `future_not_send` is allowed workspace-wide.
 - `jals-exec` is the unified execution context. `Exec` is a cheap-clone handle over a sealed
   runtime core (`inline` / `tokio` / `wasm`); hosts construct it at the top
-  (`jals_exec::tokio_rt::run` natively, `Exec::wasm()` in the browser, `Exec::inline()` for
-  tests and pure in-memory use) and thread it down. Portable code never names a runtime.
+  (`jals_exec::tokio_rt::run` natively, `Exec::wasm()` in the browser, `Exec::inline()` for tests
+  and pure in-memory use) and thread it down. Portable code never names a runtime.
 - Multi-core parallelism exists only as `Exec::fan_out`: `Send` inputs and a `Send` closure are
   distributed to dedicated worker threads that each build and drive a `!Send` future locally;
   results always return in input order, so output is identical at any parallelism. Chunked
   fan-outs must use fixed chunk-size constants, never worker-count-derived ones.
 - Cooperative yielding is runtime-free: `jals_exec::yield_now()` and the amortized
-  `jals_exec::Yielder` are free functions, so CPU crates (parsing, inference, formatting) take
-  no execution parameter at all. Recursion over input is broken with `Box::pin` only at cycle
+  `jals_exec::Yielder` need no `Exec` at all, so CPU crates (parsing, inference, formatting) take
+  no execution parameter. Recursion over input is broken with `Box::pin` only at cycle
   back-edges/choke points, never on hot straight-line calls.
 - Blocking syscalls live in native adapters only, wrapped in
   `jals_exec::tokio_rt::on_blocking_pool` (blocking pool on a runtime, inline off-runtime —
-  fan-out worker threads are blocking-legal by design). tokio is used only by crates whose
+  fan-out worker threads are blocking-legal by design). tokio is named only by crates whose
   `std`/`native` features permit it; portable crates write runtime-agnostic async.
 
-Project data is owned by `jals-storage`. It is not a generic VFS:
+### Storage
+
+Project data is owned by `jals-storage`. It is not a generic VFS.
 
 - `Name`, `RelativePath`, `FileKey`, and `DirKey` are the only portable logical locations.
-- `CodeTree` is an immutable, ordered snapshot containing directories and file bytes.
-- `ProjectStorage<S, C>` owns the base snapshot, editor overlay, artifact cache, and `Revision`.
+  `CodeTree` is an immutable, ordered snapshot of directories and file bytes. `ProjectStorage<S, C>`
+  owns the base snapshot, editor overlay, artifact cache, and `Revision`.
 - `MemorySource`/`MemoryCache` and `NativeSource`/`NativeCache` are sealed adapters implementing
   the same contract. Do not add consumer-defined backends.
 - Native filesystem changes become visible only through `refresh()`. Existing `ProjectView`s must
@@ -64,114 +73,115 @@ filesystem reads into portable interfaces.
 ## Crate boundaries
 
 - `jals-storage`: typed keys, immutable revisions, transactions, overlays, cache, memory/native
-  adapters. Only `native.rs` may use `std::path`/`std::fs`.
+  adapters (see *Storage* above). Only `native.rs` may use `std::path`/`std::fs`.
 - `jals-config`: pure schemas and revision-aware config discovery over `ProjectView`, plus the
-  shared severity vocabulary — the configured `LintLevel` and the presented `DiagnosticSeverity` —
-  so a crate that produces diagnostics states how they present without depending on an editor.
-  `jals-editor` and `jals-project` both assemble diagnostics, neither depends on the other, and
-  this is the only crate they share; before it lived here, a terminal and a browser had each
-  written the same `ProjectDiagnosticSeverity` table two crates apart. `jals-editor` re-exports
-  the name, so a host still spells it `jals_editor::DiagnosticSeverity`.
+  shared severity vocabulary — the configured `LintLevel` and the presented `DiagnosticSeverity`.
+  A crate that produces diagnostics states how they present without depending on an editor, which
+  is why the vocabulary lives here: `jals-editor` and `jals-project` both assemble diagnostics and
+  neither depends on the other. `jals-editor` re-exports the name, so a host still spells it
+  `jals_editor::DiagnosticSeverity`.
+
   `lint::Config` is **sections of typed rule keys**, not a `BTreeMap<String, Severity>`: one section
   per rule `Category` — a *defect class*, so every rule is in exactly one — and one field per rule,
-  declared by the `lint_section!` macro. Three consequences are load-bearing. A rule's built-in level
-  is the value its section's `Default` gives its key and lives **only** there, so `jals-lint`'s
-  `RuleMeta` carries `fn(&Config) -> LintLevel` rather than a copy. A rule key deserializes as a
-  *patch* (`LintPatch`), so `[naming.naming-convention] fields = "any"` keeps the built-in level
-  instead of restating it — which is why `Deserialize` is written out rather than derived. And an
-  unrecognized key is recorded in `UnknownKeys` rather than rejected, because `deny_unknown_fields`
-  would let one stale name stop every *other* rule in the file from loading; `Config::unknown_keys`
-  is how a host reports what it kept. An option is always a value with every reachable state named —
-  never an `Option<bool>`, and never two exclusive rules a config could ask for both of (clippy's
-  `print_stdout`/`print_stderr` are one `streams` key). `Lint<O>`'s serialized *shape* follows the
-  options **type** (`LintOptions::HAS_KEYS`) and not the values, which is what lets
-  `jals-lint/tests/registry.rs` find every option by walking one serialized config.
-- `jals-classpath`: resolution over project bytes and cache artifacts. The in-house zip reader is
-  isolated in `zip.rs` behind `archive` (portable, `no_std`, over the async io seam; also a
-  stored-only writer for jar remap/merge; the `zip` crate is a dev-only fixture oracle). `jar.rs`
-  is the only public surface over that writer: `JarPackage::write` packages compiled classes,
-  generating the `META-INF/MANIFEST.MF` a jar needs (first member, CRLF, 72-byte wrapped) and
-  keeping `StoredZip`/`WriteMember` sealed.
-  Mappings parsing, hierarchy-aware jar remapping, and compile-oriented jar decompilation into
-  source trees live under `archive` too. Two grammars are read into one `Mappings` index —
-  Mojang/ProGuard and Fabric's tiny v2 — and a format that names more than two namespaces carries
-  the pair it is read through *inside* its `MappingFormat` variant, so the selection reaches the
-  remap's provenance fold with it: `official→named` and `official→intermediary` over one tiny file
-  are two jars, and folding the format tag alone would have served the second the first one's.
-  HTTP/local locator lowering is in its native adapter. A manifest's `[build]` section is lowered
-  into `ProjectInputPlan` by exactly two siblings — portable `MemoryProjectPlan` and host-path
-  `NativeProjectPlan` — and there must never be a third: a host that lowers `[build] classpath`
-  itself is a second rule that will drift.
-  `MemoryProjectPlan` has no external fallback because an in-memory project has one address space;
-  an entry reaching outside it is a warning, not a host path. A `Warning` carries its subject in
-  `origin`, not in `message` — several messages name no location at all — so a host reports one by
-  rendering the whole `Warning` through its `Display`, never `warning.message` alone.
-  `NetworkPolicy` is part of the `Fetcher`, not a value travelling beside it: a host that must not
-  fetch constructs one that refuses, and every step it is handed inherits the refusal. That is why
-  `ReqwestFetcher::for_project` takes the policy and has no `Default`, and why nothing downstream
-  re-derives it — a phase that built its own fetcher is how `--offline`, `jals lint`, and the
-  language server all used to issue live HTTP GETs for uncached dependency jars. Implementors
-  supply `fetch_admitted`/`fetch_bounded_admitted`, whose precondition is that the gate already
-  admitted the locator; `io.rs`'s `Fetch` is the only caller, and `no-ungated-fetch.yml` keeps it
-  that way because a trait method cannot be `pub(crate)`. The gate refuses **network** locators
-  only (`ExternalLocator::is_remote`, never `is_url`): the same seam carries `file://` and the host
-  paths `NativeProjectPlan::classify` lowers an out-of-project `jar = "../lib/x.jar"` to, and
-  refusing those offline breaks a build that never wanted the network.
+  declared by the `lint_section!` macro. Three consequences are load-bearing:
+  - A rule's built-in level is the value its section's `Default` gives its key and lives **only**
+    there, so `jals-lint`'s `RuleMeta` carries `fn(&Config) -> LintLevel` rather than a copy.
+  - A rule key deserializes as a *patch* (`LintPatch`), so `[naming.naming-convention] fields =
+    "any"` keeps the built-in level instead of restating it — which is why `Deserialize` is written
+    out rather than derived.
+  - An unrecognized key is recorded in `UnknownKeys` rather than rejected, because
+    `deny_unknown_fields` would let one stale name stop every *other* rule in the file from
+    loading; `Config::unknown_keys` is how a host reports what it kept.
+
+  An option is always a value with every reachable state named — never an `Option<bool>`, and never
+  two exclusive rules a config could ask for both of (clippy's `print_stdout`/`print_stderr` are one
+  `streams` key). `Lint<O>`'s serialized *shape* follows the options **type**
+  (`LintOptions::HAS_KEYS`) and not the values, which is what lets `jals-lint/tests/registry.rs`
+  find every option by walking one serialized config.
+- `jals-classpath`: resolution over project bytes and cache artifacts.
+  - The in-house zip reader is isolated in `zip.rs` behind `archive` (portable, `no_std`, over the
+    async io seam; also a stored-only writer for jar remap/merge; the `zip` crate is a dev-only
+    fixture oracle). `jar.rs` is the only public surface over that writer: `JarPackage::write`
+    packages compiled classes, generating the `META-INF/MANIFEST.MF` a jar needs (first member,
+    CRLF, 72-byte wrapped) and keeping `StoredZip`/`WriteMember` sealed.
+  - Mappings parsing, hierarchy-aware jar remapping, and compile-oriented jar decompilation into
+    source trees live under `archive` too. Two grammars are read into one `Mappings` index —
+    Mojang/ProGuard and Fabric's tiny v2 — and a format that names more than two namespaces carries
+    the pair it is read through *inside* its `MappingFormat` variant, so the selection reaches the
+    remap's provenance fold with it: `official→named` and `official→intermediary` over one tiny
+    file are two jars.
+  - A manifest's `[build]` section is lowered into `ProjectInputPlan` by exactly two siblings —
+    portable `MemoryProjectPlan` and host-path `NativeProjectPlan` — and there must never be a
+    third: a host that lowers `[build] classpath` itself is a second rule that will drift.
+    `MemoryProjectPlan` has no external fallback because an in-memory project has one address
+    space; an entry reaching outside it is a warning, not a host path.
+  - A `Warning` carries its subject in `origin`, not in `message` — several messages name no
+    location at all — so a host reports one by rendering the whole `Warning` through its `Display`,
+    never `warning.message` alone.
+  - `NetworkPolicy` is part of the `Fetcher`, not a value travelling beside it: a host that must
+    not fetch constructs one that refuses, and every step it is handed inherits the refusal. That
+    is why `ReqwestFetcher::for_project` takes the policy and has no `Default`, and why nothing
+    downstream re-derives it. Implementors supply `fetch_admitted`/`fetch_bounded_admitted`, whose
+    precondition is that the gate already admitted the locator; `io.rs`'s `Fetch` is the only
+    caller, and `no-ungated-fetch.yml` keeps it that way. The gate refuses **network** locators
+    only (`ExternalLocator::is_remote`, never `is_url`): the same seam carries `file://` and the
+    host paths `NativeProjectPlan::classify` lowers an out-of-project `jar = "../lib/x.jar"` to,
+    and refusing those offline breaks a build that never wanted the network.
 - `jals-project`: transitive path/Git/JAR project-graph discovery, stable node identity,
   dependency-first preprocessing, and artifact-only projection into `jals-classpath`. The portable
   memory graph operates on one captured `CodeTree`; only the `native` adapter may acquire host path
-  trees or temporary Git checkouts. Dependency snapshots are immutable and must never receive
-  generated output: a dependency's build tasks run under `BuildTaskHost::Snapshot`, so their JARs
-  and declared source trees are projected into the *consumer's* artifact cache instead of being
-  published to the project they were declared in. Which channel a published tree lands in is the
-  `intent` its `tasks.publish_tree` declared, and a host never infers it: `navigation` becomes
-  `library_source_artifacts` (a *view* of types the classpath defines, never a compile input),
-  `compile` joins the node's authored sources through its own frontend and becomes
-  `source_dependency_artifacts`. It is a routing and never a fan-out — a tree in both channels is
-  one type mounted twice. A `replace-root` destination is owned by its publication in a dependency
-  too, so an authored source captured under one is residue of a previous run and not an input; that
-  is what keeps a consumer's compile set independent of whether anyone ever built the dependency in
-  place. The premise the `navigation` routing rests on is not enforced by the task graph, so
-  preprocessing folds the node's own classpath into a `jals_classpath::ClasspathCoverage` and warns
-  against the declaration when nothing defines a class under a published package — a *consumer-side*
-  check, since discovery gives the root project no node. That answer is memoized in
-  `CacheNamespace::PublicationCoverage`, deliberately not in `BuildTaskState`: `[build] classpath`
-  is an input to one and not the other. Each task execution is memoized in
-  `CacheNamespace::BuildTaskState` under the node identity, plan digest, and resolved features, and
-  re-verified before reuse.
-  `ProjectAssembly` owns the **order and preconditions** of the whole procedure, and a host
-  **cannot sequence the steps itself**: it calls `ProjectAssembly::script` for the root build
-  script and its task plan, then `ProjectScript::resolve_memory` / `resolve_native` for discovery,
-  preprocessing, projection, and input resolution. Those are the crate's *only* public entries into
-  the procedure — `discover`, `preprocess`, `assemble`, `execute_root`, and the two projections are
-  crate-internal, and `ProjectGraphAssembly`/`ResolvedProjectGraph`/`PreprocessedProjectGraph` are
-  not exported at all, so the intermediate states cannot be held outside and re-ordered. Keep it
-  that way: a step that becomes `pub` for one caller is the hand-sequencing this seam removed, and
-  the crate's own tests live in `src` (`graph_tests.rs`) precisely so exercising a single step never
-  requires publishing it. `ProjectScript` is the only way from the first phase into the second
-  (`skipped()` for a host that deliberately runs no script, such as `jals lint`). It is deliberately
-  *two* calls rather than one: the aggregate hand-over point belongs to the host — `jals-cli`
-  reopens storage under narrower scopes for the graph phase, and the playground releases its
-  workspace lock so a jar download never blocks the editor. The policy each phase takes is the whole
-  difference between hosts (`BuildTaskHost`/`SourcePublication`/`blocked_files` on the first,
-  `GraphPreprocess` plus `ProjectInputOptions` on the second); the steps between them exist once.
-- `jals-exec`: the execution context (`Exec`, fan-out, yields, runtime adapters). Only its
-  `tokio`-feature module may name tokio; the portable core is `no_std`.
+  trees or temporary Git checkouts.
+  - Dependency snapshots are immutable and must never receive generated output: a dependency's
+    build tasks run under `BuildTaskHost::Snapshot`, so their JARs and declared source trees are
+    projected into the *consumer's* artifact cache instead of being published to the project they
+    were declared in.
+  - Which channel a published tree lands in is the `intent` its `tasks.publish_tree` declared, and
+    a host never infers it: `navigation` becomes `library_source_artifacts` (a *view* of types the
+    classpath defines, never a compile input), `compile` joins the node's authored sources through
+    its own frontend and becomes `source_dependency_artifacts`. It is a routing and never a
+    fan-out — a tree in both channels is one type mounted twice. A `replace-root` destination is
+    owned by its publication in a dependency too, so an authored source captured under one is
+    residue of a previous run and not an input.
+  - The premise the `navigation` routing rests on is not enforced by the task graph, so
+    preprocessing folds the node's own classpath into a `jals_classpath::ClasspathCoverage` and
+    warns against the declaration when nothing defines a class under a published package — a
+    *consumer-side* check, since discovery gives the root project no node. That answer is memoized
+    in `CacheNamespace::PublicationCoverage`, deliberately not in `BuildTaskState`: `[build]
+    classpath` is an input to one and not the other. Each task execution is memoized in
+    `CacheNamespace::BuildTaskState` under the node identity, plan digest, and resolved features,
+    and re-verified before reuse.
+  - `ProjectAssembly` owns the **order and preconditions** of the whole procedure, and a host
+    **cannot sequence the steps itself**: it calls `ProjectAssembly::script` for the root build
+    script and its task plan, then `ProjectScript::resolve_memory` / `resolve_native` for
+    discovery, preprocessing, projection, and input resolution. Those are the crate's *only* public
+    entries into the procedure — `discover`, `preprocess`, `assemble`, `execute_root`, and the two
+    projections are crate-internal, and `ProjectGraphAssembly`/`ResolvedProjectGraph`/
+    `PreprocessedProjectGraph` are not exported at all, so the intermediate states cannot be held
+    outside and re-ordered. Keep it that way; the crate's own tests live in `src`
+    (`graph_tests.rs`) precisely so exercising a single step never requires publishing it.
+  - `ProjectScript` is the only way from the first phase into the second (`skipped()` for a host
+    that deliberately runs no script, such as `jals lint`). It is deliberately *two* calls rather
+    than one: the aggregate hand-over point belongs to the host — `jals-cli` reopens storage under
+    narrower scopes for the graph phase, and the playground releases its workspace lock so a jar
+    download never blocks the editor. The policy each phase takes is the whole difference between
+    hosts (`BuildTaskHost`/`SourcePublication`/`blocked_files` on the first, `GraphPreprocess` plus
+    `ProjectInputOptions` on the second); the steps between them exist once.
+- `jals-exec`: the execution context — `Exec`, fan-out, yields, runtime adapters (see *Execution*
+  above). Only its `tokio`-feature module may name tokio; the portable core is `no_std`.
 - `jals-editor`: protocol-neutral workspace and query facade over `ProjectStorage`; file identity is
   `FileKey`, and source/config invalidation follows storage revisions. All three hosts index
   through `Workspace`, so `FileId`'s three-space partition (`workspace/file_id.rs`), `#[cfg]`
-  evaluation, and path identity exist once — a host that built its own `jals_hir::ProjectIndex`
-  re-derived all three, and spelled the id space with a bare counter. **Positional** queries need
-  an `EditorHost` to decode a cursor and stay behind `Editor`; `Workspace::diagnostics` is the one
-  query that takes a `FileKey` and no position, so it is `pub` and answers in the neutral
-  `FileDiagnostic` — which is how `jals lint` joins the seam without implementing nine host
-  methods, eight of which it would have to fabricate. `ProjectLayout::with_classpath` lowers the
-  `.class` files a host resolved, so describing a project needs no `jals-hir` symbol.
+  evaluation, and path identity exist once. **Positional** queries need an `EditorHost` to decode a
+  cursor and stay behind `Editor`; `Workspace::diagnostics` is the one query that takes a `FileKey`
+  and no position, so it is `pub` and answers in the neutral `FileDiagnostic` — which is how
+  `jals lint` joins the seam without implementing the positional host methods it has no cursor for.
+  `ProjectLayout::with_classpath` lowers the `.class` files a host resolved, so describing a project
+  needs no `jals-hir` symbol.
 - `jals-frontend`: the compile frontend seam — project sources lowered to the Java sources a backend
-  compiles. Featureless and portable in every configuration. `[build.frontend]` selects the
-  lowering, and the dialect features in `[package] features` (`grouped-imports`, `attributes`)
-  override it onto `DialectFrontend`; a host **never matches on `[build.frontend]` itself**, exactly
-  as it never matches on `[build] backend`: it calls `FrontendSelection::for_manifest` once —
+  compiles. `[build.frontend]` selects the lowering, and the dialect features in
+  `[package] features` (`grouped-imports`, `attributes`) override it onto `DialectFrontend`; a host
+  **never matches on `[build.frontend]` itself**, exactly as it never matches on `[build] backend`:
+  it calls `FrontendSelection::for_manifest` once —
   `vanilla()` for a source tree with no manifest — so the decision table lives in one place, and
   with it the two rules that are cache identity rather than style (no dialect feature selects
   `VanillaFrontend` and not a flagless dialect, and `build_features` is folded in only when
@@ -181,40 +191,114 @@ filesystem reads into portable interfaces.
   remembers. The `Frontend` trait is the seam for implementors; the flag sets they take are plain
   data, and `selection.rs` is the only module here that reads `jals-config`.
 - `jals-build`: portable target/scaffold planning plus native JDK/process adapters. OS arguments,
-  environment variables, and classpath separators stay in native/host code. `[build] backend`
-  selects what compiles the lowered tree: `javac` (a host process), `jals` (in-process, one class
-  file per type), or `jals-wasm` (in-process, one WebAssembly module). Only the `javac` adapter is
-  host-gated — `JalsBackend` is portable, and builds for `wasm32` like the contract it implements.
-  All three are reached through `Backend`, and a host **never matches on `[build] backend` itself**:
-  it calls `BackendSelection` once — `in_process` where there is no process to spawn (the browser),
-  `for_host` where there is — so the decision table lives in one place and absence is a value
-  carrying a `BackendAbsence` rather than a failure raised later. `Compiler`/`CompileRequest` are the
-  crate-internal `javac` invocation layer *beneath* that seam, which `JavacBackend` drives once
-  `StagedTree` has materialized the tree; `[toolchain] compiler` still chooses which tool runs, and
-  `[toolchain] runtime` is selected independently for `jals run`'s run step.
-  A `BuildScriptDiagnostic`'s fields are sealed and it renders as `<severity>: <message>` through its
-  own `Display`; `BuildScriptError::ReportedErrors` renders every diagnostic it carries, in emission
-  order. A `build.warning` and a `build.error` read identically once the severity is dropped, so a
-  host that prints `message()` into a plain string either restates a severity it re-derived or shows
-  a warning as an error — which is why the rendering lives here. `message()` is for a destination
-  that already has a severity channel: an LSP `DiagnosticSeverity`, a Monaco marker, the `warning:`
-  lead of a CLI line, a `GraphWarning`. Filling one of those from a *documented invariant* is not a
-  re-derivation — `BuildScriptOutput::diagnostics` is warnings-only because a run that produced an
-  error diverts the whole collection into `ReportedErrors` before an output exists, so promoting it
-  needs no severity test, and writing one there erases an error rather than surfacing it.
+  environment variables, and classpath separators stay in native/host code.
+  - `[build] backend` selects what compiles the lowered tree: `javac` (a host process), `jals`
+    (in-process, one class file per type), or `jals-wasm` (in-process, one WebAssembly module).
+    Only the `javac` adapter is host-gated — `JalsBackend` is portable and builds for `wasm32` like
+    the contract it implements. All three are reached through `Backend`, and a host **never matches
+    on `[build] backend` itself**: it calls `BackendSelection` once — `in_process` where there is no
+    process to spawn (the browser), `for_host` where there is — so the decision table lives in one
+    place and absence is a value carrying a `BackendAbsence` rather than a failure raised later.
+  - `Compiler`/`CompileRequest` are the crate-internal `javac` invocation layer *beneath* that
+    seam, which `JavacBackend` drives once `StagedTree` has materialized the tree. `[toolchain]
+    compiler` still chooses which tool runs, and `[toolchain] runtime` is selected independently
+    for `jals run`'s run step.
+  - A `BuildScriptDiagnostic`'s fields are sealed and it renders as `<severity>: <message>` through
+    its own `Display`; `BuildScriptError::ReportedErrors` renders every diagnostic it carries, in
+    emission order. A `build.warning` and a `build.error` read identically once the severity is
+    dropped, so a host that prints `message()` into a plain string either restates a severity it
+    re-derived or shows a warning as an error. `message()` is for a destination that already has a
+    severity channel: an LSP `DiagnosticSeverity`, a Monaco marker, the `warning:` lead of a CLI
+    line, a `GraphWarning`. Filling one of those from a *documented invariant* is not a
+    re-derivation — `BuildScriptOutput::diagnostics` is warnings-only because a run that produced an
+    error diverts the whole collection into `ReportedErrors` before an output exists.
+- `jals-javac`: the compiler. Java source to executable code, for two targets off one front end
+  (the CST plus `jals-hir`'s resolution, with no compiler IR between): JVM class files per declared
+  type, and a single WasmGC module for a whole project. The two lowerings are separate because the
+  JVM's control flow is a `goto` stream and wasm's is structured, so the wasm side lowers from the
+  syntax tree and needs no relooper. It **never checks** — diagnostics are `jals-lint`'s job over
+  `jals-hir` — but it does *resolve*, because emitting one `invokevirtual` needs the selected
+  overload, its descriptor, and whether the owner is a class or an interface. Library signatures
+  come from `jals-hir`'s embedded stubs, not from a host `ct.sym`, so the crate stays portable; a
+  dev-only oracle checks those stubs against a real JDK.
+  - `jvm::Assembler` owns the derivations `jals-classfile` deliberately refuses (that crate keeps
+    branch offsets verbatim): label resolution with the widening fixpoint, `max_stack`/`max_locals`,
+    and the `StackMapTable`, which is emitted as `full_frame` only. On the wasm side the host's
+    collector owns every object — `struct.new_default`, declared subtyping, no `memory` section,
+    and no allocator or collector of its own.
+  - The two lowerings share one layer and it has a name: `facts` answers what the *source* says —
+    the span the inference memo is keyed on, the definition a name binds to, the locals a class
+    captures, the constant a `case` label denotes (a full JLS §15.29 evaluator, `static final`
+    constants included), the operator token run (`>>` is `[GT, GT]`, because the lexer never joins
+    a `>` to what follows). It reads `TypedFile` and nothing else, so it names no instruction:
+    `Layout`, `Slots`, `Descriptor`, and control flow stay with the backend that owns them.
+    Crate-internal — a consumer wanting a fact about Java source asks `jals-hir`, not a compiler.
+  - A fact both backends need goes in `facts`; one that names an instruction does not.
+    `no-wasm-into-jvm-lowering` and its mirror `no-jvm-into-wasm-lowering` reject one backend naming
+    the other, and `facts-names-no-instruction` rejects `Descriptor`/`ValType`/`Slots`/`Label`
+    inside `facts`. All three are ratchets against one regression class and none catches a backend
+    re-implementing a fact *inline*, so what makes a fact single-sourced is that there is one place
+    to ask and it has a test. `facts` therefore carries its own `#[cfg(test)]` suites — the JLS
+    §15.29 evaluator is verified with no JDK in reach, because the end-to-end tests stand down
+    without one and CI's wasm cell never has one.
+- `jals-hir`: the semantic analysis. Its three layers have one order — resolve a file, index the
+  project, infer types against both — and that order lives in `FileAnalysis` / `FileSemantics` /
+  `TypedFile` rather than in each consumer. `FileAnalysis` is index-independent, so it is the half a
+  host caches per file and the half a project-wide find-references reads without inferring anything;
+  `FileAnalysis::in_project` binds it to a `ProjectIndex` and is where the file's inference is
+  memoized, so one lint pass, one editor request, or one file's compile runs it **once** instead of
+  once per question. `Resolved` and `TypeInference` are the intermediate states and are **not
+  exported**, exactly as `jals-project` withholds `ResolvedProjectGraph`. `TypedFile` is the witness
+  that the inference has run, and therefore the only place types are readable without an `await` —
+  which is what keeps `jals-javac`'s lowering synchronous.
+
+  `jals-hir` states *facts* (`DeadIf`, `UnreportedException`, `TypeMismatch` with its
+  `MismatchKind`, `UnresolvedType`, `UnusedImport`, and the `unused_defs` a `Def`'s `is_private` /
+  `is_annotated` let a consumer narrow); the **wording** of every semantic diagnostic belongs to the
+  `jals-lint` rule that reports it. A negative fact — "nothing uses this" — over-approximates *use*:
+  a member name spelled where the file-local pass cannot bind it (`this.x`, `Outer.Inner`,
+  `X.class`, `@Anno`, the ambiguous-name qualifier of JLS §6.5.2, and anything inside a
+  `cfg`-disabled host — which binds nothing but serves the *other* feature set) counts as a use, and
+  a method's evidence is its **name** rather than its declaration, because the scope chain binds a
+  call to *an* overload rather than to the one the arguments select.
+- `jals-lint`: the rule engine. A rule is a name, a `Category` (the `jalslint.toml` section it is
+  configured under), a level accessor into `jals_config::lint`, and a checker; `RuleInfo::all()`
+  publishes the registry so a consumer enumerates rules instead of restating them. **The rule name
+  is the config key and the diagnostic's `rule` field**, unique across sections. The engine emits
+  exactly one diagnostic outside the table — `cfg`, a structurally malformed attribute — and it is
+  fixed at `error` because it is the failure the compile frontend rejects a build with, not a
+  judgement.
+  - In-source suppression is `@SuppressWarnings`, read from the CST and applied where a finding
+    *becomes* a diagnostic rather than as a post-pass: a suppression names a rule **or the section
+    it is configured under**, and a `Diagnostic` carries no `Category`, so filtering afterwards
+    would recover one through a second path. The vocabulary (`all`, a rule name, a section name) is
+    derived from the registry and `Category::ALL`, so a rule added later is suppressible the day it
+    lands — which is also how javac's `@SuppressWarnings("unused")` silences the whole `[unused]`
+    section for free. Running before the `cfg` errors are appended is what makes that one diagnostic
+    unsuppressible *structurally* instead of by a rule-name test. Two limits are documented rather
+    than solved: Java allows no annotation on an `import`, so `unused-imports` is config-only, and
+    the name match is syntactic on the annotation's last segment, because resolving the annotation
+    type would make the map depend on the analysis the rules have not run yet.
+  - Two ledgers hold the crate's claims. `tests/registry.rs` joins the registry against the
+    serialized schema in both directions, pins the default level set, and sweeps every schema option
+    off its default requiring the linter to notice. `tests/inventory.rs` holds
+    `jals-lint/inventory-rustc.tsv` / `inventory-clippy.tsv` — every rustc and clippy lint, in one
+    of six buckets — against that same registry (`jals-lint/MAPPING-rustc-clippy.md` is the prose,
+    `jals-lint/README.md` the roadmap). A new rule therefore lands in three places at once: the
+    section that declares its key, the `RULES` table, and whichever ledger row now maps onto it.
 - `jals-cli`: the host boundary from clap `PathBuf` values to `NativeStorage` and typed keys. It
   also owns native-formatter-config **detection** (`migrate.rs`): portable crates cannot look at a
   filesystem, so the host decides which config file is there and reads its bytes through a
-  `ProjectView`, then hands the text to `jals_fmt::import` and the result to
-  `jals_fmt::generate`. What it keeps of project assembly is only what a host path forces:
-  `NativeScope` selection, `materialize_file`/`materialize_tree`, `to_host_path`, and promoting a
-  structured failure to `anyhow`. It opens the aggregate itself — `App::project_inputs` takes one
-  rather than owning one — because `jals lint` keeps the revision the graph phase read and indexes
-  it through `jals_editor::Workspace`, while `build`/`run` drop it once their artifacts are
-  materialized. A reported file the snapshot does not capture (outside every scope, outside the
-  root, or stdin, which is not even a `Name`) is mounted as an in-memory overlay under
-  `.jals/lint/<n>/`, so it is a project file with the project's own index behind it rather than a
-  detached one. This crate names no `jals-hir` symbol.
+  `ProjectView`, then hands the text to `jals_fmt::import` and the result to `jals_fmt::generate`.
+  What it keeps of project assembly is only what a host path forces: `NativeScope` selection,
+  `materialize_file`/`materialize_tree`, `to_host_path`, and promoting a structured failure to
+  `anyhow`. It opens the aggregate itself — `App::project_inputs` takes one rather than owning one —
+  because `jals lint` keeps the revision the graph phase read and indexes it through
+  `jals_editor::Workspace`, while `build`/`run` drop it once their artifacts are materialized. A
+  reported file the snapshot does not capture (outside every scope, outside the root, or stdin,
+  which is not even a `Name`) is mounted as an in-memory overlay under `.jals/lint/<n>/`, so it is a
+  project file with the project's own index behind it rather than a detached one. This crate names
+  no `jals-hir` symbol.
 - `jals-lsp`: the only URI↔native-root adapter; watched-file notifications call `refresh()`. What it
   keeps of project assembly is diagnostic shaping, overlay mounting of navigation sources, the watch
   policy, and its own root-only fallback (a second `resolve_native` call, deliberately not folded in
@@ -227,124 +311,70 @@ filesystem reads into portable interfaces.
   under the workspace lock in `workspace.rs` and the graph phase off a detached snapshot in
   `app.rs`; the `ProjectScript` crossing between them is what keeps that split from also splitting
   the procedure.
-- `jals-javac`: the compiler. Java source to executable code, for two targets off one front end
-  (the CST plus `jals-hir`'s resolution, with no compiler IR between): JVM class files per declared
-  type, and a single WasmGC module for a whole project. The two lowerings are separate because the
-  JVM's control flow is a `goto` stream and wasm's is structured, so the wasm side lowers from the
-  syntax tree and needs no relooper. It **never checks** — diagnostics are `jals-lint`'s job over
-  `jals-hir` — but it does *resolve*, because emitting one `invokevirtual` needs the selected
-  overload, its descriptor, and whether the owner is a class or an interface. Library signatures
-  come from `jals-hir`'s embedded stubs, not from a host `ct.sym`, so the crate stays portable; a
-  dev-only oracle checks those stubs against a real JDK. `jvm::Assembler` owns the derivations
-  `jals-classfile` deliberately refuses (that crate keeps branch offsets verbatim): label
-  resolution with the widening fixpoint, `max_stack`/`max_locals`, and the `StackMapTable`, which
-  is emitted as `full_frame` only. On the wasm side the host's collector owns every object —
-  `struct.new_default`, declared subtyping, no `memory` section, and no allocator or collector of
-  its own. The two lowerings share one layer and it has a name: `facts` answers what the *source*
-  says — the span the inference memo is keyed on, the definition a name binds to, the locals a class
-  captures, the constant a `case` label denotes (a full JLS §15.29 evaluator, `static final`
-  constants included), the operator token run (`>>` is `[GT, GT]`, because the lexer never joins a
-  `>` to what follows). It reads `TypedFile` and nothing else, so it names no instruction: `Layout`,
-  `Slots`, `Descriptor`, and control flow stay with the backend that owns them. Crate-internal — a
-  consumer wanting a fact about Java source asks `jals-hir`, not a compiler. Before it existed the
-  layer was written twice and the copies drifted into wrong *output*, not merely duplication: `case
-  ~5` (a constant expression whose value is -6) was rejected by the JVM lowering and silently
-  compiled as `5` by the wasm one. A fact both backends need goes here; one that names an
-  instruction does not.
-  Being the **only** entry is the point, and for a while it was one entry among several: the
-  `case`-label evaluator read its literals through `facts` while both expression paths read theirs
-  from the JVM backend's own module — which the wasm side reached across the backend seam to call —
-  and `declarator_initialiser` existed to stop names and initialisers being paired by index while
-  four of the five sites that pair them went on doing it, which is a wrong `static` field on wasm
-  and a class the JVM rejects at load. Three ast-grep rules now hold the shape:
-  `no-wasm-into-jvm-lowering` and its mirror `no-jvm-into-wasm-lowering` (separate rules, because
-  `lower/` names `crate::lower` legitimately) reject one backend naming the other, and
-  `facts-names-no-instruction` rejects `Descriptor`/`ValType`/`Slots`/`Label` inside `facts`. None
-  of them catches a backend re-implementing a fact *inline*, which is how every one of those
-  duplications got there — so the rules are a ratchet, and what makes a fact single-sourced is that
-  there is one place to ask and it has a test. `facts` therefore carries its own `#[cfg(test)]`
-  suites: the JLS §15.29 evaluator is verified with no JDK in reach, which matters because the
-  end-to-end tests stand down without one and CI's wasm cell never has one.
-  Portable and featureless; no host filesystem APIs.
-- `jals-hir`: the semantic analysis. Its three layers have one order — resolve a file, index the
-  project, infer types against both — and that order lives in `FileAnalysis` / `FileSemantics` /
-  `TypedFile` rather than in each consumer. `FileAnalysis` is index-independent, so it is the half a
-  host caches per file and the half a project-wide find-references reads without inferring anything;
-  `FileAnalysis::in_project` binds it to a `ProjectIndex` and is where the file's inference is
-  memoized, so one lint pass, one editor request, or one file's compile runs it **once** instead of
-  once per question. `Resolved` and `TypeInference` are the intermediate states and are **not
-  exported**, exactly as `jals-project` withholds `ResolvedProjectGraph`: holding one would be
-  holding a step, and the steps are not separately orderable. `TypedFile` is the witness that the
-  inference has run, and therefore the only place types are readable without an `await` — which is
-  what keeps `jals-javac`'s lowering synchronous. `jals-hir` states *facts* (`DeadIf`,
-  `UnreportedException`, `TypeMismatch` with its `MismatchKind`, `UnresolvedType`, `UnusedImport`,
-  and the `unused_defs` a `Def`'s `is_private` / `is_annotated` let a consumer narrow); the
-  **wording** of every semantic diagnostic belongs to the `jals-lint` rule that reports it,
-  alongside the rule name and the `jalslint.toml` key. A negative fact — "nothing uses this" —
-  over-approximates *use*: a member name spelled where the file-local pass cannot bind it
-  (`this.x`, `Outer.Inner`, `X.class`, `@Anno`, the ambiguous-name qualifier of JLS §6.5.2, and
-  anything inside a `cfg`-disabled host — which binds nothing but serves the *other* feature set)
-  counts as a use, and a method's evidence is its **name** rather than its declaration, because the
-  scope chain binds a call to *an* overload rather than to the one the arguments select.
-- `jals-lint`: the rule engine. A rule is a name, a `Category` (the `jalslint.toml` section it is
-  configured under), a level accessor into `jals_config::lint`, and a checker; `RuleInfo::all()`
-  publishes the registry so a consumer enumerates rules instead of restating them. **The rule name
-  is the config key and the diagnostic's `rule` field**, unique across sections. The engine emits
-  exactly one diagnostic outside the table — `cfg`, a structurally malformed attribute — and it is
-  fixed at `error` because it is the failure the compile frontend rejects a build with, not a
-  judgement. In-source suppression is `@SuppressWarnings`, read from the CST and applied where a
-  finding *becomes* a diagnostic rather than as a post-pass: a suppression names a rule **or the
-  section it is configured under**, and a `Diagnostic` carries no `Category`, so filtering afterwards
-  would recover one through a second path. The vocabulary (`all`, a rule name, a section name) is
-  derived from the registry and `Category::ALL`, so a rule added later is suppressible the day it
-  lands and there is no second list — which is also how javac's `@SuppressWarnings("unused")` silences
-  the whole `[unused]` section for free. Running before the `cfg` errors are appended is what makes
-  that one diagnostic unsuppressible *structurally* instead of by a rule-name test. Two limits are
-  documented rather than solved: Java allows no annotation on an `import`, so `unused-imports` is
-  config-only, and the name match is syntactic on the annotation's last segment, because resolving
-  the annotation type would make the map depend on the analysis the rules have not run yet. Two
-  ledgers hold the crate's claims: `tests/registry.rs` joins the registry against the
-  serialized schema in both directions, pins the default level set, and sweeps every schema option
-  off its default requiring the linter to notice; `tests/inventory.rs` holds
-  `inventory-rustc.tsv` / `inventory-clippy.tsv` — every rustc and clippy lint, in one of six
-  buckets — against that same registry (`jals-lint/MAPPING-rustc-clippy.md` is the prose,
-  `jals-lint/README.md` the roadmap). A new rule therefore lands in three places at once: the
-  section that declares its key, the `RULES` table, and whichever ledger row now maps onto it.
-- `jals-classfile`, `jals-hir`, `jals-syntax`, `jals-fmt`, `jals-lint`, `jals-decompile`: portable
-  domain crates; do not add host filesystem APIs. `jals-fmt` has **one layout engine** — a port of
-  google-java-format's greedy `computeBreaks` over a GJF-shaped `Doc`/`Level`/`Break` IR — and
-  every style target is reached by tuning `jals_config::fmt::Config` on top of it, never by
-  swapping engines (`jals-fmt/DESIGN.md`). Do not add an engine trait, a second renderer, or a
-  Wadler/prettier `fits`. Its `import` and `generate` modules lower a native Eclipse / IntelliJ /
+- `jals-classfile`, `jals-syntax`, `jals-fmt`, `jals-decompile`: portable domain crates; do not add
+  host filesystem APIs. `jals-fmt` has **one layout engine** — a port of google-java-format's greedy
+  `computeBreaks` over a GJF-shaped `Doc`/`Level`/`Break` IR — and every style target is reached by
+  tuning `jals_config::fmt::Config` on top of it, never by swapping engines
+  (`jals-fmt/DESIGN.md`). Do not add an engine trait, a second renderer, or a Wadler/prettier
+  `fits`. Its `import` and `generate` modules lower a native Eclipse / IntelliJ /
   google-java-format / Palantir / Spotless config onto that `Config` and render it back out as a
   `jalsfmt.toml`. All of it is pure and stays portable.
 - Tests, `xtask`, and `editors/zed` may use host paths for fixtures and tooling.
 
-The `.ast-grep/rules/no-portable-host-path.yml` allowlist enforces the host boundary. Add a narrow
-adapter ignore only when OS identity is genuinely required.
+## Code conventions
+
+Four ast-grep rules under `.ast-grep/rules/` are `severity: error` and gate CI workspace-wide;
+read the rule's own `note:` before working around one.
+
+- **`no-portable-host-path`** enforces the host boundary: `std::path`, `std::fs`, and `PathBuf` are
+  allowed only in native, host, test, and tool adapters. The `ignores:` list in
+  `.ast-grep/rules/no-portable-host-path.yml` is that allowlist; add a narrow adapter ignore only
+  when OS identity is genuinely required.
+- **`no-free-functions`**: a function lives on an `impl` block or a trait, so a `pub fn` at the top
+  level of a module file is rejected. A genuinely free function is wrapped in an inline `mod` (see
+  `jals-exec/src/yields.rs`'s `mod api`) or nested inside its only caller. `main` and the
+  `#[test]`-family items are exempt, as are `build.rs`, `benches/`, `tests/`, and `examples/`; read
+  the rule for the full list.
+- **`no-extern-crate-alloc`** / **`no-extern-crate-core`**: `extern crate alloc;` is declared
+  exactly once per portable crate, in its `lib.rs`; every other module writes `use alloc::...`.
+  `extern crate core;` is never declared — write `use core::...`.
+
+`jals-javac` additionally carries `facts-names-no-instruction`, `no-wasm-into-jvm-lowering`, and
+`no-jvm-into-wasm-lowering`; see that crate's entry above.
+
+Workspace lints are set once in the root `Cargo.toml` (`[workspace.lints]`, clippy
+`all`/`pedantic`/`nursery` at `warn`, with `dbg_macro`/`todo`/`unimplemented` denied). A stale
+`#[allow(...)]` is a hard CI failure via `cargo unused-allow`, so remove one as soon as it
+suppresses nothing.
 
 ## `no_std` and features
 
-Portable crates use `core + alloc`. Each such crate declares `extern crate alloc;` exactly once, in
-its `lib.rs`; every other module imports with `use alloc::...`. The
-`.ast-grep/rules/no-extern-crate-alloc.yml` rule rejects the declaration anywhere else.
+Portable crates use `core + alloc`.
 
 - `jals-exec --no-default-features` is `no_std + alloc`; `tokio` adds the native runtime adapter
-  (current-thread bootstrap, worker pool, `on_blocking_pool`), `wasm` the browser adapter.
+  (current-thread bootstrap, worker pool, `on_blocking_pool`) and implies `std`, `wasm` adds the
+  browser adapter.
 - `jals-storage --no-default-features` is `no_std + alloc`; `std-io` adds only the `StdReader`
   bridge (wasm-safe, no host paths), and `std` adds the native adapters and implies `std-io` —
   `std` is also this crate's tokio feature (native adapters need `spawn_blocking`).
 - `jals-classpath --no-default-features` is `no_std + alloc`; `archive` adds only `miniz_oxide` +
   `crc32fast` (still `no_std`/wasm-safe; parallel decode rides `Exec::fan_out`, entry-ordered at
-  any worker count), and `native` introduces HTTP plus `jals-storage/std` and `jals-exec/tokio`.
+  any worker count), and `native` implies `archive` and introduces HTTP plus `jals-storage/std` and
+  `jals-exec/tokio`.
 - `jals-project --no-default-features` is `no_std + alloc`; it includes the portable in-memory
-  graph, Rhai dependency preprocessing, and archive projection. `native` adds host path/Git
-  acquisition plus the native classpath, execution, and storage adapters.
-- `jals-build --no-default-features` must remain a genuine portable core.
+  graph, Rhai dependency preprocessing (via `jals-build/rhai`, which it always enables), and
+  archive projection. `native` adds host path/Git acquisition plus the native classpath, execution,
+  and storage adapters.
+- `jals-build --no-default-features` must remain a genuine portable core; its `rhai` feature stays
+  portable too, and CI builds it for `wasm32`. `native` is the host half (JDK discovery, `javac`
+  spawning, `native.rs`).
+- `jals-frontend`, `jals-javac`, `jals-hir`, `jals-lint`, `jals-config`, `jals-syntax`,
+  `jals-classfile`, `jals-decompile`, and `jals-editor` have no features at all, so a plain
+  `cargo check` *is* the portability check — do not add one without a reason that survives review.
+- `jals-fmt`'s `std` feature adds only `quick-xml` for the two XML-backed config importers.
+  `jals-cli` enables it; the wasm playground resolves separately and never sees it.
 - rayon is workspace-banned except in `jals-tests`' host-only harness; product fan-out goes
   through `jals-exec`.
-- `jals-cli` enables `jals-fmt/std`, which adds only `quick-xml` for the two XML-backed config
-  importers. The wasm playground resolves separately and never sees it.
 - `serde` stays `default-features = false, features = ["derive", "alloc"]`.
 - `toml` stays `default-features = false, features = ["parse", "serde"]`.
 
@@ -371,38 +401,66 @@ its `lib.rs`; every other module imports with `use alloc::...`. The
 
 ## Commands
 
+The gates CI runs, cheapest first. Every one of them fails the build on its own.
+
 ```sh
 cargo fmt --all --check
+taplo fmt --check --diff
+typos
 ast-grep test --skip-snapshot-tests
-ast-grep scan --error
-cargo check --workspace
-cargo test --workspace
+ast-grep scan --error                    # plain `scan` exits 0 on findings; `--error` is the gate
+cargo run -p xtask -- codegen --check
+cargo machete
+biome ci --error-on-warnings             # the JS sources scoped by biome.json
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo unused-allow --all-targets -- --workspace --all-features
+cargo nextest run --workspace --all-features --no-fail-fast
+cargo test --workspace --all-features --doc     # nextest does not run doctests
+cargo hawk check -D warnings             # closed-world visibility over hawk.toml's roots
+```
 
-cargo check -p jals-exec --no-default-features
-cargo check -p jals-exec --features tokio
+The portable-core and feature audit (CI's `portable core and feature audit` job) — run it whenever
+a portable crate gains a dependency, a feature, or a `use`:
+
+```sh
 cargo check -p jals-storage --no-default-features
-cargo check -p jals-storage --no-default-features --features std-io
 cargo check -p jals-classpath --no-default-features
-cargo check -p jals-project --no-default-features
-cargo check -p jals-project --all-features
 cargo check -p jals-build --no-default-features
+cargo check -p jals-project --no-default-features
 cargo check -p jals-frontend
-cargo check -p jals-javac --no-default-features
+cargo check -p jals-project --all-features
+cargo check -p jals-build --no-default-features --features rhai --target wasm32-unknown-unknown
 cargo check -p jals-classpath --no-default-features --target wasm32-unknown-unknown
-cargo check -p jals-classpath --no-default-features --features archive --target wasm32-unknown-unknown
 cargo check -p jals-project --no-default-features --target wasm32-unknown-unknown
 cargo check -p jals-frontend --target wasm32-unknown-unknown
-cargo check -p jals-javac --no-default-features --target wasm32-unknown-unknown
 cargo build -p jals-playground --target wasm32-unknown-unknown
+cargo tree -e features -p jals-classpath --no-default-features
+cargo tree -e features -p jals-build --no-default-features
+cargo tree -e features -p jals-project --no-default-features
 ```
+
+Not gated by CI, but worth running when you touch one of these crates' feature seams — a
+workspace build enables the union of features and so proves nothing about them:
+
+```sh
+cargo check -p jals-exec --no-default-features
+cargo check -p jals-exec --features tokio
+cargo check -p jals-storage --no-default-features --features std-io
+cargo check -p jals-classpath --no-default-features --features archive --target wasm32-unknown-unknown
+cargo check -p jals-javac --target wasm32-unknown-unknown
+```
+
+Run `cargo run -p xtask -- codegen` after changing `jals-syntax/java.ungram`, and commit generated
+AST changes with the grammar change.
+
+## What CI checks that local runs usually miss
 
 CI runs clippy, test, build, and build-release on linux, macOS, Windows **and** wasm; hawk runs on
 linux and macOS only, because the tool publishes no Windows build and the from-source one answers
 wrong (see the job's comment in `.github/workflows/ci.yml`). The three host platforms take
 `--workspace`; the wasm cells take a package set, and the sets are defined once in
 `.github/workflows/ci.yml`'s `env` block (`WASM_PACKAGES`, `WASM_CORE_PACKAGES`,
-`WASM_TEST_PACKAGES`) rather than per job. Two consequences for local work:
+`WASM_TEST_PACKAGES`) rather than per job. Three consequences for local work:
 
 - A `dead_code` finding can exist in one configuration only. An item reachable solely from a
   `std`/`native`-gated module must carry that gate itself — the wasm clippy cells run `-D warnings`
@@ -416,12 +474,11 @@ wrong (see the job's comment in `.github/workflows/ci.yml`). The three host plat
   or a temporary directory reached through a symlink (macOS `/var` → `/private/var`, so compare
   canonicalized paths).
 
-Every project under `examples/` is a CI cell of its own (`example (<name>)`), running what its README
-tells a reader to run: `jals build`, then `jals fmt --check` and `jals lint` over the example's
-**tracked** `.java` files. Tracked is what separates authored source from published output — a build
-script's publication into a source root is untracked by construction (that is what each example's
-`.gitignore` reserves), so the gate never scores a decompiled skeleton as something someone wrote.
-Two consequences for an example:
+Every project under `examples/` is a CI cell of its own (`example (<name>)`), running what its
+README tells a reader to run: `jals build`, then `jals fmt --check` and `jals lint` over the
+example's **tracked** `.java` files. Tracked is what separates authored source from published
+output — a build script's publication into a source root is untracked by construction — so the gate
+never scores a decompiled skeleton as something someone wrote. Two consequences for an example:
 
 - A `tasks.project_jar` example needs its JAR, and a JAR is a binary, so none is committed:
   `examples/scripts/gen-vendor-jars.sh` writes the two the `task_dependency` and
@@ -431,6 +488,3 @@ Two consequences for an example:
   §Compile-safety). That cell asserts the pipeline instead — fetch → nested extract → remap →
   decompile → publish — by requiring all three publication roots to come out non-empty, which is a
   statement only a run that reached the last step can make.
-
-Run `cargo run -p xtask -- codegen` after changing `jals-syntax/java.ungram`, and commit generated
-AST changes with the grammar change.
