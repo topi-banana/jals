@@ -138,7 +138,7 @@ mod api {
     /// listed), naming each slot from `param_names`. Returns `None` when the descriptor's parameter
     /// count differs from `param_names`, so the body cannot name a slot the signature does not
     /// declare.
-    pub(crate) fn local_slots(
+    fn local_slots(
         params: &[FieldType],
         is_static: bool,
         param_names: &[String],
@@ -167,7 +167,7 @@ mod api {
     /// reference. Returns the declarations in slot order, or `None` — bailing the whole method — when
     /// a stored local has no usable LVT entry (no `-g` build, a synthetic temporary, or a reused
     /// slot) or its name collides with a parameter or another local.
-    pub(crate) fn local_declarations(
+    fn local_declarations(
         code: &CodeAttribute,
         pool: &ConstantPool,
         is_static: bool,
@@ -236,7 +236,7 @@ mod api {
     ///   keying M3 deliberately left for later;
     /// - the name is missing (no `-g`), or
     /// - it collides with a parameter or another clause's live parameter.
-    pub(crate) fn register_catch_parameters(
+    fn register_catch_parameters(
         code: &CodeAttribute,
         pool: &ConstantPool,
         locals: &mut BTreeMap<u16, Local>,
@@ -335,7 +335,7 @@ mod api {
 
     /// The local slot an instruction writes — a store (via [`api::store_info`]) or an `iinc`
     /// (and its `wide` form) — or `None` if it writes no local. Drives declaration discovery.
-    pub(crate) fn stored_slot(ins: &Instruction) -> Option<u16> {
+    fn stored_slot(ins: &Instruction) -> Option<u16> {
         use Instruction as I;
         store_info(ins).map(|(slot, _)| slot).or_else(|| match ins {
             I::Iinc { index, .. } => Some(u16::from(*index)),
@@ -345,7 +345,7 @@ mod api {
     }
 
     /// Trim a trailing implicit `return;` (a `void` method's fall-off return) and render the rest.
-    pub(crate) fn render_body(stmts: &[Stmt]) -> Vec<String> {
+    fn render_body(stmts: &[Stmt]) -> Vec<String> {
         let end = if matches!(stmts.last(), Some(Stmt::Return(None))) {
             stmts.len() - 1
         } else {

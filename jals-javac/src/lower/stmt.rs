@@ -79,7 +79,7 @@ mod api {
     /// A `LabeledStmt` emits nothing of its own: a label is a *name for a jump target*, and which
     /// target depends on what it wraps. So the names are passed down, and every construct that can
     /// be left registers them itself.
-    pub(crate) fn labelled(
+    fn labelled(
         statement: &ast::Stmt,
         labels: Vec<String>,
         context: &Context<'_>,
@@ -127,7 +127,7 @@ mod api {
     }
 
     /// `yield v;` — a `switch` expression's arm handing back its value.
-    pub(crate) fn yield_value(
+    fn yield_value(
         statement: &ast::YieldStmt,
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
@@ -161,7 +161,7 @@ mod api {
     }
 
     /// `throw e;`
-    pub(crate) fn throw(
+    fn throw(
         statement: &ast::ThrowStmt,
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
@@ -174,11 +174,7 @@ mod api {
     }
 
     /// One copy of what a guarded region runs on the way out.
-    pub(crate) fn cleanup(
-        cleanup: &Cleanup,
-        context: &Context<'_>,
-        emit: &mut Emit<'_, '_>,
-    ) -> Result<()> {
+    fn cleanup(cleanup: &Cleanup, context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
         match cleanup {
             Cleanup::Finally(block) => self::block(block, context, emit),
             Cleanup::Unlock(slot) => {
@@ -194,12 +190,7 @@ mod api {
     }
 
     /// `if (r != null) r.close();` — a resource is only closed if it was actually acquired.
-    pub(crate) fn close(
-        slot: u16,
-        owner: &str,
-        interface: bool,
-        emit: &mut Emit<'_, '_>,
-    ) -> Result<()> {
+    fn close(slot: u16, owner: &str, interface: bool, emit: &mut Emit<'_, '_>) -> Result<()> {
         let skip = emit.asm.label();
         emit.asm.load(slot)?;
         emit.asm.branch(Branch::RefNull(true), skip)?;
@@ -217,7 +208,7 @@ mod api {
     /// The monitor has to be released however the block ends, which is what the catch-all handler is
     /// for — and the lock expression has to be held in a slot rather than re-evaluated, because the
     /// handler needs the *same* object the `monitorenter` took.
-    pub(crate) fn synchronized(
+    fn synchronized(
         statement: &ast::SynchronizedStmt,
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
@@ -273,7 +264,7 @@ mod api {
     /// The handlers are recorded in source order, because the JVM takes the *first* entry whose range
     /// covers the throwing instruction and whose type matches — so a `catch (Exception)` written before
     /// a `catch (IOException)` would swallow it, exactly as the source says.
-    pub(crate) fn try_catch(
+    fn try_catch(
         statement: &ast::TryStmt,
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
@@ -406,7 +397,7 @@ mod api {
     ///
     /// JLS §14.20.3 defines a multi-resource `try` as nested single-resource ones, so this recurses —
     /// which is also what makes the *last* resource declared the first one closed.
-    pub(crate) fn resource_chain(
+    fn resource_chain(
         resources: &[ast::Resource],
         body: &ast::Block,
         context: &Context<'_>,
@@ -453,7 +444,7 @@ mod api {
     }
 
     /// Evaluate a resource into a slot, and work out what its `close()` is called on.
-    pub(crate) fn acquire(
+    fn acquire(
         resource: &ast::Resource,
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
@@ -501,7 +492,7 @@ mod api {
     }
 
     /// `try { r.close(); } catch (Throwable s) { primary.addSuppressed(s); }`, guarded by a null check.
-    pub(crate) fn close_suppressing(
+    fn close_suppressing(
         slot: u16,
         owner: &str,
         interface: bool,
@@ -535,7 +526,7 @@ mod api {
     }
 
     /// The type a `catch` clause's binding has: its one arm, or the nearest type every arm shares.
-    pub(crate) fn caught_type(clause: &ast::CatchClause, context: &Context<'_>) -> Result<Ty> {
+    fn caught_type(clause: &ast::CatchClause, context: &Context<'_>) -> Result<Ty> {
         let arms: Vec<Ty> = clause
             .types()
             .map(|ty| context.ty_of_type(&ty))
@@ -554,7 +545,7 @@ mod api {
     /// Guarded by the synthetic `$assertionsDisabled` field, because assertions are *off* unless the
     /// JVM was started with `-ea`. Emitting the check unguarded would change what the program does:
     /// every `assert` would run, and one that a release build relies on being skipped would throw.
-    pub(crate) fn assert(
+    fn assert(
         statement: &ast::AssertStmt,
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
@@ -598,7 +589,7 @@ mod api {
     ///
     /// The slot is allocated *before* the initialiser runs, matching the order a JVM frame is laid
     /// out; the initialiser cannot read the variable it is initialising, so nothing observes it.
-    pub(crate) fn local(
+    fn local(
         declaration: &ast::LocalVarDecl,
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
@@ -628,7 +619,7 @@ mod api {
     }
 
     /// An expression evaluated for its effect: whatever it left on the stack has to come off.
-    pub(crate) fn expression(
+    fn expression(
         statement: &ast::ExprStmt,
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
@@ -657,7 +648,7 @@ mod api {
         Ok(())
     }
 
-    pub(crate) fn ret(
+    fn ret(
         statement: &ast::ReturnStmt,
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
@@ -709,11 +700,7 @@ mod api {
     /// exception thrown by a `finally` must not reach the handler whose job is to run that `finally`,
     /// so the range closes before the copy and a fresh one opens after it. javac splits its ranges the
     /// same way, which is how one finds out it is required at all.
-    pub(crate) fn run_guards(
-        crossed: &[usize],
-        context: &Context<'_>,
-        emit: &mut Emit<'_, '_>,
-    ) -> Result<()> {
+    fn run_guards(crossed: &[usize], context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
         for &index in crossed {
             let Some(cleanup) = emit.guard_cleanup(index) else {
                 continue;
@@ -749,7 +736,7 @@ mod api {
 
     /// `if (c) { … } else { … }`: test, jump over the taken branch when false, and — when there is
     /// an `else` — jump over that from the end of the taken one.
-    pub(crate) fn conditional(
+    fn conditional(
         statement: &ast::IfStmt,
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
@@ -794,7 +781,7 @@ mod api {
     ///
     /// The label comes in already read: where it lives on the statement is a grammar fact, and both
     /// lowerings used to walk for it themselves.
-    pub(crate) fn leave(
+    fn leave(
         label: Option<SyntaxToken>,
         exit: bool,
         context: &Context<'_>,
@@ -817,7 +804,7 @@ mod api {
     }
 
     /// A labelled statement that is not a loop: `l: { … break l; … }`.
-    pub(crate) fn labelled_block(
+    fn labelled_block(
         statement: &ast::Stmt,
         labels: Vec<String>,
         context: &Context<'_>,
@@ -830,7 +817,7 @@ mod api {
         join(done, emit)
     }
 
-    pub(crate) fn while_loop(
+    fn while_loop(
         statement: &ast::WhileStmt,
         labels: Vec<String>,
         context: &Context<'_>,
@@ -859,7 +846,7 @@ mod api {
 
     /// `do { … } while (c);` — the body runs before the condition is ever tested, so the back edge is
     /// the *only* edge into it.
-    pub(crate) fn do_while(
+    fn do_while(
         statement: &ast::DoWhileStmt,
         labels: Vec<String>,
         context: &Context<'_>,
@@ -889,7 +876,7 @@ mod api {
     ///
     /// The header is flat in the CST, so which section a child sits in is not a matter of its type;
     /// [`ast::ForStmt`]'s accessors own that walk.
-    pub(crate) fn for_loop(
+    fn for_loop(
         statement: &ast::ForStmt,
         labels: Vec<String>,
         context: &Context<'_>,
@@ -933,7 +920,7 @@ mod api {
     /// A `LocalVarDecl` in the init declares the loop variable; anything else is a bare `Expr`
     /// evaluated for its effect, which is not an `ExprStmt` in the grammar and so needs the pop
     /// treatment applied here rather than inherited.
-    pub(crate) fn for_section(
+    fn for_section(
         node: &SyntaxNode,
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
@@ -951,7 +938,7 @@ mod api {
     /// The array, its length, and the index all live in slots the source never named: the array
     /// expression may not be re-evaluated, and re-reading `arraylength` every iteration would be
     /// wrong if the loop assigned to the variable holding it.
-    pub(crate) fn for_each(
+    fn for_each(
         statement: &ast::ForEachStmt,
         labels: Vec<String>,
         context: &Context<'_>,
@@ -1023,7 +1010,7 @@ mod api {
     /// `next()` returns `Object` after erasure, so the element needs a `checkcast` on the way into
     /// the loop variable. Without it the variable would hold an `Object` the frame describes as one,
     /// and the first method call on it would fail verification.
-    pub(crate) fn for_each_iterator(
+    fn for_each_iterator(
         statement: &ast::ForEachStmt,
         iterable: &ast::Expr,
         labels: Vec<String>,
@@ -1087,7 +1074,7 @@ mod api {
     }
 
     /// The definition a `for`-each's loop variable declares.
-    pub(crate) fn for_each_binding(
+    fn for_each_binding(
         statement: &ast::ForEachStmt,
         context: &Context<'_>,
     ) -> Result<jals_hir::DefId> {
@@ -1103,7 +1090,7 @@ mod api {
 
     /// A loop's body, which the grammar allows to be absent (`while (c);` is a legal, if pointless,
     /// statement).
-    pub(crate) fn body(
+    fn body(
         body: Option<&ast::Stmt>,
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
@@ -1112,7 +1099,7 @@ mod api {
     }
 
     /// Run `body` with one more construct a `break` (and maybe a `continue`) can leave.
-    pub(crate) fn in_scope(
+    fn in_scope(
         labels: Vec<String>,
         exit: Label,
         next: Option<Label>,
@@ -1130,7 +1117,7 @@ mod api {
     /// `while (true) { }` with no `break` has no exit: nothing falls out of it and nothing jumps out,
     /// so the statement after it is unreachable — which is what the JLS says too, and what leaving
     /// the label unbound records.
-    pub(crate) fn join(done: Label, emit: &mut Emit<'_, '_>) -> Result<()> {
+    fn join(done: Label, emit: &mut Emit<'_, '_>) -> Result<()> {
         if emit.asm.reachable() || emit.asm.is_targeted(done)? {
             emit.asm.bind(done)?;
         }

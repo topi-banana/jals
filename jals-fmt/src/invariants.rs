@@ -70,7 +70,7 @@ use crate::style::Style;
 type Tokens = BTreeMap<(SyntaxKind, String), usize>;
 
 /// The sources and configurations every property is checked against.
-pub(crate) mod api {
+mod api {
     use super::*;
 
     /// Sources covering the shapes the rules disagree about.
@@ -197,7 +197,7 @@ pub(crate) mod api {
     }
 
     /// Whether `tok` sits inside a node of one of `scopes`.
-    pub(crate) fn within(tok: &SyntaxToken, scopes: &[SyntaxKind]) -> bool {
+    fn within(tok: &SyntaxToken, scopes: &[SyntaxKind]) -> bool {
         tok.parent_ancestors()
             .any(|node| scopes.contains(&node.kind()))
     }
@@ -228,7 +228,7 @@ pub(crate) mod api {
     ///
     /// The two selections share this walk so they cannot come apart on what a *significant* token is,
     /// or on how the table's scopes are resolved.
-    pub(crate) fn counted(
+    fn counted(
         src: &str,
         license: License,
         keep: impl Fn(&SyntaxToken, License, &Sites, &[SyntaxKind]) -> bool,

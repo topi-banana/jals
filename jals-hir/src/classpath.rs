@@ -96,7 +96,7 @@ mod api {
         })
     }
 
-    pub(crate) fn class_kind(cf: &ClassFile) -> DefKind {
+    fn class_kind(cf: &ClassFile) -> DefKind {
         let flags = cf.access_flags;
         if flags.is_annotation() {
             DefKind::AnnotationType
@@ -115,7 +115,7 @@ mod api {
         }
     }
 
-    pub(crate) fn class_signature(cf: &ClassFile, pool: &ConstantPool) -> Option<ClassSignature> {
+    fn class_signature(cf: &ClassFile, pool: &ConstantPool) -> Option<ClassSignature> {
         ClassSignature::parse(&jals_decompile::attrs::signature_string(
             &cf.attributes,
             pool,
@@ -152,7 +152,7 @@ mod api {
             .collect()
     }
 
-    pub(crate) fn lower_supertypes(
+    fn lower_supertypes(
         cf: &ClassFile,
         class_sig: Option<&ClassSignature>,
         pool: &ConstantPool,
@@ -180,7 +180,7 @@ mod api {
         out
     }
 
-    pub(crate) async fn lower_members(
+    async fn lower_members(
         cf: &ClassFile,
         pool: &ConstantPool,
         owner_simple: &str,
@@ -256,7 +256,7 @@ mod api {
     }
 
     /// A field's type: from its `Signature` (generic) if present, else its descriptor.
-    pub(crate) fn field_member_type(
+    fn field_member_type(
         attrs: &[Attribute],
         descriptor_index: u16,
         pool: &ConstantPool,
@@ -276,7 +276,7 @@ mod api {
 
     /// A method's (return type, parameters, varargs): from its `Signature` (generic) if present, else its
     /// descriptor.
-    pub(crate) fn method_shape(
+    fn method_shape(
         method: &jals_classfile::MethodInfo,
         pool: &ConstantPool,
     ) -> (MemberType, Vec<Param>, bool, Vec<TypeParamDecl>) {
@@ -325,7 +325,7 @@ mod api {
 
     // --- descriptor / signature → MemberType -----------------------------------------------------
 
-    pub(crate) fn field_type_to_member_type(ft: &FieldType) -> MemberType {
+    fn field_type_to_member_type(ft: &FieldType) -> MemberType {
         let (base, dims) = peel_field_array(ft, 0);
         match base {
             FieldType::Base(b) => MemberType::Primitive {
@@ -341,14 +341,14 @@ mod api {
         }
     }
 
-    pub(crate) fn peel_field_array(ft: &FieldType, dims: u32) -> (&FieldType, u32) {
+    fn peel_field_array(ft: &FieldType, dims: u32) -> (&FieldType, u32) {
         match ft {
             FieldType::Array(inner) => peel_field_array(inner, dims + 1),
             other => (other, dims),
         }
     }
 
-    pub(crate) fn type_sig_to_member_type(ts: &TypeSignature) -> MemberType {
+    fn type_sig_to_member_type(ts: &TypeSignature) -> MemberType {
         let (base, dims) = peel_sig_array(ts, 0);
         match base {
             TypeSignature::Base(b) => MemberType::Primitive {
@@ -367,14 +367,14 @@ mod api {
         }
     }
 
-    pub(crate) fn peel_sig_array(ts: &TypeSignature, dims: u32) -> (&TypeSignature, u32) {
+    fn peel_sig_array(ts: &TypeSignature, dims: u32) -> (&TypeSignature, u32) {
         match ts {
             TypeSignature::Array(inner) => peel_sig_array(inner, dims + 1),
             other => (other, dims),
         }
     }
 
-    pub(crate) fn class_type_sig_to_member_type(c: &ClassTypeSignature, dims: u32) -> MemberType {
+    fn class_type_sig_to_member_type(c: &ClassTypeSignature, dims: u32) -> MemberType {
         // Fold the inner-class suffixes into one dotted name; the innermost component carries the args.
         let mut fqn = jals_decompile::types::internal_to_java(&c.name);
         let mut args = &c.type_arguments;
@@ -390,7 +390,7 @@ mod api {
         )
     }
 
-    pub(crate) fn type_arg_to_member_type(arg: &TypeArgument) -> MemberType {
+    fn type_arg_to_member_type(arg: &TypeArgument) -> MemberType {
         match arg {
             TypeArgument::Exact(t) => type_sig_to_member_type(t),
             // Wildcards are not modelled: kept as `Unknown` so positions stay aligned and assignment
@@ -401,7 +401,7 @@ mod api {
         }
     }
 
-    pub(crate) fn named_from_internal(internal: &str) -> MemberType {
+    fn named_from_internal(internal: &str) -> MemberType {
         named(
             &jals_decompile::types::internal_to_java(internal),
             0,
@@ -410,7 +410,7 @@ mod api {
     }
 
     /// Build a fully-qualified [`MemberType::Named`] (the `qualified` form so it resolves without imports).
-    pub(crate) fn named(fqn: &str, dims: u32, args: Vec<MemberType>) -> MemberType {
+    fn named(fqn: &str, dims: u32, args: Vec<MemberType>) -> MemberType {
         MemberType::Named {
             name: Fqn::simple_name_of(fqn).to_owned(),
             qualified: Some(fqn.to_owned()),

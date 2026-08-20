@@ -160,7 +160,7 @@ pub mod nested_jar {
         Ok(out)
     }
 
-    pub(crate) async fn publish_nested<C: CacheBackend>(
+    async fn publish_nested<C: CacheBackend>(
         cache: &mut ArtifactCache<C>,
         parent: &CacheKey,
         member: &str,
@@ -340,7 +340,7 @@ pub mod jar_remap {
     /// archives has the same shape. Without these, an inherited member is looked up against a
     /// supertype nobody declared, misses, and keeps its source name in an otherwise remapped jar: a
     /// silent wrong answer rather than a failure.
-    pub(super) async fn index_hierarchy<C: CacheBackend>(
+    async fn index_hierarchy<C: CacheBackend>(
         exec: &Exec,
         cache: &ArtifactCache<C>,
         hierarchy: &[CacheKey],
@@ -369,11 +369,7 @@ pub mod jar_remap {
     }
 
     /// Record one class's `this` / `super` / `interfaces` edges into the hierarchy index.
-    pub(super) fn index_class(
-        index: &mut ClassIndex,
-        name: &str,
-        cf: &ClassFile,
-    ) -> Result<(), String> {
+    fn index_class(index: &mut ClassIndex, name: &str, cf: &ClassFile) -> Result<(), String> {
         let this = cf
             .constant_pool
             .class_name(cf.this_class)

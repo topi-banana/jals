@@ -315,7 +315,7 @@ impl<'s> Engine<'s> {
 ///
 /// Its own namespace rather than a method on [`Engine`] because it reads no style and no state —
 /// widths are a property of the document alone.
-pub(crate) mod api {
+mod api {
     use super::{Box, Doc, Level, LocalBoxFuture};
 
     /// Measure one level and everything under it.
@@ -329,7 +329,7 @@ pub(crate) mod api {
     }
 
     /// The one boxed shim of the measuring recursion.
-    pub(crate) fn level_boxed(level: &mut Level) -> LocalBoxFuture<'_, ()> {
+    fn level_boxed(level: &mut Level) -> LocalBoxFuture<'_, ()> {
         Box::pin(self::level(level))
     }
 }

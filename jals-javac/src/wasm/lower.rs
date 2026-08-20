@@ -329,7 +329,7 @@ mod api {
     /// initialise the class that declares it first, and that class may be declared *after* the one
     /// reading it. The flag is what makes calling it again free, and what makes the re-entrant call a
     /// class's own initialiser produces a no-op rather than a loop — the same answer §12.4.2 gives.
-    pub(crate) fn reserve_class_inits(
+    fn reserve_class_inits(
         inputs: &[TypedFile<'_>],
         index: &ProjectIndex,
         layout: &mut Layout,
@@ -386,7 +386,7 @@ mod api {
 
     /// One function per class with static state: its `enum` constants, then its computed `static`
     /// field initialisers and `static { … }` blocks, in source order (§8.9.3, §12.4.2).
-    pub(crate) fn class_initializers(
+    fn class_initializers(
         inputs: &[TypedFile<'_>],
         index: &ProjectIndex,
         layout: &Layout,
@@ -483,7 +483,7 @@ mod api {
     /// `equals`, `hashCode`, and `toString` are *not* synthesised. All three come from
     /// `java.lang.Record` and two of them involve a `String`, which has no wasm representation by this
     /// backend's design — a call to one reports rather than being guessed at.
-    pub(crate) fn record_members(
+    fn record_members(
         inputs: &[TypedFile<'_>],
         index: &ProjectIndex,
         layout: &mut Layout,
@@ -579,7 +579,7 @@ mod api {
     /// The owner is what groups a block with the field initialisers it runs beside: JLS §12.4.2 runs
     /// one class's static initialisers as one sequence, and a block that reads a field of *another*
     /// class is what makes the grouping observable.
-    pub(crate) fn static_initializers(
+    fn static_initializers(
         root: &SyntaxNode,
         input: &TypedFile<'_>,
         index: &ProjectIndex,
@@ -607,7 +607,7 @@ mod api {
     }
 
     /// Whether a node is a type declaration, which is what a member's owner is found by walking to.
-    pub(crate) fn declares_a_type(node: &SyntaxNode) -> bool {
+    fn declares_a_type(node: &SyntaxNode) -> bool {
         matches!(
             node.kind(),
             CLASS_DECL | INTERFACE_DECL | ENUM_DECL | RECORD_DECL | ANNOTATION_TYPE_DECL
@@ -619,7 +619,7 @@ mod api {
     /// A struct's fields start with its supertype's, so the supertype's layout has to be settled
     /// first. The order is a depth-first walk of the `extends` chain; a cycle is impossible in a
     /// well-formed program and is simply not revisited here.
-    pub(crate) fn classes_in_order(
+    fn classes_in_order(
         inputs: &[TypedFile<'_>],
         index: &ProjectIndex,
         interfaces: &mut Vec<ItemId>,
@@ -678,9 +678,7 @@ mod api {
     /// An interface needs a dispatch mechanism (a function table or a per-type vtable struct), and an
     /// `enum` and a `record` need the synthesised members the JVM backend builds. None is laid out yet,
     /// and every one of them would otherwise vanish without a word.
-    pub(crate) const fn unrepresentable_kind(
-        kind: jals_syntax::SyntaxKind,
-    ) -> Option<&'static str> {
+    const fn unrepresentable_kind(kind: jals_syntax::SyntaxKind) -> Option<&'static str> {
         use jals_syntax::SyntaxKind::ANNOTATION_TYPE_DECL;
         match kind {
             ANNOTATION_TYPE_DECL => Some("an `@interface` declaration"),
@@ -698,7 +696,7 @@ mod api {
     /// A class inside a *block* is a local class, and wasm's flat type space has nothing to say about
     /// where it was written — so it is laid out like any other. What it may *not* do is capture a local:
     /// each capture needs a synthetic constructor parameter, and `captures_a_local` reports one.
-    pub(crate) fn type_declarations(root: &SyntaxNode) -> impl Iterator<Item = SyntaxNode> + '_ {
+    fn type_declarations(root: &SyntaxNode) -> impl Iterator<Item = SyntaxNode> + '_ {
         use jals_syntax::SyntaxKind::{
             ANNOTATION_TYPE_DECL, ENUM_DECL, INTERFACE_DECL, RECORD_DECL,
         };
@@ -723,12 +721,12 @@ mod api {
 
     /// Whether `node` is a lambda or a method reference — the two forms the index gives a one-method class
     /// item to, and which a backend with no `invokedynamic` emits as exactly that.
-    pub(crate) fn is_functional(node: &SyntaxNode) -> bool {
+    fn is_functional(node: &SyntaxNode) -> bool {
         matches!(node.kind(), LAMBDA_EXPR | METHOD_REF_EXPR)
     }
 
     /// The item a type declaration declares, whether it has a name to look up or only a position.
-    pub(crate) fn item_of(
+    fn item_of(
         node: &SyntaxNode,
         input: &TypedFile<'_>,
         index: &ProjectIndex,
@@ -746,7 +744,7 @@ mod api {
             .map(Some)
     }
 
-    pub(crate) fn push_with_supertypes(
+    fn push_with_supertypes(
         item: ItemId,
         index: &ProjectIndex,
         declared: &[ItemId],
@@ -764,7 +762,7 @@ mod api {
     }
 
     /// Register every method and constructor `input` declares.
-    pub(crate) fn collect_methods(
+    fn collect_methods(
         input: &TypedFile<'_>,
         position: usize,
         index: &ProjectIndex,
@@ -938,10 +936,7 @@ mod api {
     /// Two kinds rather than one because `ConstructorDecl` is not a [`ast::Decl`] variant — a
     /// constructor declares no type and no field, so the grammar keeps it out of that enum. Both
     /// arms go through the node's own generated accessor.
-    pub(crate) fn member_name_token(
-        node: &SyntaxNode,
-        is_constructor: bool,
-    ) -> Option<SyntaxToken> {
+    fn member_name_token(node: &SyntaxNode, is_constructor: bool) -> Option<SyntaxToken> {
         if is_constructor {
             ast::ConstructorDecl::cast(node.clone())?.name_token()
         } else {

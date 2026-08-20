@@ -176,7 +176,7 @@ pub(crate) mod granularity {
     }
 
     /// One declaration per member of every grouped import; everything else untouched.
-    pub(crate) fn split(block: Vec<(SyntaxNode, usize)>) -> Vec<(Unit, usize)> {
+    fn split(block: Vec<(SyntaxNode, usize)>) -> Vec<(Unit, usize)> {
         let mut out = Vec::with_capacity(block.len());
         for (node, blanks) in block {
             let members: Vec<SyntaxNode> = ImportDecl::cast(node.clone())
@@ -210,7 +210,7 @@ pub(crate) mod granularity {
     }
 
     /// Maximal runs of adjacent declarations sharing a prefix, joined into one grouped import.
-    pub(crate) fn merge(block: Vec<(SyntaxNode, usize)>) -> Vec<(Unit, usize)> {
+    fn merge(block: Vec<(SyntaxNode, usize)>) -> Vec<(Unit, usize)> {
         let mut out: Vec<(Unit, usize)> = Vec::with_capacity(block.len());
         let mut run: Vec<SyntaxNode> = Vec::new();
         let mut key: Option<(bool, String)> = None;
@@ -243,7 +243,7 @@ pub(crate) mod granularity {
     ///
     /// A run of one is deliberately *not* wrapped: `import a.B;` becoming `import a.{B};` adds
     /// braces to say nothing, and would grow a one-member group on every plain import in the file.
-    pub(crate) fn flush(out: &mut Vec<(Unit, usize)>, run: Vec<SyntaxNode>, lead: usize) {
+    fn flush(out: &mut Vec<(Unit, usize)>, run: Vec<SyntaxNode>, lead: usize) {
         match run.len() {
             0 => {}
             1 => out.push((

@@ -60,7 +60,7 @@ pub(crate) mod api {
     /// Every control character needs an escape — `formatter-off-tag` and `imports.groups` are
     /// user-supplied strings that reach here verbatim from a native config, so an unusual value
     /// must not be able to produce a file that no longer parses.
-    pub(crate) fn basic_string(text: &str) -> String {
+    fn basic_string(text: &str) -> String {
         let mut out = String::with_capacity(text.len() + 2);
         out.push('"');
         for character in text.chars() {

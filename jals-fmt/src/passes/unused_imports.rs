@@ -63,13 +63,13 @@ pub(crate) mod api {
 
     /// Whether a token sits inside an `import` declaration, whose own names must not count as
     /// uses — otherwise every import would keep itself alive.
-    pub(crate) fn inside_import(tok: &jals_syntax::SyntaxToken) -> bool {
+    fn inside_import(tok: &jals_syntax::SyntaxToken) -> bool {
         tok.parent_ancestors()
             .any(|node| node.kind() == SyntaxKind::IMPORT_DECL)
     }
 
     /// Whether the token directly before `tok` is a selector dot.
-    pub(crate) fn follows_dot(tok: &jals_syntax::SyntaxToken) -> bool {
+    fn follows_dot(tok: &jals_syntax::SyntaxToken) -> bool {
         let mut cursor = tok.prev_token();
         while let Some(previous) = cursor {
             if !previous.kind().is_trivia() {
@@ -86,7 +86,7 @@ pub(crate) mod api {
     /// a reference like `Foo#bar(Baz)`. Every identifier-shaped run in the rest of that line
     /// counts, which over-approximates — and over-approximating is the safe direction, since the
     /// cost is keeping an import that could have gone.
-    pub(crate) fn collect_javadoc_names(text: &str, used: &mut BTreeSet<String>) {
+    fn collect_javadoc_names(text: &str, used: &mut BTreeSet<String>) {
         /// The block tags whose argument is a type reference. These start a line. `@param` is
         /// not one: its argument names a parameter, and its description is prose that would keep
         /// an import alive for mentioning its name in passing.
@@ -127,7 +127,7 @@ pub(crate) mod api {
     /// This over-approximates — a reference is `Foo#bar(Baz)`, and every component of it counts —
     /// and over-approximating is the safe direction, since the cost is keeping an import that
     /// could have gone.
-    pub(crate) fn collect_names(text: &str, used: &mut BTreeSet<String>) {
+    fn collect_names(text: &str, used: &mut BTreeSet<String>) {
         for word in text.split(|c: char| !is_name_char(c)) {
             if !word.is_empty() && word.chars().next().is_some_and(char::is_alphabetic) {
                 used.insert(word.into());
@@ -136,7 +136,7 @@ pub(crate) mod api {
     }
 
     /// Whether `c` can appear in a Java identifier.
-    pub(crate) fn is_name_char(c: char) -> bool {
+    fn is_name_char(c: char) -> bool {
         c.is_alphanumeric() || c == '_' || c == '$'
     }
 
@@ -183,14 +183,14 @@ pub(crate) mod api {
     }
 
     /// A qualified name's leading components, dotted — everything before the last one.
-    pub(crate) fn qualifier(name: &jals_syntax::ast::QualifiedName) -> Option<String> {
+    fn qualifier(name: &jals_syntax::ast::QualifiedName) -> Option<String> {
         let dotted = dotted(name.syntax());
         let at = dotted.rfind('.')?;
         Some(dotted[..at].into())
     }
 
     /// The compilation unit's package name, or `None` for the unnamed package.
-    pub(crate) fn package(decl: &ImportDecl) -> Option<String> {
+    fn package(decl: &ImportDecl) -> Option<String> {
         let root = decl.syntax().ancestors().last()?;
         let package = root
             .children()
@@ -202,7 +202,7 @@ pub(crate) mod api {
     }
 
     /// A node's significant token text, concatenated.
-    pub(crate) fn dotted(node: &SyntaxNode) -> String {
+    fn dotted(node: &SyntaxNode) -> String {
         node.descendants_with_tokens()
             .filter_map(SyntaxElement::into_token)
             .filter(|tok| !tok.kind().is_trivia())

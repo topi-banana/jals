@@ -117,7 +117,7 @@ mod api {
     /// offset. A reference the file-local pass left unresolved is placed only when `project`
     /// binds it to a cross-file type (by its declared kind); any other unresolved reference is
     /// omitted, leaving its token to the syntactic fallback.
-    pub(crate) async fn resolution_classes(
+    async fn resolution_classes(
         root: &SyntaxNode,
         project: Option<(&ProjectIndex, FileId)>,
     ) -> BTreeMap<usize, (SemanticTokenKind, bool)> {
@@ -152,7 +152,7 @@ mod api {
     /// The token kind for a resolved binding's [`DefKind`]. Mirrors the declaration-site mapping
     /// in [`classify_ident_syntactic`], so a declaration classifies the same whether it is
     /// placed by resolution or syntax.
-    pub(crate) const fn kind_for(kind: DefKind) -> SemanticTokenKind {
+    const fn kind_for(kind: DefKind) -> SemanticTokenKind {
         match kind {
             DefKind::Class | DefKind::Record => SemanticTokenKind::Class,
             DefKind::Interface | DefKind::AnnotationType => SemanticTokenKind::Interface,
@@ -173,7 +173,7 @@ mod api {
     ///
     /// An identifier is taken from `by_start` (name resolution) when present, otherwise
     /// classified syntactically.
-    pub(crate) fn classify_token(
+    fn classify_token(
         token: &SyntaxToken,
         by_start: &BTreeMap<usize, (SemanticTokenKind, bool)>,
     ) -> Option<(SemanticTokenKind, bool)> {
@@ -201,9 +201,7 @@ mod api {
     /// Classify an identifier from the kind of its parent node, falling back to grandparent
     /// context to distinguish a method call from a plain name/field access. The syntactic
     /// fallback for identifiers name resolution cannot place.
-    pub(crate) fn classify_ident_syntactic(
-        token: &SyntaxToken,
-    ) -> Option<(SemanticTokenKind, bool)> {
+    fn classify_ident_syntactic(token: &SyntaxToken) -> Option<(SemanticTokenKind, bool)> {
         use SyntaxKind::{
             ANNOTATION, ANNOTATION_PAIR, ANNOTATION_TYPE_DECL, CALL_EXPR, CATCH_CLAUSE, CLASS_DECL,
             CONSTRUCTOR_DECL, ENUM_CONSTANT, ENUM_DECL, FIELD_ACCESS, FIELD_DECL, INTERFACE_DECL,
@@ -254,7 +252,7 @@ mod api {
 
     /// Whether `kind` is a keyword token — the reserved 50, the literal keywords
     /// (`true`/`false`/`null`), and the contextual keywords the parser promotes from `IDENT`.
-    pub(crate) const fn is_keyword(kind: SyntaxKind) -> bool {
+    const fn is_keyword(kind: SyntaxKind) -> bool {
         use SyntaxKind::{
             ABSTRACT_KW, ASSERT_KW, BOOLEAN_KW, BREAK_KW, BYTE_KW, CASE_KW, CATCH_KW, CHAR_KW,
             CLASS_KW, CONST_KW, CONTINUE_KW, DEFAULT_KW, DO_KW, DOUBLE_KW, ELSE_KW, ENUM_KW,

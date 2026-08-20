@@ -63,7 +63,7 @@ mod api {
         alloc::boxed::Box::pin(check_impl(root))
     }
 
-    pub(crate) async fn check_impl(root: &SyntaxNode) -> Vec<Finding> {
+    async fn check_impl(root: &SyntaxNode) -> Vec<Finding> {
         let mut yielder = Yielder::new();
         let mut out = Vec::new();
         for node in root.descendants() {
@@ -92,7 +92,7 @@ mod api {
     /// The wrapper class `ty` names, if it names one. `java.lang.Integer` and `Integer` answer
     /// alike, and `ArrayList<Integer>` answers `None` — [`Type::simple_name`] takes the last
     /// *top-level* `IDENT`, so a type argument is not the name.
-    pub(crate) fn wrapper_name(ty: &Type) -> Option<&'static str> {
+    fn wrapper_name(ty: &Type) -> Option<&'static str> {
         let name = ty.simple_name()?;
         WRAPPERS.iter().copied().find(|wrapper| *wrapper == name)
     }

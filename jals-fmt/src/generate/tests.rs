@@ -21,7 +21,7 @@ use super::{MigrationWarning, MigrationWarningKind, Provenance};
 use crate::import::{ConfigImporter, EclipsePrefs, IntellijEditorConfig};
 
 /// Shared inputs for the emitter tests.
-pub(crate) mod api {
+mod api {
     use super::*;
 
     /// A provenance whose rendering is not the point of the test using it.

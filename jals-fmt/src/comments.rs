@@ -371,7 +371,7 @@ impl CommentMap {
 /// GJF rewrites it to the canonical `/* name= */` and glues it to that argument. Recognition is
 /// unconditional — such a comment always hugs — but the *rewrite* is gated, because changing a
 /// comment's text is a change the user has to ask for.
-pub(crate) mod api {
+mod api {
     use super::String;
 
     /// The canonical form of `text` when it is a parameter-name comment, else `None`.
@@ -418,7 +418,7 @@ pub(crate) mod api {
 
     /// Whether `name` is a plain Java identifier — the label has to name a parameter, and
     /// anything else is prose that must not be rewritten.
-    pub(crate) fn is_identifier(name: &str) -> bool {
+    fn is_identifier(name: &str) -> bool {
         // A varargs parameter is named with its `...`: `PARAMETER_COMMENT`'s `(\Q...\E)?`.
         let name = name.strip_suffix("...").unwrap_or(name);
         let mut chars = name.chars();

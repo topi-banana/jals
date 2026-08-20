@@ -117,7 +117,7 @@ mod api {
     }
 
     /// Group the table's rows into clauses: one per `handler_pc`, carrying every type aimed at it.
-    pub(crate) fn clauses(cfg: &Cfg, code: &[Instruction]) -> Option<Vec<Group>> {
+    fn clauses(cfg: &Cfg, code: &[Instruction]) -> Option<Vec<Group>> {
         let mut groups: Vec<Group> = Vec::new();
         for entry in &cfg.handlers {
             let known = groups.iter().position(|g| g.handler == entry.entry);
@@ -159,7 +159,7 @@ mod api {
 
     /// The pc just past a handler's entry `astore` — where its parameter's `LocalVariableTable`
     /// entry begins.
-    pub(crate) fn param_pc(cfg: &Cfg, handler: usize) -> Option<usize> {
+    fn param_pc(cfg: &Cfg, handler: usize) -> Option<usize> {
         cfg.pcs.get(cfg.blocks.get(handler)?.start + 1).copied()
     }
 
@@ -168,7 +168,7 @@ mod api {
     /// Required, not assumed: a handler is entered with the exception on the stack and `javac`
     /// always stores it first, so an entry that is not a reference store is a shape this crate has
     /// not seen — and skipping the instruction anyway would silently drop real work.
-    pub(crate) fn entry_slot(cfg: &Cfg, code: &[Instruction], handler: usize) -> Option<u16> {
+    fn entry_slot(cfg: &Cfg, code: &[Instruction], handler: usize) -> Option<u16> {
         let start = cfg.blocks.get(handler)?.start;
         match body::store_info(code.get(start)?) {
             Some((slot, JvmKind::Reference)) => Some(slot),
@@ -178,11 +178,7 @@ mod api {
 
     /// Assemble the clauses into `try` statements: typed clauses sharing one range are one
     /// statement, and a catch-all joins the statement whose body its first range covers.
-    pub(crate) fn statements(
-        cfg: &Cfg,
-        code: &[Instruction],
-        groups: Vec<Group>,
-    ) -> Option<Vec<TryRegion>> {
+    fn statements(cfg: &Cfg, code: &[Instruction], groups: Vec<Group>) -> Option<Vec<TryRegion>> {
         let (finals, typed): (Vec<Group>, Vec<Group>) = groups
             .into_iter()
             .partition(|g| g.types.iter().all(|&t| t == 0));
@@ -246,7 +242,7 @@ mod api {
     /// the fold rests on the copies being instruction-for-instruction equal, and a switch's operands
     /// are padded to a 4-byte boundary, so two equal instruction runs can still occupy different
     /// numbers of bytes.
-    pub(crate) fn finalizer(cfg: &Cfg, code: &[Instruction], group: &Group) -> Option<Finally> {
+    fn finalizer(cfg: &Cfg, code: &[Instruction], group: &Group) -> Option<Finally> {
         let entry = cfg.blocks.get(group.handler)?.start;
         let body_start = entry + 1;
         // The rethrow closes the handler: `aload <slot>; athrow`, with the slot the entry stored.
@@ -320,7 +316,7 @@ mod api {
     /// Whether a finalizer's instructions may be folded: no `switch` (whose padding makes equal
     /// instruction runs occupy unequal byte counts), and no `return`/`athrow`/`jsr` (each changes
     /// what the pending exception means, which the rethrowing copy can no longer express).
-    pub(crate) fn foldable(body: &[Instruction]) -> bool {
+    fn foldable(body: &[Instruction]) -> bool {
         use Instruction as I;
         !body.iter().any(|ins| {
             matches!(
@@ -341,10 +337,7 @@ mod api {
     }
 
     /// The blocks a protected pc range covers.
-    pub(crate) fn body_blocks(
-        cfg: &Cfg,
-        range: &core::ops::Range<usize>,
-    ) -> Option<core::ops::Range<usize>> {
+    fn body_blocks(cfg: &Cfg, range: &core::ops::Range<usize>) -> Option<core::ops::Range<usize>> {
         let handler = cfg.handlers.iter().find(|h| h.range == *range)?;
         Some(handler.try_lo..handler.try_hi)
     }

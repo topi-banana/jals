@@ -48,7 +48,7 @@ mod api {
         alloc::boxed::Box::pin(check_impl(root, config))
     }
 
-    pub(crate) async fn check_impl(root: &SyntaxNode, config: &Config) -> Vec<Finding> {
+    async fn check_impl(root: &SyntaxNode, config: &Config) -> Vec<Finding> {
         let streams = config.restriction.print_to_console.options.streams;
         let mut yielder = Yielder::new();
         let mut out = Vec::new();
@@ -82,7 +82,7 @@ mod api {
     /// Which console stream `receiver` names, if it names one. The receiver's significant tokens
     /// are joined so that `System.out` and `java.lang.System.out` answer alike whatever whitespace
     /// or comments were written between them.
-    pub(crate) fn console_stream(receiver: &SyntaxNode) -> Option<&'static str> {
+    fn console_stream(receiver: &SyntaxNode) -> Option<&'static str> {
         // A receiver bigger than `java.lang.System.out` is not a qualified name at all.
         let mut spelling = String::new();
         for token in receiver
@@ -103,7 +103,7 @@ mod api {
     }
 
     /// Whether the configured `streams` covers `stream`.
-    pub(crate) fn reports(streams: ConsoleStreams, stream: &str) -> bool {
+    fn reports(streams: ConsoleStreams, stream: &str) -> bool {
         match streams {
             ConsoleStreams::Both => true,
             ConsoleStreams::Stdout => stream == "out",

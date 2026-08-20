@@ -31,9 +31,9 @@ extern crate alloc;
 mod attr;
 // Crate-internal, both: `[build.frontend]` is answered by [`FrontendSelection`], so the dialect's
 // flag projection and the driver that publishes into the cache are things it does, not things a
-// caller assembles. (`key::frontend_key` is crate-internal for the same reason, inside a module that
-// still carries the public `key::backend_key`.) Widening any of them back out re-opens the decision table
-// this seam closed.
+// caller assembles. (`key::frontend_key` is crate-internal for the same reason, inside a module
+// that still carries the public `key::backend_key`.) Widening any of them back out re-opens the
+// decision table this seam closed.
 mod dialect;
 pub(crate) mod driver;
 pub mod frontend;

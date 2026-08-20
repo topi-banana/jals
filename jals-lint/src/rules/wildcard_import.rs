@@ -44,10 +44,7 @@ mod api {
         alloc::boxed::Box::pin(check_impl(root, config))
     }
 
-    pub(crate) async fn check_impl(
-        root: &jals_syntax::SyntaxNode,
-        config: &Config,
-    ) -> Vec<Finding> {
+    async fn check_impl(root: &jals_syntax::SyntaxNode, config: &Config) -> Vec<Finding> {
         let exempt_static =
             config.style.wildcard_import.options.static_imports == StaticWildcard::Allow;
         let mut yielder = Yielder::new();

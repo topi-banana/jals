@@ -349,7 +349,7 @@ pub mod mapping_resolver {
     }
 
     /// What a diagnostic about this mapping set points at.
-    pub(crate) fn origin(spec: &MappingSpec) -> WarningOrigin {
+    fn origin(spec: &MappingSpec) -> WarningOrigin {
         match &spec.location {
             MappingLocation::Project(key) => WarningOrigin::ProjectFile(key.clone()),
             MappingLocation::External { locator, .. } => WarningOrigin::External(locator.clone()),
@@ -485,7 +485,7 @@ pub mod external_artifact_resolver {
     /// The provenance shared by a fetched artifact's published key and its locator-index
     /// recovery for SHA-1-pinned specs. Publish and recovery must fold identically or every
     /// recovery misses and the artifact is refetched — never inline one side.
-    pub(crate) fn provenance(spec: &ExternalArtifactSpec) -> ContentDigest {
+    fn provenance(spec: &ExternalArtifactSpec) -> ContentDigest {
         let mut fold = ProvenanceFold::new(b"external-artifact\0");
         fold.bytes(spec.locator.as_str().as_bytes())
             .bytes(&spec.expected.framed_bytes());
@@ -562,7 +562,7 @@ pub mod dependency_resolver {
 
     /// Everything that can be decided before fetching: project reads/publication, verified
     /// external lookups, and locator-index recovery. `None` means the spec needs a fetch.
-    pub(crate) async fn classify<C: CacheBackend>(
+    async fn classify<C: CacheBackend>(
         view: &ProjectView,
         cache: &mut ArtifactCache<C>,
         spec: &DependencySpec,
@@ -621,7 +621,7 @@ pub mod dependency_resolver {
         }
     }
 
-    pub(crate) async fn publish_project<C: CacheBackend>(
+    async fn publish_project<C: CacheBackend>(
         view: &ProjectView,
         cache: &mut ArtifactCache<C>,
         spec: &DependencySpec,
@@ -653,7 +653,7 @@ pub mod dependency_resolver {
 
     /// The pass-3 half of an external resolution: verify the fetched bytes against a pinned
     /// digest, publish write-once, and record the locator index for remote locators.
-    pub(crate) async fn publish_fetched<C: CacheBackend>(
+    async fn publish_fetched<C: CacheBackend>(
         cache: &mut ArtifactCache<C>,
         spec: &DependencySpec,
         fetched: &Result<Vec<u8>, String>,
@@ -704,7 +704,7 @@ pub mod dependency_resolver {
     /// The provenance shared by an external jar's published key and its locator-index
     /// recovery. Publish and recovery must fold identically or every recovery misses and the
     /// jar is refetched forever — never inline one side.
-    pub(crate) fn external_provenance(locator: &ExternalLocator) -> ContentDigest {
+    fn external_provenance(locator: &ExternalLocator) -> ContentDigest {
         let mut fold = ProvenanceFold::new(b"external\0");
         fold.bytes(locator.as_str().as_bytes());
         fold.finish()

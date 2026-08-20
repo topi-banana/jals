@@ -702,11 +702,7 @@ mod cache_identity {
         fold.finish()
     }
 
-    pub(super) fn fold(
-        kind: &'static [u8],
-        scope: BuildScriptCacheScope,
-        script: &FileKey,
-    ) -> ProvenanceFold {
+    fn fold(kind: &'static [u8], scope: BuildScriptCacheScope, script: &FileKey) -> ProvenanceFold {
         let mut fold = ProvenanceFold::new(kind);
         fold.version(BUILD_SCRIPT_API_VERSION)
             .opt_digest(scope.digest())

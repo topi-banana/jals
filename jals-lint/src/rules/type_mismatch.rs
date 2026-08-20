@@ -50,7 +50,7 @@ mod api {
         alloc::boxed::Box::pin(check_impl(analysis, project))
     }
 
-    pub(crate) async fn check_impl(
+    async fn check_impl(
         analysis: &FileAnalysis,
         project: Option<&FileSemantics<'_>>,
     ) -> Vec<Finding> {

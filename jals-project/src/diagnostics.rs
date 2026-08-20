@@ -461,13 +461,13 @@ mod api {
 
     /// The anchor a script diagnostic takes when it has nothing narrower to point at: the script
     /// when one is configured, the manifest otherwise.
-    pub(crate) fn script_anchor(file: Option<ScriptFile<'_>>) -> ProjectAnchor {
+    fn script_anchor(file: Option<ScriptFile<'_>>) -> ProjectAnchor {
         file.map_or(ProjectAnchor::Manifest, |file| {
             ProjectAnchor::Script(file.key.clone())
         })
     }
 
-    pub(crate) fn script_phase(
+    fn script_phase(
         out: &mut Vec<ProjectDiagnostic>,
         script: ScriptOutcome<'_>,
         file: Option<ScriptFile<'_>>,
@@ -514,7 +514,7 @@ mod api {
         }
     }
 
-    pub(crate) fn script_failure(
+    fn script_failure(
         out: &mut Vec<ProjectDiagnostic>,
         error: &BuildScriptError,
         file: Option<ScriptFile<'_>>,
@@ -577,7 +577,7 @@ mod api {
         }
     }
 
-    pub(crate) fn graph_phase(out: &mut Vec<ProjectDiagnostic>, graph: GraphOutcome<'_>) {
+    fn graph_phase(out: &mut Vec<ProjectDiagnostic>, graph: GraphOutcome<'_>) {
         match graph {
             GraphOutcome::NotReached => {}
             GraphOutcome::Failed(failure) => {
@@ -628,7 +628,7 @@ mod api {
     /// Every type this is used on carries its subject in an attribution the message does not
     /// repeat — a graph warning's node, a classpath warning's origin — so rendering the message
     /// alone drops the half a user can act on.
-    pub(crate) fn warning(
+    fn warning(
         anchor: ProjectAnchor,
         code: ProjectDiagnosticCode,
         subject: &dyn fmt::Display,
@@ -643,7 +643,7 @@ mod api {
     }
 
     /// [`warning`](warning) at error severity — the same whole-`Display` rendering.
-    pub(crate) fn error(
+    fn error(
         anchor: ProjectAnchor,
         code: ProjectDiagnosticCode,
         subject: &dyn fmt::Display,

@@ -103,7 +103,7 @@ mod api {
     }
 
     /// The field type a value of `ty` has, erased.
-    pub(crate) fn field_type(ty: &Ty, index: &ProjectIndex) -> Result<FieldType> {
+    fn field_type(ty: &Ty, index: &ProjectIndex) -> Result<FieldType> {
         field_type_within(ty, index, 0)
     }
 
@@ -128,7 +128,7 @@ mod api {
     const OBJECT: &str = "java/lang/Object";
 
     /// [`field_type`](field_type), tracking how many type-variable bounds have been followed.
-    pub(crate) fn field_type_within(ty: &Ty, index: &ProjectIndex, depth: u8) -> Result<FieldType> {
+    fn field_type_within(ty: &Ty, index: &ProjectIndex, depth: u8) -> Result<FieldType> {
         Ok(match ty {
             Ty::Primitive(primitive) => FieldType::Base(base_type(*primitive)),
             Ty::Array(element) => FieldType::Array(alloc::boxed::Box::new(field_type_within(
@@ -187,7 +187,7 @@ mod api {
     }
 
     /// The return descriptor for `ty`, where `void` is legal.
-    pub(crate) fn return_type(ty: &Ty, index: &ProjectIndex) -> Result<ReturnType> {
+    fn return_type(ty: &Ty, index: &ProjectIndex) -> Result<ReturnType> {
         match ty {
             Ty::Void => Ok(ReturnType::Void),
             other => Ok(ReturnType::Type(field_type(other, index)?)),
@@ -246,7 +246,7 @@ mod api {
         }
     }
 
-    pub(crate) const fn base_type(primitive: Primitive) -> BaseType {
+    const fn base_type(primitive: Primitive) -> BaseType {
         match primitive {
             Primitive::Boolean => BaseType::Boolean,
             Primitive::Byte => BaseType::Byte,

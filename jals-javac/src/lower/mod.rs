@@ -314,7 +314,7 @@ mod api {
     }
 
     /// Compile one type declaration.
-    pub(crate) fn class(
+    fn class(
         node: &SyntaxNode,
         item: ItemId,
         typed: TypedFile<'_>,
@@ -675,7 +675,7 @@ mod api {
     /// `access_flags` — the JVM has nowhere to put either — so this is the only record of what the
     /// source declared, and reflection reads it back from here. `getSimpleName` also comes from here;
     /// without it a nested class reports `Outer$Inner`.
-    pub(crate) fn inner_classes(
+    fn inner_classes(
         node: &SyntaxNode,
         context: &Context<'_>,
         pool: &mut ConstantPool,
@@ -780,7 +780,7 @@ mod api {
     /// The three constants coincide across `ClassAccessFlags` / `FieldAccessFlags` /
     /// `MethodAccessFlags` (JVMS tables 4.1-B, 4.5-A, 4.6-A), so one function answers for all
     /// three.
-    pub(crate) fn access_level(node: &SyntaxNode) -> u16 {
+    fn access_level(node: &SyntaxNode) -> u16 {
         use jals_syntax::SyntaxKind::{PRIVATE_KW, PROTECTED_KW, PUBLIC_KW};
         if Facts::has_modifier(node, PRIVATE_KW) {
             MethodAccessFlags::PRIVATE
@@ -793,7 +793,7 @@ mod api {
         }
     }
 
-    pub(crate) fn class_flags(node: &SyntaxNode, is_interface: bool, is_annotation: bool) -> u16 {
+    fn class_flags(node: &SyntaxNode, is_interface: bool, is_annotation: bool) -> u16 {
         // Only `public` is expressible on a top-level type. `private` / `protected` are nested-type
         // modifiers, and a nested type is reported rather than emitted.
         let mut flags = access_level(node) & ClassAccessFlags::PUBLIC;
@@ -818,7 +818,7 @@ mod api {
     }
 
     /// Every local class in the file `node` belongs to, mapped to the locals it captures.
-    pub(crate) fn captures_of(
+    fn captures_of(
         node: &SyntaxNode,
         facts: Facts<'_>,
     ) -> alloc::collections::BTreeMap<ItemId, alloc::vec::Vec<jals_hir::DefId>> {
@@ -864,12 +864,12 @@ mod api {
     }
 
     /// The synthetic field name a captured local gets, as javac names it.
-    pub(crate) fn capture_field(id: jals_hir::DefId, context: &Context<'_>) -> String {
+    fn capture_field(id: jals_hir::DefId, context: &Context<'_>) -> String {
         alloc::format!("val${}", context.typed.analysis().def(id).name)
     }
 
     /// The descriptor of a captured local's type.
-    pub(crate) fn capture_descriptor(id: jals_hir::DefId, context: &Context<'_>) -> Result<String> {
+    fn capture_descriptor(id: jals_hir::DefId, context: &Context<'_>) -> Result<String> {
         Ok(desc::descriptor_of(context.typed.type_of_def(id), context.index)?.to_string())
     }
 
@@ -880,7 +880,7 @@ mod api {
     /// as leading parameters of both the synthetic method and the call site, and a block body needs the
     /// statement lowering; each is its own step, and reporting beats emitting a call site whose arguments do
     /// not match its handle.
-    pub(crate) fn synthesise_lambdas<'a>(
+    fn synthesise_lambdas<'a>(
         mut context: Context<'a>,
         members: &[SyntaxNode],
         pool: &mut ConstantPool,
@@ -1083,11 +1083,7 @@ mod api {
     /// Anything the analysis could not type, or a parameter count the two do not agree on, falls
     /// back to the erased descriptor whole: a specialisation this cannot compute is one the
     /// metafactory must not be told about.
-    pub(crate) fn lambda_shape(
-        decl: &ast::LambdaExpr,
-        erased: &str,
-        context: &Context<'_>,
-    ) -> String {
+    fn lambda_shape(decl: &ast::LambdaExpr, erased: &str, context: &Context<'_>) -> String {
         let Ok(parsed) = jals_classfile::MethodDescriptor::parse(erased) else {
             return erased.to_owned();
         };
@@ -1119,7 +1115,7 @@ mod api {
     ///
     /// Only a reference to a `static` method of a named type. An instance one (`x::m`) captures the receiver,
     /// and a constructor one (`T::new`) needs `newInvokeSpecial` — each is its own kind of handle.
-    pub(crate) fn method_reference(
+    fn method_reference(
         node: &SyntaxNode,
         context: &Context<'_>,
         pool: &mut ConstantPool,
@@ -1194,7 +1190,7 @@ mod api {
     }
 
     /// `T::new`: the handle is `newInvokeSpecial` on the type's own constructor, and nothing is captured.
-    pub(crate) fn constructor_reference(
+    fn constructor_reference(
         owner_item: ItemId,
         member: jals_hir::MemberId,
         target: ItemId,
@@ -1269,7 +1265,7 @@ mod api {
     ///
     /// Anonymous class bodies are here too, keyed the way the index keys them: on the `new` keyword's
     /// own position, there being no name to key on.
-    pub(crate) fn inner_classes_of(
+    fn inner_classes_of(
         node: &SyntaxNode,
         index: &ProjectIndex,
         file: FileId,
@@ -1308,7 +1304,7 @@ mod api {
     /// `Holder.put` erases to `put(Object)`. Without a bridge the class has no `put(Object)` at all, so a
     /// call through `Holder` finds nothing to dispatch to — an `AbstractMethodError` at run time, and the
     /// one thing erasure cannot be left to sort out by itself.
-    pub(crate) fn bridges(
+    fn bridges(
         item: ItemId,
         context: &Context<'_>,
         pool: &mut ConstantPool,
@@ -1381,10 +1377,7 @@ mod api {
     /// when the returns already agree and only the parameters needed erasing. A primitive against a
     /// reference is neither: no conversion the JVM would accept is implied by the source, and a
     /// value returned unchanged fails the verifier against the descriptor it was declared under.
-    pub(crate) fn returns_are_bridgeable(
-        own: &MethodDescriptor,
-        inherited: &MethodDescriptor,
-    ) -> bool {
+    fn returns_are_bridgeable(own: &MethodDescriptor, inherited: &MethodDescriptor) -> bool {
         use jals_classfile::{FieldType, ReturnType};
         let reference = |ret: &ReturnType| {
             matches!(
@@ -1397,7 +1390,7 @@ mod api {
     }
 
     /// One bridge: take the erased arguments, cast each to what the override declared, and call it.
-    pub(crate) fn bridge(
+    fn bridge(
         context: &Context<'_>,
         pool: &mut ConstantPool,
         name: &str,
@@ -1464,11 +1457,7 @@ mod api {
     /// Every constructor of such a class takes the enclosing instance as an extra *first* parameter,
     /// so this answer has to match what a `new` of the class passes — [`inner_classes_of`]
     /// answers that side and the two ask the same question of the same node.
-    pub(crate) fn holds_enclosing_instance(
-        node: &SyntaxNode,
-        item: ItemId,
-        index: &ProjectIndex,
-    ) -> bool {
+    fn holds_enclosing_instance(node: &SyntaxNode, item: ItemId, index: &ProjectIndex) -> bool {
         if !matches!(index.item(item).kind, DefKind::Class) {
             return false;
         }
@@ -1493,11 +1482,7 @@ mod api {
     }
 
     /// The class a nested, local, or anonymous declaration sits inside.
-    pub(crate) fn enclosing_of(
-        node: &SyntaxNode,
-        index: &ProjectIndex,
-        file: FileId,
-    ) -> Result<Enclosing> {
+    fn enclosing_of(node: &SyntaxNode, index: &ProjectIndex, file: FileId) -> Result<Enclosing> {
         // The nearest enclosing *type*, not the parent's parent: a local class's parent chain runs
         // through a block and a method, and an anonymous class's through whatever expression created
         // it. For a class declared directly in another's body the two agree.
@@ -1551,7 +1536,7 @@ mod api {
     }
 
     /// Whether `node` is a `new` that carries a class body — an anonymous class declaration.
-    pub(crate) fn is_anonymous_body(node: &SyntaxNode) -> bool {
+    fn is_anonymous_body(node: &SyntaxNode) -> bool {
         node.kind() == jals_syntax::SyntaxKind::NEW_EXPR
             && node.children().any(|child| child.kind() == CLASS_BODY)
     }
@@ -1560,7 +1545,7 @@ mod api {
     ///
     /// `final` so nothing can rebind it and `synthetic` because the source never wrote it — which is also
     /// what keeps a reflective reader from listing it among the class's declared fields.
-    pub(crate) fn enclosing_field(enclosing: &str, pool: &mut ConstantPool) -> Result<FieldInfo> {
+    fn enclosing_field(enclosing: &str, pool: &mut ConstantPool) -> Result<FieldInfo> {
         Ok(FieldInfo {
             access_flags: FieldAccessFlags(FieldAccessFlags::FINAL | FieldAccessFlags::SYNTHETIC),
             name_index: pool.utf8_index(OUTER).ok_or(AsmError::PoolFull)?,
@@ -1582,7 +1567,7 @@ mod api {
     /// versions 46–60 (JVMS §4.6); from 61 on, strict floating point is the *only* semantics there
     /// is, so dropping the bit changes nothing about the program and setting it would set a bit the
     /// version reserves.
-    pub(crate) fn method_flags(node: &SyntaxNode, in_interface: bool) -> u16 {
+    fn method_flags(node: &SyntaxNode, in_interface: bool) -> u16 {
         use jals_syntax::SyntaxKind::{
             ABSTRACT_KW, FINAL_KW, NATIVE_KW, STATIC_KW, SYNCHRONIZED_KW,
         };
@@ -1610,7 +1595,7 @@ mod api {
     /// keyword list even though their access levels coincide.
     ///
     /// `in_interface` supplies JLS §9.3: an interface field is implicitly `public static final`.
-    pub(crate) fn field_flags(node: &SyntaxNode, in_interface: bool) -> u16 {
+    fn field_flags(node: &SyntaxNode, in_interface: bool) -> u16 {
         use jals_syntax::SyntaxKind::{FINAL_KW, STATIC_KW, TRANSIENT_KW, VOLATILE_KW};
         let mut flags = match access_level(node) {
             0 if in_interface => FieldAccessFlags::PUBLIC,
@@ -1634,7 +1619,7 @@ mod api {
 
     /// Emit a field declaration's `field_info`s — one per declarator, since `int a, b;` is one
     /// declaration and two fields.
-    pub(crate) fn field(
+    fn field(
         node: &SyntaxNode,
         context: &Context<'_>,
         pool: &mut ConstantPool,
@@ -1675,7 +1660,7 @@ mod api {
         Ok(())
     }
 
-    pub(crate) fn method(
+    fn method(
         node: &SyntaxNode,
         context: &Context<'_>,
         pool: &mut ConstantPool,
@@ -1793,7 +1778,7 @@ mod api {
     /// writes tag `B` over an `Integer` entry, and a reader that trusted the literal would see an `int`
     /// where a `byte` belongs. An enum constant, a class literal, and an array each have their own
     /// encoding, and the tag is what tells a reader which one it is looking at.
-    pub(crate) fn element_value(
+    fn element_value(
         value: &ast::Expr,
         declared: &jals_hir::Ty,
         context: &Context<'_>,
@@ -1897,11 +1882,11 @@ mod api {
     /// Out of range wraps, which is what a narrowing constant conversion does (JLS §5.2) — and what
     /// `jals-lint` reports, this crate not being the one that checks.
     #[allow(clippy::cast_possible_truncation)]
-    pub(crate) const fn narrow(value: i64) -> i32 {
+    const fn narrow(value: i64) -> i32 {
         value as i32
     }
 
-    pub(crate) fn constructor(
+    fn constructor(
         node: &SyntaxNode,
         context: &Context<'_>,
         pool: &mut ConstantPool,
@@ -2017,7 +2002,7 @@ mod api {
     /// each superinterface. The supertypes are written in their *erased* form here — a generic supertype
     /// (`class Box<T> extends Holder<T>`) would need the arguments the `extends` clause wrote, and
     /// erasing them loses only what a reflective reader would see, never what the JVM links on.
-    pub(crate) fn class_signature(
+    fn class_signature(
         node: &SyntaxNode,
         context: &Context<'_>,
         super_name: &str,
@@ -2100,10 +2085,7 @@ mod api {
     ///
     /// Its own type parameters first, then each formal parameter, then the result. `throws` is written
     /// only when a thrown type is itself a variable, which is the one case the encoding requires it.
-    pub(crate) fn method_signature(
-        node: &SyntaxNode,
-        context: &Context<'_>,
-    ) -> Result<Option<String>> {
+    fn method_signature(node: &SyntaxNode, context: &Context<'_>) -> Result<Option<String>> {
         let decl = ast::MethodDecl::cast(node.clone())
             .ok_or(LowerError::Unsupported("a malformed method declaration"))?;
         let vars = type_variables(node);
@@ -2188,7 +2170,7 @@ mod api {
 
     /// The type-variable names in scope for a member of `node`'s enclosing declaration, plus any the
     /// member itself declares.
-    pub(crate) fn type_variables(member: &SyntaxNode) -> Vec<String> {
+    fn type_variables(member: &SyntaxNode) -> Vec<String> {
         let mut names = Vec::new();
         for ancestor in member.ancestors() {
             if let Some(params) = ancestor.children().find_map(ast::TypeParams::cast) {
@@ -2220,11 +2202,7 @@ mod api {
     /// whatever this writes.
     const UNNAMEABLE_BOUND: &str = "Ljava/lang/Object;";
 
-    pub(crate) fn type_signature(
-        ty: &ast::Type,
-        vars: &[String],
-        context: &Context<'_>,
-    ) -> Result<String> {
+    fn type_signature(ty: &ast::Type, vars: &[String], context: &Context<'_>) -> Result<String> {
         use jals_syntax::SyntaxKind::{LBRACK, TYPE_ARGS};
         let dimensions = ty
             .syntax()
@@ -2274,7 +2252,7 @@ mod api {
     /// A wildcard is *not* wrapped in a type node of its own: its `?`, its `extends` / `super`, and its
     /// bound are all direct children of the argument list. So the list is walked in order rather than
     /// through the typed accessor, which skips the `?` and would render `? extends T` as plain `T`.
-    pub(crate) fn argument_signatures(
+    fn argument_signatures(
         args: &SyntaxNode,
         vars: &[String],
         context: &Context<'_>,
@@ -2330,7 +2308,7 @@ mod api {
 
     /// Whether a written type mentions any of `vars`, which is what decides if a member needs a
     /// `Signature` at all.
-    pub(crate) fn mentions_variable(ty: &ast::Type, vars: &[String]) -> bool {
+    fn mentions_variable(ty: &ast::Type, vars: &[String]) -> bool {
         ty.syntax()
             .descendants_with_tokens()
             .filter_map(jals_syntax::SyntaxElement::into_token)
@@ -2356,7 +2334,7 @@ mod api {
     /// `equals`, `hashCode`, and `toString` are **required from the source** here. `java.lang.Record`
     /// declares all three abstract, so a class file that omits any of them loads and then throws
     /// `AbstractMethodError` at the first call — which is why this reports rather than emits nothing.
-    pub(crate) fn record_members(
+    fn record_members(
         node: &SyntaxNode,
         context: &Context<'_>,
         pool: &mut ConstantPool,
@@ -2452,7 +2430,7 @@ mod api {
     /// is what makes two `NaN` components equal and `0.0` and `-0.0` different (§8.10.3). A reference
     /// component goes through `Objects.equals`, which is null-safe — `==` would be identity and a bare
     /// `a.equals(b)` would throw on a `null` component.
-    pub(crate) fn record_equals(
+    fn record_equals(
         context: &Context<'_>,
         pool: &mut ConstantPool,
         components: &[(String, String)],
@@ -2532,7 +2510,7 @@ mod api {
     ///
     /// §8.10.3 leaves the algorithm unspecified — only that it is derived from the components — so any
     /// consistent one is legal, and this is the one every hand-written `hashCode` uses.
-    pub(crate) fn record_hash(
+    fn record_hash(
         context: &Context<'_>,
         pool: &mut ConstantPool,
         components: &[(String, String)],
@@ -2564,7 +2542,7 @@ mod api {
     /// Each primitive gets the reduction its wrapper's `hashCode` uses, because two values that are
     /// `equals` must hash alike: a `long` folds its halves together, and a `float` hashes its *bits* so
     /// that two `NaN`s — which a record's `equals` calls equal — agree.
-    pub(crate) fn component_hash(asm: &mut Assembler<'_>, descriptor: &str) -> Result<()> {
+    fn component_hash(asm: &mut Assembler<'_>, descriptor: &str) -> Result<()> {
         match descriptor.as_bytes() {
             // A `boolean` is already 0 or 1 on the stack, and `Boolean.hashCode` maps those to
             // 1237 and 1231. Multiplying is how the two constants are reached without a branch.
@@ -2593,7 +2571,7 @@ mod api {
     }
 
     /// `(int) (value ^ (value >>> 32))` over the `long` on top: `Long.hashCode`'s own reduction.
-    pub(crate) fn fold_long(asm: &mut Assembler<'_>) -> Result<()> {
+    fn fold_long(asm: &mut Assembler<'_>) -> Result<()> {
         // `dup` on a `long` is `dup2`; `dup_pair` is for two *separate* one-word values.
         asm.dup()?;
         asm.const_int(32)?;
@@ -2606,7 +2584,7 @@ mod api {
     /// `toString()`: `Name[a=1, b=2]`, which §8.10.3 *does* specify exactly.
     ///
     /// A `StringBuilder` chain rather than `invokedynamic`, the same way `+` on a `String` lowers.
-    pub(crate) fn record_string(
+    fn record_string(
         context: &Context<'_>,
         pool: &mut ConstantPool,
         components: &[(String, String)],
@@ -2664,7 +2642,7 @@ mod api {
     ///
     /// There is no `append(byte)` or `append(short)`: both widen to `int`, which is what the JVM's
     /// stack already holds them as.
-    pub(crate) fn append_descriptor(descriptor: &str) -> alloc::string::String {
+    fn append_descriptor(descriptor: &str) -> alloc::string::String {
         let parameter = match descriptor.as_bytes() {
             [b'Z'] => "Z",
             [b'C'] => "C",
@@ -2688,7 +2666,7 @@ mod api {
     /// Compared as *descriptors*, which is the erasure a class file records — a parameter written
     /// `java.lang.String` and a component written `String` are one type, and a mismatch there would
     /// emit `<init>` twice under one descriptor.
-    pub(crate) fn declares_canonical_constructor(
+    fn declares_canonical_constructor(
         context: &Context<'_>,
         members: &[SyntaxNode],
         components: &[(String, String)],
@@ -2729,7 +2707,7 @@ mod api {
     }
 
     /// The name token of every component in a record's header, in order.
-    pub(crate) fn record_components(node: &SyntaxNode) -> Vec<SyntaxToken> {
+    fn record_components(node: &SyntaxNode) -> Vec<SyntaxToken> {
         node.children()
             .find(|child| child.kind() == jals_syntax::SyntaxKind::RECORD_HEADER)
             .into_iter()
@@ -2747,7 +2725,7 @@ mod api {
     /// (JLS §8.10.4.2). So the body is lowered with each component's *definition* bound to the
     /// parameter slot rather than to the field — which is what makes `x = Math.abs(x)` normalise the
     /// argument and what leaves the field still zero for the body's own reads, as Java has it.
-    pub(crate) fn canonical_constructor(
+    fn canonical_constructor(
         context: &Context<'_>,
         pool: &mut ConstantPool,
         super_name: &str,
@@ -2828,7 +2806,7 @@ mod api {
 
     /// Whether a member is a record's *compact* constructor: a `CONSTRUCTOR_DECL` with no parameter
     /// list at all, which is the only thing that distinguishes `P { … }` from `P() { … }` in the tree.
-    pub(crate) fn is_compact_constructor(member: &SyntaxNode) -> bool {
+    fn is_compact_constructor(member: &SyntaxNode) -> bool {
         member.kind() == CONSTRUCTOR_DECL
             && !member
                 .children()
@@ -2836,7 +2814,7 @@ mod api {
     }
 
     /// One accessor: `return this.name;`.
-    pub(crate) fn record_accessor(
+    fn record_accessor(
         context: &Context<'_>,
         pool: &mut ConstantPool,
         name: &str,
@@ -2864,7 +2842,7 @@ mod api {
     /// The constructor a class with none of its own gets. `access` is the *class's* access level,
     /// which JLS §8.8.9 gives the default constructor — a `public` one on a package-private class
     /// would widen the type's reachable surface past what the source wrote.
-    pub(crate) fn default_constructor(
+    fn default_constructor(
         context: &Context<'_>,
         pool: &mut ConstantPool,
         super_name: &str,
@@ -2924,7 +2902,7 @@ mod api {
     /// from the declaration, which would leave every one of them two parameters short; a constant with
     /// a **body** is an anonymous subclass, which is a separate class file the enum then cannot be
     /// `final`.
-    pub(crate) fn enum_members(
+    fn enum_members(
         constants: &[ast::EnumConstant],
         context: &Context<'_>,
         pool: &mut ConstantPool,
@@ -3049,7 +3027,7 @@ mod api {
     /// arity rather than by applicability: a constant's argument list is not an expression the index
     /// resolved a call target for, so there is nothing to read a selection out of. Two constructors of
     /// the same arity are reported instead of guessed at.
-    pub(crate) fn enum_constructor(
+    fn enum_constructor(
         arity: usize,
         owner: ItemId,
         context: &Context<'_>,
@@ -3091,7 +3069,7 @@ mod api {
     /// `None` when the type has neither, because an empty `<clinit>` is still a method the JVM loads
     /// and calls. `ACC_STATIC` is required on it from major version 51 (JVMS §2.9.2), and it takes no
     /// access level at all — nothing can name it.
-    pub(crate) fn class_initializer(
+    fn class_initializer(
         context: &Context<'_>,
         pool: &mut ConstantPool,
         members: &[SyntaxNode],
@@ -3137,7 +3115,7 @@ mod api {
     /// `enum SynthValues { red; SynthValues[] $VALUES = null; }` is legal Java — the name is only
     /// reserved by convention — and emitting the synthetic one anyway declared the field twice, which
     /// is a `ClassFormatError` at load. javac appends a `$` until the name is free, so this does.
-    pub(crate) fn values_field(members: &[SyntaxNode]) -> String {
+    fn values_field(members: &[SyntaxNode]) -> String {
         let declared: Vec<String> = members
             .iter()
             .filter(|member| member.kind() == FIELD_DECL)
@@ -3157,7 +3135,7 @@ mod api {
     /// The ordinal *is* the declaration position: it is what `ordinal()` returns, what a `switch` over
     /// the type indexes on, and what `compareTo` orders by. Numbering them any other way would be a
     /// class that verifies and compares wrongly.
-    pub(crate) fn enum_constants(
+    fn enum_constants(
         constants: &[ast::EnumConstant],
         internal_name: &str,
         members: &[SyntaxNode],
@@ -3240,7 +3218,7 @@ mod api {
     /// The first thing `<clinit>` does in a class containing an `assert`. The *negation* is what makes
     /// the guard one branch at each assertion site rather than two — the field is read and the
     /// assertion skipped when it is true.
-    pub(crate) fn assertion_flag(context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
+    fn assertion_flag(context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
         let enabled = emit.asm.label();
         let store = emit.asm.label();
         emit.asm.const_class(&context.this_class)?;
@@ -3261,7 +3239,7 @@ mod api {
     }
 
     /// Whether `member` contributes to the class initialiser (`statics`) or to every constructor.
-    pub(crate) fn initializes(member: &SyntaxNode, in_interface: bool, statics: bool) -> bool {
+    fn initializes(member: &SyntaxNode, in_interface: bool, statics: bool) -> bool {
         use jals_syntax::SyntaxKind::{INITIALIZER, STATIC_KW};
         match member.kind() {
             // An interface field is implicitly `static` (JLS §9.3), so it is written without the
@@ -3280,7 +3258,7 @@ mod api {
     ///
     /// One walk in source order, because JLS §12.4.2 / §12.5 run them in the order they are written
     /// and a later one may read what an earlier one assigned.
-    pub(crate) fn initializers(
+    fn initializers(
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
         members: &[SyntaxNode],
@@ -3343,7 +3321,7 @@ mod api {
     /// Worked out before anything runs, so a temporary declared mid-body cannot move it — and in one
     /// place, because two readers depend on it agreeing: the prologue that stores each capture into
     /// its field, and the argument lowering that has to read one *before* `super(...)` has done so.
-    pub(crate) fn capture_slots_of(
+    fn capture_slots_of(
         context: &Context<'_>,
         slots: &Slots,
     ) -> Result<Vec<(jals_hir::DefId, u16)>> {
@@ -3356,7 +3334,7 @@ mod api {
         Ok(out)
     }
 
-    pub(crate) fn prologue(
+    fn prologue(
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
         super_name: &str,

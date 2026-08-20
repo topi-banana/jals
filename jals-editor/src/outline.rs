@@ -46,7 +46,7 @@ mod api {
     }
 
     /// The outline node for a top-level declaration.
-    pub(crate) fn for_decl(decl: &Decl) -> OutlineNode {
+    fn for_decl(decl: &Decl) -> OutlineNode {
         match decl {
             Decl::Class(d) => for_type(d.syntax(), d.name(), DefKind::Class, d.body()),
             Decl::Interface(d) => for_type(d.syntax(), d.name(), DefKind::Interface, d.body()),
@@ -62,7 +62,7 @@ mod api {
     }
 
     /// The outline node for a type member, or `None` for an unnamed initializer block.
-    pub(crate) fn for_member(member: &Member) -> Option<OutlineNode> {
+    fn for_member(member: &Member) -> Option<OutlineNode> {
         let node = match member {
             Member::Field(d) => leaf(d.syntax(), d.name(), DefKind::Field),
             Member::Method(d) => leaf(d.syntax(), d.name(), DefKind::Method),
@@ -81,7 +81,7 @@ mod api {
     }
 
     /// A type-like node (class/interface/record/annotation) whose children are its members.
-    pub(crate) fn for_type(
+    fn for_type(
         node: &SyntaxNode,
         name: Option<String>,
         kind: DefKind,
@@ -94,7 +94,7 @@ mod api {
     }
 
     /// An enum node, whose children are its constants followed by its members.
-    pub(crate) fn for_enum(d: &EnumDecl) -> OutlineNode {
+    fn for_enum(d: &EnumDecl) -> OutlineNode {
         let children = d
             .body()
             .map(|b| {
@@ -109,12 +109,12 @@ mod api {
     }
 
     /// A node with no children.
-    pub(crate) fn leaf(node: &SyntaxNode, name: Option<String>, kind: DefKind) -> OutlineNode {
+    fn leaf(node: &SyntaxNode, name: Option<String>, kind: DefKind) -> OutlineNode {
         assemble(node, name, kind, Vec::new())
     }
 
     /// Assemble an [`OutlineNode`] over `node`'s byte range.
-    pub(crate) fn assemble(
+    fn assemble(
         node: &SyntaxNode,
         name: Option<String>,
         kind: DefKind,

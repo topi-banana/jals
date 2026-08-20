@@ -632,7 +632,7 @@ enum Parse {
 /// a name, `list.builder.add` is three dereferences — so it is a state machine over four case
 /// formats and nothing else. It is a heuristic in google-java-format too, and reproducing it
 /// exactly is the only way to reproduce where chains break.
-pub(crate) mod api {
+mod api {
     use super::{Case, Link, Parse};
 
     /// The index of the last link of the type-shaped prefix, if there is one.
@@ -661,7 +661,7 @@ pub(crate) mod api {
     }
 
     /// The classifier's transition function.
-    pub(super) const fn next(state: Parse, case: Case) -> Parse {
+    const fn next(state: Parse, case: Case) -> Parse {
         match state {
             Parse::Start => match case {
                 // An `UpperCamel` later would make this a class, so hold the judgement.
@@ -684,7 +684,7 @@ pub(crate) mod api {
     }
 
     /// Classify an identifier's case format, ignoring everything that is not a letter.
-    pub(super) fn case(name: &str) -> Case {
+    fn case(name: &str) -> Case {
         let mut first_upper = false;
         let mut has_upper = false;
         let mut has_lower = false;

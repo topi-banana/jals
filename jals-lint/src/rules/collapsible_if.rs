@@ -52,7 +52,7 @@ mod api {
         alloc::boxed::Box::pin(check_impl(root))
     }
 
-    pub(crate) async fn check_impl(root: &SyntaxNode) -> Vec<Finding> {
+    async fn check_impl(root: &SyntaxNode) -> Vec<Finding> {
         let mut yielder = Yielder::new();
         let mut out = Vec::new();
         for node in root.descendants() {
@@ -74,7 +74,7 @@ mod api {
     }
 
     /// Whether `outer`'s body is a lone `if` that could join it.
-    pub(crate) fn collapses(outer: &IfStmt) -> bool {
+    fn collapses(outer: &IfStmt) -> bool {
         let mut branches = outer.branches();
         let Some(body) = branches.next() else {
             return false;
@@ -111,7 +111,7 @@ mod api {
     /// The span is [`significant::range`] rather than `inner`'s node range, because rowan parks the
     /// leading trivia — the comment in question — inside the node that follows it, so a comment
     /// written before `if` is already part of the inner statement's range.
-    pub(crate) fn has_orphaned_comment(block: &SyntaxNode, inner: &SyntaxNode) -> bool {
+    fn has_orphaned_comment(block: &SyntaxNode, inner: &SyntaxNode) -> bool {
         let Some(inner) = significant::range(inner) else {
             return false;
         };

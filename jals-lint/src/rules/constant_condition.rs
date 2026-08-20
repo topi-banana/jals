@@ -41,7 +41,7 @@ mod api {
         alloc::boxed::Box::pin(check_impl(analysis))
     }
 
-    pub(crate) async fn check_impl(analysis: &FileAnalysis) -> Vec<Finding> {
+    async fn check_impl(analysis: &FileAnalysis) -> Vec<Finding> {
         analysis
             .dead_ifs()
             .await

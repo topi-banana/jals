@@ -56,7 +56,7 @@ mod naming_convention {
         alloc::boxed::Box::pin(check_impl(root, config))
     }
 
-    pub(crate) async fn check_impl(root: &SyntaxNode, config: &Config) -> Vec<Finding> {
+    async fn check_impl(root: &SyntaxNode, config: &Config) -> Vec<Finding> {
         let table = &config.naming.naming_convention.options;
         let mut yielder = Yielder::new();
         let mut out = Vec::new();
@@ -99,7 +99,7 @@ mod naming_convention {
         out
     }
 
-    pub(crate) fn push_if_bad(tok: &SyntaxToken, case: Case, what: &str, out: &mut Vec<Finding>) {
+    fn push_if_bad(tok: &SyntaxToken, case: Case, what: &str, out: &mut Vec<Finding>) {
         let name = tok.text();
         let Some(label) = expected::label(case) else {
             // `Case::Any` — this kind is not checked at all.
@@ -117,34 +117,34 @@ mod naming_convention {
     /// Whether `name` is a plain ASCII identifier worth checking: it starts with an ASCII letter
     /// and contains only ASCII letters, digits, and underscores (so `_`, `$name`, and Unicode
     /// names are skipped).
-    pub(crate) fn is_checkable(name: &str) -> bool {
+    fn is_checkable(name: &str) -> bool {
         name.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
             && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
     }
 
     /// Whether a `FIELD_DECL` is a constant (`static final`).
-    pub(crate) fn is_constant_field(field: &SyntaxNode) -> bool {
+    fn is_constant_field(field: &SyntaxNode) -> bool {
         field
             .children()
             .find(|c| c.kind() == MODIFIERS)
             .is_some_and(|m| has_token(&m, STATIC_KW) && has_token(&m, FINAL_KW))
     }
 
-    pub(crate) fn has_token(node: &SyntaxNode, kind: SyntaxKind) -> bool {
+    fn has_token(node: &SyntaxNode, kind: SyntaxKind) -> bool {
         node.children_with_tokens()
             .filter_map(SyntaxElement::into_token)
             .any(|t| t.kind() == kind)
     }
 
     /// The first directly-declared name (`IDENT`) of `node`, e.g. a type or method name.
-    pub(crate) fn first_name_ident(node: &SyntaxNode) -> Option<SyntaxToken> {
+    fn first_name_ident(node: &SyntaxNode) -> Option<SyntaxToken> {
         node.children_with_tokens()
             .filter_map(SyntaxElement::into_token)
             .find(|t| t.kind() == IDENT)
     }
 
     /// Every directly-declared name (`IDENT`) of `node`, e.g. each variable of `int a, b;`.
-    pub(crate) fn name_idents(node: &SyntaxNode) -> Vec<SyntaxToken> {
+    fn name_idents(node: &SyntaxNode) -> Vec<SyntaxToken> {
         node.children_with_tokens()
             .filter_map(SyntaxElement::into_token)
             .filter(|t| t.kind() == IDENT)

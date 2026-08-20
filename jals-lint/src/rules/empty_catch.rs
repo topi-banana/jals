@@ -41,7 +41,7 @@ mod api {
         alloc::boxed::Box::pin(check_impl(root, config))
     }
 
-    pub(crate) async fn check_impl(root: &SyntaxNode, config: &Config) -> Vec<Finding> {
+    async fn check_impl(root: &SyntaxNode, config: &Config) -> Vec<Finding> {
         let options = &config.suspicious.empty_catch.options;
         let mut yielder = Yielder::new();
         let mut out = Vec::new();

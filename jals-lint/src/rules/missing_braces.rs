@@ -54,7 +54,7 @@ mod api {
         alloc::boxed::Box::pin(check_impl(root, config))
     }
 
-    pub(crate) async fn check_impl(root: &SyntaxNode, config: &Config) -> Vec<Finding> {
+    async fn check_impl(root: &SyntaxNode, config: &Config) -> Vec<Finding> {
         let policy = config.style.missing_braces.options.policy;
         let mut yielder = Yielder::new();
         let mut out = Vec::new();
@@ -86,7 +86,7 @@ mod api {
 
     /// The two branches of an `if` are its statement-shaped children: `[then]` or `[then, else]`
     /// (the condition is an expression, not a statement).
-    pub(crate) fn check_if(node: &SyntaxNode, policy: BracePolicy, out: &mut Vec<Finding>) {
+    fn check_if(node: &SyntaxNode, policy: BracePolicy, out: &mut Vec<Finding>) {
         let branches: Vec<SyntaxNode> = node.children().filter(|c| is_stmt(c.kind())).collect();
         for (i, branch) in branches.iter().enumerate() {
             if branch.kind() == BLOCK {
@@ -119,11 +119,7 @@ mod api {
     /// statement's leading trivia inside the statement, so `stmt.text_range()` begins at the newline
     /// that ended the *previous* line; measuring from there would report every guard clause not on
     /// the first line of its block, which is nearly all of them.
-    pub(crate) fn requires_braces(
-        stmt: &SyntaxNode,
-        body: &SyntaxNode,
-        policy: BracePolicy,
-    ) -> bool {
+    fn requires_braces(stmt: &SyntaxNode, body: &SyntaxNode, policy: BracePolicy) -> bool {
         if policy == BracePolicy::Always {
             return true;
         }
@@ -140,7 +136,7 @@ mod api {
     }
 
     /// The keyword to name in the message for a loop statement.
-    pub(crate) const fn keyword(kind: SyntaxKind) -> &'static str {
+    const fn keyword(kind: SyntaxKind) -> &'static str {
         match kind {
             WHILE_STMT => "while",
             FOR_STMT | FOR_EACH_STMT => "for",
@@ -150,7 +146,7 @@ mod api {
     }
 
     /// Whether `kind` is a statement node kind (the shapes that can appear as a control-flow body).
-    pub(crate) const fn is_stmt(kind: SyntaxKind) -> bool {
+    const fn is_stmt(kind: SyntaxKind) -> bool {
         matches!(
             kind,
             LOCAL_VAR_DECL

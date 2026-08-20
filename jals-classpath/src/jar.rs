@@ -85,7 +85,7 @@ mod api {
     ///
     /// `Manifest-Version` comes first because the specification requires the version to be the
     /// main section's first attribute; a blank line terminates the section.
-    pub(crate) fn main_section(main_class: Option<&str>) -> String {
+    fn main_section(main_class: Option<&str>) -> String {
         let mut out = String::new();
         write_attribute(&mut out, "Manifest-Version", "1.0");
         if let Some(main_class) = main_class {

@@ -393,7 +393,7 @@ mod api {
     /// error token if the string is unterminated. On failure mid-input the error spans only
     /// the chars consumed before the failing one, which is then re-lexed on its own; at end
     /// of input it spans everything consumed.
-    pub(super) fn string_or_text_block(src: &str, start: usize) -> (Result<TokenKind, ()>, usize) {
+    fn string_or_text_block(src: &str, start: usize) -> (Result<TokenKind, ()>, usize) {
         let bytes = src.as_bytes();
         if bytes.get(start + 1) == Some(&b'"') && bytes.get(start + 2) == Some(&b'"') {
             return (Ok(TokenKind::TEXT_BLOCK), text_block(bytes, start + 3));
@@ -424,7 +424,7 @@ mod api {
     /// Scans the rest of a text block whose opening `"""` ends at `pos`. The block runs
     /// through the first closing `"""` preceded by an even-length backslash run, or to the
     /// end of input if unterminated. Returns the end offset.
-    pub(super) fn text_block(bytes: &[u8], pos: usize) -> usize {
+    fn text_block(bytes: &[u8], pos: usize) -> usize {
         let mut i = pos;
         while i + 3 <= bytes.len() {
             if &bytes[i..i + 3] == b"\"\"\"" {
@@ -446,7 +446,7 @@ mod api {
     /// Scans a token starting with `'`: a char literal (`'x'` or `'\x'`), or an error token
     /// on malformed input. The error span follows the same rule as for strings: the failing
     /// char (if any) is excluded and re-lexed on its own.
-    pub(super) fn char_literal(src: &str, start: usize) -> (Result<TokenKind, ()>, usize) {
+    fn char_literal(src: &str, start: usize) -> (Result<TokenKind, ()>, usize) {
         let mut cursor = Cursor {
             src,
             pos: start + 1,
@@ -479,7 +479,7 @@ mod api {
     // the winner is unambiguous.
 
     /// Scans a numeric literal starting at `start` (`bytes[start]` is an ASCII digit).
-    pub(super) fn number(bytes: &[u8], start: usize) -> (TokenKind, usize) {
+    fn number(bytes: &[u8], start: usize) -> (TokenKind, usize) {
         if bytes[start] == b'0' && matches!(bytes.get(start + 1), Some(b'x' | b'X')) {
             hex_number(bytes, start)
         } else {
@@ -488,7 +488,7 @@ mod api {
     }
 
     /// Scans a decimal (or `0`-prefixed octal/binary) literal starting at `start`.
-    pub(super) fn decimal_number(bytes: &[u8], start: usize) -> (TokenKind, usize) {
+    fn decimal_number(bytes: &[u8], start: usize) -> (TokenKind, usize) {
         // Integer candidates: `0`, octal `0(_*[0-7])+`, binary `0[bB][01](_*[01])*`, or a
         // decimal run `[1-9](_*[0-9])*` — each with an optional `l`/`L` suffix.
         let int_body = if bytes[start] == b'0' {
@@ -534,7 +534,7 @@ mod api {
     /// Scans a hexadecimal literal starting at `start` (`bytes[start..start + 2]` is
     /// `0x`/`0X`): a hex integer, or a hex float — which always requires a `p` exponent.
     /// Falls back to the bare `0` when no hex digit follows the prefix.
-    pub(super) fn hex_number(bytes: &[u8], start: usize) -> (TokenKind, usize) {
+    fn hex_number(bytes: &[u8], start: usize) -> (TokenKind, usize) {
         let is_hex = |b: u8| b.is_ascii_hexdigit();
         let digits = digit_run(bytes, start + 2, is_hex);
 
@@ -575,7 +575,7 @@ mod api {
 
     /// Scans a fraction-first float (`. digits [exponent] [suffix]`) whose `.` sits at
     /// `start` (`bytes[start + 1]` is an ASCII digit). Returns the end offset.
-    pub(super) fn fraction_float(bytes: &[u8], start: usize) -> usize {
+    fn fraction_float(bytes: &[u8], start: usize) -> usize {
         let digits = digit_run(bytes, start + 1, |b| b.is_ascii_digit());
         let end = decimal_exponent(bytes, digits).unwrap_or(digits);
         float_suffix(bytes, end)
@@ -584,7 +584,7 @@ mod api {
     /// Scans a `digit (_* digit)*` run at `start` using `is_digit`, returning the position
     /// after the last digit (trailing underscores are not part of the run). Returns `start`
     /// if there is no digit at `start`.
-    pub(super) fn digit_run(bytes: &[u8], start: usize, is_digit: impl Fn(u8) -> bool) -> usize {
+    fn digit_run(bytes: &[u8], start: usize, is_digit: impl Fn(u8) -> bool) -> usize {
         if !bytes.get(start).is_some_and(|&b| is_digit(b)) {
             return start;
         }
@@ -603,20 +603,20 @@ mod api {
     }
 
     /// Scans a complete decimal exponent (`[eE][+-]?digits`) at `start`.
-    pub(super) fn decimal_exponent(bytes: &[u8], start: usize) -> Option<usize> {
+    fn decimal_exponent(bytes: &[u8], start: usize) -> Option<usize> {
         exponent(bytes, start, b'e', b'E')
     }
 
     /// Scans a complete hex-float exponent (`[pP][+-]?digits`; the digits are decimal) at
     /// `start`.
-    pub(super) fn hex_exponent(bytes: &[u8], start: usize) -> Option<usize> {
+    fn hex_exponent(bytes: &[u8], start: usize) -> Option<usize> {
         exponent(bytes, start, b'p', b'P')
     }
 
     /// Scans a complete exponent (`marker [+-] digits`) at `start`, returning its end.
     /// An exponent is all-or-nothing: with no digit after the marker (and optional sign),
     /// `None` is returned and the caller keeps its shorter accepting prefix.
-    pub(super) fn exponent(bytes: &[u8], start: usize, lower: u8, upper: u8) -> Option<usize> {
+    fn exponent(bytes: &[u8], start: usize, lower: u8, upper: u8) -> Option<usize> {
         if !matches!(bytes.get(start), Some(&b) if b == lower || b == upper) {
             return None;
         }
@@ -629,7 +629,7 @@ mod api {
     }
 
     /// Extends past an optional integer suffix (`l`/`L`) at `end`.
-    pub(super) fn int_suffix(bytes: &[u8], end: usize) -> usize {
+    fn int_suffix(bytes: &[u8], end: usize) -> usize {
         if matches!(bytes.get(end), Some(b'l' | b'L')) {
             end + 1
         } else {
@@ -638,7 +638,7 @@ mod api {
     }
 
     /// Extends past an optional float suffix (`f`/`F`/`d`/`D`) at `end`.
-    pub(super) fn float_suffix(bytes: &[u8], end: usize) -> usize {
+    fn float_suffix(bytes: &[u8], end: usize) -> usize {
         if matches!(bytes.get(end), Some(b'f' | b'F' | b'd' | b'D')) {
             end + 1
         } else {
@@ -652,7 +652,7 @@ mod api {
     // start = `\p{L}\p{Nl}\p{Sc}\p{Pc}`, continue = start plus `\p{Nd}\p{Mn}\p{Mc}\p{Cf}`.
 
     /// Whether `c` can start an identifier.
-    pub(super) fn is_ident_start(c: char) -> bool {
+    fn is_ident_start(c: char) -> bool {
         use unicode_properties::{GeneralCategory as GC, UnicodeGeneralCategory as _};
 
         if c.is_ascii() {
@@ -672,7 +672,7 @@ mod api {
     }
 
     /// Whether `c` can continue an identifier.
-    pub(super) fn is_ident_continue(c: char) -> bool {
+    fn is_ident_continue(c: char) -> bool {
         use unicode_properties::{GeneralCategory as GC, UnicodeGeneralCategory as _};
 
         if c.is_ascii() {
@@ -696,7 +696,7 @@ mod api {
     ///
     /// Only *continuation*: `isJavaIdentifierStart` does not admit them, so a name cannot begin with
     /// one.
-    pub(super) const fn is_identifier_ignorable(c: char) -> bool {
+    const fn is_identifier_ignorable(c: char) -> bool {
         matches!(c, '\u{0}'..='\u{8}' | '\u{e}'..='\u{1b}' | '\u{7f}'..='\u{9f}')
     }
 }

@@ -73,7 +73,7 @@ mod api {
     /// than silently ignored. Java 22's unnamed variable (`_` on its own) binds nothing and reaches
     /// no [`Def`], so the opt-out only ever decides `_name`; `naming-convention` already leaves a
     /// name that does not start with an ASCII letter alone, so it trades no warning for another.
-    pub(crate) fn subject(def: &Def, config: &Config) -> Option<&'static str> {
+    fn subject(def: &Def, config: &Config) -> Option<&'static str> {
         let subject = match def.kind {
             DefKind::Local => "local variable",
             DefKind::Param => "parameter",

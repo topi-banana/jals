@@ -805,7 +805,7 @@ pub(crate) mod archive {
         }
     }
 
-    pub(crate) async fn decode_class<R: sio::Read>(
+    async fn decode_class<R: sio::Read>(
         origin: WarningOrigin,
         source: R,
     ) -> (Vec<ClassFile>, Vec<Warning>) {
@@ -815,7 +815,7 @@ pub(crate) mod archive {
         }
     }
 
-    pub(super) async fn decode_jar_chunk<R: JarReader>(
+    async fn decode_jar_chunk<R: JarReader>(
         origin: &WarningOrigin,
         reader: JarSource<R>,
         directory: &CentralDirectory,
@@ -917,14 +917,11 @@ pub(crate) mod archive {
     /// Whether `member` is a regular member the extension filter selects; `None` selects every
     /// non-directory member. The bounds pass and the decode pass must agree on this exactly, or the
     /// limits would be checked against a different member set than the one decoded.
-    pub(crate) fn member_selected(
-        member: &crate::zip::MemberRecord,
-        wanted_extension: Option<&str>,
-    ) -> bool {
+    fn member_selected(member: &crate::zip::MemberRecord, wanted_extension: Option<&str>) -> bool {
         !member.is_dir && wanted_extension.is_none_or(|ext| extension(&member.name) == Some(ext))
     }
 
-    pub(crate) async fn decode_bounded<R: JarReader>(
+    async fn decode_bounded<R: JarReader>(
         exec: &Exec,
         reader: R,
         wanted_extension: Option<&'static str>,
@@ -984,7 +981,7 @@ pub(crate) mod archive {
     }
 
     /// Read one member whole through its verifying stream (the crc32 check runs at EOF).
-    pub(crate) async fn read_member<R: JarReader>(
+    async fn read_member<R: JarReader>(
         reader: R,
         member: &crate::zip::MemberRecord,
     ) -> Result<Vec<u8>, String> {

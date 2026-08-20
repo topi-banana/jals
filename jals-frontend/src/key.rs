@@ -121,8 +121,6 @@ mod frontend_key {
     }
 }
 
-pub use backend_key::{classpath, output};
-
 /// Key derivation namespace for the backend tier.
 pub mod backend_key {
     use super::{CacheKey, ContentDigest, PIPELINE_API_VERSION, ProvenanceFold};

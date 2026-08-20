@@ -218,7 +218,7 @@ mod api {
     /// *Its own* — boxing never widens on the way. `Long l = 1;` is not a Java program precisely
     /// because that would take two conversions, so the wrapper is read off the value's own type and a
     /// widening *reference* conversion (to `Object`, to `Number`) then costs nothing.
-    pub(crate) fn box_value(source: Repr, emit: &mut Emit<'_, '_>) -> Result<()> {
+    fn box_value(source: Repr, emit: &mut Emit<'_, '_>) -> Result<()> {
         let (wrapper, descriptor) = match source {
             Repr::Boolean => ("java/lang/Boolean", "(Z)Ljava/lang/Boolean;"),
             Repr::Number(Numeric::Byte) => ("java/lang/Byte", "(B)Ljava/lang/Byte;"),
@@ -239,7 +239,7 @@ mod api {
     ///
     /// The accessor comes from the *source* type, because only a wrapper has one: `Object` does not
     /// unbox, and an unindexed external type is a reference whatever its name suggests.
-    pub(crate) fn unbox_value(
+    fn unbox_value(
         expr: &ast::Expr,
         target: Repr,
         context: &Context<'_>,
@@ -268,7 +268,7 @@ mod api {
     ///
     /// Through [`lower_as`](lower_as), which is where boxing lives: an `Integer` operand of an
     /// arithmetic operator unboxes first (JLS §5.6.2), and that is one call rather than a case here.
-    pub(crate) fn lower_to(
+    fn lower_to(
         expr: &ast::Expr,
         target: Numeric,
         context: &Context<'_>,
@@ -284,11 +284,7 @@ mod api {
     /// reads what is actually on the stack rather than guessing: converting a `char` value as if it
     /// were an `int` is the same instruction, and precision below `int` only matters on the target
     /// side, which is always known. That keeps a gap in inference from failing a whole method.
-    pub(crate) fn source_repr(
-        expr: &ast::Expr,
-        context: &Context<'_>,
-        emit: &Emit<'_, '_>,
-    ) -> Result<Repr> {
+    fn source_repr(expr: &ast::Expr, context: &Context<'_>, emit: &Emit<'_, '_>) -> Result<Repr> {
         use jals_classfile::VerificationType as Vt;
         if let Ok(ty) = type_of(expr.syntax(), context)
             && let Ok(repr) = Repr::of(&ty)
@@ -306,7 +302,7 @@ mod api {
     }
 
     /// Convert the value on top of the stack between two representations.
-    pub(crate) fn coerce(source: Repr, target: Repr, emit: &mut Emit<'_, '_>) -> Result<()> {
+    fn coerce(source: Repr, target: Repr, emit: &mut Emit<'_, '_>) -> Result<()> {
         match (source, target) {
             (Repr::Number(from), Repr::Number(to)) => Ok(emit.asm.convert(from, to)?),
             // Two references need nothing: a widening reference conversion is free, and a narrowing
@@ -328,7 +324,7 @@ mod api {
         }
     }
 
-    pub(crate) fn inner(expr: Option<ast::Expr>) -> Result<ast::Expr> {
+    fn inner(expr: Option<ast::Expr>) -> Result<ast::Expr> {
         expr.ok_or(LowerError::Unsupported("an expression with no operand"))
     }
 
@@ -344,7 +340,7 @@ mod api {
     }
 
     /// Binary numeric promotion (JLS §5.6.2): the one type both operands are converted to.
-    pub(crate) const fn promote(left: Numeric, right: Numeric) -> Numeric {
+    const fn promote(left: Numeric, right: Numeric) -> Numeric {
         match (left, right) {
             (Numeric::Double, _) | (_, Numeric::Double) => Numeric::Double,
             (Numeric::Float, _) | (_, Numeric::Float) => Numeric::Float,
@@ -355,7 +351,7 @@ mod api {
     }
 
     /// Unary numeric promotion (JLS §5.6.1): everything narrower than `int` becomes `int`.
-    pub(crate) const fn promote_one(numeric: Numeric) -> Numeric {
+    const fn promote_one(numeric: Numeric) -> Numeric {
         match numeric {
             Numeric::Byte | Numeric::Short | Numeric::Char | Numeric::Int => Numeric::Int,
             other => other,
@@ -363,7 +359,7 @@ mod api {
     }
 
     /// The numeric type `node`'s recorded type is, reported if it is not one.
-    pub(crate) fn numeric_of(node: &SyntaxNode, context: &Context<'_>) -> Result<Numeric> {
+    fn numeric_of(node: &SyntaxNode, context: &Context<'_>) -> Result<Numeric> {
         let ty = type_of(node, context)?;
         if let Some(numeric) = Repr::of(&ty)?.number() {
             return Ok(numeric);
@@ -376,7 +372,7 @@ mod api {
     }
 
     /// The primitive a wrapper type unboxes to, if it is one.
-    pub(crate) fn unboxed(ty: &Ty, context: &Context<'_>) -> Option<Numeric> {
+    fn unboxed(ty: &Ty, context: &Context<'_>) -> Option<Numeric> {
         let entry = desc::class_entry(ty, context.index).ok()?;
         Some(match entry.as_str() {
             "java/lang/Byte" => Numeric::Byte,
@@ -390,7 +386,7 @@ mod api {
         })
     }
 
-    pub(crate) fn literal(
+    fn literal(
         literal: &ast::Literal,
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
@@ -450,11 +446,7 @@ mod api {
     }
 
     /// A bare name: a local, a parameter, or an unqualified field of the enclosing type.
-    pub(crate) fn name(
-        name: &ast::NameRef,
-        context: &Context<'_>,
-        emit: &mut Emit<'_, '_>,
-    ) -> Result<()> {
+    fn name(name: &ast::NameRef, context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
         // Neither `this` nor `super` is a name that resolves to anything — both are slot 0, which is
         // why neither has an identifier token to look up. They part company at the *access*, not at
         // the value: which member a `super.` reaches is settled by the owner in the reference and by
@@ -566,11 +558,7 @@ mod api {
     /// — so the value comes from the parameter it arrived in. That is the shape
     /// `super(new Object() {{ use(x); }})` takes, where `x` is the enclosing method's local: javac
     /// reads the parameter there too.
-    pub(crate) fn load_captured(
-        id: DefId,
-        context: &Context<'_>,
-        emit: &mut Emit<'_, '_>,
-    ) -> Result<bool> {
+    fn load_captured(id: DefId, context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<bool> {
         if emit.uninitialized_this()
             && context.captures_local(id)
             && let Some(slot) = emit.capture_slot(id)
@@ -589,10 +577,7 @@ mod api {
 
     /// The `(field, descriptor)` a captured local is read through, or `None` when `id` is not one of the
     /// current class's captures.
-    pub(crate) fn captured_read(
-        id: DefId,
-        context: &Context<'_>,
-    ) -> Result<Option<(String, String)>> {
+    fn captured_read(id: DefId, context: &Context<'_>) -> Result<Option<(String, String)>> {
         if !context.captures_local(id) {
             return Ok(None);
         }
@@ -613,7 +598,7 @@ mod api {
     }
 
     /// `receiver.name`: a field read, `static` or instance.
-    pub(crate) fn field(
+    fn field(
         access: &ast::FieldAccess,
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
@@ -730,11 +715,7 @@ mod api {
     }
 
     /// A call, dispatched by how the selected member is reached.
-    pub(crate) fn call(
-        call: &ast::CallExpr,
-        context: &Context<'_>,
-        emit: &mut Emit<'_, '_>,
-    ) -> Result<()> {
+    fn call(call: &ast::CallExpr, context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
         let member = context
             .typed
             .call_target_of(Facts::span(call.syntax()))
@@ -887,7 +868,7 @@ mod api {
     /// array can be asked the same question as its component. A pair that differs in *shape* — an
     /// array against a class, a reference against a primitive — is no erasure gap at all, and gets
     /// no cast.
-    pub(crate) fn narrows_from_object(
+    fn narrows_from_object(
         actual: &jals_classfile::FieldType,
         target: &jals_classfile::FieldType,
     ) -> bool {
@@ -911,7 +892,7 @@ mod api {
     /// substitution that makes it a `String` exists only in the analysis. So the stack says `Object`,
     /// and the next use of the value is verified against `Object` and rejected. javac emits the same
     /// `checkcast`, in the same place, for the same reason.
-    pub(crate) fn restore_erased(
+    fn restore_erased(
         node: &SyntaxNode,
         member: MemberId,
         context: &Context<'_>,
@@ -943,11 +924,7 @@ mod api {
     }
 
     /// `array[index]`.
-    pub(crate) fn index(
-        index: &ast::IndexExpr,
-        context: &Context<'_>,
-        emit: &mut Emit<'_, '_>,
-    ) -> Result<()> {
+    fn index(index: &ast::IndexExpr, context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
         let place = Place::resolve(&ast::Expr::Index(index.clone()), context, emit)?;
         place.read(emit.asm)
     }
@@ -957,7 +934,7 @@ mod api {
     /// A reference type's is an `ldc` over the same `Class` entry a `checkcast` names. A *primitive*
     /// has no such entry — there is no `Class` constant for `int` — so `int.class` reads the
     /// `TYPE` field its wrapper carries for exactly this purpose, which is what javac emits too.
-    pub(crate) fn class_literal(
+    fn class_literal(
         literal: &ast::ClassLiteral,
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
@@ -1004,7 +981,7 @@ mod api {
     }
 
     /// The wrapper class carrying a primitive's `TYPE` field.
-    pub(crate) const fn wrapper_of(primitive: Primitive) -> &'static str {
+    const fn wrapper_of(primitive: Primitive) -> &'static str {
         match primitive {
             Primitive::Boolean => "java/lang/Boolean",
             Primitive::Byte => "java/lang/Byte",
@@ -1021,11 +998,7 @@ mod api {
     ///
     /// One node kind, two unrelated operations, told apart by whether an argument list is present:
     /// the grammar puts an object creation's `(…)` and an array creation's `[…]` in the same place.
-    pub(crate) fn new_expr(
-        new: &ast::NewExpr,
-        context: &Context<'_>,
-        emit: &mut Emit<'_, '_>,
-    ) -> Result<()> {
+    fn new_expr(new: &ast::NewExpr, context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
         if new.args().is_none() {
             return new_array(new, context, emit);
         }
@@ -1156,11 +1129,7 @@ mod api {
     /// Three shapes with three different instructions. `new T[n]` is a `newarray` or an `anewarray`;
     /// `new T[n][m]` is one `multianewarray` allocating both levels at once, and `new T[n][]` is the
     /// same instruction with only the levels it was given; `new T[]{…}` allocates and then stores.
-    pub(crate) fn new_array(
-        new: &ast::NewExpr,
-        context: &Context<'_>,
-        emit: &mut Emit<'_, '_>,
-    ) -> Result<()> {
+    fn new_array(new: &ast::NewExpr, context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
         let created = type_of(new.syntax(), context)?;
         let Ty::Array(element) = &created else {
             return Err(LowerError::Unsupported("a `new` of an unindexed type"));
@@ -1207,7 +1176,7 @@ mod api {
     ///
     /// Allocate, then store each element through a duplicated reference — which is what makes the
     /// array itself the expression's value while every `*astore` consumed a copy of it.
-    pub(crate) fn array_initializer(
+    fn array_initializer(
         init: &ast::ArrayInit,
         target: &Ty,
         context: &Context<'_>,
@@ -1245,11 +1214,7 @@ mod api {
     /// only place a *narrowing* one appears without an assignment. A reference cast is a
     /// `checkcast`, which computes nothing and exists so the failure happens here rather than at the
     /// next `invokevirtual`.
-    pub(crate) fn cast(
-        cast: &ast::CastExpr,
-        context: &Context<'_>,
-        emit: &mut Emit<'_, '_>,
-    ) -> Result<()> {
+    fn cast(cast: &ast::CastExpr, context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
         let target = type_of(cast.syntax(), context)?;
         let operand = inner(cast.expr())?;
         match Repr::of(&target)? {
@@ -1267,7 +1232,7 @@ mod api {
     }
 
     /// `c ? a : b`.
-    pub(crate) fn ternary(
+    fn ternary(
         ternary: &ast::TernaryExpr,
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
@@ -1312,7 +1277,7 @@ mod api {
     /// would break. The numeric half of JLS §15.25 needs no such walk, though — two numeric arms
     /// produce their binary numeric promotion, the same rule every arithmetic operator follows — so
     /// that case is worked out here rather than reported.
-    pub(crate) fn conditional_ty(
+    fn conditional_ty(
         then: &ast::Expr,
         otherwise: &ast::Expr,
         node: &SyntaxNode,
@@ -1361,7 +1326,7 @@ mod api {
     }
 
     /// The [`Ty`] a numeric type is, for handing back to a conversion that speaks in types.
-    pub(crate) const fn ty_of(numeric: Numeric) -> Ty {
+    const fn ty_of(numeric: Numeric) -> Ty {
         Ty::Primitive(match numeric {
             Numeric::Byte => Primitive::Byte,
             Numeric::Short => Primitive::Short,
@@ -1373,11 +1338,7 @@ mod api {
         })
     }
 
-    pub(crate) fn unary(
-        unary: &ast::UnaryExpr,
-        context: &Context<'_>,
-        emit: &mut Emit<'_, '_>,
-    ) -> Result<()> {
+    fn unary(unary: &ast::UnaryExpr, context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
         let operand = inner(unary.operand())?;
         match Facts::operator(unary.syntax()).as_slice() {
             // `+` is not a no-op: unary numeric promotion still applies, so `+aByte` is an `int`.
@@ -1416,7 +1377,7 @@ mod api {
         }
     }
 
-    pub(crate) fn postfix(
+    fn postfix(
         postfix: &ast::PostfixExpr,
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
@@ -1438,7 +1399,7 @@ mod api {
     ///
     /// The narrowing is not optional. `byte b = 127; b++` has to wrap to -128, which is the `i2b`
     /// after the `iadd`; without it the `byte` field would hold 128.
-    pub(crate) fn update(
+    fn update(
         target: &ast::Expr,
         delta: i8,
         prefix: bool,
@@ -1485,7 +1446,7 @@ mod api {
         place.write(emit.asm, prefix)
     }
 
-    pub(crate) fn binary(
+    fn binary(
         binary: &ast::BinaryExpr,
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
@@ -1572,7 +1533,7 @@ mod api {
     /// on its own would build the left string, hand it to a second builder, and throw it away. So the
     /// tree is walked to its leaves first, and only a `+` whose own result is a `String` continues the
     /// chain — `"x" + (1 + 2)` appends the sum 3, not the digits.
-    pub(crate) fn concat(
+    fn concat(
         binary: &ast::BinaryExpr,
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
@@ -1588,11 +1549,7 @@ mod api {
     }
 
     /// Append `expr` to the builder on top of the stack, flattening a nested concatenation.
-    pub(crate) fn append(
-        expr: &ast::Expr,
-        context: &Context<'_>,
-        emit: &mut Emit<'_, '_>,
-    ) -> Result<()> {
+    fn append(expr: &ast::Expr, context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
         match expr {
             // Parentheses group the *tree*, not the chain: `("a" + 1) + 2` is still one chain.
             ast::Expr::Paren(paren) => {
@@ -1653,7 +1610,7 @@ mod api {
     }
 
     /// `e instanceof T`.
-    pub(crate) fn instance_of(
+    fn instance_of(
         binary: &ast::BinaryExpr,
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
@@ -1728,7 +1685,7 @@ mod api {
     }
 
     /// Push the default value of `ty` — what an unset binding holds (JLS §4.12.5).
-    pub(crate) fn default_value(ty: &Ty, emit: &mut Emit<'_, '_>) -> Result<()> {
+    fn default_value(ty: &Ty, emit: &mut Emit<'_, '_>) -> Result<()> {
         match ty {
             Ty::Primitive(Primitive::Long) => emit.asm.const_long(0)?,
             Ty::Primitive(Primitive::Float) => emit.asm.const_float(0.0)?,
@@ -1854,7 +1811,7 @@ mod api {
     /// Materialised as a `boolean` rather than folded into the enclosing branch. A `boolean` is what
     /// the expression *is* — it can be assigned, returned, or passed — and the enclosing `if` tests
     /// it with the one `ifeq` it would have emitted anyway.
-    pub(crate) fn short_circuit(
+    fn short_circuit(
         left: &ast::Expr,
         right: &ast::Expr,
         conjunction: bool,
@@ -1884,7 +1841,7 @@ mod api {
 
     /// A comparison, materialised as a `boolean` on the stack: branch to a `1`, else fall into a
     /// `0` and jump over it.
-    pub(crate) fn compare(
+    fn compare(
         left: &ast::Expr,
         right: &ast::Expr,
         compare: Compare,
@@ -1908,7 +1865,7 @@ mod api {
     /// decides which comparison the JVM has: two numbers are promoted to one type first, two
     /// `boolean`s already share the `int` one, and two references have `if_acmp*` — for equality
     /// only, which the assembler enforces.
-    pub(crate) fn branch_compare(
+    fn branch_compare(
         left: &ast::Expr,
         right: &ast::Expr,
         compare: Compare,
@@ -1956,7 +1913,7 @@ mod api {
         Ok(emit.asm.branch_compare(&ty, compare, target)?)
     }
 
-    pub(crate) fn assignment(
+    fn assignment(
         assignment: &ast::AssignmentExpr,
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
@@ -1979,7 +1936,7 @@ mod api {
     /// to what follows, so `>>=` is `GT GT EQ` and `>>>=` is `GT GT GT EQ`. That is the shared
     /// fact's rule, and reading the run here rather than restating it is what keeps this from being
     /// the one place the rule is written a third time.
-    pub(crate) fn compound_operator(node: &SyntaxNode) -> Result<BinOp> {
+    fn compound_operator(node: &SyntaxNode) -> Result<BinOp> {
         use jals_syntax::SyntaxKind::{
             AMP_EQ, CARET_EQ, EQ, LSHIFT_EQ, MINUS_EQ, PERCENT_EQ, PIPE_EQ, PLUS_EQ, SLASH_EQ,
             STAR_EQ,
@@ -2006,7 +1963,7 @@ mod api {
     /// runs at the *promoted* type and the result is narrowed back. Both narrowings are load-bearing:
     /// `int i; i += 1L` is `i2l`, `ladd`, `l2i`, and `byte b; b += 1` is `iadd`, `i2b`. Dropping
     /// either stores a value outside the variable's range, in a class file that verifies.
-    pub(crate) fn compound(
+    fn compound(
         target: &ast::Expr,
         value: &ast::Expr,
         operation: BinOp,
@@ -2079,7 +2036,7 @@ mod api {
     }
 
     /// The comparison a token sequence spells, if it is one.
-    pub(crate) fn comparison(operator: &[SyntaxKind]) -> Option<Compare> {
+    fn comparison(operator: &[SyntaxKind]) -> Option<Compare> {
         Some(match operator {
             [EQ_EQ] => Compare::Eq,
             [BANG_EQ] => Compare::Ne,

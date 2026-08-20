@@ -116,13 +116,13 @@ pub(crate) mod api {
     }
 
     /// Parse and format a string, without the string-wrapping pass — the verification path.
-    pub(crate) async fn format_source_text(src: &str, style: &Style) -> String {
+    async fn format_source_text(src: &str, style: &Style) -> String {
         let parse = jals_syntax::Parse::parse(src).await;
         format_tree(&parse.syntax(), src, style).await
     }
 
     /// L0 → L2 → L1 → finalize, with no fail-safe and no string wrapping.
-    pub(crate) async fn format_tree(root: &SyntaxNode, src: &str, style: &Style) -> String {
+    async fn format_tree(root: &SyntaxNode, src: &str, style: &Style) -> String {
         let disabled = off_on::scan(root, style);
         let used = if style.cfg.imports.remove_unused {
             Some(unused_imports::used_names(root).await)

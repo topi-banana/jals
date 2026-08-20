@@ -70,7 +70,7 @@ pub(crate) mod api {
     /// unchanged); for a hex integer it stops before a trailing `l` / `L`. A well-formed
     /// mantissa holds only hex digits, `.`, and `_`, so an ASCII case map touches exactly the
     /// `a`–`f` letters.
-    pub(crate) fn hex_case(lit: &str, case: HexLiteralCase) -> Option<String> {
+    fn hex_case(lit: &str, case: HexLiteralCase) -> Option<String> {
         if case == HexLiteralCase::Preserve {
             return None;
         }
@@ -104,10 +104,7 @@ pub(crate) mod api {
     /// `Never` strips the whole zero run at once (`1.00` → `1.`), which is what makes it
     /// idempotent in one pass; a fraction with a non-zero digit or an underscore (`1.0_0`) is
     /// left intact.
-    pub(crate) fn float_trailing_zero(
-        lit: &str,
-        policy: FloatLiteralTrailingZero,
-    ) -> Option<String> {
+    fn float_trailing_zero(lit: &str, policy: FloatLiteralTrailingZero) -> Option<String> {
         if policy == FloatLiteralTrailingZero::Preserve {
             return None;
         }
@@ -142,11 +139,7 @@ pub(crate) mod api {
     /// The token kind disambiguates the otherwise ambiguous trailing letters: a final `f` / `d`
     /// on an *integer* literal is a hex digit (`0xabcdef`), never a suffix, and a float literal
     /// never ends in `l` / `L`.
-    pub(crate) fn suffix_case(
-        lit: &str,
-        kind: SyntaxKind,
-        case: LiteralSuffixCase,
-    ) -> Option<String> {
+    fn suffix_case(lit: &str, kind: SyntaxKind, case: LiteralSuffixCase) -> Option<String> {
         if case == LiteralSuffixCase::Preserve {
             return None;
         }

@@ -98,7 +98,7 @@ mod api {
     }
 
     /// Whether the selector reads an element of a `$SwitchMap$…` array.
-    pub(crate) fn indexes_a_switch_map(expr: &Expr) -> bool {
+    fn indexes_a_switch_map(expr: &Expr) -> bool {
         let Expr::Index { array, .. } = expr else {
             return false;
         };
@@ -106,7 +106,7 @@ mod api {
     }
 
     /// The owner of `ins` when it is an `invokevirtual …ordinal()I`.
-    pub(crate) fn ordinal_call_owner(ins: &Instruction, pool: &ConstantPool) -> Option<String> {
+    fn ordinal_call_owner(ins: &Instruction, pool: &ConstantPool) -> Option<String> {
         let Instruction::InvokeVirtual(index) = ins else {
             return None;
         };
@@ -139,7 +139,7 @@ mod api {
     /// pushed name to equal the field it is stored into is what makes this authoritative rather than
     /// an assumption about emission order: a class whose `<clinit>` does not match that shape
     /// exactly yields `None`, and the method falls back.
-    pub(crate) fn enum_constants(
+    fn enum_constants(
         owner: &str,
         hierarchy: &ClassHierarchy<'_>,
     ) -> Option<BTreeMap<i32, String>> {
@@ -186,7 +186,7 @@ mod api {
     }
 
     /// The `Code` of the class initializer.
-    pub(crate) fn clinit_code(cf: &ClassFile) -> Option<&[Instruction]> {
+    fn clinit_code(cf: &ClassFile) -> Option<&[Instruction]> {
         let clinit: &MethodInfo = cf
             .methods
             .iter()
@@ -198,11 +198,7 @@ mod api {
     }
 
     /// The `(name, descriptor)` of a `Fieldref` whose owner is `owner`.
-    pub(crate) fn field_ref(
-        index: u16,
-        owner: &str,
-        pool: &ConstantPool,
-    ) -> Option<(String, String)> {
+    fn field_ref(index: u16, owner: &str, pool: &ConstantPool) -> Option<(String, String)> {
         let ConstantPoolEntry::FieldRef {
             class_index,
             name_and_type_index,
@@ -227,7 +223,7 @@ mod api {
     }
 
     /// The `String` an `ldc` / `ldc_w` pushes.
-    pub(crate) fn string_constant(ins: &Instruction, pool: &ConstantPool) -> Option<String> {
+    fn string_constant(ins: &Instruction, pool: &ConstantPool) -> Option<String> {
         let index = match ins {
             Instruction::Ldc(i) => u16::from(*i),
             Instruction::LdcW(i) => *i,
@@ -240,7 +236,7 @@ mod api {
     }
 
     /// The value an `int`-pushing constant instruction pushes.
-    pub(crate) fn int_constant(ins: &Instruction) -> Option<i32> {
+    fn int_constant(ins: &Instruction) -> Option<i32> {
         match ins {
             Instruction::IconstM1 => Some(-1),
             Instruction::Iconst0 => Some(0),

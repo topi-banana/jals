@@ -93,13 +93,13 @@ pub(crate) mod api {
     }
 
     /// Append `run` to `ordered` in canonical order, emptying it.
-    pub(crate) fn flush_run(run: &mut Vec<SyntaxElement>, ordered: &mut Vec<SyntaxElement>) {
+    fn flush_run(run: &mut Vec<SyntaxElement>, ordered: &mut Vec<SyntaxElement>) {
         run.sort_by_key(|child| rank(child).unwrap_or(usize::MAX));
         ordered.append(run);
     }
 
     /// Whether a child is error-recovery debris that makes reordering unsafe.
-    pub(crate) fn is_debris(child: &SyntaxElement) -> bool {
+    fn is_debris(child: &SyntaxElement) -> bool {
         match child {
             SyntaxElement::Node(node) => !matches!(
                 node.kind(),
@@ -111,7 +111,7 @@ pub(crate) mod api {
 
     /// A keyword modifier's rank in the JLS order, or `None` for anything that is not one — an
     /// annotation, a jals attribute, or a keyword this list does not know.
-    pub(crate) fn rank(child: &SyntaxElement) -> Option<usize> {
+    fn rank(child: &SyntaxElement) -> Option<usize> {
         let kind = match child {
             SyntaxElement::Node(node) => node.kind(),
             SyntaxElement::Token(tok) => tok.kind(),

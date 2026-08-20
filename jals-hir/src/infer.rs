@@ -2342,7 +2342,7 @@ mod api {
 
     /// The argument index the cursor at `offset` is on: the number of top-level commas in `args` that
     /// end at or before it. `f(|)` → 0, `f(a, |)` → 1.
-    pub(crate) fn active_parameter(args: &ast::ArgList, offset: usize) -> usize {
+    fn active_parameter(args: &ast::ArgList, offset: usize) -> usize {
         collect::direct_tokens(args.syntax())
             .filter(|t| t.kind() == COMMA && usize::from(t.text_range().end()) <= offset)
             .count()
@@ -2372,7 +2372,7 @@ mod api {
 
     /// The token just left of byte `offset`: the one ending at or covering it (left-biased at a
     /// boundary, so a cursor right after `.` lands on the `.`). `None` before the first token.
-    pub(crate) fn token_left_of(root: &SyntaxNode, offset: usize) -> Option<SyntaxToken> {
+    fn token_left_of(root: &SyntaxNode, offset: usize) -> Option<SyntaxToken> {
         root.descendants_with_tokens()
             .filter_map(SyntaxElement::into_token)
             .filter(|token| {

@@ -74,26 +74,19 @@ reason = "serde-read native config models; the non-file importers have no detect
 # the gate holds on its own and the overrides are gone. A backend kind the
 # selection stops answering is now a hawk finding.
 
-# `BackendKey` folds the frontend→backend pipeline provenance. Still unreached
+# `backend_key` folds the frontend→backend pipeline provenance. Still unreached
 # because backend output is not memoized yet: every build recompiles every
 # source, so nothing asks the cache whether this compile already happened.
 [[override]]
 lint = "hawk::dead_public"
 crate = "jals_frontend"
-item = "BackendKey"
+item = "key::backend_key::output"
 level = "allow"
 reason = "backend output is not memoized yet (CacheNamespace::BackendOutput unused)"
 
 [[override]]
 lint = "hawk::dead_public"
 crate = "jals_frontend"
-item = "key::BackendKey::output"
-level = "allow"
-reason = "backend output is not memoized yet (CacheNamespace::BackendOutput unused)"
-
-[[override]]
-lint = "hawk::dead_public"
-crate = "jals_frontend"
-item = "key::BackendKey::classpath"
+item = "key::backend_key::classpath"
 level = "allow"
 reason = "backend output is not memoized yet (CacheNamespace::BackendOutput unused)"

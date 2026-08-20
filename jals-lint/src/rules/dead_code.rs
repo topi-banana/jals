@@ -90,7 +90,7 @@ mod api {
     /// Two gates on the kinds that remain. The member must be `private`, because anything wider is
     /// another file's question; and nothing must be reaching it without naming it, which is what an
     /// annotation and a serialization member each say in their own way.
-    pub(crate) fn subject(def: &Def, config: &Config) -> Option<&'static str> {
+    fn subject(def: &Def, config: &Config) -> Option<&'static str> {
         let subject = match def.kind {
             DefKind::Field => "private field",
             DefKind::Method => "private method",

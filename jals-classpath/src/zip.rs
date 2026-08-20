@@ -635,7 +635,7 @@ mod api {
     /// Mirrors the reader's extraction check: relative, `/`-separated, no `.`/`..` segment, no
     /// backslash (which Windows would treat as a separator), no drive letter, and no NUL or
     /// control character.
-    pub(crate) fn is_safe_member_name(name: &str) -> bool {
+    fn is_safe_member_name(name: &str) -> bool {
         if name.is_empty()
             || name.starts_with('/')
             || name.contains('\\')

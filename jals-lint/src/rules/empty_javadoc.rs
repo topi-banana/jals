@@ -42,7 +42,7 @@ mod api {
         alloc::boxed::Box::pin(check_impl(root))
     }
 
-    pub(crate) async fn check_impl(root: &SyntaxNode) -> Vec<Finding> {
+    async fn check_impl(root: &SyntaxNode) -> Vec<Finding> {
         let mut yielder = Yielder::new();
         let mut out = Vec::new();
         for token in root
@@ -59,7 +59,7 @@ mod api {
 
     /// Whether a Javadoc token's body says nothing: strip the `/**` and `*/` delimiters, then the
     /// per-line asterisks that are decoration rather than content.
-    pub(crate) fn is_empty(text: &str) -> bool {
+    fn is_empty(text: &str) -> bool {
         text.trim_start_matches("/**")
             .trim_end_matches("*/")
             .chars()

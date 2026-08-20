@@ -87,7 +87,7 @@ mod api {
     }
 
     /// The shared shape. `result` is `Some` for an expression, whose arms produce a value.
-    pub(crate) fn lower(
+    fn lower(
         selector: &ast::Expr,
         body: &ast::SwitchBlock,
         labels: Vec<String>,
@@ -151,7 +151,7 @@ mod api {
     }
 
     /// One arm's keys and entry label, from its `case` / `default` labels.
-    pub(crate) fn arm(
+    fn arm(
         labels: impl Iterator<Item = ast::SwitchLabel>,
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
@@ -174,7 +174,7 @@ mod api {
     }
 
     /// Emit the selector and the jump into the arms.
-    pub(crate) fn dispatch(
+    fn dispatch(
         selector: &ast::Expr,
         arms: &[Arm],
         fallback: Label,
@@ -218,7 +218,7 @@ mod api {
     /// scopes a pattern variable to its arm so nothing can read another's, but the verifier merges every
     /// edge into an arm's entry and refuses a slot some edge left unwritten; `null` joins into any
     /// reference type, so one store up front settles all of them.
-    pub(crate) fn dispatch_patterns(
+    fn dispatch_patterns(
         selector: &ast::Expr,
         arms: &[Arm],
         fallback: Label,
@@ -258,7 +258,7 @@ mod api {
     }
 
     /// The `(key, target)` pairs an integral `switch` jumps on.
-    pub(crate) fn int_cases(arms: &[Arm]) -> Result<Vec<(i32, Label)>> {
+    fn int_cases(arms: &[Arm]) -> Result<Vec<(i32, Label)>> {
         let mut cases = Vec::new();
         for arm in arms {
             for key in &arm.keys {
@@ -277,7 +277,7 @@ mod api {
     /// arms of the hash table each test the actual strings that hash there, and a key whose hash
     /// matches but whose text does not falls through to `default`. Skipping the `equals` would send a
     /// colliding string to the wrong arm, which is a wrong answer rather than a crash.
-    pub(crate) fn dispatch_text(
+    fn dispatch_text(
         selector: &ast::Expr,
         arms: &[Arm],
         fallback: Label,
@@ -334,14 +334,14 @@ mod api {
     ///
     /// Specified, not incidental — `String.hashCode`'s contract fixes the algorithm, which is what
     /// lets a compiler build the table at all.
-    pub(crate) fn java_hash(text: &str) -> i32 {
+    fn java_hash(text: &str) -> i32 {
         text.encode_utf16().fold(0i32, |hash, unit| {
             hash.wrapping_mul(31).wrapping_add(i32::from(unit))
         })
     }
 
     /// The colon form, which falls through from one group into the next.
-    pub(crate) fn groups(
+    fn groups(
         groups: &[ast::SwitchGroup],
         arms: &[Arm],
         result: Option<&Ty>,
@@ -372,7 +372,7 @@ mod api {
     }
 
     /// The arrow form, where each arm stands alone.
-    pub(crate) fn rules(
+    fn rules(
         rules: &[ast::SwitchRule],
         arms: &[Arm],
         result: Option<&Ty>,

@@ -442,7 +442,7 @@ mod api {
         })
     }
 
-    pub(crate) fn reject_blocked_roots(
+    fn reject_blocked_roots(
         roots: &[DirKey],
         blocked_files: &[FileKey],
     ) -> Result<(), BuildTaskRunError> {
@@ -457,7 +457,7 @@ mod api {
     }
 
     /// Whether a plan declares any exclusive source-tree publication.
-    pub(crate) fn declares_publication(plan: &TaskPlan) -> bool {
+    fn declares_publication(plan: &TaskPlan) -> bool {
         plan.terminals
             .iter()
             .any(|terminal| matches!(terminal, TaskTerminal::PublishTree { .. }))
@@ -472,11 +472,7 @@ mod api {
             })
     }
 
-    pub(crate) fn plan_publications_current(
-        view: &ProjectView,
-        script: &FileKey,
-        plan: &TaskPlan,
-    ) -> bool {
+    fn plan_publications_current(view: &ProjectView, script: &FileKey, plan: &TaskPlan) -> bool {
         let ownership = FileKey::parse(OWNERSHIP_FILE)
             .expect("build-task ownership path is a portable file key");
         let Some(state) = view
@@ -557,7 +553,7 @@ mod api {
     }
 
     /// Identity of one memoized snapshot execution.
-    pub(crate) fn snapshot_provenance(
+    fn snapshot_provenance(
         plan: &TaskPlan,
         options: &SnapshotTaskOptions<'_>,
     ) -> Result<ContentDigest, BuildTaskRunError> {
@@ -575,7 +571,7 @@ mod api {
 
     /// A recorded execution whose every artifact is still present, or `None` — a partially evicted
     /// record is a miss, not an error, because re-running reproduces it.
-    pub(crate) async fn cached_execution<C: CacheBackend>(
+    async fn cached_execution<C: CacheBackend>(
         cache: &ArtifactCache<C>,
         provenance: ContentDigest,
     ) -> Option<BuildTaskExecution> {
@@ -615,7 +611,7 @@ mod api {
     }
 
     /// The key a recorded token names, if its bytes are still in the cache.
-    pub(crate) async fn present_artifact<C: CacheBackend>(
+    async fn present_artifact<C: CacheBackend>(
         cache: &ArtifactCache<C>,
         artifact: &str,
     ) -> Option<CacheKey> {
@@ -626,7 +622,7 @@ mod api {
         Some(key)
     }
 
-    pub(crate) async fn record_execution<C: CacheBackend>(
+    async fn record_execution<C: CacheBackend>(
         cache: &mut ArtifactCache<C>,
         provenance: ContentDigest,
         execution: &BuildTaskExecution,
@@ -675,7 +671,7 @@ mod api {
         })
     }
 
-    pub(crate) async fn execute<F: Fetcher, C: CacheBackend>(
+    async fn execute<F: Fetcher, C: CacheBackend>(
         exec: &Exec,
         fetcher: &F,
         view: &ProjectView,
@@ -767,7 +763,7 @@ mod api {
     }
 
     /// Publication destinations declared by a plan, in terminal order.
-    pub(crate) fn publication_roots(plan: &TaskPlan) -> Result<Vec<DirKey>, BuildTaskRunError> {
+    fn publication_roots(plan: &TaskPlan) -> Result<Vec<DirKey>, BuildTaskRunError> {
         plan.terminals
             .iter()
             .filter_map(|terminal| match terminal {
@@ -958,7 +954,7 @@ mod api {
         Ok(changes)
     }
 
-    pub(crate) fn published_trees_match(view: &ProjectView, state: &OwnershipState) -> bool {
+    fn published_trees_match(view: &ProjectView, state: &OwnershipState) -> bool {
         for owner in &state.owners {
             let Ok(destination) = DirKey::parse(&owner.destination) else {
                 return false;
@@ -990,7 +986,7 @@ mod api {
         true
     }
 
-    pub(crate) fn decode_ownership(bytes: &[u8]) -> Result<OwnershipState, BuildTaskRunError> {
+    fn decode_ownership(bytes: &[u8]) -> Result<OwnershipState, BuildTaskRunError> {
         let state: OwnershipState = serde_json::from_slice(bytes).map_err(|error| {
             BuildTaskRunError::Terminal(format!("build-task ownership is corrupt: {error}"))
         })?;
@@ -1026,7 +1022,7 @@ mod api {
         Ok(state)
     }
 
-    pub(crate) async fn execute_node<F: Fetcher, C: CacheBackend>(
+    async fn execute_node<F: Fetcher, C: CacheBackend>(
         exec: &Exec,
         fetcher: &F,
         view: &ProjectView,
@@ -1264,7 +1260,7 @@ mod api {
         }
     }
 
-    pub(crate) fn reachable(plan: &TaskPlan) -> BTreeSet<TaskId> {
+    fn reachable(plan: &TaskPlan) -> BTreeSet<TaskId> {
         let mut reachable = BTreeSet::new();
         let mut pending: Vec<_> = plan.terminals.iter().map(TaskTerminal::input_id).collect();
         while let Some(id) = pending.pop() {
@@ -1278,7 +1274,7 @@ mod api {
         reachable
     }
 
-    pub(crate) fn validate_https(value: &str) -> Result<(), String> {
+    fn validate_https(value: &str) -> Result<(), String> {
         if value.starts_with("https://") && !value.bytes().any(|byte| byte.is_ascii_whitespace()) {
             Ok(())
         } else {
@@ -1286,59 +1282,56 @@ mod api {
         }
     }
 
-    pub(crate) const fn algorithm_name(algorithm: TaskDigestAlgorithm) -> &'static str {
+    const fn algorithm_name(algorithm: TaskDigestAlgorithm) -> &'static str {
         match algorithm {
             TaskDigestAlgorithm::Sha1 => "sha1",
             TaskDigestAlgorithm::Sha256 => "sha256",
         }
     }
 
-    pub(crate) fn value(values: &[Option<TaskValue>], id: TaskId) -> Result<&TaskValue, String> {
+    fn value(values: &[Option<TaskValue>], id: TaskId) -> Result<&TaskValue, String> {
         values
             .get(id.index())
             .and_then(Option::as_ref)
             .ok_or_else(|| format!("input node {} has no value", id.index()))
     }
 
-    pub(crate) fn url(values: &[Option<TaskValue>], id: TaskId) -> Result<&str, String> {
+    fn url(values: &[Option<TaskValue>], id: TaskId) -> Result<&str, String> {
         match value(values, id)? {
             TaskValue::Url(value) => Ok(value),
             _ => Err("task input is not a URL".to_owned()),
         }
     }
 
-    pub(crate) fn digest(
-        values: &[Option<TaskValue>],
-        id: TaskId,
-    ) -> Result<ExpectedDigest, String> {
+    fn digest(values: &[Option<TaskValue>], id: TaskId) -> Result<ExpectedDigest, String> {
         match value(values, id)? {
             TaskValue::Digest(value) => Ok(*value),
             _ => Err("task input is not a digest".to_owned()),
         }
     }
 
-    pub(crate) fn byte_count(values: &[Option<TaskValue>], id: TaskId) -> Result<usize, String> {
+    fn byte_count(values: &[Option<TaskValue>], id: TaskId) -> Result<usize, String> {
         match value(values, id)? {
             TaskValue::ByteCount(value) => Ok(*value),
             _ => Err("task input is not a byte count".to_owned()),
         }
     }
 
-    pub(crate) fn json(values: &[Option<TaskValue>], id: TaskId) -> Result<&Value, String> {
+    fn json(values: &[Option<TaskValue>], id: TaskId) -> Result<&Value, String> {
         match value(values, id)? {
             TaskValue::Json(value) => Ok(value),
             _ => Err("task input is not JSON".to_owned()),
         }
     }
 
-    pub(crate) fn text(values: &[Option<TaskValue>], id: TaskId) -> Result<&str, String> {
+    fn text(values: &[Option<TaskValue>], id: TaskId) -> Result<&str, String> {
         match value(values, id)? {
             TaskValue::Text(value) => Ok(value),
             _ => Err("task input is not text".to_owned()),
         }
     }
 
-    pub(crate) fn jar_key(values: &[Option<TaskValue>], id: TaskId) -> Result<&CacheKey, String> {
+    fn jar_key(values: &[Option<TaskValue>], id: TaskId) -> Result<&CacheKey, String> {
         match value(values, id)? {
             TaskValue::Jar(value) => Ok(value),
             _ => Err("task input is not a JAR".to_owned()),
@@ -1349,7 +1342,7 @@ mod api {
     ///
     /// Two enums rather than one because they are frozen by different things: the plan's tag is
     /// written into cache records, the implementation's is not. This is the one place they meet.
-    pub(crate) fn mapping_format(format: &TaskMappingFormat) -> jals_classpath::MappingFormat {
+    fn mapping_format(format: &TaskMappingFormat) -> jals_classpath::MappingFormat {
         match format {
             TaskMappingFormat::Proguard => jals_classpath::MappingFormat::Proguard,
             TaskMappingFormat::TinyV2 { from, to } => jals_classpath::MappingFormat::TinyV2 {
@@ -1360,33 +1353,28 @@ mod api {
     }
 
     /// Lower the plan's spelling of a remap direction to the implementation's.
-    pub(crate) const fn remap_direction(
-        direction: TaskRemapDirection,
-    ) -> jals_classpath::RemapDirection {
+    const fn remap_direction(direction: TaskRemapDirection) -> jals_classpath::RemapDirection {
         match direction {
             TaskRemapDirection::Deobfuscate => jals_classpath::RemapDirection::Deobfuscate,
             TaskRemapDirection::Reobfuscate => jals_classpath::RemapDirection::Reobfuscate,
         }
     }
 
-    pub(crate) fn source_tree(
-        values: &[Option<TaskValue>],
-        id: TaskId,
-    ) -> Result<&SourceTree, String> {
+    fn source_tree(values: &[Option<TaskValue>], id: TaskId) -> Result<&SourceTree, String> {
         match value(values, id)? {
             TaskValue::SourceTree(value) => Ok(value),
             _ => Err("task input is not a source tree".to_owned()),
         }
     }
 
-    pub(crate) fn json_at<'a>(mut value: &'a Value, path: &[String]) -> Option<&'a Value> {
+    fn json_at<'a>(mut value: &'a Value, path: &[String]) -> Option<&'a Value> {
         for segment in path {
             value = value.get(segment)?;
         }
         Some(value)
     }
 
-    pub(crate) fn json_scalar<'a>(value: &'a Value, path: &[String]) -> Result<&'a Value, String> {
+    fn json_scalar<'a>(value: &'a Value, path: &[String]) -> Result<&'a Value, String> {
         json_at(value, path).ok_or_else(|| format!("JSON path `{}` does not exist", path.join("/")))
     }
 }

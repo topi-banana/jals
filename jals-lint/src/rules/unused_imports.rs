@@ -41,7 +41,7 @@ mod api {
         alloc::boxed::Box::pin(check_impl(analysis))
     }
 
-    pub(crate) async fn check_impl(analysis: &FileAnalysis) -> Vec<Finding> {
+    async fn check_impl(analysis: &FileAnalysis) -> Vec<Finding> {
         let mut out = Vec::new();
         for import in analysis.unused_imports().await {
             let modifier = if import.is_static { "static " } else { "" };

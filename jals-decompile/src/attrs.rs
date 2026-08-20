@@ -41,7 +41,7 @@ mod api {
     /// reserved keywords, a literal keyword (`true`/`false`/`null`), the bare `_` (reserved since
     /// Java 9), or a restricted/contextual keyword that is unsafe in that position (`var`, `yield`,
     /// `record`, `sealed`, `permits`, `when`).
-    pub(crate) fn is_java_keyword(s: &str) -> bool {
+    fn is_java_keyword(s: &str) -> bool {
         matches!(
             s,
             "_" | "abstract"
@@ -211,7 +211,7 @@ mod api {
 
     /// Names from the `MethodParameters` attribute (`-parameters`): one entry per parameter, in
     /// order.
-    pub(crate) fn params_from_method_parameters(
+    fn params_from_method_parameters(
         method: &MethodInfo,
         pool: &ConstantPool,
         arity: usize,
@@ -239,7 +239,7 @@ mod api {
 
     /// Names from the `Code` attribute's `LocalVariableTable` (`-g`): parameters occupy the first
     /// local slots (slot 0 is `this` for an instance method; a `long`/`double` takes two slots).
-    pub(crate) fn params_from_local_variable_table(
+    fn params_from_local_variable_table(
         method: &MethodInfo,
         pool: &ConstantPool,
         is_static: bool,

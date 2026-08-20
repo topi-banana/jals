@@ -81,7 +81,7 @@ mod api {
     /// `trim_end_matches` took every trailing quote, so `"a\""` — whose last two characters are an
     /// escaped quote and the closing one — lost both and compiled to `a`. An unterminated literal the
     /// lexer recovered still yields its text rather than nothing.
-    pub(crate) fn unquote(text: &str) -> &str {
+    fn unquote(text: &str) -> &str {
         let open = text
             .strip_prefix('"')
             .or_else(|| text.strip_prefix('\''))

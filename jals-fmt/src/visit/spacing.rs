@@ -109,7 +109,7 @@ pub(crate) mod api {
     }
 
     /// The node kind a token hangs off, or `SOURCE_FILE` for the impossible orphan case.
-    pub(crate) fn parent(tok: &SyntaxToken) -> S {
+    fn parent(tok: &SyntaxToken) -> S {
         tok.parent().map_or(S::SOURCE_FILE, |node| node.kind())
     }
 
@@ -119,7 +119,7 @@ pub(crate) mod api {
     /// A type annotation is the one thing that separates from the `[` or `...` behind it
     /// (`Object @Nullable ... xs`, `new String @A [] {}`), because gluing them would read as one
     /// name. Everywhere else those brackets hug.
-    pub(crate) fn ends_annotation(tok: &SyntaxToken) -> bool {
+    fn ends_annotation(tok: &SyntaxToken) -> bool {
         tok.parent_ancestors()
             .find(|node| node.kind() == S::ANNOTATION)
             .is_some_and(|anno| anno.text_range().end() == tok.text_range().end())
@@ -127,7 +127,7 @@ pub(crate) mod api {
 
     /// Whether `tok` closes a type-argument list that a call or a method reference wrote before
     /// the name it invokes.
-    pub(crate) fn qualifies_a_name(tok: &SyntaxToken) -> bool {
+    fn qualifies_a_name(tok: &SyntaxToken) -> bool {
         tok.parent().is_some_and(|args| {
             args.kind() == S::TYPE_ARGS
                 && args.parent().is_some_and(|owner| {
@@ -143,7 +143,7 @@ pub(crate) mod api {
     ///
     /// The `>` family is the deliberate exception and is handled by [`api::fused`], which
     /// requires the two to have been adjacent in the source.
-    pub(crate) fn glues(prev: &str, next: &str) -> bool {
+    fn glues(prev: &str, next: &str) -> bool {
         let (Some(last), Some(first)) = (prev.chars().last(), next.chars().next()) else {
             return false;
         };
@@ -175,7 +175,7 @@ pub(crate) mod api {
     /// Word characters rather than token kinds, because the question is about the rendered text: a
     /// literal ends in `"` or a digit, punctuation ends in a symbol, and only two identifier-shaped
     /// edges can merge.
-    pub(crate) fn runs_together(prev: &str, next: &str) -> bool {
+    fn runs_together(prev: &str, next: &str) -> bool {
         let word = |ch: char| ch.is_alphanumeric() || ch == '_' || ch == '$';
         let (Some(last), Some(first)) = (prev.chars().last(), next.chars().next()) else {
             return false;
@@ -199,7 +199,7 @@ pub(crate) mod api {
     }
 
     /// Whether a token is word-like, so that two of them in a row must be separated.
-    pub(crate) fn is_word(kind: S) -> bool {
+    fn is_word(kind: S) -> bool {
         matches!(
             kind,
             S::IDENT
@@ -214,7 +214,7 @@ pub(crate) mod api {
 
     /// Whether a token is a keyword — everything between the first and last keyword kind, plus
     /// the three literal keywords and the context-sensitive ones the parser promotes.
-    pub(crate) fn is_keyword(kind: S) -> bool {
+    fn is_keyword(kind: S) -> bool {
         (S::ABSTRACT_KW..=S::WHILE_KW).contains(&kind)
             || matches!(kind, S::TRUE_KW | S::FALSE_KW | S::NULL_KW)
             || (S::VAR_KW..=S::WITH_KW).contains(&kind)
@@ -224,7 +224,7 @@ pub(crate) mod api {
     // ===== Bracketing =====
 
     /// Parentheses, brackets, and braces.
-    pub(crate) fn delimiters(pk: S, nk: S, pp: S, np: S, rules: &SpacingRules) -> Option<bool> {
+    fn delimiters(pk: S, nk: S, pp: S, np: S, rules: &SpacingRules) -> Option<bool> {
         match (pk, nk) {
             // An empty pair gets its own rule, since `f()` and `f( )` are a different decision
             // from `f(a)` and `f( a )`.
@@ -267,7 +267,7 @@ pub(crate) mod api {
     }
 
     /// The `within-*-parentheses` rule for a parenthesis owned by `parent`.
-    pub(crate) const fn within_parens(parent: S, rules: &SpacingRules) -> bool {
+    const fn within_parens(parent: S, rules: &SpacingRules) -> bool {
         match parent {
             S::ARG_LIST => rules.within_method_call_parentheses,
             S::PARAM_LIST | S::LAMBDA_PARAMS => rules.within_method_parentheses,
@@ -294,7 +294,7 @@ pub(crate) mod api {
     /// `None` is not "no space": it is "nobody configured this one", which is what lets
     /// [`api::separated_paren`] answer for a cast's or a group's parenthesis without
     /// overriding a rule that did have an opinion.
-    pub(crate) const fn before_parens(parent: S, rules: &SpacingRules) -> Option<bool> {
+    const fn before_parens(parent: S, rules: &SpacingRules) -> Option<bool> {
         Some(match parent {
             S::ARG_LIST => rules.before_method_call_parentheses,
             S::PARAM_LIST => rules.before_method_parentheses,
@@ -326,7 +326,7 @@ pub(crate) mod api {
     /// `before-array-initializer-left-brace` and the assignment operator's spacing. Either asking
     /// for a space is enough — `int[] xs ={1}` is not what
     /// `around-assignment-operators = true` means.
-    pub(crate) fn before_brace(previous: S, parent: S, rules: &SpacingRules) -> bool {
+    fn before_brace(previous: S, parent: S, rules: &SpacingRules) -> bool {
         if parent != S::ARRAY_INIT {
             return rules.before_left_brace;
         }
@@ -337,7 +337,7 @@ pub(crate) mod api {
     // ===== Punctuation =====
 
     /// Commas, semicolons, colons, and the ternary `?`.
-    pub(crate) fn separators(
+    fn separators(
         prev: &SyntaxToken,
         next: &SyntaxToken,
         pp: S,
@@ -366,7 +366,7 @@ pub(crate) mod api {
     }
 
     /// Java's five colon contexts genuinely disagree across vendors, so each keeps its own pair.
-    pub(crate) const fn before_colon(parent: S, rules: &SpacingRules) -> bool {
+    const fn before_colon(parent: S, rules: &SpacingRules) -> bool {
         match parent {
             S::TERNARY_EXPR => rules.before_ternary_colon,
             S::FOR_EACH_STMT => rules.before_foreach_colon,
@@ -379,7 +379,7 @@ pub(crate) mod api {
     }
 
     /// The `after-*-colon` half of the same five.
-    pub(crate) const fn after_colon(parent: S, rules: &SpacingRules) -> bool {
+    const fn after_colon(parent: S, rules: &SpacingRules) -> bool {
         match parent {
             S::TERNARY_EXPR => rules.after_ternary_colon,
             S::FOR_EACH_STMT => rules.after_foreach_colon,
@@ -393,7 +393,7 @@ pub(crate) mod api {
     // ===== Angle brackets =====
 
     /// `<` and `>` as type-list delimiters, which is decided by the parent, not the token.
-    pub(crate) fn angles(
+    fn angles(
         prev: &SyntaxToken,
         next: &SyntaxToken,
         pp: S,
@@ -437,14 +437,14 @@ pub(crate) mod api {
     /// Whether a `<` opening a type-parameter list takes a space before it.
     ///
     /// Only a declaration's own list has the rule; a type *use* (`Map<K, V>`) always hugs.
-    pub(crate) const fn before_angle(parent: S, rules: &SpacingRules) -> bool {
+    const fn before_angle(parent: S, rules: &SpacingRules) -> bool {
         matches!(parent, S::TYPE_PARAMS) && rules.before_type_parameter_list
     }
 
     // ===== Operators =====
 
     /// Binary, unary, assignment, and arrow operators.
-    pub(crate) fn operators(
+    fn operators(
         prev: &SyntaxToken,
         next: &SyntaxToken,
         pp: S,
@@ -470,13 +470,13 @@ pub(crate) mod api {
 
     /// Whether `tok` is the operator of a prefix expression — the first significant token of its
     /// `UNARY_EXPR`.
-    pub(crate) fn is_prefix_operator(tok: &SyntaxToken) -> bool {
+    fn is_prefix_operator(tok: &SyntaxToken) -> bool {
         is_edge_operator(tok, S::UNARY_EXPR, true)
     }
 
     /// Whether `tok` is the operator of a postfix expression — the last significant token of its
     /// `POSTFIX_EXPR`.
-    pub(crate) fn is_postfix_operator(tok: &SyntaxToken) -> bool {
+    fn is_postfix_operator(tok: &SyntaxToken) -> bool {
         is_edge_operator(tok, S::POSTFIX_EXPR, false)
     }
 
@@ -485,7 +485,7 @@ pub(crate) mod api {
     /// Compared by position among the significant children rather than by text range: a node's
     /// range starts at its leading whitespace, so `assert !x` would make the `!` look like it is
     /// not first.
-    pub(crate) fn is_edge_operator(tok: &SyntaxToken, kind: S, first: bool) -> bool {
+    fn is_edge_operator(tok: &SyntaxToken, kind: S, first: bool) -> bool {
         tok.parent().is_some_and(|node| {
             if node.kind() != kind {
                 return false;
@@ -504,7 +504,7 @@ pub(crate) mod api {
     }
 
     /// The spacing rule an operator token asks for, by class.
-    pub(crate) fn operator_rule(kind: S, parent: S, rules: &SpacingRules) -> Option<bool> {
+    fn operator_rule(kind: S, parent: S, rules: &SpacingRules) -> Option<bool> {
         // A prefix or postfix operator hugs its operand under `around-unary-operator`.
         if matches!(parent, S::UNARY_EXPR | S::POSTFIX_EXPR) {
             return matches!(

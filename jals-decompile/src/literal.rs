@@ -52,7 +52,7 @@ mod api {
     }
 
     /// Render a `char` constant as an escaped Java character literal (quotes included).
-    pub(crate) fn char_literal(c: char) -> String {
+    fn char_literal(c: char) -> String {
         let mut out = String::from("'");
         if c == '\'' {
             out.push_str("\\'");
@@ -88,7 +88,7 @@ mod api {
     /// Push one character of a `char` / `String` literal body, applying the escapes the two kinds
     /// share (`\\`, `\n`, `\r`, `\t`, `\b`, `\f`, and `\uXXXX` for any other control character).
     /// The delimiting quote character each kind must additionally escape is the caller's job.
-    pub(crate) fn push_escaped(c: char, out: &mut String) {
+    fn push_escaped(c: char, out: &mut String) {
         match c {
             '\\' => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),

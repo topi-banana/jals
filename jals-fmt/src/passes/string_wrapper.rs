@@ -74,7 +74,7 @@ pub(crate) mod api {
     /// moving the declaration that holds it changes what its content means. Stripping the
     /// incidental whitespace and re-adding the line's own indentation is what keeps the string
     /// the author wrote while letting the layout move.
-    pub(crate) fn text_block_edits(root: &SyntaxNode, src: &str) -> Vec<(TextRange, String)> {
+    fn text_block_edits(root: &SyntaxNode, src: &str) -> Vec<(TextRange, String)> {
         let mut edits = Vec::new();
         for tok in root
             .descendants_with_tokens()
@@ -101,7 +101,7 @@ pub(crate) mod api {
     }
 
     /// The re-indented form of a text block, measured from the start of its opening line.
-    pub(crate) fn reindent_text_block(text: &str) -> Option<String> {
+    fn reindent_text_block(text: &str) -> Option<String> {
         let leading = text.find(|ch: char| !ch.is_whitespace())?;
         let mut initial = text.split('\n');
         let first = initial.next()?;
@@ -153,7 +153,7 @@ pub(crate) mod api {
     /// The common indentation is the least of every non-blank line's *and* of the last line,
     /// blank or not — that last line is the closing delimiter, and it is what an author moves to
     /// choose the block's margin.
-    pub(crate) fn strip_indent(lines: &[&str]) -> Vec<String> {
+    fn strip_indent(lines: &[&str]) -> Vec<String> {
         // Counted in *characters*, as `String.stripIndent` does. Bytes would let a line indented
         // with a multi-byte space and one indented with an ASCII space agree on a cut that falls
         // inside a character.
@@ -221,7 +221,7 @@ pub(crate) mod api {
     }
 
     /// The pieces `node` is built from, or `None` when it is not a site.
-    pub(crate) fn site_pieces(node: &SyntaxNode) -> Option<Vec<String>> {
+    fn site_pieces(node: &SyntaxNode) -> Option<Vec<String>> {
         match node.kind() {
             SyntaxKind::BINARY_EXPR => concatenation(node),
             // A single literal too long for its line is split into a concatenation of its own —
@@ -245,7 +245,7 @@ pub(crate) mod api {
     /// What the sort *does* fix is that the survivor used to be decided by collection order rather
     /// than position: a concatenation earlier in the file than any text block was dropped for no
     /// other reason.
-    pub(crate) fn plan(root: &SyntaxNode, src: &str, style: &Style) -> Vec<(TextRange, String)> {
+    fn plan(root: &SyntaxNode, src: &str, style: &Style) -> Vec<(TextRange, String)> {
         let mut edits = text_block_edits(root, src);
         for (node, pieces) in sites(root) {
             let range = node.text_range();
@@ -292,7 +292,7 @@ pub(crate) mod api {
     /// coordinates. Keeping it here leaves the license **wider** than the pass, which is the safe
     /// direction — a pass that changes less than it is licensed to can never trip the fail-safe,
     /// whereas a license narrower than the pass is exactly the defect the table was written to fix.
-    pub(crate) fn disabled(regions: &[TextRange], range: TextRange) -> bool {
+    fn disabled(regions: &[TextRange], range: TextRange) -> bool {
         regions.iter().any(|region| {
             region
                 .intersect(range)
@@ -305,7 +305,7 @@ pub(crate) mod api {
     /// "Pure" means every leaf is a `STRING_LITERAL` and every operator is `+`. A chain with a
     /// non-literal operand cannot be re-split without changing evaluation, and a text block
     /// carries its own layout, so both are refused.
-    pub(crate) fn concatenation(node: &SyntaxNode) -> Option<Vec<String>> {
+    fn concatenation(node: &SyntaxNode) -> Option<Vec<String>> {
         let mut pieces = Vec::new();
         if !collect(node, &mut pieces) || pieces.len() < 2 {
             return None;
@@ -314,7 +314,7 @@ pub(crate) mod api {
     }
 
     /// Walk a `+` chain, pushing each literal's body. Returns whether the chain stayed pure.
-    pub(crate) fn collect(node: &SyntaxNode, out: &mut Vec<String>) -> bool {
+    fn collect(node: &SyntaxNode, out: &mut Vec<String>) -> bool {
         for child in node.children_with_tokens() {
             match child {
                 SyntaxElement::Token(tok) if tok.kind().is_trivia() => {}
@@ -340,7 +340,7 @@ pub(crate) mod api {
     }
 
     /// The text between a string literal's quotes, or `None` for anything that is not one.
-    pub(crate) fn literal_body(node: &SyntaxNode) -> Option<String> {
+    fn literal_body(node: &SyntaxNode) -> Option<String> {
         let tok = node
             .children_with_tokens()
             .filter_map(SyntaxElement::into_token)
@@ -353,7 +353,7 @@ pub(crate) mod api {
     }
 
     /// The column a byte offset sits at.
-    pub(crate) fn column_of(src: &str, offset: usize) -> usize {
+    fn column_of(src: &str, offset: usize) -> usize {
         let start = src[..offset].rfind('\n').map_or(0, |at| at + 1);
         ir::utf16(&src[start..offset])
     }
@@ -365,7 +365,7 @@ pub(crate) mod api {
     /// pieces — a generated table of `"\u0000\u0000…"` rows, say — is under the limit on every
     /// line and google-java-format leaves it exactly as written: its `LongStringsAndTextBlockScanner`
     /// only collects a literal whose own line runs past the column limit.
-    pub(crate) fn overflows(src: &str, range: TextRange, style: &Style) -> bool {
+    fn overflows(src: &str, range: TextRange, style: &Style) -> bool {
         let (start, end) = (usize::from(range.start()), usize::from(range.end()));
         let from = src[..start].rfind('\n').map_or(0, |at| at + 1);
         let to = src[end..].find('\n').map_or(src.len(), |at| end + at);
@@ -384,12 +384,7 @@ pub(crate) mod api {
     ///
     /// Returns `None` when the budget is too small to make progress — a deeply indented
     /// concatenation with a narrow limit — rather than emitting one character per line.
-    pub(crate) fn rewrap(
-        pieces: &[String],
-        column: usize,
-        trailing: usize,
-        style: &Style,
-    ) -> Option<String> {
+    fn rewrap(pieces: &[String], column: usize, trailing: usize, style: &Style) -> Option<String> {
         // The first chunk starts where the literal already is and pays only for its quotes; a
         // continuation line pays for its indent and for `+ ` on top of that
         // (`width -= 6` in google-java-format's `reflow`, for its four-column indent).
@@ -420,7 +415,7 @@ pub(crate) mod api {
 
     /// Split a literal body into chunks of at most `budget` columns, breaking after a space where
     /// possible and never inside an escape sequence.
-    pub(crate) fn split(body: &str, first: usize, rest: usize, trailing: usize) -> Vec<String> {
+    fn split(body: &str, first: usize, rest: usize, trailing: usize) -> Vec<String> {
         let mut chunks = Vec::new();
         let mut current = String::new();
         let mut width = 0usize;
@@ -493,7 +488,7 @@ pub(crate) mod api {
     }
 
     /// Apply non-overlapping replacements to `src`.
-    pub(crate) fn splice(src: &str, edits: &[(TextRange, String)]) -> String {
+    fn splice(src: &str, edits: &[(TextRange, String)]) -> String {
         let mut out = String::with_capacity(src.len());
         let mut at = 0usize;
         for (range, text) in edits {

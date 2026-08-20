@@ -676,7 +676,7 @@ mod api {
     /// Scan one symlinked entry: the link is followed only when its target stays inside the
     /// project root and off the current directory stack (an escaping or cyclic link is
     /// diagnosed, never followed), then treated like a plain directory or file.
-    pub(super) fn scan_symlink(
+    fn scan_symlink(
         path: &Path,
         logical_dir: &DirKey,
         logical_file: &FileKey,
@@ -721,7 +721,7 @@ mod api {
 
     /// Canonicalize `path` for the scan, recording an unreadable-entry diagnostic and yielding
     /// `None` when the path cannot be resolved.
-    pub(super) fn canonicalize_for_scan(path: &Path, scan: &mut NativeScan<'_>) -> Option<PathBuf> {
+    fn canonicalize_for_scan(path: &Path, scan: &mut NativeScan<'_>) -> Option<PathBuf> {
         match fs::canonicalize(path) {
             Ok(canonical) => Some(canonical),
             Err(error) => {
@@ -734,30 +734,26 @@ mod api {
         }
     }
 
-    pub(super) fn is_excluded(path: &RelativePath, excluded: &[RelativePath]) -> bool {
+    fn is_excluded(path: &RelativePath, excluded: &[RelativePath]) -> bool {
         excluded.iter().any(|prefix| path.starts_with(prefix))
     }
 
-    pub(super) fn visits_directory(
-        path: &RelativePath,
-        scopes: &[NativeScope],
-        restricted: bool,
-    ) -> bool {
+    fn visits_directory(path: &RelativePath, scopes: &[NativeScope], restricted: bool) -> bool {
         !restricted || scopes.iter().any(|scope| scope.visits_directory(path))
     }
 
-    pub(super) fn includes_file(key: &FileKey, scopes: &[NativeScope], restricted: bool) -> bool {
+    fn includes_file(key: &FileKey, scopes: &[NativeScope], restricted: bool) -> bool {
         !restricted || scopes.iter().any(|scope| scope.includes_file(key))
     }
 
     #[cfg(unix)]
-    pub(super) fn os_bytes(value: &OsStr) -> Vec<u8> {
+    fn os_bytes(value: &OsStr) -> Vec<u8> {
         use std::os::unix::ffi::OsStrExt;
         value.as_bytes().to_vec()
     }
 
     #[cfg(not(unix))]
-    pub(super) fn os_bytes(value: &OsStr) -> Vec<u8> {
+    fn os_bytes(value: &OsStr) -> Vec<u8> {
         value.to_string_lossy().as_bytes().to_vec()
     }
 
@@ -859,7 +855,7 @@ mod api {
         }
     }
 
-    pub(super) fn verify_materialized_tree(
+    fn verify_materialized_tree(
         root: &Path,
         members: &[(FileKey, Vec<u8>)],
     ) -> core::result::Result<(), CacheError> {
@@ -901,7 +897,7 @@ mod api {
         Ok(())
     }
 
-    pub(super) fn read_materialized_tree(
+    fn read_materialized_tree(
         root: &Path,
         relative: &Path,
         files: &mut BTreeMap<PathBuf, Vec<u8>>,

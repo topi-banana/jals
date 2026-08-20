@@ -99,7 +99,7 @@ mod api {
     }
 
     /// The brace-delimited body node kinds we fold.
-    pub(crate) const fn is_foldable_body(kind: SyntaxKind) -> bool {
+    const fn is_foldable_body(kind: SyntaxKind) -> bool {
         use SyntaxKind::{ARRAY_INIT, BLOCK, CLASS_BODY, ENUM_BODY, MODULE_BODY, SWITCH_BLOCK};
         matches!(
             kind,
@@ -108,7 +108,7 @@ mod api {
     }
 
     /// Build a line fold, or `None` if it does not span at least two lines.
-    pub(crate) fn line_fold(start_line: u32, end_line: u32, kind: FoldKind) -> Option<Fold> {
+    fn line_fold(start_line: u32, end_line: u32, kind: FoldKind) -> Option<Fold> {
         (start_line < end_line).then_some(Fold {
             start_line,
             end_line,
@@ -118,7 +118,7 @@ mod api {
 
     /// Offset of the last byte of `range` (`end` − 1), clamped so an empty range never
     /// underflows. Lands on the closing `}` / `*/` / `;` glyph.
-    pub(super) fn last_offset(range: text_size::TextRange) -> usize {
+    fn last_offset(range: text_size::TextRange) -> usize {
         usize::from(range.end()).saturating_sub(1)
     }
 }

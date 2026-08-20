@@ -49,7 +49,7 @@ struct Ledger {
 
 impl Ledger {
     /// Reduce `root` under `license`.
-    pub(crate) fn of(root: &SyntaxNode, license: License) -> Self {
+    fn of(root: &SyntaxNode, license: License) -> Self {
         let sites = Sites::of(root, license);
         let mut flat = Budget::new();
         for tok in root
@@ -95,7 +95,7 @@ impl Ledger {
     ///
     /// The one thing re-indenting a text block may not change: what it spells once its incidental
     /// whitespace is stripped.
-    pub(crate) fn text_block_content(root: &SyntaxNode) -> String {
+    fn text_block_content(root: &SyntaxNode) -> String {
         root.descendants_with_tokens()
             .filter_map(SyntaxElement::into_token)
             .filter(|tok| tok.kind() == SyntaxKind::TEXT_BLOCK)
@@ -111,7 +111,7 @@ impl Ledger {
     /// mis-rebuilt prefix visible. `static` is part of the entry: `import static a.B;` and
     /// `import a.B;` are different declarations, and a re-granulation must not turn one into the
     /// other.
-    pub(crate) fn imported_names(root: &SyntaxNode) -> Vec<String> {
+    fn imported_names(root: &SyntaxNode) -> Vec<String> {
         let mut names: Vec<String> = root
             .descendants()
             .filter_map(ImportDecl::cast)
@@ -122,7 +122,7 @@ impl Ledger {
     }
 
     /// Whether `after` is a rendering of `self` that `license` authorizes.
-    pub(crate) fn covers(&self, after: &Self, license: License) -> bool {
+    fn covers(&self, after: &Self, license: License) -> bool {
         // Both key sets are walked, so a key present on only one side is judged rather than
         // skipped.
         for key in self.flat.keys().chain(after.flat.keys()) {
@@ -158,7 +158,7 @@ impl Ledger {
     }
 
     /// Whether every entry of `part` appears in `whole` at least as often. Both must be sorted.
-    pub(crate) fn is_submultiset(part: &[String], whole: &[String]) -> bool {
+    fn is_submultiset(part: &[String], whole: &[String]) -> bool {
         let mut rest = whole;
         for name in part {
             match rest.iter().position(|candidate| candidate == name) {
@@ -206,7 +206,7 @@ mod tests {
     use crate::style::Style;
 
     /// One `accepts` call, spelled the way [`pipeline::run`](crate::passes::Formatter) spells it.
-    pub(crate) mod verdict {
+    mod verdict {
         use super::*;
 
         /// Whether `formatted` is an acceptable rendering of `src` under `config`.
@@ -251,7 +251,7 @@ mod tests {
     // ===== Unconditional halves: no config can waive these =====
 
     #[test]
-    pub(crate) fn an_output_that_stopped_parsing_is_never_acceptable() {
+    fn an_output_that_stopped_parsing_is_never_acceptable() {
         assert!(!verdict::of(
             "class A { int x; }",
             "class A { int x;",
@@ -260,19 +260,19 @@ mod tests {
     }
 
     #[test]
-    pub(crate) fn emptying_a_nonempty_file_is_never_acceptable() {
+    fn emptying_a_nonempty_file_is_never_acceptable() {
         assert!(!verdict::of("class A {}", "", &Config::default()));
     }
 
     #[test]
-    pub(crate) fn an_empty_input_may_stay_empty() {
+    fn an_empty_input_may_stay_empty() {
         assert!(verdict::of("", "", &Config::default()));
     }
 
     // ===== `DESIGN.md` §20 R0.1 / R0.3: reordering is multiset-neutral =====
 
     #[test]
-    pub(crate) fn reordering_imports_is_accepted_because_the_check_is_a_multiset() {
+    fn reordering_imports_is_accepted_because_the_check_is_a_multiset() {
         assert!(verdict::of(
             "import b.C;\nimport a.B;\nclass A {}\n",
             "import a.B;\nimport b.C;\nclass A {}\n",
@@ -281,7 +281,7 @@ mod tests {
     }
 
     #[test]
-    pub(crate) fn reordering_modifiers_is_accepted_for_the_same_reason() {
+    fn reordering_modifiers_is_accepted_for_the_same_reason() {
         assert!(verdict::of(
             "class A { final static public int X = 1; }",
             "class A { public static final int X = 1; }",
@@ -290,7 +290,7 @@ mod tests {
     }
 
     #[test]
-    pub(crate) fn a_token_lost_under_the_default_config_is_rejected() {
+    fn a_token_lost_under_the_default_config_is_rejected() {
         assert!(!verdict::of(
             "class A { int x; int y; }",
             "class A { int x; }",
@@ -301,7 +301,7 @@ mod tests {
     // ===== `[literals]`: compare by kind, since a literal's text may change =====
 
     #[test]
-    pub(crate) fn a_respelled_hex_literal_is_accepted_when_literals_is_active() {
+    fn a_respelled_hex_literal_is_accepted_when_literals_is_active() {
         assert!(verdict::of(
             "class A { int x = 0xff; }",
             "class A { int x = 0xFF; }",
@@ -310,7 +310,7 @@ mod tests {
     }
 
     #[test]
-    pub(crate) fn the_same_respelling_is_rejected_when_literals_is_preserve() {
+    fn the_same_respelling_is_rejected_when_literals_is_preserve() {
         assert!(!verdict::of(
             "class A { int x = 0xff; }",
             "class A { int x = 0xFF; }",
@@ -319,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    pub(crate) fn a_renamed_identifier_is_rejected_even_when_literals_is_active() {
+    fn a_renamed_identifier_is_rejected_even_when_literals_is_active() {
         // The guard for scoping the respelling to the two kinds `literals::apply` can touch.
         // A single by-kind flag for the whole file made *every* token's spelling unverifiable the
         // moment any `[literals]` rule was switched on, so a renamed identifier went unnoticed.
@@ -331,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    pub(crate) fn a_respelled_string_is_rejected_even_when_literals_is_active() {
+    fn a_respelled_string_is_rejected_even_when_literals_is_active() {
         // Same scoping, the other kind a whole-file flag used to blind: no row licenses a string's
         // spelling unless a reflow is on, and then only what it *spells* may survive re-cutting.
         assert!(!verdict::of(
@@ -342,7 +342,7 @@ mod tests {
     }
 
     #[test]
-    pub(crate) fn a_text_block_that_vanished_is_rejected_even_under_reflow() {
+    fn a_text_block_that_vanished_is_rejected_even_under_reflow() {
         // `reflow-long-strings` licenses re-indenting a text block, not losing one. Folding the
         // re-indent into the rewrap's row took `TEXT_BLOCK` out of the count altogether, leaving a
         // whole-file content string as the only witness; as its own respelling row the count is
@@ -355,7 +355,7 @@ mod tests {
     }
 
     #[test]
-    pub(crate) fn a_literal_that_became_another_kind_is_rejected_even_by_kind() {
+    fn a_literal_that_became_another_kind_is_rejected_even_by_kind() {
         assert!(!verdict::of(
             "class A { int x = 1; }",
             "class A { int x = \"s\"; }",
@@ -366,7 +366,7 @@ mod tests {
     // ===== `DESIGN.md` §20 R0.2: unused-import removal deletes declarations =====
 
     #[test]
-    pub(crate) fn remove_unused_accepts_a_dropped_import() {
+    fn remove_unused_accepts_a_dropped_import() {
         assert!(verdict::of(
             "import a.B;\nclass A {}\n",
             "class A {}\n",
@@ -375,7 +375,7 @@ mod tests {
     }
 
     #[test]
-    pub(crate) fn remove_unused_still_rejects_a_token_lost_outside_the_import_block() {
+    fn remove_unused_still_rejects_a_token_lost_outside_the_import_block() {
         assert!(!verdict::of(
             "import a.B;\nclass A { int x; int y; }\n",
             "import a.B;\nclass A { int x; }\n",
@@ -386,7 +386,7 @@ mod tests {
     // ===== `[braces] force-*`: the only rule that adds tokens =====
 
     #[test]
-    pub(crate) fn force_do_while_alone_accepts_the_braces_it_inserts() {
+    fn force_do_while_alone_accepts_the_braces_it_inserts() {
         // The guard for `forces_braces`' four-way OR. The invariant properties used to read
         // `force_if` alone, so a profile that set only this key held the formatter to an allowance
         // it does not have; they read the license now, and this is what keeps the license honest.
@@ -398,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    pub(crate) fn a_brace_is_still_never_allowed_to_go_missing() {
+    fn a_brace_is_still_never_allowed_to_go_missing() {
         assert!(!verdict::of(
             "class A { void m() { do { x(); } while (c); } }",
             "class A { void m() { do x(); while (c); } }",
@@ -407,7 +407,7 @@ mod tests {
     }
 
     #[test]
-    pub(crate) fn extra_braces_are_rejected_when_no_force_rule_is_on() {
+    fn extra_braces_are_rejected_when_no_force_rule_is_on() {
         let mut cfg = Config::default();
         cfg.braces.force_switch_arm = jals_config::fmt::ForceBraces::Never;
         assert!(!verdict::of(
@@ -420,7 +420,7 @@ mod tests {
     // ===== `DESIGN.md` §20 R4.1: a reflow re-cuts the pieces, so content is compared =====
 
     #[test]
-    pub(crate) fn reflow_accepts_a_concatenation_re_split_at_other_boundaries() {
+    fn reflow_accepts_a_concatenation_re_split_at_other_boundaries() {
         assert!(verdict::of(
             "class A { String s = \"ab\" + \"c\"; }",
             "class A { String s = \"a\" + \"bc\"; }",
@@ -429,7 +429,7 @@ mod tests {
     }
 
     #[test]
-    pub(crate) fn reflow_rejects_a_concatenation_whose_content_changed() {
+    fn reflow_rejects_a_concatenation_whose_content_changed() {
         assert!(!verdict::of(
             "class A { String s = \"ab\" + \"c\"; }",
             "class A { String s = \"a\" + \"bd\"; }",
@@ -438,7 +438,7 @@ mod tests {
     }
 
     #[test]
-    pub(crate) fn the_same_re_split_is_rejected_when_reflow_is_off() {
+    fn the_same_re_split_is_rejected_when_reflow_is_off() {
         assert!(!verdict::of(
             "class A { String s = \"ab\" + \"c\"; }",
             "class A { String s = \"a\" + \"bc\"; }",
@@ -449,7 +449,7 @@ mod tests {
     // ===== The dialect's grouped-import trailing comma =====
 
     #[test]
-    pub(crate) fn the_dialect_comma_drop_is_licensed_under_every_config() {
+    fn the_dialect_comma_drop_is_licensed_under_every_config() {
         // `visit/dialect.rs` drops this comma unconditionally, so the row that licenses it is
         // unconditional too. Before the row existed the fail-safe rejected the drop and the whole
         // file came back unformatted — and only under the *default* config, because
@@ -467,7 +467,7 @@ mod tests {
     }
 
     #[test]
-    pub(crate) fn the_comma_licence_does_not_reach_a_comma_outside_a_grouped_import() {
+    fn the_comma_licence_does_not_reach_a_comma_outside_a_grouped_import() {
         // The site predicate is what keeps the allowance from spreading. An argument list's comma
         // is not a grouped import's trailing comma, whatever the config says.
         assert!(!verdict::of(
@@ -478,7 +478,7 @@ mod tests {
     }
 
     #[test]
-    pub(crate) fn a_separator_comma_may_never_go_missing() {
+    fn a_separator_comma_may_never_go_missing() {
         // The guard against a filter greedy enough to eat a separator once the trailing comma is
         // licensed.
         assert!(!verdict::of(

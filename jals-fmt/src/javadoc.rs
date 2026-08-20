@@ -157,7 +157,7 @@ pub(crate) mod api {
     /// carries, and every line gains `//`. A line that held nothing becomes a bare `//` rather
     /// than an empty line, so the run stays one comment rather than becoming two separated by a
     /// gap the blank-line rules would then have an opinion about.
-    pub(crate) fn to_line_comments(text: &str, indent: usize) -> String {
+    fn to_line_comments(text: &str, indent: usize) -> String {
         let body = text
             .strip_prefix("/*")
             .and_then(|rest| rest.strip_suffix("*/"))
@@ -194,7 +194,7 @@ pub(crate) mod api {
     /// that moved has to take them with it. Only a *shift* is applied: the relative shape is the
     /// information such a comment carries, and ASCII art is exactly the case where reflowing it
     /// would be destruction.
-    pub(crate) fn shift(text: &str, indent: usize, column: usize) -> String {
+    fn shift(text: &str, indent: usize, column: usize) -> String {
         if indent <= column || !text.contains('\n') {
             return text.into();
         }
@@ -221,7 +221,7 @@ pub(crate) mod api {
     /// often a hand-aligned table or a commented-out statement as it is prose. All that happens
     /// is the missing space after the slashes and a break when the line overruns the limit,
     /// which is exactly `JavaCommentsHelper.wrapLineComments`.
-    pub(crate) fn render_line(text: &str, indent: usize, style: &Style) -> String {
+    fn render_line(text: &str, indent: usize, style: &Style) -> String {
         let line = space_after_slashes(text.trim());
         // `// MOE:` marks a region another tool owns, and wrapping it would break that tool.
         if line.starts_with("// MOE:") {
@@ -236,7 +236,7 @@ pub(crate) mod api {
     /// `//noinspection` and `//$NON-NLS-1$` are IDE directives that stop working with a space in
     /// them, so they are left alone — google-java-format's
     /// `LINE_COMMENT_MISSING_SPACE_PREFIX` lookahead.
-    pub(crate) fn space_after_slashes(line: &str) -> String {
+    fn space_after_slashes(line: &str) -> String {
         let slashes = line.len() - line.trim_start_matches('/').len();
         if slashes < 2 {
             return line.into();
@@ -252,7 +252,7 @@ pub(crate) mod api {
     }
 
     /// Whether `rest` opens with an Eclipse externalized-string marker, `$NON-NLS-<digits>$`.
-    pub(crate) fn is_non_nls(rest: &str) -> bool {
+    fn is_non_nls(rest: &str) -> bool {
         let Some(body) = rest.strip_prefix("$NON-NLS-") else {
             return false;
         };
@@ -263,7 +263,7 @@ pub(crate) mod api {
     }
 
     /// Break `line` at whitespace until it fits, restarting each continuation with `//`.
-    pub(crate) fn wrap_line(line: &str, column: usize, limit: usize) -> Vec<String> {
+    fn wrap_line(line: &str, column: usize, limit: usize) -> Vec<String> {
         let mut lines = Vec::new();
         let mut current = String::from(line);
         while column + ir::utf16(&current) > limit {
@@ -283,7 +283,7 @@ pub(crate) mod api {
     ///
     /// `None` means there is nowhere to break — a single long word, or a URL — and the line stays
     /// over the limit rather than being cut mid-token.
-    pub(crate) fn break_at(line: &str, budget: usize) -> Option<usize> {
+    fn break_at(line: &str, budget: usize) -> Option<usize> {
         let mut best = None;
         let mut column = 0usize;
         for (at, ch) in line.char_indices() {
@@ -299,7 +299,7 @@ pub(crate) mod api {
     }
 
     /// Reflow a `/* … */` or `/** … */` comment.
-    pub(crate) fn render_block(
+    fn render_block(
         text: &str,
         kind: SyntaxKind,
         indent: usize,
@@ -490,7 +490,7 @@ pub(crate) mod api {
     ///
     /// Continuation lines start at column zero here; the writer re-aligns them under the opening
     /// delimiter when it knows the final column.
-    pub(crate) fn push_line(out: &mut String, text: &str, asterisks: bool) {
+    fn push_line(out: &mut String, text: &str, asterisks: bool) {
         out.push('\n');
         if asterisks {
             out.push('*');
@@ -505,7 +505,7 @@ pub(crate) mod api {
     ///
     /// `space` says whether the run itself followed whitespace; the pieces after the first do not.
     /// An inline `{@…}` tag is left whole — it is one token to google-java-format's lexer too.
-    pub(super) fn tokenize(run: &str, space: bool, out: &mut Vec<Word>) {
+    fn tokenize(run: &str, space: bool, out: &mut Vec<Word>) {
         if run.starts_with("{@") {
             out.push(Word {
                 text: run.into(),
@@ -555,7 +555,7 @@ pub(crate) mod api {
     /// Its patterns name exactly these: `pre`, `code`, `table`, `ul|ol|dl`, `li|dt|dd`, `h[1-6]`,
     /// `p`, `blockquote`, `br`, and `a`. Everything else — `<em>`, `<i>` — is part of the literal
     /// around it, which is what keeps `<em>locale-sensitive</em>` one unbreakable unit.
-    pub(crate) fn is_known_tag(inner: &str) -> bool {
+    fn is_known_tag(inner: &str) -> bool {
         const TAGS: [&str; 13] = [
             "pre",
             "code",
@@ -590,7 +590,7 @@ pub(crate) mod api {
     /// Only these two: google-java-format standardizes the `br` and `p` *tokens*
     /// (`standardizeBrToken`, `standardizePToken`) and leaves every other tag as the author wrote
     /// it, `<CODE>` included.
-    pub(crate) fn standardize_tag(tag: &str) -> String {
+    fn standardize_tag(tag: &str) -> String {
         let inner = tag
             .trim_start_matches('<')
             .trim_end_matches('>')
@@ -603,12 +603,12 @@ pub(crate) mod api {
     }
 
     /// Whether a token is a `<br>`, which ends its line.
-    pub(crate) const fn is_break_tag(text: &str) -> bool {
+    const fn is_break_tag(text: &str) -> bool {
         text.eq_ignore_ascii_case("<br>")
     }
 
     /// Every whitespace-delimited run of `line`, tokenized.
-    pub(super) fn tokens_of(line: &str, out: &mut Vec<Word>) {
+    fn tokens_of(line: &str, out: &mut Vec<Word>) {
         for run in line.split_whitespace() {
             // A list item's text starts right after its tag however the author spaced it.
             let space = !out.last().is_some_and(|last| is_item_tag(&last.text));
@@ -623,7 +623,7 @@ pub(crate) mod api {
     /// the text it labels can share a line boundary without a stray space appearing. The link's
     /// closing `>` may arrive in a run of its own, since `<a` and its `href` are routinely written
     /// on separate lines.
-    pub(crate) fn is_item_tag(text: &str) -> bool {
+    fn is_item_tag(text: &str) -> bool {
         let lower = text.to_ascii_lowercase();
         // A tag the whitespace split cut in half — `<dt` of `<dt id="x">` — is not a tag yet, and
         // hugging the next token to it would delete the space inside the tag.
@@ -645,7 +645,7 @@ pub(crate) mod api {
     }
 
     /// Emit one body line with `pad` columns of extra indent.
-    pub(crate) fn push_indented(out: &mut String, text: &str, pad: usize, asterisks: bool) {
+    fn push_indented(out: &mut String, text: &str, pad: usize, asterisks: bool) {
         if pad == 0 {
             push_line(out, text, asterisks);
             return;
@@ -663,7 +663,7 @@ pub(crate) mod api {
     /// `None` at an index means "no alignment here" — either the block is not a tag, or the mode
     /// asks for none. A tag's own head width is `@name` plus the argument it takes, so a run whose
     /// widest member is `@throws IllegalArgumentException` pads every sibling out to that.
-    pub(super) fn tag_columns(blocks: &[Block], mode: TagAlignment) -> Vec<Option<usize>> {
+    fn tag_columns(blocks: &[Block], mode: TagAlignment) -> Vec<Option<usize>> {
         let mut columns = alloc::vec![None; blocks.len()];
         if mode == TagAlignment::None {
             return columns;
@@ -724,7 +724,7 @@ pub(crate) mod api {
     /// [`render_block`]. Computed twice, they disagreed — the description sat at the
     /// aligned column while everything continuing it sat a continuation step beyond, because the
     /// second copy *added* what the first had chosen.
-    pub(crate) const fn tag_continuation(aligned: Option<usize>, style: &Style) -> usize {
+    const fn tag_continuation(aligned: Option<usize>, style: &Style) -> usize {
         match aligned {
             Some(column) => column + 1,
             None if style.comments().indent_tag_description => style.continuation_cols,
@@ -733,7 +733,7 @@ pub(crate) mod api {
     }
 
     /// Emit a block tag and its refilled description.
-    pub(super) fn push_tag(
+    fn push_tag(
         out: &mut String,
         name: &str,
         argument: Option<&str>,
@@ -783,7 +783,7 @@ pub(crate) mod api {
     }
 
     /// The text between a comment's delimiters, with each line's leading `*` removed.
-    pub(crate) fn body(text: &str, doc: bool) -> Option<String> {
+    fn body(text: &str, doc: bool) -> Option<String> {
         let inner = if doc {
             text.strip_prefix("/**")?
         } else {
@@ -807,7 +807,7 @@ pub(crate) mod api {
     }
 
     /// Split a comment body into prose paragraphs, verbatim regions, and block tags.
-    pub(super) fn parse(body: &str, style: &Style) -> Vec<Block> {
+    fn parse(body: &str, style: &Style) -> Vec<Block> {
         let cfg = style.comments();
         let mut blocks: Vec<Block> = Vec::new();
         let mut prose: Vec<Word> = Vec::new();
@@ -1221,7 +1221,7 @@ pub(crate) mod api {
     /// a list or a preformatted region is its own token at **either** end, so the paragraph after
     /// one opens without a `<p>` — `<blockquote>` followed by a blank line and a `{@code …}` is
     /// the quote's own first paragraph, not a new one.
-    pub(super) fn ends_block_tag(block: &Block) -> bool {
+    fn ends_block_tag(block: &Block) -> bool {
         const NAMES: [&str; 16] = [
             "h1",
             "h2",
@@ -1266,7 +1266,7 @@ pub(crate) mod api {
     /// tags are left alone: one whose brace never closes inside this block, because swallowing
     /// the rest of the paragraph is a worse answer than the break it avoids, and one wider than
     /// `budget`, because Eclipse splits a tag that cannot fit a line either.
-    pub(super) fn join_inline_tags(words: &mut Vec<Word>, budget: usize) {
+    fn join_inline_tags(words: &mut Vec<Word>, budget: usize) {
         let mut at = 0usize;
         while at < words.len() {
             if !words[at].text.starts_with("{@") || brace_delta(&words[at].text) <= 0 {
@@ -1309,7 +1309,7 @@ pub(crate) mod api {
     /// `<p>` is a block-level HTML element, and Eclipse's `CommentsPreparator` treats it as one:
     /// a `<p>` ending a sentence (`…implement this interface. <p>`) breaks the line before it and
     /// after it. Only google-java-format hoists it into the next paragraph's first word instead.
-    pub(super) fn split_paragraph_tags(blocks: &mut Vec<Block>) {
+    fn split_paragraph_tags(blocks: &mut Vec<Block>) {
         let mut at = 0usize;
         while at < blocks.len() {
             let Block::Prose { words, rest, .. } = &mut blocks[at] else {
@@ -1355,7 +1355,7 @@ pub(crate) mod api {
     }
 
     /// A `<p>` occupying a content line of its own.
-    pub(super) fn paragraph_line(indent: usize) -> Block {
+    fn paragraph_line(indent: usize) -> Block {
         Block::Prose {
             words: alloc::vec![Word {
                 text: "<p>".into(),
@@ -1375,7 +1375,7 @@ pub(crate) mod api {
     ///
     /// `own_line` writes the inferred tag on its own line instead of gluing it to the first word,
     /// which is the shape IntelliJ's `JD_P_AT_EMPTY_LINES` produces.
-    pub(super) fn infer_paragraph_tags(blocks: &mut Vec<Block>, own_line: bool) {
+    fn infer_paragraph_tags(blocks: &mut Vec<Block>, own_line: bool) {
         // Right to left: an insertion shifts every later index, and going backwards keeps the
         // ones still to be examined where they were.
         for at in (2..blocks.len()).rev() {
@@ -1416,7 +1416,7 @@ pub(crate) mod api {
     ///
     /// Nothing written yet is nothing to separate, which is `flushWhitespace` with no output
     /// behind it.
-    pub(super) fn request_blank(blocks: &mut Vec<Block>) {
+    fn request_blank(blocks: &mut Vec<Block>) {
         match blocks.last_mut() {
             Some(Block::Blank { requested }) => *requested = true,
             None => {}
@@ -1431,14 +1431,14 @@ pub(crate) mod api {
     /// list close, a preformatted region — ends that wait: `writeParagraphOpen` has already
     /// written the tag, so it keeps the place the author gave it instead of being carried past
     /// the block and glued to the first word on the other side.
-    pub(super) fn release_pending(pending: &mut Option<String>, prose: &mut Vec<Word>) {
+    fn release_pending(pending: &mut Option<String>, prose: &mut Vec<Word>) {
         if let Some(glued) = pending.take() {
             tokenize(&glued, true, prose);
         }
     }
 
     /// Move any accumulated prose into `blocks`, at `first` / `rest` columns of extra indent.
-    pub(super) fn flush(prose: &mut Vec<Word>, blocks: &mut Vec<Block>, first: usize, rest: usize) {
+    fn flush(prose: &mut Vec<Word>, blocks: &mut Vec<Block>, first: usize, rest: usize) {
         if !prose.is_empty() {
             blocks.push(Block::Prose {
                 words: core::mem::take(prose),
@@ -1456,7 +1456,7 @@ pub(crate) mod api {
     /// HTML tag names are case-insensitive, and hand-written Javadoc really does close a `<pre>`
     /// with `</PRE>`. Matching only the lower-case spelling leaves the fence open to the end of
     /// the comment, which grows a blank line on every run.
-    pub(crate) fn opens_fence(line: &str, tables: bool) -> bool {
+    fn opens_fence(line: &str, tables: bool) -> bool {
         let lower = line.to_ascii_lowercase();
         lower.starts_with("```")
             || lower.contains("<pre>")
@@ -1471,12 +1471,12 @@ pub(crate) mod api {
     /// second, and arming only the first left it with no reachable exit — [`closes_fence`]
     /// knows ```` ``` ````, `</pre>` and `</table>`, none of which ever arrives — so the rest of
     /// the comment was swallowed into one verbatim region, footer tags included.
-    pub(crate) fn brace_fence(line: &str) -> bool {
+    fn brace_fence(line: &str) -> bool {
         line.contains("{@snippet") || line.to_ascii_lowercase().starts_with("{@code")
     }
 
     /// A line's net brace count, ignoring the braces inside a string or a character literal.
-    pub(crate) fn brace_delta(line: &str) -> i32 {
+    fn brace_delta(line: &str) -> i32 {
         let mut delta = 0i32;
         for ch in line.chars() {
             match ch {
@@ -1508,7 +1508,7 @@ pub(crate) mod api {
     /// A region that says something else on its `<pre>` line — `<pre>{@code foo}` — is ordinary
     /// preformatted text: the lexer matches `[ \t]*[{]@code` against the whole joined literal, so
     /// one word after it is enough to leave every space where the author put it.
-    pub(crate) fn normalize_pre_code_block(lines: &mut Vec<String>) {
+    fn normalize_pre_code_block(lines: &mut Vec<String>) {
         let Some(first) = lines.first() else {
             return;
         };
@@ -1567,7 +1567,7 @@ pub(crate) mod api {
     /// source is not part of what the snippet says. Relative indentation inside the snippet is,
     /// so only the common prefix goes. The opening and closing lines are excluded: they carry the
     /// delimiters, not the code.
-    pub(crate) fn dedent_code_region(lines: &mut [String]) {
+    fn dedent_code_region(lines: &mut [String]) {
         let Some(first) = lines.first() else {
             return;
         };
@@ -1614,7 +1614,7 @@ pub(crate) mod api {
     ///
     /// A `<pre>` fences ASCII art at least as often as it fences Java, which is why the rule is
     /// **off by default** — not why it is narrow. Turning it on is opting into this reading.
-    pub(crate) fn reindent_code_region(lines: &mut [String], style: &Style) {
+    fn reindent_code_region(lines: &mut [String], style: &Style) {
         let code = lines.first().is_some_and(|line| {
             let lower = line.to_ascii_lowercase();
             lower.starts_with("```")
@@ -1677,7 +1677,7 @@ pub(crate) mod api {
     }
 
     /// Whether a line closes such a region.
-    pub(crate) fn closes_fence(line: &str, tables: bool) -> bool {
+    fn closes_fence(line: &str, tables: bool) -> bool {
         let lower = line.to_ascii_lowercase();
         lower.starts_with("```")
             || lower.contains("</pre>")
@@ -1685,7 +1685,7 @@ pub(crate) mod api {
     }
 
     /// Whether a line both opens and closes a region, so it is verbatim on its own.
-    pub(crate) fn self_closing_fence(line: &str, tables: bool) -> bool {
+    fn self_closing_fence(line: &str, tables: bool) -> bool {
         let lower = line.to_ascii_lowercase();
         (lower.contains("<pre>") && lower.contains("</pre>"))
             || (tables && lower.contains("<table") && lower.contains("</table>"))
@@ -1698,7 +1698,7 @@ pub(crate) mod api {
     /// Counted over the whole line rather than its start: refilling can leave a `<ul>` at the end
     /// of a prose line, and a depth that only saw line-initial tags would then forget the list
     /// exists on the next run.
-    pub(crate) fn list_depth(depth: usize, line: &str) -> usize {
+    fn list_depth(depth: usize, line: &str) -> usize {
         const NAMES: [&str; 3] = ["ul", "ol", "dl"];
         let lower = line.to_ascii_lowercase();
         // Each `<` decides for itself which of the two it is. Counting `"<ul"` over the whole line
@@ -1727,7 +1727,7 @@ pub(crate) mod api {
     ///
     /// The list's own tags sit at the enclosing level; an item tag opens one level in and its
     /// continuations one item level further.
-    pub(crate) fn list_indents(depth: usize, line: &str) -> (usize, usize) {
+    fn list_indents(depth: usize, line: &str) -> (usize, usize) {
         /// Columns a list indents its contents by (`writeListOpen`).
         const LIST: usize = 2;
         /// Columns an item's continuation lines take on top of that (`writeListItemOpen`, which
@@ -1763,7 +1763,7 @@ pub(crate) mod api {
     ///
     /// google-java-format standardizes any simple form — `<P>`, `<p/>`, `<p />` — to `<p>`
     /// (`standardizePToken`), so all of them are recognized here.
-    pub(crate) fn paragraph_open(line: &str) -> Option<&str> {
+    fn paragraph_open(line: &str) -> Option<&str> {
         let rest = line.strip_prefix('<')?;
         let rest = rest.strip_prefix(['p', 'P'])?;
         let rest = rest.trim_start();
@@ -1781,7 +1781,7 @@ pub(crate) mod api {
     /// Only those four. The guard used to ask `line.contains("</")` — twice, of two byte-identical
     /// operands — so it fired on *any* closing tag, which is what made the strip below reachable
     /// from lines it has nothing to remove from.
-    pub(crate) fn has_paragraph_close(line: &str) -> bool {
+    fn has_paragraph_close(line: &str) -> bool {
         IGNORED_CLOSE.iter().any(|tag| closing_tag_at(line, tag))
     }
 
@@ -1789,7 +1789,7 @@ pub(crate) mod api {
     ///
     /// `openTagPattern`'s `\b`: `</p>` is a paragraph close and `</param>` is not, so the name has
     /// to end at a non-word character rather than merely start the rest of the tag.
-    pub(crate) fn closing_tag_at(line: &str, name: &str) -> bool {
+    fn closing_tag_at(line: &str, name: &str) -> bool {
         let lower = line.to_ascii_lowercase();
         lower
             .match_indices("</")
@@ -1797,7 +1797,7 @@ pub(crate) mod api {
     }
 
     /// `line` with every `</p>` removed.
-    pub(crate) fn drop_paragraph_close(line: &str) -> String {
+    fn drop_paragraph_close(line: &str) -> String {
         let mut out = String::with_capacity(line.len());
         let mut rest = line;
         while let Some(at) = rest.find("</") {
@@ -1824,7 +1824,7 @@ pub(crate) mod api {
     ///
     /// Matched case-insensitively: HTML tag names are, and hand-written Javadoc really does say
     /// `<UL>`.
-    pub(crate) fn is_html_block(line: &str, tables: bool) -> bool {
+    fn is_html_block(line: &str, tables: bool) -> bool {
         // `<br>` is deliberately absent. It ends a line — `writeBr` requests a newline after
         // it — but it does not start a *block*: the prose on either side of one is the same
         // paragraph, and flushing at it turned `… interfered with. <br>For example …` into two
@@ -1856,7 +1856,7 @@ pub(crate) mod api {
     /// brace context and a bare `{` nests only inside one, and inside a brace context there is no
     /// HTML to interpret. `popUntil` is a no-op when its context is not open, so a stray `</code>`
     /// closes nothing.
-    pub(crate) fn lexes_cleanly(body: &str) -> bool {
+    fn lexes_cleanly(body: &str) -> bool {
         #[derive(Clone, Copy, PartialEq)]
         enum Ctx {
             Pre,
@@ -1933,7 +1933,7 @@ pub(crate) mod api {
     ///
     /// `openTagPattern` is `<(?:name)\b[^>]*>`, so the name has to end at a non-word character
     /// and the tag at the first `>`.
-    pub(crate) fn html_tag(rest: &str, name: &str, closing: bool) -> Option<usize> {
+    fn html_tag(rest: &str, name: &str, closing: bool) -> Option<usize> {
         let after = rest
             .strip_prefix('<')?
             .strip_prefix(if closing { "/" } else { "" })?
@@ -1946,7 +1946,7 @@ pub(crate) mod api {
     }
 
     /// Whether a line opens a footer tag — `FOOTER_TAG_PATTERN`, `@` and a lowercase word.
-    pub(crate) fn opens_footer_tag(line: &str) -> bool {
+    fn opens_footer_tag(line: &str) -> bool {
         line.strip_prefix('@')
             .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_lowercase()))
     }
@@ -1956,7 +1956,7 @@ pub(crate) mod api {
     /// `None` when the line holds none, or holds one that does not close on it — a comment
     /// spanning lines is `HTML_COMMENT_PATTERN`'s `DOTALL` case, and giving its opening half a
     /// line of its own would split the comment rather than set it off.
-    pub(crate) fn split_html_comment(line: &str) -> Option<(&str, &str, &str)> {
+    fn split_html_comment(line: &str) -> Option<(&str, &str, &str)> {
         let open = line.find("<!--")?;
         let close = line[open..].find("-->")? + open + "-->".len();
         Some((
@@ -1967,13 +1967,13 @@ pub(crate) mod api {
     }
 
     /// Whether a line is a `<blockquote>` tag.
-    pub(crate) fn is_blockquote(line: &str) -> bool {
+    fn is_blockquote(line: &str) -> bool {
         let lower = line.trim_start().to_ascii_lowercase();
         lower.starts_with("<blockquote") || lower.starts_with("</blockquote")
     }
 
     /// Whether a line opens an HTML list.
-    pub(crate) fn opens_list(line: &str) -> bool {
+    fn opens_list(line: &str) -> bool {
         let lower = line.trim_start().to_ascii_lowercase();
         ["<ul", "<ol", "<dl"]
             .iter()
@@ -1981,7 +1981,7 @@ pub(crate) mod api {
     }
 
     /// Whether a line is nothing but an HTML list's closing tag.
-    pub(crate) fn closes_list(line: &str) -> bool {
+    fn closes_list(line: &str) -> bool {
         let lower = line.trim().to_ascii_lowercase();
         ["</ul", "</ol", "</dl"]
             .iter()
@@ -2006,7 +2006,7 @@ pub(crate) mod api {
     /// word it introduces by [`paragraph_open`]; and a heading *contains* its text —
     /// `writeHeaderOpen` asks for a blank line before `<h2>` and none after it, so
     /// `<h2>1.0 Background</h2>` is one line and splitting it strands the heading's own words.
-    pub(crate) fn split_block_tag(line: &str) -> Option<(&str, &str)> {
+    fn split_block_tag(line: &str) -> Option<(&str, &str)> {
         const TAGS: [&str; 8] = [
             "<ul",
             "<ol",
@@ -2049,7 +2049,7 @@ pub(crate) mod api {
     /// `</pre></blockquote>` ends the region at `</pre>`; the `</blockquote>` after it is a token
     /// of the enclosing prose, and keeping it inside the region emits it verbatim — which is how
     /// two tags that each want a line of their own ended up sharing one.
-    pub(crate) fn split_after_fence_close(line: &str, tables: bool) -> Option<(&str, &str)> {
+    fn split_after_fence_close(line: &str, tables: bool) -> Option<(&str, &str)> {
         let lower = line.to_ascii_lowercase();
         let end = ["</pre>", "</table>"]
             .iter()
@@ -2063,7 +2063,7 @@ pub(crate) mod api {
     /// Whether a line is a section heading, which stands alone between blank lines.
     ///
     /// `JavadocWriter` requests one before `writeHeaderOpen` and one after `writeHeaderClose`.
-    pub(crate) fn is_heading(line: &str) -> bool {
+    fn is_heading(line: &str) -> bool {
         let lower = line.trim_start().to_ascii_lowercase();
         let Some(rest) = lower.strip_prefix("<h") else {
             return false;
@@ -2075,7 +2075,7 @@ pub(crate) mod api {
     ///
     /// `@param` / `@throws` / `@exception` take a name before their description; every other tag
     /// takes only a description. An inline `{@…}` tag is prose and is not matched here.
-    pub(super) fn block_tag(line: &str) -> Option<Block> {
+    fn block_tag(line: &str) -> Option<Block> {
         let rest = line.strip_prefix('@')?;
         let mut parts = rest.split_whitespace();
         let name = parts.next()?;
@@ -2108,7 +2108,7 @@ pub(crate) mod api {
     /// block tag, so refilling prose into that position would turn `… the @Override annotation`
     /// into a tag on the next run. Keeping it on the line it is already on costs a few columns of
     /// overflow and keeps the comment a fixed point.
-    pub(super) fn fill_two(words: &[Word], first: usize, rest: usize) -> Vec<String> {
+    fn fill_two(words: &[Word], first: usize, rest: usize) -> Vec<String> {
         let mut lines: Vec<String> = Vec::new();
         let mut current = String::new();
         for word in words {
