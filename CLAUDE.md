@@ -323,7 +323,7 @@ filesystem reads into portable interfaces.
 
 ## Code conventions
 
-Four ast-grep rules under `.ast-grep/rules/` are `severity: error` and gate CI workspace-wide;
+Five ast-grep rules under `.ast-grep/rules/` are `severity: error` and gate CI workspace-wide;
 read the rule's own `note:` before working around one.
 
 - **`no-portable-host-path`** enforces the host boundary: `std::path`, `std::fs`, and `PathBuf` are
@@ -335,6 +335,33 @@ read the rule's own `note:` before working around one.
   `jals-exec/src/yields.rs`'s `mod api`) or nested inside its only caller. `main` and the
   `#[test]`-family items are exempt, as are `build.rs`, `benches/`, `tests/`, and `examples/`; read
   the rule for the full list.
+- **`no-namespace-only-empty-struct`**: an empty struct — `struct Foo;`, `struct Foo {}`, and
+  `struct Foo();` alike — is rejected when it is only a namespace for associated functions. It is
+  the companion to `no-free-functions`: that rule pushes a free function onto an `impl`, and this
+  one says the home it lands in must be a `mod` rather than a type that never holds a value. A
+  genuine zero-sized *value* is accepted, and the rule reads that off the source rather than off an
+  `ignores:` list — a `#[derive]` on the struct, or an `impl <Trait> for <Name>` among its siblings,
+  because a `mod` can carry neither. The one limit is that the sibling scan does not reach an impl
+  written inside a *nested* `mod` (`mod inner { impl Trait for super::Foo {} }`).
+
+  The shape it steers to is the one `no-free-functions` already names: an inline module beside the
+  items it serves, whose entry points the declaring module re-exports, so a caller still spells the
+  call `<module>::<fn>` and nothing outside the file learns the grouping's name.
+
+      pub(crate) use api::level;
+
+      mod api {
+          use super::*;
+
+          pub(crate) async fn level(level: &mut Level) { .. }
+      }
+
+  It is named `api` where the file holds one such struct, and after the struct in snake_case where
+  it holds several (`jals-fmt/src/import/xml.rs`, `jals-lint/src/rules/naming.rs`) — one name per
+  file is what keeps a caller's `use` unambiguous. Where the struct *was* the public surface, the
+  declaring module is published instead of the type (`jals_classpath::jar_remap::remap`,
+  `jals_decompile::attrs::parameter_names`), which is why those paths read as a module and not as a
+  namespace type.
 - **`no-extern-crate-alloc`** / **`no-extern-crate-core`**: `extern crate alloc;` is declared
   exactly once per portable crate, in its `lib.rs`; every other module writes `use alloc::...`.
   `extern crate core;` is never declared — write `use core::...`.

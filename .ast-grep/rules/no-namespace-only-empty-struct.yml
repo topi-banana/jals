@@ -1,0 +1,116 @@
+id: no-namespace-only-empty-struct
+language: Rust
+severity: error
+message: An empty struct that only namespaces associated functions must be a `mod` instead.
+note: |
+  `struct Measure;` followed by `impl Measure { .. }` is a type that never holds a value and is
+  never passed as one — it exists only to give free functions a home, because `no-free-functions`
+  refuses a `pub fn` at the top level of a module file. That rule's own note names the intended
+  shape: an inline `mod`. Two spellings for one idea is one too many, and the `mod` is the honest
+  one — it says "namespace" instead of dressing a namespace up as a type.
+
+      // rejected
+      struct Measure;
+      impl Measure {
+          fn level(l: &mut Level) { .. }
+      }
+
+      // accepted
+      mod measure {
+          pub fn level(l: &mut Level) { .. }
+      }
+
+  All three empty spellings are rejected — `struct Foo;`, `struct Foo {}`, `struct Foo();` — so the
+  ban cannot be sidestepped by writing a different kind of nothing.
+
+  An empty struct that is a genuine zero-sized *value* is not the target and is accepted: a `mod`
+  cannot implement a trait, so `impl Fetcher for NoFetch` and `#[derive(Deserialize)]` both need a
+  type. The rule reads that off the source — a `#[derive]` on the struct, or an `impl <Trait> for
+  <Name>` among its siblings — rather than off an `ignores:` list, so a new namespace ZST in one of
+  those files is still caught.
+
+  The sibling scan is the one limit: an `impl Trait for Foo` written inside a *nested* `mod` that
+  the struct is not itself in (`mod inner { impl Trait for super::Foo {} }`) is not reachable from
+  the struct's own sibling list, and the struct is reported. Move the impl beside the struct.
+
+rule:
+  all:
+    - kind: struct_item
+    - has:
+        field: name
+        pattern: $N
+
+    # The three empty spellings. `struct Foo;` and `struct Foo<T>;` carry no body node at all;
+    # the other two carry an empty one, and they are different node kinds.
+    - any:
+        - all:
+            - kind: struct_item
+            - not:
+                has:
+                  field: body
+                  any:
+                    - kind: field_declaration_list
+                    - kind: ordered_field_declaration_list
+        - has:
+            field: body
+            kind: field_declaration_list
+            not:
+              has:
+                kind: field_declaration
+        - has:
+            field: body
+            kind: ordered_field_declaration_list
+            regex: '^\(\s*\)$'
+
+    # A zero-sized value: something implements a trait for it. Matched on `impl_item` rather than a
+    # pattern so that generics, lifetimes, `unsafe impl`, a `where` clause, and a path-qualified
+    # trait name all read the same. `has: {field: trait}` is what separates a trait impl from the
+    # inherent `impl Measure { .. }` this rule exists to reject.
+    - not:
+        any:
+          - precedes:
+              all:
+                - kind: impl_item
+                - has:
+                    field: trait
+                    regex: '.'
+                - has:
+                    field: type
+                    pattern: $N
+              stopBy: end
+          - follows:
+              all:
+                - kind: impl_item
+                - has:
+                    field: trait
+                    regex: '.'
+                - has:
+                    field: type
+                    pattern: $N
+              stopBy: end
+
+    # A zero-sized value: `#[derive(..)]` expands to trait impls, which a `mod` cannot carry.
+    # Attributes are preceding siblings rather than children, so this reads the same way
+    # `no-free-functions` reads `#[test]` — walk back over the consecutive attribute siblings and
+    # stop at the first node that is not one.
+    - not:
+        follows:
+          kind: attribute_item
+          regex: '^#\[derive'
+          stopBy:
+            not:
+              kind: attribute_item
+
+# The same exemptions `no-free-functions` grants, and for the same reason: where a free `pub fn` is
+# already allowed, nothing pushes a helper onto an `impl` in the first place, so there is no
+# namespace ZST for this rule to steer. Globs are matched against workspace-relative paths, so
+# crate subdirectories need the leading `**/`.
+ignores:
+  - '**/target/**'
+  - '**/build.rs'
+  - '**/benches/**/*.rs'
+  - '**/tests/**/*.rs'
+  # `no-free-functions` carries this same entry: a test adapter that moved into `src` so that
+  # exercising one step of project assembly no longer requires making that step `pub`.
+  - 'jals-project/src/graph_tests.rs'
+  - '**/examples/**/*.rs'

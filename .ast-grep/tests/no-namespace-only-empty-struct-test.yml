@@ -1,0 +1,110 @@
+id: no-namespace-only-empty-struct
+
+valid:
+  # A struct that holds something is not the target.
+  - |
+      struct Engine {
+          config: Config,
+      }
+
+  - |
+      pub struct StdReader<R>(pub R);
+
+  # A zero-sized *value*: a trait is implemented for it, which a `mod` cannot carry.
+  - |
+      struct NoFetch;
+
+      impl Fetcher for NoFetch {
+          fn fetch(&self) {}
+      }
+
+  # The impl may come first.
+  - |
+      impl Fetcher for NoFetch {
+          fn fetch(&self) {}
+      }
+
+      struct NoFetch;
+
+  # Generics, lifetimes, `unsafe`, a `where` clause, and a path-qualified trait all read the same.
+  - |
+      struct Visitor;
+
+      impl<'de> serde::de::Visitor<'de> for Visitor {
+          type Value = Config;
+      }
+
+  - |
+      struct Marker;
+
+      unsafe impl Send for Marker {}
+
+  - |
+      struct Bounded;
+
+      impl Trait for Bounded
+      where
+          Self: Sized,
+      {
+      }
+
+  # `#[derive(..)]` expands to trait impls, so the type has to stay a type.
+  - |
+      #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+      pub struct NoOptions {}
+
+  - |
+      #[derive(Default)]
+      struct VanillaFrontend;
+
+  # A derive under other attributes is still a derive.
+  - |
+      #[non_exhaustive]
+      #[derive(Debug)]
+      struct Tagged;
+
+  # The shape this rule exists to steer toward.
+  - |
+      mod measure {
+          pub fn level(l: &mut Level) {}
+      }
+
+invalid:
+  # The namespace ZST: a type that never holds a value, carrying only associated functions.
+  - |
+      struct Measure;
+
+      impl Measure {
+          fn level(l: &mut Level) {}
+      }
+
+  # Visibility does not change the reading.
+  - |
+      pub struct CleanTargets;
+
+  - |
+      pub(crate) struct Codegen;
+
+  # The other two ways of spelling nothing.
+  - |
+      struct Fixture {}
+
+  - |
+      struct Fixture();
+
+  # Generic parameters do not make it non-empty.
+  - |
+      struct Marker<T>;
+
+  # An inherent impl is not a trait impl, so it does not earn the carve-out.
+  - |
+      struct Scan;
+
+      impl Scan {
+          fn token(src: &str) -> Token {}
+      }
+
+  # A non-derive attribute is not a trait impl either.
+  - |
+      #[allow(dead_code)]
+      struct Unused;
