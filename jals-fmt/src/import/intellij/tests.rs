@@ -24,11 +24,11 @@ struct Row {
 }
 
 /// The inventory reader and the scheme builder, grouped so they are not free functions.
-struct Fixture;
+pub(crate) mod api {
+    use super::*;
 
-impl Fixture {
     /// Every option row, comments and blank lines dropped.
-    fn inventory() -> Vec<Row> {
+    pub(super) fn inventory() -> Vec<Row> {
         INVENTORY
             .lines()
             .filter(|line| !line.is_empty() && !line.starts_with('#'))
@@ -45,7 +45,7 @@ impl Fixture {
     }
 
     /// A parseable, non-default value for a setting of `kind`.
-    fn probe(kind: &str) -> &'static str {
+    pub(crate) fn probe(kind: &str) -> &'static str {
         match kind {
             "bool" => "true",
             "int" | "wrap-on-typing" | "rearrange-mode" | "javadoc-names" => "7",
@@ -60,7 +60,7 @@ impl Fixture {
     }
 
     /// Parse a scheme given as `(XML option name, value)` pairs.
-    fn scheme(options: &[(&str, &str)]) -> IntellijConfig {
+    pub(crate) fn scheme(options: &[(&str, &str)]) -> IntellijConfig {
         let pairs = options
             .iter()
             .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
@@ -74,9 +74,9 @@ fn every_inventoried_setting_is_modeled() {
     let baseline = IntellijConfig::default();
     let mut missing = Vec::new();
 
-    for row in Fixture::inventory() {
+    for row in api::inventory() {
         let mut pairs = BTreeMap::new();
-        pairs.insert(row.setting.clone(), Fixture::probe(&row.kind).to_owned());
+        pairs.insert(row.setting.clone(), api::probe(&row.kind).to_owned());
         let parsed = IntellijConfig::from_pairs(pairs).expect("single setting should parse");
         if parsed == baseline {
             missing.push(row.setting);
@@ -95,7 +95,7 @@ fn every_editorconfig_key_resolves_to_its_setting() {
     // The generated key table and the inventory must not drift apart, or an `.editorconfig`
     // would silently lose settings the XML form keeps.
     let mut unresolved = Vec::new();
-    for row in Fixture::inventory() {
+    for row in api::inventory() {
         if let Some(key) = row.editorconfig
             && IntellijConfig::setting_name(&key) != Some(row.setting.as_str())
         {
@@ -110,7 +110,7 @@ fn every_editorconfig_key_resolves_to_its_setting() {
 
 #[test]
 fn the_inventory_is_the_documented_size() {
-    let rows = Fixture::inventory();
+    let rows = api::inventory();
     assert_eq!(
         rows.len(),
         297,
@@ -136,7 +136,7 @@ fn editorconfig_and_xml_spellings_agree() {
     .expect("editorconfig should parse");
 
     // The same settings in the scheme XML's raw-integer spelling.
-    let from_scheme = Fixture::scheme(&[
+    let from_scheme = api::scheme(&[
         ("USE_TAB_CHARACTER", "false"),
         ("INDENT_SIZE", "2"),
         ("CONTINUATION_INDENT_SIZE", "4"),
@@ -248,7 +248,7 @@ fn brace_alternation_selects_java_from_either_position() {
 fn an_inherit_sentinel_is_not_a_width() {
     // IntelliJ writes -1 for "inherit the general setting" on every width; taking it literally
     // would collapse the indent to zero columns.
-    let config: Config = Fixture::scheme(&[
+    let config: Config = api::scheme(&[
         ("INDENT_SIZE", "-1"),
         ("TAB_SIZE", "-1"),
         ("CONTINUATION_INDENT_SIZE", "-1"),
@@ -264,7 +264,7 @@ fn an_inherit_sentinel_is_not_a_width() {
 #[test]
 fn the_three_integer_tables_are_not_interchangeable() {
     // `2` means Wrap Always, Allman braces, and nothing at all, depending on the property.
-    let config: Config = Fixture::scheme(&[
+    let config: Config = api::scheme(&[
         ("CALL_PARAMETERS_WRAP", "2"),
         ("CLASS_BRACE_STYLE", "2"),
         ("IF_BRACE_FORCE", "1"),
@@ -278,7 +278,7 @@ fn the_three_integer_tables_are_not_interchangeable() {
 
 #[test]
 fn the_counter_intuitive_wrap_tokens_land_correctly() {
-    let config: Config = Fixture::scheme(&[
+    let config: Config = api::scheme(&[
         ("CALL_PARAMETERS_WRAP", "split_into_lines"),
         ("METHOD_PARAMETERS_WRAP", "on_every_item"),
         ("BINARY_OPERATION_WRAP", "normal"),
@@ -295,7 +295,7 @@ fn the_counter_intuitive_wrap_tokens_land_correctly() {
 
 #[test]
 fn whitesmiths_and_gnu_stay_distinct() {
-    let config: Config = Fixture::scheme(&[
+    let config: Config = api::scheme(&[
         ("CLASS_BRACE_STYLE", "whitesmiths"),
         ("METHOD_BRACE_STYLE", "gnu"),
         ("BRACE_STYLE", "next_line_if_wrapped"),
@@ -312,7 +312,7 @@ fn whitesmiths_and_gnu_stay_distinct() {
 
 #[test]
 fn keep_simple_booleans_become_the_preserve_policy() {
-    let config: Config = Fixture::scheme(&[
+    let config: Config = api::scheme(&[
         ("KEEP_SIMPLE_METHODS_IN_ONE_LINE", "true"),
         ("KEEP_SIMPLE_CLASSES_IN_ONE_LINE", "false"),
     ])
@@ -346,7 +346,7 @@ fn the_import_layout_table_becomes_jals_groups() {
 
 #[test]
 fn paren_booleans_fold_onto_the_delimiter_vocabulary() {
-    let config: Config = Fixture::scheme(&[
+    let config: Config = api::scheme(&[
         ("METHOD_PARAMETERS_LPAREN_ON_NEXT_LINE", "true"),
         ("METHOD_PARAMETERS_RPAREN_ON_NEXT_LINE", "true"),
         ("CALL_PARAMETERS_LPAREN_ON_NEXT_LINE", "false"),
@@ -366,10 +366,10 @@ fn paren_booleans_fold_onto_the_delimiter_vocabulary() {
 
 #[test]
 fn keep_line_breaks_inverts_into_join_wrapped_lines() {
-    let config: Config = Fixture::scheme(&[("KEEP_LINE_BREAKS", "true")]).into();
+    let config: Config = api::scheme(&[("KEEP_LINE_BREAKS", "true")]).into();
     assert!(!config.wrapping.join_wrapped_lines);
 
-    let config: Config = Fixture::scheme(&[("KEEP_LINE_BREAKS", "false")]).into();
+    let config: Config = api::scheme(&[("KEEP_LINE_BREAKS", "false")]).into();
     assert!(config.wrapping.join_wrapped_lines);
 }
 
@@ -377,7 +377,7 @@ fn keep_line_breaks_inverts_into_join_wrapped_lines() {
 fn naming_and_codegen_settings_are_modeled_but_not_projected() {
     // They are part of the `ij_java_*` surface, so they must parse; they are not formatter
     // rules, so they must not move the config (MAPPING.md §7).
-    let native = Fixture::scheme(&[
+    let native = api::scheme(&[
         ("FIELD_NAME_PREFIX", "m_"),
         ("VISIBILITY", "private"),
         ("INSERT_OVERRIDE_ANNOTATION", "false"),
@@ -413,7 +413,7 @@ fn an_unknown_editorconfig_key_is_dropped() {
 #[test]
 fn a_negative_right_margin_does_not_become_a_zero_width() {
     // IntelliJ writes -1 for "inherit the general setting".
-    let config: Config = Fixture::scheme(&[("RIGHT_MARGIN", "-1")]).into();
+    let config: Config = api::scheme(&[("RIGHT_MARGIN", "-1")]).into();
     assert_eq!(config.layout.max_width, Config::default().layout.max_width);
 }
 

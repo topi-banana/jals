@@ -36,10 +36,10 @@
 //! structurally unreachable from an integration test. The alternative was widening a five-item
 //! public surface for a test.
 //!
-//! The cost of being inside is that these drive [`Formatter::run`] directly instead of the public
+//! The cost of being inside is that these drive [`pipeline::run`] directly instead of the public
 //! [`FormatOutput::format_source`](crate::FormatOutput::format_source), which is the only stage that
 //! entry point adds today. Should it ever grow a second one, that stage would sit outside every
-//! property here — so a step added there belongs in [`Formatter::run`], or this corpus needs a second
+//! property here — so a step added there belongs in [`pipeline::run`], or this corpus needs a second
 //! driver.
 //!
 //! The split is deliberate: the **policy** (which changes are allowed) comes from the license, so it
@@ -49,6 +49,7 @@
 //! version of this file that re-derived the allowances from config fields had read `force-if` alone
 //! where the fail-safe read all four `force-*` keys, and had no reflow allowance at all.
 
+use crate::passes::pipeline;
 use alloc::borrow::ToOwned;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -58,7 +59,7 @@ use jals_config::fmt::{Config, ForceBraces, ImportOrder};
 use jals_syntax::{SyntaxElement, SyntaxKind, SyntaxToken};
 
 use crate::comments::CommentMap;
-use crate::passes::pipeline::{Formatted, Formatter};
+use crate::passes::pipeline::Formatted;
 use crate::passes::token_license::{License, Sites};
 use crate::style::Style;
 
@@ -69,11 +70,11 @@ use crate::style::Style;
 type Tokens = BTreeMap<(SyntaxKind, String), usize>;
 
 /// The sources and configurations every property is checked against.
-struct Corpus;
+pub(crate) mod api {
+    use super::*;
 
-impl Corpus {
     /// Sources covering the shapes the rules disagree about.
-    const SOURCES: &'static [&'static str] = &[
+    pub(crate) const SOURCES: &[&str] = &[
         "package p;\n\nimport java.util.List;\n\nclass A {\n  int x = 1;\n}\n",
         "class B { void m() { if (a) b(); else c(); for (int i = 0; i < 9; i++) d(); } }",
         "class C {\n  // leading\n  int x; /* trailing */\n  /** doc */\n  void m() {}\n}\n",
@@ -107,7 +108,7 @@ impl Corpus {
         "import a.{,};\nclass  A  {  }\n",
         // Long enough for `reflow-long-strings` to fire, which the `gjf` profile turns on — so the
         // reflow path is walked here, and held to idempotence. It does *not* stand in for the
-        // allowance: withdrawing the reflow row makes `Formatter::run` discard the rewrap and keep
+        // allowance: withdrawing the reflow row makes `pipeline::run` discard the rewrap and keep
         // the plain layout, which is still vouched for, so the loss is invisible from out here. What
         // pins the allowance is `token_budget`'s unit test, which asks `accepts` directly.
         "class T {\n  void m() {\n    throw new RuntimeException(\"a single very long literal that runs well past the hundred column limit and then some more\");\n  }\n}\n",
@@ -129,7 +130,7 @@ impl Corpus {
     ];
 
     /// The configurations to check every property under.
-    fn configurations() -> Vec<(&'static str, Config)> {
+    pub(crate) fn configurations() -> Vec<(&'static str, Config)> {
         let mut force = Config::default();
         force.braces.force_if = ForceBraces::IfMultiline;
         force.braces.force_for = ForceBraces::IfMultiline;
@@ -174,29 +175,29 @@ impl Corpus {
     }
 
     /// Format once, keeping whether the formatter could vouch for the result.
-    fn run(src: &str, config: &Config) -> Formatted {
+    pub(crate) fn run(src: &str, config: &Config) -> Formatted {
         jals_exec::block_on_inline(async {
             let (style, _) = Style::reify(config, src, jals_config::FeatureSet::default());
             let parse = jals_syntax::Parse::parse(src).await;
             let errors = parse.errors().len();
-            Formatter::run(&parse.syntax(), src, errors, &style).await
+            pipeline::run(&parse.syntax(), src, errors, &style).await
         })
     }
 
     /// Format once.
-    fn format(src: &str, config: &Config) -> String {
-        Self::run(src, config).text()
+    pub(crate) fn format(src: &str, config: &Config) -> String {
+        run(src, config).text()
     }
 
     /// The license `config` grants, resolved the way the engine resolves it.
-    fn license(src: &str, config: &Config) -> License {
+    pub(crate) fn license(src: &str, config: &Config) -> License {
         Style::reify(config, src, jals_config::FeatureSet::default())
             .0
             .license
     }
 
     /// Whether `tok` sits inside a node of one of `scopes`.
-    fn within(tok: &SyntaxToken, scopes: &[SyntaxKind]) -> bool {
+    pub(crate) fn within(tok: &SyntaxToken, scopes: &[SyntaxKind]) -> bool {
         tok.parent_ancestors()
             .any(|node| scopes.contains(&node.kind()))
     }
@@ -206,28 +207,28 @@ impl Corpus {
     /// Two exclusions, both read off the table rather than off a config field: a token some row can
     /// reach, and anything inside a scope some row may empty. What is left is the part of the file no
     /// operation is allowed to touch, so it is held to exact equality.
-    fn untouched(src: &str, license: License) -> Tokens {
-        Self::counted(src, license, |tok, license, sites, scopes| {
-            !license.claims(tok, sites) && !Self::within(tok, scopes)
+    pub(crate) fn untouched(src: &str, license: License) -> Tokens {
+        counted(src, license, |tok, license, sites, scopes| {
+            !license.claims(tok, sites) && !within(tok, scopes)
         })
     }
 
     /// The significant tokens of `src` inside a scope `license` lets a row empty, with their counts.
     ///
-    /// The other half of [`untouched`](Self::untouched)'s second exclusion. Those tokens are outside
+    /// The other half of [`untouched`](untouched)'s second exclusion. Those tokens are outside
     /// exact equality because a row may *delete* them — but deletion is all it may do, so nothing may
     /// **appear** there, and that much is still checkable. Without it an import declaration's tokens
     /// leave this file's view entirely, and a token materializing inside one is left to the fail-safe
     /// alone.
-    fn removable(src: &str, license: License) -> Tokens {
-        Self::counted(src, license, |tok, _, _, scopes| Self::within(tok, scopes))
+    pub(crate) fn removable(src: &str, license: License) -> Tokens {
+        counted(src, license, |tok, _, _, scopes| within(tok, scopes))
     }
 
     /// The significant tokens of `src` that `keep` selects, with their counts.
     ///
     /// The two selections share this walk so they cannot come apart on what a *significant* token is,
     /// or on how the table's scopes are resolved.
-    fn counted(
+    pub(crate) fn counted(
         src: &str,
         license: License,
         keep: impl Fn(&SyntaxToken, License, &Sites, &[SyntaxKind]) -> bool,
@@ -236,7 +237,7 @@ impl Corpus {
         let parse = jals_exec::block_on_inline(jals_syntax::Parse::parse(src));
         let root = parse.syntax();
         // The reflow row scopes its kinds to these nodes, so resolving them is part of asking the
-        // table which tokens it claims — through the same `StringWrapper::sites` the pass reads.
+        // table which tokens it claims — through the same `string_wrapper::sites` the pass reads.
         let sites = Sites::of(&root, license);
         let mut out = Tokens::new();
         for tok in root
@@ -257,9 +258,9 @@ impl Corpus {
     /// inferred — so under one the property is that the comment is still **there**, and its text
     /// is not the thing to compare. With every reflow rule off, the text is compared with each
     /// line's own indentation normalized away: moving a comment to its new column is precisely
-    /// what [`CommentFormatter::shift`](crate::javadoc) is for, and a multi-line comment on a
+    /// what [`javadoc::shift`](crate::javadoc) is for, and a multi-line comment on a
     /// member that changed indent width would otherwise read as a comment that went missing.
-    fn comments(src: &str, reordered: bool, reflow: bool) -> Vec<String> {
+    pub(crate) fn comments(src: &str, reordered: bool, reflow: bool) -> Vec<String> {
         let parse = jals_exec::block_on_inline(jals_syntax::Parse::parse(src));
         let mut collected: Vec<String> = parse
             .syntax()
@@ -290,10 +291,10 @@ impl Corpus {
 
 #[test]
 fn formatting_is_idempotent() {
-    for (name, config) in Corpus::configurations() {
-        for src in Corpus::SOURCES {
-            let once = Corpus::format(src, &config);
-            let twice = Corpus::format(&once, &config);
+    for (name, config) in api::configurations() {
+        for src in api::SOURCES {
+            let once = api::format(src, &config);
+            let twice = api::format(&once, &config);
             assert_eq!(
                 once, twice,
                 "{name}: fmt is not idempotent on {src:?}\n--- once ---\n{once}\n--- twice ---\n{twice}",
@@ -307,9 +308,9 @@ fn the_fail_safe_never_fires_on_the_corpus() {
     // The progress property. Every other property here is a *preservation* property, and a total
     // fallback satisfies all of them at once — which is how a defect that handed back whole files
     // unformatted lived in a corpus that was checked four ways.
-    for (name, config) in Corpus::configurations() {
-        for src in Corpus::SOURCES {
-            let outcome = Corpus::run(src, &config);
+    for (name, config) in api::configurations() {
+        for src in api::SOURCES {
+            let outcome = api::run(src, &config);
             assert!(
                 matches!(outcome, Formatted::Vouched(_)),
                 "{name}: the fail-safe rejected the output for {src:?}, so the whole file came back \
@@ -326,9 +327,9 @@ fn the_public_output_reports_the_verdict_the_pipeline_reached() {
     // decision it names. `jals fmt --check` fails on a fallback, so a `vouched` that silently went
     // constant would put the CLI back to reporting a refused file as clean, which is the symptom the
     // whole fail-safe audit started from.
-    for (name, config) in Corpus::configurations() {
-        for src in Corpus::SOURCES {
-            let internal = Corpus::run(src, &config);
+    for (name, config) in api::configurations() {
+        for src in api::SOURCES {
+            let internal = api::run(src, &config);
             let public = jals_exec::block_on_inline(crate::FormatOutput::format_source(
                 src,
                 &config,
@@ -353,21 +354,21 @@ fn a_token_no_operation_claims_is_never_touched() {
     // The allowances come from the license, so this cannot be held to a rule the fail-safe does not
     // apply — nor miss one it does. The comparison is this module's own, so it is still an
     // independent witness rather than the fail-safe agreeing with itself.
-    for (name, config) in Corpus::configurations() {
-        for src in Corpus::SOURCES {
-            let license = Corpus::license(src, &config);
-            let formatted = Corpus::format(src, &config);
+    for (name, config) in api::configurations() {
+        for src in api::SOURCES {
+            let license = api::license(src, &config);
+            let formatted = api::format(src, &config);
             assert_eq!(
-                Corpus::untouched(src, license),
-                Corpus::untouched(&formatted, license),
+                api::untouched(src, license),
+                api::untouched(&formatted, license),
                 "{name}: a token no row claims changed for {src:?}\n--- output ---\n{formatted}",
             );
 
             // A `RemovesSubtrees` row licenses *deletion* inside its scope and nothing else, so what
             // survives there has to be a sub-multiset of what went in. Exact equality is not
             // available — the row may empty the scope — but "appeared from nowhere" still is.
-            let given = Corpus::removable(src, license);
-            for (token, count) in Corpus::removable(&formatted, license) {
+            let given = api::removable(src, license);
+            for (token, count) in api::removable(&formatted, license) {
                 assert!(
                     given.get(&token).copied().unwrap_or(0) >= count,
                     "{name}: {token:?} appeared inside a removable scope for {src:?}\n\
@@ -380,11 +381,11 @@ fn a_token_no_operation_claims_is_never_touched() {
 
 #[test]
 fn no_comment_is_ever_dropped() {
-    for (name, config) in Corpus::configurations() {
+    for (name, config) in api::configurations() {
         // Nothing is excluded any more. A profile that deletes unused imports used to take their
         // comments with it, and the import block was skipped rather than the whole profile; the
         // comments now survive, so the only concession left is that their *order* inside the block
-        // may change (`Corpus::comments`).
+        // may change (`api::comments`).
         let reordered = config.imports.remove_unused;
         // A reflow rewrites the comment's interior by design, so under one this asks only that
         // the comment survived. Which rule is on is read off the config, not assumed per profile.
@@ -397,11 +398,11 @@ fn no_comment_is_ever_dropped() {
             || comments.format_block
             || comments.format_javadoc
             || comments.normalize_block_comments;
-        for src in Corpus::SOURCES {
-            let formatted = Corpus::format(src, &config);
+        for src in api::SOURCES {
+            let formatted = api::format(src, &config);
             assert_eq!(
-                Corpus::comments(src, reordered, reflow),
-                Corpus::comments(&formatted, reordered, reflow),
+                api::comments(src, reordered, reflow),
+                api::comments(&formatted, reordered, reflow),
                 "{name}: a comment was dropped or duplicated for {src:?}\n--- output ---\n{formatted}",
             );
         }
@@ -411,8 +412,8 @@ fn no_comment_is_ever_dropped() {
 #[test]
 fn malformed_input_is_never_lost() {
     let config = Config::default();
-    for src in Corpus::SOURCES {
-        let formatted = Corpus::format(src, &config);
+    for src in api::SOURCES {
+        let formatted = api::format(src, &config);
         assert!(
             !src.trim().is_empty() || formatted.trim().is_empty(),
             "an empty input produced output: {formatted:?}",

@@ -169,7 +169,7 @@ pub enum ProjectDiagnosticCode {
     ProjectStorage,
     /// The procedure did not complete, for a reason it could not report as a value — a host
     /// observing a panic or a cancelled run. Never produced by
-    /// [`assemble`](ProjectDiagnostics::assemble); it is here so a host reporting one spells it
+    /// [`assemble`](api::assemble); it is here so a host reporting one spells it
     /// from the same vocabulary as everything else it publishes.
     ProjectAssembly,
     /// The root build script reported, or failed.
@@ -393,10 +393,16 @@ pub enum GraphOutcome<'a> {
     NotReached,
 }
 
-/// Assembles the canonical diagnostics for one run of the project-assembly procedure.
-pub struct ProjectDiagnostics;
+pub use api::{assemble, has_errors};
 
-impl ProjectDiagnostics {
+/// Assembles the canonical diagnostics for one run of the project-assembly procedure.
+mod api {
+    use super::{
+        BuildScriptError, GraphOutcome, NetworkPolicy, ProjectAnchor, ProjectDiagnostic,
+        ProjectDiagnosticCode, ProjectDiagnosticSeverity, RootBuildScriptError, ScriptFile,
+        ScriptOutcome, ToOwned, ToString, Vec, fmt,
+    };
+
     /// Assemble what one run of the procedure has to say.
     ///
     /// Both phases in one call, because a host that reports them separately has to remember not to
@@ -410,9 +416,9 @@ impl ProjectDiagnostics {
         script_file: Option<ScriptFile<'_>>,
     ) -> Vec<ProjectDiagnostic> {
         let mut out = Vec::new();
-        Self::script_phase(&mut out, script, script_file);
+        script_phase(&mut out, script, script_file);
         let graph_start = out.len();
-        Self::graph_phase(&mut out, graph);
+        graph_phase(&mut out, graph);
 
         // Advisory last, and only about what the graph phase just said. A refusal reads the same in
         // a graph warning and a classpath one, so the scan runs over both rather than over the type
@@ -455,13 +461,13 @@ impl ProjectDiagnostics {
 
     /// The anchor a script diagnostic takes when it has nothing narrower to point at: the script
     /// when one is configured, the manifest otherwise.
-    fn script_anchor(file: Option<ScriptFile<'_>>) -> ProjectAnchor {
+    pub(crate) fn script_anchor(file: Option<ScriptFile<'_>>) -> ProjectAnchor {
         file.map_or(ProjectAnchor::Manifest, |file| {
             ProjectAnchor::Script(file.key.clone())
         })
     }
 
-    fn script_phase(
+    pub(crate) fn script_phase(
         out: &mut Vec<ProjectDiagnostic>,
         script: ScriptOutcome<'_>,
         file: Option<ScriptFile<'_>>,
@@ -474,7 +480,7 @@ impl ProjectDiagnostics {
                 // arise while erasing the one that would.
                 for diagnostic in &output.diagnostics {
                     out.push(ProjectDiagnostic {
-                        anchor: Self::script_anchor(file),
+                        anchor: script_anchor(file),
                         span: None,
                         severity: ProjectDiagnosticSeverity::Warning,
                         code: ProjectDiagnosticCode::BuildScript,
@@ -483,23 +489,23 @@ impl ProjectDiagnostics {
                 }
             }
             ScriptOutcome::Failed(RootBuildScriptError::BuildScript(error)) => {
-                Self::script_failure(out, error, file);
+                script_failure(out, error, file);
             }
-            ScriptOutcome::Failed(error @ RootBuildScriptError::Task(_)) => out.push(Self::error(
-                Self::script_anchor(file),
+            ScriptOutcome::Failed(error @ RootBuildScriptError::Task(_)) => out.push(self::error(
+                script_anchor(file),
                 ProjectDiagnosticCode::BuildScript,
                 error,
             )),
             ScriptOutcome::Failed(error @ RootBuildScriptError::Storage(_)) => {
-                out.push(Self::error(
-                    Self::script_anchor(file),
+                out.push(self::error(
+                    script_anchor(file),
                     ProjectDiagnosticCode::ProjectStorage,
                     error,
                 ));
             }
             // `[build] source-dirs` content, so the manifest is what a reader goes to fix.
             ScriptOutcome::Failed(error @ RootBuildScriptError::InvalidSourceRoot(_)) => {
-                out.push(Self::error(
+                out.push(self::error(
                     ProjectAnchor::Manifest,
                     ProjectDiagnosticCode::ProjectManifest,
                     error,
@@ -508,7 +514,7 @@ impl ProjectDiagnostics {
         }
     }
 
-    fn script_failure(
+    pub(crate) fn script_failure(
         out: &mut Vec<ProjectDiagnostic>,
         error: &BuildScriptError,
         file: Option<ScriptFile<'_>>,
@@ -520,7 +526,7 @@ impl ProjectDiagnostics {
             BuildScriptError::ReportedErrors(diagnostics) => {
                 for diagnostic in diagnostics {
                     out.push(ProjectDiagnostic {
-                        anchor: Self::script_anchor(file),
+                        anchor: script_anchor(file),
                         span: None,
                         severity: if diagnostic.is_error() {
                             ProjectDiagnosticSeverity::Error
@@ -534,12 +540,12 @@ impl ProjectDiagnostics {
             }
             // A complaint about `[build] script`, not about the script — which the host could not
             // anchor to anyway, since the path it names is not a usable key.
-            BuildScriptError::InvalidScriptPath { .. } => out.push(Self::error(
+            BuildScriptError::InvalidScriptPath { .. } => out.push(self::error(
                 ProjectAnchor::Manifest,
                 ProjectDiagnosticCode::ProjectManifest,
                 error,
             )),
-            BuildScriptError::ScriptTooLarge { script, .. } => out.push(Self::error(
+            BuildScriptError::ScriptTooLarge { script, .. } => out.push(self::error(
                 ProjectAnchor::Script(script.clone()),
                 ProjectDiagnosticCode::BuildScript,
                 error,
@@ -556,14 +562,14 @@ impl ProjectDiagnostics {
                 code: ProjectDiagnosticCode::BuildScript,
                 message: error.to_string(),
             }),
-            BuildScriptError::Storage { .. } => out.push(Self::error(
-                Self::script_anchor(file),
+            BuildScriptError::Storage { .. } => out.push(self::error(
+                script_anchor(file),
                 ProjectDiagnosticCode::ProjectStorage,
                 error,
             )),
             BuildScriptError::InvalidLimit(_) | BuildScriptError::EnvironmentLimit(_) => {
-                out.push(Self::error(
-                    Self::script_anchor(file),
+                out.push(self::error(
+                    script_anchor(file),
                     ProjectDiagnosticCode::BuildScript,
                     error,
                 ));
@@ -571,7 +577,7 @@ impl ProjectDiagnostics {
         }
     }
 
-    fn graph_phase(out: &mut Vec<ProjectDiagnostic>, graph: GraphOutcome<'_>) {
+    pub(crate) fn graph_phase(out: &mut Vec<ProjectDiagnostic>, graph: GraphOutcome<'_>) {
         match graph {
             GraphOutcome::NotReached => {}
             GraphOutcome::Failed(failure) => {
@@ -579,13 +585,13 @@ impl ProjectDiagnostics {
                 // one preprocessing then failed on, and reading the failure without them is reading
                 // half of it.
                 for warning in &failure.warnings {
-                    out.push(Self::warning(
+                    out.push(self::warning(
                         ProjectAnchor::Manifest,
                         ProjectDiagnosticCode::DependencyResolution,
                         warning,
                     ));
                 }
-                out.push(Self::error(
+                out.push(error(
                     ProjectAnchor::Manifest,
                     ProjectDiagnosticCode::of_graph_error(&failure.error),
                     &failure.error,
@@ -593,21 +599,21 @@ impl ProjectDiagnostics {
             }
             GraphOutcome::Resolved(report) => {
                 for warning in report.warnings {
-                    out.push(Self::warning(
+                    out.push(self::warning(
                         ProjectAnchor::Manifest,
                         ProjectDiagnosticCode::DependencyResolution,
                         warning,
                     ));
                 }
                 for error in report.errors {
-                    out.push(Self::error(
+                    out.push(self::error(
                         ProjectAnchor::Manifest,
                         ProjectDiagnosticCode::DependencyAssembly,
                         error,
                     ));
                 }
                 for warning in report.inputs {
-                    out.push(Self::warning(
+                    out.push(self::warning(
                         ProjectAnchor::Manifest,
                         ProjectDiagnosticCode::ClasspathInput,
                         warning,
@@ -622,7 +628,7 @@ impl ProjectDiagnostics {
     /// Every type this is used on carries its subject in an attribution the message does not
     /// repeat — a graph warning's node, a classpath warning's origin — so rendering the message
     /// alone drops the half a user can act on.
-    fn warning(
+    pub(crate) fn warning(
         anchor: ProjectAnchor,
         code: ProjectDiagnosticCode,
         subject: &dyn fmt::Display,
@@ -636,15 +642,15 @@ impl ProjectDiagnostics {
         }
     }
 
-    /// [`warning`](Self::warning) at error severity — the same whole-`Display` rendering.
-    fn error(
+    /// [`warning`](warning) at error severity — the same whole-`Display` rendering.
+    pub(crate) fn error(
         anchor: ProjectAnchor,
         code: ProjectDiagnosticCode,
         subject: &dyn fmt::Display,
     ) -> ProjectDiagnostic {
         ProjectDiagnostic {
             severity: ProjectDiagnosticSeverity::Error,
-            ..Self::warning(anchor, code, subject)
+            ..warning(anchor, code, subject)
         }
     }
 }
@@ -703,7 +709,7 @@ mod tests {
 
     /// The assembly under one outcome pair, with no script file configured.
     fn assemble(script: ScriptOutcome<'_>, graph: GraphOutcome<'_>) -> Vec<ProjectDiagnostic> {
-        ProjectDiagnostics::assemble(script, graph, None)
+        api::assemble(script, graph, None)
     }
 
     fn codes(diagnostics: &[ProjectDiagnostic]) -> Vec<ProjectDiagnosticCode> {
@@ -769,7 +775,7 @@ mod tests {
             }),
             RootBuildScriptError::InvalidSourceRoot("../src".into()),
         ] {
-            let out = ProjectDiagnostics::assemble(
+            let out = api::assemble(
                 ScriptOutcome::Failed(&error),
                 GraphOutcome::NotReached,
                 Some(file),
@@ -790,7 +796,7 @@ mod tests {
             position: None,
             message: "syntax error".into(),
         });
-        let out = ProjectDiagnostics::assemble(
+        let out = api::assemble(
             ScriptOutcome::Failed(&error),
             GraphOutcome::NotReached,
             Some(ScriptFile {
@@ -804,7 +810,7 @@ mod tests {
         // A different script than the error names: resolving in the wrong text would be a silently
         // wrong range, so the diagnostic is still reported and simply carries no span.
         let other = key("other.rhai");
-        let out = ProjectDiagnostics::assemble(
+        let out = api::assemble(
             ScriptOutcome::Failed(&error),
             GraphOutcome::NotReached,
             Some(ScriptFile {
@@ -986,7 +992,7 @@ mod tests {
             GraphWarning::node("../b", "two"),
         ];
         let report = ProjectReport::new(&warnings, &[], &[]);
-        let out = ProjectDiagnostics::assemble(
+        let out = api::assemble(
             ScriptOutcome::Failed(&error),
             GraphOutcome::Resolved(report),
             Some(ScriptFile {
@@ -1068,8 +1074,8 @@ mod tests {
         let info = shaped(None, ProjectDiagnosticSeverity::Info);
         let error = shaped(None, ProjectDiagnosticSeverity::Error);
 
-        assert!(!ProjectDiagnostics::has_errors(&[]));
-        assert!(!ProjectDiagnostics::has_errors(&[warning.clone(), info]));
-        assert!(ProjectDiagnostics::has_errors(&[warning, error]));
+        assert!(!api::has_errors(&[]));
+        assert!(!api::has_errors(&[warning.clone(), info]));
+        assert!(api::has_errors(&[warning, error]));
     }
 }

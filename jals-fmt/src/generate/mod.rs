@@ -45,9 +45,6 @@ use jals_config::fmt::{Braces, Config, KeepOnOneLine, ParenPositions, Wrapping};
 mod prune;
 mod toml_out;
 
-use prune::Pruned;
-use toml_out::Toml;
-
 #[cfg(test)]
 mod tests;
 
@@ -178,7 +175,7 @@ impl Provenance {
             let _ = writeln!(out, "#\n# warning: {warning}");
         }
 
-        let Some(sections) = Pruned::non_default(config) else {
+        let Some(sections) = prune::non_default(config) else {
             // Unreachable while `Config` stays two levels deep (pinned by
             // `the_schema_is_two_levels_deep`). Say so in the file rather than emitting a table
             // that would not round-trip.
@@ -189,13 +186,13 @@ impl Provenance {
             return out;
         };
 
-        for section in Toml::SECTIONS {
+        for section in toml_out::SECTIONS {
             let Some(keys) = sections.get(section).and_then(serde_json::Value::as_object) else {
                 continue;
             };
             let _ = writeln!(out, "\n[{section}]");
             for (key, value) in keys {
-                let _ = match Toml::scalar(value) {
+                let _ = match toml_out::scalar(value) {
                     Some(rendered) => writeln!(out, "{key} = {rendered}"),
                     // A value with no TOML spelling (only `null` can be one, and only if a key's
                     // default ever stops being `None`). Record it instead of writing broken TOML.

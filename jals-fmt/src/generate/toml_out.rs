@@ -6,10 +6,12 @@ use core::fmt::Write as _;
 
 use serde_json::Value;
 
-/// TOML rendering of the pruned config tree.
-pub(super) struct Toml;
+pub(crate) use api::{SECTIONS, scalar};
 
-impl Toml {
+/// TOML rendering of the pruned config tree.
+pub(crate) mod api {
+    use super::*;
+
     /// The eight `[section]` tables, in `Config`'s **declaration** order.
     ///
     /// The order has to be stated here: `serde_json::Map` is a `BTreeMap` (the crate's
@@ -20,7 +22,7 @@ impl Toml {
     ///
     /// `tests::sections_covers_every_key` pins this list against the schema: a typo here would
     /// drop a whole section from every generated file without any error.
-    pub(super) const SECTIONS: [&str; 8] = [
+    pub(crate) const SECTIONS: [&str; 8] = [
         "layout",
         "blank-lines",
         "braces",
@@ -33,18 +35,18 @@ impl Toml {
 
     /// Render one leaf as a TOML value, or `None` when it has no TOML spelling (`null`) or is not
     /// a leaf at all.
-    pub(super) fn scalar(value: &Value) -> Option<String> {
+    pub(crate) fn scalar(value: &Value) -> Option<String> {
         match value {
             Value::Bool(flag) => Some(if *flag { "true" } else { "false" }.to_owned()),
             Value::Number(number) => Some(number.to_string()),
-            Value::String(text) => Some(Self::basic_string(text)),
+            Value::String(text) => Some(basic_string(text)),
             Value::Array(items) => {
                 let mut out = String::from("[");
                 for (index, item) in items.iter().enumerate() {
                     if index > 0 {
                         out.push_str(", ");
                     }
-                    out.push_str(&Self::scalar(item)?);
+                    out.push_str(&scalar(item)?);
                 }
                 out.push(']');
                 Some(out)
@@ -58,7 +60,7 @@ impl Toml {
     /// Every control character needs an escape — `formatter-off-tag` and `imports.groups` are
     /// user-supplied strings that reach here verbatim from a native config, so an unusual value
     /// must not be able to produce a file that no longer parses.
-    fn basic_string(text: &str) -> String {
+    pub(crate) fn basic_string(text: &str) -> String {
         let mut out = String::with_capacity(text.len() + 2);
         out.push('"');
         for character in text.chars() {

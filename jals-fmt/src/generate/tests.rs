@@ -5,6 +5,7 @@
 //! rest are round trips — emit, parse, compare — because `Config` ignores unknown keys, so a
 //! generated file that drifted from the schema would still parse and silently yield defaults.
 
+use crate::generate::toml_out;
 use alloc::borrow::ToOwned;
 use alloc::string::String;
 use alloc::vec;
@@ -16,16 +17,15 @@ use jals_config::fmt::{
 };
 use serde_json::Value;
 
-use super::toml_out::Toml;
 use super::{MigrationWarning, MigrationWarningKind, Provenance};
 use crate::import::{ConfigImporter, EclipsePrefs, IntellijEditorConfig};
 
 /// Shared inputs for the emitter tests.
-struct Fixture;
+pub(crate) mod api {
+    use super::*;
 
-impl Fixture {
     /// A provenance whose rendering is not the point of the test using it.
-    fn provenance() -> Provenance {
+    pub(crate) fn provenance() -> Provenance {
         Provenance {
             source: ".settings/org.eclipse.jdt.core.prefs".to_owned(),
             tool: "eclipse",
@@ -34,15 +34,15 @@ impl Fixture {
     }
 
     /// Emit `config` with no warnings and parse the result straight back.
-    fn round_trip(config: &Config) -> Config {
-        let text = Self::provenance().jalsfmt_toml(config, &[]);
+    pub(crate) fn round_trip(config: &Config) -> Config {
+        let text = provenance().jalsfmt_toml(config, &[]);
         toml::from_str(&text)
             .unwrap_or_else(|err| panic!("generated config should parse: {err}\n{text}"))
     }
 
     /// A config with at least one non-default key in every section, chosen to exercise every
     /// value shape the emitter can meet: bool, integer, `Option`, enum, string, and string list.
-    fn every_section_touched() -> Config {
+    pub(crate) fn every_section_touched() -> Config {
         let mut config = Config::default();
         config.layout.indent_width = 2;
         config.layout.max_width = 120;
@@ -64,7 +64,7 @@ impl Fixture {
 
 #[test]
 fn default_config_emits_only_a_header() {
-    let text = Fixture::provenance().jalsfmt_toml(&Config::default(), &[]);
+    let text = api::provenance().jalsfmt_toml(&Config::default(), &[]);
 
     assert!(
         !text.contains('['),
@@ -81,23 +81,23 @@ fn default_config_emits_only_a_header() {
 fn the_header_does_not_collide_with_the_documented_defaults_marker() {
     // `jals-tests` picks the documented *defaults* sample out of a Markdown page by this exact
     // string. A generated example pasted into the README must not be mistaken for it.
-    let text = Fixture::provenance().jalsfmt_toml(&Fixture::every_section_touched(), &[]);
+    let text = api::provenance().jalsfmt_toml(&api::every_section_touched(), &[]);
     assert!(!text.contains("# jalsfmt.toml"), "{text}");
 }
 
 #[test]
 fn every_section_round_trips() {
-    let config = Fixture::every_section_touched();
-    let text = Fixture::provenance().jalsfmt_toml(&config, &[]);
+    let config = api::every_section_touched();
+    let text = api::provenance().jalsfmt_toml(&config, &[]);
 
     // Every section is represented, so the round trip below covers all eight.
-    for section in Toml::SECTIONS {
+    for section in toml_out::SECTIONS {
         assert!(
             text.contains(&alloc::format!("[{section}]")),
             "{section} should be written: {text}"
         );
     }
-    assert_eq!(Fixture::round_trip(&config), config);
+    assert_eq!(api::round_trip(&config), config);
 }
 
 #[test]
@@ -105,7 +105,7 @@ fn only_the_changed_keys_of_a_section_are_written() {
     let mut config = Config::default();
     config.layout.max_width = 120;
 
-    let text = Fixture::provenance().jalsfmt_toml(&config, &[]);
+    let text = api::provenance().jalsfmt_toml(&config, &[]);
 
     assert!(text.contains("max-width = 120"), "{text}");
     // `indent-width` is untouched, so it stays out of the file (DESIGN.md §15 P-gen-6).
@@ -143,7 +143,7 @@ fn sections_covers_every_key() {
     else {
         panic!("the config root should be a table");
     };
-    let mut listed: Vec<&str> = Toml::SECTIONS.to_vec();
+    let mut listed: Vec<&str> = toml_out::SECTIONS.to_vec();
     listed.sort_unstable();
     let mut actual: Vec<&str> = root.keys().map(String::as_str).collect();
     actual.sort_unstable();
@@ -152,13 +152,13 @@ fn sections_covers_every_key() {
 
 #[test]
 fn section_order_is_declaration_order() {
-    let text = Fixture::provenance().jalsfmt_toml(&Fixture::every_section_touched(), &[]);
+    let text = api::provenance().jalsfmt_toml(&api::every_section_touched(), &[]);
 
     let written: Vec<&str> = text
         .lines()
         .filter_map(|line| line.strip_prefix('[')?.strip_suffix(']'))
         .collect();
-    assert_eq!(written, Toml::SECTIONS);
+    assert_eq!(written, toml_out::SECTIONS);
 }
 
 #[test]
@@ -207,7 +207,7 @@ org.eclipse.jdt.core.formatter.brace_position_for_type_declaration=next_line
     assert_eq!(config.layout.indent_width, 2);
     assert_eq!(config.braces.type_declaration, BraceStyle::NextLine);
     // The projection and the emitter cannot drift: what was imported is what is written back.
-    assert_eq!(Fixture::round_trip(&config), config);
+    assert_eq!(api::round_trip(&config), config);
 }
 
 #[test]
@@ -225,7 +225,7 @@ insert_final_newline = true
 
     assert_eq!(config.layout.indent_width, 2);
     assert_eq!(config.layout.max_width, 120);
-    assert_eq!(Fixture::round_trip(&config), config);
+    assert_eq!(api::round_trip(&config), config);
 }
 
 #[test]

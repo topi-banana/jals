@@ -132,7 +132,7 @@ impl ClasspathLoad {
         for entry in entries {
             Self::plan_entry(view, cache, entry, &mut tasks).await;
         }
-        let outcomes = exec.fan_out(tasks, Archive::decode_task).await;
+        let outcomes = exec.fan_out(tasks, archive::decode_task).await;
         let mut load = Self::default();
         for (classes, warnings) in outcomes {
             load.classes.extend(classes);
@@ -271,9 +271,9 @@ impl ClasspathLoad {
         reader: JarSource<R>,
         tasks: &mut Vec<DecodeTask<R>>,
     ) {
-        match Archive::open(reader).await {
+        match archive::open(reader).await {
             Ok((reader, directory)) => {
-                for members in Archive::chunk_ranges(directory.members.len()) {
+                for members in archive::chunk_ranges(directory.members.len()) {
                     tasks.push(DecodeTask::JarChunk {
                         origin: origin.clone(),
                         reader: reader.clone(),
@@ -372,7 +372,7 @@ impl ClasspathCoverage {
             return;
         }
         match Self::kind(path) {
-            Some(EntryKind::Class) => match Archive::read_class(bytes).await {
+            Some(EntryKind::Class) => match archive::read_class(bytes).await {
                 Ok(class) => self.add_parsed_class(&class),
                 Err(message) => self.warnings.push(Warning::new(origin, message)),
             },
@@ -415,7 +415,7 @@ impl ClasspathCoverage {
     }
 
     async fn add_archive<R: sio::Read + sio::Seek>(&mut self, origin: WarningOrigin, reader: R) {
-        let directory = match Archive::open(reader).await {
+        let directory = match archive::open(reader).await {
             Ok((_, directory)) => directory,
             Err(message) => {
                 self.warnings.push(Warning::new(origin, message));
@@ -433,7 +433,7 @@ impl ClasspathCoverage {
             }
             yielder.tick().await;
             if member.is_dir
-                || !Archive::extension(&member.name)
+                || !archive::extension(&member.name)
                     .is_some_and(|extension| extension.eq_ignore_ascii_case("class"))
             {
                 continue;
@@ -456,7 +456,7 @@ impl ClasspathCoverage {
     }
 
     fn kind(path: &RelativePath) -> Option<EntryKind> {
-        let extension = Archive::extension(path.name()?.as_str())?;
+        let extension = archive::extension(path.name()?.as_str())?;
         if extension.eq_ignore_ascii_case("class") {
             Some(EntryKind::Class)
         } else if extension.eq_ignore_ascii_case("jar") || extension.eq_ignore_ascii_case("zip") {
@@ -496,9 +496,13 @@ pub struct SourceTreeLimits {
 }
 
 /// Strict source-tree extraction for build tasks.
-pub struct SourceTreeExtraction;
+pub mod source_tree_extraction {
+    use super::{
+        ArtifactCache, BTreeMap, CacheBackend, CacheKey, CacheNamespace, ClassFile, ClassHierarchy,
+        Exec, LibrarySource, RelativePath, SkeletonGroup, SkeletonMode, SourceTree,
+        SourceTreeLimits, String, ToOwned, Vec, archive, format,
+    };
 
-impl SourceTreeExtraction {
     /// Extract every `.java` member below `prefix`, stripping that prefix from result paths.
     /// Any unsafe, duplicate, corrupt, or unpublishable matching member fails the whole operation.
     pub async fn java<C: CacheBackend>(
@@ -513,11 +517,11 @@ impl SourceTreeExtraction {
             .await
             .map_err(|error| format!("source jar is invalid: {error:?}"))?
             .ok_or_else(|| "source jar is not cached".to_owned())?;
-        let members = Archive::decode_matching_bounded(exec, reader, "java", limits).await?;
+        let members = archive::decode_matching_bounded(exec, reader, "java", limits).await?;
         let prefix_len = prefix.segments().len();
         let mut files = BTreeMap::new();
         for (name, outcome) in members {
-            let member = Archive::safe_relative(&name)
+            let member = archive::safe_relative(&name)
                 .ok_or_else(|| format!("unsafe Java archive member `{name}`"))?;
             if !member.starts_with(prefix) {
                 continue;
@@ -535,7 +539,7 @@ impl SourceTreeExtraction {
         }
         let mut tree = SourceTree::default();
         for (path, (member, bytes)) in files {
-            let key = Archive::member_key(CacheNamespace::BuildTaskSource, jar, &member, &bytes);
+            let key = archive::member_key(CacheNamespace::BuildTaskSource, jar, &member, &bytes);
             cache
                 .publish(&key, &bytes)
                 .await
@@ -545,8 +549,8 @@ impl SourceTreeExtraction {
         Ok(tree)
     }
 
-    /// Decompile every `.class` member of `jar` whose internal binary name sits under `prefix`
-    /// into compile-safe skeleton `.java` sources, stripping that prefix from result paths.
+    /// Decompile every `.class` member of `jar` whose internal binary name sits under `prefix` into compile-safe skeleton `.java` sources, stripping that prefix from result paths.
+    ///
     /// Any render/parse/publish failure fails the whole operation.
     pub async fn decompile<C: CacheBackend>(
         exec: &Exec,
@@ -560,7 +564,7 @@ impl SourceTreeExtraction {
             .await
             .map_err(|error| format!("decompile jar is invalid: {error:?}"))?
             .ok_or_else(|| "decompile jar is not cached".to_owned())?;
-        let members = Archive::decode_matching_bounded(exec, reader, "class", limits).await?;
+        let members = archive::decode_matching_bounded(exec, reader, "class", limits).await?;
 
         let mut classes = Vec::new();
         for (name, outcome) in members {
@@ -633,7 +637,7 @@ impl SourceTreeExtraction {
 
         let mut tree = SourceTree::default();
         for (path, (member, bytes)) in files {
-            let key = Archive::member_key(CacheNamespace::BuildTaskSource, jar, &member, &bytes);
+            let key = archive::member_key(CacheNamespace::BuildTaskSource, jar, &member, &bytes);
             cache.publish(&key, &bytes).await.map_err(|error| {
                 format!("decompiled source `{member}` publish failed: {error:?}")
             })?;
@@ -678,7 +682,7 @@ impl JarExtraction<LibrarySource> {
             let prefix = RelativePath::new([
                 Name::new(jar.provenance().to_hex()).expect("digest hex is a portable name")
             ]);
-            let members = match Archive::decode_matching(exec, reader, "java").await {
+            let members = match archive::decode_matching(exec, reader, "java").await {
                 Ok(members) => members,
                 Err(message) => {
                     out.warn(jar, &message);
@@ -686,7 +690,7 @@ impl JarExtraction<LibrarySource> {
                 }
             };
             for (name, outcome) in members {
-                match Archive::publish_member(
+                match archive::publish_member(
                     cache,
                     CacheNamespace::ExtractedSource,
                     jar,
@@ -738,13 +742,13 @@ impl JarExtraction<CachedJar> {
                     return self.warn(jar, &format!("nested jar parent is invalid: {error:?}"));
                 }
             };
-            let members = match Archive::decode_matching(exec, reader, "jar").await {
+            let members = match archive::decode_matching(exec, reader, "jar").await {
                 Ok(members) => members,
                 Err(message) => return self.warn(jar, &message),
             };
             let mut level = Vec::new();
             for (name, outcome) in members {
-                match Archive::publish_member(cache, CacheNamespace::NestedJar, jar, &name, outcome)
+                match archive::publish_member(cache, CacheNamespace::NestedJar, jar, &name, outcome)
                     .await
                 {
                     Ok((member, key)) => level.push(CachedJar { member, key }),
@@ -767,44 +771,51 @@ impl<T> JarExtraction<T> {
     }
 }
 
-pub(crate) struct Archive;
+pub(crate) mod archive {
+    use super::{
+        Arc, ArtifactCache, Buffered, CacheBackend, CacheKey, CacheNamespace, CentralDirectory,
+        ClassFile, ContentDigest, DecodeTask, Exec, JAR_CHUNK_MEMBERS, JarReader, JarSource,
+        MemberStream, ProvenanceFold, Range, RelativePath, SourceTreeLimits, String, ToOwned,
+        ToString, Vec, Warning, WarningOrigin, format, sio, vec,
+    };
 
-impl Archive {
     /// The fixed-size chunk split of `0..len`.
-    fn chunk_ranges(len: usize) -> impl Iterator<Item = Range<usize>> {
+    pub(crate) fn chunk_ranges(len: usize) -> impl Iterator<Item = Range<usize>> {
         (0..len)
             .step_by(JAR_CHUNK_MEMBERS)
             .map(move |start| start..(start + JAR_CHUNK_MEMBERS).min(len))
     }
 
     /// Phase B: decode one planned task on a fan-out worker.
-    async fn decode_task<R: JarReader>(task: DecodeTask<R>) -> (Vec<ClassFile>, Vec<Warning>) {
+    pub(super) async fn decode_task<R: JarReader>(
+        task: DecodeTask<R>,
+    ) -> (Vec<ClassFile>, Vec<Warning>) {
         match task {
             DecodeTask::Warn(warning) => (Vec::new(), vec![warning]),
-            DecodeTask::ClassBytes { origin, bytes } => Self::decode_class(origin, &*bytes).await,
+            DecodeTask::ClassBytes { origin, bytes } => decode_class(origin, &*bytes).await,
             DecodeTask::ClassReader { origin, reader } => {
-                Self::decode_class(origin, Buffered::new(reader)).await
+                decode_class(origin, Buffered::new(reader)).await
             }
             DecodeTask::JarChunk {
                 origin,
                 reader,
                 directory,
                 members,
-            } => Self::decode_jar_chunk(&origin, reader, &directory, members).await,
+            } => decode_jar_chunk(&origin, reader, &directory, members).await,
         }
     }
 
-    async fn decode_class<R: sio::Read>(
+    pub(crate) async fn decode_class<R: sio::Read>(
         origin: WarningOrigin,
         source: R,
     ) -> (Vec<ClassFile>, Vec<Warning>) {
-        match Self::read_class(source).await {
+        match read_class(source).await {
             Ok(class) => (vec![class], Vec::new()),
             Err(message) => (Vec::new(), vec![Warning::new(origin, message)]),
         }
     }
 
-    async fn decode_jar_chunk<R: JarReader>(
+    pub(super) async fn decode_jar_chunk<R: JarReader>(
         origin: &WarningOrigin,
         reader: JarSource<R>,
         directory: &CentralDirectory,
@@ -814,8 +825,7 @@ impl Archive {
         let mut warnings = Vec::new();
         for member in &directory.members[members] {
             if member.is_dir
-                || !Self::extension(&member.name)
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("class"))
+                || !extension(&member.name).is_some_and(|ext| ext.eq_ignore_ascii_case("class"))
             {
                 continue;
             }
@@ -839,7 +849,7 @@ impl Archive {
 
     /// Parse a class file from any portable byte source, tagging a failure with the shared
     /// diagnostic message.
-    async fn read_class<R: sio::Read>(source: R) -> Result<ClassFile, String> {
+    pub(crate) async fn read_class<R: sio::Read>(source: R) -> Result<ClassFile, String> {
         ClassFile::read(source)
             .await
             .map_err(|error| format!("failed to parse class file: {error}"))
@@ -853,7 +863,7 @@ impl Archive {
     /// nothing, so a caller that only asks *what* an archive contains may hand over a borrowed
     /// cursor instead of copying the bytes into an `Arc` to satisfy `'static`. Decoding members is
     /// what needs the stronger bound, and every caller that goes on to do it already has it.
-    async fn open<R: sio::Read + sio::Seek>(
+    pub(crate) async fn open<R: sio::Read + sio::Seek>(
         mut reader: R,
     ) -> Result<(R, Arc<CentralDirectory>), String> {
         let directory = CentralDirectory::parse(&mut reader)
@@ -866,12 +876,12 @@ impl Archive {
     /// member chunks on the fan-out. Results arrive in member order as
     /// `(raw name, bytes or diagnostic)`; extraction targets must be whole because their cache
     /// key derives from a digest of the complete content before a write-once publish.
-    async fn decode_matching<R: JarReader>(
+    pub(crate) async fn decode_matching<R: JarReader>(
         exec: &Exec,
         reader: R,
         wanted_extension: &'static str,
     ) -> Result<Vec<(String, Result<Vec<u8>, String>)>, String> {
-        Self::decode_matching_bounded(
+        decode_matching_bounded(
             exec,
             reader,
             wanted_extension,
@@ -884,13 +894,13 @@ impl Archive {
         .await
     }
 
-    async fn decode_matching_bounded<R: JarReader>(
+    pub(crate) async fn decode_matching_bounded<R: JarReader>(
         exec: &Exec,
         reader: R,
         wanted_extension: &'static str,
         limits: SourceTreeLimits,
     ) -> Result<Vec<(String, Result<Vec<u8>, String>)>, String> {
-        Self::decode_bounded(exec, reader, Some(wanted_extension), limits).await
+        decode_bounded(exec, reader, Some(wanted_extension), limits).await
     }
 
     /// Fully materialize every regular member (no extension filter), decoding fixed-size member
@@ -901,28 +911,30 @@ impl Archive {
         reader: R,
         limits: SourceTreeLimits,
     ) -> Result<Vec<(String, Result<Vec<u8>, String>)>, String> {
-        Self::decode_bounded(exec, reader, None, limits).await
+        decode_bounded(exec, reader, None, limits).await
     }
 
     /// Whether `member` is a regular member the extension filter selects; `None` selects every
     /// non-directory member. The bounds pass and the decode pass must agree on this exactly, or the
     /// limits would be checked against a different member set than the one decoded.
-    fn member_selected(member: &crate::zip::MemberRecord, wanted_extension: Option<&str>) -> bool {
-        !member.is_dir
-            && wanted_extension.is_none_or(|ext| Self::extension(&member.name) == Some(ext))
+    pub(crate) fn member_selected(
+        member: &crate::zip::MemberRecord,
+        wanted_extension: Option<&str>,
+    ) -> bool {
+        !member.is_dir && wanted_extension.is_none_or(|ext| extension(&member.name) == Some(ext))
     }
 
-    async fn decode_bounded<R: JarReader>(
+    pub(crate) async fn decode_bounded<R: JarReader>(
         exec: &Exec,
         reader: R,
         wanted_extension: Option<&'static str>,
         limits: SourceTreeLimits,
     ) -> Result<Vec<(String, Result<Vec<u8>, String>)>, String> {
-        let (reader, directory) = Self::open(reader).await?;
+        let (reader, directory) = open(reader).await?;
         let mut count = 0usize;
         let mut total = 0usize;
         for member in &directory.members {
-            if !Self::member_selected(member, wanted_extension) {
+            if !member_selected(member, wanted_extension) {
                 continue;
             }
             count = count
@@ -952,17 +964,17 @@ impl Archive {
                 limits.max_total_bytes
             ));
         }
-        let chunks: Vec<_> = Self::chunk_ranges(directory.members.len())
+        let chunks: Vec<_> = chunk_ranges(directory.members.len())
             .map(|members| (reader.clone(), Arc::clone(&directory), members))
             .collect();
         let decoded = exec
             .fan_out(chunks, move |(reader, directory, members)| async move {
                 let mut out = Vec::new();
                 for member in &directory.members[members] {
-                    if !Self::member_selected(member, wanted_extension) {
+                    if !member_selected(member, wanted_extension) {
                         continue;
                     }
-                    let outcome = Self::read_member(reader.clone(), member).await;
+                    let outcome = read_member(reader.clone(), member).await;
                     out.push((member.name.clone(), outcome));
                 }
                 out
@@ -972,7 +984,7 @@ impl Archive {
     }
 
     /// Read one member whole through its verifying stream (the crc32 check runs at EOF).
-    async fn read_member<R: JarReader>(
+    pub(crate) async fn read_member<R: JarReader>(
         reader: R,
         member: &crate::zip::MemberRecord,
     ) -> Result<Vec<u8>, String> {
@@ -995,7 +1007,7 @@ impl Archive {
 
     /// Publish one decoded member under `namespace` after the archive-safety check. The error
     /// string is the warning to record when the member is skipped.
-    async fn publish_member<C: CacheBackend>(
+    pub(crate) async fn publish_member<C: CacheBackend>(
         cache: &mut ArtifactCache<C>,
         namespace: CacheNamespace,
         parent: &CacheKey,
@@ -1003,11 +1015,11 @@ impl Archive {
         outcome: Result<Vec<u8>, String>,
     ) -> Result<(RelativePath, CacheKey), String> {
         let (member, bytes) = outcome.and_then(|bytes| {
-            Self::safe_relative(name)
+            safe_relative(name)
                 .map(|path| (path, bytes))
                 .ok_or_else(|| format!("skipped unsafe archive member `{name}`"))
         })?;
-        let key = Self::member_key(namespace, parent, &member, &bytes);
+        let key = member_key(namespace, parent, &member, &bytes);
         cache
             .publish(&key, &bytes)
             .await
@@ -1015,7 +1027,7 @@ impl Archive {
         Ok((member, key))
     }
 
-    fn member_key(
+    pub(crate) fn member_key(
         namespace: CacheNamespace,
         parent: &CacheKey,
         member: &RelativePath,
@@ -1026,7 +1038,7 @@ impl Archive {
         CacheKey::new(namespace, fold.finish(), ContentDigest::of(bytes))
     }
 
-    fn extension(value: &str) -> Option<&str> {
+    pub(crate) fn extension(value: &str) -> Option<&str> {
         let name = value.rsplit('/').next().unwrap_or(value);
         match name.rfind('.') {
             Some(0) | None => None,
@@ -1034,7 +1046,7 @@ impl Archive {
         }
     }
 
-    fn safe_relative(value: &str) -> Option<RelativePath> {
+    pub(crate) fn safe_relative(value: &str) -> Option<RelativePath> {
         if value.starts_with('/') || value.starts_with('\\') {
             return None;
         }

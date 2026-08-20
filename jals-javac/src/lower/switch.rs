@@ -27,8 +27,8 @@ use jals_syntax::ast::{self, AstNode as _};
 
 use crate::facts::{ArmLabels, CaseKey};
 use crate::jvm::{Branch, Compare, Label};
-use crate::lower::expr::Expr;
-use crate::lower::stmt::Stmt;
+use crate::lower::expr;
+use crate::lower::stmt;
 use crate::lower::{Context, Emit, LowerError, Result};
 
 /// One arm of a lowered `switch`: what it matches, and where its body is.
@@ -48,10 +48,12 @@ struct Arm {
     entry: Label,
 }
 
-/// `switch` lowering.
-pub(crate) struct Switch;
+pub(crate) use api::{expression, statement};
 
-impl Switch {
+/// `switch` lowering.
+mod api {
+    use super::*;
+
     /// `switch (selector) { … }` as a statement.
     pub(crate) fn statement(
         statement: &ast::SwitchStmt,
@@ -65,7 +67,7 @@ impl Switch {
         let body = statement
             .body()
             .ok_or(LowerError::Unsupported("a `switch` with no body"))?;
-        Self::lower(&selector, &body, labels, None, context, emit)
+        lower(&selector, &body, labels, None, context, emit)
     }
 
     /// `switch (selector) { … }` as an expression, leaving its value on the stack.
@@ -80,12 +82,12 @@ impl Switch {
         let body = expression
             .body()
             .ok_or(LowerError::Unsupported("a `switch` with no body"))?;
-        let result = Expr::type_of(expression.syntax(), context)?;
-        Self::lower(&selector, &body, Vec::new(), Some(&result), context, emit)
+        let result = expr::type_of(expression.syntax(), context)?;
+        lower(&selector, &body, Vec::new(), Some(&result), context, emit)
     }
 
     /// The shared shape. `result` is `Some` for an expression, whose arms produce a value.
-    fn lower(
+    pub(crate) fn lower(
         selector: &ast::Expr,
         body: &ast::SwitchBlock,
         labels: Vec<String>,
@@ -104,12 +106,12 @@ impl Switch {
         let arms: Vec<Arm> = if rules.is_empty() {
             groups
                 .iter()
-                .map(|group| Self::arm(group.labels(), context, emit))
+                .map(|group| arm(group.labels(), context, emit))
                 .collect::<Result<_>>()?
         } else {
             rules
                 .iter()
-                .map(|rule| Self::arm(rule.label().into_iter(), context, emit))
+                .map(|rule| arm(rule.label().into_iter(), context, emit))
                 .collect::<Result<_>>()?
         };
         // A `switch` *expression* has to produce a value on every path, so an unmatched key cannot
@@ -123,7 +125,7 @@ impl Switch {
         }
         let fallback = fallback.unwrap_or(done);
 
-        Self::dispatch(selector, &arms, fallback, context, emit)?;
+        dispatch(selector, &arms, fallback, context, emit)?;
 
         // `break` leaves the whole `switch`; `yield` hands it a value. Neither is a loop, so a
         // `continue` looks straight past it.
@@ -132,9 +134,9 @@ impl Switch {
             emit.enter_yield(done, result.clone());
         }
         let outcome = if rules.is_empty() {
-            Self::groups(&groups, &arms, result, done, context, emit)
+            self::groups(&groups, &arms, result, done, context, emit)
         } else {
-            Self::rules(&rules, &arms, result, done, context, emit)
+            self::rules(&rules, &arms, result, done, context, emit)
         };
         if result.is_some() {
             emit.leave_yield();
@@ -149,7 +151,7 @@ impl Switch {
     }
 
     /// One arm's keys and entry label, from its `case` / `default` labels.
-    fn arm(
+    pub(crate) fn arm(
         labels: impl Iterator<Item = ast::SwitchLabel>,
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
@@ -172,7 +174,7 @@ impl Switch {
     }
 
     /// Emit the selector and the jump into the arms.
-    fn dispatch(
+    pub(crate) fn dispatch(
         selector: &ast::Expr,
         arms: &[Arm],
         fallback: Label,
@@ -183,26 +185,26 @@ impl Switch {
             .iter()
             .any(|arm| !arm.patterns.is_empty() || arm.guard.is_some())
         {
-            return Self::dispatch_patterns(selector, arms, fallback, context, emit);
+            return dispatch_patterns(selector, arms, fallback, context, emit);
         }
         let text = arms
             .iter()
             .flat_map(|arm| &arm.keys)
             .any(|key| matches!(key, CaseKey::Text(_)));
         if text {
-            return Self::dispatch_text(selector, arms, fallback, context, emit);
+            return dispatch_text(selector, arms, fallback, context, emit);
         }
         // The selector has to *already* be an `int` on the stack. Converting one that is not would
         // narrow it silently — a `long` selector is not a Java program, but an `l2i` would compile it
         // into one that switches on the low 32 bits.
         if !matches!(
-            Expr::type_of(selector.syntax(), context)?,
+            expr::type_of(selector.syntax(), context)?,
             Ty::Primitive(Primitive::Byte | Primitive::Short | Primitive::Char | Primitive::Int)
         ) {
             return Err(LowerError::Unsupported("a `switch` on this selector type"));
         }
-        Expr::lower(selector, context, emit)?;
-        let cases = Self::int_cases(arms)?;
+        expr::lower(selector, context, emit)?;
+        let cases = int_cases(arms)?;
         Ok(emit.asm.switch(&cases, fallback)?)
     }
 
@@ -216,7 +218,7 @@ impl Switch {
     /// scopes a pattern variable to its arm so nothing can read another's, but the verifier merges every
     /// edge into an arm's entry and refuses a slot some edge left unwritten; `null` joins into any
     /// reference type, so one store up front settles all of them.
-    fn dispatch_patterns(
+    pub(crate) fn dispatch_patterns(
         selector: &ast::Expr,
         arms: &[Arm],
         fallback: Label,
@@ -229,11 +231,11 @@ impl Switch {
         }
         for arm in arms {
             for pattern in &arm.patterns {
-                Expr::declare_bindings(pattern, context, emit)?;
+                expr::declare_bindings(pattern, context, emit)?;
             }
         }
         let scratch = emit.slots.declare_temporary(1);
-        Expr::lower(selector, context, emit)?;
+        expr::lower(selector, context, emit)?;
         emit.asm.store(scratch)?;
         for arm in arms {
             // A bare `default` matches nothing here: it is where the chain lands when every test failed.
@@ -243,10 +245,10 @@ impl Switch {
             let next = emit.asm.label();
             for pattern in &arm.patterns {
                 // Bound before the guard runs, because the guard is written in terms of the binding.
-                Expr::match_pattern(pattern, scratch, next, None, context, emit)?;
+                expr::match_pattern(pattern, scratch, next, None, context, emit)?;
             }
             if let Some(guard) = &arm.guard {
-                Expr::lower(guard, context, emit)?;
+                expr::lower(guard, context, emit)?;
                 emit.asm.branch(Branch::IntZero(Compare::Eq), next)?;
             }
             emit.asm.branch(Branch::Always, arm.entry)?;
@@ -256,7 +258,7 @@ impl Switch {
     }
 
     /// The `(key, target)` pairs an integral `switch` jumps on.
-    fn int_cases(arms: &[Arm]) -> Result<Vec<(i32, Label)>> {
+    pub(crate) fn int_cases(arms: &[Arm]) -> Result<Vec<(i32, Label)>> {
         let mut cases = Vec::new();
         for arm in arms {
             for key in &arm.keys {
@@ -275,7 +277,7 @@ impl Switch {
     /// arms of the hash table each test the actual strings that hash there, and a key whose hash
     /// matches but whose text does not falls through to `default`. Skipping the `equals` would send a
     /// colliding string to the wrong arm, which is a wrong answer rather than a crash.
-    fn dispatch_text(
+    pub(crate) fn dispatch_text(
         selector: &ast::Expr,
         arms: &[Arm],
         fallback: Label,
@@ -285,7 +287,7 @@ impl Switch {
         // The selector is read three times — once for the hash and once per `equals` — so it is held
         // rather than re-evaluated.
         let held = emit.slots.declare_temporary(1);
-        Expr::lower(selector, context, emit)?;
+        expr::lower(selector, context, emit)?;
         emit.asm.store(held)?;
 
         // Group the labels by hash, keeping source order within a bucket.
@@ -295,7 +297,7 @@ impl Switch {
                 let CaseKey::Text(text) = key else {
                     return Err(LowerError::Unsupported("a `switch` mixing key types"));
                 };
-                let hash = Self::java_hash(text);
+                let hash = java_hash(text);
                 match buckets.iter_mut().find(|(existing, _)| *existing == hash) {
                     Some((_, entries)) => entries.push((text.clone(), arm.entry)),
                     None => buckets.push((hash, alloc::vec![(text.clone(), arm.entry)])),
@@ -332,14 +334,14 @@ impl Switch {
     ///
     /// Specified, not incidental — `String.hashCode`'s contract fixes the algorithm, which is what
     /// lets a compiler build the table at all.
-    fn java_hash(text: &str) -> i32 {
+    pub(crate) fn java_hash(text: &str) -> i32 {
         text.encode_utf16().fold(0i32, |hash, unit| {
             hash.wrapping_mul(31).wrapping_add(i32::from(unit))
         })
     }
 
     /// The colon form, which falls through from one group into the next.
-    fn groups(
+    pub(crate) fn groups(
         groups: &[ast::SwitchGroup],
         arms: &[Arm],
         result: Option<&Ty>,
@@ -350,7 +352,7 @@ impl Switch {
         for (group, arm) in groups.iter().zip(arms) {
             emit.asm.bind(arm.entry)?;
             for statement in group.stmts() {
-                Stmt::lower(&statement, context, emit)?;
+                stmt::lower(&statement, context, emit)?;
             }
             // No jump: falling into the next group is what the colon form means, and a group that
             // wanted to stop said `break`.
@@ -370,7 +372,7 @@ impl Switch {
     }
 
     /// The arrow form, where each arm stands alone.
-    fn rules(
+    pub(crate) fn rules(
         rules: &[ast::SwitchRule],
         arms: &[Arm],
         result: Option<&Ty>,
@@ -384,13 +386,13 @@ impl Switch {
             // first *is* the arm's value; in a statement one it is evaluated for its effect.
             if let Some(value) = rule.expr() {
                 match result {
-                    Some(result) => Expr::lower_as(&value, result, context, emit)?,
-                    None => Stmt::discarded(&value, context, emit)?,
+                    Some(result) => expr::lower_as(&value, result, context, emit)?,
+                    None => stmt::discarded(&value, context, emit)?,
                 }
             } else if let Some(block) = rule.syntax().children().find_map(ast::Block::cast) {
-                Stmt::block(&block, context, emit)?;
+                stmt::block(&block, context, emit)?;
             } else if let Some(thrown) = rule.syntax().children().find_map(ast::ThrowStmt::cast) {
-                Stmt::lower(&ast::Stmt::Throw(thrown), context, emit)?;
+                stmt::lower(&ast::Stmt::Throw(thrown), context, emit)?;
             }
             if emit.asm.reachable() {
                 if result.is_some() && rule.expr().is_none() {

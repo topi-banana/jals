@@ -18,10 +18,12 @@ pub(crate) struct Formatted {
     pub(crate) fell_back: bool,
 }
 
-/// Whole-document formatting via `jals-fmt`.
-pub(crate) struct Formatting;
+pub(crate) use api::formatting_edits;
 
-impl Formatting {
+/// Whole-document formatting via `jals-fmt`.
+mod api {
+    use super::{Config, Document, FeatureSet, Formatted, LspHost, Position, Range, TextEdit};
+
     /// Format the whole document. Returns a single full-range text edit, or no edits when the
     /// document is already formatted. Async because formatting yields cooperatively.
     ///
@@ -85,8 +87,7 @@ mod tests {
     fn already_formatted_yields_no_edits() {
         block_on_inline(async {
             let doc = Document::new("class C {\n    int x = 1;\n}\n".to_owned()).await;
-            let out =
-                Formatting::formatting_edits(&doc, &Config::default(), FeatureSet::default()).await;
+            let out = api::formatting_edits(&doc, &Config::default(), FeatureSet::default()).await;
             assert!(out.edits.is_empty());
             // The distinction the actor turns into a `window/showMessage`: nothing to do is not the
             // same answer as a refusal, even though both produce no edits.

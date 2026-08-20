@@ -4,11 +4,10 @@
 //! formatter, so they are modeled for completeness and deliberately not projected
 //! (`MAPPING.md` §7).
 
+use crate::import::serde_kv;
 use alloc::string::String;
 
 use serde::Deserialize;
-
-use super::super::serde_kv::Kv;
 
 /// The naming-convention settings of a Java code style (not formatter rules).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -33,7 +32,10 @@ pub struct IntellijNaming {
     #[serde(rename = "PARAMETER_NAME_SUFFIX")]
     pub parameter_name_suffix: Option<String>,
     /// `PREFER_LONGER_NAMES` in `<JavaCodeStyleSettings>`; `ij_java_prefer_longer_names` in `.editorconfig`.
-    #[serde(rename = "PREFER_LONGER_NAMES", deserialize_with = "Kv::opt_bool")]
+    #[serde(
+        rename = "PREFER_LONGER_NAMES",
+        deserialize_with = "serde_kv::opt_bool"
+    )]
     pub prefer_longer_names: Option<bool>,
     /// `STATIC_FIELD_NAME_PREFIX` in `<JavaCodeStyleSettings>`; `ij_java_static_field_name_prefix` in `.editorconfig`.
     #[serde(rename = "STATIC_FIELD_NAME_PREFIX")]

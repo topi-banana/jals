@@ -46,10 +46,15 @@ use tower::ServiceBuilder;
 use crate::actor::{Actor, Cmd, FeatureSelection, Reply};
 use crate::host::LspHost;
 
-/// The jals language server: builds the async-lsp main loop and runs the stdio event loop.
-pub struct Server;
+pub use api::serve;
 
-impl Server {
+/// The jals language server: builds the async-lsp main loop and runs the stdio event loop.
+mod api {
+    use super::{
+        Actor, CatchUnwindLayer, ClientProcessMonitorLayer, ConcurrencyLayer, Exec, LifecycleLayer,
+        MainLoop, Router, ServerState, ServiceBuilder, TracingLayer, mpsc,
+    };
+
     /// Build the server and run its stdio event loop until the client disconnects. Exported so a
     /// host that already owns a `jals-exec` runtime (the CLI) can await it directly.
     // Runs on a current-thread runtime, so the future is deliberately

@@ -1,12 +1,12 @@
 //! Jar remap / merge / compile-safe decompile smoke tests.
 
+use jals_classpath::jar_merge;
+use jals_classpath::jar_remap;
+use jals_classpath::source_tree_extraction;
 use std::io::{Cursor, Write};
 
 use jals_classfile::ClassFile;
-use jals_classpath::{
-    JarMerge, JarRemap, MappingFormat, RemapDirection, RemapRequest, SourceTreeExtraction,
-    SourceTreeLimits,
-};
+use jals_classpath::{MappingFormat, RemapDirection, RemapRequest, SourceTreeLimits};
 use jals_exec::{Exec, block_on_inline};
 use jals_storage::io::Cursor as SioCursor;
 use jals_storage::{
@@ -105,7 +105,7 @@ Renamed -> Box:
         let exec = Exec::inline();
         let mut cache = ArtifactCache::new(MemoryCache::default());
         let jar = publish(&mut cache, b"fixture", &jar_bytes).await;
-        let remapped = JarRemap::remap(&exec, &mut cache, &jar, &deobfuscate(mappings))
+        let remapped = jar_remap::remap(&exec, &mut cache, &jar, &deobfuscate(mappings))
             .await
             .expect("remap succeeds");
         let bytes = cache
@@ -138,7 +138,7 @@ fn tiny_v2_remaps_the_same_jar_the_proguard_text_does() {
         let exec = Exec::inline();
         let mut cache = ArtifactCache::new(MemoryCache::default());
         let jar = publish(&mut cache, b"fixture", &jar_bytes).await;
-        let remapped = JarRemap::remap(
+        let remapped = jar_remap::remap(
             &exec,
             &mut cache,
             &jar,
@@ -164,7 +164,7 @@ fn the_namespace_pair_a_tiny_file_is_read_through_is_part_of_the_cache_key() {
         let mut cache = ArtifactCache::new(MemoryCache::default());
         let jar = publish(&mut cache, b"fixture", &jar_bytes).await;
 
-        let named = JarRemap::remap(
+        let named = jar_remap::remap(
             &exec,
             &mut cache,
             &jar,
@@ -172,7 +172,7 @@ fn the_namespace_pair_a_tiny_file_is_read_through_is_part_of_the_cache_key() {
         )
         .await
         .expect("remap succeeds");
-        let intermediary = JarRemap::remap(
+        let intermediary = jar_remap::remap(
             &exec,
             &mut cache,
             &jar,
@@ -200,7 +200,7 @@ fn merge_overlay_wins_on_conflict() {
         let mut cache = ArtifactCache::new(MemoryCache::default());
         let base_key = publish(&mut cache, b"base", &base).await;
         let overlay_key = publish(&mut cache, b"overlay", &overlay).await;
-        let merged = JarMerge::merge(&exec, &mut cache, &base_key, &overlay_key)
+        let merged = jar_merge::merge(&exec, &mut cache, &base_key, &overlay_key)
             .await
             .expect("merge");
         let bytes = cache
@@ -233,7 +233,7 @@ fn decompile_strips_prefix_and_drops_field_final() {
         let exec = Exec::inline();
         let mut cache = ArtifactCache::new(MemoryCache::default());
         let jar = publish(&mut cache, b"fixture", &jar_bytes).await;
-        let tree = SourceTreeExtraction::decompile(
+        let tree = source_tree_extraction::decompile(
             &exec,
             &mut cache,
             &jar,
@@ -326,7 +326,7 @@ evolution.RenamedRoot -> evolution.HierarchyRoot:
         let jar = publish(&mut cache, b"subject", &subject).await;
         let supers = publish(&mut cache, b"supertypes", &supertypes).await;
 
-        let alone = JarRemap::remap(&exec, &mut cache, &jar, &deobfuscate(mappings))
+        let alone = jar_remap::remap(&exec, &mut cache, &jar, &deobfuscate(mappings))
             .await
             .expect("remap succeeds");
         let alone = member_bytes(
@@ -339,7 +339,7 @@ evolution.RenamedRoot -> evolution.HierarchyRoot:
         );
 
         let supers = [supers];
-        let with_supers = JarRemap::remap(
+        let with_supers = jar_remap::remap(
             &exec,
             &mut cache,
             &jar,
@@ -382,10 +382,10 @@ Renamed -> Box:
         )
         .await;
 
-        let deobf = JarRemap::remap(&exec, &mut cache, &jar, &deobfuscate(mappings))
+        let deobf = jar_remap::remap(&exec, &mut cache, &jar, &deobfuscate(mappings))
             .await
             .expect("deobfuscate succeeds");
-        let reobf = JarRemap::remap(
+        let reobf = jar_remap::remap(
             &exec,
             &mut cache,
             &deobf,

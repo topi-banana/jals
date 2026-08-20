@@ -23,22 +23,26 @@ pub(crate) const RULE: RuleMeta = RuleMeta {
     category: Category::Documentation,
     level: |config| config.documentation.empty_javadoc.level,
     needs_clean_parse: false,
-    check: Checker::Syntactic(EmptyJavadoc::check),
+    check: Checker::Syntactic(api::check),
 };
 
 /// The `empty-javadoc` rule.
-struct EmptyJavadoc;
+mod api {
+    use super::{
+        Config, Finding, LocalBoxFuture, SyntaxElement, SyntaxKind, SyntaxNode, Vec, Yielder,
+    };
 
-impl EmptyJavadoc {
-    const MESSAGE: &'static str =
-        "empty Javadoc comment; document the declaration or remove the comment";
+    const MESSAGE: &str = "empty Javadoc comment; document the declaration or remove the comment";
 
     /// The table-edge shim: boxes the async rule body once per file.
-    fn check<'a>(root: &'a SyntaxNode, _config: &'a Config) -> LocalBoxFuture<'a, Vec<Finding>> {
-        alloc::boxed::Box::pin(Self::check_impl(root))
+    pub(crate) fn check<'a>(
+        root: &'a SyntaxNode,
+        _config: &'a Config,
+    ) -> LocalBoxFuture<'a, Vec<Finding>> {
+        alloc::boxed::Box::pin(check_impl(root))
     }
 
-    async fn check_impl(root: &SyntaxNode) -> Vec<Finding> {
+    pub(crate) async fn check_impl(root: &SyntaxNode) -> Vec<Finding> {
         let mut yielder = Yielder::new();
         let mut out = Vec::new();
         for token in root
@@ -46,8 +50,8 @@ impl EmptyJavadoc {
             .filter_map(SyntaxElement::into_token)
         {
             yielder.tick().await;
-            if token.kind() == SyntaxKind::DOC_COMMENT && Self::is_empty(token.text()) {
-                out.push(Finding::at_token(&token, Self::MESSAGE));
+            if token.kind() == SyntaxKind::DOC_COMMENT && is_empty(token.text()) {
+                out.push(Finding::at_token(&token, MESSAGE));
             }
         }
         out
@@ -55,7 +59,7 @@ impl EmptyJavadoc {
 
     /// Whether a Javadoc token's body says nothing: strip the `/**` and `*/` delimiters, then the
     /// per-line asterisks that are decoration rather than content.
-    fn is_empty(text: &str) -> bool {
+    pub(crate) fn is_empty(text: &str) -> bool {
         text.trim_start_matches("/**")
             .trim_end_matches("*/")
             .chars()

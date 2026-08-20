@@ -32,23 +32,23 @@ pub(crate) const RULE: RuleMeta = RuleMeta {
     category: Category::Correctness,
     level: |config| config.correctness.cannot_resolve.level,
     needs_clean_parse: false,
-    check: Checker::Semantic(CannotResolve::check),
+    check: Checker::Semantic(api::check),
 };
 
 /// The `cannot-resolve` rule.
-struct CannotResolve;
+mod api {
+    use super::{Config, FileAnalysis, FileSemantics, Finding, LocalBoxFuture, Vec, format};
 
-impl CannotResolve {
     /// The table-edge shim: boxes the async rule body once per file.
-    fn check<'a>(
+    pub(crate) fn check<'a>(
         analysis: &'a FileAnalysis,
         project: Option<&'a FileSemantics<'a>>,
         _config: &'a Config,
     ) -> LocalBoxFuture<'a, Vec<Finding>> {
-        alloc::boxed::Box::pin(Self::check_impl(analysis, project))
+        alloc::boxed::Box::pin(check_impl(analysis, project))
     }
 
-    async fn check_impl(
+    pub(crate) async fn check_impl(
         _analysis: &FileAnalysis,
         project: Option<&FileSemantics<'_>>,
     ) -> Vec<Finding> {

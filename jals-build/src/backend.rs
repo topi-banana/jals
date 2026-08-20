@@ -17,7 +17,7 @@
 //! `[build] backend` decision table exists in exactly one place.
 //!
 //! TODO(backend-tier): output memoization under `CacheNamespace::BackendOutput` is still unbuilt,
-//! and without it every build recompiles every source — `jals_frontend::BackendKey`, which folds
+//! and without it every build recompiles every source — `jals_frontend::backend_key`, which folds
 //! [`config_digest`](Backend::config_digest), still has no caller. Each adapter names what it must
 //! fold before that can be switched on.
 
@@ -66,7 +66,7 @@ impl BackendOptions {
     /// Everything about these options that affects output, folded to one digest.
     ///
     /// Crate-internal until backend output is memoized: the only caller that needs it outside is
-    /// the one that would fold it into a `BackendKey`, and nothing builds those yet.
+    /// the one that would fold it into a `backend_key`, and nothing builds those yet.
     pub(crate) fn digest(&self) -> ContentDigest {
         let mut fold = jals_storage::ProvenanceFold::new(b"jals.backend.options\0");
         for value in [self.release, self.source, self.target] {
@@ -88,7 +88,7 @@ impl BackendOptions {
 /// One lowered source file: where it lives, what the frontend published it as, and its content.
 ///
 /// All three travel together because each answers a different question and no two backends ask the
-/// same ones. The `key` is provenance — it is what [`BackendKey`](jals_frontend::BackendKey) folds
+/// same ones. The `key` is provenance — it is what [`backend_key`](jals_frontend::backend_key) folds
 /// to decide whether this compile is already cached. The `bytes` are the content, resolved from the
 /// cache by the driver rather than by the backend, because [`Backend`] is object-safe and
 /// `ArtifactCache` is not. The `path` is what a compiler reports errors against and what a

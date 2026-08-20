@@ -18,7 +18,10 @@ use jals_config::{DiscoverableConfig, FeatureSet, Manifest, ResolvedBuildFeature
 use jals_exec::Exec;
 use jals_storage::{DirKey, FileKey, Name, NativeScope, NativeStorage, RelativePath};
 
-use report::Reporter;
+use report::{
+    print_diff, report_format_fallback, report_format_warnings, report_lint, report_migration,
+    report_project, report_unknown_lint_keys,
+};
 
 #[derive(Parser)]
 #[command(name = "jals", version, about = "JALS/Java tooling")]
@@ -250,7 +253,7 @@ fn main() -> ExitCode {
 impl FmtArgs {
     async fn run(&self, exec: &Exec) -> Result<ExitCode> {
         let deny_warnings = self.deny.iter().any(|d| d == "warnings");
-        let explicit_config = App::load_explicit::<Config>(self.config.as_deref())?;
+        let explicit_config = api::load_explicit::<Config>(self.config.as_deref())?;
 
         // `--check` and `--diff` both render a diff and write nothing; `--check` additionally
         // fails the run. With neither, stdin is echoed to stdout and files are rewritten in place.
@@ -284,10 +287,10 @@ impl FmtArgs {
             any_changed |= changed;
             any_warning |= out.has_warnings();
             any_fallback |= out.fell_back();
-            Reporter::report_format_warnings("<stdin>", &src, &out);
-            Reporter::report_format_fallback("<stdin>", &out);
+            report_format_warnings("<stdin>", &src, &out);
+            report_format_fallback("<stdin>", &out);
             if show_diff {
-                Reporter::print_diff("<stdin>", &src, &out.formatted);
+                print_diff("<stdin>", &src, &out.formatted);
             } else {
                 std::io::stdout()
                     .write_all(out.formatted.as_bytes())
@@ -309,7 +312,7 @@ impl FmtArgs {
                 groups
                     .entry(root)
                     .or_default()
-                    .extend(App::collect_java_files(std::slice::from_ref(target))?);
+                    .extend(api::collect_java_files(std::slice::from_ref(target))?);
             }
             // Resolve — and, in write mode, emit — the migrated config before any source is
             // rewritten, so a run can never format against a config it then fails to record.
@@ -360,11 +363,11 @@ impl FmtArgs {
                     any_warning |= out.has_warnings();
                     any_fallback |= out.fell_back();
                     let label = path.display().to_string();
-                    Reporter::report_format_warnings(&label, &src, &out);
-                    Reporter::report_format_fallback(&label, &out);
+                    report_format_warnings(&label, &src, &out);
+                    report_format_fallback(&label, &out);
 
                     if show_diff {
-                        Reporter::print_diff(&label, &src, &out.formatted);
+                        print_diff(&label, &src, &out.formatted);
                     } else if changed {
                         edits.push((key, out.formatted.into_bytes()));
                     }
@@ -420,7 +423,7 @@ impl FmtArgs {
             if !seen.insert(migration.root.clone()) {
                 continue;
             }
-            Reporter::report_migration(&migration);
+            report_migration(&migration);
             if may_write && !self.no_migrate {
                 match migration.write(exec).await? {
                     Some(path) => println!("created {}", path.display()),
@@ -476,7 +479,7 @@ struct LintTarget {
 
 impl LintArgs {
     async fn run(&self, exec: &Exec) -> Result<ExitCode> {
-        let explicit_config = App::load_explicit::<LintConfig>(self.config.as_deref())?;
+        let explicit_config = api::load_explicit::<LintConfig>(self.config.as_deref())?;
         let mut discovery = HostConfigs::new(explicit_config);
 
         // What this run reports on, and where project discovery starts from.
@@ -516,16 +519,13 @@ impl LintArgs {
             if let Some(path) = config_path
                 && reported_configs.insert(path.clone())
             {
-                Reporter::report_unknown_lint_keys(
-                    &path.display().to_string(),
-                    &config.unknown_keys(),
-                );
+                report_unknown_lint_keys(&path.display().to_string(), &config.unknown_keys());
             }
             // The one policy — syntax errors, `cfg` hints, and the rule engine, in one order —
             // reached through the same seam the other two hosts reach it through. What a broken
             // tree suppresses is decided inside the engine, so no host restates it.
             let diagnostics = workspace.diagnostics(&target.key, &config).await;
-            any_finding |= Reporter::report_lint(&target.label, &doc.text, &diagnostics);
+            any_finding |= report_lint(&target.label, &doc.text, &diagnostics);
         }
 
         Ok(if any_finding {
@@ -562,9 +562,9 @@ impl LintArgs {
             }]);
         }
         let mut seen = HashSet::new();
-        Ok(App::collect_java_files(paths)?
+        Ok(api::collect_java_files(paths)?
             .into_iter()
-            .filter(|path| seen.insert(App::canonical_path(path)))
+            .filter(|path| seen.insert(api::canonical_path(path)))
             .map(|path| NamedSource {
                 label: path.display().to_string(),
                 config_dir: path
@@ -629,7 +629,7 @@ impl LspArgs {
     /// accepted for editor compatibility and ignored (the stdio transport is always used). Serves
     /// inside the CLI's own runtime — no nested runtime.
     async fn run(exec: Exec) -> Result<ExitCode> {
-        jals_lsp::Server::serve(exec).await?;
+        jals_lsp::serve(exec).await?;
         Ok(ExitCode::SUCCESS)
     }
 }
@@ -638,7 +638,7 @@ impl BuildArgs {
     /// Compiles the project: discovers the manifest and sources, builds the `javac` invocation, and
     /// either prints it (`--dry-run`) or spawns `javac` and maps its exit code.
     async fn run(&self, exec: &Exec) -> Result<ExitCode> {
-        let (mut manifest, root) = App::resolve_manifest(self.manifest_path.as_deref()).await?;
+        let (mut manifest, root) = api::resolve_manifest(self.manifest_path.as_deref()).await?;
         let features = self.features.resolve(&manifest)?;
         if let Some(out) = &self.out_dir {
             manifest.build.classes_dir = out.to_string_lossy().into_owned();
@@ -646,7 +646,7 @@ impl BuildArgs {
         // `--bin` does not narrow compilation (javac compiles all sources); it only asserts the bin
         // exists, so a typo fails fast before spawning the compiler.
         if let Some(name) = &self.bin {
-            jals_build::RunTarget::resolve(&manifest, Some(name)).map_err(|e| anyhow!("{e}"))?;
+            jals_build::resolve_run_target(&manifest, Some(name)).map_err(|e| anyhow!("{e}"))?;
         }
         // Assemble the root script outputs and complete transitive dependency graph. Structural graph
         // and dependency-script failures abort before javac; lower-level classpath misses remain
@@ -657,7 +657,7 @@ impl BuildArgs {
             root.clone(),
             jals_classpath::NetworkPolicy::when_offline(self.offline),
         );
-        let (sources, tree, inputs) = App::prepare_compile_inputs(
+        let (sources, tree, inputs) = api::prepare_compile_inputs(
             &mut manifest,
             &root,
             exec,
@@ -687,12 +687,12 @@ impl BuildArgs {
             .compile(&request)
             .await
             .map_err(|e| anyhow!("{e}"))?;
-        App::finish_compile(&manifest, &root, &outcome)?;
-        App::finish_package(
+        api::finish_compile(&manifest, &root, &outcome)?;
+        api::finish_package(
             &manifest, &root, exec, &features, &fetcher, &outcome, &inputs,
         )
         .await?;
-        Ok(App::outcome_exit_code(outcome.code()))
+        Ok(api::outcome_exit_code(outcome.code()))
     }
 }
 
@@ -700,7 +700,7 @@ impl RunArgs {
     /// Compiles the project, then runs its main class with `java`. Compilation must succeed before the
     /// run; `--dry-run` prints both commands without executing either.
     async fn run(&self, exec: &Exec) -> Result<ExitCode> {
-        let (mut manifest, root) = App::resolve_manifest(self.manifest_path.as_deref()).await?;
+        let (mut manifest, root) = api::resolve_manifest(self.manifest_path.as_deref()).await?;
         // `jals run` is `java`, and a WebAssembly module is not something `java` can be handed. The
         // check is here rather than at the launch because the failure would otherwise surface as a
         // missing main class in a `classes-dir` that holds a `.wasm` — true, and useless.
@@ -721,7 +721,7 @@ impl RunArgs {
         // from `[[bin]]` / `[package] default-run` / `[run] main-class`.
         let main_class: String = match &self.main_class {
             Some(explicit) => explicit.clone(),
-            None => jals_build::RunTarget::resolve(&manifest, self.bin.as_deref())
+            None => jals_build::resolve_run_target(&manifest, self.bin.as_deref())
                 .map_err(|e| anyhow!("{e}"))?
                 .to_owned(),
         };
@@ -732,7 +732,7 @@ impl RunArgs {
             root.clone(),
             jals_classpath::NetworkPolicy::when_offline(self.offline),
         );
-        let (sources, tree, inputs) = App::prepare_compile_inputs(
+        let (sources, tree, inputs) = api::prepare_compile_inputs(
             &mut manifest,
             &root,
             exec,
@@ -777,15 +777,15 @@ impl RunArgs {
             .compile(&compile_request)
             .await
             .map_err(|e| anyhow!("{e}"))?;
-        App::finish_compile(&manifest, &root, &outcome)?;
+        api::finish_compile(&manifest, &root, &outcome)?;
         if !outcome.success() {
-            return Ok(App::outcome_exit_code(outcome.code()));
+            return Ok(api::outcome_exit_code(outcome.code()));
         }
         let run_outcome = runtime
             .run(&run_request)
             .await
             .map_err(|e| anyhow!("{e}"))?;
-        Ok(App::outcome_exit_code(run_outcome.code))
+        Ok(api::outcome_exit_code(run_outcome.code))
     }
 }
 
@@ -794,7 +794,7 @@ impl CleanArgs {
     /// deletes each existing directory (a missing one is simply skipped, so cleaning a never-built
     /// project succeeds quietly). `--dry-run` prints the paths without deleting them.
     async fn run(&self, exec: &Exec) -> Result<ExitCode> {
-        let (manifest, root) = App::resolve_manifest(self.manifest_path.as_deref()).await?;
+        let (manifest, root) = api::resolve_manifest(self.manifest_path.as_deref()).await?;
         let storage = NativeStorage::for_project_scoped(
             &root,
             [NativeScope::all(RelativePath::ROOT)],
@@ -810,13 +810,10 @@ impl CleanArgs {
             .iter()
             .filter_map(|root| jals_storage::DirKey::parse(root).ok())
             .collect();
-        let mut keys = jals_project::BuildTaskExecutor::owned_publication_roots(
-            &storage.view(),
-            &source_roots,
-        )
-        .map_err(|error| anyhow!(error))?;
+        let mut keys = jals_project::task::owned_publication_roots(&storage.view(), &source_roots)
+            .map_err(|error| anyhow!(error))?;
         keys.extend(
-            jals_build::CleanTargets::keys(&manifest)
+            jals_build::clean_target_keys(&manifest)
                 .map_err(|error| anyhow!("invalid classes-dir: {error:?}"))?,
         );
         let mut seen = HashSet::new();
@@ -882,7 +879,7 @@ impl InitArgs {
         if let Some(migration) =
             migrate::Migration::detect(&dir, migrate::Walk::DirectoryOnly, exec).await?
         {
-            Reporter::report_migration(&migration);
+            report_migration(&migration);
             files.push(jals_build::ScaffoldFile {
                 path: FileKey::parse("jalsfmt.toml").expect("static key is valid"),
                 contents: migration
@@ -975,10 +972,10 @@ impl LintProject {
                 .resolve_build_features(&[], false, false)
                 .unwrap_or_default()
         });
-        let environment = App::build_script_environment(&manifest, &features);
+        let environment = api::build_script_environment(&manifest, &features);
         // Opened by this caller rather than inside `project_inputs`, because it outlives that
         // call: the revision the graph phase read is the one the lint index is built over.
-        let mut storage = match App::open_project_storage(&manifest, root, exec).await {
+        let mut storage = match api::open_project_storage(&manifest, root, exec).await {
             Ok(storage) => storage,
             Err(error) => {
                 eprintln!("warning: project analysis inputs unavailable: {error:#}");
@@ -988,7 +985,7 @@ impl LintProject {
         // The project's analysis inputs, best-effort: the classpath `.class` from `[build]
         // classpath` plus resolved `[dependencies]` jars, the `[package] features`, and the
         // `.java` of `git`/`path` dependencies — every typing authority a name can resolve to.
-        let inputs = match App::project_inputs(
+        let inputs = match api::project_inputs(
             &mut storage,
             &manifest,
             root,
@@ -1075,8 +1072,8 @@ impl LintProject {
     /// key is one indexed file. The CLI used to compare canonicalized paths itself for exactly
     /// this; now the comparison is the key's.
     fn key_of(&self, path: &Path) -> Option<FileKey> {
-        let root = App::canonical_path(&self.root);
-        let path = App::canonical_path(path);
+        let root = api::canonical_path(&self.root);
+        let path = api::canonical_path(path);
         RelativePath::from_host_path(&root, &path).and_then(|relative| FileKey::new(relative).ok())
     }
 
@@ -1170,11 +1167,6 @@ impl LintProject {
         keys
     }
 }
-
-/// Host-side helper operations for the CLI commands with no more natural home: manifest/source
-/// resolution, JDK tool discovery and spawning, exit-code mapping, and `.java` file collection. A
-/// stateless namespace grouping these cross-command utilities.
-struct App;
 
 #[derive(Default)]
 struct HostProjectInputs {
@@ -1350,15 +1342,27 @@ struct RootScriptInputs<'a> {
     features: &'a ResolvedBuildFeatures,
 }
 
-impl App {
+pub(crate) use api::canonical_path;
+
+/// Host-side helper operations for the CLI commands with no more natural home: manifest/source
+/// resolution, JDK tool discovery and spawning, exit-code mapping, and `.java` file collection. A
+/// stateless namespace grouping these cross-command utilities.
+mod api {
+    use super::{
+        BuildScriptEnvironment, BuildScriptLimits, BuildScriptSession, Context, DiscoverableConfig,
+        Exec, ExitCode, FileKey, HashSet, HostBuildScript, HostProjectInputs, Manifest,
+        ManifestExt, NativeScope, NativeStorage, Path, PathBuf, RelativePath,
+        ResolvedBuildFeatures, Result, RootScript, RootScriptInputs, anyhow, bail, report_project,
+    };
+
     /// Open the project aggregate the graph phase reads and writes.
     ///
     /// Scoped by [`snapshot_scopes`](jals_classpath::NativeProjectPlan::snapshot_scopes), which is
     /// the only rule for what a project revision captures. Separate from
-    /// [`project_inputs`](Self::project_inputs) because the aggregate outlives that call for one
+    /// [`project_inputs`](project_inputs) because the aggregate outlives that call for one
     /// caller: `jals lint` goes on to index the same revision through `jals_editor::Workspace`,
     /// while `build`/`run` drop it as soon as their artifacts are materialized.
-    async fn open_project_storage(
+    pub(super) async fn open_project_storage(
         manifest: &Manifest,
         root: &Path,
         exec: &Exec,
@@ -1372,11 +1376,11 @@ impl App {
     /// Discover and preprocess the complete dependency graph, then project it together with the
     /// root manifest over one immutable project revision and its verified native artifact cache.
     ///
-    /// The aggregate is the caller's — see [`open_project_storage`](Self::open_project_storage) —
+    /// The aggregate is the caller's — see [`open_project_storage`](open_project_storage) —
     /// and it carries the execution context, so there is no separate `exec` to hand over and no
     /// way to hand over one that is not the aggregate's. `jals_editor::Workspace::load` takes its
     /// own the same way.
-    async fn project_inputs(
+    pub(super) async fn project_inputs(
         storage: &mut NativeStorage,
         manifest: &Manifest,
         root: &Path,
@@ -1414,8 +1418,8 @@ impl App {
                 //
                 // The script phase is `Skipped` here whichever command is running: whoever ran a
                 // script reports it (`run_build_script`), and `jals lint` runs none at all.
-                Reporter::report_project(
-                    &jals_project::ProjectDiagnostics::assemble(
+                report_project(
+                    &jals_project::diagnostics::assemble(
                         jals_project::ScriptOutcome::Skipped,
                         jals_project::GraphOutcome::Failed(&failure),
                         None,
@@ -1427,14 +1431,14 @@ impl App {
                 anyhow!("the project dependency graph could not be resolved")
             })?;
 
-        let reported = jals_project::ProjectDiagnostics::assemble(
+        let reported = jals_project::diagnostics::assemble(
             jals_project::ScriptOutcome::Skipped,
             jals_project::GraphOutcome::Resolved(assembly.report()),
             None,
         );
-        Reporter::report_project(&reported, None);
+        report_project(&reported, None);
         // What "could not be assembled" means is the assembly's, not a severity test spelled here.
-        if jals_project::ProjectDiagnostics::has_errors(&reported) {
+        if jals_project::diagnostics::has_errors(&reported) {
             // No outer phrase and no restated detail: every failure has just been reported in full,
             // and repeating one here would print it twice under two different leads.
             return Err(anyhow!("the project could not be assembled"));
@@ -1520,7 +1524,7 @@ impl App {
     }
 
     /// Prepare the root and transitive compile inputs shared by `build` and `run`.
-    async fn prepare_compile_inputs(
+    pub(super) async fn prepare_compile_inputs(
         manifest: &mut Manifest,
         root: &Path,
         exec: &Exec,
@@ -1532,12 +1536,10 @@ impl App {
         Vec<jals_build::BackendSource>,
         HostProjectInputs,
     )> {
-        let environment = Self::build_script_environment(manifest, features);
+        let environment = build_script_environment(manifest, features);
         let script =
-            Self::run_build_script(manifest, root, exec, &environment, fetcher, publications)
-                .await?;
-        let sources =
-            Self::discover_sources(manifest, root, !script.host.generated_sources.is_empty())?;
+            run_build_script(manifest, root, exec, &environment, fetcher, publications).await?;
+        let sources = discover_sources(manifest, root, !script.host.generated_sources.is_empty())?;
         // The root build script's output is root project source, so it goes through the root
         // frontend alongside the authored files. Dependency-contributed sources, which land in
         // `extra_sources` further down, deliberately do not: a dependency is lowered under its
@@ -1545,8 +1547,8 @@ impl App {
         let generated = script.host.generated_sources.clone();
         // A compile consumes its dependency artifacts as host paths, so the aggregate is done with
         // once they are materialized; only `jals lint` keeps one past this call.
-        let mut storage = Self::open_project_storage(manifest, root, exec).await?;
-        let mut inputs = Self::project_inputs(
+        let mut storage = open_project_storage(manifest, root, exec).await?;
+        let mut inputs = project_inputs(
             &mut storage,
             manifest,
             root,
@@ -1572,7 +1574,7 @@ impl App {
                 to_lower.push(path.clone());
             }
         }
-        let (staged, tree) = Self::lower_sources(manifest, root, &to_lower, features).await?;
+        let (staged, tree) = lower_sources(manifest, root, &to_lower, features).await?;
         // Whatever was lowered is now represented by its staged copy; leaving the original in
         // `extra_sources` would hand javac the pre-frontend file as well.
         inputs
@@ -1590,7 +1592,7 @@ impl App {
         // misses. That is fine today because every source is passed to javac explicitly; a future
         // rewriting frontend that relies on implicit resolution would have to stage under the
         // original source-dir prefix instead.
-        manifest.build.source_dirs = Self::staged_source_dirs(root, &staged);
+        manifest.build.source_dirs = staged_source_dirs(root, &staged);
         Ok((staged, tree, inputs))
     }
 
@@ -1606,7 +1608,7 @@ impl App {
     /// `[dependencies]` entries aimed at it and whatever a `[features]` entry forwarded — the
     /// [`dependencies`](ResolvedBuildFeatures::dependencies) half, which never lands in an
     /// environment the root's script can read.
-    fn build_script_environment(
+    pub(super) fn build_script_environment(
         manifest: &Manifest,
         features: &ResolvedBuildFeatures,
     ) -> BuildScriptEnvironment {
@@ -1619,7 +1621,7 @@ impl App {
     /// Execute the manifest's optional Rhai pre-build phase against a project snapshot. The host
     /// supplies environment values as plain data; scripts only read and publish through typed
     /// `jals-storage` keys.
-    async fn run_build_script(
+    pub(super) async fn run_build_script(
         manifest: &Manifest,
         root: &Path,
         exec: &Exec,
@@ -1655,8 +1657,8 @@ impl App {
             text: script_text.as_deref(),
         });
         let report = |outcome: jals_project::ScriptOutcome<'_>| {
-            Reporter::report_project(
-                &jals_project::ProjectDiagnostics::assemble(
+            report_project(
+                &jals_project::diagnostics::assemble(
                     outcome,
                     jals_project::GraphOutcome::NotReached,
                     script_file,
@@ -1666,7 +1668,7 @@ impl App {
                 script_label.as_deref().zip(script_text.as_deref()),
             );
         };
-        let assembled = match jals_project::ProjectAssembly::script(
+        let assembled = match jals_project::assembly::script(
             exec,
             fetcher,
             &mut storage,
@@ -1741,7 +1743,7 @@ impl App {
     /// Resolves the manifest from an explicit path or by discovering `jals.toml` upward from the cwd,
     /// returning the parsed manifest and the project root (the manifest's parent directory). A missing
     /// manifest is an error, unlike the formatter/linter configs.
-    async fn resolve_manifest(explicit: Option<&Path>) -> Result<(Manifest, PathBuf)> {
+    pub(super) async fn resolve_manifest(explicit: Option<&Path>) -> Result<(Manifest, PathBuf)> {
         let manifest_path = if let Some(p) = explicit {
             if p.is_absolute() {
                 p.to_path_buf()
@@ -1768,7 +1770,7 @@ impl App {
 
     /// Collects the `.java` files under the manifest's source directories (resolved against `root`).
     /// Each source directory must exist, and at least one source file must be found.
-    fn discover_sources(
+    pub(super) fn discover_sources(
         manifest: &Manifest,
         root: &Path,
         has_generated_sources: bool,
@@ -1783,7 +1785,7 @@ impl App {
             .into_iter()
             .filter(|root| root.is_dir())
             .collect();
-        let sources = Self::collect_java_files(&existing_roots)?;
+        let sources = collect_java_files(&existing_roots)?;
         if sources.is_empty() && !has_generated_sources {
             return Err(anyhow!(
                 "no .java files found under {:?}",
@@ -1804,7 +1806,7 @@ impl App {
     /// The staged tree lives under `target/jals/build/frontend`, which `jals clean` already
     /// removes and which the build-script fingerprint rules already refuse to treat as a rerun
     /// input.
-    async fn lower_sources(
+    pub(super) async fn lower_sources(
         manifest: &Manifest,
         root: &Path,
         sources: &[PathBuf],
@@ -1875,7 +1877,7 @@ impl App {
     /// Artifacts are only written on success, and only an in-process backend has any: a process-based
     /// one already wrote its own output through `javac -d`, so the loop is a no-op for it and the two
     /// backends need no branch here.
-    fn finish_compile(
+    pub(super) fn finish_compile(
         manifest: &Manifest,
         root: &Path,
         outcome: &jals_build::BackendOutcome,
@@ -1908,7 +1910,7 @@ impl App {
     /// does not. This host never matches on `[build] remap` itself: it asks
     /// [`RemapSelection`](jals_project::RemapSelection) once and does what comes back. What is left
     /// here is only what a host path forces — collecting the class bytes, and writing the jar.
-    async fn finish_package(
+    pub(super) async fn finish_package(
         manifest: &Manifest,
         root: &Path,
         exec: &Exec,
@@ -1935,10 +1937,10 @@ impl App {
 
         // Where the class bytes are is the one part of this a host has to answer: an in-process
         // backend returns them, and `javac` wrote its own through `-d` and hands back nothing.
-        let classes = if jals_project::CompiledClasses::are_in_memory(&outcome.artifacts) {
+        let classes = if jals_project::remap::are_in_memory(&outcome.artifacts) {
             outcome.artifacts.clone()
         } else {
-            Self::read_classes_dir(&root.join(&manifest.build.classes_dir))?
+            read_classes_dir(&root.join(&manifest.build.classes_dir))?
         };
         if classes.is_empty() {
             bail!("`[build] remap` found no class files to package");
@@ -1948,7 +1950,7 @@ impl App {
         let mut storage = NativeStorage::for_project_scoped(root, scopes, exec.clone())
             .await
             .context("opening project storage")?;
-        let main_class = jals_build::RunTarget::resolve(manifest, None).ok();
+        let main_class = jals_build::resolve_run_target(manifest, None).ok();
         let bytes = plan
             .run(
                 exec,
@@ -1976,7 +1978,9 @@ impl App {
     ///
     /// Reading the compiler's own output back is what a process-based backend forces: it wrote the
     /// files and reported nothing, so a step that consumes what it produced has to go and look.
-    fn read_classes_dir(dir: &Path) -> Result<Vec<(jals_storage::RelativePath, Vec<u8>)>> {
+    pub(super) fn read_classes_dir(
+        dir: &Path,
+    ) -> Result<Vec<(jals_storage::RelativePath, Vec<u8>)>> {
         let mut pending = vec![dir.to_path_buf()];
         let mut classes = Vec::new();
         while let Some(current) = pending.pop() {
@@ -2024,7 +2028,7 @@ impl App {
     /// project-relative path beneath it, so setting `-sourcepath` to it resolves nothing
     /// implicitly. It is retained only to replace — and thereby exclude — the authored source
     /// dirs; every source is passed to javac explicitly.
-    fn staged_source_dirs(root: &Path, staged: &jals_build::StagedTree) -> Vec<String> {
+    pub(super) fn staged_source_dirs(root: &Path, staged: &jals_build::StagedTree) -> Vec<String> {
         let path = staged
             .root()
             .strip_prefix(root)
@@ -2038,7 +2042,7 @@ impl App {
     /// The mapping stays here because it is this driver's policy: `javac` distinguishes a compile
     /// error (1) from bad arguments (2) and a system error (3), and a shell that sees only "nonzero"
     /// cannot tell a broken invocation from broken source.
-    fn outcome_exit_code(code: Option<i32>) -> ExitCode {
+    pub(super) fn outcome_exit_code(code: Option<i32>) -> ExitCode {
         match code {
             Some(0) => ExitCode::SUCCESS,
             // A `u8` exit code passes through; anything out of range (Windows codes, a signal) fails
@@ -2050,7 +2054,7 @@ impl App {
 
     /// Collect the files to format: explicit files as-is, directories searched recursively
     /// for `.java` files.
-    fn collect_java_files(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    pub(super) fn collect_java_files(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
         fn collect_dir(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
             let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)?
                 .map(|e| e.map(|e| e.path()))
@@ -2083,7 +2087,7 @@ impl App {
     }
 
     /// Read and parse the single config file at `path` — no project snapshot is taken for it.
-    fn load_config<C: DiscoverableConfig>(path: &Path) -> Result<C> {
+    pub(super) fn load_config<C: DiscoverableConfig>(path: &Path) -> Result<C> {
         let name = path
             .file_name()
             .and_then(|name| name.to_str())
@@ -2105,7 +2109,7 @@ impl App {
     ///
     /// Falls back to the path as given when it cannot be canonicalized (it may not exist yet),
     /// which is no worse than not canonicalizing at all.
-    fn canonical_path(path: &Path) -> PathBuf {
+    pub(crate) fn canonical_path(path: &Path) -> PathBuf {
         let path = if path.as_os_str().is_empty() {
             Path::new(".")
         } else {
@@ -2115,9 +2119,11 @@ impl App {
     }
 
     /// The config an explicit `--config` path names, when one was given.
-    fn load_explicit<C: DiscoverableConfig>(explicit: Option<&Path>) -> Result<Option<C>> {
+    pub(super) fn load_explicit<C: DiscoverableConfig>(
+        explicit: Option<&Path>,
+    ) -> Result<Option<C>> {
         explicit
-            .map(|p| Self::load_config::<C>(p).context("loading --config"))
+            .map(|p| load_config::<C>(p).context("loading --config"))
             .transpose()
     }
 }
@@ -2149,7 +2155,7 @@ impl<C: DiscoverableConfig + Clone + Default> HostConfigs<C> {
     /// project untouched). Nothing seeds the lint config, so `jals lint` keeps its exact
     /// file-or-default behavior.
     fn seed(&mut self, root: &Path, config: C) {
-        self.by_root.insert(App::canonical_path(root), config);
+        self.by_root.insert(api::canonical_path(root), config);
     }
 
     /// The config governing `dir`: the explicit override, the memoized or seeded config of the
@@ -2169,7 +2175,7 @@ impl<C: DiscoverableConfig + Clone + Default> HostConfigs<C> {
             return Ok((None, config.clone()));
         }
         // Nearest first, so an authored config always beats one seeded further up.
-        let start = App::canonical_path(dir);
+        let start = api::canonical_path(dir);
         let Some(root) = start.ancestors().find(|candidate| {
             self.by_root.contains_key(*candidate) || candidate.join(C::FILE_NAME).is_file()
         }) else {
@@ -2179,7 +2185,7 @@ impl<C: DiscoverableConfig + Clone + Default> HostConfigs<C> {
         if let Some(config) = self.by_root.get(root) {
             return Ok((path.is_file().then_some(path), config.clone()));
         }
-        let config: C = App::load_config(&path)
+        let config: C = api::load_config(&path)
             .with_context(|| format!("discovering config from {}", dir.display()))?;
         self.by_root.insert(root.to_path_buf(), config.clone());
         Ok((Some(path), config))
@@ -2205,7 +2211,7 @@ struct HostFeatures {
 impl HostFeatures {
     /// The feature set governing `dir`, discovered once per directory.
     async fn for_dir(&mut self, dir: &Path) -> FeatureSet {
-        let key = App::canonical_path(dir);
+        let key = api::canonical_path(dir);
         if let Some(features) = self.by_dir.get(&key) {
             return *features;
         }

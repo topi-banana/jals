@@ -515,7 +515,7 @@ mod tests {
     /// Assemble-and-map for `text` under the default config, with no project index.
     fn diagnostics(text: &str) -> Vec<Diagnostic> {
         let document = doc(text);
-        block_on_inline(jals_editor::FileDiagnostics::assemble(
+        block_on_inline(jals_editor::diagnostics::assemble(
             &document.parse,
             None,
             &jals_config::lint::Config::default(),
@@ -569,7 +569,7 @@ mod tests {
         let document = doc(text);
         let syms = LspHost.symbols(
             &document,
-            jals_editor::Outline::of(&document.parse.syntax()),
+            jals_editor::outline::of(&document.parse.syntax()),
         );
         assert_eq!(syms.len(), 2);
         let c = &syms[0];
@@ -743,7 +743,7 @@ mod tests {
     /// Decode the tokens produced for `text` (with no project index).
     fn decode(text: &str) -> Vec<Tok> {
         let document = doc(text);
-        let classified = block_on_inline(jals_editor::SemanticTokens::classify(
+        let classified = block_on_inline(jals_editor::semantic::classify(
             &document.parse.syntax(),
             None,
         ));
@@ -891,7 +891,7 @@ mod tests {
         // region folds carry no kind, comment/import folds carry theirs.
         let folds = |text: &str| -> Vec<(u32, u32, Option<FoldingRangeKind>)> {
             let document = doc(text);
-            let mut v: Vec<_> = jals_editor::Folds::of(
+            let mut v: Vec<_> = jals_editor::folding::of(
                 &document.parse.syntax(),
                 &document.text,
                 &document.line_index,
@@ -928,7 +928,7 @@ mod tests {
         let document = doc(text);
         let sr = LspHost.selection(
             &document,
-            jals_editor::SelectionChains::at(&document.parse.syntax(), 17),
+            jals_editor::selection::at(&document.parse.syntax(), 17),
         );
         let mut chain = Vec::new();
         let mut cur = Some(&sr);

@@ -24,29 +24,35 @@ use jals_exec::{LocalBoxFuture, Yielder};
 use jals_syntax::ast::{AstNode, IfStmt, Stmt};
 use jals_syntax::{SyntaxElement, SyntaxKind, SyntaxNode};
 
-use crate::rules::{Checker, Finding, RuleMeta, Significant};
+use crate::rules::significant;
+use crate::rules::{Checker, Finding, RuleMeta};
 
 pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "collapsible-if",
     category: Category::Complexity,
     level: |config| config.complexity.collapsible_if.level,
     needs_clean_parse: false,
-    check: Checker::Syntactic(CollapsibleIf::check),
+    check: Checker::Syntactic(api::check),
 };
 
 /// The `collapsible-if` rule.
-struct CollapsibleIf;
+mod api {
+    use super::{
+        AstNode, Config, Finding, IfStmt, LocalBoxFuture, Stmt, SyntaxElement, SyntaxKind,
+        SyntaxNode, Vec, Yielder, significant,
+    };
 
-impl CollapsibleIf {
-    const MESSAGE: &'static str =
-        "this `if` only guards another `if`; join the two conditions with `&&`";
+    const MESSAGE: &str = "this `if` only guards another `if`; join the two conditions with `&&`";
 
     /// The table-edge shim: boxes the async rule body once per file.
-    fn check<'a>(root: &'a SyntaxNode, _config: &'a Config) -> LocalBoxFuture<'a, Vec<Finding>> {
-        alloc::boxed::Box::pin(Self::check_impl(root))
+    pub(crate) fn check<'a>(
+        root: &'a SyntaxNode,
+        _config: &'a Config,
+    ) -> LocalBoxFuture<'a, Vec<Finding>> {
+        alloc::boxed::Box::pin(check_impl(root))
     }
 
-    async fn check_impl(root: &SyntaxNode) -> Vec<Finding> {
+    pub(crate) async fn check_impl(root: &SyntaxNode) -> Vec<Finding> {
         let mut yielder = Yielder::new();
         let mut out = Vec::new();
         for node in root.descendants() {
@@ -54,21 +60,21 @@ impl CollapsibleIf {
             let Some(outer) = IfStmt::cast(node) else {
                 continue;
             };
-            if !Self::collapses(&outer) {
+            if !collapses(&outer) {
                 continue;
             }
             // The condition, not the statement: it is what the fix rewrites.
             out.extend(
                 outer
                     .condition()
-                    .map(|cond| Finding::at_node(cond.syntax(), Self::MESSAGE)),
+                    .map(|cond| Finding::at_node(cond.syntax(), MESSAGE)),
             );
         }
         out
     }
 
     /// Whether `outer`'s body is a lone `if` that could join it.
-    fn collapses(outer: &IfStmt) -> bool {
+    pub(crate) fn collapses(outer: &IfStmt) -> bool {
         let mut branches = outer.branches();
         let Some(body) = branches.next() else {
             return false;
@@ -87,7 +93,7 @@ impl CollapsibleIf {
                 if stmts.next().is_some() {
                     return false;
                 }
-                if Self::has_orphaned_comment(block.syntax(), inner.syntax()) {
+                if has_orphaned_comment(block.syntax(), inner.syntax()) {
                     return false;
                 }
                 inner
@@ -102,11 +108,11 @@ impl CollapsibleIf {
     /// Whether `block` holds a comment that collapsing would orphan: one written outside `inner`'s
     /// own significant span, which is where a comment about the *nesting* goes.
     ///
-    /// The span is [`Significant::range`] rather than `inner`'s node range, because rowan parks the
+    /// The span is [`significant::range`] rather than `inner`'s node range, because rowan parks the
     /// leading trivia — the comment in question — inside the node that follows it, so a comment
     /// written before `if` is already part of the inner statement's range.
-    fn has_orphaned_comment(block: &SyntaxNode, inner: &SyntaxNode) -> bool {
-        let Some(inner) = Significant::range(inner) else {
+    pub(crate) fn has_orphaned_comment(block: &SyntaxNode, inner: &SyntaxNode) -> bool {
+        let Some(inner) = significant::range(inner) else {
             return false;
         };
         block

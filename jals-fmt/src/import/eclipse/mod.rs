@@ -29,6 +29,7 @@
 //! `insert_space_*` in full, the column-alignment settings, the Javadoc minutiae — stay here,
 //! typed and named, as the option surface a future Eclipse-compatible layout engine reads.
 
+use crate::import::serde_kv;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
 
@@ -40,7 +41,6 @@ use jals_config::fmt::{
 use serde::{Deserialize, Deserializer};
 
 use super::baseline::pin_java_baseline;
-use super::serde_kv::Kv;
 use super::{ConfigImporter, ImportError};
 
 mod alignment;
@@ -50,7 +50,8 @@ mod comments;
 mod indentation;
 mod new_lines;
 mod one_line;
-mod spacing;
+pub(crate) mod spacing;
+pub use spacing::Spacing;
 mod values;
 mod wrapping;
 
@@ -64,7 +65,6 @@ pub use comments::Comments;
 pub use indentation::Indentation;
 pub use new_lines::NewLines;
 pub use one_line::OneLineBodies;
-pub use spacing::Spacing;
 pub use values::{
     Alignment, BracePosition, Insert, OneLine, ParenthesisPositions, TabChar, TextBlockIndentation,
 };
@@ -99,17 +99,17 @@ impl EclipseConfig {
     /// Nine independent passes over the same object: each family model takes the ids it names
     /// and ignores the rest, so no `#[serde(flatten)]` buffering is involved.
     pub fn from_pairs(pairs: BTreeMap<String, String>) -> Result<Self, ImportError> {
-        let object = Kv::object(pairs);
+        let object = serde_kv::object(pairs);
         Ok(Self {
-            indentation: Kv::from_object(&object)?,
-            braces: Kv::from_object(&object)?,
-            one_line: Kv::from_object(&object)?,
-            blank_lines: Kv::from_object(&object)?,
-            alignment: Kv::from_object(&object)?,
-            wrapping: Kv::from_object(&object)?,
-            spacing: Kv::from_object(&object)?,
-            new_lines: Kv::from_object(&object)?,
-            comments: Kv::from_object(&object)?,
+            indentation: serde_kv::from_object(&object)?,
+            braces: serde_kv::from_object(&object)?,
+            one_line: serde_kv::from_object(&object)?,
+            blank_lines: serde_kv::from_object(&object)?,
+            alignment: serde_kv::from_object(&object)?,
+            wrapping: serde_kv::from_object(&object)?,
+            spacing: serde_kv::from_object(&object)?,
+            new_lines: serde_kv::from_object(&object)?,
+            comments: serde_kv::from_object(&object)?,
         })
     }
 }
@@ -193,29 +193,29 @@ impl Alignment {
 }
 
 /// The projection's three shapes, grouped so each call site reads as the pair being mapped.
-struct Lower;
+pub(crate) mod api {
+    use super::{Alignment, Insert, WrapPolicy};
 
-impl Lower {
     /// Set `target` from `value` when the profile declared it, applying `map`.
     ///
     /// The projection is one long sequence of "if the native setting is present, lower it";
     /// this keeps each line to the pair being mapped instead of an `if let` block.
-    fn set<T, U>(target: &mut U, value: Option<T>, map: impl FnOnce(T) -> U) {
+    pub(crate) fn set<T, U>(target: &mut U, value: Option<T>, map: impl FnOnce(T) -> U) {
         if let Some(value) = value {
             *target = map(value);
         }
     }
 
     /// Lower one `alignment_for_*` bitmask onto a jals wrap policy.
-    fn align(target: &mut WrapPolicy, value: Option<Alignment>) {
-        Self::set(target, value, Alignment::to_jals);
+    pub(crate) fn align(target: &mut WrapPolicy, value: Option<Alignment>) {
+        set(target, value, Alignment::to_jals);
     }
 
     /// Fold Eclipse's before/after pair for one token role onto jals's single key.
     ///
     /// Eclipse states spacing twice per role; jals has one key. A role counts as spaced when
     /// either side inserts, and the jals default survives when the profile declared neither.
-    fn around(target: &mut bool, before: Option<Insert>, after: Option<Insert>) {
+    pub(crate) fn around(target: &mut bool, before: Option<Insert>, after: Option<Insert>) {
         if before.is_some() || after.is_some() {
             *target = before.is_some_and(Insert::is_insert) || after.is_some_and(Insert::is_insert);
         }
@@ -240,7 +240,7 @@ impl From<EclipseConfig> for Config {
 
         // --- [layout] -------------------------------------------------------------------
         let layout = &mut config.layout;
-        Lower::set(
+        api::set(
             &mut layout.indent_style,
             indentation.tabulation_char,
             |tab| match tab {
@@ -249,7 +249,7 @@ impl From<EclipseConfig> for Config {
                 TabChar::Mixed => IndentStyle::Mixed,
             },
         );
-        Lower::set(&mut layout.tab_width, indentation.tabulation_size, |n| n);
+        api::set(&mut layout.tab_width, indentation.tabulation_size, |n| n);
         // Under `mixed`, `indentation.size` is the logical level width and `tabulation.size` is
         // only the tab stop; otherwise the two are the same knob.
         let indent_width = if indentation.tabulation_char == Some(TabChar::Mixed) {
@@ -257,52 +257,52 @@ impl From<EclipseConfig> for Config {
         } else {
             indentation.tabulation_size
         };
-        Lower::set(&mut layout.indent_width, indent_width, |n| n);
+        api::set(&mut layout.indent_width, indent_width, |n| n);
         // Eclipse counts the continuation indent in indentation *levels*; jals wants columns.
         // `saturating_mul` guards a pathological level count (usize is 32-bit on wasm).
         let level_cols = layout.indent_width;
-        Lower::set(
+        api::set(
             &mut layout.continuation_indent,
             indentation.continuation_indentation,
             |levels| Some(levels.saturating_mul(level_cols)),
         );
-        Lower::set(&mut layout.max_width, indentation.line_split, |n| n);
-        Lower::set(
+        api::set(&mut layout.max_width, indentation.line_split, |n| n);
+        api::set(
             &mut layout.indent_empty_lines,
             indentation.indent_empty_lines,
             |b| b,
         );
-        Lower::set(
+        api::set(
             &mut layout.indent_switch_labels,
             indentation.indent_switchstatements_compare_to_switch,
             |b| b,
         );
-        Lower::set(
+        api::set(
             &mut layout.indent_switch_case_body,
             indentation.indent_switchstatements_compare_to_cases,
             |b| b,
         );
-        Lower::set(
+        api::set(
             &mut layout.indent_type_members,
             indentation.indent_body_declarations_compare_to_type_header,
             |b| b,
         );
-        Lower::set(
+        api::set(
             &mut layout.formatter_tags,
             indentation.use_on_off_tags,
             |b| b,
         );
-        Lower::set(
+        api::set(
             &mut layout.formatter_off_tag,
             indentation.disabling_tag,
             |tag| tag,
         );
-        Lower::set(
+        api::set(
             &mut layout.formatter_on_tag,
             indentation.enabling_tag,
             |tag| tag,
         );
-        Lower::set(
+        api::set(
             &mut layout.insert_final_newline,
             new_lines.insert_new_line_at_end_of_file_if_missing,
             Insert::is_insert,
@@ -311,94 +311,94 @@ impl From<EclipseConfig> for Config {
         // --- [blank-lines] --------------------------------------------------------------
         let blanks = &mut config.blank_lines;
         // Eclipse has one preserve count for both contexts.
-        Lower::set(
+        api::set(
             &mut blanks.max_in_code,
             blank_lines.number_of_empty_lines_to_preserve,
             |n| n,
         );
-        Lower::set(
+        api::set(
             &mut blanks.max_in_declarations,
             blank_lines.number_of_empty_lines_to_preserve,
             |n| n,
         );
         // JDT has no rule that singles out the gap after a doc comment, so the one preserve count
         // covers it too.
-        Lower::set(
+        api::set(
             &mut blanks.max_after_doc_comment,
             blank_lines.number_of_empty_lines_to_preserve,
             |n| n,
         );
-        Lower::set(
+        api::set(
             &mut blanks.before_package,
             blank_lines.blank_lines_before_package,
             |n| n,
         );
-        Lower::set(
+        api::set(
             &mut blanks.after_package,
             blank_lines.blank_lines_after_package,
             |n| n,
         );
-        Lower::set(
+        api::set(
             &mut blanks.before_imports,
             blank_lines.blank_lines_before_imports,
             |n| n,
         );
-        Lower::set(
+        api::set(
             &mut blanks.after_imports,
             blank_lines.blank_lines_after_imports,
             |n| n,
         );
-        Lower::set(
+        api::set(
             &mut blanks.between_import_groups,
             blank_lines.blank_lines_between_import_groups,
             |n| n,
         );
-        Lower::set(
+        api::set(
             &mut blanks.around_type,
             blank_lines.blank_lines_between_type_declarations,
             |n| n,
         );
-        Lower::set(
+        api::set(
             &mut blanks.at_type_body_start,
             blank_lines.blank_lines_before_first_class_body_declaration,
             |n| n,
         );
-        Lower::set(
+        api::set(
             &mut blanks.at_type_body_end,
             blank_lines.blank_lines_after_last_class_body_declaration,
             |n| n,
         );
-        Lower::set(
+        api::set(
             &mut blanks.around_field,
             blank_lines.blank_lines_before_field,
             |n| n,
         );
-        Lower::set(
+        api::set(
             &mut blanks.around_method,
             blank_lines.blank_lines_before_method,
             |n| n,
         );
-        Lower::set(
+        api::set(
             &mut blanks.around_initializer,
             blank_lines.blank_lines_before_new_chunk,
             |n| n,
         );
-        Lower::set(
+        api::set(
             &mut blanks.before_method_body,
             blank_lines.number_of_blank_lines_at_beginning_of_method_body,
             |n| n,
         );
-        Lower::set(
+        api::set(
             &mut blanks.at_block_start,
             blank_lines.number_of_blank_lines_at_beginning_of_code_block,
             |n| n,
         );
-        Lower::set(
+        api::set(
             &mut blanks.at_block_end,
             blank_lines.number_of_blank_lines_at_end_of_code_block,
             |n| n,
         );
-        Lower::set(
+        api::set(
             &mut blanks.between_switch_groups,
             blank_lines.blank_lines_between_statement_group_in_switch,
             |n| n,
@@ -406,103 +406,103 @@ impl From<EclipseConfig> for Config {
 
         // --- [braces] -------------------------------------------------------------------
         let jbraces = &mut config.braces;
-        Lower::set(
+        api::set(
             &mut jbraces.type_declaration,
             braces.brace_position_for_type_declaration,
             BracePosition::to_jals,
         );
-        Lower::set(
+        api::set(
             &mut jbraces.method_declaration,
             braces.brace_position_for_method_declaration,
             BracePosition::to_jals,
         );
-        Lower::set(
+        api::set(
             &mut jbraces.block,
             braces.brace_position_for_block,
             BracePosition::to_jals,
         );
-        Lower::set(
+        api::set(
             &mut jbraces.lambda_body,
             braces.brace_position_for_lambda_body,
             BracePosition::to_jals,
         );
-        Lower::set(
+        api::set(
             &mut jbraces.switch,
             braces.brace_position_for_switch,
             BracePosition::to_jals,
         );
-        Lower::set(
+        api::set(
             &mut jbraces.array_initializer,
             braces.brace_position_for_array_initializer,
             BracePosition::to_jals,
         );
-        Lower::set(
+        api::set(
             &mut jbraces.else_on_new_line,
             new_lines.insert_new_line_before_else_in_if_statement,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut jbraces.while_on_new_line,
             new_lines.insert_new_line_before_while_in_do_statement,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut jbraces.catch_on_new_line,
             new_lines.insert_new_line_before_catch_in_try_statement,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut jbraces.finally_on_new_line,
             new_lines.insert_new_line_before_finally_in_try_statement,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut jbraces.compact_else_if,
             indentation.compact_else_if,
             |b| b,
         );
-        Lower::set(
+        api::set(
             &mut jbraces.keep_type_body_on_one_line,
             one_line.keep_type_declaration_on_one_line,
             OneLine::to_jals,
         );
-        Lower::set(
+        api::set(
             &mut jbraces.keep_method_body_on_one_line,
             one_line.keep_method_body_on_one_line,
             OneLine::to_jals,
         );
-        Lower::set(
+        api::set(
             &mut jbraces.keep_block_on_one_line,
             one_line.keep_code_block_on_one_line,
             OneLine::to_jals,
         );
-        Lower::set(
+        api::set(
             &mut jbraces.keep_lambda_body_on_one_line,
             one_line.keep_lambda_body_block_on_one_line,
             OneLine::to_jals,
         );
-        Lower::set(
+        api::set(
             &mut jbraces.keep_switch_body_on_one_line,
             one_line.keep_switch_body_block_on_one_line,
             OneLine::to_jals,
         );
-        Lower::set(
+        api::set(
             &mut jbraces.keep_enum_declaration_on_one_line,
             one_line.keep_enum_declaration_on_one_line,
             OneLine::to_jals,
         );
-        Lower::set(
+        api::set(
             &mut jbraces.keep_record_declaration_on_one_line,
             one_line.keep_record_declaration_on_one_line,
             OneLine::to_jals,
         );
-        Lower::set(
+        api::set(
             &mut jbraces.keep_annotation_declaration_on_one_line,
             one_line.keep_annotation_declaration_on_one_line,
             OneLine::to_jals,
         );
         // Note the id's typo: Eclipse ships `keep_imple_if_on_one_line`.
-        Lower::set(
+        api::set(
             &mut jbraces.keep_control_statement_on_one_line,
             one_line.keep_imple_if_on_one_line,
             |b| b,
@@ -510,84 +510,84 @@ impl From<EclipseConfig> for Config {
 
         // --- [wrapping] -----------------------------------------------------------------
         let wrap = &mut config.wrapping;
-        Lower::align(
+        api::align(
             &mut wrap.call_arguments,
             alignment.alignment_for_arguments_in_method_invocation,
         );
-        Lower::align(
+        api::align(
             &mut wrap.method_parameters,
             alignment.alignment_for_parameters_in_method_declaration,
         );
-        Lower::align(
+        api::align(
             &mut wrap.record_components,
             alignment.alignment_for_record_components,
         );
-        Lower::align(
+        api::align(
             &mut wrap.resource_list,
             alignment.alignment_for_resources_in_try,
         );
-        Lower::align(
+        api::align(
             &mut wrap.throws_list,
             alignment.alignment_for_throws_clause_in_method_declaration,
         );
-        Lower::align(
+        api::align(
             &mut wrap.extends_list,
             alignment.alignment_for_superinterfaces_in_type_declaration,
         );
-        Lower::align(
+        api::align(
             &mut wrap.enum_constants,
             alignment.alignment_for_enum_constants,
         );
-        Lower::align(
+        api::align(
             &mut wrap.array_initializer,
             alignment.alignment_for_expressions_in_array_initializer,
         );
-        Lower::align(
+        api::align(
             &mut wrap.annotation_arguments,
             alignment.alignment_for_arguments_in_annotation,
         );
-        Lower::align(
+        api::align(
             &mut wrap.type_arguments,
             alignment.alignment_for_type_arguments,
         );
-        Lower::align(
+        api::align(
             &mut wrap.type_parameters,
             alignment.alignment_for_type_parameters,
         );
-        Lower::align(
+        api::align(
             &mut wrap.multi_catch_types,
             alignment.alignment_for_union_type_in_multicatch,
         );
-        Lower::align(
+        api::align(
             &mut wrap.case_labels,
             alignment.alignment_for_expressions_in_switch_case_with_colon,
         );
-        Lower::align(
+        api::align(
             &mut wrap.method_chain,
             alignment.alignment_for_selector_in_method_invocation,
         );
         // Eclipse splits binary wrapping across seven operator classes; the additive one is
         // taken as the representative and the other six stay in the native model.
-        Lower::align(
+        api::align(
             &mut wrap.binary_operation,
             alignment
                 .alignment_for_additive_operator
                 .or(alignment.alignment_for_binary_expression),
         );
-        Lower::align(
+        api::align(
             &mut wrap.ternary,
             alignment.alignment_for_conditional_expression,
         );
-        Lower::align(&mut wrap.assignment, alignment.alignment_for_assignment);
-        Lower::align(
+        api::align(&mut wrap.assignment, alignment.alignment_for_assignment);
+        api::align(
             &mut wrap.for_statement,
             alignment.alignment_for_expressions_in_for_loop_header,
         );
-        Lower::align(
+        api::align(
             &mut wrap.assert_statement,
             alignment.alignment_for_assertion_message,
         );
-        Lower::align(
+        api::align(
             &mut wrap.switch_expression,
             alignment.alignment_for_expressions_in_switch_case_with_arrow,
         );
@@ -600,91 +600,91 @@ impl From<EclipseConfig> for Config {
                 WrapPolicy::Never
             }
         };
-        Lower::set(
+        api::set(
             &mut wrap.type_annotations,
             new_lines
                 .insert_new_line_after_annotation_on_type
                 .or(new_lines.insert_new_line_after_annotation),
             annotation_wrap,
         );
-        Lower::set(
+        api::set(
             &mut wrap.method_annotations,
             new_lines
                 .insert_new_line_after_annotation_on_method
                 .or(new_lines.insert_new_line_after_annotation_on_member),
             annotation_wrap,
         );
-        Lower::set(
+        api::set(
             &mut wrap.field_annotations,
             new_lines
                 .insert_new_line_after_annotation_on_field
                 .or(new_lines.insert_new_line_after_annotation_on_member),
             annotation_wrap,
         );
-        Lower::set(
+        api::set(
             &mut wrap.parameter_annotations,
             new_lines.insert_new_line_after_annotation_on_parameter,
             annotation_wrap,
         );
-        Lower::set(
+        api::set(
             &mut wrap.variable_annotations,
             new_lines.insert_new_line_after_annotation_on_local_variable,
             annotation_wrap,
         );
-        Lower::set(
+        api::set(
             &mut wrap.before_binary_operator,
             wrapping
                 .wrap_before_additive_operator
                 .or(wrapping.wrap_before_binary_operator),
             |b| b,
         );
-        Lower::set(
+        api::set(
             &mut wrap.before_ternary_operator,
             wrapping.wrap_before_conditional_operator,
             |b| b,
         );
-        Lower::set(
+        api::set(
             &mut wrap.before_assignment_operator,
             wrapping.wrap_before_assignment_operator,
             |b| b,
         );
-        Lower::set(
+        api::set(
             &mut wrap.before_assert_colon,
             wrapping.wrap_before_assertion_message_operator,
             |b| b,
         );
-        Lower::set(
+        api::set(
             &mut wrap.paren_method_declaration,
             // Eclipse ships this id with a typo: `..._method_delcaration`.
             wrapping.parentheses_positions_in_method_delcaration,
             ParenthesisPositions::to_jals,
         );
-        Lower::set(
+        api::set(
             &mut wrap.paren_method_invocation,
             wrapping.parentheses_positions_in_method_invocation,
             ParenthesisPositions::to_jals,
         );
-        Lower::set(
+        api::set(
             &mut wrap.paren_control,
             wrapping.parentheses_positions_in_if_while_statement,
             ParenthesisPositions::to_jals,
         );
-        Lower::set(
+        api::set(
             &mut wrap.paren_annotation,
             wrapping.parentheses_positions_in_annotation,
             ParenthesisPositions::to_jals,
         );
-        Lower::set(
+        api::set(
             &mut wrap.paren_lambda,
             wrapping.parentheses_positions_in_lambda_declaration,
             ParenthesisPositions::to_jals,
         );
-        Lower::set(
+        api::set(
             &mut wrap.paren_record,
             wrapping.parentheses_positions_in_record_declaration,
             ParenthesisPositions::to_jals,
         );
-        Lower::set(
+        api::set(
             &mut wrap.join_wrapped_lines,
             indentation.join_wrapped_lines,
             |b| b,
@@ -695,232 +695,232 @@ impl From<EclipseConfig> for Config {
         // token role, so the pair is folded with `||` — a space on either side means the role
         // is spaced.
         let space = &mut config.spacing;
-        Lower::around(
+        api::around(
             &mut space.around_assignment_operators,
             spacing.insert_space_before_assignment_operator,
             spacing.insert_space_after_assignment_operator,
         );
-        Lower::around(
+        api::around(
             &mut space.around_logical_operators,
             spacing.insert_space_before_logical_operator,
             spacing.insert_space_after_logical_operator,
         );
-        Lower::around(
+        api::around(
             &mut space.around_equality_operators,
             spacing.insert_space_before_relational_operator,
             spacing.insert_space_after_relational_operator,
         );
-        Lower::around(
+        api::around(
             &mut space.around_relational_operators,
             spacing.insert_space_before_relational_operator,
             spacing.insert_space_after_relational_operator,
         );
-        Lower::around(
+        api::around(
             &mut space.around_bitwise_operators,
             spacing.insert_space_before_bitwise_operator,
             spacing.insert_space_after_bitwise_operator,
         );
-        Lower::around(
+        api::around(
             &mut space.around_additive_operators,
             spacing.insert_space_before_additive_operator,
             spacing.insert_space_after_additive_operator,
         );
-        Lower::around(
+        api::around(
             &mut space.around_multiplicative_operators,
             spacing.insert_space_before_multiplicative_operator,
             spacing.insert_space_after_multiplicative_operator,
         );
-        Lower::around(
+        api::around(
             &mut space.around_shift_operators,
             spacing.insert_space_before_shift_operator,
             spacing.insert_space_after_shift_operator,
         );
-        Lower::around(
+        api::around(
             &mut space.around_unary_operator,
             spacing.insert_space_before_unary_operator,
             spacing.insert_space_after_unary_operator,
         );
-        Lower::around(
+        api::around(
             &mut space.around_lambda_arrow,
             spacing.insert_space_before_lambda_arrow,
             spacing.insert_space_after_lambda_arrow,
         );
-        Lower::around(
+        api::around(
             &mut space.around_type_bounds,
             spacing.insert_space_before_and_in_type_parameter,
             spacing.insert_space_after_and_in_type_parameter,
         );
-        Lower::set(
+        api::set(
             &mut space.before_comma,
             spacing.insert_space_before_comma_in_method_invocation_arguments,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut space.after_comma,
             spacing.insert_space_after_comma_in_method_invocation_arguments,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut space.before_semicolon,
             spacing.insert_space_before_semicolon_in_for,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut space.after_semicolon,
             spacing.insert_space_after_semicolon_in_for,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut space.before_method_call_parentheses,
             spacing.insert_space_before_opening_paren_in_method_invocation,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut space.before_method_parentheses,
             spacing.insert_space_before_opening_paren_in_method_declaration,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut space.before_keyword_parentheses,
             spacing.insert_space_before_opening_paren_in_if,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut space.before_annotation_parentheses,
             spacing.insert_space_before_opening_paren_in_annotation,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut space.within_method_call_parentheses,
             spacing.insert_space_after_opening_paren_in_method_invocation,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut space.within_method_parentheses,
             spacing.insert_space_after_opening_paren_in_method_declaration,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut space.within_keyword_parentheses,
             spacing.insert_space_after_opening_paren_in_if,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut space.within_cast_parentheses,
             spacing.insert_space_after_opening_paren_in_cast,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut space.within_annotation_parentheses,
             spacing.insert_space_after_opening_paren_in_annotation,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut space.within_brackets,
             spacing.insert_space_after_opening_bracket_in_array_reference,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut space.within_array_initializer_braces,
             spacing.insert_space_after_opening_brace_in_array_initializer,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut space.within_angle_brackets,
             spacing.insert_space_after_opening_angle_bracket_in_type_arguments,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut space.within_record_header,
             spacing.insert_space_after_opening_paren_in_record_declaration,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut space.within_empty_parentheses,
             spacing.insert_space_between_empty_parens_in_method_declaration,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut space.within_empty_braces,
             spacing.insert_space_between_empty_braces_in_array_initializer,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut space.before_left_brace,
             spacing.insert_space_before_opening_brace_in_block,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut space.before_array_initializer_left_brace,
             spacing.insert_space_before_opening_brace_in_array_initializer,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut space.after_type_cast,
             spacing.insert_space_after_closing_paren_in_cast,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut space.before_type_parameter_list,
             spacing.insert_space_before_opening_angle_bracket_in_type_parameters,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut space.before_ternary_question,
             spacing.insert_space_before_question_in_conditional,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut space.after_ternary_question,
             spacing.insert_space_after_question_in_conditional,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut space.before_ternary_colon,
             spacing.insert_space_before_colon_in_conditional,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut space.after_ternary_colon,
             spacing.insert_space_after_colon_in_conditional,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut space.before_foreach_colon,
             spacing.insert_space_before_colon_in_for,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut space.after_foreach_colon,
             spacing.insert_space_after_colon_in_for,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut space.before_label_colon,
             spacing.insert_space_before_colon_in_labeled_statement,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut space.after_label_colon,
             spacing.insert_space_after_colon_in_labeled_statement,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut space.before_case_colon,
             spacing.insert_space_before_colon_in_case,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut space.after_case_colon,
             spacing.insert_space_after_colon_in_case,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut space.before_assert_colon,
             spacing.insert_space_before_colon_in_assert,
             Insert::is_insert,
         );
-        Lower::set(
+        api::set(
             &mut space.after_assert_colon,
             spacing.insert_space_after_colon_in_assert,
             Insert::is_insert,
@@ -928,44 +928,44 @@ impl From<EclipseConfig> for Config {
 
         // --- [comments] -----------------------------------------------------------------
         let jcomments = &mut config.comments;
-        Lower::set(
+        api::set(
             &mut jcomments.format_line,
             comments
                 .comment_format_line_comments
                 .or(comments.comment_format_comments),
             |b| b,
         );
-        Lower::set(
+        api::set(
             &mut jcomments.format_block,
             comments
                 .comment_format_block_comments
                 .or(comments.comment_format_comments),
             |b| b,
         );
-        Lower::set(
+        api::set(
             &mut jcomments.format_javadoc,
             comments
                 .comment_format_javadoc_comments
                 .or(comments.comment_format_comments),
             |b| b,
         );
-        Lower::set(
+        api::set(
             &mut jcomments.format_header,
             comments.comment_format_header,
             |b| b,
         );
-        Lower::set(
+        api::set(
             &mut jcomments.format_html,
             comments.comment_format_html,
             |b| b,
         );
-        Lower::set(
+        api::set(
             &mut jcomments.format_source_in_comments,
             comments.comment_format_source_code,
             |b| b,
         );
-        Lower::set(&mut jcomments.width, comments.comment_line_length, |n| n);
-        Lower::set(
+        api::set(&mut jcomments.width, comments.comment_line_length, |n| n);
+        api::set(
             &mut jcomments.count_width_from_start,
             comments.comment_count_line_length_from_starting_position,
             |b| b,
@@ -973,21 +973,21 @@ impl From<EclipseConfig> for Config {
         // One JDT setting, two jals rules: `clear_blank_lines_in_javadoc_comment` governs the
         // whole comment, and jals splits the description from the footer because
         // google-java-format keeps one and not the other.
-        Lower::set(
+        api::set(
             &mut jcomments.preserve_blank_lines,
             comments
                 .comment_clear_blank_lines_in_javadoc_comment
                 .or(comments.comment_clear_blank_lines),
             |clear| !clear,
         );
-        Lower::set(
+        api::set(
             &mut jcomments.blank_lines_between_tags,
             comments
                 .comment_clear_blank_lines_in_javadoc_comment
                 .or(comments.comment_clear_blank_lines),
             |clear| !clear,
         );
-        Lower::set(
+        api::set(
             &mut jcomments.blank_line_before_tags,
             comments.comment_insert_new_line_before_root_tags,
             Insert::is_insert,
@@ -1003,17 +1003,17 @@ impl From<EclipseConfig> for Config {
             (Some(false), _) | (_, Some(false)) => TagAlignment::None,
             (None, None) => jcomments.tag_alignment,
         };
-        Lower::set(
+        api::set(
             &mut jcomments.indent_tag_description,
             comments.comment_indent_tag_description,
             |b| b,
         );
-        Lower::set(
+        api::set(
             &mut jcomments.javadoc_boundaries_on_own_lines,
             comments.comment_new_lines_at_javadoc_boundaries,
             |b| b,
         );
-        Lower::set(
+        api::set(
             &mut jcomments.block_boundaries_on_own_lines,
             comments.comment_new_lines_at_block_boundaries,
             |b| b,
@@ -1042,7 +1042,7 @@ impl ConfigImporter for EclipsePrefs {
     type Native = EclipseConfig;
 
     fn parse(src: &str) -> Result<Self::Native, ImportError> {
-        EclipseConfig::from_pairs(super::text::Properties::parse(src))
+        EclipseConfig::from_pairs(super::text::properties::parse(src))
     }
 }
 
@@ -1057,6 +1057,6 @@ impl ConfigImporter for EclipseXmlProfile {
     type Native = EclipseConfig;
 
     fn parse(src: &str) -> Result<Self::Native, ImportError> {
-        EclipseConfig::from_pairs(super::xml::EclipseProfileReader::parse(src)?)
+        EclipseConfig::from_pairs(super::xml::eclipse_profile_reader::parse(src)?)
     }
 }

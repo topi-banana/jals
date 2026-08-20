@@ -24,6 +24,7 @@
 //! enum constant gets its own refusal, because `case RED:` names an arm by identity rather than by
 //! value, and a caller that saw a generic "not a constant" would look for the wrong thing.
 
+use super::literal;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -35,7 +36,7 @@ use jals_syntax::SyntaxKind::{
 };
 use jals_syntax::ast::{self, AstNode as _};
 
-use super::literal::{Literal, Width};
+use super::literal::Width;
 use super::{FactError, Facts, Result};
 
 /// A constant expression's value, at the width Java gives it.
@@ -144,7 +145,7 @@ impl Const<'_> {
         let raw = token.text();
         match token.kind() {
             INT_LITERAL => {
-                let (value, width) = Literal::integer(raw)?;
+                let (value, width) = literal::integer(raw)?;
                 #[expect(
                     clippy::cast_possible_truncation,
                     reason = "an unsuffixed literal is an `int`, and `0x8000_0000` is one whose \
@@ -159,7 +160,7 @@ impl Const<'_> {
                 })
             }
             FLOAT_LITERAL => {
-                let (value, is_float) = Literal::floating(raw)?;
+                let (value, is_float) = literal::floating(raw)?;
                 #[expect(
                     clippy::cast_possible_truncation,
                     reason = "an `f` suffix makes the literal a `float`, which is that narrowing"
@@ -170,12 +171,12 @@ impl Const<'_> {
                     ConstValue::Double(value)
                 })
             }
-            CHAR_LITERAL => Literal::text(raw)?
+            CHAR_LITERAL => literal::text(raw)?
                 .chars()
                 .next()
                 .map(ConstValue::Char)
                 .ok_or(FactError::Unsupported("an empty character literal")),
-            STRING_LITERAL => Ok(ConstValue::Text(Literal::text(raw)?)),
+            STRING_LITERAL => Ok(ConstValue::Text(literal::text(raw)?)),
             TRUE_KW => Ok(ConstValue::Bool(true)),
             FALSE_KW => Ok(ConstValue::Bool(false)),
             _ => Err(FactError::Unsupported("a `case` of this literal kind")),

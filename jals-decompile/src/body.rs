@@ -27,20 +27,28 @@ use jals_classfile::{
 };
 use jals_exec::{LocalBoxFuture, Yielder};
 
-use crate::attrs::Attrs;
+use crate::attrs;
 use crate::cfg::{Cfg, Term};
-use crate::exceptions::{Clause, Exceptions, Finally, TryRegion};
+use crate::exceptions::{Clause, Finally, TryRegion};
 use crate::expr::{ArrayForm, CatchClause, ConcatPart, Expr, ForInit, ForUpdate, Stmt, SwitchArm};
 use crate::hierarchy::ClassHierarchy;
-use crate::lines::Lines;
-use crate::literal::Literal;
-use crate::switch::Subject;
-use crate::types::JavaType;
+use crate::lines;
+use crate::literal;
+use crate::switch;
+use crate::types;
+
+pub use api::decompile;
+pub(crate) use api::{load_slot, store_info};
 
 /// Namespace for method-body decompilation: the entry point and its slot / declaration pre-passes.
-pub struct MethodBody;
+mod api {
+    use super::{
+        AttributeBody, BTreeMap, BTreeSet, Cfg, ClassFile, ClassHierarchy, Clause, CodeAttribute,
+        ConstantPool, FieldType, Instruction, JvmKind, Local, MethodDescriptor, MethodInfo, Stmt,
+        String, Structurer, TryRegion, Vec, WideInstruction, attrs, lines, types,
+    };
+    use crate::exceptions;
 
-impl MethodBody {
     /// Reconstruct a method's body as indented Java statement lines, or `None` if it cannot be
     /// decompiled confidently.
     ///
@@ -89,12 +97,12 @@ impl MethodBody {
         let cfg = Cfg::build(&code.code, &code.exception_table).await?;
         // The `try` statements the exception table records. Read before the locals, because which
         // slots belong to a handler decides which ones may be hoisted.
-        let tries = Exceptions::regions(&cfg, &code.code)?;
-        let mut locals = Self::local_slots(&method_descriptor.params, is_static, param_names)?;
+        let tries = exceptions::regions(&cfg, &code.code)?;
+        let mut locals = local_slots(&method_descriptor.params, is_static, param_names)?;
         // Hoist a typed declaration for every non-parameter local the method stores into, registering
         // each in `locals` so the body can name it — bailing if any local cannot be resolved from the
         // `LocalVariableTable` (no `-g`, a synthetic temporary, a reused slot, or a name collision).
-        let decls = Self::local_declarations(code, pool, is_static, &mut locals, &tries)?;
+        let decls = local_declarations(code, pool, is_static, &mut locals, &tries)?;
         let structurer = Structurer {
             code: &code.code,
             cfg: &cfg,
@@ -108,8 +116,8 @@ impl MethodBody {
             is_static,
             locals,
             return_type: method_descriptor.return_type,
-            lines: Lines::table(code).unwrap_or_default(),
-            lvt: Attrs::local_variable_table(code).unwrap_or_default(),
+            lines: lines::table(code).unwrap_or_default(),
+            lvt: attrs::local_variable_table(code).unwrap_or_default(),
             tries: &tries,
         };
         let body = structurer.structure().await?;
@@ -123,14 +131,14 @@ impl MethodBody {
             .filter(|decl| !matches!(decl, Stmt::Declare { name, .. } if declared.contains(name)))
             .collect();
         stmts.extend(body);
-        Some(Self::render_body(&stmts))
+        Some(render_body(&stmts))
     }
 
     /// The parameter slot → source-name map (slot 0 is `this` for an instance method and is not
     /// listed), naming each slot from `param_names`. Returns `None` when the descriptor's parameter
     /// count differs from `param_names`, so the body cannot name a slot the signature does not
     /// declare.
-    fn local_slots(
+    pub(crate) fn local_slots(
         params: &[FieldType],
         is_static: bool,
         param_names: &[String],
@@ -138,7 +146,7 @@ impl MethodBody {
         if params.len() != param_names.len() {
             return None;
         }
-        let map = Attrs::parameter_slots(params, is_static)
+        let map = attrs::parameter_slots(params, is_static)
             .zip(param_names)
             .map(|((slot, param), name)| {
                 (
@@ -159,7 +167,7 @@ impl MethodBody {
     /// reference. Returns the declarations in slot order, or `None` — bailing the whole method — when
     /// a stored local has no usable LVT entry (no `-g` build, a synthetic temporary, or a reused
     /// slot) or its name collides with a parameter or another local.
-    fn local_declarations(
+    pub(crate) fn local_declarations(
         code: &CodeAttribute,
         pool: &ConstantPool,
         is_static: bool,
@@ -168,11 +176,11 @@ impl MethodBody {
     ) -> Option<Vec<Stmt>> {
         // Slots written by a store / `iinc`, minus `this` (slot 0, instance) and the parameters —
         // `locals` holds exactly those slots here, before any hoisted local is registered.
-        let mut stored: BTreeSet<u16> = code.code.iter().filter_map(Self::stored_slot).collect();
+        let mut stored: BTreeSet<u16> = code.code.iter().filter_map(stored_slot).collect();
         if !is_static {
             stored.remove(&0);
         }
-        Self::register_catch_parameters(code, pool, locals, tries)?;
+        register_catch_parameters(code, pool, locals, tries)?;
         // Every slot a handler owns is declared by the handler, not hoisted: a `catch` parameter by
         // its own clause, and a `finally`'s pending exception by nothing at all — it is a compiler
         // temporary that the entry `astore` and the trailing `aload`/`athrow` fold away with it.
@@ -189,15 +197,15 @@ impl MethodBody {
             return Some(Vec::new());
         }
         // Locals need types (a bare `var x;` is illegal), so the `LocalVariableTable` is required.
-        let table = Attrs::local_variable_table(code)?;
+        let table = attrs::local_variable_table(code)?;
         let mut decls = Vec::with_capacity(stored.len());
         for slot in stored {
-            let (name, ty) = Attrs::local_variable(table, pool, slot)?;
+            let (name, ty) = attrs::local_variable(table, pool, slot)?;
             // A hoisted declaration must never shadow a parameter or an already-hoisted local.
             if locals.values().any(|local| local.name == name) {
                 return None;
             }
-            let rendered_ty = JavaType::render_field_type(&ty);
+            let rendered_ty = types::render_field_type(&ty);
             locals.insert(
                 slot,
                 Local {
@@ -228,7 +236,7 @@ impl MethodBody {
     ///   keying M3 deliberately left for later;
     /// - the name is missing (no `-g`), or
     /// - it collides with a parameter or another clause's live parameter.
-    fn register_catch_parameters(
+    pub(crate) fn register_catch_parameters(
         code: &CodeAttribute,
         pool: &ConstantPool,
         locals: &mut BTreeMap<u16, Local>,
@@ -238,7 +246,7 @@ impl MethodBody {
         if clauses.is_empty() {
             return Some(());
         }
-        let table = Attrs::local_variable_table(code)?;
+        let table = attrs::local_variable_table(code)?;
         let births: BTreeSet<usize> = clauses.iter().map(|c| c.param_pc).collect();
         for clause in clauses {
             // Every entry in this slot must be a catch parameter's. One that is not means the slot
@@ -253,7 +261,7 @@ impl MethodBody {
             // An unused parameter has no entry at all. Nothing loads the slot, so there is nothing
             // to register; the clause still names itself, from a synthesised identifier.
             let Some((name, ty)) =
-                Attrs::local_variable_at(table, pool, clause.slot, clause.param_pc)
+                attrs::local_variable_at(table, pool, clause.slot, clause.param_pc)
             else {
                 continue;
             };
@@ -270,7 +278,7 @@ impl MethodBody {
 
     /// The local slot and JVM kind a *store* instruction writes (a store form, its numbered
     /// shorthand, or the `wide` form), or `None` for a non-store. Shared by declaration discovery
-    /// ([`MethodBody::stored_slot`]) and the simulator ([`Sim::step`]) so the two never drift.
+    /// ([`api::stored_slot`]) and the simulator ([`Sim::step`]) so the two never drift.
     /// `iinc` is deliberately excluded — it read-modify-writes and carries a delta, handled
     /// separately.
     pub(crate) fn store_info(ins: &Instruction) -> Option<(u16, JvmKind)> {
@@ -325,21 +333,19 @@ impl MethodBody {
         })
     }
 
-    /// The local slot an instruction writes — a store (via [`MethodBody::store_info`]) or an `iinc`
+    /// The local slot an instruction writes — a store (via [`api::store_info`]) or an `iinc`
     /// (and its `wide` form) — or `None` if it writes no local. Drives declaration discovery.
-    fn stored_slot(ins: &Instruction) -> Option<u16> {
+    pub(crate) fn stored_slot(ins: &Instruction) -> Option<u16> {
         use Instruction as I;
-        Self::store_info(ins)
-            .map(|(slot, _)| slot)
-            .or_else(|| match ins {
-                I::Iinc { index, .. } => Some(u16::from(*index)),
-                I::Wide(WideInstruction::Iinc { index, .. }) => Some(*index),
-                _ => None,
-            })
+        store_info(ins).map(|(slot, _)| slot).or_else(|| match ins {
+            I::Iinc { index, .. } => Some(u16::from(*index)),
+            I::Wide(WideInstruction::Iinc { index, .. }) => Some(*index),
+            _ => None,
+        })
     }
 
     /// Trim a trailing implicit `return;` (a `void` method's fall-off return) and render the rest.
-    fn render_body(stmts: &[Stmt]) -> Vec<String> {
+    pub(crate) fn render_body(stmts: &[Stmt]) -> Vec<String> {
         let end = if matches!(stmts.last(), Some(Stmt::Return(None))) {
             stmts.len() - 1
         } else {
@@ -599,14 +605,14 @@ impl Sim<'_, '_> {
         match (&value.ty, expected) {
             (StackType::Field(actual), expected) if actual == expected => Some(value.expr),
             (StackType::Null, expected) if Self::is_reference(expected) => Some(Expr::Cast {
-                ty: JavaType::render_field_type(expected),
+                ty: types::render_field_type(expected),
                 expr: Box::new(value.expr),
             }),
             (StackType::Field(actual), expected)
                 if Self::is_reference(actual) && Self::is_reference(expected) =>
             {
                 Some(Expr::Cast {
-                    ty: JavaType::render_field_type(expected),
+                    ty: types::render_field_type(expected),
                     expr: Box::new(value.expr),
                 })
             }
@@ -626,7 +632,7 @@ impl Sim<'_, '_> {
                         1 => Some(Expr::lit("true")),
                         _ => None,
                     },
-                    BaseType::Char => Some(Expr::lit(Literal::char_code_unit(constant)?)),
+                    BaseType::Char => Some(Expr::lit(literal::char_code_unit(constant)?)),
                     BaseType::Byte if i8::try_from(constant).is_ok() => Some(Expr::Cast {
                         ty: "byte".into(),
                         expr: Box::new(value.expr),
@@ -857,7 +863,7 @@ impl Sim<'_, '_> {
         }
         self.stack.push(StackValue::field(
             Expr::Cast {
-                ty: JavaType::render_field_type(&target),
+                ty: types::render_field_type(&target),
                 expr: Box::new(value.expr),
             },
             target,
@@ -875,7 +881,7 @@ impl Sim<'_, '_> {
         }
         let args = self.pop_call_args(&md.params)?;
         let recv = if is_static {
-            Box::new(Expr::Type(JavaType::internal_to_java(&owner)))
+            Box::new(Expr::Type(types::internal_to_java(&owner)))
         } else {
             Box::new(Self::consume_as(
                 self.pop()?,
@@ -920,7 +926,7 @@ impl Sim<'_, '_> {
                                 &descriptor,
                             ) =>
                     {
-                        Expr::QualifiedSuper(JavaType::internal_to_java(&owner))
+                        Expr::QualifiedSuper(types::internal_to_java(&owner))
                     }
                     _ => return None,
                 }
@@ -1101,7 +1107,7 @@ impl Sim<'_, '_> {
         let flush = |chunk: &mut String, parts: &mut Vec<ConcatPart>| {
             if !chunk.is_empty() {
                 parts.push(ConcatPart {
-                    expr: Expr::lit(Literal::string_literal(chunk)),
+                    expr: Expr::lit(literal::string_literal(chunk)),
                     stringy: true,
                 });
                 chunk.clear();
@@ -1177,7 +1183,7 @@ impl Sim<'_, '_> {
                     .iter()
                     .map(|&i| match self.pool.get(i)? {
                         ConstantPoolEntry::String { string_index } => Some(ConcatPart {
-                            expr: Expr::lit(Literal::string_literal(
+                            expr: Expr::lit(literal::string_literal(
                                 &self.pool.utf8(*string_index)?,
                             )),
                             stringy: true,
@@ -1195,7 +1201,7 @@ impl Sim<'_, '_> {
     /// reference popped from the stack.
     fn field_receiver(&mut self, owner: &str, is_static: bool) -> Option<Expr> {
         if is_static {
-            Some(Expr::Type(JavaType::internal_to_java(owner)))
+            Some(Expr::Type(types::internal_to_java(owner)))
         } else {
             Self::consume_as(self.pop()?, &Self::internal_type(owner)?)
         }
@@ -1240,7 +1246,7 @@ impl Sim<'_, '_> {
             .int_constant()
             .and_then(|value| usize::try_from(value).ok());
         let len_expr = Self::int_numeric_expr(len)?;
-        let (elem, empty_dims) = JavaType::array_base(&element_type);
+        let (elem, empty_dims) = types::array_base(&element_type);
         let array_type = FieldType::Array(Box::new(element_type));
         let expr = match constant_len {
             Some(len) => Expr::PendingArray {
@@ -1271,7 +1277,7 @@ impl Sim<'_, '_> {
     /// store pattern on one (a following `dup` bails).
     fn multi_new_array(&mut self, index: u16, dimensions: u8) -> Option<()> {
         let array_type = self.class_ref_type(index)?;
-        let (elem, depth) = JavaType::array_base(&array_type);
+        let (elem, depth) = types::array_base(&array_type);
         let dimensions = usize::from(dimensions);
         if dimensions == 0 || dimensions > depth {
             return None;
@@ -1395,7 +1401,7 @@ impl Sim<'_, '_> {
         use Instruction as I;
         // Local stores (all forms) are decoded once for both declaration discovery and simulation.
         // Handle them before the `match` because a guard cannot bind the slot and kind there.
-        if let Some((slot, kind)) = MethodBody::store_info(ins) {
+        if let Some((slot, kind)) = api::store_info(ins) {
             return self.store(slot, kind);
         }
         match ins {
@@ -1420,23 +1426,23 @@ impl Sim<'_, '_> {
                 .stack
                 .push(StackValue::base(Expr::lit("1L"), BaseType::Long)),
             I::Fconst0 => self.stack.push(StackValue::base(
-                Expr::lit(Literal::float_literal(0.0)),
+                Expr::lit(literal::float_literal(0.0)),
                 BaseType::Float,
             )),
             I::Fconst1 => self.stack.push(StackValue::base(
-                Expr::lit(Literal::float_literal(1.0)),
+                Expr::lit(literal::float_literal(1.0)),
                 BaseType::Float,
             )),
             I::Fconst2 => self.stack.push(StackValue::base(
-                Expr::lit(Literal::float_literal(2.0)),
+                Expr::lit(literal::float_literal(2.0)),
                 BaseType::Float,
             )),
             I::Dconst0 => self.stack.push(StackValue::base(
-                Expr::lit(Literal::double_literal(0.0)),
+                Expr::lit(literal::double_literal(0.0)),
                 BaseType::Double,
             )),
             I::Dconst1 => self.stack.push(StackValue::base(
-                Expr::lit(Literal::double_literal(1.0)),
+                Expr::lit(literal::double_literal(1.0)),
                 BaseType::Double,
             )),
             I::Bipush(v) => self.stack.push(StackValue::int_literal(i32::from(*v))),
@@ -1545,7 +1551,7 @@ impl Sim<'_, '_> {
             // Object creation.
             I::New(i) => {
                 let internal = self.class_ref(*i)?;
-                let ty = JavaType::internal_to_java(&internal);
+                let ty = types::internal_to_java(&internal);
                 self.stack
                     .push(StackValue::object(Expr::Uninitialized(ty), internal));
             }
@@ -1662,19 +1668,19 @@ impl Sim<'_, '_> {
                 StackValue::base(Expr::lit(format!("{v}L")), BaseType::Long)
             }
             ConstantPoolEntry::Float(v) => {
-                StackValue::base(Expr::lit(Literal::float_literal(*v)), BaseType::Float)
+                StackValue::base(Expr::lit(literal::float_literal(*v)), BaseType::Float)
             }
             ConstantPoolEntry::Double(v) => {
-                StackValue::base(Expr::lit(Literal::double_literal(*v)), BaseType::Double)
+                StackValue::base(Expr::lit(literal::double_literal(*v)), BaseType::Double)
             }
             ConstantPoolEntry::String { string_index } => StackValue::object(
-                Expr::lit(Literal::string_literal(&self.pool.utf8(*string_index)?)),
+                Expr::lit(literal::string_literal(&self.pool.utf8(*string_index)?)),
                 "java/lang/String",
             ),
             ConstantPoolEntry::Class { .. } => {
                 let class_type = self.class_ref_type(index)?;
                 StackValue::object(
-                    Expr::lit(Literal::class_literal(&class_type)),
+                    Expr::lit(literal::class_literal(&class_type)),
                     "java/lang/Class",
                 )
             }
@@ -1693,7 +1699,7 @@ impl Sim<'_, '_> {
             } => {
                 let owner = self.pool.class_name(*class_index)?.into_owned();
                 let (name, descriptor) = self.name_and_type(*name_and_type_index)?;
-                if !Attrs::is_java_identifier(&name) {
+                if !attrs::is_java_identifier(&name) {
                     return None;
                 }
                 Some((owner, name, descriptor))
@@ -1719,7 +1725,7 @@ impl Sim<'_, '_> {
         };
         let owner = self.pool.class_name(class_index)?.into_owned();
         let (name, descriptor) = self.name_and_type(name_and_type_index)?;
-        if name != "<init>" && !Attrs::is_java_identifier(&name) {
+        if name != "<init>" && !attrs::is_java_identifier(&name) {
             return None;
         }
         Some((kind, owner, name, descriptor))
@@ -2246,10 +2252,10 @@ impl Structurer<'_, '_> {
         latch_stmts: &mut Vec<Stmt>,
         preceding: &mut Vec<Stmt>,
     ) -> Option<(Option<ForInit>, ForUpdate)> {
-        let header_line = Lines::line_at(self.lines, self.block_first_pc(header)?)?;
+        let header_line = lines::line_at(self.lines, self.block_first_pc(header)?)?;
         // The update is the last instruction the latch replays; a latch that replays none (a bare
         // `goto`) has no update to lift.
-        if Lines::line_at(self.lines, self.block_last_pc(latch)?)? != header_line {
+        if lines::line_at(self.lines, self.block_last_pc(latch)?)? != header_line {
             return None;
         }
         let update = match ForUpdate::from_stmt(latch_stmts.pop()?) {
@@ -2280,7 +2286,7 @@ impl Structurer<'_, '_> {
         {
             return None;
         }
-        if Lines::line_at(self.lines, self.block_last_pc(header - 1)?)? != header_line {
+        if lines::line_at(self.lines, self.block_last_pc(header - 1)?)? != header_line {
             return None;
         }
         let Some(Stmt::Assign {
@@ -2298,8 +2304,8 @@ impl Structurer<'_, '_> {
         let ty = self.slot_of_name(&name).and_then(|slot| {
             let local = self.locals.get(&slot)?;
             let range = self.loop_pc_range(header, latch)?;
-            Attrs::slot_confined_to(self.lvt, slot, &range)
-                .then(|| JavaType::render_field_type(&local.ty))
+            attrs::slot_confined_to(self.lvt, slot, &range)
+                .then(|| types::render_field_type(&local.ty))
         });
         let Some(Stmt::Assign { value, .. }) = preceding.pop() else {
             return None;
@@ -2330,7 +2336,7 @@ impl Structurer<'_, '_> {
     }
 
     /// The local slot whose source name is `name`. Names are unique across a method's locals —
-    /// [`MethodBody::local_declarations`] bails on a collision — so at most one slot matches.
+    /// [`api::local_declarations`] bails on a collision — so at most one slot matches.
     fn slot_of_name(&self, name: &str) -> Option<u16> {
         self.locals
             .iter()
@@ -2376,7 +2382,7 @@ impl Structurer<'_, '_> {
         let expr = Sim::int_numeric_expr(value)?;
         let last_instr = self.code[self.cfg.blocks[b].body()].last();
         let (selector, labels) =
-            Subject::recover(expr, is_char, last_instr, self.pool, self.hierarchy)?;
+            switch::recover(expr, is_char, last_instr, self.pool, self.hierarchy)?;
 
         let mut arm_starts: Vec<usize> = cases.iter().map(|&(_, target)| target).collect();
         arm_starts.push(default);
@@ -2663,11 +2669,11 @@ impl Structurer<'_, '_> {
         let types = clause
             .types
             .iter()
-            .map(|&index| Some(JavaType::internal_to_java(&self.pool.class_name(index)?)))
+            .map(|&index| Some(types::internal_to_java(&self.pool.class_name(index)?)))
             .collect::<Option<Vec<_>>>()?;
         // An unused parameter has no entry to read a name from, and the type the *body* would see
         // does not matter when no instruction loads the slot.
-        let recorded = Attrs::local_variable_at(self.lvt, self.pool, clause.slot, clause.param_pc);
+        let recorded = attrs::local_variable_at(self.lvt, self.pool, clause.slot, clause.param_pc);
         let (name, ty) = if let Some(pair) = recorded {
             pair
         } else {
@@ -2701,7 +2707,7 @@ impl Structurer<'_, '_> {
     /// A `finally` is compiled by copying its body onto every exit, so the recovered statement keeps
     /// exactly one copy — the one on the try body's normal exit — and discards the rest, including
     /// the handler's, whose `athrow` rethrows what the source never named. Discarding is safe only
-    /// because [`Exceptions::regions`] has already proved the copies identical instruction for
+    /// because [`exceptions::regions`] has already proved the copies identical instruction for
     /// instruction; that proof is what replaces the "emitted exactly once" guard here, since a
     /// discarded copy is visited without being emitted.
     async fn structure_try_finally(

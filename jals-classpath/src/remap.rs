@@ -1,15 +1,16 @@
 //! Jar remapping with Mojang official mappings, plus registered jar merge.
 //!
-//! [`JarRemap::remap`] turns an obfuscated jar + mapping text into a deobfuscated jar published
+//! [`jar_remap::remap`] turns an obfuscated jar + mapping text into a deobfuscated jar published
 //! under `BuildTaskArtifact`. The transform is append-only on every class pool (new Utf8 /
 //! `NameAndType` / Class entries are added, refs are rewritten in place) so every external index
 //! stays stable while rates of hierarchy-aware member renaming and descriptor/signature
 //! rewriting proceed. Non-class members pass through verbatim; `META-INF/MANIFEST.MF`'s
 //! `Main-Class` is rewritten when present.
 //!
-//! [`JarMerge::merge`] unions two jars by member path: the overlay wins on conflicts, the base
+//! [`jar_merge::merge`] unions two jars by member path: the overlay wins on conflicts, the base
 //! keeps everything else, both in deterministic input order.
 
+use crate::load::archive;
 use alloc::borrow::ToOwned;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
@@ -30,9 +31,10 @@ use jals_storage::{
     ArtifactCache, CacheBackend, CacheKey, CacheNamespace, ContentDigest, ProvenanceFold,
 };
 
-use crate::load::{Archive, SourceTreeLimits};
+use crate::load::SourceTreeLimits;
 use crate::mappings::Mappings;
-use crate::zip::{StoredZip, WriteMember};
+use crate::zip;
+use crate::zip::WriteMember;
 use crate::{MappingFormat, RemapDirection};
 
 /// Hardcoded size budget for a remapped / merged jar input. Matches the task-side
@@ -100,9 +102,12 @@ impl ClassIndex {
 }
 
 /// Nested-jar extraction namespace.
-pub struct NestedJar;
+pub mod nested_jar {
+    use super::{
+        ArtifactCache, CacheBackend, CacheKey, CacheNamespace, ContentDigest, Exec, JAR_LIMITS,
+        ProvenanceFold, String, ToOwned, Vec, archive, format, helpers,
+    };
 
-impl NestedJar {
     /// Extract a single nested `-jar` member from `parent` and publish it as a build-task artifact.
     pub async fn extract<C: CacheBackend>(
         exec: &Exec,
@@ -115,14 +120,14 @@ impl NestedJar {
             .await
             .map_err(|error| format!("parent jar is invalid: {error:?}"))?
             .ok_or_else(|| "parent jar is not cached".to_owned())?;
-        let members = Archive::decode_all_bounded(exec, reader, JAR_LIMITS).await?;
+        let members = archive::decode_all_bounded(exec, reader, JAR_LIMITS).await?;
         let bytes = members
             .into_iter()
             .find(|(name, _)| name == member)
             .ok_or_else(|| format!("nested jar member `{member}` is missing"))?
             .1
             .map_err(|error| format!("failed to read nested jar `{member}`: {error}"))?;
-        Self::publish_nested(cache, parent, member, &bytes).await
+        publish_nested(cache, parent, member, &bytes).await
     }
 
     /// Extract every nested `-jar` member of `parent` (in archive order) and publish each as a
@@ -137,7 +142,7 @@ impl NestedJar {
             .await
             .map_err(|error| format!("parent jar is invalid: {error:?}"))?
             .ok_or_else(|| "parent jar is not cached".to_owned())?;
-        let members = Archive::decode_all_bounded(exec, reader, JAR_LIMITS).await?;
+        let members = archive::decode_all_bounded(exec, reader, JAR_LIMITS).await?;
         let mut out = Vec::new();
         for (name, outcome) in members {
             if !helpers::has_extension(&name, "jar") {
@@ -150,12 +155,12 @@ impl NestedJar {
             if !helpers::looks_like_zip(&bytes) {
                 continue;
             }
-            out.push(Self::publish_nested(cache, parent, &name, &bytes).await?);
+            out.push(publish_nested(cache, parent, &name, &bytes).await?);
         }
         Ok(out)
     }
 
-    async fn publish_nested<C: CacheBackend>(
+    pub(crate) async fn publish_nested<C: CacheBackend>(
         cache: &mut ArtifactCache<C>,
         parent: &CacheKey,
         member: &str,
@@ -180,9 +185,13 @@ impl NestedJar {
 }
 
 /// Jar remapping namespace.
-pub struct JarRemap;
+pub mod jar_remap {
+    use super::{
+        Arc, ArtifactCache, BTreeMap, BTreeSet, CacheBackend, CacheKey, CacheNamespace, ClassFile,
+        ClassIndex, ContentDigest, Exec, JAR_LIMITS, Mappings, RemapRequest, String, ToOwned, Vec,
+        WriteMember, archive, format, helpers, zip,
+    };
 
-impl JarRemap {
     /// Remap every `.class` member of `jar` per `request`, publishing the resulting jar under
     /// `BuildTaskArtifact`.
     ///
@@ -224,7 +233,7 @@ impl JarRemap {
             .await
             .map_err(|error| format!("remap jar is invalid: {error:?}"))?
             .ok_or_else(|| "remap jar is not cached".to_owned())?;
-        let members = Archive::decode_all_bounded(exec, reader, JAR_LIMITS).await?;
+        let members = archive::decode_all_bounded(exec, reader, JAR_LIMITS).await?;
 
         // Pass 1: parse every class file and build the source-namespace class hierarchy.
         let mut parsed: Vec<(usize, ClassFile)> = Vec::new();
@@ -239,10 +248,10 @@ impl JarRemap {
             let cf = ClassFile::read(bytes.as_slice())
                 .await
                 .map_err(|error| format!("failed to parse archive member `{name}`: {error}"))?;
-            Self::index_class(&mut index, name, &cf)?;
+            index_class(&mut index, name, &cf)?;
             parsed.push((position, cf));
         }
-        Self::index_hierarchy(exec, cache, request.hierarchy, &mut index).await?;
+        index_hierarchy(exec, cache, request.hierarchy, &mut index).await?;
         let index = Arc::new(index);
 
         // Pass 2: remap each class (CPU-bound; fan-out keeps input order).
@@ -306,7 +315,7 @@ impl JarRemap {
             }
             out_members.push(WriteMember { name, bytes });
         }
-        let jar_bytes = StoredZip::write(&out_members)?;
+        let jar_bytes = zip::write(&out_members)?;
 
         let key = CacheKey::new(
             CacheNamespace::BuildTaskArtifact,
@@ -331,7 +340,7 @@ impl JarRemap {
     /// archives has the same shape. Without these, an inherited member is looked up against a
     /// supertype nobody declared, misses, and keeps its source name in an otherwise remapped jar: a
     /// silent wrong answer rather than a failure.
-    async fn index_hierarchy<C: CacheBackend>(
+    pub(super) async fn index_hierarchy<C: CacheBackend>(
         exec: &Exec,
         cache: &ArtifactCache<C>,
         hierarchy: &[CacheKey],
@@ -343,7 +352,7 @@ impl JarRemap {
                 .await
                 .map_err(|error| format!("hierarchy jar is invalid: {error:?}"))?
                 .ok_or_else(|| "hierarchy jar is not cached".to_owned())?;
-            for (name, outcome) in Archive::decode_all_bounded(exec, reader, JAR_LIMITS).await? {
+            for (name, outcome) in archive::decode_all_bounded(exec, reader, JAR_LIMITS).await? {
                 if !helpers::has_extension(&name, "class") {
                     continue;
                 }
@@ -353,14 +362,18 @@ impl JarRemap {
                 let cf = ClassFile::read(bytes.as_slice()).await.map_err(|error| {
                     format!("failed to parse hierarchy member `{name}`: {error}")
                 })?;
-                Self::index_class(index, &name, &cf)?;
+                index_class(index, &name, &cf)?;
             }
         }
         Ok(())
     }
 
     /// Record one class's `this` / `super` / `interfaces` edges into the hierarchy index.
-    fn index_class(index: &mut ClassIndex, name: &str, cf: &ClassFile) -> Result<(), String> {
+    pub(super) fn index_class(
+        index: &mut ClassIndex,
+        name: &str,
+        cf: &ClassFile,
+    ) -> Result<(), String> {
         let this = cf
             .constant_pool
             .class_name(cf.this_class)
@@ -391,7 +404,7 @@ impl JarRemap {
     }
 }
 
-/// What one [`JarRemap::remap`] applies: the mapping text, how to read it, which way to apply it,
+/// What one [`jar_remap::remap`] applies: the mapping text, how to read it, which way to apply it,
 /// and the archives that close the hierarchy it needs.
 ///
 /// Not `Copy`: a [`MappingFormat`] that names a namespace pair owns those names, and holding them
@@ -435,9 +448,12 @@ impl RemapRequest<'_> {
 }
 
 /// Jar merge namespace.
-pub struct JarMerge;
+pub mod jar_merge {
+    use super::{
+        ArtifactCache, BTreeMap, CacheBackend, CacheKey, CacheNamespace, ContentDigest, Exec,
+        JAR_LIMITS, ProvenanceFold, String, ToOwned, Vec, WriteMember, archive, format, zip,
+    };
 
-impl JarMerge {
     /// Merge two cached jars. Members of `overlay` win on path conflicts; everything else comes
     /// from `base` in its original order, followed by any `overlay`-only members in overlay order.
     pub async fn merge<C: CacheBackend>(
@@ -456,8 +472,8 @@ impl JarMerge {
             .await
             .map_err(|error| format!("merge overlay jar is invalid: {error:?}"))?
             .ok_or_else(|| "merge overlay jar is not cached".to_owned())?;
-        let base_members = Archive::decode_all_bounded(exec, base_reader, JAR_LIMITS).await?;
-        let overlay_members = Archive::decode_all_bounded(exec, overlay_reader, JAR_LIMITS).await?;
+        let base_members = archive::decode_all_bounded(exec, base_reader, JAR_LIMITS).await?;
+        let overlay_members = archive::decode_all_bounded(exec, overlay_reader, JAR_LIMITS).await?;
 
         let mut overlay_map: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         let mut overlay_order: Vec<String> = Vec::new();
@@ -486,7 +502,7 @@ impl JarMerge {
             }
         }
 
-        let jar_bytes = StoredZip::write(&out_members)?;
+        let jar_bytes = zip::write(&out_members)?;
         let mut fold = ProvenanceFold::new(b"merge-jars\0");
         fold.parent(base).parent(overlay);
         let key = CacheKey::new(

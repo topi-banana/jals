@@ -20,11 +20,19 @@ pub(crate) struct DeclFacts {
     pub is_annotated: bool,
 }
 
+pub(crate) use api::{
+    byte_range, decl_facts, direct_ident_tokens, direct_tokens, first_ident_token, node_span,
+    pattern_var_tokens, significant_span, token_start,
+};
+
 /// Namespace for the CST token/range extraction helpers shared across the resolver, the project
 /// index, and inference.
-pub(crate) struct Collect;
+mod api {
+    use super::{
+        ANNOTATION, DeclFacts, IDENT, MODIFIERS, PRIVATE_KW, Range, SyntaxElement, SyntaxNode,
+        SyntaxToken, TYPE_PATTERN, Vec,
+    };
 
-impl Collect {
     /// The tokens directly under `node` (its own trivia and punctuation; operands / types / other
     /// structure are child *nodes*, not direct tokens). The base walk the other extraction helpers
     /// filter.
@@ -36,13 +44,13 @@ impl Collect {
     /// The direct `IDENT` token children of `node` (a declaration's names; its type is a nested node,
     /// so its identifiers are not direct token children and are correctly skipped).
     pub(crate) fn direct_ident_tokens(node: &SyntaxNode) -> impl Iterator<Item = SyntaxToken> {
-        Self::direct_tokens(node).filter(|t| t.kind() == IDENT)
+        direct_tokens(node).filter(|t| t.kind() == IDENT)
     }
 
     /// The first directly-declared name (`IDENT` token child) of `node`, e.g. a type, method, or
     /// parameter name.
     pub(crate) fn first_ident_token(node: &SyntaxNode) -> Option<SyntaxToken> {
-        Self::direct_ident_tokens(node).next()
+        direct_ident_tokens(node).next()
     }
 
     /// Every pattern variable bound anywhere within `node` (a switch label or guard).
@@ -52,7 +60,7 @@ impl Collect {
     pub(crate) fn pattern_var_tokens(node: &SyntaxNode) -> Vec<SyntaxToken> {
         node.descendants()
             .filter(|n| n.kind() == TYPE_PATTERN)
-            .filter_map(|n| Self::first_ident_token(&n))
+            .filter_map(|n| first_ident_token(&n))
             .collect()
     }
 
@@ -72,7 +80,7 @@ impl Collect {
                 ANNOTATION => facts.is_annotated = true,
                 MODIFIERS => {
                     facts.is_private |=
-                        Self::direct_tokens(&child).any(|token| token.kind() == PRIVATE_KW);
+                        direct_tokens(&child).any(|token| token.kind() == PRIVATE_KW);
                     facts.is_annotated |= child.children().any(|inner| inner.kind() == ANNOTATION);
                 }
                 _ => {}
@@ -94,7 +102,7 @@ impl Collect {
             .filter(|token| !token.kind().is_trivia())
             .map(|token| token.text_range());
         let Some(first) = tokens.next() else {
-            return Self::node_span(node);
+            return node_span(node);
         };
         let last = tokens.last().unwrap_or(first);
         usize::from(first.start())..usize::from(last.end())
@@ -141,7 +149,7 @@ mod tests {
     fn first_ident_token_is_the_method_name_not_its_type() {
         let method = node_of("class C { int compute() { return 0; } }", METHOD_DECL);
         assert_eq!(
-            Collect::first_ident_token(&method)
+            api::first_ident_token(&method)
                 .map(|t| t.text().to_owned())
                 .as_deref(),
             Some("compute"),
@@ -154,7 +162,7 @@ mod tests {
             "class C { void m(Object o) { switch (o) { case Point(int x, int y) -> {} default -> {} } } }",
             SWITCH_LABEL,
         );
-        assert_eq!(text(Collect::pattern_var_tokens(&label)), ["x", "y"]);
+        assert_eq!(text(api::pattern_var_tokens(&label)), ["x", "y"]);
     }
 
     #[test]
@@ -163,6 +171,6 @@ mod tests {
             "class C { void m(Object o) { switch (o) { case Integer i -> {} default -> {} } } }",
             SWITCH_LABEL,
         );
-        assert_eq!(text(Collect::pattern_var_tokens(&label)), ["i"]);
+        assert_eq!(text(api::pattern_var_tokens(&label)), ["i"]);
     }
 }

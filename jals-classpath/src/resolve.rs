@@ -13,7 +13,7 @@ use jals_storage::{
 };
 use sha1::{Digest as _, Sha1};
 
-use crate::io::Fetch;
+use crate::io;
 use crate::{Fetcher, MappingFormat, Warning, WarningOrigin};
 use jals_config::{AmbiguousMapping, Manifest, MappingDigest, MappingFormatKind, MappingSource};
 
@@ -109,7 +109,7 @@ pub enum MappingLocation {
 /// that wrote it, and a dependency's table is a different namespace from its consumer's. Resolving
 /// at lowering time is what keeps that question from reaching anything downstream.
 ///
-/// A caller outside this module holds one and hands it back — to [`MappingResolver::text`], or to a
+/// A caller outside this module holds one and hands it back — to [`mapping_resolver::text`], or to a
 /// remap request through `format`. The other two fields are how *this* module resolves it, so they
 /// stay in it: anything that read `location` would be deciding where the bytes come from, which is
 /// the decision this type exists to have already made.
@@ -269,9 +269,9 @@ enum Classified {
 }
 
 /// Stateless mapping-text resolver.
-pub struct MappingResolver;
+pub mod mapping_resolver {
+    use super::*;
 
-impl MappingResolver {
     /// Read one mapping set's text, fetching and verifying it when it is external.
     ///
     /// The fetch capability is the `Fetcher`, exactly as it is for [`DependencyResolver`] beside it:
@@ -306,7 +306,7 @@ impl MappingResolver {
                 expected,
                 max_bytes,
             } => {
-                let key = ExternalArtifactResolver::resolve(
+                let key = external_artifact_resolver::resolve(
                     fetcher,
                     cache,
                     &ExternalArtifactSpec {
@@ -342,23 +342,20 @@ impl MappingResolver {
         };
         String::from_utf8(bytes).map_err(|error| {
             Warning::new(
-                Self::origin(spec),
+                origin(spec),
                 format!("mapping `{}` is not UTF-8: {error}", spec.name),
             )
         })
     }
 
     /// What a diagnostic about this mapping set points at.
-    fn origin(spec: &MappingSpec) -> WarningOrigin {
+    pub(crate) fn origin(spec: &MappingSpec) -> WarningOrigin {
         match &spec.location {
             MappingLocation::Project(key) => WarningOrigin::ProjectFile(key.clone()),
             MappingLocation::External { locator, .. } => WarningOrigin::External(locator.clone()),
         }
     }
 }
-
-/// Stateless dependency resolver. Persistence belongs to [`ArtifactCache`].
-pub struct DependencyResolver;
 
 /// Expected digest supplied by an external artifact's metadata.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -427,9 +424,9 @@ pub struct ExternalArtifactSpec {
 }
 
 /// Cache-first resolver shared by build tasks and dependency lowering.
-pub struct ExternalArtifactResolver;
+pub mod external_artifact_resolver {
+    use super::*;
 
-impl ExternalArtifactResolver {
     pub async fn resolve<F: Fetcher, C: CacheBackend>(
         fetcher: &F,
         cache: &mut ArtifactCache<C>,
@@ -438,7 +435,7 @@ impl ExternalArtifactResolver {
         if spec.max_bytes == 0 {
             return Err("external artifact has a zero byte limit".to_owned());
         }
-        let provenance = Self::provenance(spec);
+        let provenance = provenance(spec);
         let cached = match spec.expected {
             ExpectedDigest::Sha256(content) => {
                 Some(CacheKey::new(spec.namespace, provenance, content))
@@ -466,7 +463,7 @@ impl ExternalArtifactResolver {
                 spec.locator.as_str()
             ));
         }
-        let bytes = Fetch::bounded(fetcher, &spec.locator, spec.max_bytes).await?;
+        let bytes = io::bounded(fetcher, &spec.locator, spec.max_bytes).await?;
         if !spec.expected.matches(&bytes) {
             return Err(format!(
                 "external artifact `{}` digest mismatch",
@@ -488,7 +485,7 @@ impl ExternalArtifactResolver {
     /// The provenance shared by a fetched artifact's published key and its locator-index
     /// recovery for SHA-1-pinned specs. Publish and recovery must fold identically or every
     /// recovery misses and the artifact is refetched — never inline one side.
-    fn provenance(spec: &ExternalArtifactSpec) -> ContentDigest {
+    pub(crate) fn provenance(spec: &ExternalArtifactSpec) -> ContentDigest {
         let mut fold = ProvenanceFold::new(b"external-artifact\0");
         fold.bytes(spec.locator.as_str().as_bytes())
             .bytes(&spec.expected.framed_bytes());
@@ -496,7 +493,10 @@ impl ExternalArtifactResolver {
     }
 }
 
-impl DependencyResolver {
+/// Stateless dependency resolver. Persistence belongs to [`ArtifactCache`].
+pub mod dependency_resolver {
+    use super::*;
+
     /// Resolve project and external jars into the cache.
     ///
     /// Three passes keep the output byte-identical to a sequential walk while overlapping the
@@ -514,7 +514,7 @@ impl DependencyResolver {
         let mut classified = Vec::with_capacity(specs.len());
         let mut locators: Vec<&ExternalLocator> = Vec::new();
         for spec in specs {
-            let state = Self::classify(view, cache, spec).await.map_or_else(
+            let state = classify(view, cache, spec).await.map_or_else(
                 || {
                     let DependencyLocation::External { locator, .. } = &spec.location else {
                         unreachable!("only external specs need a fetch");
@@ -535,12 +535,9 @@ impl DependencyResolver {
 
         // Pass 2: overlap the network waits. Single-thread concurrency is the right shape here —
         // the work is waiting, not CPU.
-        let fetched = jals_exec::join_ordered(
-            locators
-                .iter()
-                .map(|locator| Fetch::bytes(fetcher, locator)),
-        )
-        .await;
+        let fetched =
+            jals_exec::join_ordered(locators.iter().map(|locator| io::bytes(fetcher, locator)))
+                .await;
 
         // Pass 3: serial, in spec order — verify, publish, record, emit.
         let mut out = ResolvedDependencies::default();
@@ -548,7 +545,7 @@ impl DependencyResolver {
             let outcome = match state {
                 Classified::Done(outcome) => outcome,
                 Classified::NeedsFetch { locator } => {
-                    Self::publish_fetched(cache, spec, &fetched[locator]).await
+                    publish_fetched(cache, spec, &fetched[locator]).await
                 }
             };
             match outcome {
@@ -565,14 +562,14 @@ impl DependencyResolver {
 
     /// Everything that can be decided before fetching: project reads/publication, verified
     /// external lookups, and locator-index recovery. `None` means the spec needs a fetch.
-    async fn classify<C: CacheBackend>(
+    pub(crate) async fn classify<C: CacheBackend>(
         view: &ProjectView,
         cache: &mut ArtifactCache<C>,
         spec: &DependencySpec,
     ) -> Option<Result<CacheKey, Warning>> {
         match &spec.location {
             DependencyLocation::Project(file) => {
-                Some(Self::publish_project(view, cache, spec, file).await)
+                Some(publish_project(view, cache, spec, file).await)
             }
             DependencyLocation::Artifact(key) => Some(match cache.open_verified(key).await {
                 Ok(Some(_)) => Ok(key.clone()),
@@ -589,7 +586,7 @@ impl DependencyResolver {
                 if let Some(content) = expected {
                     let key = CacheKey::new(
                         CacheNamespace::DependencyJar,
-                        Self::external_provenance(locator),
+                        external_provenance(locator),
                         *content,
                     );
                     match cache.open_verified(&key).await {
@@ -610,7 +607,7 @@ impl DependencyResolver {
                     // locator index, so an already-fetched dependency resolves from the
                     // persistent cache (and offline). The artifact is still read through the
                     // verified lookup; any index or artifact problem just falls back to a fetch.
-                    let provenance = Self::external_provenance(locator);
+                    let provenance = external_provenance(locator);
                     if let Ok(Some(key)) = cache
                         .indexed_key(CacheNamespace::DependencyJar, provenance)
                         .await
@@ -624,7 +621,7 @@ impl DependencyResolver {
         }
     }
 
-    async fn publish_project<C: CacheBackend>(
+    pub(crate) async fn publish_project<C: CacheBackend>(
         view: &ProjectView,
         cache: &mut ArtifactCache<C>,
         spec: &DependencySpec,
@@ -656,7 +653,7 @@ impl DependencyResolver {
 
     /// The pass-3 half of an external resolution: verify the fetched bytes against a pinned
     /// digest, publish write-once, and record the locator index for remote locators.
-    async fn publish_fetched<C: CacheBackend>(
+    pub(crate) async fn publish_fetched<C: CacheBackend>(
         cache: &mut ArtifactCache<C>,
         spec: &DependencySpec,
         fetched: &Result<Vec<u8>, String>,
@@ -686,7 +683,7 @@ impl DependencyResolver {
         }
         let key = CacheKey::new(
             CacheNamespace::DependencyJar,
-            Self::external_provenance(locator),
+            external_provenance(locator),
             actual,
         );
         cache.publish(&key, bytes).await.map_err(|error| {
@@ -707,7 +704,7 @@ impl DependencyResolver {
     /// The provenance shared by an external jar's published key and its locator-index
     /// recovery. Publish and recovery must fold identically or every recovery misses and the
     /// jar is refetched forever — never inline one side.
-    fn external_provenance(locator: &ExternalLocator) -> ContentDigest {
+    pub(crate) fn external_provenance(locator: &ExternalLocator) -> ContentDigest {
         let mut fold = ProvenanceFold::new(b"external\0");
         fold.bytes(locator.as_str().as_bytes());
         fold.finish()

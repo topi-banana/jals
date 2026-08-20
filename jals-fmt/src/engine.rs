@@ -34,6 +34,7 @@
 //! Each boxes its recursion **once, at the level-to-level back edge**, which is the walk's only
 //! cycle; leaves are reached by a plain loop.
 
+use crate::ir;
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec;
@@ -41,7 +42,7 @@ use alloc::vec::Vec;
 
 use jals_exec::{LocalBoxFuture, Yielder};
 
-use crate::ir::{BreakTag, Doc, FillMode, Indent, Level, Width};
+use crate::ir::{BreakTag, Doc, FillMode, Indent, Level};
 use crate::style::Style;
 
 /// The engine's left-to-right state.
@@ -92,7 +93,7 @@ impl<'s> Engine<'s> {
     /// Measure, resolve, and render `doc`.
     pub(crate) async fn render(&mut self, doc: &mut Doc) -> String {
         if let Doc::Level(level) = doc {
-            Measure::level(level).await;
+            api::level(level).await;
             let state = State {
                 last_indent: 0,
                 indent: 0,
@@ -267,7 +268,7 @@ impl<'s> Engine<'s> {
             let Doc::Break(brk) = &level.docs[index] else {
                 return state;
             };
-            (Width::utf16(&brk.flat), self.eval(&brk.plus_indent))
+            (ir::utf16(&brk.flat), self.eval(&brk.plus_indent))
         };
 
         let new_indent =
@@ -314,22 +315,22 @@ impl<'s> Engine<'s> {
 ///
 /// Its own namespace rather than a method on [`Engine`] because it reads no style and no state —
 /// widths are a property of the document alone.
-struct Measure;
+pub(crate) mod api {
+    use super::{Box, Doc, Level, LocalBoxFuture};
 
-impl Measure {
     /// Measure one level and everything under it.
-    async fn level(level: &mut Level) {
+    pub(crate) async fn level(level: &mut Level) {
         for child in &mut level.docs {
             if let Doc::Level(inner) = child {
-                Self::level_boxed(inner).await;
+                level_boxed(inner).await;
             }
         }
         level.width = Doc::width_of(&level.docs);
     }
 
     /// The one boxed shim of the measuring recursion.
-    fn level_boxed(level: &mut Level) -> LocalBoxFuture<'_, ()> {
-        Box::pin(Self::level(level))
+    pub(crate) fn level_boxed(level: &mut Level) -> LocalBoxFuture<'_, ()> {
+        Box::pin(self::level(level))
     }
 }
 
@@ -368,8 +369,8 @@ impl<'s> Writer<'s> {
     /// The column after emitting `text` from `column`.
     fn advance(column: usize, text: &str) -> usize {
         text.rfind('\n').map_or_else(
-            || column.saturating_add(Width::utf16(text)),
-            |at| Width::utf16(text[at + 1..].trim_end_matches('\r')),
+            || column.saturating_add(ir::utf16(text)),
+            |at| ir::utf16(text[at + 1..].trim_end_matches('\r')),
         )
     }
 
@@ -397,7 +398,7 @@ impl<'s> Writer<'s> {
                     self.column = brk.new_indent;
                 } else {
                     self.out.push_str(&brk.flat);
-                    self.column += Width::utf16(&brk.flat);
+                    self.column += ir::utf16(&brk.flat);
                 }
             }
             Doc::Tok { text, reindent } => {
@@ -472,13 +473,13 @@ impl<'s> Writer<'s> {
             start + 1
         };
         self.out.push_str(first.trim_end_matches('\r'));
-        let mut last_width = Width::utf16(first);
+        let mut last_width = ir::utf16(first);
         for line in text.split('\n').skip(1) {
             self.out.push('\n');
             self.style.write_indent(indent, &mut self.out);
             let body = line.trim_end_matches('\r').trim_start();
             self.out.push_str(body);
-            last_width = indent + Width::utf16(body);
+            last_width = indent + ir::utf16(body);
         }
         self.column = last_width;
     }

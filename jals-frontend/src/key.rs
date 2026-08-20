@@ -8,11 +8,20 @@ use crate::frontend::FrontendCaps;
 use crate::ir::IrFile;
 use crate::level::{IrLevel, PIPELINE_API_VERSION};
 
-/// Key derivation namespace for the frontend tier.
-pub(crate) struct FrontendKey;
+pub(crate) use frontend_key::{artifact, canonical_order, emitted, lowering, observed_input};
+// `project` has no caller outside the fold-order test, which is the whole point of it: the test is
+// what pins the order the digests depend on.
+#[cfg(test)]
+pub(crate) use frontend_key::project;
 
-impl FrontendKey {
-    const KIND: &'static [u8] = b"jals.frontend\0";
+/// Key derivation namespace for the frontend tier.
+mod frontend_key {
+    use super::{
+        CacheKey, CacheNamespace, ContentDigest, FrontendCaps, IrFile, IrLevel,
+        PIPELINE_API_VERSION, ProvenanceFold, RelativePath, ToString,
+    };
+
+    const KIND: &[u8] = b"jals.frontend\0";
 
     /// The digest of everything a frontend at `level` is permitted to observe.
     ///
@@ -36,7 +45,7 @@ impl FrontendKey {
     ) -> ContentDigest {
         match (level, origin) {
             (IrLevel::Bytes, Some(file)) => file.digest,
-            (IrLevel::Bytes, None) => Self::project(all),
+            (IrLevel::Bytes, None) => project(all),
         }
     }
 
@@ -57,7 +66,7 @@ impl FrontendKey {
         observed: ContentDigest,
         path: &RelativePath,
     ) -> ContentDigest {
-        let mut fold = ProvenanceFold::new(Self::KIND);
+        let mut fold = ProvenanceFold::new(KIND);
         fold.version(PIPELINE_API_VERSION)
             .bytes(caps.id.as_bytes())
             .version(caps.version)
@@ -86,7 +95,7 @@ impl FrontendKey {
             .version(caps.version)
             .bytes(&[caps.needs.tag()])
             .digest(config)
-            .digest(Self::project(all));
+            .digest(project(all));
         fold.finish()
     }
 
@@ -112,11 +121,13 @@ impl FrontendKey {
     }
 }
 
-/// Key derivation namespace for the backend tier.
-pub struct BackendKey;
+pub use backend_key::{classpath, output};
 
-impl BackendKey {
-    const KIND: &'static [u8] = b"jals.backend\0";
+/// Key derivation namespace for the backend tier.
+pub mod backend_key {
+    use super::{CacheKey, ContentDigest, PIPELINE_API_VERSION, ProvenanceFold};
+
+    const KIND: &[u8] = b"jals.backend\0";
 
     /// Provenance for a backend's output.
     ///
@@ -135,7 +146,7 @@ impl BackendKey {
         tool_identity: ContentDigest,
         frontend_out: &CacheKey,
     ) -> ContentDigest {
-        let mut fold = ProvenanceFold::new(Self::KIND);
+        let mut fold = ProvenanceFold::new(KIND);
         fold.version(PIPELINE_API_VERSION)
             .bytes(backend_id.as_bytes())
             .digest(config)

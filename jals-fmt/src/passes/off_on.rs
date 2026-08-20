@@ -32,10 +32,12 @@ use text_size::TextRange;
 use crate::comments::CommentMap;
 use crate::style::Style;
 
-/// Locates formatter-disabled regions.
-pub(crate) struct OffOn;
+pub(crate) use api::{region_at, scan};
 
-impl OffOn {
+/// Locates formatter-disabled regions.
+pub(crate) mod api {
+    use super::{CommentMap, Style, SyntaxElement, SyntaxNode, TextRange, Vec};
+
     /// The disabled regions of `root`, in source order and never overlapping.
     ///
     /// A region opens at the comment holding `formatter-off-tag` and closes at the end of the

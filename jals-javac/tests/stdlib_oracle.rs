@@ -21,7 +21,7 @@ use std::process::Command;
 
 use jals_classfile::{ClassFile, MethodDescriptor};
 use jals_hir::{DefKind, ItemOrigin, ProjectIndex};
-use jals_javac::desc::Descriptor;
+use jals_javac::desc;
 
 /// The running JDK's home directory and specification version, from the JVM itself.
 ///
@@ -159,7 +159,7 @@ fn every_stdlib_stub_member_exists_in_the_real_jdk() {
         if item.origin != ItemOrigin::Stdlib {
             continue;
         }
-        let internal = Descriptor::internal_name(item.fqn.as_str());
+        let internal = desc::internal_name(item.fqn.as_str());
         let Some((_, class)) = jdk_classes.iter().find(|(name, _)| *name == internal) else {
             wrong.push(format!("{internal}: no such class in the JDK"));
             continue;
@@ -176,15 +176,14 @@ fn every_stdlib_stub_member_exists_in_the_real_jdk() {
             }
             let (name, expected) = match member.kind {
                 DefKind::Field => {
-                    let Ok(descriptor) = Descriptor::field_descriptor(member_id, &index) else {
+                    let Ok(descriptor) = desc::field_descriptor(member_id, &index) else {
                         continue;
                     };
                     (member.name.clone(), (&fields, descriptor.to_string()))
                 }
                 DefKind::Method | DefKind::Constructor => {
                     let constructor = member.kind == DefKind::Constructor;
-                    let Ok(descriptor) =
-                        Descriptor::method_descriptor(member_id, &index, constructor)
+                    let Ok(descriptor) = desc::method_descriptor(member_id, &index, constructor)
                     else {
                         continue;
                     };

@@ -6,7 +6,7 @@ use alloc::string::String;
 
 use rowan::ast::{AstChildren, AstNode, support};
 
-use super::AstSupport;
+use super::ast_support;
 use crate::language::{JavaLanguage, SyntaxNode, SyntaxToken};
 use crate::syntax_kind::SyntaxKind::{
     self, ANNOTATION, ANNOTATION_ARG_LIST, ANNOTATION_PAIR, ANNOTATION_TYPE_DECL, ARG_LIST,
@@ -696,10 +696,10 @@ impl ClassDecl {
         support::child(&self.syntax)
     }
     pub fn name(&self) -> Option<String> {
-        AstSupport::name_text(&self.syntax)
+        ast_support::name_text(&self.syntax)
     }
     pub fn name_token(&self) -> Option<SyntaxToken> {
-        AstSupport::name_token(&self.syntax)
+        ast_support::name_token(&self.syntax)
     }
     pub fn type_params(&self) -> Option<TypeParams> {
         support::child(&self.syntax)
@@ -749,10 +749,10 @@ impl InterfaceDecl {
         support::child(&self.syntax)
     }
     pub fn name(&self) -> Option<String> {
-        AstSupport::name_text(&self.syntax)
+        ast_support::name_text(&self.syntax)
     }
     pub fn name_token(&self) -> Option<SyntaxToken> {
-        AstSupport::name_token(&self.syntax)
+        ast_support::name_token(&self.syntax)
     }
     pub fn type_params(&self) -> Option<TypeParams> {
         support::child(&self.syntax)
@@ -799,10 +799,10 @@ impl EnumDecl {
         support::child(&self.syntax)
     }
     pub fn name(&self) -> Option<String> {
-        AstSupport::name_text(&self.syntax)
+        ast_support::name_text(&self.syntax)
     }
     pub fn name_token(&self) -> Option<SyntaxToken> {
-        AstSupport::name_token(&self.syntax)
+        ast_support::name_token(&self.syntax)
     }
     pub fn implements_clause(&self) -> Option<ImplementsClause> {
         support::child(&self.syntax)
@@ -843,10 +843,10 @@ impl RecordDecl {
         support::child(&self.syntax)
     }
     pub fn name(&self) -> Option<String> {
-        AstSupport::name_text(&self.syntax)
+        ast_support::name_text(&self.syntax)
     }
     pub fn name_token(&self) -> Option<SyntaxToken> {
-        AstSupport::name_token(&self.syntax)
+        ast_support::name_token(&self.syntax)
     }
     pub fn type_params(&self) -> Option<TypeParams> {
         support::child(&self.syntax)
@@ -893,10 +893,10 @@ impl AnnotationTypeDecl {
         support::child(&self.syntax)
     }
     pub fn name(&self) -> Option<String> {
-        AstSupport::name_text(&self.syntax)
+        ast_support::name_text(&self.syntax)
     }
     pub fn name_token(&self) -> Option<SyntaxToken> {
-        AstSupport::name_token(&self.syntax)
+        ast_support::name_token(&self.syntax)
     }
     pub fn body(&self) -> Option<ClassBody> {
         support::child(&self.syntax)
@@ -937,10 +937,10 @@ impl MethodDecl {
         support::child(&self.syntax)
     }
     pub fn name(&self) -> Option<String> {
-        AstSupport::name_text(&self.syntax)
+        ast_support::name_text(&self.syntax)
     }
     pub fn name_token(&self) -> Option<SyntaxToken> {
-        AstSupport::name_token(&self.syntax)
+        ast_support::name_token(&self.syntax)
     }
     pub fn params(&self) -> Option<ParamList> {
         support::child(&self.syntax)
@@ -984,10 +984,10 @@ impl FieldDecl {
         support::child(&self.syntax)
     }
     pub fn name(&self) -> Option<String> {
-        AstSupport::name_text(&self.syntax)
+        ast_support::name_text(&self.syntax)
     }
     pub fn name_token(&self) -> Option<SyntaxToken> {
-        AstSupport::name_token(&self.syntax)
+        ast_support::name_token(&self.syntax)
     }
     pub fn value(&self) -> Option<Expr> {
         support::child(&self.syntax)
@@ -1286,10 +1286,10 @@ pub struct AnnotationPair {
 
 impl AnnotationPair {
     pub fn name(&self) -> Option<String> {
-        AstSupport::name_text(&self.syntax)
+        ast_support::name_text(&self.syntax)
     }
     pub fn name_token(&self) -> Option<SyntaxToken> {
-        AstSupport::name_token(&self.syntax)
+        ast_support::name_token(&self.syntax)
     }
     pub fn value(&self) -> Option<Expr> {
         support::child(&self.syntax)
@@ -1416,10 +1416,10 @@ pub struct TypeParam {
 
 impl TypeParam {
     pub fn name(&self) -> Option<String> {
-        AstSupport::name_text(&self.syntax)
+        ast_support::name_text(&self.syntax)
     }
     pub fn name_token(&self) -> Option<SyntaxToken> {
-        AstSupport::name_token(&self.syntax)
+        ast_support::name_token(&self.syntax)
     }
     pub fn bounds(&self) -> AstChildren<Type> {
         support::children(&self.syntax)
@@ -1512,10 +1512,10 @@ impl RecordComponent {
         support::child(&self.syntax)
     }
     pub fn name(&self) -> Option<String> {
-        AstSupport::name_text(&self.syntax)
+        ast_support::name_text(&self.syntax)
     }
     pub fn name_token(&self) -> Option<SyntaxToken> {
-        AstSupport::name_token(&self.syntax)
+        ast_support::name_token(&self.syntax)
     }
 }
 
@@ -1603,10 +1603,10 @@ pub struct EnumConstant {
 
 impl EnumConstant {
     pub fn name(&self) -> Option<String> {
-        AstSupport::name_text(&self.syntax)
+        ast_support::name_text(&self.syntax)
     }
     pub fn name_token(&self) -> Option<SyntaxToken> {
-        AstSupport::name_token(&self.syntax)
+        ast_support::name_token(&self.syntax)
     }
     pub fn args(&self) -> Option<ArgList> {
         support::child(&self.syntax)
@@ -1673,10 +1673,10 @@ impl ConstructorDecl {
         support::child(&self.syntax)
     }
     pub fn name(&self) -> Option<String> {
-        AstSupport::name_text(&self.syntax)
+        ast_support::name_text(&self.syntax)
     }
     pub fn name_token(&self) -> Option<SyntaxToken> {
-        AstSupport::name_token(&self.syntax)
+        ast_support::name_token(&self.syntax)
     }
     pub fn params(&self) -> Option<ParamList> {
         support::child(&self.syntax)
@@ -1813,10 +1813,10 @@ impl Param {
         support::child(&self.syntax)
     }
     pub fn name(&self) -> Option<String> {
-        AstSupport::name_text(&self.syntax)
+        ast_support::name_text(&self.syntax)
     }
     pub fn name_token(&self) -> Option<SyntaxToken> {
-        AstSupport::name_token(&self.syntax)
+        ast_support::name_token(&self.syntax)
     }
 }
 
@@ -1982,10 +1982,10 @@ impl LocalVarDecl {
         support::child(&self.syntax)
     }
     pub fn name(&self) -> Option<String> {
-        AstSupport::name_text(&self.syntax)
+        ast_support::name_text(&self.syntax)
     }
     pub fn name_token(&self) -> Option<SyntaxToken> {
-        AstSupport::name_token(&self.syntax)
+        ast_support::name_token(&self.syntax)
     }
     pub fn value(&self) -> Option<Expr> {
         support::child(&self.syntax)
@@ -2221,10 +2221,10 @@ impl ForEachStmt {
         support::child(&self.syntax)
     }
     pub fn name(&self) -> Option<String> {
-        AstSupport::name_text(&self.syntax)
+        ast_support::name_text(&self.syntax)
     }
     pub fn name_token(&self) -> Option<SyntaxToken> {
-        AstSupport::name_token(&self.syntax)
+        ast_support::name_token(&self.syntax)
     }
     pub fn iterable(&self) -> Option<Expr> {
         support::child(&self.syntax)
@@ -2524,10 +2524,10 @@ impl LabeledStmt {
         support::children(&self.syntax)
     }
     pub fn label(&self) -> Option<String> {
-        AstSupport::name_text(&self.syntax)
+        ast_support::name_text(&self.syntax)
     }
     pub fn label_token(&self) -> Option<SyntaxToken> {
-        AstSupport::name_token(&self.syntax)
+        ast_support::name_token(&self.syntax)
     }
     pub fn stmt(&self) -> Option<Stmt> {
         support::child(&self.syntax)
@@ -2888,10 +2888,10 @@ impl TypePattern {
         support::child(&self.syntax)
     }
     pub fn name(&self) -> Option<String> {
-        AstSupport::name_text(&self.syntax)
+        ast_support::name_text(&self.syntax)
     }
     pub fn name_token(&self) -> Option<SyntaxToken> {
-        AstSupport::name_token(&self.syntax)
+        ast_support::name_token(&self.syntax)
     }
 }
 

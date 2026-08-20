@@ -8,10 +8,6 @@
 //! them is hand-written in `jals-syntax/src/ast/ext.rs`.
 
 use std::fmt::Write as _;
-use std::fs;
-use std::io::Write as _;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail, ensure};
 use ungrammar::{Grammar, Rule};
@@ -21,23 +17,37 @@ const GRAMMAR: &str = "jals-syntax/java.ungram";
 /// Path of the generated file, relative to the project root.
 const TARGET: &str = "jals-syntax/src/ast/generated.rs";
 
+pub(crate) use api::run;
+
 /// The codegen task's orchestration: reading the grammar, rendering the file,
 /// and the `rustfmt` post-pass. The lowering/rendering steps hang off the data
 /// types they produce (`Item`, `NodeSrc`, `EnumSrc`, `Accessor`, `Shape`).
-pub(crate) struct Codegen;
+///
+/// Grouped per the repository's no-free-functions layout; the entry point is
+/// re-exported above so callers still spell it `codegen::run`.
+mod api {
+    use std::fmt::Write as _;
+    use std::fs;
+    use std::io::Write as _;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
 
-impl Codegen {
+    use anyhow::{Context, Result, ensure};
+    use ungrammar::Grammar;
+
+    use super::{AccessorKind, GRAMMAR, Item, TARGET};
+
     /// Renders the generated file and writes it; with `check`, renders to memory
     /// and fails if the committed file differs.
     pub(crate) fn run(check: bool) -> Result<()> {
-        let root = Self::project_root();
+        let root = project_root();
         let grammar_path = root.join(GRAMMAR);
         let grammar_text = fs::read_to_string(&grammar_path)
             .with_context(|| format!("failed to read {}", grammar_path.display()))?;
         let grammar: Grammar = grammar_text
             .parse()
             .with_context(|| format!("failed to parse {}", grammar_path.display()))?;
-        let code = Self::generate(&grammar)?;
+        let code = generate(&grammar)?;
 
         let target = root.join(TARGET);
         if check {
@@ -64,7 +74,7 @@ impl Codegen {
     }
 
     /// The workspace root (the parent of the `xtask` crate).
-    fn project_root() -> PathBuf {
+    pub(crate) fn project_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("xtask lives directly under the project root")
@@ -92,7 +102,7 @@ impl Codegen {
         buf.push_str("// @generated\n\n");
         buf.push_str("use alloc::string::String;\n\n");
         buf.push_str("use rowan::ast::{AstChildren, AstNode, support};\n\n");
-        buf.push_str("use super::AstSupport;\n");
+        buf.push_str("use super::ast_support;\n");
         buf.push_str("use crate::language::{JavaLanguage, SyntaxNode");
         if body.contains("SyntaxToken") {
             buf.push_str(", SyntaxToken");
@@ -104,10 +114,10 @@ impl Codegen {
         let _ = writeln!(
             buf,
             "use crate::syntax_kind::SyntaxKind::{{self, {}}};",
-            Self::referenced_kinds(&items).join(", ")
+            referenced_kinds(&items).join(", ")
         );
         buf.push_str(&body);
-        Self::reformat(&buf)
+        reformat(&buf)
     }
 
     /// Every `SyntaxKind` variant the generated code names, deduplicated. Feeds the
@@ -141,7 +151,7 @@ impl Codegen {
     fn reformat(text: &str) -> Result<String> {
         let mut child = Command::new("rustfmt")
             .args(["--edition", "2024"])
-            .current_dir(Self::project_root())
+            .current_dir(project_root())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -275,8 +285,8 @@ impl NodeSrc {
                     // together is what keeps the pair from drifting apart per-node.
                     AccessorKind::NameText => writeln!(
                         buf,
-                        "pub fn {label}(&self) -> Option<String> {{ AstSupport::name_text(&self.syntax) }}\n\
-                         pub fn {label}_token(&self) -> Option<SyntaxToken> {{ AstSupport::name_token(&self.syntax) }}"
+                        "pub fn {label}(&self) -> Option<String> {{ ast_support::name_text(&self.syntax) }}\n\
+                         pub fn {label}_token(&self) -> Option<SyntaxToken> {{ ast_support::name_token(&self.syntax) }}"
                     ),
                 };
             }
@@ -544,10 +554,12 @@ impl Shape {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     fn grammar() -> Grammar {
-        let path = Codegen::project_root().join(GRAMMAR);
+        let path = api::project_root().join(GRAMMAR);
         fs::read_to_string(&path).unwrap().parse().unwrap()
     }
 
@@ -557,8 +569,7 @@ mod tests {
     #[test]
     fn node_kinds_exist_in_syntax_kind() {
         let syntax_kind =
-            fs::read_to_string(Codegen::project_root().join("jals-syntax/src/syntax_kind.rs"))
-                .unwrap();
+            fs::read_to_string(api::project_root().join("jals-syntax/src/syntax_kind.rs")).unwrap();
         for item in Item::lower(&grammar()).unwrap() {
             if let Item::Node(node) = item {
                 assert!(

@@ -10,10 +10,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
-use jals_tests::Harness;
 use jals_tests::compile::{
     COMPILE_SOURCES, CompileReport, CompileSource, JAVAC_PIN, Jdk, Verifier,
 };
+use jals_tests::{configure_threads, default_sources_dir};
 
 #[derive(Parser)]
 #[command(
@@ -76,7 +76,7 @@ impl Cli {
     fn run() -> ExitCode {
         let cli = Self::parse();
 
-        if let Err(message) = Harness::configure_threads(cli.jobs) {
+        if let Err(message) = configure_threads(cli.jobs) {
             eprintln!("error: {message}");
             return ExitCode::from(1);
         }
@@ -130,10 +130,7 @@ impl Cli {
             return cli.exit_code(reports, false);
         }
 
-        let sources_dir = cli
-            .root
-            .clone()
-            .unwrap_or_else(Harness::default_sources_dir);
+        let sources_dir = cli.root.clone().unwrap_or_else(default_sources_dir);
 
         let selected: Vec<&str> = if cli.sources.is_empty() {
             COMPILE_SOURCES.iter().map(|source| source.name).collect()

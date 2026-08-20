@@ -1,11 +1,13 @@
+use jals_classpath::dependency_resolver;
+use jals_classpath::external_artifact_resolver;
+use jals_classpath::mapping_resolver;
 use std::collections::BTreeSet;
 use std::str::FromStr as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use jals_classpath::{
-    DependencyLocation, DependencyResolver, DependencySpec, ExpectedDigest,
-    ExternalArtifactResolver, ExternalArtifactSpec, ExternalLocator, Fetcher, MappingResolver,
-    MappingSpec, NetworkPolicy,
+    DependencyLocation, DependencySpec, ExpectedDigest, ExternalArtifactSpec, ExternalLocator,
+    Fetcher, MappingSpec, NetworkPolicy,
 };
 use jals_exec::block_on_inline;
 use jals_storage::{
@@ -65,14 +67,14 @@ fn external_artifacts_verify_sha1_and_reuse_the_sha256_cache_offline() {
             namespace: CacheNamespace::BuildTaskArtifact,
         };
         let online = MockFetcher::online(bytes);
-        let key = ExternalArtifactResolver::resolve(&online, storage.artifacts_mut(), &spec)
+        let key = external_artifact_resolver::resolve(&online, storage.artifacts_mut(), &spec)
             .await
             .unwrap();
         assert_eq!(online.calls(), 1);
         assert_eq!(key.content(), ContentDigest::of(bytes));
 
         let offline = MockFetcher::offline(b"wrong");
-        let cached = ExternalArtifactResolver::resolve(&offline, storage.artifacts_mut(), &spec)
+        let cached = external_artifact_resolver::resolve(&offline, storage.artifacts_mut(), &spec)
             .await
             .unwrap();
         assert_eq!(cached, key);
@@ -92,7 +94,7 @@ fn external_artifacts_reject_oversize_and_digest_mismatch_without_indexing() {
             namespace: CacheNamespace::BuildTaskArtifact,
         };
         let fetcher = MockFetcher::online(b"oversized");
-        let error = ExternalArtifactResolver::resolve(&fetcher, storage.artifacts_mut(), &spec)
+        let error = external_artifact_resolver::resolve(&fetcher, storage.artifacts_mut(), &spec)
             .await
             .unwrap_err();
         assert!(error.contains("exceeding the limit"), "{error}");
@@ -102,18 +104,20 @@ fn external_artifacts_reject_oversize_and_digest_mismatch_without_indexing() {
             max_bytes: 1024,
             ..spec
         };
-        let error = ExternalArtifactResolver::resolve(&fetcher, storage.artifacts_mut(), &mismatch)
-            .await
-            .unwrap_err();
+        let error =
+            external_artifact_resolver::resolve(&fetcher, storage.artifacts_mut(), &mismatch)
+                .await
+                .unwrap_err();
         assert!(error.contains("digest mismatch"), "{error}");
 
         // The whole message, not a substring: this is the one diagnostic that has to say the cache
         // was already tried, and it reaches a destination (`BuildTaskRunError::Node`) that renders
         // it with no origin beside it, so it names its own locator.
         let offline = MockFetcher::offline(b"oversized");
-        let error = ExternalArtifactResolver::resolve(&offline, storage.artifacts_mut(), &mismatch)
-            .await
-            .unwrap_err();
+        let error =
+            external_artifact_resolver::resolve(&offline, storage.artifacts_mut(), &mismatch)
+                .await
+                .unwrap_err();
         assert_eq!(
             error,
             "external artifact `https://example.invalid/artifact.jar` is not available in the \
@@ -139,7 +143,7 @@ fn project_dependency_is_read_from_the_captured_revision() {
             recursive: false,
             remap: None,
         };
-        let resolved = DependencyResolver::resolve(
+        let resolved = dependency_resolver::resolve(
             &fetcher,
             &storage.view(),
             storage.artifacts_mut(),
@@ -171,7 +175,7 @@ fn artifact_dependency_is_verified_without_fetching_or_republishing() {
         );
         storage.artifacts_mut().publish(&key, b"jar").await.unwrap();
         let fetcher = MockFetcher::online(b"wrong");
-        let resolved = DependencyResolver::resolve(
+        let resolved = dependency_resolver::resolve(
             &fetcher,
             &storage.view(),
             storage.artifacts_mut(),
@@ -204,7 +208,7 @@ fn expected_digest_enables_verified_external_cache_hits() {
             recursive: false,
             remap: None,
         };
-        let first = DependencyResolver::resolve(
+        let first = dependency_resolver::resolve(
             &fetcher,
             &storage.view(),
             storage.artifacts_mut(),
@@ -212,7 +216,7 @@ fn expected_digest_enables_verified_external_cache_hits() {
         )
         .await;
         assert_eq!(fetcher.calls(), 1);
-        let second = DependencyResolver::resolve(
+        let second = dependency_resolver::resolve(
             &fetcher,
             &storage.view(),
             storage.artifacts_mut(),
@@ -255,7 +259,7 @@ fn digest_less_external_dependency_resolves_from_cache_offline() {
             recursive: false,
             remap: None,
         };
-        let first = DependencyResolver::resolve(
+        let first = dependency_resolver::resolve(
             &fetcher,
             &storage.view(),
             storage.artifacts_mut(),
@@ -266,7 +270,7 @@ fn digest_less_external_dependency_resolves_from_cache_offline() {
         assert!(first.warnings.is_empty());
 
         // The second resolution has no network at all; the locator index recovers the cached jar.
-        let second = DependencyResolver::resolve(
+        let second = dependency_resolver::resolve(
             &OfflineFetcher,
             &storage.view(),
             storage.artifacts_mut(),
@@ -301,7 +305,7 @@ fn digest_mismatch_is_a_warning_and_is_not_published() {
             recursive: false,
             remap: None,
         };
-        let resolved = DependencyResolver::resolve(
+        let resolved = dependency_resolver::resolve(
             &fetcher,
             &storage.view(),
             storage.artifacts_mut(),
@@ -330,7 +334,7 @@ fn duplicate_locators_fetch_once_and_resolve_in_spec_order() {
             recursive: false,
             remap: None,
         };
-        let resolved = DependencyResolver::resolve(
+        let resolved = dependency_resolver::resolve(
             &fetcher,
             &storage.view(),
             storage.artifacts_mut(),
@@ -357,7 +361,7 @@ fn offline_does_not_fetch_an_uncached_external_dependency_jar() {
         let mut storage = MemoryStorage::memory(CodeTree::default());
         let locator = ExternalLocator::new("https://example.invalid/dep.jar");
         let fetcher = MockFetcher::offline(b"must not be served");
-        let resolved = DependencyResolver::resolve(
+        let resolved = dependency_resolver::resolve(
             &fetcher,
             &storage.view(),
             storage.artifacts_mut(),
@@ -406,7 +410,7 @@ fn offline_still_reads_a_non_network_external_locator() {
             recursive: false,
             remap: None,
         };
-        let resolved = DependencyResolver::resolve(
+        let resolved = dependency_resolver::resolve(
             &fetcher,
             &storage.view(),
             storage.artifacts_mut(),
@@ -423,7 +427,7 @@ fn offline_still_reads_a_non_network_external_locator() {
     });
 }
 
-/// `MappingResolver::text` hardcoded `NetworkPolicy::Online`, which was the one place its own doc
+/// `mapping_resolver::text` hardcoded `NetworkPolicy::Online`, which was the one place its own doc
 /// comment — "a host with no network hands over one that refuses" — was untrue.
 #[test]
 fn offline_does_not_fetch_an_external_mapping_text() {
@@ -443,7 +447,7 @@ fn offline_does_not_fetch_an_external_mapping_text() {
 
         let fetcher = MockFetcher::offline(b"must not be served");
         let warning =
-            MappingResolver::text(&fetcher, &storage.view(), storage.artifacts_mut(), &spec)
+            mapping_resolver::text(&fetcher, &storage.view(), storage.artifacts_mut(), &spec)
                 .await
                 .unwrap_err();
 

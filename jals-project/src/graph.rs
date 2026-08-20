@@ -22,9 +22,8 @@ use jals_storage::{
     ProjectView, ProvenanceFold, RelativePath,
 };
 
-use crate::task::{
-    BuildTaskExecution, BuildTaskExecutor, BuildTaskPublication, SnapshotTaskOptions, TaskRuntime,
-};
+use crate::task;
+use crate::task::{BuildTaskExecution, BuildTaskPublication, SnapshotTaskOptions, TaskRuntime};
 
 /// Stable opaque identity of a resolved dependency node.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -817,7 +816,7 @@ impl ResolvedNode {
         options: &GraphPreprocess<'_, F>,
         view: &ProjectView,
     ) -> Result<BuildTaskExecution, GraphError> {
-        BuildTaskExecutor::execute_snapshot(
+        task::execute_snapshot(
             options.exec,
             options.fetcher,
             view,
@@ -939,7 +938,7 @@ impl ResolvedNode {
         // `run_task_plan` already serialized this plan to key its own record, so `None` is
         // unreachable rather than a second policy — and if it ever happened, the answer would still
         // be computed, just never recorded.
-        let provenance = BuildTaskExecutor::plan_fingerprint(plan)
+        let provenance = task::plan_fingerprint(plan)
             .ok()
             .map(|plan| Self::coverage_provenance(plan, &roots, classpath));
         if let Some(provenance) = provenance

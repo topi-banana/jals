@@ -1,18 +1,19 @@
-//! Method-body decompilation (`MethodBody::decompile`) over real classes compiled with
+//! Method-body decompilation (`body::decompile`) over real classes compiled with
 //! `-parameters -g`, so reconstruction is checked against actual javac bytecode.
 
 use jals_classfile::{ClassAccessFlags, ClassFile, MethodAccessFlags, MethodInfo};
-use jals_decompile::{ClassHierarchy, MethodBody};
+use jals_decompile::ClassHierarchy;
+use jals_decompile::body;
 use jals_exec::block_on_inline;
 
 fn fixture(bytes: &[u8]) -> ClassFile {
     block_on_inline(ClassFile::read(bytes)).expect("parse fixture class")
 }
 
-/// Synchronous test-side driver for the async [`MethodBody::decompile`].
+/// Synchronous test-side driver for the async [`body::decompile`].
 fn decompile(method: &MethodInfo, cf: &ClassFile, param_names: &[String]) -> Option<Vec<String>> {
     let hierarchy = ClassHierarchy::new(core::slice::from_ref(cf));
-    block_on_inline(MethodBody::decompile(method, cf, param_names, &hierarchy))
+    block_on_inline(body::decompile(method, cf, param_names, &hierarchy))
 }
 
 fn decompile_with_hierarchy(
@@ -22,7 +23,7 @@ fn decompile_with_hierarchy(
     classes: &[ClassFile],
 ) -> Option<Vec<String>> {
     let hierarchy = ClassHierarchy::new(classes);
-    block_on_inline(MethodBody::decompile(method, cf, param_names, &hierarchy))
+    block_on_inline(body::decompile(method, cf, param_names, &hierarchy))
 }
 
 fn consts() -> ClassFile {

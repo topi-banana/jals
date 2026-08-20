@@ -211,7 +211,7 @@ impl<'a> ProjectQueries<'a> {
     /// The byte range of the identifier under `offset` when it names a symbol that may be renamed
     /// soundly, else `None` (an external name, a keyword/literal, or a withheld member).
     ///
-    /// A file-local binding qualifies by kind ([`Ident::is_renamable_kind`] — locals and project
+    /// A file-local binding qualifies by kind ([`api::is_renamable_kind`] — locals and project
     /// types yes, members no); a cross-file *use* of a project type (one the file-local pass left
     /// unresolved) qualifies too, since the host rewrites it project-wide. A use that resolves to
     /// anything *outside* the project's own sources — a stdlib stub, a classpath `.class` type,
@@ -234,7 +234,7 @@ impl<'a> ProjectQueries<'a> {
                             )
                     })
             },
-            |id| Ident::is_renamable_kind(self.analysis().def(id).kind),
+            |id| api::is_renamable_kind(self.analysis().def(id).kind),
         );
         renamable.then(|| crate::byte_range(ident.text_range()))
     }
@@ -479,11 +479,15 @@ impl SignatureHelpUtf16 {
     }
 }
 
-/// Identifier policies shared by rename in every host.
-pub struct Ident;
+pub use api::is_valid_java_identifier;
 
-impl Ident {
-    /// Whether `name` is a single legal Java identifier: it tokenizes to exactly one `IDENT`
+/// Identifier policies shared by rename in every host.
+mod api {
+    use super::{DefKind, SyntaxKind};
+
+    /// Whether `name` is a single legal Java identifier.
+    ///
+    /// It tokenizes to exactly one `IDENT`
     /// token spanning the whole string. A reserved word lexes to its keyword kind (`int` →
     /// `INT_KW`), and anything with whitespace, punctuation, or a leading digit yields a
     /// non-`IDENT` token or more than one token — all rejected. (A context-sensitive keyword such
@@ -501,7 +505,7 @@ impl Ident {
     /// Locals and other file-scoped bindings always qualify; project types do too (a host widens
     /// their rewrite project-wide). Members are withheld — their uses can span files a rename
     /// does not rewrite.
-    const fn is_renamable_kind(kind: DefKind) -> bool {
+    pub(crate) const fn is_renamable_kind(kind: DefKind) -> bool {
         use DefKind::{
             AnnotationType, CatchParam, Class, Enum, Interface, LambdaParam, Local, Param,
             PatternVar, Record, Resource, TypeParam,
@@ -714,7 +718,7 @@ mod tests {
                     .await,
                 Some(FileRange {
                     file: FileId(0),
-                    range: component..component + 1,
+                    range: component..component + 1
                 })
             );
         });
@@ -880,7 +884,7 @@ mod tests {
                 fixture.queries(1).highlights(type_offset),
                 [Highlight {
                     range: type_offset..type_offset + 1,
-                    kind: HighlightKind::Read,
+                    kind: HighlightKind::Read
                 }]
             );
         });
@@ -931,11 +935,11 @@ mod tests {
                 [
                     FileRange {
                         file: FileId(0),
-                        range: 10..16,
+                        range: 10..16
                     },
                     FileRange {
                         file: FileId(0),
-                        range: 24..30,
+                        range: 24..30
                     },
                 ]
             );

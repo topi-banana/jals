@@ -5,7 +5,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, ValueEnum};
-use jals_tests::{ALL_SOURCES, Harness, Outcome, Source, SourceReport};
+use jals_tests::{
+    ALL_SOURCES, Outcome, Source, SourceReport, configure_threads, default_sources_dir,
+};
 
 #[derive(Parser)]
 #[command(
@@ -68,15 +70,12 @@ impl Cli {
     fn run() -> ExitCode {
         let cli = Self::parse();
 
-        if let Err(msg) = Harness::configure_threads(cli.jobs) {
+        if let Err(msg) = configure_threads(cli.jobs) {
             eprintln!("error: {msg}");
             return ExitCode::from(1);
         }
 
-        let sources_dir = cli
-            .root
-            .clone()
-            .unwrap_or_else(Harness::default_sources_dir);
+        let sources_dir = cli.root.clone().unwrap_or_else(default_sources_dir);
 
         let selected: Vec<&'static Source> = if cli.sources.is_empty() {
             ALL_SOURCES.iter().collect()

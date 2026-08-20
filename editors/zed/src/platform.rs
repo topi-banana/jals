@@ -7,10 +7,12 @@ use zed_extension_api::{self as zed, Architecture, Os, Result};
 
 use crate::JALS_BINARY;
 
-/// Platform-dependent naming for the downloaded `jals` binary.
-pub(crate) struct Platform;
+pub(crate) use api::{artifact_name, binary_file_name, needs_executable_bit};
 
-impl Platform {
+/// Platform-dependent naming for the downloaded `jals` binary.
+mod api {
+    use super::*;
+
     /// The name of the CI artifact holding this platform's `jals` binary
     /// (`jals-<target-triple>`, uploaded by the `lsp-binary` job in `.github/workflows/ci.yml`).
     pub(crate) fn artifact_name() -> Result<String> {

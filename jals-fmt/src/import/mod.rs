@@ -125,6 +125,8 @@ pub trait ConfigImporter {
     }
 }
 
+pub(crate) use api::{prefix, push_static};
+
 /// The shared normalization of a native import-group entry into a jals `import_groups` prefix.
 ///
 /// Every native formatter spells its groups differently (IntelliJ `java.**`, Spotless `java`), but
@@ -132,19 +134,19 @@ pub trait ConfigImporter {
 /// `import_groups` by raw string prefix, so the representation has to carry a trailing `.` — it is
 /// the dot that stops `java` from also capturing `javax.*`. Both importers go through here so they
 /// cannot drift apart on the encoding.
-struct ImportGroups;
+pub(crate) mod api {
+    use super::{String, ToOwned, Vec, format};
 
-impl ImportGroups {
     /// The catch-all group (every import not claimed by a named prefix).
-    const CATCH_ALL: &'static str = "*";
+    pub(crate) const CATCH_ALL: &str = "*";
     /// The single group jals uses for static imports; every native static group collapses into it.
-    const STATIC: &'static str = "static";
+    pub(crate) const STATIC: &str = "static";
 
     /// Normalize one package prefix, already stripped of its native wildcard / marker syntax.
     /// An empty prefix is the catch-all; anything else is returned dotted.
-    fn prefix(package: &str) -> String {
+    pub(crate) fn prefix(package: &str) -> String {
         if package.is_empty() {
-            Self::CATCH_ALL.to_owned()
+            CATCH_ALL.to_owned()
         } else if package.ends_with('.') {
             package.to_owned()
         } else {
@@ -154,9 +156,9 @@ impl ImportGroups {
 
     /// Append the `"static"` group unless it is already present — native configs may declare
     /// several static groups (`$*`, `\#com.acme`), and jals models only one.
-    fn push_static(groups: &mut Vec<String>) {
-        if !groups.iter().any(|group| group == Self::STATIC) {
-            groups.push(Self::STATIC.to_owned());
+    pub(crate) fn push_static(groups: &mut Vec<String>) {
+        if !groups.iter().any(|group| group == STATIC) {
+            groups.push(STATIC.to_owned());
         }
     }
 }

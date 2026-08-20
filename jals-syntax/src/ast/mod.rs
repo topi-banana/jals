@@ -27,7 +27,7 @@ use alloc::string::String;
 
 pub use rowan::ast::{AstChildren, AstNode, AstPtr, SyntaxNodePtr};
 
-pub use ext::Declarators;
+pub use ext::declarators;
 pub use generated::*;
 
 use crate::language::{SyntaxNode, SyntaxToken};
@@ -36,11 +36,11 @@ use crate::syntax_kind::SyntaxKind::IDENT;
 // ===== Shared accessor helpers =====
 
 /// Namespace for the shared typed-AST accessor helpers that walk a node's tokens.
-struct AstSupport;
+mod ast_support {
+    use super::{IDENT, String, SyntaxNode, SyntaxToken};
 
-impl AstSupport {
     /// Returns the first significant token (non-trivia) of `node`, if any.
-    fn first_sig_token(node: &SyntaxNode) -> Option<SyntaxToken> {
+    pub(super) fn first_sig_token(node: &SyntaxNode) -> Option<SyntaxToken> {
         node.children_with_tokens()
             .filter_map(rowan::NodeOrToken::into_token)
             .find(|t| !t.kind().is_trivia())
@@ -53,7 +53,7 @@ impl AstSupport {
     /// ([`crate::decoded_ident`]), and running this over a subtree would reach string and character
     /// literals, whose own escape handling is a different layer's.
     #[cfg(test)]
-    fn non_trivia_text(node: &SyntaxNode) -> String {
+    pub(super) fn non_trivia_text(node: &SyntaxNode) -> String {
         node.descendants_with_tokens()
             .filter_map(rowan::NodeOrToken::into_token)
             .filter(|t| !t.kind().is_trivia())
@@ -66,25 +66,25 @@ impl AstSupport {
     /// This is the token, not its text, because a consumer that has to look the declaration up in
     /// `jals-hir` needs its offset: the index is keyed on where the name starts
     /// (`ProjectIndex::item_by_decl` / `member_by_decl`), and text alone cannot answer that.
-    fn name_token(node: &SyntaxNode) -> Option<SyntaxToken> {
-        Self::ident_tokens(node).next()
+    pub(super) fn name_token(node: &SyntaxNode) -> Option<SyntaxToken> {
+        ident_tokens(node).next()
     }
 
-    /// The text of [`name_token`](Self::name_token), with its JLS §3.3 escapes resolved. Defined in
+    /// The text of [`name_token`](name_token), with its JLS §3.3 escapes resolved. Defined in
     /// terms of it so the pair cannot disagree about which token is the name.
     ///
     /// The *decoded* spelling, because this is a declaration's identity rather than its rendering:
     /// `int \u0061;` declares `a`, and reading the raw text made it a field literally named
     /// `\u0061` in the emitted class file and a different name from every use of it.
     /// [`crate::decoded_ident`] states the rule and why a token's own text is enough to apply it.
-    fn name_text(node: &SyntaxNode) -> Option<String> {
-        Self::name_token(node).map(|t| crate::decoded_ident(&t).into_owned())
+    pub(super) fn name_text(node: &SyntaxNode) -> Option<String> {
+        name_token(node).map(|t| crate::decoded_ident(&t).into_owned())
     }
 
     /// The directly-declared name tokens (`IDENT` children) of `node`, in source order. The type of a
     /// declaration is a nested `TYPE` node, so its identifiers are not direct children; an unnamed `_`
     /// binding is an `UNDERSCORE` token and is likewise excluded.
-    fn ident_tokens(node: &SyntaxNode) -> impl Iterator<Item = SyntaxToken> {
+    pub(super) fn ident_tokens(node: &SyntaxNode) -> impl Iterator<Item = SyntaxToken> {
         node.children_with_tokens()
             .filter_map(rowan::NodeOrToken::into_token)
             .filter(|t| t.kind() == IDENT)

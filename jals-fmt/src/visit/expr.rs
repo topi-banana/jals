@@ -10,12 +10,13 @@
 //! A same-precedence run is one level, which is what makes it break as a unit: `a + b + c` either
 //! fits or splits at every operator under `if-long-per-item`, and packs under `if-long`.
 
+use crate::visit::spacing;
 use jals_config::fmt::WrapPolicy;
 use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::ir::Indent;
 use crate::passes::token_license::License;
-use crate::visit::{Ctx, Spacing};
+use crate::visit::Ctx;
 
 impl Ctx<'_> {
     /// A binary operator run.
@@ -149,7 +150,7 @@ impl Ctx<'_> {
 
     /// Whether `children[nth]` is another token of the fused operator `children[nth - 1]` opens.
     ///
-    /// [`Spacing::fused`] is the single definition of "these two tokens spell one operator" — it
+    /// [`spacing::fused`] is the single definition of "these two tokens spell one operator" — it
     /// is what keeps them emitted tight — so the break placement asks it rather than re-deriving
     /// the answer from `GT` alone. Two questions about one operator, answered once.
     fn fuses_with_previous(children: &[SyntaxElement], nth: usize) -> bool {
@@ -159,7 +160,7 @@ impl Ctx<'_> {
         ) else {
             return false;
         };
-        Spacing::fused(previous, current)
+        spacing::fused(previous, current)
     }
 
     /// The flat rendering of the break placed against an operator token.
@@ -179,7 +180,7 @@ impl Ctx<'_> {
         let space = child.as_token().is_some_and(|tok| {
             self.previous
                 .as_ref()
-                .is_none_or(|previous| Spacing::between(previous, tok, self.style))
+                .is_none_or(|previous| spacing::between(previous, tok, self.style))
         });
         Self::flat_space(space)
     }
@@ -191,13 +192,13 @@ impl Ctx<'_> {
     /// which is the gap a `before` break stands in. An `after` break stands in the other gap —
     /// (operator, right operand) — and on a **fused** operator the two are not interchangeable:
     /// `x >>= 2` spells its operator as `GT GT EQ`, so the pair in front of the `=` is *inside*
-    /// the operator and [`Spacing::fused`] answers "tight". Asking about the gap the break is
+    /// the operator and [`spacing::fused`] answers "tight". Asking about the gap the break is
     /// actually placed in renders `x >>= 2`, where asking about the operator rendered `x >>=2`.
     fn gap_flat(&self, next: &SyntaxElement) -> &'static str {
         let space = Self::leading_token(next).is_some_and(|tok| {
             self.previous
                 .as_ref()
-                .is_none_or(|previous| Spacing::between(previous, &tok, self.style))
+                .is_none_or(|previous| spacing::between(previous, &tok, self.style))
         });
         Self::flat_space(space)
     }

@@ -78,7 +78,7 @@ impl NativeSource {
         } else {
             root
         };
-        let metadata = fs::metadata(&root).map_err(|error| NativeFs::io_error(&root, &error))?;
+        let metadata = fs::metadata(&root).map_err(|error| api::io_error(&root, &error))?;
         if !metadata.is_dir() {
             return Err(Error::Io(format!(
                 "project root is not a directory: {}",
@@ -206,7 +206,7 @@ impl NativeSource {
     /// files without reading their contents.
     fn scan_structure(&self) -> Result<ScanOutcome> {
         let canonical_root =
-            fs::canonicalize(&self.root).map_err(|error| NativeFs::io_error(&self.root, &error))?;
+            fs::canonicalize(&self.root).map_err(|error| api::io_error(&self.root, &error))?;
         let mut outcome = ScanOutcome {
             entries: vec![Entry::Directory(DirKey::ROOT)],
             files: Vec::new(),
@@ -223,7 +223,7 @@ impl NativeSource {
             scopes: &self.scopes,
             restricted: self.restricted,
         };
-        NativeFs::scan_directory(&self.root, &DirKey::ROOT, &mut scan, true)?;
+        api::scan_directory(&self.root, &DirKey::ROOT, &mut scan, true)?;
         Ok(outcome)
     }
 
@@ -241,7 +241,7 @@ impl NativeSource {
 
     fn apply_sync(&self, changes: &[Change], base: &CodeTree) -> Result<()> {
         let canonical_root =
-            fs::canonicalize(&self.root).map_err(|error| NativeFs::io_error(&self.root, &error))?;
+            fs::canonicalize(&self.root).map_err(|error| api::io_error(&self.root, &error))?;
         self.require_preconditions(changes, base, &canonical_root)?;
         let mut journal = ApplyJournal::default();
         let mut expected = base.clone();
@@ -300,9 +300,9 @@ impl NativeSource {
         match change {
             Change::CreateFile(key, bytes) => {
                 let path = self.confined_path(canonical_root, key.path())?;
-                let parent = path.parent().ok_or_else(|| NativeFs::no_parent(&path))?;
+                let parent = path.parent().ok_or_else(|| api::no_parent(&path))?;
                 journal.create_directories(parent)?;
-                NativeFs::atomic_write(&path, bytes, WriteMode::Create)?;
+                api::atomic_write(&path, bytes, WriteMode::Create)?;
                 journal.record(Undo::RemoveCreatedFile(path));
             }
             Change::ReplaceFile(key, bytes) => {
@@ -316,7 +316,7 @@ impl NativeSource {
                 // this check and the write, which only OS-level locking could close.)
                 Self::require_unchanged(base, key, &path)?;
                 journal.back_up_file(&path)?;
-                NativeFs::atomic_write(&path, bytes, WriteMode::Replace)?;
+                api::atomic_write(&path, bytes, WriteMode::Replace)?;
             }
             Change::RemoveFile(key) => {
                 let path = self.confined_path(canonical_root, key.path())?;
@@ -344,7 +344,7 @@ impl NativeSource {
         let Some(expected) = base.file(key) else {
             return Ok(());
         };
-        let actual = fs::read(path).map_err(|error| NativeFs::io_error(path, &error))?;
+        let actual = fs::read(path).map_err(|error| api::io_error(path, &error))?;
         if actual == expected.bytes() {
             Ok(())
         } else {
@@ -401,13 +401,13 @@ impl NativeSource {
                     existing = existing
                         .parent()
                         .filter(|parent| !parent.as_os_str().is_empty())
-                        .ok_or_else(|| NativeFs::io_error(existing, &error))?;
+                        .ok_or_else(|| api::io_error(existing, &error))?;
                 }
-                Err(error) => return Err(NativeFs::io_error(existing, &error)),
+                Err(error) => return Err(api::io_error(existing, &error)),
             }
         }
         let canonical =
-            fs::canonicalize(existing).map_err(|error| NativeFs::io_error(existing, &error))?;
+            fs::canonicalize(existing).map_err(|error| api::io_error(existing, &error))?;
         if !canonical.starts_with(canonical_root) {
             return Err(Error::Io(format!(
                 "refusing to write outside the project root through {}",
@@ -466,7 +466,7 @@ impl ApplyJournal {
             }
         }
         for dir in missing.iter().rev() {
-            fs::create_dir(dir).map_err(|error| NativeFs::io_error(dir, &error))?;
+            fs::create_dir(dir).map_err(|error| api::io_error(dir, &error))?;
             self.record(Undo::RemoveCreatedDir(dir.clone()));
         }
         if !path.is_dir() {
@@ -478,7 +478,7 @@ impl ApplyJournal {
     /// Copy `path` aside before it is replaced, so a later failure restores the original bytes.
     fn back_up_file(&mut self, path: &Path) -> Result<()> {
         let backup = Self::backup_path(path)?;
-        fs::copy(path, &backup).map_err(|error| NativeFs::io_error(path, &error))?;
+        fs::copy(path, &backup).map_err(|error| api::io_error(path, &error))?;
         self.record(Undo::RestoreFile {
             original: path.to_path_buf(),
             backup,
@@ -489,7 +489,7 @@ impl ApplyJournal {
     /// Remove `path` by moving it aside, so a later failure restores it.
     fn remove_file(&mut self, path: &Path) -> Result<()> {
         let backup = Self::backup_path(path)?;
-        fs::rename(path, &backup).map_err(|error| NativeFs::io_error(path, &error))?;
+        fs::rename(path, &backup).map_err(|error| api::io_error(path, &error))?;
         self.record(Undo::RestoreFile {
             original: path.to_path_buf(),
             backup,
@@ -500,7 +500,7 @@ impl ApplyJournal {
     /// Remove the directory at `path` by moving it aside, so a later failure restores it whole.
     fn remove_directory(&mut self, path: &Path) -> Result<()> {
         let backup = Self::backup_path(path)?;
-        fs::rename(path, &backup).map_err(|error| NativeFs::io_error(path, &error))?;
+        fs::rename(path, &backup).map_err(|error| api::io_error(path, &error))?;
         self.record(Undo::RestoreDir {
             original: path.to_path_buf(),
             backup,
@@ -510,8 +510,8 @@ impl ApplyJournal {
 
     /// A sibling backup location, so the moves stay on one filesystem.
     fn backup_path(path: &Path) -> Result<PathBuf> {
-        let parent = path.parent().ok_or_else(|| NativeFs::no_parent(path))?;
-        Ok(NativeFs::temporary_path(
+        let parent = path.parent().ok_or_else(|| api::no_parent(path))?;
+        Ok(api::temporary_path(
             parent,
             path.file_name().unwrap_or_else(|| OsStr::new("entry")),
         ))
@@ -566,8 +566,6 @@ enum WriteMode {
     Replace,
 }
 
-struct NativeFs;
-
 struct NativeScan<'a> {
     canonical_root: &'a Path,
     stack: &'a mut Vec<PathBuf>,
@@ -580,9 +578,15 @@ struct NativeScan<'a> {
     restricted: bool,
 }
 
-impl NativeFs {
+mod api {
+    use super::{
+        BTreeMap, BTreeSet, CacheError, Diagnostic, DirKey, Entry, Error, FileKey, Name,
+        NativeScan, NativeScope, OpenOptions, Ordering, OsStr, Path, PathBuf, RelativePath, Result,
+        TEMP_SEQUENCE, ToString, Vec, Write, WriteMode, fs,
+    };
+
     #[allow(clippy::unnecessary_debug_formatting)]
-    fn scan_directory(
+    pub(super) fn scan_directory(
         physical: &Path,
         logical: &DirKey,
         scan: &mut NativeScan<'_>,
@@ -590,7 +594,7 @@ impl NativeFs {
     ) -> Result<()> {
         let read_dir = match fs::read_dir(physical) {
             Ok(read_dir) => read_dir,
-            Err(error) if root => return Err(Self::io_error(physical, &error)),
+            Err(error) if root => return Err(io_error(physical, &error)),
             Err(error) => {
                 scan.diagnostics
                     .push(Diagnostic::UnreadableEntry(format!("{logical}: {error}")));
@@ -602,7 +606,7 @@ impl NativeFs {
         // Unreadable entries sort last; readable ones by name bytes. The key is computed once per
         // entry rather than on every comparison.
         dir_entries.sort_by_cached_key(|entry| match entry {
-            Ok(entry) => (false, Self::os_bytes(&entry.file_name())),
+            Ok(entry) => (false, os_bytes(&entry.file_name())),
             Err(error) => (true, error.to_string().into_bytes()),
         });
 
@@ -643,25 +647,25 @@ impl NativeFs {
             };
             let logical_dir = logical.directory(name.clone());
             let logical_file = logical.file(name);
-            if Self::is_excluded(logical_dir.path(), scan.excluded) {
+            if is_excluded(logical_dir.path(), scan.excluded) {
                 continue;
             }
 
             if file_type.is_symlink() {
-                Self::scan_symlink(&path, &logical_dir, &logical_file, scan)?;
+                scan_symlink(&path, &logical_dir, &logical_file, scan)?;
             } else if file_type.is_dir() {
-                if !Self::visits_directory(logical_dir.path(), scan.scopes, scan.restricted) {
+                if !visits_directory(logical_dir.path(), scan.scopes, scan.restricted) {
                     continue;
                 }
                 scan.entries.push(Entry::Directory(logical_dir.clone()));
-                let Some(canonical) = Self::canonicalize_for_scan(&path, scan) else {
+                let Some(canonical) = canonicalize_for_scan(&path, scan) else {
                     continue;
                 };
                 scan.stack.push(canonical);
-                Self::scan_directory(&path, &logical_dir, scan, false)?;
+                scan_directory(&path, &logical_dir, scan, false)?;
                 scan.stack.pop();
             } else if file_type.is_file()
-                && Self::includes_file(&logical_file, scan.scopes, scan.restricted)
+                && includes_file(&logical_file, scan.scopes, scan.restricted)
             {
                 scan.files.push((logical_file, path));
             }
@@ -672,13 +676,13 @@ impl NativeFs {
     /// Scan one symlinked entry: the link is followed only when its target stays inside the
     /// project root and off the current directory stack (an escaping or cyclic link is
     /// diagnosed, never followed), then treated like a plain directory or file.
-    fn scan_symlink(
+    pub(super) fn scan_symlink(
         path: &Path,
         logical_dir: &DirKey,
         logical_file: &FileKey,
         scan: &mut NativeScan<'_>,
     ) -> Result<()> {
-        let Some(canonical) = Self::canonicalize_for_scan(path, scan) else {
+        let Some(canonical) = canonicalize_for_scan(path, scan) else {
             return Ok(());
         };
         if !canonical.starts_with(scan.canonical_root) {
@@ -693,16 +697,16 @@ impl NativeFs {
         }
         match fs::metadata(&canonical) {
             Ok(metadata) if metadata.is_dir() => {
-                if !Self::visits_directory(logical_dir.path(), scan.scopes, scan.restricted) {
+                if !visits_directory(logical_dir.path(), scan.scopes, scan.restricted) {
                     return Ok(());
                 }
                 scan.entries.push(Entry::Directory(logical_dir.clone()));
                 scan.stack.push(canonical.clone());
-                Self::scan_directory(&canonical, logical_dir, scan, false)?;
+                scan_directory(&canonical, logical_dir, scan, false)?;
                 scan.stack.pop();
             }
             Ok(metadata) if metadata.is_file() => {
-                if Self::includes_file(logical_file, scan.scopes, scan.restricted) {
+                if includes_file(logical_file, scan.scopes, scan.restricted) {
                     scan.files.push((logical_file.clone(), canonical));
                 }
             }
@@ -717,7 +721,7 @@ impl NativeFs {
 
     /// Canonicalize `path` for the scan, recording an unreadable-entry diagnostic and yielding
     /// `None` when the path cannot be resolved.
-    fn canonicalize_for_scan(path: &Path, scan: &mut NativeScan<'_>) -> Option<PathBuf> {
+    pub(super) fn canonicalize_for_scan(path: &Path, scan: &mut NativeScan<'_>) -> Option<PathBuf> {
         match fs::canonicalize(path) {
             Ok(canonical) => Some(canonical),
             Err(error) => {
@@ -730,33 +734,37 @@ impl NativeFs {
         }
     }
 
-    fn is_excluded(path: &RelativePath, excluded: &[RelativePath]) -> bool {
+    pub(super) fn is_excluded(path: &RelativePath, excluded: &[RelativePath]) -> bool {
         excluded.iter().any(|prefix| path.starts_with(prefix))
     }
 
-    fn visits_directory(path: &RelativePath, scopes: &[NativeScope], restricted: bool) -> bool {
+    pub(super) fn visits_directory(
+        path: &RelativePath,
+        scopes: &[NativeScope],
+        restricted: bool,
+    ) -> bool {
         !restricted || scopes.iter().any(|scope| scope.visits_directory(path))
     }
 
-    fn includes_file(key: &FileKey, scopes: &[NativeScope], restricted: bool) -> bool {
+    pub(super) fn includes_file(key: &FileKey, scopes: &[NativeScope], restricted: bool) -> bool {
         !restricted || scopes.iter().any(|scope| scope.includes_file(key))
     }
 
     #[cfg(unix)]
-    fn os_bytes(value: &OsStr) -> Vec<u8> {
+    pub(super) fn os_bytes(value: &OsStr) -> Vec<u8> {
         use std::os::unix::ffi::OsStrExt;
         value.as_bytes().to_vec()
     }
 
     #[cfg(not(unix))]
-    fn os_bytes(value: &OsStr) -> Vec<u8> {
+    pub(super) fn os_bytes(value: &OsStr) -> Vec<u8> {
         value.to_string_lossy().as_bytes().to_vec()
     }
 
-    fn atomic_write(path: &Path, bytes: &[u8], mode: WriteMode) -> Result<()> {
-        let parent = path.parent().ok_or_else(|| Self::no_parent(path))?;
-        fs::create_dir_all(parent).map_err(|error| Self::io_error(parent, &error))?;
-        let temporary = Self::temporary_path(
+    pub(super) fn atomic_write(path: &Path, bytes: &[u8], mode: WriteMode) -> Result<()> {
+        let parent = path.parent().ok_or_else(|| no_parent(path))?;
+        fs::create_dir_all(parent).map_err(|error| io_error(parent, &error))?;
+        let temporary = temporary_path(
             parent,
             path.file_name().unwrap_or_else(|| OsStr::new("artifact")),
         );
@@ -764,10 +772,10 @@ impl NativeFs {
             .write(true)
             .create_new(true)
             .open(&temporary)
-            .map_err(|error| Self::io_error(&temporary, &error))?;
+            .map_err(|error| io_error(&temporary, &error))?;
         if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
             let _ = fs::remove_file(&temporary);
-            return Err(Self::io_error(&temporary, &error));
+            return Err(io_error(&temporary, &error));
         }
         drop(file);
         let result = match mode {
@@ -775,16 +783,16 @@ impl NativeFs {
             WriteMode::Replace => fs::rename(&temporary, path),
         };
         let _ = fs::remove_file(&temporary);
-        result.map_err(|error| Self::io_error(path, &error))
+        result.map_err(|error| io_error(path, &error))
     }
 
     /// Write-once creation of `path`. A concurrent writer may win the `Create` race; a winner
     /// that persisted identical bytes counts as success, anything else is a conflict.
-    fn create_once_accepting_identical(
+    pub(super) fn create_once_accepting_identical(
         path: &Path,
         bytes: &[u8],
     ) -> core::result::Result<(), CacheError> {
-        if let Err(error) = Self::atomic_write(path, bytes, WriteMode::Create) {
+        if let Err(error) = atomic_write(path, bytes, WriteMode::Create) {
             return match fs::read(path) {
                 Ok(winner) if winner == bytes => Ok(()),
                 Ok(_) => Err(CacheError::Conflict),
@@ -794,25 +802,25 @@ impl NativeFs {
         Ok(())
     }
 
-    fn materialize_tree(
+    pub(super) fn materialize_tree(
         root: &Path,
         members: &[(FileKey, Vec<u8>)],
     ) -> core::result::Result<(), CacheError> {
         match fs::symlink_metadata(root) {
-            Ok(_) => return Self::verify_materialized_tree(root, members),
+            Ok(_) => return verify_materialized_tree(root, members),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(Self::cache_io_error(root, &error)),
+            Err(error) => return Err(cache_io_error(root, &error)),
         }
 
         let parent = root
             .parent()
             .ok_or_else(|| CacheError::Io(format!("path has no parent: {}", root.display())))?;
-        fs::create_dir_all(parent).map_err(|error| Self::cache_io_error(parent, &error))?;
-        let temporary = Self::temporary_path(
+        fs::create_dir_all(parent).map_err(|error| cache_io_error(parent, &error))?;
+        let temporary = temporary_path(
             parent,
             root.file_name().unwrap_or_else(|| OsStr::new("tree")),
         );
-        fs::create_dir(&temporary).map_err(|error| Self::cache_io_error(&temporary, &error))?;
+        fs::create_dir(&temporary).map_err(|error| cache_io_error(&temporary, &error))?;
 
         let write_result = (|| {
             for (path, bytes) in members {
@@ -821,15 +829,15 @@ impl NativeFs {
                     CacheError::Io(format!("path has no parent: {}", destination.display()))
                 })?;
                 fs::create_dir_all(member_parent)
-                    .map_err(|error| Self::cache_io_error(member_parent, &error))?;
+                    .map_err(|error| cache_io_error(member_parent, &error))?;
                 let mut file = OpenOptions::new()
                     .write(true)
                     .create_new(true)
                     .open(&destination)
-                    .map_err(|error| Self::cache_io_error(&destination, &error))?;
+                    .map_err(|error| cache_io_error(&destination, &error))?;
                 file.write_all(bytes)
                     .and_then(|()| file.sync_all())
-                    .map_err(|error| Self::cache_io_error(&destination, &error))?;
+                    .map_err(|error| cache_io_error(&destination, &error))?;
             }
             Ok(())
         })();
@@ -843,20 +851,19 @@ impl NativeFs {
             Err(error) => {
                 let _ = fs::remove_dir_all(&temporary);
                 if root.exists() {
-                    Self::verify_materialized_tree(root, members)
+                    verify_materialized_tree(root, members)
                 } else {
-                    Err(Self::cache_io_error(root, &error))
+                    Err(cache_io_error(root, &error))
                 }
             }
         }
     }
 
-    fn verify_materialized_tree(
+    pub(super) fn verify_materialized_tree(
         root: &Path,
         members: &[(FileKey, Vec<u8>)],
     ) -> core::result::Result<(), CacheError> {
-        let metadata =
-            fs::symlink_metadata(root).map_err(|error| Self::cache_io_error(root, &error))?;
+        let metadata = fs::symlink_metadata(root).map_err(|error| cache_io_error(root, &error))?;
         if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
             return Err(CacheError::Corrupt);
         }
@@ -882,7 +889,7 @@ impl NativeFs {
 
         let mut actual_files = BTreeMap::new();
         let mut actual_directories = BTreeSet::from([PathBuf::new()]);
-        Self::read_materialized_tree(
+        read_materialized_tree(
             root,
             Path::new(""),
             &mut actual_files,
@@ -894,7 +901,7 @@ impl NativeFs {
         Ok(())
     }
 
-    fn read_materialized_tree(
+    pub(super) fn read_materialized_tree(
         root: &Path,
         relative: &Path,
         files: &mut BTreeMap<PathBuf, Vec<u8>>,
@@ -902,22 +909,22 @@ impl NativeFs {
     ) -> core::result::Result<(), CacheError> {
         let directory = root.join(relative);
         let entries =
-            fs::read_dir(&directory).map_err(|error| Self::cache_io_error(&directory, &error))?;
+            fs::read_dir(&directory).map_err(|error| cache_io_error(&directory, &error))?;
         for entry in entries {
-            let entry = entry.map_err(|error| Self::cache_io_error(&directory, &error))?;
+            let entry = entry.map_err(|error| cache_io_error(&directory, &error))?;
             let path = entry.path();
             let file_type = entry
                 .file_type()
-                .map_err(|error| Self::cache_io_error(&path, &error))?;
+                .map_err(|error| cache_io_error(&path, &error))?;
             if file_type.is_symlink() {
                 return Err(CacheError::Corrupt);
             }
             let child = relative.join(entry.file_name());
             if file_type.is_dir() {
                 directories.insert(child.clone());
-                Self::read_materialized_tree(root, &child, files, directories)?;
+                read_materialized_tree(root, &child, files, directories)?;
             } else if file_type.is_file() {
-                let bytes = fs::read(&path).map_err(|error| Self::cache_io_error(&path, &error))?;
+                let bytes = fs::read(&path).map_err(|error| cache_io_error(&path, &error))?;
                 files.insert(child, bytes);
             } else {
                 return Err(CacheError::Corrupt);
@@ -926,22 +933,22 @@ impl NativeFs {
         Ok(())
     }
 
-    fn temporary_path(parent: &Path, name: &OsStr) -> PathBuf {
+    pub(super) fn temporary_path(parent: &Path, name: &OsStr) -> PathBuf {
         let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let mut temp_name = name.to_os_string();
         temp_name.push(format!(".jals-{}-{sequence}.tmp", std::process::id()));
         parent.join(temp_name)
     }
 
-    fn io_error(path: &Path, error: &std::io::Error) -> Error {
+    pub(super) fn io_error(path: &Path, error: &std::io::Error) -> Error {
         Error::Io(format!("{}: {error}", path.display()))
     }
 
-    fn cache_io_error(path: &Path, error: &std::io::Error) -> CacheError {
+    pub(super) fn cache_io_error(path: &Path, error: &std::io::Error) -> CacheError {
         CacheError::Io(format!("{}: {error}", path.display()))
     }
 
-    fn no_parent(path: &Path) -> Error {
+    pub(super) fn no_parent(path: &Path) -> Error {
         Error::Io(format!("path has no parent: {}", path.display()))
     }
 }
@@ -996,9 +1003,9 @@ impl ArtifactCache<NativeCache> {
                 Ok(existing) if existing == bytes => return Ok(path),
                 Ok(_) => return Err(CacheError::Corrupt),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(NativeFs::cache_io_error(&path, &error)),
+                Err(error) => return Err(api::cache_io_error(&path, &error)),
             }
-            NativeFs::create_once_accepting_identical(&path, &bytes)?;
+            api::create_once_accepting_identical(&path, &bytes)?;
             Ok(path)
         })
         .await
@@ -1044,7 +1051,7 @@ impl ArtifactCache<NativeCache> {
         let digest = ContentDigest::of(&identity);
         let root = self.backend().root.join("tree-view").join(digest.to_hex());
         let materialized = root.clone();
-        on_blocking_pool(move || NativeFs::materialize_tree(&materialized, &verified)).await?;
+        on_blocking_pool(move || api::materialize_tree(&materialized, &verified)).await?;
         Ok(root)
     }
 }
@@ -1226,11 +1233,11 @@ impl CacheBackend for NativeCache {
             let file = match File::open(&path) {
                 Ok(file) => file,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                Err(error) => return Err(NativeFs::cache_io_error(&path, &error)),
+                Err(error) => return Err(api::cache_io_error(&path, &error)),
             };
             let len = file
                 .metadata()
-                .map_err(|error| NativeFs::cache_io_error(&path, &error))?
+                .map_err(|error| api::cache_io_error(&path, &error))?
                 .len();
             Ok(Some(NativeArtifactReader::new(file, len)))
         })
@@ -1242,7 +1249,7 @@ impl CacheBackend for NativeCache {
         on_blocking_pool(move || match fs::read(&path) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(NativeFs::cache_io_error(&path, &error)),
+            Err(error) => Err(api::cache_io_error(&path, &error)),
         })
         .await
     }
@@ -1254,7 +1261,7 @@ impl CacheBackend for NativeCache {
     ) -> core::result::Result<(), CacheError> {
         let path = self.artifact_path(key);
         let bytes = bytes.to_vec();
-        on_blocking_pool(move || NativeFs::create_once_accepting_identical(&path, &bytes)).await
+        on_blocking_pool(move || api::create_once_accepting_identical(&path, &bytes)).await
     }
 
     async fn load_index(
@@ -1268,7 +1275,7 @@ impl CacheBackend for NativeCache {
                 .map(Some)
                 .ok_or(CacheError::Corrupt),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(NativeFs::cache_io_error(&path, &error)),
+            Err(error) => Err(api::cache_io_error(&path, &error)),
         })
         .await
     }
@@ -1284,7 +1291,7 @@ impl CacheBackend for NativeCache {
         // `Replace` semantics: the pointer is last-writer-wins by design (see
         // `ArtifactCache::record_index`), unlike write-once artifact publication.
         on_blocking_pool(move || {
-            NativeFs::atomic_write(&path, rendered.as_bytes(), WriteMode::Replace)
+            api::atomic_write(&path, rendered.as_bytes(), WriteMode::Replace)
                 .map_err(|error| CacheError::Io(error.to_string()))
         })
         .await

@@ -25,13 +25,14 @@
 //! this module's own: the pass that drops it and the check that licenses it have to agree, and two
 //! implementations of that question are how they came apart.
 
+use crate::passes::import_granularity;
 use alloc::vec::Vec;
 
 use jals_syntax::{SyntaxElement, SyntaxKind as S, SyntaxNode, SyntaxToken};
 
 use crate::ir::Indent;
+use crate::passes::Unit;
 use crate::passes::token_license::License;
-use crate::passes::{ImportNames, Parts, Unit};
 use crate::visit::Ctx;
 
 impl Ctx<'_> {
@@ -59,7 +60,7 @@ impl Ctx<'_> {
     /// emitting the real tokens twice would emit their comments twice.
     async fn visit_import_split(&mut self, decl: &SyntaxNode, member: &SyntaxNode, lead: bool) {
         if lead {
-            for child in Parts::lead(decl) {
+            for child in import_granularity::parts::lead(decl) {
                 self.visit_element(&child).await;
             }
         } else {
@@ -76,7 +77,7 @@ impl Ctx<'_> {
                 .children()
                 .find(|child| child.kind() == S::QUALIFIED_NAME)
                 .map_or_else(alloc::string::String::new, |name| {
-                    ImportNames::text_of(&name)
+                    import_granularity::import_names::text_of(&name)
                 });
             self.synthetic(&prefix);
         }
@@ -98,7 +99,7 @@ impl Ctx<'_> {
         let Some((first, rest)) = decls.split_first() else {
             return;
         };
-        for child in Parts::lead(first) {
+        for child in import_granularity::parts::lead(first) {
             // The group's prefix is the *shared* part of the first declaration's name. A plain
             // declaration's name also carries the segment it contributes as a member, and emitting
             // the whole name here is what produced `import java.util.HashMap.{HashMap, List};`.
@@ -141,11 +142,11 @@ impl Ctx<'_> {
         if members.is_empty() {
             // A plain declaration: everything but its last segment is already in the prefix.
             if !leads {
-                for child in Parts::lead(decl) {
+                for child in import_granularity::parts::lead(decl) {
                     self.drop_element(&child);
                 }
             }
-            if let Some(segment) = Parts::last_segment(decl) {
+            if let Some(segment) = import_granularity::parts::last_segment(decl) {
                 self.synthetic(&segment);
             }
             if !leads {
@@ -155,7 +156,7 @@ impl Ctx<'_> {
         }
 
         if !leads {
-            for child in Parts::lead(decl) {
+            for child in import_granularity::parts::lead(decl) {
                 self.drop_element(&child);
             }
         }
@@ -203,7 +204,7 @@ impl Ctx<'_> {
 
     /// Emit the comments of everything after the declaration's prefix, dropping the tokens.
     fn drop_group_delimiters(&mut self, decl: &SyntaxNode) {
-        for child in Parts::tail(decl) {
+        for child in import_granularity::parts::tail(decl) {
             self.drop_element(&child);
         }
     }

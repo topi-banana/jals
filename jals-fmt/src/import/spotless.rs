@@ -18,13 +18,13 @@
 //! is the **resolved** pipeline, constructible through serde from a `[compat.spotless]` table.
 //! That is also why there is no [`ConfigImporter`](super::ConfigImporter) impl here.
 
+use crate::import;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use jals_config::fmt::{Config, ImportOrder, IndentStyle};
 use serde::Deserialize;
 
-use super::ImportGroups;
 use super::eclipse::EclipseConfig;
 use super::gjf::GoogleJavaFormatConfig;
 use super::palantir::PalantirJavaFormatConfig;
@@ -164,7 +164,7 @@ impl SpotlessConfig {
     /// A `\#` prefix marks a *static* group — bare (`\#`, every static import) or scoped to a
     /// package (`\#com.acme`); jals models one `"static"` group, so all of them collapse into
     /// it. Everything else is a package prefix (`""` being the catch-all) and is normalized by
-    /// [`ImportGroups::prefix`], which keeps this importer's encoding identical to the IntelliJ
+    /// [`import::prefix`], which keeps this importer's encoding identical to the IntelliJ
     /// one. The number of backslashes is host-dependent (`.importorder` `\#`, Groovy `'\\#'`),
     /// so both the escaped and bare spellings are accepted.
     fn map_import_order(order: &[String]) -> Vec<String> {
@@ -172,10 +172,10 @@ impl SpotlessConfig {
         for entry in order {
             let entry = entry.as_str();
             if entry.starts_with("\\#") || entry.starts_with('#') {
-                ImportGroups::push_static(&mut groups);
+                import::push_static(&mut groups);
                 continue;
             }
-            groups.push(ImportGroups::prefix(entry));
+            groups.push(import::prefix(entry));
         }
         groups
     }

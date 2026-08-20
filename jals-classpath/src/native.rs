@@ -23,7 +23,7 @@ use jals_storage::{
     RelativePath,
 };
 
-use crate::io::Fetch;
+use crate::io;
 use crate::{
     ClasspathEntry, DependencyLocation, ExternalLocator, Fetcher, LibrarySource, NetworkPolicy,
     ProjectInputOptions, ProjectInputPlan, ProjectInputs, Warning, WarningOrigin,
@@ -493,7 +493,7 @@ impl NativeProjectPlan {
     /// authority, so every option reads it — but the `Analysis` skip that used to stand here was
     /// also the only thing keeping an analysis host out of `git clone`. The clone is a subprocess,
     /// so the capability's bytes never carry it; its network access is the capability's all the
-    /// same, and `Fetch::admit` is what answers for it now.
+    /// same, and `io::admit` is what answers for it now.
     pub async fn materialize_git_sources<F: Fetcher>(
         &mut self,
         project_root: &Path,
@@ -560,7 +560,7 @@ impl NativeProjectPlan {
         // checkout already in the verified cache is content this machine has, and an offline host
         // is entitled to resolve against it. Refusing before that check is what the `Analysis` skip
         // used to do, and it cost a host the types it had already acquired.
-        Fetch::admit(fetcher, &ExternalLocator::new(git.git.clone()))?;
+        io::admit(fetcher, &ExternalLocator::new(git.git.clone()))?;
         let temporary =
             tempfile::tempdir().map_err(|error| format!("creating checkout: {error}"))?;
         let checkout = temporary.path().join("checkout");

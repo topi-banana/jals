@@ -18,8 +18,8 @@ use jals_exec::Exec;
 use jals_storage::{CodeTree, DirKey, Entry, FileKey, MemoryStorage, NativeStorage, RelativePath};
 
 use crate::graph::NodeKind;
-use crate::memory::MemoryProjectGraph;
-use crate::native::NativeProjectGraph;
+use crate::memory;
+use crate::native;
 use crate::{CompileClasspathEntry, GraphError, GraphPreprocess, ProjectScript};
 
 /// A fetch capability for graphs that declare no task plan. Reaching it is the failure.
@@ -112,7 +112,7 @@ fn a_dependency_build_entry_names_the_project_that_declared_it() {
         );
         let root = manifest("[dependencies]\ndep = { path = \"dep\" }\n");
 
-        let graph = NativeProjectGraph::discover(
+        let graph = native::discover(
             &root,
             project.path(),
             &exec,
@@ -157,7 +157,7 @@ fn transitive_path_graph_is_classified_in_parent_discovery_order() {
         write(project.path(), "b/src/main/java/B.java", "class B {}\n");
         let root = manifest("[dependencies]\na = { path = \"a\" }\n");
 
-        let graph = NativeProjectGraph::discover(
+        let graph = native::discover(
             &root,
             project.path(),
             &exec,
@@ -199,13 +199,11 @@ fn native_and_memory_providers_coexist_under_native_features() {
             )])
             .unwrap(),
         );
-        let memory_graph = MemoryProjectGraph::discover(&root, &memory.view())
-            .await
-            .unwrap();
+        let memory_graph = memory::discover(&root, &memory.view()).await.unwrap();
         assert_eq!(memory_graph.metadata().nodes().len(), 1);
 
         write(project.path(), "dep/src/Native.java", "class Native {}\n");
-        let native_graph = NativeProjectGraph::discover(
+        let native_graph = native::discover(
             &root,
             project.path(),
             &exec,
@@ -229,7 +227,7 @@ fn native_companion_source_archives_are_role_distinct() {
              remote = { jar = \"https://example.invalid/binary.jar\", sources = \"https://example.invalid/sources.jar\" }\n",
         );
         let mut cache = MemoryStorage::memory(CodeTree::default());
-        let graph = NativeProjectGraph::discover(&root, project.path(), &exec, jals_classpath::NetworkPolicy::Online)
+        let graph = native::discover(&root, project.path(), &exec, jals_classpath::NetworkPolicy::Online)
             .await
             .unwrap()
             .preprocess(cache.artifacts_mut(), inert!())
@@ -252,7 +250,7 @@ fn manifest_probe_is_exact_and_malformed_manifest_is_hard() {
         write(project.path(), "base/selected/src/S.java", "class S {}\n");
         let selected =
             manifest("[dependencies]\nselected = { path = \"base\", dir = \"selected\" }\n");
-        let graph = NativeProjectGraph::discover(
+        let graph = native::discover(
             &selected,
             project.path(),
             &exec,
@@ -267,7 +265,7 @@ fn manifest_probe_is_exact_and_malformed_manifest_is_hard() {
             "base/selected/jals.toml",
             "[build]\nsource-dirs = [\n",
         );
-        let error = NativeProjectGraph::discover(
+        let error = native::discover(
             &selected,
             project.path(),
             &exec,
@@ -282,7 +280,7 @@ fn manifest_probe_is_exact_and_malformed_manifest_is_hard() {
             "base/selected/jals.toml",
             "[build]\nsource-dirs = [\"src\"]\n",
         );
-        let graph = NativeProjectGraph::discover(
+        let graph = native::discover(
             &selected,
             project.path(),
             &exec,
@@ -309,7 +307,7 @@ fn diamond_deduplicates_nodes_and_cycle_reports_edge_chain() {
         write(project.path(), "shared/src/S.java", "class S {}\n");
         let root =
             manifest("[dependencies]\nleft = { path = \"left\" }\nright = { path = \"right\" }\n");
-        let graph = NativeProjectGraph::discover(
+        let graph = native::discover(
             &root,
             project.path(),
             &exec,
@@ -325,7 +323,7 @@ fn diamond_deduplicates_nodes_and_cycle_reports_edge_chain() {
             "shared/jals.toml",
             "[dependencies]\nleft-again = { path = \"../left\" }\n",
         );
-        let error = NativeProjectGraph::discover(
+        let error = native::discover(
             &root,
             project.path(),
             &exec,
@@ -362,7 +360,7 @@ fn relative_child_jar_and_classpath_become_verified_artifacts() {
         write(project.path(), "lib/dep.jar", b"jar bytes");
         let root = manifest("[dependencies]\nchild = { path = \"child\" }\n");
         let mut root_storage = storage(project.path(), &exec).await;
-        let graph = NativeProjectGraph::discover(
+        let graph = native::discover(
             &root,
             project.path(),
             &exec,
@@ -414,7 +412,7 @@ fn declared_classpath_directory_remains_one_compile_tree() {
         write(project.path(), "classes/pkg/internal/Impl.class", b"impl");
         let root = manifest("[dependencies]\nchild = { path = \"child\" }\n");
         let mut root_storage = storage(project.path(), &exec).await;
-        let graph = NativeProjectGraph::discover(
+        let graph = native::discover(
             &root,
             project.path(),
             &exec,
@@ -461,7 +459,7 @@ fn binary_diamond_emits_one_first_edge_spec_and_ors_recursive() {
         let root =
             manifest("[dependencies]\nleft = { path = \"left\" }\nright = { path = \"right\" }\n");
         let mut root_storage = storage(project.path(), &exec).await;
-        let graph = NativeProjectGraph::discover(
+        let graph = native::discover(
             &root,
             project.path(),
             &exec,
@@ -510,7 +508,7 @@ off = { jar = "lib/off.jar", optional = true }
             .unwrap();
 
         let mut cache = MemoryStorage::memory(CodeTree::default());
-        let graph = NativeProjectGraph::discover(
+        let graph = native::discover(
             &root,
             project.path(),
             &exec,
@@ -568,7 +566,7 @@ fn mixed_local_and_remote_binary_specs_keep_first_edge_order() {
              c-remote = { jar = \"https://example.invalid/c.jar\" }\n",
         );
         let mut cache = MemoryStorage::memory(CodeTree::default());
-        let graph = NativeProjectGraph::discover(
+        let graph = native::discover(
             &root,
             project.path(),
             &exec,
@@ -632,7 +630,7 @@ fn native_compile_classpath_keeps_mixed_local_and_remote_order() {
              c-remote = {{ jar = \"http://{address}/c.jar\" }}\n"
         ));
         let mut root_storage = storage(project.path(), &exec).await;
-        let graph = NativeProjectGraph::discover(
+        let graph = native::discover(
             &root,
             project.path(),
             &exec,
@@ -724,7 +722,7 @@ fn every_node_kind_preprocesses_and_scripts_export_only_sources_and_classpath() 
              plain = { path = \"plain\" }\nscripted = { path = \"scripted\" }\n",
         );
         let mut root_storage = storage(project.path(), &exec).await;
-        let graph = NativeProjectGraph::discover(&root, project.path(), &exec, jals_classpath::NetworkPolicy::Online)
+        let graph = native::discover(&root, project.path(), &exec, jals_classpath::NetworkPolicy::Online)
             .await
             .unwrap();
         assert_eq!(
@@ -789,7 +787,7 @@ fn node_tokens_isolate_identical_script_paths_and_outputs() {
             "[dependencies]\none = { path = \"one\" }\ntwo = { path = \"two\" }\n",
         );
         let mut root_storage = storage(project.path(), &exec).await;
-        let graph = NativeProjectGraph::discover(&root, project.path(), &exec, jals_classpath::NetworkPolicy::Online)
+        let graph = native::discover(&root, project.path(), &exec, jals_classpath::NetworkPolicy::Online)
             .await
             .unwrap()
             .preprocess(root_storage.artifacts_mut(), inert!())
@@ -861,7 +859,7 @@ fn git_identity_uses_head_not_checkout_path_and_local_children_stay_confined() {
         );
         let root = manifest("[dependencies]\nrepo = { git = \"repository\" }\n");
 
-        let first = NativeProjectGraph::discover(
+        let first = native::discover(
             &root,
             project.path(),
             &exec,
@@ -869,7 +867,7 @@ fn git_identity_uses_head_not_checkout_path_and_local_children_stay_confined() {
         )
         .await
         .unwrap();
-        let second = NativeProjectGraph::discover(
+        let second = native::discover(
             &root,
             project.path(),
             &exec,
@@ -933,7 +931,7 @@ fn git_identity_uses_head_not_checkout_path_and_local_children_stay_confined() {
                 .unwrap()
                 .success()
         );
-        let graph = NativeProjectGraph::discover(
+        let graph = native::discover(
             &root,
             project.path(),
             &exec,
@@ -960,7 +958,7 @@ fn native_projection_returns_watch_paths_and_applies_mode_downstream() {
         write(project.path(), "src/main/java/Root.java", "class Root {}\n");
         let root = manifest("[dependencies]\ndep = { path = \"dep\" }\n");
         let mut root_storage = storage(project.path(), &exec).await;
-        let graph = NativeProjectGraph::discover(
+        let graph = native::discover(
             &root,
             project.path(),
             &exec,
@@ -1108,7 +1106,7 @@ fn dependency_snapshots_exclude_git_and_jals_cache_inputs() {
         write(project.path(), "dep/.git/secret", b"git");
         let root = manifest("[dependencies]\ndep = { path = \"dep\" }\n");
         let mut cache = MemoryStorage::memory(CodeTree::default());
-        let graph = NativeProjectGraph::discover(
+        let graph = native::discover(
             &root,
             project.path(),
             &exec,
@@ -1153,7 +1151,7 @@ fn snapshot_diagnostics_warn_but_unreadable_manifest_is_hard() {
             );
         }
         let warning_root = manifest("[dependencies]\nwarn = { path = \"warn\" }\n");
-        let graph = NativeProjectGraph::discover(
+        let graph = native::discover(
             &warning_root,
             project.path(),
             &exec,
@@ -1201,7 +1199,7 @@ fn snapshot_diagnostics_warn_but_unreadable_manifest_is_hard() {
         .unwrap();
         let hard_root = manifest("[dependencies]\nhard = { path = \"hard\" }\n");
         assert!(matches!(
-            NativeProjectGraph::discover(
+            native::discover(
                 &hard_root,
                 project.path(),
                 &exec,
@@ -1234,7 +1232,7 @@ fn memory_and_native_resolve_sibling_inputs_relative_to_the_selected_project() {
             .unwrap(),
         );
         let mut memory_cache = MemoryStorage::memory(CodeTree::default());
-        let memory = MemoryProjectGraph::discover(&root, &memory_storage.view())
+        let memory = memory::discover(&root, &memory_storage.view())
             .await
             .unwrap()
             .preprocess(memory_cache.artifacts_mut(), inert!())
@@ -1248,7 +1246,7 @@ fn memory_and_native_resolve_sibling_inputs_relative_to_the_selected_project() {
             write(project.path(), path, bytes);
         }
         let mut native_cache = storage(project.path(), &exec).await;
-        let native = NativeProjectGraph::discover(&root, project.path(), &exec, jals_classpath::NetworkPolicy::Online)
+        let native = native::discover(&root, project.path(), &exec, jals_classpath::NetworkPolicy::Online)
             .await
             .unwrap()
             .preprocess(native_cache.artifacts_mut(), inert!())
@@ -1329,7 +1327,7 @@ async fn local_assembly(
     storage: &MemoryStorage,
     cache: &mut MemoryStorage,
 ) -> crate::assemble::ProjectGraphAssembly {
-    MemoryProjectGraph::discover(root, &storage.view())
+    memory::discover(root, &storage.view())
         .await
         .unwrap()
         .preprocess(cache.artifacts_mut(), inert!())
@@ -1358,7 +1356,7 @@ async fn publication_diagnoses_in(
     storage: &MemoryStorage,
     cache: &mut MemoryStorage,
 ) -> Vec<crate::graph::PublicationDiagnosis> {
-    let graph = MemoryProjectGraph::discover(root, &storage.view())
+    let graph = memory::discover(root, &storage.view())
         .await
         .unwrap()
         .preprocess(cache.artifacts_mut(), inert!())
@@ -1481,7 +1479,7 @@ fn a_dependency_build_task_puts_its_jar_on_the_consumer_classpath() {
         let mut cache = MemoryStorage::memory(CodeTree::default());
         let fetcher = CountingFetcher::new(&[("https://example.invalid/game.jar", &game)]);
 
-        let assembly = MemoryProjectGraph::discover(&root, &view_storage.view())
+        let assembly = memory::discover(&root, &view_storage.view())
             .await
             .unwrap()
             .preprocess(
@@ -1540,7 +1538,7 @@ fn a_dependency_publication_becomes_navigation_source_and_never_touches_the_snap
         let mut cache = MemoryStorage::memory(CodeTree::default());
         let fetcher = CountingFetcher::new(&[("https://example.invalid/sources.jar", &sources)]);
 
-        let assembly = MemoryProjectGraph::discover(&root, &before)
+        let assembly = memory::discover(&root, &before)
             .await
             .unwrap()
             .preprocess(
@@ -1611,7 +1609,7 @@ fn a_dependency_publication_outside_a_source_root_is_rejected() {
         let mut cache = MemoryStorage::memory(CodeTree::default());
         let fetcher = CountingFetcher::new(&[("https://example.invalid/sources.jar", &sources)]);
 
-        let error = MemoryProjectGraph::discover(&root, &view_storage.view())
+        let error = memory::discover(&root, &view_storage.view())
             .await
             .unwrap()
             .preprocess(
@@ -1652,7 +1650,7 @@ fn a_dependency_build_script_error_reaches_the_consumer_with_its_message() {
         );
         let mut cache = MemoryStorage::memory(CodeTree::default());
 
-        let error = MemoryProjectGraph::discover(&root, &view_storage.view())
+        let error = memory::discover(&root, &view_storage.view())
             .await
             .unwrap()
             .preprocess(
@@ -1701,7 +1699,7 @@ fn a_dependency_task_execution_is_memoized_across_preprocessing() {
         let (root, with_jar) = task_dependency(script, &[("dep/vendor/lib.jar", &library)]);
         let mut cache = MemoryStorage::memory(CodeTree::default());
 
-        let first = MemoryProjectGraph::discover(&root, &with_jar.view())
+        let first = memory::discover(&root, &with_jar.view())
             .await
             .unwrap()
             .preprocess(cache.artifacts_mut(), inert!())
@@ -1713,7 +1711,7 @@ fn a_dependency_task_execution_is_memoized_across_preprocessing() {
         assert_eq!(first.compile_classpath.len(), 1);
 
         let (root, without_jar) = task_dependency(script, &[]);
-        let second = MemoryProjectGraph::discover(&root, &without_jar.view())
+        let second = memory::discover(&root, &without_jar.view())
             .await
             .unwrap()
             .preprocess(cache.artifacts_mut(), inert!())
@@ -1756,7 +1754,7 @@ fn a_memoized_dependency_execution_is_keyed_on_its_build_features() {
             "dep = { path = \"dep\", features = [\"wide\"] }",
         ] {
             let root = manifest(&format!("[dependencies]\n{entry}\n"));
-            let assembly = MemoryProjectGraph::discover(&root, &view_storage.view())
+            let assembly = memory::discover(&root, &view_storage.view())
                 .await
                 .unwrap()
                 .preprocess(cache.artifacts_mut(), inert!())
@@ -1798,7 +1796,7 @@ fn a_dependency_publication_reaches_the_editor_but_not_the_compiler() {
         let mut cache = MemoryStorage::memory(CodeTree::default());
         let fetcher = CountingFetcher::new(&[("https://example.invalid/sources.jar", &sources)]);
 
-        let assembly = MemoryProjectGraph::discover(&root, &view_storage.view())
+        let assembly = memory::discover(&root, &view_storage.view())
             .await
             .unwrap()
             .preprocess(
@@ -2041,7 +2039,7 @@ fn a_compile_intent_publication_outside_a_source_root_is_rejected() {
         );
         let mut cache = MemoryStorage::memory(CodeTree::default());
 
-        let error = MemoryProjectGraph::discover(&root, &view_storage.view())
+        let error = memory::discover(&root, &view_storage.view())
             .await
             .unwrap()
             .preprocess(cache.artifacts_mut(), inert!())
@@ -2401,7 +2399,7 @@ fn a_publication_at_a_source_root_is_rejected_before_the_check() {
         );
         let mut cache = MemoryStorage::memory(CodeTree::default());
 
-        let error = MemoryProjectGraph::discover(&root, &storage.view())
+        let error = memory::discover(&root, &storage.view())
             .await
             .unwrap()
             .preprocess(cache.artifacts_mut(), inert!())
@@ -2528,7 +2526,7 @@ fn two_entries_reaching_one_jar_must_agree_about_remap() {
         // classpath under two names, which is exactly what the dedup prevents.
         let (root, view_storage) = shared_jar_project("remap = \"a\"", "remap = \"b\"");
         let mut cache = MemoryStorage::memory(CodeTree::default());
-        let assembly = MemoryProjectGraph::discover(&root, &view_storage.view())
+        let assembly = memory::discover(&root, &view_storage.view())
             .await
             .unwrap()
             .preprocess(cache.artifacts_mut(), inert!())
@@ -2559,7 +2557,7 @@ fn agreeing_entries_carry_one_remap_and_report_nothing() {
     jals_exec::block_on_inline(async {
         let (root, view_storage) = shared_jar_project("remap = \"a\"", "remap = \"a\"");
         let mut cache = MemoryStorage::memory(CodeTree::default());
-        let assembly = MemoryProjectGraph::discover(&root, &view_storage.view())
+        let assembly = memory::discover(&root, &view_storage.view())
             .await
             .unwrap()
             .preprocess(cache.artifacts_mut(), inert!())
@@ -2609,7 +2607,7 @@ fn an_inactive_required_feature_leaves_the_jar_unremapped() {
             .expect("tree is valid"),
         );
         let mut cache = MemoryStorage::memory(CodeTree::default());
-        let assembly = MemoryProjectGraph::discover(&root, &view_storage.view())
+        let assembly = memory::discover(&root, &view_storage.view())
             .await
             .unwrap()
             .preprocess(cache.artifacts_mut(), inert!())
@@ -2672,7 +2670,7 @@ fn alternatives_select_the_one_the_root_selection_activates() {
         for selection in [&["1.20.1"][..], &["1.19.4"][..]] {
             let (root, view_storage, features) = alternatives_project(selection);
             let mut cache = MemoryStorage::memory(CodeTree::default());
-            let assembly = MemoryProjectGraph::discover(&root, &view_storage.view())
+            let assembly = memory::discover(&root, &view_storage.view())
                 .await
                 .unwrap()
                 .preprocess(
@@ -2705,7 +2703,7 @@ fn an_ambiguous_edge_remap_warns_and_leaves_the_jar_unremapped() {
         // sets of names is the disagreement the dedup above refuses for the same reason.
         let (root, view_storage, features) = alternatives_project(&["1.20.1", "1.19.4"]);
         let mut cache = MemoryStorage::memory(CodeTree::default());
-        let assembly = MemoryProjectGraph::discover(&root, &view_storage.view())
+        let assembly = memory::discover(&root, &view_storage.view())
             .await
             .unwrap()
             .preprocess(

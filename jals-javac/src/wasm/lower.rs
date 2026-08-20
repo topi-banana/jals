@@ -37,6 +37,7 @@
 //! - **There is no integer negation.** `-n` on an `int` is `0 - n`, which puts the zero on the stack
 //!   *before* the operand rather than after it.
 
+use crate::facts::literal;
 use alloc::borrow::ToOwned as _;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString as _};
@@ -51,7 +52,7 @@ use jals_syntax::SyntaxKind::{
 use jals_syntax::ast::{self, AstNode as _};
 use jals_syntax::{SyntaxNode, SyntaxToken};
 
-use crate::facts::{ArmLabels, Facts, Hierarchy, Literal, Overrides};
+use crate::facts::{ArmLabels, Facts, Hierarchy, Overrides};
 use crate::wasm::encode::{
     CompType, ExportKind, FieldType, Func, Global, HeapType, Module, RefType, StorageType, SubType,
     ValType,
@@ -135,10 +136,12 @@ struct Method {
     has_result: bool,
 }
 
-/// Compiles a whole project to one WebAssembly module.
-pub struct CompileWasm;
+pub use api::project;
 
-impl CompileWasm {
+/// Compiles a whole project to one WebAssembly module.
+mod api {
+    use super::*;
+
     /// Emit the module. `index` must have been built over exactly `inputs`.
     pub fn project(inputs: &[TypedFile<'_>], index: &ProjectIndex) -> Result<Vec<u8>> {
         let mut module = Module::new();
@@ -152,7 +155,7 @@ impl CompileWasm {
         let mut inner_items = Vec::new();
         let mut captured_items = Vec::new();
         let mut body_nodes = Vec::new();
-        let classes = Self::classes_in_order(
+        let classes = classes_in_order(
             inputs,
             index,
             &mut interface_items,
@@ -233,7 +236,7 @@ impl CompileWasm {
         // can name a function declared later in the source.
         let mut methods = Vec::new();
         for (position, input) in inputs.iter().enumerate() {
-            Self::collect_methods(
+            collect_methods(
                 input,
                 position,
                 index,
@@ -246,7 +249,7 @@ impl CompileWasm {
         // A record's canonical constructor and its accessors have no declaration to walk: the header
         // declares the components and the compiler owes the rest. They are synthesised here, after every
         // *declared* method has its index, so the indices stay in step with the order bodies are pushed.
-        let synthesised = Self::record_members(inputs, index, &mut layout, &mut module, &methods)?;
+        let synthesised = record_members(inputs, index, &mut layout, &mut module, &methods)?;
 
         // Each class's initialisation is a function of its own, reserved before any body so a body can
         // call it. A body has to: JLS §12.4.1 initialises a class on its first *use*, and this module's
@@ -257,7 +260,7 @@ impl CompileWasm {
             .iter()
             .enumerate()
             .flat_map(|(position, input)| {
-                Self::static_initializers(input.root(), input, index)
+                static_initializers(input.root(), input, index)
                     .into_iter()
                     .map(move |(owner, block)| (position, owner, block))
             })
@@ -267,7 +270,7 @@ impl CompileWasm {
             constants: &constants,
             blocks: &blocks,
         };
-        Self::reserve_class_inits(
+        reserve_class_inits(
             inputs,
             index,
             &mut layout,
@@ -275,7 +278,7 @@ impl CompileWasm {
             &state,
             methods.len() + synthesised.len(),
         );
-        let inits = Self::class_initializers(inputs, index, &layout, &state, &mut module)?;
+        let inits = class_initializers(inputs, index, &layout, &state, &mut module)?;
 
         // Pass 3: bodies.
         for method in &methods {
@@ -326,7 +329,7 @@ impl CompileWasm {
     /// initialise the class that declares it first, and that class may be declared *after* the one
     /// reading it. The flag is what makes calling it again free, and what makes the re-entrant call a
     /// class's own initialiser produces a no-op rather than a loop — the same answer §12.4.2 gives.
-    fn reserve_class_inits(
+    pub(crate) fn reserve_class_inits(
         inputs: &[TypedFile<'_>],
         index: &ProjectIndex,
         layout: &mut Layout,
@@ -348,7 +351,7 @@ impl CompileWasm {
                 }
             };
             for node in input.root().descendants() {
-                if !Self::declares_a_type(&node) {
+                if !declares_a_type(&node) {
                     continue;
                 }
                 let Ok(owner) = Layout::owner_of(&node, input, index) else {
@@ -383,7 +386,7 @@ impl CompileWasm {
 
     /// One function per class with static state: its `enum` constants, then its computed `static`
     /// field initialisers and `static { … }` blocks, in source order (§8.9.3, §12.4.2).
-    fn class_initializers(
+    pub(crate) fn class_initializers(
         inputs: &[TypedFile<'_>],
         index: &ProjectIndex,
         layout: &Layout,
@@ -480,7 +483,7 @@ impl CompileWasm {
     /// `equals`, `hashCode`, and `toString` are *not* synthesised. All three come from
     /// `java.lang.Record` and two of them involve a `String`, which has no wasm representation by this
     /// backend's design — a call to one reports rather than being guessed at.
-    fn record_members(
+    pub(crate) fn record_members(
         inputs: &[TypedFile<'_>],
         index: &ProjectIndex,
         layout: &mut Layout,
@@ -576,7 +579,7 @@ impl CompileWasm {
     /// The owner is what groups a block with the field initialisers it runs beside: JLS §12.4.2 runs
     /// one class's static initialisers as one sequence, and a block that reads a field of *another*
     /// class is what makes the grouping observable.
-    fn static_initializers(
+    pub(crate) fn static_initializers(
         root: &SyntaxNode,
         input: &TypedFile<'_>,
         index: &ProjectIndex,
@@ -590,7 +593,7 @@ impl CompileWasm {
             }
             let owner = node
                 .ancestors()
-                .find(Self::declares_a_type)
+                .find(declares_a_type)
                 .and_then(|declaration| ast::Decl::name_token_of(&declaration))
                 .and_then(|name| {
                     index.item_by_decl(input.file(), usize::from(name.text_range().start()))
@@ -604,7 +607,7 @@ impl CompileWasm {
     }
 
     /// Whether a node is a type declaration, which is what a member's owner is found by walking to.
-    fn declares_a_type(node: &SyntaxNode) -> bool {
+    pub(crate) fn declares_a_type(node: &SyntaxNode) -> bool {
         matches!(
             node.kind(),
             CLASS_DECL | INTERFACE_DECL | ENUM_DECL | RECORD_DECL | ANNOTATION_TYPE_DECL
@@ -616,7 +619,7 @@ impl CompileWasm {
     /// A struct's fields start with its supertype's, so the supertype's layout has to be settled
     /// first. The order is a depth-first walk of the `extends` chain; a cycle is impossible in a
     /// well-formed program and is simply not revisited here.
-    fn classes_in_order(
+    pub(crate) fn classes_in_order(
         inputs: &[TypedFile<'_>],
         index: &ProjectIndex,
         interfaces: &mut Vec<ItemId>,
@@ -626,14 +629,14 @@ impl CompileWasm {
     ) -> Result<Vec<ItemId>> {
         let mut declared = Vec::new();
         for input in inputs {
-            for node in Self::type_declarations(input.root()) {
+            for node in type_declarations(input.root()) {
                 // A type this backend does not lay out at all. Dropping one is what the class walk used
                 // to do to *every* nested declaration: the type never exists, and the first use of it
                 // reports an unresolved name that points at nothing a reader can act on.
-                if let Some(what) = Self::unrepresentable_kind(node.kind()) {
+                if let Some(what) = unrepresentable_kind(node.kind()) {
                     return Err(WasmError::Unsupported(what));
                 }
-                let Some(item) = Self::item_of(&node, input, index)? else {
+                let Some(item) = item_of(&node, input, index)? else {
                     continue;
                 };
                 if node.kind() == INTERFACE_DECL {
@@ -665,7 +668,7 @@ impl CompileWasm {
 
         let mut ordered: Vec<ItemId> = Vec::with_capacity(declared.len());
         for &item in &declared {
-            Self::push_with_supertypes(item, index, &declared, &mut ordered);
+            push_with_supertypes(item, index, &declared, &mut ordered);
         }
         Ok(ordered)
     }
@@ -675,7 +678,9 @@ impl CompileWasm {
     /// An interface needs a dispatch mechanism (a function table or a per-type vtable struct), and an
     /// `enum` and a `record` need the synthesised members the JVM backend builds. None is laid out yet,
     /// and every one of them would otherwise vanish without a word.
-    const fn unrepresentable_kind(kind: jals_syntax::SyntaxKind) -> Option<&'static str> {
+    pub(crate) const fn unrepresentable_kind(
+        kind: jals_syntax::SyntaxKind,
+    ) -> Option<&'static str> {
         use jals_syntax::SyntaxKind::ANNOTATION_TYPE_DECL;
         match kind {
             ANNOTATION_TYPE_DECL => Some("an `@interface` declaration"),
@@ -693,7 +698,7 @@ impl CompileWasm {
     /// A class inside a *block* is a local class, and wasm's flat type space has nothing to say about
     /// where it was written — so it is laid out like any other. What it may *not* do is capture a local:
     /// each capture needs a synthetic constructor parameter, and `captures_a_local` reports one.
-    fn type_declarations(root: &SyntaxNode) -> impl Iterator<Item = SyntaxNode> + '_ {
+    pub(crate) fn type_declarations(root: &SyntaxNode) -> impl Iterator<Item = SyntaxNode> + '_ {
         use jals_syntax::SyntaxKind::{
             ANNOTATION_TYPE_DECL, ENUM_DECL, INTERFACE_DECL, RECORD_DECL,
         };
@@ -701,15 +706,15 @@ impl CompileWasm {
             matches!(
                 node.kind(),
                 CLASS_DECL | INTERFACE_DECL | ENUM_DECL | RECORD_DECL | ANNOTATION_TYPE_DECL
-            ) || Self::is_anonymous(node)
-                || Self::is_functional(node)
+            ) || is_anonymous(node)
+                || is_functional(node)
         })
     }
 
     /// Whether `node` is an anonymous class body: a `new` with a class body of its own. It is a type
     /// declaration with no name and no keyword, so it is recognised by shape; the index keys its item on
     /// the `new` keyword's position, which is the only offset it can be found by.
-    fn is_anonymous(node: &SyntaxNode) -> bool {
+    pub(crate) fn is_anonymous(node: &SyntaxNode) -> bool {
         // An `enum` constant with a body is the other form: an anonymous subclass of the enum, keyed on
         // the constant's own position for the same reason — there is no name to key on.
         matches!(node.kind(), NEW_EXPR | ENUM_CONSTANT)
@@ -718,19 +723,19 @@ impl CompileWasm {
 
     /// Whether `node` is a lambda or a method reference — the two forms the index gives a one-method class
     /// item to, and which a backend with no `invokedynamic` emits as exactly that.
-    fn is_functional(node: &SyntaxNode) -> bool {
+    pub(crate) fn is_functional(node: &SyntaxNode) -> bool {
         matches!(node.kind(), LAMBDA_EXPR | METHOD_REF_EXPR)
     }
 
     /// The item a type declaration declares, whether it has a name to look up or only a position.
-    fn item_of(
+    pub(crate) fn item_of(
         node: &SyntaxNode,
         input: &TypedFile<'_>,
         index: &ProjectIndex,
     ) -> Result<Option<ItemId>> {
         // A lambda and an anonymous body are both nameless, and the index keys each on its own start
         // offset — the only thing either has to be found by.
-        if Self::is_anonymous(node) || Self::is_functional(node) {
+        if is_anonymous(node) || is_functional(node) {
             return Ok(index.item_by_decl(input.file(), usize::from(node.text_range().start())));
         }
         let name =
@@ -741,7 +746,7 @@ impl CompileWasm {
             .map(Some)
     }
 
-    fn push_with_supertypes(
+    pub(crate) fn push_with_supertypes(
         item: ItemId,
         index: &ProjectIndex,
         declared: &[ItemId],
@@ -753,13 +758,13 @@ impl CompileWasm {
         if let Some(parent) = Hierarchy::of(index).superclass(item)
             && declared.contains(&parent)
         {
-            Self::push_with_supertypes(parent, index, declared, ordered);
+            push_with_supertypes(parent, index, declared, ordered);
         }
         ordered.push(item);
     }
 
     /// Register every method and constructor `input` declares.
-    fn collect_methods(
+    pub(crate) fn collect_methods(
         input: &TypedFile<'_>,
         position: usize,
         index: &ProjectIndex,
@@ -767,13 +772,13 @@ impl CompileWasm {
         module: &mut Module,
         out: &mut Vec<Method>,
     ) -> Result<()> {
-        for class in Self::type_declarations(input.root()) {
-            let Some(item) = Self::item_of(&class, input, index)? else {
+        for class in type_declarations(input.root()) {
+            let Some(item) = item_of(&class, input, index)? else {
                 continue;
             };
             // A lambda has no body *node* of members: it declares exactly one method, the interface's, and
             // the lambda expression itself is that method's body.
-            if Self::is_functional(&class) {
+            if is_functional(&class) {
                 let Some(member) = index
                     .own_members(item)
                     .iter()
@@ -865,7 +870,7 @@ impl CompileWasm {
                 if !is_constructor && node.children().find_map(ast::Block::cast).is_none() {
                     continue;
                 }
-                let member_name = Self::member_name_token(&node, is_constructor)
+                let member_name = member_name_token(&node, is_constructor)
                     .ok_or(WasmError::Unsupported("a member with no name"))?;
                 let member = Facts::of(*input).member_at(&member_name)?;
                 let is_static = index.member(member).modifiers.is_static;
@@ -933,7 +938,10 @@ impl CompileWasm {
     /// Two kinds rather than one because `ConstructorDecl` is not a [`ast::Decl`] variant — a
     /// constructor declares no type and no field, so the grammar keeps it out of that enum. Both
     /// arms go through the node's own generated accessor.
-    fn member_name_token(node: &SyntaxNode, is_constructor: bool) -> Option<SyntaxToken> {
+    pub(crate) fn member_name_token(
+        node: &SyntaxNode,
+        is_constructor: bool,
+    ) -> Option<SyntaxToken> {
         if is_constructor {
             ast::ConstructorDecl::cast(node.clone())?.name_token()
         } else {
@@ -1232,7 +1240,7 @@ impl Layout {
                 insn.i32_const(0);
             }
             (CHAR_LITERAL, ValType::I32) => {
-                let Ok(character) = Literal::character(text) else {
+                let Ok(character) = literal::character(text) else {
                     return default();
                 };
                 insn.i32_const(character as i32);
@@ -1242,7 +1250,7 @@ impl Layout {
             // extension no constant expression may hold. Which width to fold *into* is the field's,
             // so the one the fact reads off the suffix is dropped.
             (INT_LITERAL, _) => {
-                let Ok((value, _)) = Literal::integer(text) else {
+                let Ok((value, _)) = literal::integer(text) else {
                     return default();
                 };
                 #[allow(clippy::cast_precision_loss)]
@@ -1257,7 +1265,7 @@ impl Layout {
                 };
             }
             (FLOAT_LITERAL, ValType::F32 | ValType::F64) => {
-                let Ok((value, _)) = Literal::floating(text) else {
+                let Ok((value, _)) = literal::floating(text) else {
                     return default();
                 };
                 #[allow(clippy::cast_possible_truncation)]
@@ -3313,7 +3321,7 @@ impl Lowering<'_> {
                 // mean what they mean in both, and reading them twice was two chances to disagree
                 // about one of them. The width comes from the inferred type below, so the one the
                 // fact reads off the suffix is dropped.
-                let (value, _) = Literal::integer(text)?;
+                let (value, _) = literal::integer(text)?;
                 match ty {
                     ValType::I64 => insn.i64_const(value),
                     _ => insn
@@ -3323,7 +3331,7 @@ impl Lowering<'_> {
                 };
             }
             FLOAT_LITERAL => {
-                let (value, _) = Literal::floating(text)?;
+                let (value, _) = literal::floating(text)?;
                 #[expect(
                     clippy::cast_possible_truncation,
                     reason = "the inferred type says `f32`, and that narrowing is what a `float` \
@@ -3339,7 +3347,7 @@ impl Lowering<'_> {
             // `'\u0041'` mean what they mean in both, and reading them twice would be two chances to
             // disagree about one of them.
             CHAR_LITERAL => {
-                let value = Literal::character(text)?;
+                let value = literal::character(text)?;
                 match ty {
                     ValType::I64 => insn.i64_const(i64::from(u32::from(value))),
                     _ => insn.i32_const(i32::try_from(u32::from(value)).unwrap_or(0)),
@@ -4382,7 +4390,7 @@ impl Lowering<'_> {
             return Ok(ty);
         }
         // An anonymous class is its own type, and the `new` builds *that* rather than the type it named.
-        let anonymous = CompileWasm::is_anonymous(new.syntax());
+        let anonymous = api::is_anonymous(new.syntax());
         let item = if anonymous {
             self.index
                 .item_by_decl(self.input.file(), Facts::span(new.syntax()).start)

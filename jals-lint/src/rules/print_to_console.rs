@@ -30,19 +30,25 @@ pub(crate) const RULE: RuleMeta = RuleMeta {
     category: Category::Restriction,
     level: |config| config.restriction.print_to_console.level,
     needs_clean_parse: false,
-    check: Checker::Syntactic(PrintToConsole::check),
+    check: Checker::Syntactic(api::check),
 };
 
 /// The `print-to-console` rule.
-struct PrintToConsole;
+mod api {
+    use super::{
+        AstNode, CallExpr, Config, ConsoleStreams, Expr, Finding, LocalBoxFuture, String,
+        SyntaxElement, SyntaxKind, SyntaxNode, Vec, Yielder,
+    };
 
-impl PrintToConsole {
     /// The table-edge shim: boxes the async rule body once per file.
-    fn check<'a>(root: &'a SyntaxNode, config: &'a Config) -> LocalBoxFuture<'a, Vec<Finding>> {
-        alloc::boxed::Box::pin(Self::check_impl(root, config))
+    pub(crate) fn check<'a>(
+        root: &'a SyntaxNode,
+        config: &'a Config,
+    ) -> LocalBoxFuture<'a, Vec<Finding>> {
+        alloc::boxed::Box::pin(check_impl(root, config))
     }
 
-    async fn check_impl(root: &SyntaxNode, config: &Config) -> Vec<Finding> {
+    pub(crate) async fn check_impl(root: &SyntaxNode, config: &Config) -> Vec<Finding> {
         let streams = config.restriction.print_to_console.options.streams;
         let mut yielder = Yielder::new();
         let mut out = Vec::new();
@@ -59,10 +65,10 @@ impl PrintToConsole {
             let Some(receiver) = callee.receiver() else {
                 continue;
             };
-            let Some(stream) = Self::console_stream(receiver.syntax()) else {
+            let Some(stream) = console_stream(receiver.syntax()) else {
                 continue;
             };
-            if !Self::reports(streams, stream) {
+            if !reports(streams, stream) {
                 continue;
             }
             out.push(Finding::at_node(
@@ -76,7 +82,7 @@ impl PrintToConsole {
     /// Which console stream `receiver` names, if it names one. The receiver's significant tokens
     /// are joined so that `System.out` and `java.lang.System.out` answer alike whatever whitespace
     /// or comments were written between them.
-    fn console_stream(receiver: &SyntaxNode) -> Option<&'static str> {
+    pub(crate) fn console_stream(receiver: &SyntaxNode) -> Option<&'static str> {
         // A receiver bigger than `java.lang.System.out` is not a qualified name at all.
         let mut spelling = String::new();
         for token in receiver
@@ -97,7 +103,7 @@ impl PrintToConsole {
     }
 
     /// Whether the configured `streams` covers `stream`.
-    fn reports(streams: ConsoleStreams, stream: &str) -> bool {
+    pub(crate) fn reports(streams: ConsoleStreams, stream: &str) -> bool {
         match streams {
             ConsoleStreams::Both => true,
             ConsoleStreams::Stdout => stream == "out",

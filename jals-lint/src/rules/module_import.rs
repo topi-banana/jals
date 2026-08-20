@@ -24,15 +24,15 @@ pub(crate) const RULE: RuleMeta = RuleMeta {
     check: Checker::Gated {
         feature: Feature::ModuleImports,
         subject: "module import declarations (`import module …;`)",
-        find: ModuleImport::find,
+        find: api::find,
     },
 };
 
 /// The `module-import` rule.
-struct ModuleImport;
+mod api {
+    use super::{AstNode, SourceFile, SyntaxNode, Vec};
 
-impl ModuleImport {
-    fn find(root: &SyntaxNode) -> Vec<SyntaxNode> {
+    pub(crate) fn find(root: &SyntaxNode) -> Vec<SyntaxNode> {
         // The driver runs this only when `module-imports` is disabled and stamps the gate message,
         // so here we just locate the syntax (nothing when the root is not a source file).
         let Some(file) = SourceFile::cast(root.clone()) else {

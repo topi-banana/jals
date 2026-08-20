@@ -29,20 +29,26 @@ use jals_build::{
     build_script::{BuildScriptEnvironment, BuildScriptLimits, BuildScriptSession},
 };
 use jals_config::{BuildScript, Dependency, FeatureSet, Manifest, ResolvedBuildFeatures};
+use jals_editor::folding;
+use jals_editor::outline;
+use jals_editor::queries;
+use jals_editor::selection;
 use jals_editor::{
-    EditorHost, FoldingHost, Folds, Ident, LineIndex, Outline, SelectionChains, SelectionHost,
-    SemanticTokensHost, SignatureHelpUtf16, SingleFileProject,
+    EditorHost, FoldingHost, LineIndex, SelectionHost, SemanticTokensHost, SignatureHelpUtf16,
+    SingleFileProject,
 };
 use jals_exec::Exec;
+use jals_project::assembly;
+use jals_project::diagnostics;
 use jals_project::{
     BuildTaskHost, GraphOutcome, GraphResolveError, NativeProjectAssembly, ProjectAnchor,
-    ProjectAssembly, ProjectDiagnostic, ProjectDiagnosticCode, ProjectDiagnosticSeverity,
-    ProjectDiagnostics, ProjectScript, RootBuildScriptOptions, ScriptFile, ScriptOutcome,
+    ProjectDiagnostic, ProjectDiagnosticCode, ProjectDiagnosticSeverity, ProjectScript,
+    RootBuildScriptOptions, ScriptFile, ScriptOutcome,
 };
 use jals_storage::{DirKey, FileKey, NativeScope, NativeStorage, RelativePath};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::formatting::Formatting;
+use crate::formatting::formatting_edits;
 use crate::host::LspHost;
 use crate::state::{Document, DocumentStore, ProjectWorkspace, UriConfigs};
 
@@ -1270,7 +1276,7 @@ impl Actor {
     fn document_symbol(&self, uri: &Url) -> Option<DocumentSymbolResponse> {
         self.store.get(uri).map(|doc| {
             DocumentSymbolResponse::Nested(
-                LspHost.symbols(&doc.content, Outline::of(&doc.content.parse.syntax())),
+                LspHost.symbols(&doc.content, outline::of(&doc.content.parse.syntax())),
             )
         })
     }
@@ -1368,7 +1374,7 @@ impl Actor {
     ) -> Result<Option<WorkspaceEdit>, ResponseError> {
         // Reject a new name that is not a single legal Java identifier before producing any
         // edit, so the editor surfaces the error instead of writing broken source.
-        if !Ident::is_valid_java_identifier(new_name).await {
+        if !queries::is_valid_java_identifier(new_name).await {
             return Err(ResponseError::new(
                 ErrorCode::INVALID_PARAMS,
                 format!("`{new_name}` is not a valid Java identifier"),
@@ -1449,7 +1455,7 @@ impl Actor {
             jals_config::FeatureSet::default,
             ProjectWorkspace::feature_set,
         );
-        let formatted = Formatting::formatting_edits(&doc.content, &config, features).await;
+        let formatted = formatting_edits(&doc.content, &config, features).await;
         // No edits is the *same* response as "already formatted", so a refusal has to say so out of
         // band or the command looks like it did nothing. `window/showMessage` rather than a
         // diagnostic: the fail-safe's subject is the whole file, and there is no range to point at.
@@ -1469,7 +1475,7 @@ impl Actor {
 
     fn folding_range(&self, uri: &Url) -> Option<Vec<FoldingRange>> {
         self.store.get(uri).map(|doc| {
-            Folds::of(
+            folding::of(
                 &doc.content.parse.syntax(),
                 &doc.content.text,
                 &doc.content.line_index,
@@ -1487,7 +1493,7 @@ impl Actor {
                 .iter()
                 .map(|position| {
                     let offset = LspHost.offset(&doc.content, position);
-                    LspHost.selection(&doc.content, SelectionChains::at(&root, offset))
+                    LspHost.selection(&doc.content, selection::at(&root, offset))
                 })
                 .collect()
         })
@@ -1618,8 +1624,7 @@ impl Actor {
             return Some(tokens.data);
         }
         let doc = self.store.get(uri)?;
-        let classified =
-            jals_editor::SemanticTokens::classify(&doc.content.parse.syntax(), None).await;
+        let classified = jals_editor::semantic::classify(&doc.content.parse.syntax(), None).await;
         Some(LspHost.semantic_tokens(&doc.content, classified).data)
     }
 
@@ -1858,7 +1863,7 @@ impl AssembledWorkspace {
         let script_text = configured_script
             .as_ref()
             .and_then(|script| storage.view().file_text(script).ok().map(ToOwned::to_owned));
-        let (script, script_error) = match ProjectAssembly::script(
+        let (script, script_error) = match assembly::script(
             &exec,
             &fetcher,
             &mut storage,
@@ -1925,7 +1930,7 @@ impl AssembledWorkspace {
                     // deliberately `Skipped`: the fallback's own `finish_assembly` reports it, and
                     // `workspace_ready` concatenates both sets — reporting it here too would
                     // publish every script warning twice on exactly this path.
-                    let project_diagnostics = ProjectDiagnostics::assemble(
+                    let project_diagnostics = diagnostics::assemble(
                         ScriptOutcome::Skipped,
                         GraphOutcome::Failed(&failure),
                         None,
@@ -2043,11 +2048,11 @@ impl AssembledWorkspace {
         // Everything the procedure had to say, ordered and severity-assigned once. What is left
         // here is splitting it by the file it is anchored to, because LSP publishes per URI.
         //
-        // No `ProjectDiagnostics::has_errors` gate, deliberately, and this is the one host that
+        // No `diagnostics::has_errors` gate, deliberately, and this is the one host that
         // has none: the CLI and the browser stop on an error because they were asked to produce
         // something, and this server was asked to be useful *while* the project is wrong. The
         // errors are published against their anchors and the workspace loads anyway.
-        let assembled = ProjectDiagnostics::assemble(
+        let assembled = diagnostics::assemble(
             script_outcome,
             GraphOutcome::Resolved(assembly.report()),
             script_file,
@@ -2704,7 +2709,7 @@ mod tests {
             BuildScriptDiagnostic::warning("generated fallback"),
             BuildScriptDiagnostic::error("generation failed"),
         ]));
-        let shaped: Vec<Diagnostic> = ProjectDiagnostics::assemble(
+        let shaped: Vec<Diagnostic> = diagnostics::assemble(
             ScriptOutcome::Failed(&reported),
             GraphOutcome::NotReached,
             Some(ScriptFile {

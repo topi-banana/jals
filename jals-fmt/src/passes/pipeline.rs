@@ -1,6 +1,6 @@
 //! The pipeline driver: L0 plans, L2 lowering, the engine, then L4.
 //!
-//! [`Formatter::run`] is where the whole crate's pipeline is wired, and it is the only place that
+//! [`api::run`] is where the whole crate's pipeline is wired, and it is the only place that
 //! knows the order. It ends with [`TokenBudget`](super::TokenBudget), the fail-safe that returns
 //! the input untouched rather than hand back an output it cannot vouch for.
 //!
@@ -12,13 +12,17 @@
 //! document does this construct emit", and this one answers "what runs, in what order, and is the
 //! result trustworthy".
 
+use crate::passes::finalize;
+use crate::passes::off_on;
+use crate::passes::string_wrapper;
+use crate::passes::token_budget;
+use crate::passes::unused_imports;
 use alloc::borrow::ToOwned;
 use alloc::string::String;
 
 use jals_syntax::SyntaxNode;
 
 use crate::engine::Engine;
-use crate::passes::{Finalize, OffOn, StringWrapper, TokenBudget, UnusedImports};
 use crate::style::Style;
 use crate::visit::Ctx;
 
@@ -60,10 +64,15 @@ impl Formatted {
     }
 }
 
-/// Drives the whole formatting pipeline.
-pub(crate) struct Formatter;
+pub(crate) use api::run;
 
-impl Formatter {
+/// Drives the whole formatting pipeline.
+pub(crate) mod api {
+    use super::{
+        Ctx, Engine, Formatted, String, Style, SyntaxNode, ToOwned, finalize, off_on,
+        string_wrapper, token_budget, unused_imports,
+    };
+
     /// Format a parsed tree, falling back to `src` if the result cannot be vouched for.
     pub(crate) async fn run(
         root: &SyntaxNode,
@@ -71,20 +80,21 @@ impl Formatter {
         src_errors: usize,
         style: &Style,
     ) -> Formatted {
-        let laid_out = Self::format_tree(root, src, style).await;
+        let laid_out = format_tree(root, src, style).await;
 
         // L4: re-wrap long string concatenations, but only when re-formatting the candidate
         // reproduces it exactly (`DESIGN.md` §R4.1) *and* the result still holds the input's
         // tokens. Checking the budget here rather than only at the end is what keeps a rewrap the
         // formatter cannot vouch for from costing the whole file: it costs the rewrap.
-        let (text, vouched) = match StringWrapper::candidate(&laid_out, style).await {
+        let (text, vouched) = match string_wrapper::candidate(&laid_out, style).await {
             Some(candidate) => {
                 // The candidate is a re-split concatenation on one logical line; the engine
                 // places the breaks. Adopt its formatting only if formatting *that* is a fixed
                 // point, which is the guarantee `DESIGN.md` §R4.1 asks for.
-                let wrapped = Self::format_source_text(&candidate, style).await;
-                if Self::format_source_text(&wrapped, style).await == wrapped
-                    && TokenBudget::accepts(src, root, src_errors, &wrapped, style.license).await
+                let wrapped = format_source_text(&candidate, style).await;
+                if format_source_text(&wrapped, style).await == wrapped
+                    && token_budget::budget::accepts(src, root, src_errors, &wrapped, style.license)
+                        .await
                 {
                     // Already vouched for, against the same five arguments the final check would
                     // pass. `accepts` is pure, so asking twice can only get the same answer.
@@ -96,7 +106,9 @@ impl Formatter {
             None => (laid_out, false),
         };
 
-        if vouched || TokenBudget::accepts(src, root, src_errors, &text, style.license).await {
+        if vouched
+            || token_budget::budget::accepts(src, root, src_errors, &text, style.license).await
+        {
             Formatted::Vouched(text)
         } else {
             Formatted::FellBack(src.to_owned())
@@ -104,16 +116,16 @@ impl Formatter {
     }
 
     /// Parse and format a string, without the string-wrapping pass — the verification path.
-    async fn format_source_text(src: &str, style: &Style) -> String {
+    pub(crate) async fn format_source_text(src: &str, style: &Style) -> String {
         let parse = jals_syntax::Parse::parse(src).await;
-        Self::format_tree(&parse.syntax(), src, style).await
+        format_tree(&parse.syntax(), src, style).await
     }
 
     /// L0 → L2 → L1 → finalize, with no fail-safe and no string wrapping.
-    async fn format_tree(root: &SyntaxNode, src: &str, style: &Style) -> String {
-        let disabled = OffOn::scan(root, style);
+    pub(crate) async fn format_tree(root: &SyntaxNode, src: &str, style: &Style) -> String {
+        let disabled = off_on::scan(root, style);
         let used = if style.cfg.imports.remove_unused {
-            Some(UnusedImports::used_names(root).await)
+            Some(unused_imports::used_names(root).await)
         } else {
             None
         };
@@ -123,6 +135,6 @@ impl Formatter {
         let (mut doc, tags) = ctx.finish();
 
         let rendered = Engine::new(style, tags).render(&mut doc).await;
-        Finalize::apply(&rendered, src, style)
+        finalize::apply(&rendered, src, style)
     }
 }

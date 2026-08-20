@@ -49,7 +49,7 @@ use crate::def::{Def, DefId, DefKind, Namespace};
 use crate::project::{FileId, ItemId, MemberId, MemberType, ProjectIndex, TypeResolution};
 use crate::reference::Resolution;
 use crate::resolve::Resolved;
-use crate::resolve::collect::Collect;
+use crate::resolve::collect;
 use crate::ty::{ClassTy, Primitive, Ty};
 
 /// The inferred types of one file's declarations and expressions.
@@ -297,14 +297,14 @@ impl TypeInference {
             .children()
             .find_map(ast::Type::cast)
             .as_ref()
-            .is_some_and(Cst::is_var_type)
+            .is_some_and(api::is_var_type)
         {
             return;
         }
         // The declarator name is a *definition*, recovered with `symbol_at` (not `definition_at`,
         // which looks up a reference).
-        for (name, value) in Cst::declarator_initializers(node) {
-            if let Some(def_id) = resolved.symbol_at(Collect::token_start(&name)) {
+        for (name, value) in api::declarator_initializers(node) {
+            if let Some(def_id) = resolved.symbol_at(collect::token_start(&name)) {
                 self.record_if_mismatch(value.syntax(), self.type_of_def(def_id), index, out);
             }
         }
@@ -318,7 +318,7 @@ impl TypeInference {
         index: Option<&ProjectIndex>,
         out: &mut Vec<TypeMismatch>,
     ) {
-        if Cst::op_kinds(node).as_slice() != [EQ] {
+        if api::op_kinds(node).as_slice() != [EQ] {
             return;
         }
         let Some(assign) = ast::AssignmentExpr::cast(node.clone()) else {
@@ -327,7 +327,7 @@ impl TypeInference {
         let (Some(target), Some(value)) = (assign.target(), assign.value()) else {
             return;
         };
-        let Some(expected) = self.type_of_expr(Collect::node_span(target.syntax())) else {
+        let Some(expected) = self.type_of_expr(collect::node_span(target.syntax())) else {
             return;
         };
         self.record_if_mismatch(value.syntax(), expected, index, out);
@@ -354,8 +354,8 @@ impl TypeInference {
             return;
         };
         // The method's definition is typed with its return type (see `declares_typed_bindings`).
-        let Some(def_id) = Collect::first_ident_token(&method)
-            .and_then(|n| resolved.symbol_at(Collect::token_start(&n)))
+        let Some(def_id) = collect::first_ident_token(&method)
+            .and_then(|n| resolved.symbol_at(collect::token_start(&n)))
         else {
             return;
         };
@@ -424,7 +424,7 @@ impl TypeInference {
                 .map(|ty| ty.cloned().unwrap_or(Ty::Unknown))
                 .collect();
             out.push(TypeMismatch::no_overload(
-                Collect::node_span(call.syntax()),
+                collect::node_span(call.syntax()),
                 name,
                 arg_tys,
             ));
@@ -449,7 +449,7 @@ impl TypeInference {
         let (mut calls, mut fields) = (Vec::new(), Vec::new());
         for node in root.descendants() {
             yielder.tick().await;
-            let span = Collect::node_span(&node);
+            let span = collect::node_span(&node);
             match node.kind() {
                 CALL_EXPR => {
                     if let Some(call) = ast::CallExpr::cast(node.clone())
@@ -547,7 +547,7 @@ impl TypeInference {
         // un-inferred argument is `None`, and treated as applicable — never blocking).
         let arg_spans: Vec<Range<usize>> = args
             .iter()
-            .map(|a| Collect::node_span(a.syntax()))
+            .map(|a| collect::node_span(a.syntax()))
             .collect();
         let arg_tys: Vec<Option<&Ty>> = arg_spans
             .iter()
@@ -678,7 +678,7 @@ impl TypeInference {
         }
         let arg_tys: Vec<Option<&Ty>> = args
             .iter()
-            .map(|argument| self.type_of_expr(Collect::node_span(argument.syntax())))
+            .map(|argument| self.type_of_expr(collect::node_span(argument.syntax())))
             .collect();
         Self::select_overload(&candidates, &arg_tys, index)
     }
@@ -692,7 +692,7 @@ impl TypeInference {
     /// — or when none of them accepts the arguments.
     fn resolve_new(&self, new: &ast::NewExpr, index: &ProjectIndex) -> Option<MemberId> {
         let owner = self
-            .type_of_expr(Collect::node_span(new.syntax()))?
+            .type_of_expr(collect::node_span(new.syntax()))?
             .project_id()?;
         let args: Vec<ast::Expr> = new
             .syntax()
@@ -728,7 +728,7 @@ impl TypeInference {
             .collect();
         let arg_tys: Vec<Option<&Ty>> = args
             .iter()
-            .map(|argument| self.type_of_expr(Collect::node_span(argument.syntax())))
+            .map(|argument| self.type_of_expr(collect::node_span(argument.syntax())))
             .collect();
         Self::select_overload(&candidates, &arg_tys, index)
     }
@@ -782,7 +782,7 @@ impl TypeInference {
                 Some((owner, name))
             }
             ast::Expr::NameRef(n) => {
-                let name = jals_syntax::decoded_ident(&Collect::first_ident_token(n.syntax())?)
+                let name = jals_syntax::decoded_ident(&collect::first_ident_token(n.syntax())?)
                     .into_owned();
                 // A bare call is an implicit `this` first (JLS §15.12.1); a `static` import is what
                 // answers when the enclosing type has no such method. Falling back to the enclosing
@@ -819,15 +819,15 @@ impl TypeInference {
         // starts at the *superclass* — `resolve_member`'s walk begins at the item it is given, which
         // is exactly right, because `super.f()` may bind to the superclass's own `f`. Answering with
         // the enclosing type instead would bind an overridden member to the override.
-        if Cst::is_super(receiver) {
+        if api::is_super(receiver) {
             return index.superclass_of(index.enclosing_item(file, receiver.syntax())?);
         }
         // Through `member_receiver`, so a type variable is looked up on its bound and an array on
         // `Object` (JLS §4.4, §10.7) — the two shapes that resolved to nothing at all.
-        self.type_of_expr(Collect::node_span(receiver.syntax()))
+        self.type_of_expr(collect::node_span(receiver.syntax()))
             .map(|ty| index.member_receiver(ty))
             .and_then(|ty| ty.project_id())
-            .or_else(|| Cst::type_qualifier(receiver, index, file))
+            .or_else(|| api::type_qualifier(receiver, index, file))
     }
 
     /// The field or enum constant the access `receiver.name` binds to.
@@ -852,7 +852,7 @@ impl TypeInference {
         index: Option<&ProjectIndex>,
         out: &mut Vec<TypeMismatch>,
     ) {
-        let span = Collect::node_span(value);
+        let span = collect::node_span(value);
         let Some(found) = self.type_of_expr(span.clone()) else {
             return;
         };
@@ -961,7 +961,7 @@ impl<'a> Inferer<'a> {
             yielder.tick().await;
             if Self::declares_typed_bindings(node.kind()) {
                 let ty = node.children().find_map(ast::Type::cast);
-                if !ty.as_ref().is_some_and(Cst::is_var_type) {
+                if !ty.as_ref().is_some_and(api::is_var_type) {
                     let mut t = self.ty_of_opt_type(ty.as_ref());
                     // A `...` parameter is an array binding inside the body: `int... xs` writes the
                     // element type, and only the ellipsis says the local is an `int[]`. Without this
@@ -974,9 +974,9 @@ impl<'a> Inferer<'a> {
                     // (`int m()[]`) are written after the parameter list, where the same walk finds
                     // them. Giving every name the declaration's type made `a.length` a lookup on an
                     // `int`, which is a report about a type the source never wrote.
-                    for (tok, dims) in ast::Declarators::dims_of(&node) {
+                    for (tok, dims) in ast::declarators::dims_of(&node) {
                         let ty = (0..dims).fold(t.clone(), |ty, _| Ty::Array(Box::new(ty)));
-                        self.set_def_type(Collect::token_start(&tok), ty);
+                        self.set_def_type(collect::token_start(&tok), ty);
                     }
                 }
             }
@@ -1039,13 +1039,13 @@ impl<'a> Inferer<'a> {
                         .children()
                         .find_map(ast::Type::cast)
                         .as_ref()
-                        .is_some_and(Cst::is_var_type)
+                        .is_some_and(api::is_var_type)
                 {
                     continue;
                 }
                 let ty = index.resolved_member_ty(*component);
-                for tok in Collect::direct_ident_tokens(sub) {
-                    self.set_def_type(Collect::token_start(&tok), ty.clone());
+                for tok in collect::direct_ident_tokens(sub) {
+                    self.set_def_type(collect::token_start(&tok), ty.clone());
                 }
             }
         }
@@ -1161,15 +1161,15 @@ impl<'a> Inferer<'a> {
     /// pass 2 has already inferred, since children are visited first).
     fn fill_var_binding(&mut self, node: &SyntaxNode) {
         let ty = node.children().find_map(ast::Type::cast);
-        if !ty.as_ref().is_some_and(Cst::is_var_type) {
+        if !ty.as_ref().is_some_and(api::is_var_type) {
             return;
         }
         let init_ty = node
             .children()
             .find_map(ast::Expr::cast)
             .map_or(Ty::Unknown, |e| self.expr_ty(e.syntax()));
-        for tok in Collect::direct_ident_tokens(node) {
-            self.set_def_type(Collect::token_start(&tok), init_ty.clone());
+        for tok in collect::direct_ident_tokens(node) {
+            self.set_def_type(collect::token_start(&tok), init_ty.clone());
         }
     }
 
@@ -1222,7 +1222,7 @@ impl<'a> Inferer<'a> {
             // `F f = …` / `F f; f = …`: the declared type is written right there.
             LOCAL_VAR_DECL | FIELD_DECL => {
                 let ty = parent.children().find_map(ast::Type::cast);
-                if ty.as_ref().is_some_and(Cst::is_var_type) {
+                if ty.as_ref().is_some_and(api::is_var_type) {
                     // `var f = () -> …` is not a Java program: there is no type to infer *from*.
                     return Ty::Unknown;
                 }
@@ -1346,7 +1346,7 @@ impl<'a> Inferer<'a> {
     fn nameref_ty(&self, node: &SyntaxNode) -> Ty {
         // A reference is keyed by its identifier *token* start, which excludes the leading trivia
         // that the `NAME_REF` node carries; look that token up, not the node.
-        let Some(tok) = Collect::first_ident_token(node) else {
+        let Some(tok) = collect::first_ident_token(node) else {
             // `this` has no identifier token and is never recorded as a reference, so its type has to
             // come from where it appears: the enclosing type. That is what makes `this.field` and
             // `this.method()` resolve at all — a constructor writing `this.x = x` is the ordinary
@@ -1365,7 +1365,7 @@ impl<'a> Inferer<'a> {
                 Ty::Unknown
             };
         };
-        if let Some(&ri) = self.ref_by_start.get(&Collect::token_start(&tok))
+        if let Some(&ri) = self.ref_by_start.get(&collect::token_start(&tok))
             && let Resolution::Def(id) = self.resolved.references[ri].resolution
         {
             return self.inference.def_types[id.0 as usize].clone();
@@ -1430,7 +1430,7 @@ impl<'a> Inferer<'a> {
 
     fn unary_ty(&self, u: &ast::UnaryExpr) -> Ty {
         let operand = self.child_ty(u.operand());
-        match Cst::op_kinds(u.syntax()).first() {
+        match api::op_kinds(u.syntax()).first() {
             Some(BANG) => Ty::Primitive(Primitive::Boolean),
             Some(TILDE | PLUS | MINUS) => operand.unary_promote(),
             // Prefix `++` / `--` keep the operand type.
@@ -1439,7 +1439,7 @@ impl<'a> Inferer<'a> {
     }
 
     fn binary_ty(&self, b: &ast::BinaryExpr) -> Ty {
-        let ops = Cst::op_kinds(b.syntax());
+        let ops = api::op_kinds(b.syntax());
         // `instanceof` carries no right operand (its RHS is a type/pattern).
         if ops.contains(&INSTANCEOF_KW) {
             return Ty::Primitive(Primitive::Boolean);
@@ -1477,7 +1477,7 @@ impl<'a> Inferer<'a> {
         let base = self
             .qualified_new_ty(n)
             .unwrap_or_else(|| self.ty_of_opt_type(n.ty().as_ref()));
-        base.array_of(Cst::lbrack_count(n.syntax()))
+        base.array_of(api::lbrack_count(n.syntax()))
     }
 
     /// The type a *qualified* class instance creation names (JLS §15.9.1): `p.new Inner()` looks
@@ -1597,12 +1597,12 @@ impl<'a> Inferer<'a> {
 
     fn ty_of_type(&self, ty: &ast::Type) -> Ty {
         let base = self.base_ty_of_type(ty);
-        base.array_of(Cst::lbrack_count(ty.syntax()))
+        base.array_of(api::lbrack_count(ty.syntax()))
     }
 
     fn base_ty_of_type(&self, ty: &ast::Type) -> Ty {
         if ty.is_primitive_or_var() {
-            Collect::direct_tokens(ty.syntax())
+            collect::direct_tokens(ty.syntax())
                 .find_map(|t| Self::primitive_ty(t.kind()))
                 .unwrap_or(Ty::Unknown)
         } else {
@@ -1620,7 +1620,7 @@ impl<'a> Inferer<'a> {
         let name = jals_syntax::decoded_ident(&tok).into_owned();
         let args = self.type_args_of(ty);
         if let Some((index, file)) = self.project
-            && let Some(&ri) = self.ref_by_start.get(&Collect::token_start(&tok))
+            && let Some(&ri) = self.ref_by_start.get(&collect::token_start(&tok))
             && let TypeResolution::Project(id) =
                 index.resolve_reference(file, &self.resolved.references[ri])
         {
@@ -1690,12 +1690,12 @@ impl<'a> Inferer<'a> {
                 // `super.f()` the *overridden* member's type rather than the override's — and
                 // `System.out` names the declaring class rather than an instance of it.
                 Some((index, file)) => {
-                    let owner = if Cst::is_super(&expr) {
+                    let owner = if api::is_super(&expr) {
                         index
                             .enclosing_item(file, expr.syntax())
                             .and_then(|enclosing| index.superclass_of(enclosing))
                     } else {
-                        Cst::type_qualifier(&expr, index, file)
+                        api::type_qualifier(&expr, index, file)
                     };
                     owner.map_or(Ty::Unknown, |owner| {
                         self.member_ty_in(owner, &[], &name, namespace)
@@ -1735,7 +1735,7 @@ impl<'a> Inferer<'a> {
         match call.callee() {
             Some(ast::Expr::FieldAccess(fa)) => self.field_access_member_ty(&fa, Namespace::Method),
             Some(ast::Expr::NameRef(n)) => {
-                let Some(name) = Collect::first_ident_token(n.syntax())
+                let Some(name) = collect::first_ident_token(n.syntax())
                     .map(|t| jals_syntax::decoded_ident(&t).into_owned())
                 else {
                     return Ty::Unknown;
@@ -1833,10 +1833,10 @@ impl ProjectIndex {
         name: &str,
     ) -> Option<(ItemId, Option<MemberId>)> {
         for ancestor in node.ancestors() {
-            let Some(declared) = Collect::first_ident_token(&ancestor) else {
+            let Some(declared) = collect::first_ident_token(&ancestor) else {
                 continue;
             };
-            let start = Collect::token_start(&declared);
+            let start = collect::token_start(&declared);
             if matches!(ancestor.kind(), METHOD_DECL | CONSTRUCTOR_DECL) {
                 if let Some(member) = self.member_by_decl(file, start)
                     && self.is_member_type_param(member, name)
@@ -2128,8 +2128,8 @@ impl ProjectIndex {
         let decl = node
             .ancestors()
             .find(|a| Self::type_decl_kind(a.kind()).is_some())?;
-        let name = Collect::first_ident_token(&decl)?;
-        self.item_by_decl(file, Collect::token_start(&name))
+        let name = collect::first_ident_token(&decl)?;
+        self.item_by_decl(file, collect::token_start(&name))
     }
 }
 
@@ -2222,11 +2222,16 @@ impl Inferer<'_> {
     }
 }
 
+pub(crate) use api::{declarator_initializers, op_kinds};
+
 /// Namespace for the low-level CST token / span helpers shared across inference, the constant-`if`
 /// analysis, and the checked-exception analysis.
-pub(crate) struct Cst;
+mod api {
+    use super::{
+        AstNode, COMMA, DOT, FileId, IDENT, ItemId, LBRACK, ProjectIndex, SUPER_KW, SyntaxElement,
+        SyntaxKind, SyntaxNode, SyntaxToken, VAR_KW, Vec, ast, collect,
+    };
 
-impl Cst {
     /// The indexed type a *type-qualified* member access is looked up on: the `System` of
     /// `System.out`.
     ///
@@ -2238,11 +2243,15 @@ impl Cst {
     ///
     /// Only a simple name is handled. A fully-qualified qualifier (`java.io.PrintStream.out`) is a
     /// nested field access, not a name reference, and is not modelled.
-    fn type_qualifier(receiver: &ast::Expr, index: &ProjectIndex, file: FileId) -> Option<ItemId> {
+    pub(crate) fn type_qualifier(
+        receiver: &ast::Expr,
+        index: &ProjectIndex,
+        file: FileId,
+    ) -> Option<ItemId> {
         let ast::Expr::NameRef(name) = receiver else {
             return None;
         };
-        let token = Collect::first_ident_token(name.syntax())?;
+        let token = collect::first_ident_token(name.syntax())?;
         index
             .resolve_type_name(file, &jals_syntax::decoded_ident(&token), None)
             .project_id()
@@ -2257,7 +2266,7 @@ impl Cst {
     /// *Bare* only. A qualified super (`Iface.super.m()`, JLS §15.12.1) names one particular
     /// superinterface's default method and is a different receiver — a field access whose own
     /// receiver is a type name — so it is not this, and it is not handled.
-    fn is_super(receiver: &ast::Expr) -> bool {
+    pub(crate) fn is_super(receiver: &ast::Expr) -> bool {
         let ast::Expr::NameRef(name) = receiver else {
             return false;
         };
@@ -2266,26 +2275,23 @@ impl Cst {
             .filter_map(jals_syntax::SyntaxElement::into_token)
             .any(|token| token.kind() == SUPER_KW)
     }
-}
-
-impl Cst {
     /// Whether the syntactic type is `var` (local variable type inference).
-    fn is_var_type(ty: &ast::Type) -> bool {
-        Collect::direct_tokens(ty.syntax()).any(|t| t.kind() == VAR_KW)
+    pub(crate) fn is_var_type(ty: &ast::Type) -> bool {
+        collect::direct_tokens(ty.syntax()).any(|t| t.kind() == VAR_KW)
     }
 
     /// The non-trivia operator token kinds directly under `node` (operands are child nodes, so for a
     /// binary/unary expression these are exactly the operator tokens).
     pub(crate) fn op_kinds(node: &SyntaxNode) -> Vec<SyntaxKind> {
-        Collect::direct_tokens(node)
+        collect::direct_tokens(node)
             .filter(|t| !t.kind().is_trivia())
             .map(|t| t.kind())
             .collect()
     }
 
     /// The count of `[` tokens directly under `node` — the array dimension count of a type or `new`.
-    fn lbrack_count(node: &SyntaxNode) -> usize {
-        Collect::direct_tokens(node)
+    pub(crate) fn lbrack_count(node: &SyntaxNode) -> usize {
+        collect::direct_tokens(node)
             .filter(|t| t.kind() == LBRACK)
             .count()
     }
@@ -2309,6 +2315,96 @@ impl Cst {
             let value = elem.into_node().and_then(ast::Expr::cast)?;
             Some((current.take()?, value))
         })
+    }
+    /// The innermost call whose argument list (between the parens) contains `offset`, with the
+    /// cursor's argument index (commas before it). Scans every call so a nested `outer(inner(|))`
+    /// picks `inner` (the smallest containing argument list).
+    pub(crate) fn enclosing_call(
+        root: &SyntaxNode,
+        offset: usize,
+    ) -> Option<(ast::CallExpr, usize)> {
+        let (call, args, _) = root
+            .descendants()
+            .filter_map(ast::CallExpr::cast)
+            .filter_map(|call| {
+                let args = call.args()?;
+                let span = collect::node_span(args.syntax());
+                (span.start <= offset && offset <= span.end).then_some((
+                    call,
+                    args,
+                    span.end - span.start,
+                ))
+            })
+            .min_by_key(|(.., width)| *width)?;
+        let active = active_parameter(&args, offset);
+        Some((call, active))
+    }
+
+    /// The argument index the cursor at `offset` is on: the number of top-level commas in `args` that
+    /// end at or before it. `f(|)` → 0, `f(a, |)` → 1.
+    pub(crate) fn active_parameter(args: &ast::ArgList, offset: usize) -> usize {
+        collect::direct_tokens(args.syntax())
+            .filter(|t| t.kind() == COMMA && usize::from(t.text_range().end()) <= offset)
+            .count()
+    }
+    /// The receiver expression that ends at the `.`: the outermost expression node containing `before`
+    /// (the token just before the dot) that still ends at or before `dot_start` — so for `a.b.c.|` it
+    /// is `a.b.c`, and for a partial `recv.fo|` it is `recv` (the enclosing `recv.fo` field access
+    /// ends *after* the dot and is excluded).
+    pub(crate) fn receiver_node(before: &SyntaxToken, dot_start: usize) -> Option<SyntaxNode> {
+        // The nearest expression ancestor of `before`.
+        let mut node = before.parent()?;
+        while ast::Expr::cast(node.clone()).is_none() {
+            node = node.parent()?;
+        }
+        // Climb to the outermost expression that still ends before the dot.
+        while let Some(parent) = node.parent() {
+            if ast::Expr::cast(parent.clone()).is_some()
+                && usize::from(parent.text_range().end()) <= dot_start
+            {
+                node = parent;
+            } else {
+                break;
+            }
+        }
+        Some(node)
+    }
+
+    /// The token just left of byte `offset`: the one ending at or covering it (left-biased at a
+    /// boundary, so a cursor right after `.` lands on the `.`). `None` before the first token.
+    pub(crate) fn token_left_of(root: &SyntaxNode, offset: usize) -> Option<SyntaxToken> {
+        root.descendants_with_tokens()
+            .filter_map(SyntaxElement::into_token)
+            .filter(|token| {
+                let range = token.text_range();
+                usize::from(range.start()) < offset && offset <= usize::from(range.end())
+            })
+            .max_by_key(|token| usize::from(token.text_range().start()))
+    }
+
+    /// The nearest non-trivia token before `token`, or `None` at the start of the file.
+    pub(crate) fn prev_significant(token: &SyntaxToken) -> Option<SyntaxToken> {
+        let mut current = token.prev_token();
+        while let Some(tok) = current {
+            if !tok.kind().is_trivia() {
+                return Some(tok);
+            }
+            current = tok.prev_token();
+        }
+        None
+    }
+
+    /// The `.` of the member access at byte `offset`, if the cursor is in one: the `.` token itself
+    /// for `receiver.|`, or the `.` before a partially-typed member name for `receiver.fo|`. The
+    /// anchor both member completion and
+    /// [`FileAnalysis::at_member_access`](crate::FileAnalysis::at_member_access) are built on.
+    pub(crate) fn member_access_dot(root: &SyntaxNode, offset: usize) -> Option<SyntaxToken> {
+        let token = token_left_of(root, offset)?;
+        match token.kind() {
+            DOT => Some(token),
+            IDENT => prev_significant(&token).filter(|t| t.kind() == DOT),
+            _ => None,
+        }
     }
 }
 
@@ -2352,7 +2448,7 @@ impl crate::analysis::FileSemantics<'_> {
     /// Anchors structurally first: a cursor in no call answers without running inference at all.
     pub async fn signature_help(&self, offset: usize) -> Option<SignatureHelp> {
         let index = self.index();
-        let (call, active_parameter) = Cst::enclosing_call(self.root(), offset)?;
+        let (call, active_parameter) = api::enclosing_call(self.root(), offset)?;
         let typed = self.typed().await;
         let (owner, name) = typed.inference().call_target(&call, index, self.file())?;
         let signatures: Vec<Signature> = index
@@ -2403,37 +2499,6 @@ impl ProjectIndex {
         }
         label.push(')');
         Signature { label, parameters }
-    }
-}
-
-impl Cst {
-    /// The innermost call whose argument list (between the parens) contains `offset`, with the
-    /// cursor's argument index (commas before it). Scans every call so a nested `outer(inner(|))`
-    /// picks `inner` (the smallest containing argument list).
-    fn enclosing_call(root: &SyntaxNode, offset: usize) -> Option<(ast::CallExpr, usize)> {
-        let (call, args, _) = root
-            .descendants()
-            .filter_map(ast::CallExpr::cast)
-            .filter_map(|call| {
-                let args = call.args()?;
-                let span = Collect::node_span(args.syntax());
-                (span.start <= offset && offset <= span.end).then_some((
-                    call,
-                    args,
-                    span.end - span.start,
-                ))
-            })
-            .min_by_key(|(.., width)| *width)?;
-        let active = Self::active_parameter(&args, offset);
-        Some((call, active))
-    }
-
-    /// The argument index the cursor at `offset` is on: the number of top-level commas in `args` that
-    /// end at or before it. `f(|)` → 0, `f(a, |)` → 1.
-    fn active_parameter(args: &ast::ArgList, offset: usize) -> usize {
-        Collect::direct_tokens(args.syntax())
-            .filter(|t| t.kind() == COMMA && usize::from(t.text_range().end()) <= offset)
-            .count()
     }
 }
 
@@ -2531,7 +2596,7 @@ impl crate::analysis::FileAnalysis {
     /// ([`FileSemantics::scope_completions`](crate::FileSemantics::scope_completions)). A purely
     /// syntactic pre-check — it reads only the CST and `offset`, which is why it needs no project.
     pub fn at_member_access(&self, offset: usize) -> bool {
-        Cst::member_access_dot(self.root(), offset).is_some()
+        api::member_access_dot(self.root(), offset).is_some()
     }
 }
 
@@ -2545,8 +2610,8 @@ impl crate::analysis::FileSemantics<'_> {
     /// expression is found — so a cursor on no member access, or a `this.` / `super.` receiver, costs
     /// no inference at all (member completion is triggered on every `.`).
     async fn receiver_owner(&self, offset: usize) -> Option<ItemId> {
-        let dot = Cst::member_access_dot(self.root(), offset)?;
-        let before = Cst::prev_significant(&dot)?;
+        let dot = api::member_access_dot(self.root(), offset)?;
+        let before = api::prev_significant(&dot)?;
         // A `this` / `super` receiver has no inferred type. `this` completes the enclosing type's
         // members; `super` completes the *superclass*'s, by the same rule `access_owner` uses — so a
         // completion list and a resolved call cannot disagree about what `super.` reaches.
@@ -2561,10 +2626,10 @@ impl crate::analysis::FileSemantics<'_> {
             };
         }
         let dot_start = usize::from(dot.text_range().start());
-        let receiver = Cst::receiver_node(&before, dot_start)?;
+        let receiver = api::receiver_node(&before, dot_start)?;
         let typed = self.typed().await;
         typed
-            .type_of_expr(Collect::node_span(&receiver))?
+            .type_of_expr(collect::node_span(&receiver))?
             .project_id()
     }
 
@@ -2611,68 +2676,6 @@ impl crate::analysis::FileSemantics<'_> {
             }
         }
         out
-    }
-}
-
-impl Cst {
-    /// The receiver expression that ends at the `.`: the outermost expression node containing `before`
-    /// (the token just before the dot) that still ends at or before `dot_start` — so for `a.b.c.|` it
-    /// is `a.b.c`, and for a partial `recv.fo|` it is `recv` (the enclosing `recv.fo` field access
-    /// ends *after* the dot and is excluded).
-    fn receiver_node(before: &SyntaxToken, dot_start: usize) -> Option<SyntaxNode> {
-        // The nearest expression ancestor of `before`.
-        let mut node = before.parent()?;
-        while ast::Expr::cast(node.clone()).is_none() {
-            node = node.parent()?;
-        }
-        // Climb to the outermost expression that still ends before the dot.
-        while let Some(parent) = node.parent() {
-            if ast::Expr::cast(parent.clone()).is_some()
-                && usize::from(parent.text_range().end()) <= dot_start
-            {
-                node = parent;
-            } else {
-                break;
-            }
-        }
-        Some(node)
-    }
-
-    /// The token just left of byte `offset`: the one ending at or covering it (left-biased at a
-    /// boundary, so a cursor right after `.` lands on the `.`). `None` before the first token.
-    fn token_left_of(root: &SyntaxNode, offset: usize) -> Option<SyntaxToken> {
-        root.descendants_with_tokens()
-            .filter_map(SyntaxElement::into_token)
-            .filter(|token| {
-                let range = token.text_range();
-                usize::from(range.start()) < offset && offset <= usize::from(range.end())
-            })
-            .max_by_key(|token| usize::from(token.text_range().start()))
-    }
-
-    /// The nearest non-trivia token before `token`, or `None` at the start of the file.
-    fn prev_significant(token: &SyntaxToken) -> Option<SyntaxToken> {
-        let mut current = token.prev_token();
-        while let Some(tok) = current {
-            if !tok.kind().is_trivia() {
-                return Some(tok);
-            }
-            current = tok.prev_token();
-        }
-        None
-    }
-
-    /// The `.` of the member access at byte `offset`, if the cursor is in one: the `.` token itself
-    /// for `receiver.|`, or the `.` before a partially-typed member name for `receiver.fo|`. The
-    /// anchor both member completion and
-    /// [`FileAnalysis::at_member_access`](crate::FileAnalysis::at_member_access) are built on.
-    fn member_access_dot(root: &SyntaxNode, offset: usize) -> Option<SyntaxToken> {
-        let token = Self::token_left_of(root, offset)?;
-        match token.kind() {
-            DOT => Some(token),
-            IDENT => Self::prev_significant(&token).filter(|t| t.kind() == DOT),
-            _ => None,
-        }
     }
 }
 

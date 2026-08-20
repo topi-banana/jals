@@ -17,7 +17,7 @@
 //!   use, and the syntax makes the name mandatory, so flagging one asks for a change that cannot
 //!   be made.
 //! - A name beginning with the configured prefix — `_` out of the box
-//!   ([`UnusedVariables::ignore_prefix`]) — is the author's own opt-out: it says the binding is
+//!   ([`api::ignore_prefix`]) — is the author's own opt-out: it says the binding is
 //!   deliberately unused where the syntax still demands one, as in an `@Override` parameter or a
 //!   `catch` clause whose exception is genuinely ignored. It is honoured here and not on a
 //!   `private` member, where a leading `_` is a naming *style* rather than a statement of intent
@@ -39,27 +39,30 @@ use jals_config::lint::Config;
 
 use jals_config::lint::UnusedVariables as Options;
 
-use crate::rules::{Checker, Finding, RuleMeta, UnusedDefs};
+use crate::rules::unused_defs;
+use crate::rules::{Checker, Finding, RuleMeta};
 
 pub(crate) const RULE: RuleMeta = RuleMeta {
     name: "unused-variables",
     category: Category::Unused,
     level: |config| config.unused.unused_variables.level,
     needs_clean_parse: false,
-    check: Checker::Analyzed(UnusedVariables::check),
+    check: Checker::Analyzed(api::check),
 };
 
 /// The `unused-variables` rule.
-struct UnusedVariables;
+mod api {
+    use super::{
+        Config, Def, DefKind, FileAnalysis, Finding, LocalBoxFuture, Options, Vec, unused_defs,
+    };
 
-impl UnusedVariables {
-    /// The table edge: [`UnusedDefs`] walks the signal, [`subject`](Self::subject) is this rule's
+    /// The table edge: [`UnusedDefs`] walks the signal, [`subject`](subject) is this rule's
     /// share of it.
-    fn check<'a>(
+    pub(crate) fn check<'a>(
         analysis: &'a FileAnalysis,
         config: &'a Config,
     ) -> LocalBoxFuture<'a, Vec<Finding>> {
-        UnusedDefs::findings(analysis, config, Self::subject)
+        unused_defs::findings(analysis, config, subject)
     }
 
     /// How to name `def` in the diagnostic, or `None` when this rule does not report its kind.
@@ -70,7 +73,7 @@ impl UnusedVariables {
     /// than silently ignored. Java 22's unnamed variable (`_` on its own) binds nothing and reaches
     /// no [`Def`], so the opt-out only ever decides `_name`; `naming-convention` already leaves a
     /// name that does not start with an ASCII letter alone, so it trades no warning for another.
-    fn subject(def: &Def, config: &Config) -> Option<&'static str> {
+    pub(crate) fn subject(def: &Def, config: &Config) -> Option<&'static str> {
         let subject = match def.kind {
             DefKind::Local => "local variable",
             DefKind::Param => "parameter",

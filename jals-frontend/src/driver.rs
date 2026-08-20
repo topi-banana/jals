@@ -6,7 +6,7 @@ use jals_storage::{ArtifactCache, CacheBackend, CacheError, CacheNamespace, Rela
 
 use crate::frontend::{Frontend, FrontendError};
 use crate::ir::{FrontendDiagnostic, Ir, IrFile, LoweredFile, LoweredTree, Severity};
-use crate::key::FrontendKey;
+use crate::key;
 
 /// A completed lowering.
 #[derive(Debug)]
@@ -59,10 +59,15 @@ impl core::fmt::Display for LowerError {
     }
 }
 
-/// Lowering namespace: runs a frontend and publishes what it emitted.
-pub(crate) struct Driver;
+pub(crate) use api::lower;
 
-impl Driver {
+/// Lowering namespace: runs a frontend and publishes what it emitted.
+mod api {
+    use super::{
+        ArtifactCache, CacheBackend, CacheNamespace, Frontend, Ir, IrFile, LowerError, Lowered,
+        LoweredFile, LoweredTree, RelativePath, Vec, key,
+    };
+
     /// Lower `files` with `frontend`, publishing every emitted file into `cache`.
     ///
     /// The generic `C: CacheBackend` sits on this function rather than on the [`Frontend`] trait:
@@ -70,7 +75,7 @@ impl Driver {
     /// cache here is also the existing layering — generation logic never knows the cache exists,
     /// and publication happens at exactly one boundary.
     ///
-    /// `files` must already be in canonical order ([`FrontendKey::canonical_order`]) — which is
+    /// `files` must already be in canonical order ([`key::canonical_order`]) — which is
     /// why this is crate-internal and
     /// [`FrontendSelection::lower`](crate::FrontendSelection::lower) is what a caller reaches:
     /// a precondition no signature enforces is one every call site has to remember, and there is
@@ -106,7 +111,7 @@ impl Driver {
         // `indexed_key` is a hint and `record_index` is last-writer-wins, which is safe because
         // the manifest is still read back through a verified lookup: a stale index causes a
         // miss, never a wrong tree.
-        let lowering = FrontendKey::lowering(&caps, config, files);
+        let lowering = key::lowering(&caps, config, files);
         if let Some(manifest_key) = cache
             .indexed_key(CacheNamespace::FrontendOutput, lowering)
             .await?
@@ -130,9 +135,9 @@ impl Driver {
 
         let mut lowered = Vec::with_capacity(output.files.len());
         for (path, bytes) in &output.files {
-            let observed = FrontendKey::observed_input(caps.needs, origin_of(files, path), files);
-            let provenance = FrontendKey::emitted(&caps, config, observed, path);
-            let key = FrontendKey::artifact(provenance, bytes);
+            let observed = key::observed_input(caps.needs, origin_of(files, path), files);
+            let provenance = key::emitted(&caps, config, observed, path);
+            let key = key::artifact(provenance, bytes);
             // Write-once and idempotent: republishing identical bytes under the same key is a
             // no-op, so re-emitting an unchanged file costs a digest comparison, not a rewrite.
             cache.publish(&key, bytes).await?;
@@ -147,7 +152,7 @@ impl Driver {
         // Publish the manifest last, and only on success: it is the certificate that every
         // member above is present, so it must never be reachable before they are.
         let manifest = tree.encode();
-        let manifest_key = FrontendKey::artifact(lowering, &manifest);
+        let manifest_key = key::artifact(lowering, &manifest);
         cache.publish(&manifest_key, &manifest).await?;
         cache.record_index(&manifest_key).await?;
 

@@ -31,23 +31,26 @@ pub(crate) const RULE: RuleMeta = RuleMeta {
     level: |config| config.correctness.type_mismatch.level,
     // Every finding here comes from type inference; see `RuleMeta::needs_clean_parse`.
     needs_clean_parse: true,
-    check: Checker::Semantic(TypeMismatch::check),
+    check: Checker::Semantic(api::check),
 };
 
 /// The `type-mismatch` rule.
-struct TypeMismatch;
+mod api {
+    use super::{
+        Config, FileAnalysis, FileSemantics, Finding, LocalBoxFuture, MismatchKind, ToString, Vec,
+        format,
+    };
 
-impl TypeMismatch {
     /// The table-edge shim: boxes the async rule body once per file.
-    fn check<'a>(
+    pub(crate) fn check<'a>(
         analysis: &'a FileAnalysis,
         project: Option<&'a FileSemantics<'a>>,
         _config: &'a Config,
     ) -> LocalBoxFuture<'a, Vec<Finding>> {
-        alloc::boxed::Box::pin(Self::check_impl(analysis, project))
+        alloc::boxed::Box::pin(check_impl(analysis, project))
     }
 
-    async fn check_impl(
+    pub(crate) async fn check_impl(
         analysis: &FileAnalysis,
         project: Option<&FileSemantics<'_>>,
     ) -> Vec<Finding> {

@@ -34,13 +34,19 @@ use crate::diagnostics::ProjectReport;
 use crate::graph::{
     GraphError, GraphMetadata, GraphPreprocess, GraphWarning, NodeBody, PreprocessedProjectGraph,
 };
-use crate::memory::MemoryProjectGraph;
-use crate::task::{BuildTaskExecutor, RootBuildScriptError, RootBuildScriptOptions};
+use crate::memory;
+use crate::task::{RootBuildScriptError, RootBuildScriptOptions};
+
+pub use api::script;
 
 /// Namespace owning the project-assembly procedure.
-pub struct ProjectAssembly;
+mod api {
+    use super::{
+        BuildScriptSession, CacheBackend, Exec, Fetcher, ProjectScript, ProjectStorage,
+        RootBuildScriptError, RootBuildScriptOptions, SourceBackend,
+    };
+    use crate::task;
 
-impl ProjectAssembly {
     /// Phase 1 — prepare and execute the root build script and its task plan, publishing ordinary
     /// and task output in one transaction.
     ///
@@ -57,8 +63,7 @@ impl ProjectAssembly {
         S: SourceBackend,
         C: CacheBackend,
     {
-        let output =
-            BuildTaskExecutor::execute_root(exec, fetcher, storage, session, options).await?;
+        let output = task::execute_root(exec, fetcher, storage, session, options).await?;
         Ok(ProjectScript {
             output: output.script,
             task_classpath: output.task_classpath,
@@ -147,7 +152,7 @@ impl ProjectScript {
         // `preprocess` is consumed by the phase it names, but the graph plan needs the same fetch
         // capability again when it resolves. The field is a shared reference, so copy it out first.
         let fetcher = preprocess.fetcher;
-        let graph = MemoryProjectGraph::discover(manifest, &storage.view())
+        let graph = memory::discover(manifest, &storage.view())
             .await
             .map_err(GraphResolveError::unreported)?;
         let discovered = graph.warnings.clone();
@@ -328,10 +333,10 @@ impl MemoryProjectAssembly {
     /// The three channels are not separately readable. The graph's warnings and errors sit here,
     /// the classpath's input warnings sit inside `inputs`, and a host that reached for the first
     /// two alone silently dropped the third — which is how an unreadable jar became something only
-    /// a server's stderr ever mentioned. [`ProjectDiagnostics::assemble`] takes this, so there is
+    /// a server's stderr ever mentioned. [`diagnostics::assemble`] takes this, so there is
     /// nothing left to forget.
     ///
-    /// [`ProjectDiagnostics::assemble`]: crate::ProjectDiagnostics::assemble
+    /// [`diagnostics::assemble`]: crate::diagnostics::assemble
     pub fn report(&self) -> ProjectReport<'_> {
         ProjectReport::new(&self.warnings, &self.errors, &self.inputs.warnings)
     }
@@ -670,7 +675,7 @@ mod tests {
             );
             // A task terminal's verified jar. It has to be a real archive: the fold places task
             // artifacts as `ClasspathEntry::Artifact`, which a classpath load reads as a jar.
-            let task_jar = jals_classpath::JarPackage::write(
+            let task_jar = jals_classpath::write_jar(
                 &[(
                     RelativePath::parse("Box.class").expect("portable path"),
                     stamped(2),
@@ -747,7 +752,7 @@ mod tests {
                 .publish(&key, bytes)
                 .await
                 .expect("an in-memory publication is infallible");
-            // What `ProjectAssembly::script` would have produced for a root plan whose terminal
+            // What `api::script` would have produced for a root plan whose terminal
             // added one verified artifact to the classpath.
             let script = ProjectScript::from_parts(None, vec![key.clone()]);
 
@@ -791,7 +796,7 @@ mod tests {
             // so the task jar is the only thing on the classpath and the only thing a skeleton can
             // have come from.
             let manifest = root_manifest();
-            let task_jar = jals_classpath::JarPackage::write(
+            let task_jar = jals_classpath::write_jar(
                 &[(
                     RelativePath::parse("Box.class").expect("portable path"),
                     BOX_CLASS.to_vec(),
@@ -889,7 +894,7 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../jals-classpath/tests/fixtures/Box.class"
         ));
-        jals_classpath::JarPackage::write(
+        jals_classpath::write_jar(
             &[(
                 RelativePath::parse("Box.class").expect("portable path"),
                 BOX_CLASS.to_vec(),
@@ -1057,7 +1062,7 @@ mod tests {
                 .expect("tree is valid"),
             );
 
-            let script = ProjectAssembly::script(
+            let script = api::script(
                 &jals_exec::Exec::inline(),
                 &UnreachableFetcher,
                 &mut storage,

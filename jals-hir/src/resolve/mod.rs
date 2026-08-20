@@ -22,7 +22,6 @@ use jals_syntax::{SyntaxNode, SyntaxToken};
 use crate::def::{Def, DefId, DefKind, Namespace};
 use crate::reference::{Reference, Resolution};
 use crate::scope::{Scope, ScopeId, ScopeKind};
-use collect::Collect;
 
 /// The result of resolving names within one file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -259,7 +258,7 @@ impl Resolver {
             id: ScopeId(0),
             kind: ScopeKind::File,
             parent: None,
-            range: Collect::node_span(root),
+            range: collect::node_span(root),
             defs: Vec::new(),
         };
         Self {
@@ -316,7 +315,7 @@ impl Resolver {
             id,
             kind,
             parent: Some(parent),
-            range: Collect::node_span(node),
+            range: collect::node_span(node),
             defs: Vec::new(),
         });
         id
@@ -336,14 +335,14 @@ impl Resolver {
         decl: &SyntaxNode,
     ) -> DefId {
         let id = DefId(self.defs.len() as u32);
-        let facts = Collect::decl_facts(decl);
+        let facts = collect::decl_facts(decl);
         self.defs.push(Def {
             id,
             kind,
             // The *decoded* spelling (JLS §3.3): `int \u0061;` declares `a`, and keying a
             // definition on the raw text made it a different name from every plain-spelled use.
             name: jals_syntax::decoded_ident(name_tok).into_owned(),
-            name_range: Collect::byte_range(name_tok),
+            name_range: collect::byte_range(name_tok),
             is_private: facts.is_private,
             is_annotated: facts.is_annotated,
             scope,
@@ -358,7 +357,7 @@ impl Resolver {
     /// file-local definition target and are skipped. The namespace is decided by position: a bare
     /// callee of a call is a method reference, everything else is a value reference.
     fn record_ref(&mut self, scope: ScopeId, node: &SyntaxNode) {
-        let Some(tok) = Collect::first_ident_token(node) else {
+        let Some(tok) = collect::first_ident_token(node) else {
             return;
         };
         let parent = node.parent().map(|p| p.kind());
@@ -385,7 +384,7 @@ impl Resolver {
             self.mentions.insert(name.clone());
         }
         self.raw_refs.push(RawRef {
-            range: Collect::byte_range(&tok),
+            range: collect::byte_range(&tok),
             name,
             namespace,
             scope,
@@ -416,7 +415,7 @@ impl Resolver {
             self.record_mentions(node);
         }
         self.raw_refs.push(RawRef {
-            range: Collect::byte_range(&tok),
+            range: collect::byte_range(&tok),
             name: jals_syntax::decoded_ident(&tok).into_owned(),
             namespace: Namespace::Type,
             scope,
@@ -431,7 +430,7 @@ impl Resolver {
     /// a child *node*, and a qualified name or an annotation name spells every segment as a direct
     /// token of the one node passed in.
     fn record_mentions(&mut self, node: &SyntaxNode) {
-        for tok in Collect::direct_ident_tokens(node) {
+        for tok in collect::direct_ident_tokens(node) {
             self.mention(&jals_syntax::decoded_ident(&tok));
         }
     }

@@ -26,7 +26,7 @@ impl NetworkPolicy {
     /// Public so a host that wants to add remediation advice — the language server tells the user
     /// `jals build` populates the cache — can recognize one without copying the sentence. One
     /// owner, so the wording and the thing that matches it cannot drift apart.
-    pub const OFFLINE_REFUSAL: &'static str = "not fetched while offline";
+    pub const OFFLINE_REFUSAL: &str = "not fetched while offline";
 
     /// Whether `message` reports a refusal by [`Offline`](Self::Offline).
     ///
@@ -86,7 +86,7 @@ pub trait Fetcher {
     /// Fetch `locator`, returning a diagnostic-ready error message on failure.
     ///
     /// **Precondition:** the network gate has already admitted `locator`. This crate reaches it
-    /// through `Fetch::bytes` and nothing else may call it directly.
+    /// through `api::bytes` and nothing else may call it directly.
     async fn fetch_admitted(&self, locator: &str) -> Result<Vec<u8>, String>;
 
     /// Fetch at most `max_bytes`, rejecting an oversized result. Carries the same precondition as
@@ -110,21 +110,26 @@ pub trait Fetcher {
     }
 }
 
+pub(crate) use api::{bounded, bytes};
+// `native.rs` is its only caller, so the re-export carries the same gate the module does.
+#[cfg(feature = "native")]
+pub(crate) use api::admit;
+
 /// The crate's only door onto a [`Fetcher`]: apply the capability's own [`NetworkPolicy`], then
 /// call it.
 ///
 /// Not a provided method on the trait. Rust has no final trait method, so a gate written as one is
 /// advisory — an implementor overrides it and the policy is gone. Nothing outside this crate calls
 /// a `Fetcher` at all, so a `pub(crate)` namespace really is the only path a fetch can take.
-pub(crate) struct Fetch;
+mod api {
+    use super::{ExternalLocator, Fetcher, NetworkPolicy, String, ToOwned, Vec};
 
-impl Fetch {
     /// Fetch `locator` in full.
     pub(crate) async fn bytes<F: Fetcher>(
         fetcher: &F,
         locator: &ExternalLocator,
     ) -> Result<Vec<u8>, String> {
-        Self::admit(fetcher, locator)?;
+        admit(fetcher, locator)?;
         fetcher.fetch_admitted(locator.as_str()).await
     }
 
@@ -134,7 +139,7 @@ impl Fetch {
         locator: &ExternalLocator,
         max_bytes: usize,
     ) -> Result<Vec<u8>, String> {
-        Self::admit(fetcher, locator)?;
+        admit(fetcher, locator)?;
         fetcher
             .fetch_bounded_admitted(locator.as_str(), max_bytes)
             .await

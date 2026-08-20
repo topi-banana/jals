@@ -1,6 +1,7 @@
+use jals_classpath::source_tree_extraction;
 use std::io::{Cursor, Write};
 
-use jals_classpath::{JarExtraction, LibrarySource, SourceTreeExtraction, SourceTreeLimits};
+use jals_classpath::{JarExtraction, LibrarySource, SourceTreeLimits};
 use jals_exec::{Exec, block_on_inline};
 use jals_storage::{
     ArtifactCache, CacheKey, CacheNamespace, ContentDigest, MemoryCache, RelativePath,
@@ -90,7 +91,7 @@ fn task_source_tree_strips_the_prefix_and_rejects_the_whole_unsafe_archive() {
             ("other/Ignored.java", b"class Ignored {}"),
         ]);
         let jar = publish(&mut cache, &bytes).await;
-        let tree = SourceTreeExtraction::java(
+        let tree = source_tree_extraction::java(
             &exec,
             &mut cache,
             &jar,
@@ -110,7 +111,7 @@ fn task_source_tree_strips_the_prefix_and_rejects_the_whole_unsafe_archive() {
                 .collect::<Vec<_>>(),
             ["A.java", "nested/B.java"]
         );
-        let error = SourceTreeExtraction::java(
+        let error = source_tree_extraction::java(
             &exec,
             &mut cache,
             &jar,
@@ -127,7 +128,7 @@ fn task_source_tree_strips_the_prefix_and_rejects_the_whole_unsafe_archive() {
 
         let unsafe_bytes = sources_jar(&[("../Escape.java", b"bad")]);
         let unsafe_jar = publish(&mut cache, &unsafe_bytes).await;
-        let error = SourceTreeExtraction::java(
+        let error = source_tree_extraction::java(
             &exec,
             &mut cache,
             &unsafe_jar,

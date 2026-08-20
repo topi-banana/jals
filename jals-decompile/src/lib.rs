@@ -13,8 +13,8 @@
 
 extern crate alloc;
 
-mod attrs;
-mod body;
+pub mod attrs;
+pub mod body;
 mod cfg;
 mod exceptions;
 mod expr;
@@ -22,9 +22,6 @@ mod hierarchy;
 mod lines;
 mod literal;
 mod switch;
-mod types;
+pub mod types;
 
-pub use attrs::Attrs;
-pub use body::MethodBody;
 pub use hierarchy::ClassHierarchy;
-pub use types::JavaType;

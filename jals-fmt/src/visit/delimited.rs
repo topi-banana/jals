@@ -738,7 +738,7 @@ impl Ctx<'_> {
             if previous.kind() == S::NEWLINE {
                 return Some(column);
             }
-            column += crate::ir::Width::utf16(previous.text());
+            column += crate::ir::utf16(previous.text());
             cursor = previous.prev_token();
         }
         Some(column)

@@ -21,11 +21,11 @@ struct Row {
 }
 
 /// The inventory reader and the profile builder, grouped so they are not free functions.
-struct Fixture;
+pub(crate) mod api {
+    use super::*;
 
-impl Fixture {
     /// Every option row, comments and blank lines dropped.
-    fn inventory() -> Vec<Row> {
+    pub(super) fn inventory() -> Vec<Row> {
         INVENTORY
             .lines()
             .filter(|line| !line.is_empty() && !line.starts_with('#'))
@@ -34,7 +34,7 @@ impl Fixture {
                 let id = columns.next().expect("row has an id");
                 let kind = columns.next().expect("row has a kind");
                 Row {
-                    id: format!("{}{id}", super::super::text::ECLIPSE_FORMATTER_PREFIX),
+                    id: format!("{}{id}", crate::import::text::ECLIPSE_FORMATTER_PREFIX),
                     kind: kind.to_owned(),
                 }
             })
@@ -42,7 +42,7 @@ impl Fixture {
     }
 
     /// A parseable, non-default value for a setting of `kind`.
-    fn probe(kind: &str) -> &'static str {
+    pub(crate) fn probe(kind: &str) -> &'static str {
         match kind {
             "insert" => "insert",
             "bool" => "true",
@@ -59,10 +59,10 @@ impl Fixture {
     }
 
     /// Parse a profile given as `.prefs` lines.
-    fn prefs(lines: &[(&str, &str)]) -> EclipseConfig {
+    pub(crate) fn prefs(lines: &[(&str, &str)]) -> EclipseConfig {
         let mut src = String::new();
         for (id, value) in lines {
-            let prefix = super::super::text::ECLIPSE_FORMATTER_PREFIX;
+            let prefix = crate::import::text::ECLIPSE_FORMATTER_PREFIX;
             writeln!(src, "{prefix}{id}={value}").expect("writing to a String cannot fail");
         }
         EclipsePrefs::parse(&src).expect("profile should parse")
@@ -76,9 +76,9 @@ fn every_inventoried_option_is_modeled() {
     let baseline = EclipseConfig::default();
     let mut missing = Vec::new();
 
-    for row in Fixture::inventory() {
+    for row in api::inventory() {
         let mut pairs = BTreeMap::new();
-        pairs.insert(row.id.clone(), Fixture::probe(&row.kind).to_owned());
+        pairs.insert(row.id.clone(), api::probe(&row.kind).to_owned());
         let parsed = EclipseConfig::from_pairs(pairs).expect("single setting should parse");
         if parsed == baseline {
             missing.push(row.id);
@@ -95,7 +95,7 @@ fn every_inventoried_option_is_modeled() {
 #[test]
 fn the_inventory_is_the_documented_size() {
     // A guard against silently shrinking the checklist the test above depends on.
-    let rows = Fixture::inventory();
+    let rows = api::inventory();
     assert_eq!(rows.len(), 416, "Eclipse ships 401 live + 15 legacy ids");
 }
 
@@ -114,7 +114,7 @@ fn a_profile_key_outside_the_formatter_namespace_is_ignored() {
 
 #[test]
 fn indentation_and_width_project() {
-    let config: Config = Fixture::prefs(&[
+    let config: Config = api::prefs(&[
         ("tabulation.char", "space"),
         ("tabulation.size", "2"),
         ("continuation_indentation", "2"),
@@ -131,7 +131,7 @@ fn indentation_and_width_project() {
 
 #[test]
 fn mixed_indentation_separates_the_level_width_from_the_tab_stop() {
-    let config: Config = Fixture::prefs(&[
+    let config: Config = api::prefs(&[
         ("tabulation.char", "mixed"),
         ("tabulation.size", "8"),
         ("indentation.size", "4"),
@@ -146,7 +146,7 @@ fn mixed_indentation_separates_the_level_width_from_the_tab_stop() {
 
 #[test]
 fn brace_positions_keep_their_four_way_distinction() {
-    let config: Config = Fixture::prefs(&[
+    let config: Config = api::prefs(&[
         ("brace_position_for_type_declaration", "next_line"),
         ("brace_position_for_method_declaration", "next_line_shifted"),
         ("brace_position_for_block", "next_line_on_wrap"),
@@ -168,7 +168,7 @@ fn alignment_bits_decide_the_wrap_policy() {
     // `M_COMPACT_SPLIT`(16) is a fill; adding `M_FORCE`(1) makes it unconditional; the
     // one-per-line split(48) chops down; `Integer.MAX_VALUE` is the never-wrap sentinel; and a
     // value with no split bits means "no alignment here".
-    let config: Config = Fixture::prefs(&[
+    let config: Config = api::prefs(&[
         ("alignment_for_arguments_in_method_invocation", "16"),
         ("alignment_for_parameters_in_method_declaration", "17"),
         ("alignment_for_expressions_in_array_initializer", "48"),
@@ -183,7 +183,7 @@ fn alignment_bits_decide_the_wrap_policy() {
     assert_eq!(config.wrapping.enum_constants, WrapPolicy::Never);
     assert_eq!(config.wrapping.assignment, WrapPolicy::Never);
     // An alignment is a bitmask, not an opaque id: `17` keeps its split mode and adds `M_FORCE`.
-    let forced = Fixture::prefs(&[("alignment_for_parameters_in_method_declaration", "17")]);
+    let forced = api::prefs(&[("alignment_for_parameters_in_method_declaration", "17")]);
     let alignment = forced
         .alignment
         .alignment_for_parameters_in_method_declaration
@@ -196,11 +196,11 @@ fn alignment_bits_decide_the_wrap_policy() {
 fn the_deprecated_binary_operator_ids_still_land() {
     // JDT keeps reading `wrap_before_binary_operator` and fans it out; jals uses it as the
     // fallback for the per-operator-class setting.
-    let config: Config = Fixture::prefs(&[("wrap_before_binary_operator", "false")]).into();
+    let config: Config = api::prefs(&[("wrap_before_binary_operator", "false")]).into();
     assert!(!config.wrapping.before_binary_operator);
 
     // The granular setting wins when both are present.
-    let config: Config = Fixture::prefs(&[
+    let config: Config = api::prefs(&[
         ("wrap_before_binary_operator", "false"),
         ("wrap_before_additive_operator", "true"),
     ])
@@ -210,7 +210,7 @@ fn the_deprecated_binary_operator_ids_still_land() {
 
 #[test]
 fn the_five_colon_contexts_project_independently() {
-    let config: Config = Fixture::prefs(&[
+    let config: Config = api::prefs(&[
         ("insert_space_before_colon_in_conditional", "insert"),
         ("insert_space_before_colon_in_for", "do not insert"),
         ("insert_space_before_colon_in_labeled_statement", "insert"),
@@ -228,7 +228,7 @@ fn the_five_colon_contexts_project_independently() {
 
 #[test]
 fn one_line_policies_map_one_to_one() {
-    let config: Config = Fixture::prefs(&[
+    let config: Config = api::prefs(&[
         ("keep_method_body_on_one_line", "one_line_if_single_item"),
         ("keep_code_block_on_one_line", "one_line_preserve"),
         ("keep_type_declaration_on_one_line", "one_line_never"),
@@ -252,7 +252,7 @@ fn one_line_policies_map_one_to_one() {
 #[test]
 fn parenthesis_positions_map_one_to_one() {
     // Note the two ids Eclipse ships misspelled; the model reproduces them verbatim.
-    let config: Config = Fixture::prefs(&[
+    let config: Config = api::prefs(&[
         (
             "parentheses_positions_in_method_delcaration",
             "separate_lines",
@@ -279,7 +279,7 @@ fn parenthesis_positions_map_one_to_one() {
 #[test]
 fn an_unparsable_value_leaves_the_setting_unset() {
     // Real profiles carry stray and tool-specific values; those must not fail the whole import.
-    let config = Fixture::prefs(&[("lineSplit", "not-a-number"), ("tabulation.char", "wobbly")]);
+    let config = api::prefs(&[("lineSplit", "not-a-number"), ("tabulation.char", "wobbly")]);
     assert_eq!(config.indentation.line_split, None);
     assert_eq!(config.indentation.tabulation_char, None);
 
@@ -293,7 +293,7 @@ fn an_unparsable_value_leaves_the_setting_unset() {
 
 #[test]
 fn comment_settings_project() {
-    let config: Config = Fixture::prefs(&[
+    let config: Config = api::prefs(&[
         ("comment.format_javadoc_comments", "true"),
         ("comment.format_line_comments", "false"),
         ("comment.line_length", "72"),
@@ -324,7 +324,7 @@ fn the_xml_profile_and_the_prefs_file_agree() {
 </profiles>"#;
 
     let from_xml = EclipseXmlProfile::parse(xml).expect("profile should parse");
-    let from_prefs = Fixture::prefs(&[
+    let from_prefs = api::prefs(&[
         ("tabulation.char", "space"),
         ("tabulation.size", "2"),
         ("lineSplit", "120"),

@@ -26,15 +26,18 @@ use super::ImportError;
 use super::text::ECLIPSE_FORMATTER_PREFIX;
 
 /// Shared XML helpers.
-struct Xml;
+pub(crate) mod attrs {
+    use super::{BytesStart, ImportError, String, ToString, XmlVersion};
 
-impl Xml {
     /// Read one string attribute (`want`) off an element, unescaping entities.
     ///
     /// Normalization is pinned to [`XmlVersion::Implicit1_0`]: the two 1.0 spellings normalize
     /// identically, exported Eclipse / IntelliJ documents are never 1.1, and it is what the
     /// pre-0.41 `unescape_value` did, so no declaration needs to be tracked to reach it.
-    fn attr(element: &BytesStart<'_>, want: &[u8]) -> Result<Option<String>, ImportError> {
+    pub(crate) fn attr(
+        element: &BytesStart<'_>,
+        want: &[u8],
+    ) -> Result<Option<String>, ImportError> {
         for attribute in element.attributes() {
             let attribute = attribute.map_err(|err| ImportError::Xml(err.to_string()))?;
             if attribute.key.as_ref() == want {
@@ -49,9 +52,11 @@ impl Xml {
 }
 
 /// Reader for an exported Eclipse XML formatter profile (`<setting id=… value=…/>`).
-pub(crate) struct EclipseProfileReader;
+pub(crate) mod eclipse_profile_reader {
+    use super::{
+        BTreeMap, ECLIPSE_FORMATTER_PREFIX, Event, ImportError, Reader, String, ToString, attrs,
+    };
 
-impl EclipseProfileReader {
     /// Lower the profile to the formatter-id map that [`super::eclipse::EclipseConfig`] expects.
     pub(crate) fn parse(src: &str) -> Result<BTreeMap<String, String>, ImportError> {
         let mut reader = Reader::from_str(src);
@@ -65,9 +70,10 @@ impl EclipseProfileReader {
                 Event::Empty(element) | Event::Start(element)
                     if element.name().as_ref() == b"setting" =>
                 {
-                    if let (Some(id), Some(value)) =
-                        (Xml::attr(&element, b"id")?, Xml::attr(&element, b"value")?)
-                        && id.starts_with(ECLIPSE_FORMATTER_PREFIX)
+                    if let (Some(id), Some(value)) = (
+                        attrs::attr(&element, b"id")?,
+                        attrs::attr(&element, b"value")?,
+                    ) && id.starts_with(ECLIPSE_FORMATTER_PREFIX)
                     {
                         out.insert(id, value);
                     }
@@ -114,7 +120,10 @@ impl SchemeScan {
     /// Record one opening / empty element.
     fn visit(&mut self, element: &BytesStart<'_>) -> Result<(), ImportError> {
         match element.name().as_ref() {
-            b"option" => match (Xml::attr(element, b"name")?, Xml::attr(element, b"value")?) {
+            b"option" => match (
+                attrs::attr(element, b"name")?,
+                attrs::attr(element, b"value")?,
+            ) {
                 (Some(name), Some(value)) => {
                     self.raw.insert(name, value);
                 }
@@ -127,11 +136,11 @@ impl SchemeScan {
             },
             b"package" if self.open_table.is_some() => {
                 self.entries.push(ImportEntry::Package {
-                    name: Xml::attr(element, b"name")?.unwrap_or_default(),
-                    with_subpackages: Xml::attr(element, b"withSubpackages")?.as_deref()
+                    name: attrs::attr(element, b"name")?.unwrap_or_default(),
+                    with_subpackages: attrs::attr(element, b"withSubpackages")?.as_deref()
                         == Some("true"),
-                    is_static: Xml::attr(element, b"static")?.as_deref() == Some("true"),
-                    is_module: Xml::attr(element, b"module")?.as_deref() == Some("true"),
+                    is_static: attrs::attr(element, b"static")?.as_deref() == Some("true"),
+                    is_module: attrs::attr(element, b"module")?.as_deref() == Some("true"),
                 });
             }
             b"emptyLine" if self.open_table.is_some() => self.entries.push(ImportEntry::Blank),
@@ -182,9 +191,11 @@ impl SchemeScan {
 }
 
 /// Reader for an IntelliJ code-style scheme.
-pub(crate) struct IntellijSchemeReader;
+pub(crate) mod intellij_scheme_reader {
+    use super::{
+        BTreeMap, BytesStart, Event, ImportError, Reader, SchemeScan, String, ToString, attrs,
+    };
 
-impl IntellijSchemeReader {
     /// Lower the scheme to the `UPPER_SNAKE` option map [`super::intellij::IntellijConfig`] reads.
     ///
     /// Values are passed through **verbatim** — the model's value types accept a raw integer just
@@ -221,7 +232,7 @@ impl IntellijSchemeReader {
             match event {
                 Event::Eof => break,
                 Event::Start(element) => {
-                    if Self::is_foreign_language_block(&element)? {
+                    if is_foreign_language_block(&element)? {
                         skip_depth = 1;
                     } else {
                         scan.visit(&element)?;
@@ -229,7 +240,7 @@ impl IntellijSchemeReader {
                 }
                 // An empty element opens no subtree, so a foreign one needs no skip state.
                 Event::Empty(element) => {
-                    if !Self::is_foreign_language_block(&element)? {
+                    if !is_foreign_language_block(&element)? {
                         scan.visit(&element)?;
                     }
                 }
@@ -254,12 +265,12 @@ impl IntellijSchemeReader {
     /// `<…CodeStyleSettings>` siblings (`<JavaCodeStyleSettings>`, `<KotlinCodeStyleSettings>`, …)
     /// hold the import policy. Anything else — notably the `<code_scheme>` top level — is global
     /// and read as Java's.
-    fn is_foreign_language_block(element: &BytesStart<'_>) -> Result<bool, ImportError> {
+    pub(crate) fn is_foreign_language_block(element: &BytesStart<'_>) -> Result<bool, ImportError> {
         let name = element.name();
         let name = name.as_ref();
         if name == b"codeStyleSettings" {
             // Without a `language` attribute the block is not language-scoped, so read it.
-            return Ok(Xml::attr(element, b"language")?
+            return Ok(attrs::attr(element, b"language")?
                 .is_some_and(|language| !language.eq_ignore_ascii_case("JAVA")));
         }
         // `codeStyleSettings` itself does not match this suffix (its leading `c` is lowercase).

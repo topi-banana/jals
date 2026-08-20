@@ -4,11 +4,12 @@
 //! these prove the whole path — parse, resolve, infer, select overloads, erase to descriptors,
 //! lower, assemble — against the only authority that matters.
 
+use jals_javac::lower;
 use std::fmt::Write as _;
 use std::process::{Command, Stdio};
 
 use jals_hir::{FileAnalysis, FileId, ProjectIndex};
-use jals_javac::lower::{Compile, CompiledClass, LowerError};
+use jals_javac::lower::{CompiledClass, LowerError};
 
 /// Java 25, matching the class files the rest of the workspace pins its fixtures to.
 const MAJOR_JAVA_25: u16 = 69;
@@ -40,7 +41,7 @@ fn compile(source: &str) -> Result<Vec<CompiledClass>, LowerError> {
     );
     let semantics = analysis.in_project(&index, FileId(0));
     let typed = jals_exec::block_on_inline(semantics.typed());
-    Compile::file(typed, MAJOR_JAVA_25)
+    lower::file(typed, MAJOR_JAVA_25)
 }
 
 /// Compile `source`, run its `main` class on a real JVM, and return stdout.
@@ -3520,7 +3521,7 @@ public class Uplevel {
 
 /// The same walk for an unqualified **call** to an enclosing class's method.
 ///
-/// The lowering is ready for it — `Expr::load_unqualified_receiver` treats a method's owner exactly
+/// The lowering is ready for it — `expr::load_unqualified_receiver` treats a method's owner exactly
 /// as it treats a field's — but the call never reaches it: `jals-hir` does not resolve an unqualified
 /// call to an enclosing class's method at all, so lowering reports `helper()` as unresolved. The gap
 /// is in resolution, not in this crate, and the test stays here as the ratchet for closing it.
@@ -5547,7 +5548,7 @@ public class SupIface {
 /// `super.x = 5` and `super.x += 5` lower, which needs the receiver answered where the *write* path
 /// passes.
 ///
-/// A store goes `Place::resolve` → `Place::field` → `Expr::lower` → `Expr::name`, and that chain has
+/// A store goes `Place::resolve` → `Place::field` → `expr::lower` → `expr::name`, and that chain has
 /// no receiver branch of its own: the one the read path grew special-cased `this` only, so a `super`
 /// write reported `Unresolved("super")` while `super.x` read fine. Which `x` is written is the
 /// hiding rule (JLS §15.11.2), which the `Fieldref`'s owner already carries.

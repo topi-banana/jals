@@ -12,10 +12,11 @@ use alloc::vec::Vec;
 use rowan::WalkEvent;
 use rowan::ast::support;
 
+use super::ast_support;
 use super::{
-    AssignmentExpr, AstNode, AstSupport, AttrMeta, Attribute, BinaryExpr, BreakStmt, CatchClause,
-    ContinueStmt, Decl, Expr, FieldAccess, FieldDecl, ForStmt, Literal, LocalVarDecl, MethodDecl,
-    Modifiers, Param, QualifiedName, Resource, Stmt, SwitchExpr, Type, YieldStmt,
+    AssignmentExpr, AstNode, AttrMeta, Attribute, BinaryExpr, BreakStmt, CatchClause, ContinueStmt,
+    Decl, Expr, FieldAccess, FieldDecl, ForStmt, Literal, LocalVarDecl, MethodDecl, Modifiers,
+    Param, QualifiedName, Resource, Stmt, SwitchExpr, Type, YieldStmt,
 };
 use crate::language::{SyntaxNode, SyntaxToken};
 use crate::syntax_kind::SyntaxKind::{
@@ -33,9 +34,9 @@ use crate::syntax_kind::SyntaxKind::{MODIFIERS, NON_SEALED_KW};
 /// `try` resource — and `jals-hir` types all of them in one walk. A per-node accessor would have
 /// been six copies of the rule, and a rule with six copies is the reason `int a[]` was captured as
 /// an `int` in some of them and not others.
-pub struct Declarators;
+pub mod declarators {
+    use super::{COMMA, EQ, IDENT, LBRACK, SyntaxNode, SyntaxToken, UNDERSCORE, Vec};
 
-impl Declarators {
     /// Each directly-declared name of `node`, paired with the array dimensions written **after** it.
     ///
     /// Java lets a declarator carry its own brackets (JLS §8.4.1, §10.2): `int a[], b;` declares an
@@ -105,7 +106,7 @@ impl QualifiedName {
     /// The dotted segments in source order (`a.b.C` → `["a", "b", "C"]`), decoded. The trailing
     /// wildcard `*` of an on-demand import is not a segment.
     fn segments(&self) -> Vec<String> {
-        AstSupport::ident_tokens(&self.syntax)
+        ast_support::ident_tokens(&self.syntax)
             .map(|t| crate::decoded_ident(&t).into_owned())
             .collect()
     }
@@ -116,7 +117,7 @@ impl QualifiedName {
         if self.is_wildcard() {
             return None;
         }
-        AstSupport::ident_tokens(&self.syntax)
+        ast_support::ident_tokens(&self.syntax)
             .last()
             .map(|t| crate::decoded_ident(&t).into_owned())
     }
@@ -177,7 +178,7 @@ impl Type {
     /// Use [`AstNode::syntax`]<code>().text()</code> if you need the verbatim slice including trivia.
     #[cfg(test)]
     pub(crate) fn text(&self) -> String {
-        AstSupport::non_trivia_text(&self.syntax)
+        ast_support::non_trivia_text(&self.syntax)
     }
 
     /// The simple-name identifier token of a reference type (the last top-level `IDENT`): `a.b.C`
@@ -187,7 +188,7 @@ impl Type {
     /// Type arguments are nested `TYPE_ARGS` nodes, so the names inside `List<Foo>` are not direct
     /// `IDENT` tokens — only the outer `List` is considered here.
     pub fn simple_name_token(&self) -> Option<SyntaxToken> {
-        AstSupport::ident_tokens(&self.syntax).last()
+        ast_support::ident_tokens(&self.syntax).last()
     }
 
     /// The text of [`simple_name_token`](Type::simple_name_token): `a.b.C` → `C`, with its JLS §3.3
@@ -223,7 +224,7 @@ impl Type {
     /// Whether this is a primitive, `var`, or `void` type — one with no reference name to resolve.
     /// Equivalently, a type with no top-level `IDENT` token (a reference type always has one).
     pub fn is_primitive_or_var(&self) -> bool {
-        AstSupport::ident_tokens(&self.syntax).next().is_none()
+        ast_support::ident_tokens(&self.syntax).next().is_none()
     }
 
     /// The type-argument `Type` nodes written on this type, in order (`List<String>` → one `String`,
@@ -237,7 +238,7 @@ impl Type {
 impl Literal {
     /// The literal token.
     pub fn token(&self) -> Option<SyntaxToken> {
-        AstSupport::first_sig_token(&self.syntax)
+        ast_support::first_sig_token(&self.syntax)
     }
 
     /// The literal text as written.
@@ -313,7 +314,7 @@ impl LocalVarDecl {
     /// token child (the type is a nested `TYPE` node, so its identifiers are not included).
     /// An unnamed `_` binding is an `UNDERSCORE` token and is intentionally not reported here.
     pub fn names(&self) -> impl Iterator<Item = SyntaxToken> {
-        AstSupport::ident_tokens(&self.syntax)
+        ast_support::ident_tokens(&self.syntax)
     }
 }
 
@@ -323,7 +324,7 @@ impl FieldDecl {
     /// Like [`LocalVarDecl::names`]: each name is a direct `IDENT` token child, and an unnamed
     /// `_` binding is not reported.
     pub fn names(&self) -> impl Iterator<Item = SyntaxToken> {
-        AstSupport::ident_tokens(&self.syntax)
+        ast_support::ident_tokens(&self.syntax)
     }
 
     /// Every declared field name token paired with the array dimensions written after it
@@ -336,9 +337,9 @@ impl FieldDecl {
     ///
     /// There is deliberately no twin on [`LocalVarDecl`]. A field is captured name by name, so it
     /// reads the two together; a local's type comes from the whole-declaration walk
-    /// ([`Declarators::dims_of`]), which is the same rule reached one level lower.
+    /// ([`declarators::dims_of`]), which is the same rule reached one level lower.
     pub fn names_with_dims(&self) -> Vec<(SyntaxToken, u32)> {
-        Declarators::dims_of(&self.syntax)
+        declarators::dims_of(&self.syntax)
     }
 }
 
@@ -363,7 +364,7 @@ impl Param {
     /// separately-compiled caller links against. `void m(int xs[])` is `([I)V`, and reading only
     /// the `TYPE` node spelled it `(I)V`.
     pub fn extra_dims(&self) -> u32 {
-        Declarators::dims_of(&self.syntax)
+        declarators::dims_of(&self.syntax)
             .first()
             .map_or(0, |&(_, dims)| dims)
     }
@@ -374,10 +375,10 @@ impl MethodDecl {
     ///
     /// The odd one out: these brackets belong to neither the return `TYPE` node nor a declarator
     /// name, because the grammar puts them after `params` (`int m()[]` returns an `int[]`). The
-    /// parameter list is a node, so [`Declarators::dims_of`] still reads them the same way — the
+    /// parameter list is a node, so [`declarators::dims_of`] still reads them the same way — the
     /// method's own name is the only declarator open when they arrive.
     pub fn extra_return_dims(&self) -> u32 {
-        Declarators::dims_of(&self.syntax)
+        declarators::dims_of(&self.syntax)
             .first()
             .map_or(0, |&(_, dims)| dims)
     }
@@ -389,7 +390,7 @@ impl CatchClause {
     /// The catch types are nested `TYPE` nodes, so the only direct `IDENT` token is the binding.
     /// Returns `None` for an unnamed `_` binding (an `UNDERSCORE` token).
     pub fn binding(&self) -> Option<SyntaxToken> {
-        AstSupport::ident_tokens(&self.syntax).next()
+        ast_support::ident_tokens(&self.syntax).next()
     }
 
     /// Every caught exception type, including each arm of a multi-catch (`catch (A | B e)`). The
@@ -406,14 +407,14 @@ impl BreakStmt {
     /// The grammar has no slot for it — there is nothing else a bare `IDENT` on a `break` could be —
     /// so it is the statement's own first identifier token, exactly as a `catch` binding is.
     pub fn label(&self) -> Option<SyntaxToken> {
-        AstSupport::ident_tokens(&self.syntax).next()
+        ast_support::ident_tokens(&self.syntax).next()
     }
 }
 
 impl ContinueStmt {
     /// The label this `continue` names, if any. See [`BreakStmt::label`].
     pub fn label(&self) -> Option<SyntaxToken> {
-        AstSupport::ident_tokens(&self.syntax).next()
+        ast_support::ident_tokens(&self.syntax).next()
     }
 }
 
@@ -424,7 +425,7 @@ impl Resource {
     /// Returns `None` when the resource is an existing variable used directly (`try (existing)`,
     /// where the resource is a reference node, not a declaration) or an unnamed `_` binding.
     pub fn binding(&self) -> Option<SyntaxToken> {
-        AstSupport::ident_tokens(&self.syntax).next()
+        ast_support::ident_tokens(&self.syntax).next()
     }
 }
 
@@ -584,11 +585,12 @@ impl SwitchExpr {
 
 #[cfg(test)]
 mod tests {
+    use super::declarators;
     use super::{AstNode, SyntaxNode};
     use crate::ast::{
-        AttrArg, Attribute, BreakStmt, CatchClause, ClassDecl, ContinueStmt, Decl, Declarators,
-        ExprStmt, FieldDecl, ForStmt, ImportDecl, ImportGroup, LocalVarDecl, MethodDecl,
-        QualifiedName, Resource, Stmt, SwitchExpr, Type,
+        AttrArg, Attribute, BreakStmt, CatchClause, ClassDecl, ContinueStmt, Decl, ExprStmt,
+        FieldDecl, ForStmt, ImportDecl, ImportGroup, LocalVarDecl, MethodDecl, QualifiedName,
+        Resource, Stmt, SwitchExpr, Type,
     };
     use crate::parser::Parse;
 
@@ -632,7 +634,7 @@ mod tests {
     fn declarator_dims_belong_to_the_name_they_follow() {
         let local: LocalVarDecl = first("class C { void m() { int a[], b, c[][] = null; } }");
         assert_eq!(
-            dims_of(Declarators::dims_of(local.syntax())),
+            dims_of(declarators::dims_of(local.syntax())),
             [
                 ("a".to_owned(), 1),
                 ("b".to_owned(), 0),
@@ -649,7 +651,7 @@ mod tests {
     fn an_initialiser_closes_the_declarator() {
         let local: LocalVarDecl = first("class C { void m() { int a = xs[0], b[] = null; } }");
         assert_eq!(
-            dims_of(Declarators::dims_of(local.syntax())),
+            dims_of(declarators::dims_of(local.syntax())),
             [("a".to_owned(), 0), ("b".to_owned(), 1)]
         );
     }
@@ -867,7 +869,7 @@ mod tests {
 
     #[test]
     fn a_generated_name_and_its_token_cannot_disagree() {
-        // `AstSupport::name_text` is written in terms of `name_token`; this pins that they keep
+        // `ast_support::name_text` is written in terms of `name_token`; this pins that they keep
         // reporting the same token, since the two are generated from one label.
         let class: ClassDecl = first("class Foo {}");
         assert_eq!(class.name().as_deref(), Some("Foo"));

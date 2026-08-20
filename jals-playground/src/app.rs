@@ -32,18 +32,18 @@ use jals_classpath::{LibrarySource, ProjectInputOptions, SourceFile};
 use jals_config::fmt::Config;
 use jals_config::{FeatureSet, Manifest, ManifestParseError};
 use jals_hir::{LoweredClasspath, ProjectIndex};
+use jals_project::diagnostics;
 use jals_project::{
-    GraphOutcome, ProjectAnchor, ProjectDiagnostic, ProjectDiagnostics, ProjectScript, ScriptFile,
-    ScriptOutcome,
+    GraphOutcome, ProjectAnchor, ProjectDiagnostic, ProjectScript, ScriptFile, ScriptOutcome,
 };
 use jals_storage::{ArtifactCache, DirKey, FileKey, MemoryCache, MemoryStorage};
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::spawn_local;
 use yew::prelude::*;
 
-use crate::compile::Compile;
+use crate::compile;
 use crate::components::{EditorPane, FileTree, Header, PaneTab, ResultPane, TreeEntry};
-use crate::download::Download;
+use crate::download;
 use crate::fetcher::BrowserFetcher;
 use crate::host::{MonacoRange, PlaygroundDiagnostic};
 use crate::workspace::{BUILD_SCRIPT_PATH, MANIFEST_PATH, Workspace};
@@ -973,7 +973,7 @@ impl App {
             .and_then(|script| match script {
                 jals_config::BuildScript::Rhai { file } => FileKey::parse(file).ok(),
             });
-        ProjectDiagnostics::assemble(
+        diagnostics::assemble(
             outcome,
             GraphOutcome::NotReached,
             key.as_ref().map(|key| ScriptFile {
@@ -1052,20 +1052,20 @@ impl App {
             // the status line, and the assembly is what puts them in front of the error they
             // explain.
             .map_err(|failure| {
-                Self::status_line(&ProjectDiagnostics::assemble(
+                Self::status_line(&diagnostics::assemble(
                     ScriptOutcome::Skipped,
                     GraphOutcome::Failed(&failure),
                     None,
                 ))
             })?;
-        let diagnostics = ProjectDiagnostics::assemble(
+        let diagnostics = diagnostics::assemble(
             ScriptOutcome::Skipped,
             GraphOutcome::Resolved(assembly.report()),
             None,
         );
         // The browser was asked to produce a classpath, so an error stops it. What "error" means is
         // the assembly's, not a severity test spelled here.
-        if ProjectDiagnostics::has_errors(&diagnostics) {
+        if diagnostics::has_errors(&diagnostics) {
             return Err(Self::status_line(&diagnostics));
         }
         let inputs = assembly.inputs;
@@ -1385,7 +1385,7 @@ impl Component for App {
                 self.editor_ready = true;
                 self.repaint_config_markers();
                 // Register the language-feature providers, backed by the shared workspace.
-                providers::Providers::install(Rc::clone(&workspace));
+                providers::install(Rc::clone(&workspace));
                 let link = ctx.link().clone();
                 spawn_local(async move {
                     let ws = workspace.lock().await;
@@ -1610,7 +1610,7 @@ impl Component for App {
                     if !token.is_current() {
                         return;
                     }
-                    let message = match Compile::workspace(&manifest, &files).await {
+                    let message = match compile::workspace(&manifest, &files).await {
                         Ok(artifact) => Msg::CompileFinished {
                             generation: token.captured,
                             name: artifact.name,
@@ -1656,7 +1656,7 @@ impl Component for App {
             }
             Msg::Download => {
                 if let Some((name, bytes)) = &self.compile_artifact {
-                    Download::save(name, bytes);
+                    download::save(name, bytes);
                 }
                 false
             }
@@ -1779,7 +1779,7 @@ mod tests {
             .expect("seed manifest is valid");
         assert_eq!(manifest.build.backend, jals_config::BackendKind::Jals {});
         assert_eq!(
-            jals_build::RunTarget::resolve(&manifest, None),
+            jals_build::resolve_run_target(&manifest, None),
             Ok("com.example.Main")
         );
     }

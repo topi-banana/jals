@@ -13,29 +13,29 @@
 extern crate alloc;
 
 mod assemble;
-mod assembly;
-mod diagnostics;
+pub mod assembly;
+pub mod diagnostics;
 mod graph;
 #[cfg(all(test, feature = "native"))]
 mod graph_tests;
 mod memory;
 #[cfg(feature = "native")]
 mod native;
-mod remap;
-mod task;
+pub mod remap;
+pub mod task;
 mod walk;
 
 pub use assemble::{
     CompileClasspathEntry, CompileClasspathFile, CompileClasspathTree, CompileClasspathTreeMember,
     ProjectAssemblyError,
 };
-pub use assembly::{GraphResolveError, MemoryProjectAssembly, ProjectAssembly, ProjectScript};
+pub use assembly::{GraphResolveError, MemoryProjectAssembly, ProjectScript};
 // The canonical, protocol-neutral diagnostics assembly for one project — the project-scoped
 // counterpart of `jals_editor::FileDiagnostics`. A host maps a `ProjectDiagnostic` to its
 // protocol's shape and sequences nothing.
 pub use diagnostics::{
     GraphOutcome, ProjectAnchor, ProjectDiagnostic, ProjectDiagnosticCode,
-    ProjectDiagnosticSeverity, ProjectDiagnostics, ProjectReport, ScriptFile, ScriptOutcome,
+    ProjectDiagnosticSeverity, ProjectReport, ScriptFile, ScriptOutcome,
 };
 // `CycleEdge` and `NodeId` are here because a public error names them — `GraphError::Cycle` carries
 // the chain and `GraphError::InvalidDependency` the declaring node. A host reads neither: they
@@ -45,7 +45,7 @@ pub use diagnostics::{
 pub use graph::{CycleEdge, GraphError, GraphPreprocess, GraphWarning, NodeId};
 #[cfg(feature = "native")]
 pub use native::NativeProjectAssembly;
-pub use remap::{CompiledClasses, RemapAbsence, RemapPlan, RemapSelection};
+pub use remap::{RemapAbsence, RemapPlan, RemapSelection};
 // `ProjectGraphAssembly`, `ResolvedProjectGraph`, `PreprocessedProjectGraph`, `MemoryProjectGraph`,
 // and `NativeProjectGraph` are deliberately *not* re-exported. They are the steps `ProjectAssembly`
 // sequences and the intermediate values that only exist between them; a host hands over policy and
@@ -57,6 +57,6 @@ pub use remap::{CompiledClasses, RemapAbsence, RemapPlan, RemapSelection};
 // is now the crate's own, so exporting the types would publish names with nothing readable behind
 // them. A host that needs to ask about the graph should get an accessor on the assembly, not these.
 pub use task::{
-    BuildTaskExecutor, BuildTaskHost, BuildTaskRunError, RootBuildScriptError,
-    RootBuildScriptOptions, SourcePublication,
+    BuildTaskHost, BuildTaskRunError, RootBuildScriptError, RootBuildScriptOptions,
+    SourcePublication,
 };

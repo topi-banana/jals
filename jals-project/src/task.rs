@@ -16,8 +16,8 @@ use jals_build::task::{
     TaskPublishIntent, TaskRemapDirection, TaskTerminal,
 };
 use jals_classpath::{
-    ExpectedDigest, ExternalArtifactResolver, ExternalArtifactSpec, ExternalLocator, Fetcher,
-    LibrarySource, SourceTree, SourceTreeExtraction, SourceTreeLimits,
+    ExpectedDigest, ExternalArtifactSpec, ExternalLocator, Fetcher, LibrarySource, SourceTree,
+    SourceTreeLimits, external_artifact_resolver, source_tree_extraction,
 };
 use jals_config::Manifest;
 use jals_exec::Exec;
@@ -150,7 +150,7 @@ pub struct RootBuildScriptOptions<'a> {
 /// Identity of one memoized snapshot task execution, plus the runtime it executes under.
 ///
 /// `identity` and `features` are what the cache record is keyed on, together with the plan
-/// fingerprint — see [`snapshot_provenance`](BuildTaskExecutor::snapshot_provenance), which folds
+/// fingerprint — see [`snapshot_provenance`](api::snapshot_provenance), which folds
 /// exactly those and nothing else. `runtime` is deliberately *not* part of that key: it carries
 /// ceilings on how an execution runs, not inputs that change what it produces.
 #[derive(Debug, Clone, Copy)]
@@ -211,9 +211,6 @@ enum TaskValue {
     Jar(CacheKey),
     SourceTree(SourceTree),
 }
-
-/// Namespace for executing a validated build-task plan.
-pub struct BuildTaskExecutor;
 
 const OWNERSHIP_FILE: &str = "target/jals/build/tasks/ownership-v1.json";
 const OWNERSHIP_VERSION: u32 = 1;
@@ -279,7 +276,26 @@ struct PublishedFile {
     artifact: String,
 }
 
-impl BuildTaskExecutor {
+pub use api::owned_publication_roots;
+pub(crate) use api::{execute_root, execute_snapshot, plan_fingerprint};
+
+/// Namespace for executing a validated build-task plan.
+mod api {
+    use super::{
+        ArtifactCache, BTreeMap, BTreeSet, BuildScriptCacheScope, BuildScriptSession,
+        BuildTaskExecution, BuildTaskHost, BuildTaskPublication, BuildTaskRunError, CacheBackend,
+        CacheKey, CacheNamespace, Change, ContentDigest, DirKey, Exec, ExpectedDigest,
+        ExternalArtifactSpec, ExternalLocator, Fetcher, FileKey, LibrarySource, OWNERSHIP_FILE,
+        OWNERSHIP_VERSION, OwnedFile, OwnerState, OwnershipState, ProjectStorage, ProjectView,
+        ProvenanceFold, PublishedFile, PublishedTree, RelativePath, RootBuildScriptError,
+        RootBuildScriptOptions, RootBuildScriptOutput, SnapshotTaskOptions, SourceBackend,
+        SourcePublication, SourceTree, SourceTreeLimits, String, TASK_EXECUTION_VERSION,
+        TaskDigestAlgorithm, TaskExecutionState, TaskFetchKind, TaskId, TaskMappingFormat,
+        TaskNodeKind, TaskPlan, TaskRemapDirection, TaskRuntime, TaskTerminal, TaskValue, ToOwned,
+        ToString, Value, Vec, external_artifact_resolver, format, prepare_build_script,
+        publish_prepared_build_script, source_tree_extraction,
+    };
+
     /// Exclusive publication roots recorded by the current ownership state.
     pub fn owned_publication_roots(
         view: &ProjectView,
@@ -288,7 +304,7 @@ impl BuildTaskExecutor {
         let key = FileKey::parse(OWNERSHIP_FILE)
             .expect("build-task ownership path is a portable file key");
         let state = match view.file(&key) {
-            Ok(file) => Self::decode_ownership(file.bytes())?,
+            Ok(file) => decode_ownership(file.bytes())?,
             Err(jals_storage::Error::NotFoundFile(_)) => return Ok(Vec::new()),
             Err(error) => {
                 return Err(BuildTaskRunError::Terminal(format!(
@@ -321,7 +337,7 @@ impl BuildTaskExecutor {
 
     /// Prepare and execute one root build script, then atomically publish ordinary and task output.
     ///
-    /// Reached from [`ProjectAssembly::script`](crate::ProjectAssembly::script), which is the sole
+    /// Reached from [`assembly::script`](crate::assembly::script), which is the sole
     /// public entry: a host that ran the script is holding the token the graph phase requires, so
     /// the two phases cannot be ordered the wrong way round.
     pub(crate) async fn execute_root<F, S, C>(
@@ -358,13 +374,13 @@ impl BuildTaskExecutor {
         )
         .await?;
         let Some(prepared) = prepared else {
-            Self::reject_blocked_roots(
-                &Self::owned_publication_roots(&view, &source_roots)?,
+            reject_blocked_roots(
+                &owned_publication_roots(&view, &source_roots)?,
                 options.blocked_files,
             )?;
             let changes = match options.publications {
                 SourcePublication::Apply => {
-                    Self::publication_changes(
+                    publication_changes(
                         &view,
                         storage.artifacts(),
                         &FileKey::parse("jals.toml").expect("manifest path is portable"),
@@ -388,10 +404,10 @@ impl BuildTaskExecutor {
             });
         };
         let plan = prepared.output(view.revision()).task_plan;
-        if !Self::plan_publications_current(&view, prepared.script_path(), &plan) {
-            Self::reject_blocked_roots(&Self::publication_roots(&plan)?, options.blocked_files)?;
+        if !plan_publications_current(&view, prepared.script_path(), &plan) {
+            reject_blocked_roots(&publication_roots(&plan)?, options.blocked_files)?;
         }
-        let execution = Self::execute(
+        let execution = execute(
             exec,
             fetcher,
             &view,
@@ -405,7 +421,7 @@ impl BuildTaskExecutor {
         .await?;
         let changes = match options.publications {
             SourcePublication::Apply => {
-                Self::publication_changes(
+                publication_changes(
                     &view,
                     storage.artifacts(),
                     prepared.script_path(),
@@ -426,7 +442,7 @@ impl BuildTaskExecutor {
         })
     }
 
-    fn reject_blocked_roots(
+    pub(crate) fn reject_blocked_roots(
         roots: &[DirKey],
         blocked_files: &[FileKey],
     ) -> Result<(), BuildTaskRunError> {
@@ -441,7 +457,7 @@ impl BuildTaskExecutor {
     }
 
     /// Whether a plan declares any exclusive source-tree publication.
-    fn declares_publication(plan: &TaskPlan) -> bool {
+    pub(crate) fn declares_publication(plan: &TaskPlan) -> bool {
         plan.terminals
             .iter()
             .any(|terminal| matches!(terminal, TaskTerminal::PublishTree { .. }))
@@ -456,17 +472,21 @@ impl BuildTaskExecutor {
             })
     }
 
-    fn plan_publications_current(view: &ProjectView, script: &FileKey, plan: &TaskPlan) -> bool {
+    pub(crate) fn plan_publications_current(
+        view: &ProjectView,
+        script: &FileKey,
+        plan: &TaskPlan,
+    ) -> bool {
         let ownership = FileKey::parse(OWNERSHIP_FILE)
             .expect("build-task ownership path is a portable file key");
         let Some(state) = view
             .file(&ownership)
             .ok()
-            .and_then(|file| Self::decode_ownership(file.bytes()).ok())
+            .and_then(|file| decode_ownership(file.bytes()).ok())
         else {
-            return !Self::declares_publication(plan);
+            return !declares_publication(plan);
         };
-        let Ok(fingerprint) = Self::plan_fingerprint(plan).map(ContentDigest::to_hex) else {
+        let Ok(fingerprint) = plan_fingerprint(plan).map(ContentDigest::to_hex) else {
             return false;
         };
         let mut declared: Vec<_> = plan
@@ -496,7 +516,7 @@ impl BuildTaskExecutor {
                 .owners
                 .iter()
                 .all(|owner| owner.plan_fingerprint == fingerprint)
-            && Self::published_trees_match(view, &state)
+            && published_trees_match(view, &state)
     }
 
     /// Execute `plan` against an immutable snapshot, memoized on the verified cache.
@@ -518,11 +538,11 @@ impl BuildTaskExecutor {
         plan: &TaskPlan,
         options: SnapshotTaskOptions<'_>,
     ) -> Result<BuildTaskExecution, BuildTaskRunError> {
-        let provenance = Self::snapshot_provenance(plan, &options)?;
-        if let Some(execution) = Self::cached_execution(cache, provenance).await {
+        let provenance = snapshot_provenance(plan, &options)?;
+        if let Some(execution) = cached_execution(cache, provenance).await {
             return Ok(execution);
         }
-        let execution = Self::execute(
+        let execution = execute(
             exec,
             fetcher,
             view,
@@ -532,19 +552,19 @@ impl BuildTaskExecutor {
             BuildTaskHost::Snapshot,
         )
         .await?;
-        Self::record_execution(cache, provenance, &execution).await?;
+        record_execution(cache, provenance, &execution).await?;
         Ok(execution)
     }
 
     /// Identity of one memoized snapshot execution.
-    fn snapshot_provenance(
+    pub(crate) fn snapshot_provenance(
         plan: &TaskPlan,
         options: &SnapshotTaskOptions<'_>,
     ) -> Result<ContentDigest, BuildTaskRunError> {
         let mut fold = ProvenanceFold::new(b"jals.build-task.snapshot\0");
         fold.version(TASK_EXECUTION_VERSION)
             .digest(options.identity)
-            .digest(Self::plan_fingerprint(plan)?);
+            .digest(plan_fingerprint(plan)?);
         // The feature set is already ordered and deduplicated by `BTreeSet`, and every append is
         // length-framed, so two different selections can never fold to one digest.
         for feature in options.features {
@@ -555,7 +575,7 @@ impl BuildTaskExecutor {
 
     /// A recorded execution whose every artifact is still present, or `None` — a partially evicted
     /// record is a miss, not an error, because re-running reproduces it.
-    async fn cached_execution<C: CacheBackend>(
+    pub(crate) async fn cached_execution<C: CacheBackend>(
         cache: &ArtifactCache<C>,
         provenance: ContentDigest,
     ) -> Option<BuildTaskExecution> {
@@ -574,14 +594,14 @@ impl BuildTaskExecutor {
         for artifact in &state.classpath {
             execution
                 .classpath
-                .push(Self::present_artifact(cache, artifact).await?);
+                .push(present_artifact(cache, artifact).await?);
         }
         for tree in &state.publications {
             let mut files = Vec::with_capacity(tree.files.len());
             for file in &tree.files {
                 files.push(LibrarySource {
                     path: RelativePath::parse(&file.path).ok()?,
-                    key: Self::present_artifact(cache, &file.artifact).await?,
+                    key: present_artifact(cache, &file.artifact).await?,
                 });
             }
             execution.publications.push(BuildTaskPublication {
@@ -595,7 +615,7 @@ impl BuildTaskExecutor {
     }
 
     /// The key a recorded token names, if its bytes are still in the cache.
-    async fn present_artifact<C: CacheBackend>(
+    pub(crate) async fn present_artifact<C: CacheBackend>(
         cache: &ArtifactCache<C>,
         artifact: &str,
     ) -> Option<CacheKey> {
@@ -606,7 +626,7 @@ impl BuildTaskExecutor {
         Some(key)
     }
 
-    async fn record_execution<C: CacheBackend>(
+    pub(crate) async fn record_execution<C: CacheBackend>(
         cache: &mut ArtifactCache<C>,
         provenance: ContentDigest,
         execution: &BuildTaskExecution,
@@ -655,7 +675,7 @@ impl BuildTaskExecutor {
         })
     }
 
-    async fn execute<F: Fetcher, C: CacheBackend>(
+    pub(crate) async fn execute<F: Fetcher, C: CacheBackend>(
         exec: &Exec,
         fetcher: &F,
         view: &ProjectView,
@@ -668,7 +688,7 @@ impl BuildTaskExecutor {
             // Publication is checked before the blanket terminal refusal so a host that rejects
             // everything still names the specific effect it would not have allowed anyway.
             BuildTaskHost::NoTerminals | BuildTaskHost::ArtifactsOnly
-                if Self::declares_publication(plan) =>
+                if declares_publication(plan) =>
             {
                 return Err(BuildTaskRunError::UnsupportedPublication);
             }
@@ -680,19 +700,18 @@ impl BuildTaskExecutor {
             _ => {}
         }
 
-        let reachable = Self::reachable(plan);
+        let reachable = reachable(plan);
         let mut values: Vec<Option<TaskValue>> = (0..plan.nodes.len()).map(|_| None).collect();
         for node in &plan.nodes {
             if !reachable.contains(&node.id) {
                 continue;
             }
-            let value =
-                Self::execute_node(exec, fetcher, view, cache, &values, &node.kind, runtime)
-                    .await
-                    .map_err(|message| BuildTaskRunError::Node {
-                        id: node.id,
-                        message,
-                    })?;
+            let value = execute_node(exec, fetcher, view, cache, &values, &node.kind, runtime)
+                .await
+                .map_err(|message| BuildTaskRunError::Node {
+                    id: node.id,
+                    message,
+                })?;
             values[node.id.index()] = Some(value);
         }
 
@@ -701,16 +720,16 @@ impl BuildTaskExecutor {
             match terminal {
                 TaskTerminal::AddClasspath { jar } => {
                     output.classpath.push(
-                        Self::jar(&values, *jar)
+                        jar_key(&values, *jar)
                             .map_err(BuildTaskRunError::Terminal)?
                             .clone(),
                     );
                 }
                 TaskTerminal::AddNestedClasspath { jar } => {
-                    let parent = Self::jar(&values, *jar)
+                    let parent = jar_key(&values, *jar)
                         .map_err(BuildTaskRunError::Terminal)?
                         .clone();
-                    let nested = jals_classpath::NestedJar::extract_all(exec, cache, &parent)
+                    let nested = jals_classpath::nested_jar::extract_all(exec, cache, &parent)
                         .await
                         .map_err(BuildTaskRunError::Terminal)?;
                     output.classpath.extend(nested);
@@ -722,7 +741,7 @@ impl BuildTaskExecutor {
                     intent,
                     ..
                 } => {
-                    let tree = Self::source_tree(&values, *tree)
+                    let tree = source_tree(&values, *tree)
                         .map_err(BuildTaskRunError::Terminal)?
                         .clone();
                     if tree.files.is_empty() {
@@ -748,7 +767,7 @@ impl BuildTaskExecutor {
     }
 
     /// Publication destinations declared by a plan, in terminal order.
-    fn publication_roots(plan: &TaskPlan) -> Result<Vec<DirKey>, BuildTaskRunError> {
+    pub(crate) fn publication_roots(plan: &TaskPlan) -> Result<Vec<DirKey>, BuildTaskRunError> {
         plan.terminals
             .iter()
             .filter_map(|terminal| match terminal {
@@ -767,7 +786,7 @@ impl BuildTaskExecutor {
 
     /// Prepare the complete project change set for exclusive-root publication and ownership.
     /// No project bytes are changed until the caller combines and commits these changes.
-    async fn publication_changes<C: CacheBackend>(
+    pub(crate) async fn publication_changes<C: CacheBackend>(
         view: &ProjectView,
         cache: &ArtifactCache<C>,
         script: &FileKey,
@@ -778,7 +797,7 @@ impl BuildTaskExecutor {
         let ownership_key = FileKey::parse(OWNERSHIP_FILE)
             .expect("build-task ownership path is a portable file key");
         let previous = match view.file(&ownership_key) {
-            Ok(file) => Some(Self::decode_ownership(file.bytes())?),
+            Ok(file) => Some(decode_ownership(file.bytes())?),
             Err(jals_storage::Error::NotFoundFile(_)) => None,
             Err(error) => {
                 return Err(BuildTaskRunError::Terminal(format!(
@@ -787,7 +806,7 @@ impl BuildTaskExecutor {
             }
         };
 
-        let fingerprint = Self::plan_fingerprint(plan)?.to_hex();
+        let fingerprint = plan_fingerprint(plan)?.to_hex();
         let mut owner_names = BTreeSet::new();
         let mut destinations = BTreeSet::new();
         let build_root =
@@ -922,7 +941,7 @@ impl BuildTaskExecutor {
                 version: OWNERSHIP_VERSION,
                 owners,
             };
-            if previous.as_ref() == Some(&state) && Self::published_trees_match(view, &state) {
+            if previous.as_ref() == Some(&state) && published_trees_match(view, &state) {
                 return Ok(Vec::new());
             }
             let bytes = serde_json::to_vec(&state).map_err(|error| {
@@ -939,7 +958,7 @@ impl BuildTaskExecutor {
         Ok(changes)
     }
 
-    fn published_trees_match(view: &ProjectView, state: &OwnershipState) -> bool {
+    pub(crate) fn published_trees_match(view: &ProjectView, state: &OwnershipState) -> bool {
         for owner in &state.owners {
             let Ok(destination) = DirKey::parse(&owner.destination) else {
                 return false;
@@ -971,7 +990,7 @@ impl BuildTaskExecutor {
         true
     }
 
-    fn decode_ownership(bytes: &[u8]) -> Result<OwnershipState, BuildTaskRunError> {
+    pub(crate) fn decode_ownership(bytes: &[u8]) -> Result<OwnershipState, BuildTaskRunError> {
         let state: OwnershipState = serde_json::from_slice(bytes).map_err(|error| {
             BuildTaskRunError::Terminal(format!("build-task ownership is corrupt: {error}"))
         })?;
@@ -1007,7 +1026,7 @@ impl BuildTaskExecutor {
         Ok(state)
     }
 
-    async fn execute_node<F: Fetcher, C: CacheBackend>(
+    pub(crate) async fn execute_node<F: Fetcher, C: CacheBackend>(
         exec: &Exec,
         fetcher: &F,
         view: &ProjectView,
@@ -1018,7 +1037,7 @@ impl BuildTaskExecutor {
     ) -> Result<TaskValue, String> {
         match node {
             TaskNodeKind::HttpsUrl { value } => {
-                Self::validate_https(value)?;
+                validate_https(value)?;
                 Ok(TaskValue::Url(value.clone()))
             }
             TaskNodeKind::ProjectJar { path } => {
@@ -1056,7 +1075,7 @@ impl BuildTaskExecutor {
                 Ok(TaskValue::Text(text.to_owned()))
             }
             TaskNodeKind::Digest { algorithm, value } => {
-                let digest = ExpectedDigest::from_hex(Self::algorithm(*algorithm), value)
+                let digest = ExpectedDigest::from_hex(algorithm_name(*algorithm), value)
                     .ok_or_else(|| "invalid canonical digest".to_owned())?;
                 Ok(TaskValue::Digest(digest))
             }
@@ -1069,17 +1088,17 @@ impl BuildTaskExecutor {
                 digest,
                 max_bytes,
             } => {
-                let url = Self::url(values, *url)?;
-                Self::validate_https(url)?;
-                let expected = Self::digest(values, *digest)?;
-                let max_bytes = Self::byte_count(values, *max_bytes)?;
+                let url = self::url(values, *url)?;
+                validate_https(url)?;
+                let expected = self::digest(values, *digest)?;
+                let max_bytes = byte_count(values, *max_bytes)?;
                 let spec = ExternalArtifactSpec {
                     locator: ExternalLocator::new(url),
                     expected,
                     max_bytes,
                     namespace: CacheNamespace::BuildTaskArtifact,
                 };
-                let key = ExternalArtifactResolver::resolve(fetcher, cache, &spec).await?;
+                let key = external_artifact_resolver::resolve(fetcher, cache, &spec).await?;
                 match kind {
                     TaskFetchKind::Jar => Ok(TaskValue::Jar(key)),
                     TaskFetchKind::Json => {
@@ -1104,7 +1123,7 @@ impl BuildTaskExecutor {
                     }
                 }
             }
-            TaskNodeKind::JsonAt { json, path } => Self::json_at(Self::json(values, *json)?, path)
+            TaskNodeKind::JsonAt { json, path } => json_at(self::json(values, *json)?, path)
                 .cloned()
                 .map(TaskValue::Json)
                 .ok_or_else(|| format!("JSON path `{}` does not exist", path.join("/"))),
@@ -1114,7 +1133,7 @@ impl BuildTaskExecutor {
                 field,
                 value,
             } => {
-                let array = Self::json_at(Self::json(values, *json)?, path)
+                let array = json_at(self::json(values, *json)?, path)
                     .and_then(Value::as_array)
                     .ok_or_else(|| format!("JSON path `{}` is not an array", path.join("/")))?;
                 array
@@ -1125,10 +1144,10 @@ impl BuildTaskExecutor {
                     .ok_or_else(|| format!("JSON array contains no `{field}` equal to `{value}`"))
             }
             TaskNodeKind::JsonUrl { json, path } => {
-                let value = Self::json_scalar(Self::json(values, *json)?, path)?
+                let value = json_scalar(self::json(values, *json)?, path)?
                     .as_str()
                     .ok_or_else(|| "projected JSON URL is not a string".to_owned())?;
-                Self::validate_https(value)?;
+                validate_https(value)?;
                 Ok(TaskValue::Url(value.to_owned()))
             }
             TaskNodeKind::JsonDigest {
@@ -1136,15 +1155,15 @@ impl BuildTaskExecutor {
                 path,
                 algorithm,
             } => {
-                let value = Self::json_scalar(Self::json(values, *json)?, path)?
+                let value = json_scalar(self::json(values, *json)?, path)?
                     .as_str()
                     .ok_or_else(|| "projected JSON digest is not a string".to_owned())?;
-                ExpectedDigest::from_hex(Self::algorithm(*algorithm), value)
+                ExpectedDigest::from_hex(algorithm_name(*algorithm), value)
                     .map(TaskValue::Digest)
                     .ok_or_else(|| "projected JSON digest is not canonical".to_owned())
             }
             TaskNodeKind::JsonU64 { json, path } => {
-                Self::json_scalar(Self::json(values, *json)?, path)?
+                json_scalar(self::json(values, *json)?, path)?
                     .as_u64()
                     .ok_or_else(|| {
                         "projected JSON byte count is not an unsigned integer".to_owned()
@@ -1167,10 +1186,10 @@ impl BuildTaskExecutor {
                     })
             }
             TaskNodeKind::ExtractJava { jar, prefix } => {
-                let jar = Self::jar(values, *jar)?.clone();
+                let jar = jar_key(values, *jar)?.clone();
                 let prefix = RelativePath::parse(prefix)
                     .map_err(|error| format!("invalid extraction prefix: {error:?}"))?;
-                SourceTreeExtraction::java(
+                source_tree_extraction::java(
                     exec,
                     cache,
                     &jar,
@@ -1185,8 +1204,8 @@ impl BuildTaskExecutor {
                 .map(TaskValue::SourceTree)
             }
             TaskNodeKind::NestedJar { jar, member } => {
-                let jar = Self::jar(values, *jar)?.clone();
-                jals_classpath::NestedJar::extract(exec, cache, &jar, member)
+                let jar = jar_key(values, *jar)?.clone();
+                jals_classpath::nested_jar::extract(exec, cache, &jar, member)
                     .await
                     .map(TaskValue::Jar)
             }
@@ -1197,20 +1216,20 @@ impl BuildTaskExecutor {
                 direction,
                 hierarchy,
             } => {
-                let jar = Self::jar(values, *jar)?.clone();
+                let jar = jar_key(values, *jar)?.clone();
                 let hierarchy = hierarchy
                     .iter()
-                    .map(|id| Self::jar(values, *id).cloned())
+                    .map(|id| jar_key(values, *id).cloned())
                     .collect::<Result<Vec<_>, _>>()?;
-                let mappings = Self::text(values, *mappings)?;
-                jals_classpath::JarRemap::remap(
+                let mappings = text(values, *mappings)?;
+                jals_classpath::jar_remap::remap(
                     exec,
                     cache,
                     &jar,
                     &jals_classpath::RemapRequest {
                         mappings,
-                        format: Self::mapping_format(format),
-                        direction: Self::remap_direction(*direction),
+                        format: mapping_format(format),
+                        direction: remap_direction(*direction),
                         hierarchy: &hierarchy,
                     },
                 )
@@ -1218,17 +1237,17 @@ impl BuildTaskExecutor {
                 .map(TaskValue::Jar)
             }
             TaskNodeKind::MergeJars { base, overlay } => {
-                let base = Self::jar(values, *base)?.clone();
-                let overlay = Self::jar(values, *overlay)?.clone();
-                jals_classpath::JarMerge::merge(exec, cache, &base, &overlay)
+                let base = jar_key(values, *base)?.clone();
+                let overlay = jar_key(values, *overlay)?.clone();
+                jals_classpath::jar_merge::merge(exec, cache, &base, &overlay)
                     .await
                     .map(TaskValue::Jar)
             }
             TaskNodeKind::DecompileJava { jar, prefix } => {
-                let jar = Self::jar(values, *jar)?.clone();
+                let jar = jar_key(values, *jar)?.clone();
                 let prefix = RelativePath::parse(prefix)
                     .map_err(|error| format!("invalid decompile prefix: {error:?}"))?;
-                SourceTreeExtraction::decompile(
+                source_tree_extraction::decompile(
                     exec,
                     cache,
                     &jar,
@@ -1245,7 +1264,7 @@ impl BuildTaskExecutor {
         }
     }
 
-    fn reachable(plan: &TaskPlan) -> BTreeSet<TaskId> {
+    pub(crate) fn reachable(plan: &TaskPlan) -> BTreeSet<TaskId> {
         let mut reachable = BTreeSet::new();
         let mut pending: Vec<_> = plan.terminals.iter().map(TaskTerminal::input_id).collect();
         while let Some(id) = pending.pop() {
@@ -1259,7 +1278,7 @@ impl BuildTaskExecutor {
         reachable
     }
 
-    fn validate_https(value: &str) -> Result<(), String> {
+    pub(crate) fn validate_https(value: &str) -> Result<(), String> {
         if value.starts_with("https://") && !value.bytes().any(|byte| byte.is_ascii_whitespace()) {
             Ok(())
         } else {
@@ -1267,57 +1286,60 @@ impl BuildTaskExecutor {
         }
     }
 
-    const fn algorithm(algorithm: TaskDigestAlgorithm) -> &'static str {
+    pub(crate) const fn algorithm_name(algorithm: TaskDigestAlgorithm) -> &'static str {
         match algorithm {
             TaskDigestAlgorithm::Sha1 => "sha1",
             TaskDigestAlgorithm::Sha256 => "sha256",
         }
     }
 
-    fn value(values: &[Option<TaskValue>], id: TaskId) -> Result<&TaskValue, String> {
+    pub(crate) fn value(values: &[Option<TaskValue>], id: TaskId) -> Result<&TaskValue, String> {
         values
             .get(id.index())
             .and_then(Option::as_ref)
             .ok_or_else(|| format!("input node {} has no value", id.index()))
     }
 
-    fn url(values: &[Option<TaskValue>], id: TaskId) -> Result<&str, String> {
-        match Self::value(values, id)? {
+    pub(crate) fn url(values: &[Option<TaskValue>], id: TaskId) -> Result<&str, String> {
+        match value(values, id)? {
             TaskValue::Url(value) => Ok(value),
             _ => Err("task input is not a URL".to_owned()),
         }
     }
 
-    fn digest(values: &[Option<TaskValue>], id: TaskId) -> Result<ExpectedDigest, String> {
-        match Self::value(values, id)? {
+    pub(crate) fn digest(
+        values: &[Option<TaskValue>],
+        id: TaskId,
+    ) -> Result<ExpectedDigest, String> {
+        match value(values, id)? {
             TaskValue::Digest(value) => Ok(*value),
             _ => Err("task input is not a digest".to_owned()),
         }
     }
 
-    fn byte_count(values: &[Option<TaskValue>], id: TaskId) -> Result<usize, String> {
-        match Self::value(values, id)? {
+    pub(crate) fn byte_count(values: &[Option<TaskValue>], id: TaskId) -> Result<usize, String> {
+        match value(values, id)? {
             TaskValue::ByteCount(value) => Ok(*value),
             _ => Err("task input is not a byte count".to_owned()),
         }
     }
 
-    fn json(values: &[Option<TaskValue>], id: TaskId) -> Result<&Value, String> {
-        match Self::value(values, id)? {
+    pub(crate) fn json(values: &[Option<TaskValue>], id: TaskId) -> Result<&Value, String> {
+        match value(values, id)? {
             TaskValue::Json(value) => Ok(value),
             _ => Err("task input is not JSON".to_owned()),
         }
     }
 
-    fn text(values: &[Option<TaskValue>], id: TaskId) -> Result<&str, String> {
-        match Self::value(values, id)? {
+    pub(crate) fn text(values: &[Option<TaskValue>], id: TaskId) -> Result<&str, String> {
+        match value(values, id)? {
             TaskValue::Text(value) => Ok(value),
             _ => Err("task input is not text".to_owned()),
         }
     }
 
-    fn jar(values: &[Option<TaskValue>], id: TaskId) -> Result<&CacheKey, String> {
-        match Self::value(values, id)? {
+    pub(crate) fn jar_key(values: &[Option<TaskValue>], id: TaskId) -> Result<&CacheKey, String> {
+        match value(values, id)? {
             TaskValue::Jar(value) => Ok(value),
             _ => Err("task input is not a JAR".to_owned()),
         }
@@ -1327,7 +1349,7 @@ impl BuildTaskExecutor {
     ///
     /// Two enums rather than one because they are frozen by different things: the plan's tag is
     /// written into cache records, the implementation's is not. This is the one place they meet.
-    fn mapping_format(format: &TaskMappingFormat) -> jals_classpath::MappingFormat {
+    pub(crate) fn mapping_format(format: &TaskMappingFormat) -> jals_classpath::MappingFormat {
         match format {
             TaskMappingFormat::Proguard => jals_classpath::MappingFormat::Proguard,
             TaskMappingFormat::TinyV2 { from, to } => jals_classpath::MappingFormat::TinyV2 {
@@ -1338,30 +1360,34 @@ impl BuildTaskExecutor {
     }
 
     /// Lower the plan's spelling of a remap direction to the implementation's.
-    const fn remap_direction(direction: TaskRemapDirection) -> jals_classpath::RemapDirection {
+    pub(crate) const fn remap_direction(
+        direction: TaskRemapDirection,
+    ) -> jals_classpath::RemapDirection {
         match direction {
             TaskRemapDirection::Deobfuscate => jals_classpath::RemapDirection::Deobfuscate,
             TaskRemapDirection::Reobfuscate => jals_classpath::RemapDirection::Reobfuscate,
         }
     }
 
-    fn source_tree(values: &[Option<TaskValue>], id: TaskId) -> Result<&SourceTree, String> {
-        match Self::value(values, id)? {
+    pub(crate) fn source_tree(
+        values: &[Option<TaskValue>],
+        id: TaskId,
+    ) -> Result<&SourceTree, String> {
+        match value(values, id)? {
             TaskValue::SourceTree(value) => Ok(value),
             _ => Err("task input is not a source tree".to_owned()),
         }
     }
 
-    fn json_at<'a>(mut value: &'a Value, path: &[String]) -> Option<&'a Value> {
+    pub(crate) fn json_at<'a>(mut value: &'a Value, path: &[String]) -> Option<&'a Value> {
         for segment in path {
             value = value.get(segment)?;
         }
         Some(value)
     }
 
-    fn json_scalar<'a>(value: &'a Value, path: &[String]) -> Result<&'a Value, String> {
-        Self::json_at(value, path)
-            .ok_or_else(|| format!("JSON path `{}` does not exist", path.join("/")))
+    pub(crate) fn json_scalar<'a>(value: &'a Value, path: &[String]) -> Result<&'a Value, String> {
+        json_at(value, path).ok_or_else(|| format!("JSON path `{}` does not exist", path.join("/")))
     }
 }
 
@@ -1471,7 +1497,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             );
-            let first = BuildTaskExecutor::execute_root(
+            let first = api::execute_root(
                 &Exec::inline(),
                 &online,
                 &mut storage,
@@ -1493,7 +1519,7 @@ mod tests {
             // The policy now rides the capability instead of `RootBuildScriptOptions.network`,
             // which is the shape production uses.
             let offline = MockFetcher::offline();
-            let second = BuildTaskExecutor::execute_root(
+            let second = api::execute_root(
                 &Exec::inline(),
                 &offline,
                 &mut storage,
@@ -1531,7 +1557,7 @@ mod tests {
             );
             let mut storage = storage(&script);
             let fetcher = MockFetcher::online(StdBTreeMap::new());
-            let error = BuildTaskExecutor::execute_root(
+            let error = api::execute_root(
                 &Exec::inline(),
                 &fetcher,
                 &mut storage,
@@ -1596,7 +1622,7 @@ mod tests {
             let plan = TaskPlan::new();
 
             let view = storage.view();
-            let changes = BuildTaskExecutor::publication_changes(
+            let changes = api::publication_changes(
                 &view,
                 storage.artifacts(),
                 &script,
@@ -1612,7 +1638,7 @@ mod tests {
 
             let view = storage.view();
             assert!(
-                BuildTaskExecutor::publication_changes(
+                api::publication_changes(
                     &view,
                     storage.artifacts(),
                     &script,
@@ -1637,7 +1663,7 @@ mod tests {
             transaction.commit().await.unwrap();
 
             let view = storage.view();
-            let changes = BuildTaskExecutor::publication_changes(
+            let changes = api::publication_changes(
                 &view,
                 storage.artifacts(),
                 &script,

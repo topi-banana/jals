@@ -36,7 +36,7 @@ use jals_syntax::ast::{self, AstNode};
 use crate::def::{DefKind, Namespace};
 use crate::infer::TypeInference;
 use crate::project::{FileId, ItemId, ProjectIndex, TypeResolution};
-use crate::resolve::collect::Collect;
+use crate::resolve::collect;
 
 /// A checked exception a method / constructor can raise that is neither declared nor caught.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,7 +156,7 @@ impl Cx<'_> {
                     continue; // caught by an enclosing `try`.
                 }
                 out.push(UnreportedException {
-                    range: Collect::node_span(&node),
+                    range: collect::node_span(&node),
                     name: self.index.item(exc).fqn.simple_name().into(),
                 });
             }
@@ -300,7 +300,7 @@ impl Cx<'_> {
 
     /// The indexed item an expression's inferred type denotes, if it is a project/stub/classpath type.
     fn expr_item(&self, expr: &SyntaxNode) -> Option<ItemId> {
-        self.ti.type_of_expr(Collect::node_span(expr))?.project_id()
+        self.ti.type_of_expr(collect::node_span(expr))?.project_id()
     }
 
     /// Resolve an AST type reference (a `throws` / `catch` type) to an indexed item, honouring whether

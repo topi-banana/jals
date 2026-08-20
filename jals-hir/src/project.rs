@@ -43,7 +43,7 @@ use crate::Namespace;
 use crate::def::DefKind;
 use crate::reference::{Reference, Resolution};
 use crate::resolve::Resolved;
-use crate::resolve::collect::Collect;
+use crate::resolve::collect;
 use crate::ty::Ty;
 
 /// Identifies a file within a [`ProjectIndex`]. The host maps it to a path / URL; the index only
@@ -786,7 +786,7 @@ impl ProjectIndex {
         let mut classes = Vec::new();
         for cf in classfiles {
             yielder.tick().await;
-            if let Some(class) = crate::classpath::ClasspathLower::lower(cf).await {
+            if let Some(class) = crate::classpath::lower(cf).await {
                 classes.push(class);
             }
         }
@@ -951,7 +951,7 @@ impl ProjectIndex {
     /// re-indexes on every edit extracts these once and reuses them across every
     /// [`assemble`](Self::assemble).
     pub async fn stub_facts() -> Vec<(FileId, FileFacts)> {
-        let sources = crate::stdlib::Stdlib::stub_sources();
+        let sources = crate::stdlib::stub_sources();
         let mut facts = Vec::with_capacity(sources.len());
         for (i, src) in sources.iter().enumerate() {
             let root = jals_syntax::Parse::parse(src).await.syntax();
@@ -1997,13 +1997,13 @@ impl SourceLocations {
         while let Some((node, enclosing)) = stack.pop() {
             yielder.tick().await;
             let next_enclosing = if ProjectIndex::type_decl_kind(node.kind()).is_some()
-                && let Some(name_tok) = Collect::first_ident_token(&node)
+                && let Some(name_tok) = collect::first_ident_token(&node)
             {
                 let name = jals_syntax::decoded_ident(&name_tok);
                 let fqn = ProjectIndex::build_fqn(package, enclosing.as_deref(), &name);
                 self.types
                     .entry(fqn.clone())
-                    .or_insert_with(|| (file, Collect::byte_range(&name_tok)));
+                    .or_insert_with(|| (file, collect::byte_range(&name_tok)));
                 // Library sources are never `cfg`-filtered (they are navigation-only and a
                 // dependency's own feature selection does not reach this seam), so the empty map.
                 for member in
@@ -2155,14 +2155,14 @@ impl ProjectIndex {
                 });
             }
             let next_enclosing = if let Some(kind) = Self::type_decl_kind(node.kind())
-                && let Some(name_tok) = Collect::first_ident_token(&node)
+                && let Some(name_tok) = collect::first_ident_token(&node)
             {
                 let name = jals_syntax::decoded_ident(&name_tok);
                 let fqn = Self::build_fqn(package, enclosing.as_deref(), &name);
                 out.push(RawType {
                     fqn: fqn.clone(),
                     kind,
-                    name_range: Collect::byte_range(&name_tok),
+                    name_range: collect::byte_range(&name_tok),
                     type_params: Self::type_params_of(&node),
                     // Placeholder owner/file, fixed up when these facts are folded into an index.
                     members: Self::members_of_decl(ItemId(0), FileId(0), &node, &name, cfg),
@@ -2218,7 +2218,7 @@ impl ProjectIndex {
             // `<...>`; every other member kind cannot declare one.
             type_params: Vec::new(),
             file,
-            name_range: Collect::byte_range(name_tok),
+            name_range: collect::byte_range(name_tok),
             ty,
             modifiers: MemberModifiers::default(),
             params: Vec::new(),
@@ -2257,7 +2257,7 @@ impl ProjectIndex {
                     }
                 }
                 METHOD_DECL => {
-                    if let Some(name) = Collect::first_ident_token(&member) {
+                    if let Some(name) = collect::first_ident_token(&member) {
                         let declared = ast::MethodDecl::cast(member.clone());
                         // `int m()[]` returns an `int[]`, and those brackets sit after the parameter
                         // list — neither in the return `TYPE` node nor on a declarator name.
@@ -2301,7 +2301,7 @@ impl ProjectIndex {
                     }
                 }
                 CONSTRUCTOR_DECL => {
-                    if let Some(name) = Collect::first_ident_token(&member) {
+                    if let Some(name) = collect::first_ident_token(&member) {
                         let (params, varargs) = Self::params_of(&member);
                         let throws = Self::throws_of(&member);
                         members.push(Member {
@@ -2315,7 +2315,7 @@ impl ProjectIndex {
                     }
                 }
                 ENUM_CONSTANT => {
-                    if let Some(name) = Collect::first_ident_token(&member) {
+                    if let Some(name) = collect::first_ident_token(&member) {
                         let ty = MemberType::Named {
                             name: owner_simple.to_owned(),
                             qualified: None,
@@ -2349,7 +2349,7 @@ impl ProjectIndex {
                 .flat_map(|header| header.children())
                 .filter(|child| child.kind() == RECORD_COMPONENT)
                 .filter_map(|component| {
-                    let name = Collect::first_ident_token(&component)?;
+                    let name = collect::first_ident_token(&component)?;
                     let mut ty =
                         MemberType::of(ast::RecordComponent::cast(component.clone())?.ty());
                     if component
@@ -2414,7 +2414,7 @@ impl ProjectIndex {
                         // Where it is *written*, though, is the component — so "go to definition" on
                         // `p.x()` lands on the header. This is the same field the classpath uses to
                         // point a `.class` member at real source, and it is what an editor prefers.
-                        source_location: Some((file, Collect::byte_range(name))),
+                        source_location: Some((file, collect::byte_range(name))),
                     });
                 }
             }

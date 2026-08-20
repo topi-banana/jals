@@ -25,7 +25,7 @@
 //! | rung | what it proves |
 //! | --- | --- |
 //! | parsed | `jals-syntax` accepted the source with no syntax error |
-//! | lowered | `Compile::file` produced class files rather than a [`LowerError`] |
+//! | lowered | `lower::file` produced class files rather than a [`LowerError`] |
 //! | re-read | `jals_classfile::ClassFile::read` reads back what the assembler wrote |
 //! | verified | a real JVM **linked** the class: the bytecode verifier accepted it |
 //! | descriptor-equal | every method's descriptor is one javac gave the same name |
@@ -67,7 +67,7 @@ use std::process::Command;
 
 use jals_classfile::ClassFile;
 use jals_hir::{FileAnalysis, FileId, LoweredClasspath, ProjectIndex};
-use jals_javac::lower::Compile;
+use jals_javac::lower;
 use rayon::prelude::*;
 use walkdir::WalkDir;
 
@@ -1015,7 +1015,7 @@ impl CaseResult {
             );
             let semantics = analysis.in_project(&index, FileId(0));
             let typed = jals_exec::block_on_inline(semantics.typed());
-            let classes = match Compile::file(typed, MAJOR_JAVA_25) {
+            let classes = match lower::file(typed, MAJOR_JAVA_25) {
                 Err(error) => return Outcome::LowerError(format!("{error}")),
                 Ok(classes) => classes,
             };

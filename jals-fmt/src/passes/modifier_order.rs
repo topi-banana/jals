@@ -29,10 +29,12 @@ use alloc::vec::Vec;
 
 use jals_syntax::{SyntaxElement, SyntaxKind, SyntaxNode};
 
-/// Canonical modifier ordering.
-pub(crate) struct ModifierOrder;
+pub(crate) use api::plan;
 
-impl ModifierOrder {
+/// Canonical modifier ordering.
+pub(crate) mod api {
+    use super::{SyntaxElement, SyntaxKind, SyntaxNode, Vec};
+
     /// The JLS order. A kind's index here is its sort key; anything absent sorts last, keeping
     /// its relative position.
     const CANONICAL: [SyntaxKind; 14] = [
@@ -64,7 +66,7 @@ impl ModifierOrder {
             .children_with_tokens()
             .filter(|child| !child.as_token().is_some_and(|tok| tok.kind().is_trivia()))
             .collect();
-        if children.iter().any(Self::is_debris) {
+        if children.iter().any(is_debris) {
             return None;
         }
 
@@ -74,14 +76,14 @@ impl ModifierOrder {
         let mut ordered: Vec<SyntaxElement> = Vec::with_capacity(children.len());
         let mut run: Vec<SyntaxElement> = Vec::new();
         for child in &children {
-            if Self::rank(child).is_some() {
+            if rank(child).is_some() {
                 run.push(child.clone());
                 continue;
             }
-            Self::flush_run(&mut run, &mut ordered);
+            flush_run(&mut run, &mut ordered);
             ordered.push(child.clone());
         }
-        Self::flush_run(&mut run, &mut ordered);
+        flush_run(&mut run, &mut ordered);
 
         let moved = ordered
             .iter()
@@ -91,13 +93,13 @@ impl ModifierOrder {
     }
 
     /// Append `run` to `ordered` in canonical order, emptying it.
-    fn flush_run(run: &mut Vec<SyntaxElement>, ordered: &mut Vec<SyntaxElement>) {
-        run.sort_by_key(|child| Self::rank(child).unwrap_or(usize::MAX));
+    pub(crate) fn flush_run(run: &mut Vec<SyntaxElement>, ordered: &mut Vec<SyntaxElement>) {
+        run.sort_by_key(|child| rank(child).unwrap_or(usize::MAX));
         ordered.append(run);
     }
 
     /// Whether a child is error-recovery debris that makes reordering unsafe.
-    fn is_debris(child: &SyntaxElement) -> bool {
+    pub(crate) fn is_debris(child: &SyntaxElement) -> bool {
         match child {
             SyntaxElement::Node(node) => !matches!(
                 node.kind(),
@@ -109,13 +111,11 @@ impl ModifierOrder {
 
     /// A keyword modifier's rank in the JLS order, or `None` for anything that is not one — an
     /// annotation, a jals attribute, or a keyword this list does not know.
-    fn rank(child: &SyntaxElement) -> Option<usize> {
+    pub(crate) fn rank(child: &SyntaxElement) -> Option<usize> {
         let kind = match child {
             SyntaxElement::Node(node) => node.kind(),
             SyntaxElement::Token(tok) => tok.kind(),
         };
-        Self::CANONICAL
-            .iter()
-            .position(|canonical| *canonical == kind)
+        CANONICAL.iter().position(|canonical| *canonical == kind)
     }
 }

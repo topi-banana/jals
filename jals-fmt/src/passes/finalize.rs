@@ -9,10 +9,12 @@ use alloc::string::String;
 
 use crate::style::Style;
 
-/// Applies `[layout]`'s output-shape rules to the rendered text.
-pub(crate) struct Finalize;
+pub(crate) use api::apply;
 
-impl Finalize {
+/// Applies `[layout]`'s output-shape rules to the rendered text.
+pub(crate) mod api {
+    use super::{String, Style};
+
     /// Trim, normalize terminators, and settle the final newline.
     ///
     /// `src` is the text this run started from, and the only thing read off it is whether it

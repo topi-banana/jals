@@ -32,14 +32,19 @@ use serde_json::Value;
 
 use super::ImportError;
 
-/// The key/value → model bridge and its string-coercing `deserialize_with` helpers, grouped as
-/// associated functions so `deserialize_with = "Kv::…"` references them by path.
-pub(crate) struct Kv;
+pub(crate) use api::{from_object, object, opt_bool, opt_enum, opt_list, opt_number, opt_tab_flag};
 
-impl Kv {
+/// The key/value → model bridge and its string-coercing `deserialize_with` helpers, grouped as
+/// associated functions so `deserialize_with = "api::…"` references them by path.
+pub(crate) mod api {
+    use super::{
+        BTreeMap, Deserialize, DeserializeOwned, Deserializer, FromStr, ImportError,
+        IntoDeserializer, StrDeserializer, String, ToOwned, ToString, Value, Vec,
+    };
+
     /// Lift a native-config key/value map into the JSON object the model reads.
     ///
-    /// Kept separate from [`from_object`](Self::from_object) because a config's surface is
+    /// Kept separate from [`from_object`](from_object) because a config's surface is
     /// modeled as several family structs, each of which deserializes from the *same* object.
     pub(crate) fn object(pairs: BTreeMap<String, String>) -> Value {
         Value::Object(

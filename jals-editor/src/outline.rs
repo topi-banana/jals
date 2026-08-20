@@ -29,92 +29,92 @@ pub struct OutlineNode {
     pub(crate) children: Vec<Self>,
 }
 
+pub use api::of;
 /// Builds the document outline from a parsed file's syntax tree.
-pub struct Outline;
+mod api {
+    use super::{
+        AstNode, ClassBody, Decl, DefKind, EnumDecl, Member, OutlineNode, SourceFile, String,
+        SyntaxNode, ToOwned, Vec,
+    };
 
-impl Outline {
     /// The outline of `root`'s top-level declarations (empty for a non-source-file root).
     pub fn of(root: &SyntaxNode) -> Vec<OutlineNode> {
         let Some(file) = SourceFile::cast(root.clone()) else {
             return Vec::new();
         };
-        file.decls().map(|decl| Self::for_decl(&decl)).collect()
+        file.decls().map(|decl| for_decl(&decl)).collect()
     }
 
     /// The outline node for a top-level declaration.
-    fn for_decl(decl: &Decl) -> OutlineNode {
+    pub(crate) fn for_decl(decl: &Decl) -> OutlineNode {
         match decl {
-            Decl::Class(d) => Self::for_type(d.syntax(), d.name(), DefKind::Class, d.body()),
-            Decl::Interface(d) => {
-                Self::for_type(d.syntax(), d.name(), DefKind::Interface, d.body())
-            }
-            Decl::Record(d) => Self::for_type(d.syntax(), d.name(), DefKind::Record, d.body()),
+            Decl::Class(d) => for_type(d.syntax(), d.name(), DefKind::Class, d.body()),
+            Decl::Interface(d) => for_type(d.syntax(), d.name(), DefKind::Interface, d.body()),
+            Decl::Record(d) => for_type(d.syntax(), d.name(), DefKind::Record, d.body()),
             Decl::AnnotationType(d) => {
-                Self::for_type(d.syntax(), d.name(), DefKind::AnnotationType, d.body())
+                for_type(d.syntax(), d.name(), DefKind::AnnotationType, d.body())
             }
-            Decl::Enum(d) => Self::for_enum(d),
+            Decl::Enum(d) => for_enum(d),
             // Top-level field / method of a compact source file (JEP 512).
-            Decl::Field(d) => Self::leaf(d.syntax(), d.name(), DefKind::Field),
-            Decl::Method(d) => Self::leaf(d.syntax(), d.name(), DefKind::Method),
+            Decl::Field(d) => leaf(d.syntax(), d.name(), DefKind::Field),
+            Decl::Method(d) => leaf(d.syntax(), d.name(), DefKind::Method),
         }
     }
 
     /// The outline node for a type member, or `None` for an unnamed initializer block.
-    fn for_member(member: &Member) -> Option<OutlineNode> {
+    pub(crate) fn for_member(member: &Member) -> Option<OutlineNode> {
         let node = match member {
-            Member::Field(d) => Self::leaf(d.syntax(), d.name(), DefKind::Field),
-            Member::Method(d) => Self::leaf(d.syntax(), d.name(), DefKind::Method),
-            Member::Constructor(d) => Self::leaf(d.syntax(), d.name(), DefKind::Constructor),
+            Member::Field(d) => leaf(d.syntax(), d.name(), DefKind::Field),
+            Member::Method(d) => leaf(d.syntax(), d.name(), DefKind::Method),
+            Member::Constructor(d) => leaf(d.syntax(), d.name(), DefKind::Constructor),
             // Unnamed static/instance initializer block: skip.
             Member::Initializer(_) => return None,
-            Member::Class(d) => Self::for_type(d.syntax(), d.name(), DefKind::Class, d.body()),
-            Member::Interface(d) => {
-                Self::for_type(d.syntax(), d.name(), DefKind::Interface, d.body())
-            }
-            Member::Record(d) => Self::for_type(d.syntax(), d.name(), DefKind::Record, d.body()),
+            Member::Class(d) => for_type(d.syntax(), d.name(), DefKind::Class, d.body()),
+            Member::Interface(d) => for_type(d.syntax(), d.name(), DefKind::Interface, d.body()),
+            Member::Record(d) => for_type(d.syntax(), d.name(), DefKind::Record, d.body()),
             Member::AnnotationType(d) => {
-                Self::for_type(d.syntax(), d.name(), DefKind::AnnotationType, d.body())
+                for_type(d.syntax(), d.name(), DefKind::AnnotationType, d.body())
             }
-            Member::Enum(d) => Self::for_enum(d),
+            Member::Enum(d) => for_enum(d),
         };
         Some(node)
     }
 
     /// A type-like node (class/interface/record/annotation) whose children are its members.
-    fn for_type(
+    pub(crate) fn for_type(
         node: &SyntaxNode,
         name: Option<String>,
         kind: DefKind,
         body: Option<ClassBody>,
     ) -> OutlineNode {
         let children = body
-            .map(|b| b.members().filter_map(|m| Self::for_member(&m)).collect())
+            .map(|b| b.members().filter_map(|m| for_member(&m)).collect())
             .unwrap_or_default();
-        Self::node(node, name, kind, children)
+        assemble(node, name, kind, children)
     }
 
     /// An enum node, whose children are its constants followed by its members.
-    fn for_enum(d: &EnumDecl) -> OutlineNode {
+    pub(crate) fn for_enum(d: &EnumDecl) -> OutlineNode {
         let children = d
             .body()
             .map(|b| {
                 let constants = b
                     .constants()
-                    .map(|c| Self::leaf(c.syntax(), c.name(), DefKind::EnumConstant));
-                let members = b.members().filter_map(|m| Self::for_member(&m));
+                    .map(|c| leaf(c.syntax(), c.name(), DefKind::EnumConstant));
+                let members = b.members().filter_map(|m| for_member(&m));
                 constants.chain(members).collect()
             })
             .unwrap_or_default();
-        Self::node(d.syntax(), d.name(), DefKind::Enum, children)
+        assemble(d.syntax(), d.name(), DefKind::Enum, children)
     }
 
     /// A node with no children.
-    fn leaf(node: &SyntaxNode, name: Option<String>, kind: DefKind) -> OutlineNode {
-        Self::node(node, name, kind, Vec::new())
+    pub(crate) fn leaf(node: &SyntaxNode, name: Option<String>, kind: DefKind) -> OutlineNode {
+        assemble(node, name, kind, Vec::new())
     }
 
     /// Assemble an [`OutlineNode`] over `node`'s byte range.
-    fn node(
+    pub(crate) fn assemble(
         node: &SyntaxNode,
         name: Option<String>,
         kind: DefKind,
@@ -137,7 +137,7 @@ mod tests {
 
     fn outline(text: &str) -> Vec<OutlineNode> {
         let parse = jals_exec::block_on_inline(jals_syntax::Parse::parse(text));
-        Outline::of(&parse.syntax())
+        api::of(&parse.syntax())
     }
 
     /// `(name, kind)` pairs of a level, for compact assertions.

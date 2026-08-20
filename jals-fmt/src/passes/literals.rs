@@ -16,19 +16,23 @@ use alloc::string::String;
 use jals_config::fmt::{FloatLiteralTrailingZero, HexLiteralCase, LiteralSuffixCase, Literals};
 use jals_syntax::SyntaxKind;
 
-/// The literal rewrites, as a namespace over `[literals]`.
-pub(crate) struct LiteralRewrite;
+pub(crate) use api::{KINDS, apply, is_active};
 
-impl LiteralRewrite {
+/// The literal rewrites, as a namespace over `[literals]`.
+pub(crate) mod api {
+    use super::{
+        Cow, FloatLiteralTrailingZero, HexLiteralCase, LiteralSuffixCase, Literals, String,
+        SyntaxKind, format,
+    };
+
     /// The token kinds `[literals]` can respell.
     ///
-    /// Read by [`apply`](Self::apply) and by this operation's row in
+    /// Read by [`apply`](apply) and by this operation's row in
     /// [`OPERATIONS`](super::token_license::OPERATIONS), so the license can never come out narrower
     /// than the pass. Adding a rewrite over a third kind without adding it here would make the pass
     /// change a token no row claims — which the fail-safe answers by returning the whole file
     /// unformatted.
-    pub(crate) const KINDS: &'static [SyntaxKind] =
-        &[SyntaxKind::INT_LITERAL, SyntaxKind::FLOAT_LITERAL];
+    pub(crate) const KINDS: &[SyntaxKind] = &[SyntaxKind::INT_LITERAL, SyntaxKind::FLOAT_LITERAL];
 
     /// The final text of a literal token, borrowing when nothing changes.
     ///
@@ -36,17 +40,17 @@ impl LiteralRewrite {
     /// suffix letter — and they operate on disjoint parts of a literal, so the order does not
     /// affect the result. It is fixed anyway, so the composition stays idempotent by inspection.
     pub(crate) fn apply(text: &str, kind: SyntaxKind, rules: Literals) -> Cow<'_, str> {
-        if !Self::KINDS.contains(&kind) {
+        if !KINDS.contains(&kind) {
             return Cow::Borrowed(text);
         }
         let mut current = Cow::Borrowed(text);
-        if let Some(next) = Self::hex_case(&current, rules.hex_case) {
+        if let Some(next) = hex_case(&current, rules.hex_case) {
             current = Cow::Owned(next);
         }
-        if let Some(next) = Self::float_trailing_zero(&current, rules.float_trailing_zero) {
+        if let Some(next) = float_trailing_zero(&current, rules.float_trailing_zero) {
             current = Cow::Owned(next);
         }
-        if let Some(next) = Self::suffix_case(&current, kind, rules.suffix_case) {
+        if let Some(next) = suffix_case(&current, kind, rules.suffix_case) {
             current = Cow::Owned(next);
         }
         current
@@ -66,7 +70,7 @@ impl LiteralRewrite {
     /// unchanged); for a hex integer it stops before a trailing `l` / `L`. A well-formed
     /// mantissa holds only hex digits, `.`, and `_`, so an ASCII case map touches exactly the
     /// `a`–`f` letters.
-    fn hex_case(lit: &str, case: HexLiteralCase) -> Option<String> {
+    pub(crate) fn hex_case(lit: &str, case: HexLiteralCase) -> Option<String> {
         if case == HexLiteralCase::Preserve {
             return None;
         }
@@ -100,7 +104,10 @@ impl LiteralRewrite {
     /// `Never` strips the whole zero run at once (`1.00` → `1.`), which is what makes it
     /// idempotent in one pass; a fraction with a non-zero digit or an underscore (`1.0_0`) is
     /// left intact.
-    fn float_trailing_zero(lit: &str, policy: FloatLiteralTrailingZero) -> Option<String> {
+    pub(crate) fn float_trailing_zero(
+        lit: &str,
+        policy: FloatLiteralTrailingZero,
+    ) -> Option<String> {
         if policy == FloatLiteralTrailingZero::Preserve {
             return None;
         }
@@ -135,7 +142,11 @@ impl LiteralRewrite {
     /// The token kind disambiguates the otherwise ambiguous trailing letters: a final `f` / `d`
     /// on an *integer* literal is a hex digit (`0xabcdef`), never a suffix, and a float literal
     /// never ends in `l` / `L`.
-    fn suffix_case(lit: &str, kind: SyntaxKind, case: LiteralSuffixCase) -> Option<String> {
+    pub(crate) fn suffix_case(
+        lit: &str,
+        kind: SyntaxKind,
+        case: LiteralSuffixCase,
+    ) -> Option<String> {
         if case == LiteralSuffixCase::Preserve {
             return None;
         }

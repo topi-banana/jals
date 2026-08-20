@@ -34,17 +34,23 @@ use crate::walk::{
     Acquired, DeclaredEntry, DeclaredFile, DeclaredTree, GraphHost, GraphWalk, Opened, Placement,
 };
 
-/// Native entry point for recursive dependency graph discovery.
-pub struct NativeProjectGraph;
+#[cfg(test)]
+pub(crate) use api::discover;
 
-impl NativeProjectGraph {
+/// Native entry point for recursive dependency graph discovery.
+mod api {
+    use super::{
+        BTreeSet, Command, DeclaringProject, Exec, GraphError, GraphWalk, GraphWarning, Manifest,
+        NativeGraphState, NativeHost, NetworkPolicy, Path, ResolvedProjectGraph, ToString,
+    };
+
     /// A `git` invocation that can never stop waiting for a human.
     ///
     /// Dependency acquisition runs unattended — from `jals build`, but also from the language
     /// server while someone is just editing. Git's default behaviour on a private or mistyped
     /// remote is to prompt for credentials on the inherited terminal, which would hang the build
     /// (or the whole LSP session) with no visible cause. Fail fast instead.
-    fn git_command() -> Command {
+    pub(crate) fn git_command() -> Command {
         let mut command = Command::new("git");
         command
             .env("GIT_TERMINAL_PROMPT", "0")
@@ -53,6 +59,52 @@ impl NativeProjectGraph {
             .env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
             .stdin(std::process::Stdio::null());
         command
+    }
+    /// Discover all root path/Git dependencies recursively. The root manifest is never searched
+    /// upward; every dependency probes exactly its selected root's `jals.toml`.
+    pub(crate) async fn discover(
+        root_manifest: &Manifest,
+        root_directory: &Path,
+        exec: &Exec,
+        network: NetworkPolicy,
+    ) -> Result<ResolvedProjectGraph, GraphError> {
+        root_manifest
+            .validate()
+            .map_err(|error| GraphError::InvalidRootManifest {
+                message: error.to_string(),
+            })?;
+        let root = NativeHost::canonical_project_root(root_directory).await?;
+        let snapshot = NativeHost::snapshot(&root, exec).await?;
+        // The root project is no node, so its own snapshot diagnostics are attributed to nothing.
+        // Seeded ahead of the walk so they read before anything it finds.
+        let warnings = NativeHost::snapshot_notes("snapshot", &snapshot.diagnostics)
+            .into_iter()
+            .map(|message| GraphWarning {
+                node: None,
+                dependency: None,
+                message,
+            })
+            .collect();
+        let declaring = DeclaringProject {
+            root,
+            view: snapshot.view,
+            confinement: None,
+        };
+        let mut host = NativeHost {
+            exec: exec.clone(),
+            network,
+            watch_paths: BTreeSet::new(),
+        };
+        let output = GraphWalk::run(&mut host, &declaring, root_manifest, warnings).await?;
+        Ok(ResolvedProjectGraph {
+            nodes: output.nodes,
+            edges: output.edges,
+            order: output.order,
+            warnings: output.warnings,
+            native: NativeGraphState {
+                watch_paths: host.watch_paths.into_iter().collect(),
+            },
+        })
     }
 }
 
@@ -142,55 +194,6 @@ struct NativeHost {
     watch_paths: BTreeSet<PathBuf>,
 }
 
-impl NativeProjectGraph {
-    /// Discover all root path/Git dependencies recursively. The root manifest is never searched
-    /// upward; every dependency probes exactly its selected root's `jals.toml`.
-    pub(crate) async fn discover(
-        root_manifest: &Manifest,
-        root_directory: &Path,
-        exec: &Exec,
-        network: NetworkPolicy,
-    ) -> Result<ResolvedProjectGraph, GraphError> {
-        root_manifest
-            .validate()
-            .map_err(|error| GraphError::InvalidRootManifest {
-                message: error.to_string(),
-            })?;
-        let root = NativeHost::canonical_project_root(root_directory).await?;
-        let snapshot = NativeHost::snapshot(&root, exec).await?;
-        // The root project is no node, so its own snapshot diagnostics are attributed to nothing.
-        // Seeded ahead of the walk so they read before anything it finds.
-        let warnings = NativeHost::snapshot_notes("snapshot", &snapshot.diagnostics)
-            .into_iter()
-            .map(|message| GraphWarning {
-                node: None,
-                dependency: None,
-                message,
-            })
-            .collect();
-        let declaring = DeclaringProject {
-            root,
-            view: snapshot.view,
-            confinement: None,
-        };
-        let mut host = NativeHost {
-            exec: exec.clone(),
-            network,
-            watch_paths: BTreeSet::new(),
-        };
-        let output = GraphWalk::run(&mut host, &declaring, root_manifest, warnings).await?;
-        Ok(ResolvedProjectGraph {
-            nodes: output.nodes,
-            edges: output.edges,
-            order: output.order,
-            warnings: output.warnings,
-            native: NativeGraphState {
-                watch_paths: host.watch_paths.into_iter().collect(),
-            },
-        })
-    }
-}
-
 impl ProjectScript {
     /// The graph phase over a native project root: discover, preprocess, project, and resolve the
     /// root's and the graph's inputs against `storage`.
@@ -212,10 +215,9 @@ impl ProjectScript {
         // — exactly as `resolve_memory` does. Rebuilding one here instead is what used to fetch
         // under `--offline`.
         let fetcher = preprocess.fetcher;
-        let graph =
-            NativeProjectGraph::discover(manifest, root, preprocess.exec, fetcher.network())
-                .await
-                .map_err(GraphResolveError::unreported)?;
+        let graph = api::discover(manifest, root, preprocess.exec, fetcher.network())
+            .await
+            .map_err(GraphResolveError::unreported)?;
         let discovered = graph.warnings.clone();
         let graph = graph
             .preprocess(storage.artifacts_mut(), preprocess)
@@ -683,7 +685,7 @@ impl GraphHost for NativeHost {
                 let temporary = tempfile::tempdir()
                     .map_err(|error| format!("creating temporary Git checkout: {error}"))?;
                 let checkout = temporary.path().join("checkout");
-                let clone = NativeProjectGraph::git_command()
+                let clone = api::git_command()
                     .current_dir(&current_directory)
                     .arg("clone")
                     .arg("--quiet")
@@ -701,7 +703,7 @@ impl GraphHost for NativeHost {
                     ));
                 }
                 if let Some(target) = checkout_arg {
-                    let output = NativeProjectGraph::git_command()
+                    let output = api::git_command()
                         .arg("-C")
                         .arg(&checkout)
                         .arg("checkout")
@@ -719,7 +721,7 @@ impl GraphHost for NativeHost {
                         ));
                     }
                 }
-                let head = NativeProjectGraph::git_command()
+                let head = api::git_command()
                     .arg("-C")
                     .arg(&checkout)
                     .arg("rev-parse")
@@ -1007,24 +1009,23 @@ mod tests {
                     .unwrap();
 
             let mut storage = MemoryStorage::memory(CodeTree::default());
-            let graph =
-                NativeProjectGraph::discover(&root, project.path(), &exec, NetworkPolicy::Offline)
-                    .await
-                    .unwrap()
-                    .preprocess(
-                        storage.artifacts_mut(),
-                        crate::graph::GraphPreprocess {
-                            exec: &exec,
-                            fetcher: &UnreachableFetcher,
-                            // A root selection the dependency must not inherit.
-                            environment: &BuildScriptEnvironment::new()
-                                .with_features(BTreeSet::from(["root-only".to_owned()])),
-                            root_features: &ResolvedBuildFeatures::default(),
-                            limits: &BuildScriptLimits::default(),
-                        },
-                    )
-                    .await
-                    .unwrap();
+            let graph = api::discover(&root, project.path(), &exec, NetworkPolicy::Offline)
+                .await
+                .unwrap()
+                .preprocess(
+                    storage.artifacts_mut(),
+                    crate::graph::GraphPreprocess {
+                        exec: &exec,
+                        fetcher: &UnreachableFetcher,
+                        // A root selection the dependency must not inherit.
+                        environment: &BuildScriptEnvironment::new()
+                            .with_features(BTreeSet::from(["root-only".to_owned()])),
+                        root_features: &ResolvedBuildFeatures::default(),
+                        limits: &BuildScriptLimits::default(),
+                    },
+                )
+                .await
+                .unwrap();
 
             let generated: Vec<String> = graph
                 .exports

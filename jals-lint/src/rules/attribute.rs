@@ -23,15 +23,15 @@ pub(crate) const RULE: RuleMeta = RuleMeta {
     check: Checker::Gated {
         feature: Feature::Attributes,
         subject: "attributes (`#[cfg(...)]`)",
-        find: Attr::find,
+        find: api::find,
     },
 };
 
 /// The `attribute` rule.
-struct Attr;
+mod api {
+    use super::{SyntaxKind, SyntaxNode, Vec};
 
-impl Attr {
-    fn find(root: &SyntaxNode) -> Vec<SyntaxNode> {
+    pub(crate) fn find(root: &SyntaxNode) -> Vec<SyntaxNode> {
         // The driver runs this only when `attributes` is disabled and stamps the gate message, so
         // here we just locate the syntax. Attributes attach at several depths (imports, any
         // declaration's modifiers, statements), so they are found by kind rather than through one

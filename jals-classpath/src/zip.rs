@@ -621,16 +621,21 @@ pub(crate) struct WriteMember {
     pub(crate) bytes: Vec<u8>,
 }
 
-/// Stored-only zip writer.
-pub(crate) struct StoredZip;
+pub(crate) use api::write;
 
-impl StoredZip {
+/// Stored-only zip writer.
+mod api {
+    use super::{
+        BTreeSet, CENTRAL_HEADER_SIG, EOCD_SIG, LOCAL_HEADER_SIG, String, ToOwned, Vec,
+        WriteMember, format, le,
+    };
+
     /// Whether `name` is a member path that stays inside the archive when extracted.
     ///
     /// Mirrors the reader's extraction check: relative, `/`-separated, no `.`/`..` segment, no
     /// backslash (which Windows would treat as a separator), no drive letter, and no NUL or
     /// control character.
-    fn is_safe_member_name(name: &str) -> bool {
+    pub(crate) fn is_safe_member_name(name: &str) -> bool {
         if name.is_empty()
             || name.starts_with('/')
             || name.contains('\\')
@@ -663,7 +668,7 @@ impl StoredZip {
         // duplicate names here rather than relying on every extraction site to re-check.
         let mut names = BTreeSet::new();
         for member in members {
-            if !Self::is_safe_member_name(&member.name) {
+            if !is_safe_member_name(&member.name) {
                 return Err(format!(
                     "archive member `{}` is not a safe name",
                     member.name
@@ -818,7 +823,7 @@ mod tests {
                 bytes: bytes.to_vec(),
             })
             .collect();
-        let archive = StoredZip::write(&members).expect("stored writer succeeds");
+        let archive = api::write(&members).expect("stored writer succeeds");
 
         // The in-house reader round-trips the archive byte-for-byte.
         let directory = parse(&archive);
@@ -861,10 +866,7 @@ mod tests {
                 name: name.to_owned(),
                 bytes: b"x".to_vec(),
             }];
-            assert!(
-                StoredZip::write(&members).is_err(),
-                "`{name}` must be rejected"
-            );
+            assert!(api::write(&members).is_err(), "`{name}` must be rejected");
         }
 
         let duplicated = vec![
@@ -877,7 +879,7 @@ mod tests {
                 bytes: b"two".to_vec(),
             },
         ];
-        assert!(StoredZip::write(&duplicated).is_err());
+        assert!(api::write(&duplicated).is_err());
     }
 
     /// Two writes of the same members produce identical bytes (no timestamps, no nondeterminism).
@@ -889,8 +891,8 @@ mod tests {
                 bytes: format!("member {n}").into_bytes(),
             })
             .collect();
-        let a = StoredZip::write(&members).unwrap();
-        let b = StoredZip::write(&members).unwrap();
+        let a = api::write(&members).unwrap();
+        let b = api::write(&members).unwrap();
         assert_eq!(a, b);
     }
 

@@ -25,15 +25,15 @@ pub(crate) const RULE: RuleMeta = RuleMeta {
     check: Checker::Gated {
         feature: Feature::CompactSourceFiles,
         subject: "top-level declarations like `main`",
-        find: CompactSourceFile::find,
+        find: api::find,
     },
 };
 
 /// The `compact-source-file` rule.
-struct CompactSourceFile;
+mod api {
+    use super::{AstNode, Decl, SourceFile, SyntaxNode, Vec};
 
-impl CompactSourceFile {
-    fn find(root: &SyntaxNode) -> Vec<SyntaxNode> {
+    pub(crate) fn find(root: &SyntaxNode) -> Vec<SyntaxNode> {
         // The driver runs this only when `compact-source-files` is disabled and stamps the gate
         // message, so here we just locate the syntax (nothing when the root is not a source file).
         let Some(file) = SourceFile::cast(root.clone()) else {

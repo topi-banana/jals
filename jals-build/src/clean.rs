@@ -1,6 +1,6 @@
 //! Pure resolution of the build artifacts that `jals clean` removes.
 //!
-//! [`CleanTargets::keys`] turns a [`Manifest`] into the set of root-relative directory keys whose
+//! [`api::keys`] turns a [`Manifest`] into the set of root-relative directory keys whose
 //! removal constitutes a clean — the Java analogue of `cargo clean` deleting `target/`. Like the
 //! rest of this crate it is pure: it computes keys but never touches the filesystem. `jals-cli`
 //! resolves them against the project root and owns the removal, which keeps this logic
@@ -11,10 +11,12 @@ use alloc::vec::Vec;
 use jals_config::Manifest;
 use jals_storage::DirKey;
 
-/// Namespace for resolving the build artifacts that `jals clean` removes.
-pub struct CleanTargets;
+pub use api::keys as clean_target_keys;
 
-impl CleanTargets {
+/// Namespace for resolving the build artifacts that `jals clean` removes.
+mod api {
+    use super::{DirKey, Manifest, Vec, vec};
+
     /// Resolve the build-output directories that `jals clean` should remove for `manifest`, as
     /// root-relative keys the caller resolves against the project root.
     ///
@@ -73,7 +75,7 @@ mod tests {
     #[test]
     fn removes_the_classes_dir_and_stale_build_script_outputs() {
         let m = Manifest::default();
-        let paths = CleanTargets::keys(&m).unwrap();
+        let paths = api::keys(&m).unwrap();
         assert_eq!(
             paths,
             vec![
@@ -87,7 +89,7 @@ mod tests {
     fn honors_a_custom_classes_dir() {
         let mut m = Manifest::default();
         m.build.classes_dir = "out".into();
-        let paths = CleanTargets::keys(&m).unwrap();
+        let paths = api::keys(&m).unwrap();
         assert_eq!(
             paths,
             vec![
@@ -104,15 +106,12 @@ mod tests {
     fn rejects_a_root_classes_dir() {
         let mut m = Manifest::default();
         m.build.classes_dir = String::new();
-        assert_eq!(
-            CleanTargets::keys(&m),
-            Err(jals_storage::PathError::DirectoryIsRoot)
-        );
+        assert_eq!(api::keys(&m), Err(jals_storage::PathError::DirectoryIsRoot));
 
         // `.` never reaches the root check: `Name` rejects it outright. Pin that too, so neither
         // spelling of "the project root" can become a clean target.
         m.build.classes_dir = ".".into();
-        assert!(CleanTargets::keys(&m).is_err());
+        assert!(api::keys(&m).is_err());
     }
 
     #[test]
@@ -120,7 +119,7 @@ mod tests {
         let mut m = Manifest::default();
         m.build.classes_dir = "target/jals/build".into();
         assert_eq!(
-            CleanTargets::keys(&m).unwrap(),
+            api::keys(&m).unwrap(),
             vec![DirKey::parse("target/jals/build").unwrap()]
         );
     }
@@ -134,7 +133,7 @@ mod tests {
         let script = FileKey::parse("scripts/build.rhai").unwrap();
 
         assert!(
-            CleanTargets::keys(&manifest)
+            api::keys(&manifest)
                 .unwrap()
                 .iter()
                 .all(|target| !script.path().starts_with(target.path()))
@@ -145,7 +144,7 @@ mod tests {
     fn a_declared_remap_contributes_its_managed_root() {
         let mut m = Manifest::default();
         assert!(
-            !CleanTargets::keys(&m)
+            !api::keys(&m)
                 .unwrap()
                 .contains(&DirKey::parse(jals_config::MANAGED_REMAP_ROOT).unwrap())
         );
@@ -155,7 +154,7 @@ mod tests {
             jar: None,
         });
         assert!(
-            CleanTargets::keys(&m)
+            api::keys(&m)
                 .unwrap()
                 .contains(&DirKey::parse(jals_config::MANAGED_REMAP_ROOT).unwrap())
         );
@@ -170,7 +169,7 @@ mod tests {
             with: "mojmap".to_owned(),
             jar: Some("dist/mod.jar".to_owned()),
         });
-        let keys = CleanTargets::keys(&m).unwrap();
+        let keys = api::keys(&m).unwrap();
         assert!(!keys.contains(&DirKey::parse("dist").unwrap()), "{keys:?}");
         assert!(keys.contains(&DirKey::parse(jals_config::MANAGED_REMAP_ROOT).unwrap()));
     }

@@ -14,17 +14,19 @@ extern "C" {
     fn download_bytes(name: &str, bytes: &js_sys::Uint8Array);
 }
 
-/// Namespace for handing bytes to the browser.
-pub struct Download;
+pub use api::save;
 
-impl Download {
+/// Namespace for handing bytes to the browser.
+mod api {
+    use super::*;
+
     /// Save `bytes` as a download named `name`.
     ///
     /// A browser-only effect: like every Monaco binding this panics off `wasm32`, so no test may
-    /// reach it. [`Compile::workspace`] returns bytes rather than saving them for exactly that
+    /// reach it. [`compile::workspace`] returns bytes rather than saving them for exactly that
     /// reason.
     ///
-    /// [`Compile::workspace`]: crate::compile::Compile::workspace
+    /// [`compile::workspace`]: crate::compile::workspace
     pub fn save(name: &str, bytes: &[u8]) {
         download_bytes(name, &js_sys::Uint8Array::from(bytes));
     }

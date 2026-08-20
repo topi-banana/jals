@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use jals_classpath::{
-    Fetcher, JarPackage, JarRemap, MappingResolver, MappingSpec, RemapDirection, RemapRequest,
+    Fetcher, MappingSpec, RemapDirection, RemapRequest, jar_remap, mapping_resolver, write_jar,
 };
 use jals_config::{AmbiguousMapping, BackendKind, Manifest, ResolvedBuildFeatures};
 use jals_exec::Exec;
@@ -189,7 +189,7 @@ impl RemapPlan {
         // byte for byte.
         let mut entries = classes.to_vec();
         entries.extend(self.resource_entries(&view));
-        let staged = JarPackage::write(&entries, main_class)?;
+        let staged = write_jar(&entries, main_class)?;
 
         // No active mapping is the whole answer: the packaged jar already carries the names the
         // target runtime loads, and its manifest's `Main-Class` is correspondingly left alone
@@ -198,7 +198,7 @@ impl RemapPlan {
             return Ok(staged);
         };
 
-        let mappings = MappingResolver::text(fetcher, &view, storage.artifacts_mut(), mapping)
+        let mappings = mapping_resolver::text(fetcher, &view, storage.artifacts_mut(), mapping)
             .await
             .map_err(|warning| warning.to_string())?;
 
@@ -209,7 +209,7 @@ impl RemapPlan {
             .await
             .map_err(|error| format!("staging the compiled classes failed: {error:?}"))?;
 
-        let remapped = JarRemap::remap(
+        let remapped = jar_remap::remap(
             exec,
             storage.artifacts_mut(),
             &key,
@@ -277,10 +277,12 @@ impl RemapPlan {
     }
 }
 
-/// Namespace for the class bytes a host collects for [`RemapPlan::run`].
-pub struct CompiledClasses;
+pub use api::are_in_memory;
 
-impl CompiledClasses {
+/// Namespace for the class bytes a host collects for [`RemapPlan::run`].
+mod api {
+    use super::{RelativePath, Vec};
+
     /// Whether a compile's artifacts came back in memory.
     ///
     /// An in-process backend's output *is* its return value; a process-based one wrote its own

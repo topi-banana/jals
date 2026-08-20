@@ -679,23 +679,34 @@ enum DiagnosticLevelWire {
 /// The provenance shared by every writer and re-derivation of build-script state and output
 /// keys. All sides must fold identically or persisted state stops resolving its outputs —
 /// always go through these functions, never inline the fold.
-struct CacheIdentity;
+mod cache_identity {
+    use super::{
+        BUILD_SCRIPT_API_VERSION, BuildScriptCacheScope, ContentDigest, FileKey, ProvenanceFold,
+        ToString,
+    };
 
-impl CacheIdentity {
-    const STATE: &'static [u8] = b"jals.build-script.state\0";
-    const OUTPUT: &'static [u8] = b"jals.build-script.output\0";
+    const STATE: &[u8] = b"jals.build-script.state\0";
+    const OUTPUT: &[u8] = b"jals.build-script.output\0";
 
-    fn state(scope: BuildScriptCacheScope, script: &FileKey) -> ContentDigest {
-        Self::fold(Self::STATE, scope, script).finish()
+    pub(super) fn state(scope: BuildScriptCacheScope, script: &FileKey) -> ContentDigest {
+        fold(STATE, scope, script).finish()
     }
 
-    fn output(scope: BuildScriptCacheScope, script: &FileKey, output: &FileKey) -> ContentDigest {
-        let mut fold = Self::fold(Self::OUTPUT, scope, script);
+    pub(super) fn output(
+        scope: BuildScriptCacheScope,
+        script: &FileKey,
+        output: &FileKey,
+    ) -> ContentDigest {
+        let mut fold = fold(OUTPUT, scope, script);
         fold.bytes(output.to_string().as_bytes());
         fold.finish()
     }
 
-    fn fold(kind: &'static [u8], scope: BuildScriptCacheScope, script: &FileKey) -> ProvenanceFold {
+    pub(super) fn fold(
+        kind: &'static [u8],
+        scope: BuildScriptCacheScope,
+        script: &FileKey,
+    ) -> ProvenanceFold {
         let mut fold = ProvenanceFold::new(kind);
         fold.version(BUILD_SCRIPT_API_VERSION)
             .opt_digest(scope.digest())
@@ -993,7 +1004,7 @@ impl PreparedBuildScript {
         self.pending.generated.get(path).map(|bytes| {
             CacheKey::new(
                 CacheNamespace::BuildScriptOutput,
-                CacheIdentity::output(self.cache_scope, &self.script, path),
+                cache_identity::output(self.cache_scope, &self.script, path),
                 ContentDigest::of(bytes),
             )
         })
@@ -1041,6 +1052,7 @@ impl PreparedBuildScript {
 }
 
 mod api {
+    use super::cache_identity;
     use alloc::borrow::ToOwned;
     use alloc::boxed::Box;
     use alloc::collections::{BTreeMap, BTreeSet};
@@ -1062,10 +1074,10 @@ mod api {
         BuildScriptCacheScope, BuildScriptDiagnostic, BuildScriptEnvironment, BuildScriptError,
         BuildScriptLimits, BuildScriptLimitsWire, BuildScriptOutput, BuildScriptOutputPath,
         BuildScriptPosition, BuildScriptSession, BuildScriptSeverity, BuildScriptStateWire,
-        CacheIdentity, DiagnosticLevelWire, DiagnosticWire, EnvironmentFingerprintWire,
-        FileFingerprintWire, FingerprintFilesModeWire, FingerprintInputsWire, MANAGED_ROOT,
-        MANIFEST_FILE, OutputApi, OutputArtifactWire, PendingOutput, PreparedBuildScript,
-        PreparedCacheState, ProjectApi, RHAI_OUTPUT_ROOT,
+        DiagnosticLevelWire, DiagnosticWire, EnvironmentFingerprintWire, FileFingerprintWire,
+        FingerprintFilesModeWire, FingerprintInputsWire, MANAGED_ROOT, MANIFEST_FILE, OutputApi,
+        OutputArtifactWire, PendingOutput, PreparedBuildScript, PreparedCacheState, ProjectApi,
+        RHAI_OUTPUT_ROOT,
     };
     use crate::task::{TaskPlan, TasksApi};
 
@@ -2245,7 +2257,7 @@ mod api {
         let state_key = cache
             .indexed_key(
                 CacheNamespace::BuildScriptState,
-                CacheIdentity::state(cache_scope, script),
+                cache_identity::state(cache_scope, script),
             )
             .await
             .ok()??;
@@ -2274,7 +2286,7 @@ mod api {
         for (path, digest) in &state.outputs {
             let key = CacheKey::new(
                 CacheNamespace::BuildScriptOutput,
-                CacheIdentity::output(cache_scope, script, path),
+                cache_identity::output(cache_scope, script, path),
                 *digest,
             );
             match cache
@@ -2479,7 +2491,7 @@ mod api {
         }
         let state_key = CacheKey::new(
             CacheNamespace::BuildScriptState,
-            CacheIdentity::state(cache_scope, script),
+            cache_identity::state(cache_scope, script),
             ContentDigest::of(&state_bytes),
         );
         Ok(PreparedCacheState {
@@ -2821,7 +2833,7 @@ mod tests {
             .artifacts()
             .indexed_key(
                 CacheNamespace::BuildScriptState,
-                CacheIdentity::state(cache_scope, &script),
+                cache_identity::state(cache_scope, &script),
             )
             .await
             .unwrap()
@@ -2945,7 +2957,7 @@ mod tests {
                     .artifacts()
                     .indexed_key(
                         CacheNamespace::BuildScriptState,
-                        CacheIdentity::state(scope, &script),
+                        cache_identity::state(scope, &script),
                     )
                     .await
                     .unwrap()
@@ -4315,7 +4327,7 @@ mod tests {
             let missing_output_state = serde_json::to_vec(&state).unwrap();
             let missing_output_key = CacheKey::new(
                 CacheNamespace::BuildScriptState,
-                CacheIdentity::state(BuildScriptCacheScope::ROOT, &script_key),
+                cache_identity::state(BuildScriptCacheScope::ROOT, &script_key),
                 ContentDigest::of(&missing_output_state),
             );
             storage
@@ -4342,7 +4354,7 @@ mod tests {
             let malformed = br#"{"state_version":1}"#;
             let malformed_key = CacheKey::new(
                 CacheNamespace::BuildScriptState,
-                CacheIdentity::state(BuildScriptCacheScope::ROOT, &script_key),
+                cache_identity::state(BuildScriptCacheScope::ROOT, &script_key),
                 ContentDigest::of(malformed),
             );
             storage
@@ -4398,7 +4410,7 @@ mod tests {
             let oversized_directive_state = serde_json::to_vec(&directive_state).unwrap();
             let oversized_directive_key = CacheKey::new(
                 CacheNamespace::BuildScriptState,
-                CacheIdentity::state(BuildScriptCacheScope::ROOT, &script),
+                cache_identity::state(BuildScriptCacheScope::ROOT, &script),
                 ContentDigest::of(&oversized_directive_state),
             );
             storage
@@ -4430,7 +4442,7 @@ mod tests {
             let oversized_output = b"123456789";
             let oversized_output_key = CacheKey::new(
                 CacheNamespace::BuildScriptOutput,
-                CacheIdentity::output(BuildScriptCacheScope::ROOT, &script, &output_path),
+                cache_identity::output(BuildScriptCacheScope::ROOT, &script, &output_path),
                 ContentDigest::of(oversized_output),
             );
             storage
@@ -4442,7 +4454,7 @@ mod tests {
             let oversized_output_state = serde_json::to_vec(&state).unwrap();
             let oversized_output_state_key = CacheKey::new(
                 CacheNamespace::BuildScriptState,
-                CacheIdentity::state(BuildScriptCacheScope::ROOT, &script),
+                cache_identity::state(BuildScriptCacheScope::ROOT, &script),
                 ContentDigest::of(&oversized_output_state),
             );
             storage
@@ -4470,7 +4482,7 @@ mod tests {
             let oversized_state = vec![b'x'; limits.max_cache_state_size + 1];
             let oversized_state_key = CacheKey::new(
                 CacheNamespace::BuildScriptState,
-                CacheIdentity::state(BuildScriptCacheScope::ROOT, &script),
+                cache_identity::state(BuildScriptCacheScope::ROOT, &script),
                 ContentDigest::of(&oversized_state),
             );
             storage
@@ -4604,7 +4616,7 @@ mod tests {
                     .artifacts()
                     .indexed_key(
                         CacheNamespace::BuildScriptState,
-                        CacheIdentity::state(
+                        cache_identity::state(
                             BuildScriptCacheScope::ROOT,
                             &FileKey::parse("build.rhai").unwrap(),
                         ),

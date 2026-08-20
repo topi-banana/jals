@@ -2,11 +2,11 @@ use super::*;
 use crate::DiscoverableConfig;
 
 /// The fragment parser, grouped so it is not a free function.
-struct Fixture;
+mod api {
+    use super::Config;
 
-impl Fixture {
     /// Parse a `jalsfmt.toml` fragment, panicking with the parse error on failure.
-    fn parse(src: &str) -> Config {
+    pub(super) fn parse(src: &str) -> Config {
         toml::from_str(src).expect("fragment should parse")
     }
 }
@@ -94,12 +94,12 @@ fn defaults_align_mapped_keys_with_rustfmt() {
 
 #[test]
 fn empty_input_is_the_default_config() {
-    assert_eq!(Fixture::parse(""), Config::default());
+    assert_eq!(api::parse(""), Config::default());
 }
 
 #[test]
 fn an_omitted_section_keeps_its_defaults() {
-    let c = Fixture::parse("[layout]\nindent-width = 2\n");
+    let c = api::parse("[layout]\nindent-width = 2\n");
     assert_eq!(c.layout.indent_width, 2);
     // Untouched keys in the same section, and every other section, are unchanged.
     assert_eq!(c.layout.max_width, Layout::default().max_width);
@@ -109,7 +109,7 @@ fn an_omitted_section_keeps_its_defaults() {
 
 #[test]
 fn every_section_round_trips_from_toml() {
-    let c = Fixture::parse(
+    let c = api::parse(
         r#"
         [layout]
         indent-style = "mixed"
@@ -198,7 +198,7 @@ fn every_section_round_trips_from_toml() {
 fn the_five_colon_contexts_are_independent() {
     // The old rule set folded these into `space-before-colon` plus an additive
     // `space-around-operator-colon`; each context now stands alone.
-    let c = Fixture::parse(
+    let c = api::parse(
         r"
         [spacing]
         before-ternary-colon = false
@@ -218,7 +218,7 @@ fn the_five_colon_contexts_are_independent() {
 #[test]
 fn an_unknown_key_is_ignored_rather_than_rejected() {
     // A config written for a newer jals must still load, so unknown keys are dropped.
-    let c = Fixture::parse("[layout]\nindent-width = 2\nnot-a-real-key = 7\n");
+    let c = api::parse("[layout]\nindent-width = 2\nnot-a-real-key = 7\n");
     assert_eq!(c.layout.indent_width, 2);
 }
 
@@ -229,7 +229,7 @@ fn a_rule_that_grew_states_still_reads_the_spelling_it_replaced() {
     // it stops loading too. Both of these were emitted by `jals_fmt::generate` for every
     // google-java-format and palantir import, and one of them is what this repo's own
     // `jals-fmt.toml` said.
-    let old = Fixture::parse(concat!(
+    let old = api::parse(concat!(
         "[wrapping]\ninline-argumentless-annotations = true\n",
         "[comments]\nalign-tag-descriptions = true\n",
     ));
@@ -239,7 +239,7 @@ fn a_rule_that_grew_states_still_reads_the_spelling_it_replaced() {
     );
     assert_eq!(old.comments.tag_alignment, TagAlignment::All);
 
-    let off = Fixture::parse(concat!(
+    let off = api::parse(concat!(
         "[wrapping]\ninline-argumentless-annotations = false\n",
         "[comments]\nalign-tag-descriptions = false\n",
     ));
@@ -250,7 +250,7 @@ fn a_rule_that_grew_states_still_reads_the_spelling_it_replaced() {
     assert_eq!(off.comments.tag_alignment, TagAlignment::None);
 
     // The new spelling is what the same keys are written back as, so a migrated file is stable.
-    let new = Fixture::parse(concat!(
+    let new = api::parse(concat!(
         "[wrapping]\ninline-argumentless-annotations = \"locals\"\n",
         "[comments]\ntag-alignment = \"grouped\"\n",
     ));
@@ -269,12 +269,12 @@ fn a_documented_member_is_separated_more_less_or_by_its_kind() {
         Config::default().blank_lines.around_documented_member,
         DocumentedMember::Inherit,
     );
-    let raised = Fixture::parse("[blank-lines]\naround-documented-member = 1\n");
+    let raised = api::parse("[blank-lines]\naround-documented-member = 1\n");
     assert_eq!(
         raised.blank_lines.around_documented_member,
         DocumentedMember::AtLeast(1),
     );
-    let kept = Fixture::parse("[blank-lines]\naround-documented-member = \"preserve\"\n");
+    let kept = api::parse("[blank-lines]\naround-documented-member = \"preserve\"\n");
     assert_eq!(
         kept.blank_lines.around_documented_member,
         DocumentedMember::Preserve,

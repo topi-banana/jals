@@ -9,10 +9,12 @@ use zed_extension_api::{
 
 use crate::GITHUB_REPO;
 
-/// The GitHub Actions artifacts API for the [`GITHUB_REPO`] repository.
-pub(crate) struct Github;
+pub(crate) use api::latest_artifact_id;
 
-impl Github {
+/// The GitHub Actions artifacts API for the [`GITHUB_REPO`] repository.
+mod api {
+    use super::*;
+
     /// Looks up the id of the newest un-expired `main`-branch artifact with the given name.
     /// The listing endpoint — unlike the artifact download — allows anonymous access.
     pub(crate) fn latest_artifact_id(artifact_name: &str) -> Result<u64> {
