@@ -384,7 +384,7 @@ impl ExpectedDigest {
             return None;
         }
         let mut out = [0u8; N];
-        for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
+        for (index, chunk) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
             let high = char::from(chunk[0]).to_digit(16)?;
             let low = char::from(chunk[1]).to_digit(16)?;
             out[index] = u8::try_from((high << 4) | low).ok()?;
