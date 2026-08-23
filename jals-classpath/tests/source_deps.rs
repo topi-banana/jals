@@ -1,3 +1,5 @@
+use core::future::{Future, ready};
+
 use jals_classpath::{Fetcher, ProjectInputOptions, ProjectInputPlan, ProjectInputs};
 use jals_exec::block_on_inline;
 use jals_storage::{CodeTree, Entry, FileKey, MemoryStorage};
@@ -9,7 +11,14 @@ impl Fetcher for NoFetch {
         jals_classpath::NetworkPolicy::Online
     }
 
-    async fn fetch_admitted(&self, _: &str) -> Result<Vec<u8>, String> {
+    fn fetch_admitted(&self, _: &str) -> impl Future<Output = Result<Vec<u8>, String>> {
+        ready(Self::refuse())
+    }
+}
+
+impl NoFetch {
+    /// Diverges: being asked at all is the failure this fixture asserts against.
+    fn refuse() -> Result<Vec<u8>, String> {
         panic!("unexpected fetch")
     }
 }

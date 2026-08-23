@@ -8,6 +8,7 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::future::{Future, ready};
 
 use jals_exec::Exec;
 
@@ -1163,13 +1164,19 @@ impl io::Read for NativeArtifactReader {
 }
 
 impl io::Seek for NativeArtifactReader {
-    async fn seek(&mut self, pos: SeekFrom) -> core::result::Result<u64, IoError> {
-        self.pos = pos.resolve(self.len, self.pos)?;
-        Ok(self.pos)
+    fn seek(&mut self, pos: SeekFrom) -> impl Future<Output = core::result::Result<u64, IoError>> {
+        ready(self.seek_now(pos))
     }
 }
 
 impl NativeArtifactReader {
+    /// Seeking only moves the offset the next read starts at, so it never touches the host and
+    /// is the one operation on this reader that completes without suspending.
+    fn seek_now(&mut self, pos: SeekFrom) -> core::result::Result<u64, IoError> {
+        self.pos = pos.resolve(self.len, self.pos)?;
+        Ok(self.pos)
+    }
+
     #[cfg(unix)]
     fn read_at(
         file: &ArtifactHandle,

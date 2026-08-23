@@ -1,3 +1,5 @@
+use core::future::{Future, ready};
+
 use std::io::{Cursor, Write};
 
 use jals_classpath::{
@@ -20,7 +22,14 @@ impl Fetcher for NoFetch {
         jals_classpath::NetworkPolicy::Online
     }
 
-    async fn fetch_admitted(&self, _: &str) -> Result<Vec<u8>, String> {
+    fn fetch_admitted(&self, _: &str) -> impl Future<Output = Result<Vec<u8>, String>> {
+        ready(Self::refuse())
+    }
+}
+
+impl NoFetch {
+    /// Diverges: being asked at all is the failure this fixture asserts against.
+    fn refuse() -> Result<Vec<u8>, String> {
         panic!("unexpected fetch")
     }
 }

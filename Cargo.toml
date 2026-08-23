@@ -170,14 +170,6 @@ future_not_send = "allow"
 # `pub(crate)` in a private module is a deliberate crate-internal intent marker; the nursery lint
 # that flags it as redundant would erase that signal, so keep it off.
 redundant_pub_crate = "allow"
-# An `async fn` in a trait impl states that the *contract* is async, not that this particular
-# implementation suspends. Half the workspace's sealed backends are in-memory ones that complete
-# every operation immediately — `MemorySource`, `MemoryCache`, the portable `MemoryProjectPlan`
-# graph — and their host-backed siblings implement the very same trait by suspending. Rewriting
-# each immediate impl to return `impl Future` would spell an implementation detail into ~60
-# signatures, obscure that the two adapters satisfy one contract, and break the day the impl grows
-# an `.await`.
-unused_async_trait_impl = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 missing_safety_doc = "allow"

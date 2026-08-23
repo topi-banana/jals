@@ -6,6 +6,7 @@
 //! reaching them from outside would be the very hand-sequencing the seam exists to prevent. The
 //! module is `native`-gated, which is the same range the integration test built in.
 
+use core::future::{Future, ready};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -31,7 +32,14 @@ impl jals_classpath::Fetcher for UnreachableFetcher {
         jals_classpath::NetworkPolicy::Online
     }
 
-    async fn fetch_admitted(&self, locator: &str) -> Result<Vec<u8>, String> {
+    fn fetch_admitted(&self, locator: &str) -> impl Future<Output = Result<Vec<u8>, String>> {
+        ready(Self::refuse(locator))
+    }
+}
+
+impl UnreachableFetcher {
+    /// Diverges: being asked at all is the failure this fixture asserts against.
+    fn refuse(locator: &str) -> Result<Vec<u8>, String> {
         panic!("this graph must not fetch, but asked for `{locator}`")
     }
 }
@@ -1452,13 +1460,15 @@ impl jals_classpath::Fetcher for CountingFetcher {
         jals_classpath::NetworkPolicy::Online
     }
 
-    async fn fetch_admitted(&self, locator: &str) -> Result<Vec<u8>, String> {
+    fn fetch_admitted(&self, locator: &str) -> impl Future<Output = Result<Vec<u8>, String>> {
         self.calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.responses
-            .get(locator)
-            .cloned()
-            .ok_or_else(|| format!("unexpected fetch `{locator}`"))
+        ready(
+            self.responses
+                .get(locator)
+                .cloned()
+                .ok_or_else(|| format!("unexpected fetch `{locator}`")),
+        )
     }
 }
 
@@ -2747,7 +2757,14 @@ impl jals_classpath::Fetcher for RefusingFetcher {
         jals_classpath::NetworkPolicy::Offline
     }
 
-    async fn fetch_admitted(&self, locator: &str) -> Result<Vec<u8>, String> {
+    fn fetch_admitted(&self, locator: &str) -> impl Future<Output = Result<Vec<u8>, String>> {
+        ready(Self::refuse(locator))
+    }
+}
+
+impl RefusingFetcher {
+    /// Diverges: the gate must refuse before an ask can reach this adapter.
+    fn refuse(locator: &str) -> Result<Vec<u8>, String> {
         panic!("the gate must refuse before this runs, but `{locator}` reached it")
     }
 }

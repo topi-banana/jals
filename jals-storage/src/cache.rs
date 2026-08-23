@@ -4,6 +4,7 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
+use core::future::{Future, ready};
 
 use jals_exec::Yielder;
 use sha2::{Digest, Sha256};
@@ -364,48 +365,54 @@ impl private::Sealed for MemoryCache {}
 impl CacheBackend for MemoryCache {
     type Reader = io::Cursor<Arc<[u8]>>;
 
-    async fn open(&self, key: &CacheKey) -> core::result::Result<Option<Self::Reader>, CacheError> {
-        Ok(self
+    fn open(
+        &self,
+        key: &CacheKey,
+    ) -> impl Future<Output = core::result::Result<Option<Self::Reader>, CacheError>> {
+        ready(Ok(self
             .entries
             .get(key)
-            .map(|bytes| io::Cursor::new(Arc::clone(bytes))))
+            .map(|bytes| io::Cursor::new(Arc::clone(bytes)))))
     }
 
-    async fn load(&self, key: &CacheKey) -> core::result::Result<Option<Vec<u8>>, CacheError> {
-        Ok(self.entries.get(key).map(|bytes| bytes.to_vec()))
+    fn load(
+        &self,
+        key: &CacheKey,
+    ) -> impl Future<Output = core::result::Result<Option<Vec<u8>>, CacheError>> {
+        ready(Ok(self.entries.get(key).map(|bytes| bytes.to_vec())))
     }
 
-    async fn publish_once(
+    fn publish_once(
         &mut self,
         key: &CacheKey,
         bytes: &[u8],
-    ) -> core::result::Result<(), CacheError> {
-        match self.entries.get(key) {
+    ) -> impl Future<Output = core::result::Result<(), CacheError>> {
+        ready(match self.entries.get(key) {
             Some(existing) if existing[..] == *bytes => Ok(()),
             Some(_) => Err(CacheError::Conflict),
             None => {
                 self.entries.insert(key.clone(), Arc::from(bytes));
                 Ok(())
             }
-        }
+        })
     }
 
-    async fn load_index(
+    fn load_index(
         &self,
         namespace: CacheNamespace,
         provenance: &ContentDigest,
-    ) -> core::result::Result<Option<ContentDigest>, CacheError> {
-        Ok(self.index.get(&(namespace, *provenance)).copied())
+    ) -> impl Future<Output = core::result::Result<Option<ContentDigest>, CacheError>> {
+        ready(Ok(self.index.get(&(namespace, *provenance)).copied()))
     }
 
-    async fn store_index(
+    fn store_index(
         &mut self,
         namespace: CacheNamespace,
         provenance: &ContentDigest,
         content: &ContentDigest,
-    ) -> core::result::Result<(), CacheError> {
+    ) -> impl Future<Output = core::result::Result<(), CacheError>> {
         self.index.insert((namespace, *provenance), *content);
-        Ok(())
+        ready(Ok(()))
     }
 }
 

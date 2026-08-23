@@ -1,6 +1,8 @@
 //! The streaming side of the codec: parsing through a portable reader must behave exactly like
 //! parsing a slice, and source failures must stay distinct from malformed input.
 
+use core::future::{Future, ready};
+
 use std::fs::File;
 use std::io::BufReader;
 
@@ -75,14 +77,15 @@ struct FailAfter {
 }
 
 impl Read for FailAfter {
-    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
-        if self.prefix.is_empty() {
-            return Err(IoError::Failed(String::from("simulated source failure")));
-        }
-        let n = self.prefix.len().min(buf.len());
-        buf[..n].copy_from_slice(&self.prefix[..n]);
-        self.prefix.drain(..n);
-        Ok(n)
+    fn read(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<usize, IoError>> {
+        ready(if self.prefix.is_empty() {
+            Err(IoError::Failed(String::from("simulated source failure")))
+        } else {
+            let n = self.prefix.len().min(buf.len());
+            buf[..n].copy_from_slice(&self.prefix[..n]);
+            self.prefix.drain(..n);
+            Ok(n)
+        })
     }
 }
 

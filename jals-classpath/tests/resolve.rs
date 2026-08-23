@@ -1,3 +1,5 @@
+use core::future::{Future, ready};
+
 use std::collections::BTreeSet;
 use std::str::FromStr as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -46,9 +48,9 @@ impl Fetcher for MockFetcher {
         self.network
     }
 
-    async fn fetch_admitted(&self, _locator: &str) -> Result<Vec<u8>, String> {
+    fn fetch_admitted(&self, _locator: &str) -> impl Future<Output = Result<Vec<u8>, String>> {
         self.calls.fetch_add(1, Ordering::Relaxed);
-        Ok(self.bytes.clone())
+        ready(Ok(self.bytes.clone()))
     }
 }
 
@@ -236,7 +238,14 @@ impl Fetcher for OfflineFetcher {
         NetworkPolicy::Offline
     }
 
-    async fn fetch_admitted(&self, locator: &str) -> Result<Vec<u8>, String> {
+    fn fetch_admitted(&self, locator: &str) -> impl Future<Output = Result<Vec<u8>, String>> {
+        ready(Self::refuse(locator))
+    }
+}
+
+impl OfflineFetcher {
+    /// Diverges: locator-index recovery must answer before anything reaches the fetch seam.
+    fn refuse(locator: &str) -> Result<Vec<u8>, String> {
         panic!("resolution must not fetch, but asked for `{locator}`")
     }
 }
