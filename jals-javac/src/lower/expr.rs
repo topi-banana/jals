@@ -2046,7 +2046,7 @@ impl Expr {
     }
 
     /// The comparison a token sequence spells, if it is one.
-    fn comparison(operator: &[SyntaxKind]) -> Option<Compare> {
+    const fn comparison(operator: &[SyntaxKind]) -> Option<Compare> {
         Some(match operator {
             [EQ_EQ] => Compare::Eq,
             [BANG_EQ] => Compare::Ne,

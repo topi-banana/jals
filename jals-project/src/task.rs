@@ -1370,6 +1370,8 @@ mod tests {
     use std::collections::BTreeMap as StdBTreeMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use core::future::{Future, ready};
+
     use jals_config::BuildScript;
     use jals_exec::block_on_inline;
     use jals_storage::{CodeTree, Entry, MemoryStorage, Name};
@@ -1406,12 +1408,14 @@ mod tests {
             self.network
         }
 
-        async fn fetch_admitted(&self, locator: &str) -> Result<Vec<u8>, String> {
+        fn fetch_admitted(&self, locator: &str) -> impl Future<Output = Result<Vec<u8>, String>> {
             self.calls.fetch_add(1, Ordering::Relaxed);
-            self.responses
-                .get(locator)
-                .cloned()
-                .ok_or_else(|| format!("unexpected fetch `{locator}`"))
+            ready(
+                self.responses
+                    .get(locator)
+                    .cloned()
+                    .ok_or_else(|| format!("unexpected fetch `{locator}`")),
+            )
         }
     }
 

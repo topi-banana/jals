@@ -893,8 +893,10 @@ impl GraphHost for NativeHost {
 
 #[cfg(test)]
 mod tests {
+    use core::future::{Future, ready};
     use jals_build::build_script::{BuildScriptEnvironment, BuildScriptLimits};
     use jals_config::ResolvedBuildFeatures;
+
     use jals_storage::{CodeTree, MemoryStorage};
 
     use super::*;
@@ -909,7 +911,14 @@ mod tests {
             jals_classpath::NetworkPolicy::Online
         }
 
-        async fn fetch_admitted(&self, locator: &str) -> Result<Vec<u8>, String> {
+        fn fetch_admitted(&self, locator: &str) -> impl Future<Output = Result<Vec<u8>, String>> {
+            ready(Self::refuse(locator))
+        }
+    }
+
+    impl UnreachableFetcher {
+        /// Diverges: being asked at all is the failure this fixture asserts against.
+        fn refuse(locator: &str) -> Result<Vec<u8>, String> {
             panic!("this graph must not fetch, but asked for `{locator}`")
         }
     }

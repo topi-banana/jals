@@ -386,6 +386,7 @@ impl core::error::Error for GraphResolveError {
 mod tests {
     use alloc::string::String;
     use alloc::vec;
+    use core::future::{Future, ready};
 
     use jals_build::build_script::{BuildScriptEnvironment, BuildScriptLimits};
     use jals_config::ResolvedBuildFeatures;
@@ -405,7 +406,14 @@ mod tests {
             jals_classpath::NetworkPolicy::Online
         }
 
-        async fn fetch_admitted(&self, locator: &str) -> Result<Vec<u8>, String> {
+        fn fetch_admitted(&self, locator: &str) -> impl Future<Output = Result<Vec<u8>, String>> {
+            ready(Self::refuse(locator))
+        }
+    }
+
+    impl UnreachableFetcher {
+        /// Diverges: being asked at all is the failure this fixture asserts against.
+        fn refuse(locator: &str) -> Result<Vec<u8>, String> {
             panic!("this assembly must not fetch, but asked for `{locator}`")
         }
     }

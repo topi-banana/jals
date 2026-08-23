@@ -9,6 +9,7 @@ use alloc::borrow::ToOwned;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::future::{Future, ready};
 
 use jals_config::{GitDependency, Manifest, PathDependency};
 use jals_storage::{
@@ -118,26 +119,13 @@ impl MemoryHost {
     }
 }
 
-impl GraphHost for MemoryHost {
-    type Site = Selected;
-    type Project = RelativePath;
-    /// Selecting a subtree copies nothing that has to be cleaned up.
-    type Guard = ();
-
-    const SCOPE: &'static str = "memory";
-
-    fn manifest_location(&self, _id: &NodeId, acquired: &Acquired<Self>) -> String {
-        let root = &acquired.site.root;
-        if root.is_root() {
-            "jals.toml".to_owned()
-        } else {
-            format!("{root}/jals.toml")
-        }
-    }
-
-    async fn acquire_path(
-        &mut self,
-        project: &Self::Project,
+/// The always-ready primitives behind the [`GraphHost`] impl below. An in-memory graph resolves
+/// every declaration out of one captured tree, so nothing here reaches a host or suspends; the
+/// trait impl wraps each in `ready`.
+impl MemoryHost {
+    fn acquire_path_now(
+        &self,
+        project: &RelativePath,
         dependency: &PathDependency,
     ) -> Result<Acquired<Self>, String> {
         let base = Self::normalize(project, &dependency.path)?;
@@ -162,37 +150,10 @@ impl GraphHost for MemoryHost {
         })
     }
 
-    async fn acquire_git(
-        &mut self,
-        _project: &Self::Project,
-        _name: &str,
-        _dependency: &GitDependency,
-    ) -> Result<Acquired<Self>, String> {
-        Err("Git dependencies cannot be acquired from a portable memory graph".to_owned())
-    }
-
-    async fn open(&mut self, acquired: &Acquired<Self>) -> Result<Opened<Self>, GraphError> {
-        Ok(Opened {
-            view: acquired.site.view.clone(),
-            project: acquired.site.root.clone(),
-            notes: Vec::new(),
-            // Every file in the captured tree is already read. A `jals.toml` that is not here is
-            // one the project does not have.
-            manifest_unreadable: None,
-        })
-    }
-
-    fn admitted(&mut self, _acquired: &Acquired<Self>) {}
-
-    async fn release(&mut self, (): Self::Guard) -> Result<(), String> {
-        Ok(())
-    }
-
-    async fn resolve_declared_file(
-        &mut self,
-        project: &Self::Project,
+    fn resolve_declared_file_now(
+        &self,
+        project: &RelativePath,
         raw: &str,
-        _role: &str,
     ) -> Result<DeclaredFile, String> {
         let path = Self::normalize(project, raw)?;
         let key = FileKey::new(path.clone())
@@ -209,11 +170,10 @@ impl GraphHost for MemoryHost {
         })
     }
 
-    async fn resolve_source_dir(
-        &mut self,
-        project: &Self::Project,
+    fn resolve_source_dir_now(
+        &self,
+        project: &RelativePath,
         raw: &str,
-        _notes: &mut Vec<String>,
     ) -> Result<DeclaredTree, String> {
         let path = Self::normalize(project, raw)
             .map_err(|message| format!("source directory is unavailable: {message}"))?;
@@ -228,11 +188,10 @@ impl GraphHost for MemoryHost {
         })
     }
 
-    async fn resolve_classpath_entry(
-        &mut self,
-        project: &Self::Project,
+    fn resolve_classpath_entry_now(
+        &self,
+        project: &RelativePath,
         raw: &str,
-        _notes: &mut Vec<String>,
     ) -> Result<DeclaredEntry, String> {
         let path = Self::normalize(project, raw)
             .map_err(|message| format!("classpath entry is unavailable: {message}"))?;
@@ -259,6 +218,90 @@ impl GraphHost for MemoryHost {
     }
 }
 
+impl GraphHost for MemoryHost {
+    type Site = Selected;
+    type Project = RelativePath;
+    /// Selecting a subtree copies nothing that has to be cleaned up.
+    type Guard = ();
+
+    const SCOPE: &'static str = "memory";
+
+    fn manifest_location(&self, _id: &NodeId, acquired: &Acquired<Self>) -> String {
+        let root = &acquired.site.root;
+        if root.is_root() {
+            "jals.toml".to_owned()
+        } else {
+            format!("{root}/jals.toml")
+        }
+    }
+
+    fn acquire_path(
+        &mut self,
+        project: &Self::Project,
+        dependency: &PathDependency,
+    ) -> impl Future<Output = Result<Acquired<Self>, String>> {
+        ready(self.acquire_path_now(project, dependency))
+    }
+
+    fn acquire_git(
+        &mut self,
+        _project: &Self::Project,
+        _name: &str,
+        _dependency: &GitDependency,
+    ) -> impl Future<Output = Result<Acquired<Self>, String>> {
+        ready(Err(
+            "Git dependencies cannot be acquired from a portable memory graph".to_owned(),
+        ))
+    }
+
+    fn open(
+        &mut self,
+        acquired: &Acquired<Self>,
+    ) -> impl Future<Output = Result<Opened<Self>, GraphError>> {
+        ready(Ok(Opened {
+            view: acquired.site.view.clone(),
+            project: acquired.site.root.clone(),
+            notes: Vec::new(),
+            // Every file in the captured tree is already read. A `jals.toml` that is not here is
+            // one the project does not have.
+            manifest_unreadable: None,
+        }))
+    }
+
+    fn admitted(&mut self, _acquired: &Acquired<Self>) {}
+
+    fn release(&mut self, (): Self::Guard) -> impl Future<Output = Result<(), String>> {
+        ready(Ok(()))
+    }
+
+    fn resolve_declared_file(
+        &mut self,
+        project: &Self::Project,
+        raw: &str,
+        _role: &str,
+    ) -> impl Future<Output = Result<DeclaredFile, String>> {
+        ready(self.resolve_declared_file_now(project, raw))
+    }
+
+    fn resolve_source_dir(
+        &mut self,
+        project: &Self::Project,
+        raw: &str,
+        _notes: &mut Vec<String>,
+    ) -> impl Future<Output = Result<DeclaredTree, String>> {
+        ready(self.resolve_source_dir_now(project, raw))
+    }
+
+    fn resolve_classpath_entry(
+        &mut self,
+        project: &Self::Project,
+        raw: &str,
+        _notes: &mut Vec<String>,
+    ) -> impl Future<Output = Result<DeclaredEntry, String>> {
+        ready(self.resolve_classpath_entry_now(project, raw))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use alloc::collections::BTreeSet;
@@ -273,14 +316,21 @@ mod tests {
     /// A fetch capability for graphs that declare no task plan. Reaching it is the failure.
     struct UnreachableFetcher;
 
+    impl UnreachableFetcher {
+        /// Diverges: being asked at all is the failure this fixture asserts against.
+        fn refuse(locator: &str) -> Result<Vec<u8>, String> {
+            panic!("this graph must not fetch, but asked for `{locator}`")
+        }
+    }
+
     impl jals_classpath::Fetcher for UnreachableFetcher {
         // `Online`: the panic is the assertion — `Offline` would refuse first and pass blind.
         fn network(&self) -> jals_classpath::NetworkPolicy {
             jals_classpath::NetworkPolicy::Online
         }
 
-        async fn fetch_admitted(&self, locator: &str) -> Result<Vec<u8>, String> {
-            panic!("this graph must not fetch, but asked for `{locator}`")
+        fn fetch_admitted(&self, locator: &str) -> impl Future<Output = Result<Vec<u8>, String>> {
+            ready(Self::refuse(locator))
         }
     }
 

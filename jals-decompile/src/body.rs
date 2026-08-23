@@ -2842,7 +2842,7 @@ impl Structurer<'_, '_> {
 
     /// Claim block `b` as emitted exactly once — the "emitted exactly once" invariant `structure`
     /// asserts — bailing if it was already visited.
-    fn claim(visited: &mut [bool], b: usize) -> Option<()> {
+    const fn claim(visited: &mut [bool], b: usize) -> Option<()> {
         if visited[b] {
             return None;
         }

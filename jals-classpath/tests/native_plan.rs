@@ -2,6 +2,8 @@
 //! Native manifest lowering: host path spellings, in-project `path` dependencies, and
 //! out-of-project (sibling) `path` dependencies.
 
+use core::future::{Future, ready};
+
 use std::fs;
 use std::str::FromStr;
 
@@ -28,7 +30,14 @@ impl Fetcher for NoFetch {
         jals_classpath::NetworkPolicy::Online
     }
 
-    async fn fetch_admitted(&self, _: &str) -> Result<Vec<u8>, String> {
+    fn fetch_admitted(&self, _: &str) -> impl Future<Output = Result<Vec<u8>, String>> {
+        ready(Self::refuse())
+    }
+}
+
+impl NoFetch {
+    /// Diverges: being asked at all is the failure this fixture asserts against.
+    fn refuse() -> Result<Vec<u8>, String> {
         panic!("unexpected fetch")
     }
 }

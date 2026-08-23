@@ -261,7 +261,7 @@ impl StringWrapper {
             // What follows the concatenation on its line — the `);` of `foo("…");` — has to
             // fit after the last chunk, so the last line's budget answers for it.
             let end = usize::from(range.end());
-            let trailing = src[end..].find('\n').map_or(src.len() - end, |at| at);
+            let trailing = src[end..].find('\n').unwrap_or(src.len() - end);
             if let Some(text) = Self::rewrap(&pieces, column, trailing, style) {
                 edits.push((range, text));
             }

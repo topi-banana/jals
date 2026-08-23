@@ -1,6 +1,7 @@
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use core::future::{Future, ready};
 
 use jals_exec::Exec;
 
@@ -56,26 +57,33 @@ impl MemorySource {
 
 impl private::Sealed for MemorySource {}
 
+impl MemorySource {
+    /// The always-ready primitive behind [`SourceBackend::apply`]. In-memory storage cannot change
+    /// underneath the aggregate, so the base snapshot carries no extra precondition beyond the
+    /// tree's own structural checks.
+    fn apply_now(&mut self, changes: &[Change]) -> Result<()> {
+        let mut next = self.tree.clone();
+        next.apply_changes(changes)?;
+        self.tree = next;
+        Ok(())
+    }
+}
+
 impl SourceBackend for MemorySource {
-    async fn snapshot(&self, _exec: &Exec) -> Result<SourceSnapshot> {
-        Ok(SourceSnapshot {
+    fn snapshot(&self, _exec: &Exec) -> impl Future<Output = Result<SourceSnapshot>> {
+        ready(Ok(SourceSnapshot {
             tree: self.tree.clone(),
             diagnostics: Vec::new(),
-        })
+        }))
     }
 
-    async fn apply(
+    fn apply(
         &mut self,
         changes: Arc<[Change]>,
         _base: &CodeTree,
         _exec: &Exec,
-    ) -> Result<()> {
-        // In-memory storage cannot change underneath the aggregate, so the base snapshot carries
-        // no extra precondition beyond the tree's own structural checks.
-        let mut next = self.tree.clone();
-        next.apply_changes(&changes)?;
-        self.tree = next;
-        Ok(())
+    ) -> impl Future<Output = Result<()>> {
+        ready(self.apply_now(&changes))
     }
 }
 
@@ -603,19 +611,19 @@ mod tests {
     }
     impl private::Sealed for FailingSource {}
     impl SourceBackend for FailingSource {
-        async fn snapshot(&self, _exec: &Exec) -> Result<SourceSnapshot> {
-            Ok(SourceSnapshot {
+        fn snapshot(&self, _exec: &Exec) -> impl Future<Output = Result<SourceSnapshot>> {
+            ready(Ok(SourceSnapshot {
                 tree: self.tree.clone(),
                 diagnostics: Vec::new(),
-            })
+            }))
         }
-        async fn apply(
+        fn apply(
             &mut self,
             _changes: Arc<[Change]>,
             _base: &CodeTree,
             _exec: &Exec,
-        ) -> Result<()> {
-            Err(Error::Io("injected persistence failure".into()))
+        ) -> impl Future<Output = Result<()>> {
+            ready(Err(Error::Io("injected persistence failure".into())))
         }
     }
 

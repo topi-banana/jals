@@ -11,6 +11,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec;
 use core::fmt;
+use core::future::{Future, ready};
 
 /// Failure of a portable byte source.
 ///
@@ -118,8 +119,8 @@ mod detail {
 
 /// Mirrors `std`: a slice reads by consuming itself from the front. Always ready.
 impl Read for &[u8] {
-    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
-        Ok(read_from_slice(self, buf))
+    fn read(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<usize, IoError>> {
+        ready(Ok(read_from_slice(self, buf)))
     }
 }
 
@@ -139,21 +140,33 @@ impl<T> Cursor<T> {
     }
 }
 
-impl<T: AsRef<[u8]>> Read for Cursor<T> {
-    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
+/// The always-ready primitives the [`Read`] and [`Seek`] impls below wrap: an in-memory cursor
+/// moves bytes and its position without ever suspending.
+impl<T: AsRef<[u8]>> Cursor<T> {
+    fn read_now(&mut self, buf: &mut [u8]) -> usize {
         let data = self.data.as_ref();
         let start = usize::try_from(self.pos).map_or(data.len(), |pos| pos.min(data.len()));
         let mut pending = &data[start..];
         let n = read_from_slice(&mut pending, buf);
         self.pos += n as u64;
-        Ok(n)
+        n
+    }
+
+    fn seek_now(&mut self, pos: SeekFrom) -> Result<u64, IoError> {
+        self.pos = pos.resolve(self.data.as_ref().len() as u64, self.pos)?;
+        Ok(self.pos)
+    }
+}
+
+impl<T: AsRef<[u8]>> Read for Cursor<T> {
+    fn read(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<usize, IoError>> {
+        ready(Ok(self.read_now(buf)))
     }
 }
 
 impl<T: AsRef<[u8]>> Seek for Cursor<T> {
-    async fn seek(&mut self, pos: SeekFrom) -> Result<u64, IoError> {
-        self.pos = pos.resolve(self.data.as_ref().len() as u64, self.pos)?;
-        Ok(self.pos)
+    fn seek(&mut self, pos: SeekFrom) -> impl Future<Output = Result<u64, IoError>> {
+        ready(self.seek_now(pos))
     }
 }
 
@@ -210,6 +223,8 @@ impl<R: Read> Read for Buffered<R> {
 
 #[cfg(any(feature = "std-io", test))]
 mod bridge {
+    use core::future::{Future, ready};
+
     use super::{IoError, Read, Seek, SeekFrom};
 
     /// Portable view of a std reader. `ErrorKind::Interrupted` is retried, so `Ok(0)` keeps the
@@ -222,8 +237,9 @@ mod bridge {
     #[derive(Debug, Clone)]
     pub struct StdReader<R>(pub R);
 
-    impl<R: std::io::Read> Read for StdReader<R> {
-        async fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
+    impl<R: std::io::Read> StdReader<R> {
+        /// The wrapped read, driven to completion on the calling thread.
+        fn read_now(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
             loop {
                 match self.0.read(buf) {
                     Ok(n) => return Ok(n),
@@ -237,8 +253,15 @@ mod bridge {
         }
     }
 
-    impl<S: std::io::Seek> Seek for StdReader<S> {
-        async fn seek(&mut self, pos: SeekFrom) -> Result<u64, IoError> {
+    impl<R: std::io::Read> Read for StdReader<R> {
+        fn read(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<usize, IoError>> {
+            ready(self.read_now(buf))
+        }
+    }
+
+    impl<S: std::io::Seek> StdReader<S> {
+        /// The wrapped seek, driven to completion on the calling thread.
+        fn seek_now(&mut self, pos: SeekFrom) -> Result<u64, IoError> {
             let pos = match pos {
                 SeekFrom::Start(offset) => std::io::SeekFrom::Start(offset),
                 SeekFrom::End(offset) => std::io::SeekFrom::End(offset),
@@ -247,6 +270,12 @@ mod bridge {
             self.0
                 .seek(pos)
                 .map_err(|error| IoError::Failed(error.to_string()))
+        }
+    }
+
+    impl<S: std::io::Seek> Seek for StdReader<S> {
+        fn seek(&mut self, pos: SeekFrom) -> impl Future<Output = Result<u64, IoError>> {
+            ready(self.seek_now(pos))
         }
     }
 }
@@ -324,12 +353,13 @@ mod tests {
     struct OneByteAtATime(Vec<u8>);
 
     impl Read for OneByteAtATime {
-        async fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
-            if self.0.is_empty() || buf.is_empty() {
-                return Ok(0);
-            }
-            buf[0] = self.0.remove(0);
-            Ok(1)
+        fn read(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<usize, IoError>> {
+            ready(if self.0.is_empty() || buf.is_empty() {
+                Ok(0)
+            } else {
+                buf[0] = self.0.remove(0);
+                Ok(1)
+            })
         }
     }
 
@@ -365,13 +395,14 @@ mod tests {
     fn buffered_error_does_not_leave_stale_bytes() {
         struct FailAfter(usize);
         impl Read for FailAfter {
-            async fn read(&mut self, buf: &mut [u8]) -> Result<usize, IoError> {
-                if self.0 == 0 {
-                    return Err(IoError::Failed(String::from("boom")));
-                }
-                self.0 -= 1;
-                buf[0] = 42;
-                Ok(1)
+            fn read(&mut self, buf: &mut [u8]) -> impl Future<Output = Result<usize, IoError>> {
+                ready(if self.0 == 0 {
+                    Err(IoError::Failed(String::from("boom")))
+                } else {
+                    self.0 -= 1;
+                    buf[0] = 42;
+                    Ok(1)
+                })
             }
         }
         block_on_inline(async {
