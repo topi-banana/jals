@@ -1,23 +1,27 @@
 //! `naming-convention`: flag declarations whose name breaks the project's naming table.
 //!
-//! One rule with one key per kind of declaration ([`NamingTable`]), defaulting to the
-//! conventional Java casing: types `UpperCamelCase`, methods / fields / statics / parameters /
-//! locals `lowerCamelCase`, and a `static final` field — Java's spelling of a constant —
+//! One rule with one key per kind of declaration ([`NamingTable`]): types `UpperCamelCase`,
+//! methods / fields / parameters / locals `lowerCamelCase`, and both kinds of `static` field —
+//! the `static final` Java spells a constant with, and the mutable global beside it —
 //! `SCREAMING_SNAKE_CASE`. A kind is exempted by setting it to [`Case::Any`], which is a value and
 //! not an absent key, so the table stays total and this rule never has to interpret a missing
 //! entry.
 //!
 //! A field declaration picks one of three keys from its own modifiers, most specific first:
 //! `static final` is `constants`, a `static` that is not `final` is `statics`, and everything else
-//! is `fields`. The middle cell is what rustc's `non_upper_case_globals` covers beyond a constant;
-//! its built-in is `lowerCamelCase` because that is what Java writes a mutable global in, so a
-//! project wanting the rustc reading sets `statics = "screaming-snake-case"` rather than losing
-//! the distinction. The three cells are read off the modifiers the declaration *writes*, so an
-//! interface field — `public static final` with none of those tokens spelled — reads as `fields`.
-//! Recovering the implicit set is an ancestor check and not a resolution (`jals-hir` does exactly
-//! that with `is_static |= in_interface`), so this is a change that could be made and has not
-//! been: it would move every interface constant into the `constants` cell, which is a different
-//! question from the one this key answers.
+//! is `fields`. The two `static` cells share a built-in — rustc's `non_upper_case_globals`
+//! reading, where a global is upper-case whether or not it can be reassigned — and are separate
+//! keys because that is precisely where the readings come apart: Google Java Style §5.2.4 writes
+//! a non-constant field in `lowerCamelCase` however it is scoped, and `statics =
+//! "lower-camel-case"` is how a project says so without also unspelling its constants. A finding
+//! names the cell it came from, so it says which key to reach for.
+//!
+//! The three cells are read off the modifiers the declaration *writes*, so an interface field —
+//! `public static final` with none of those tokens spelled — reads as `fields`. Recovering the
+//! implicit set is an ancestor check and not a resolution (`jals-hir` does exactly that with
+//! `is_static |= in_interface`), so this is a change that could be made and has not been: it would
+//! move every interface constant into the `constants` cell, which is a different question from
+//! the one this key answers.
 //!
 //! Constructors and enum constants are not checked at all, and neither is a configuration
 //! question. A constructor's name *is* its type's, so a wrong case is already reported once,
@@ -126,7 +130,9 @@ impl NamingConvention {
     ///
     /// Read off the modifiers the declaration actually writes, most specific first: `static final`
     /// is a constant, a `static` without `final` is one of the class's mutable globals, and
-    /// anything else is an ordinary field. The three are exclusive, so a field is reported once.
+    /// anything else is an instance field. The three are exclusive, so a field is reported once —
+    /// and the two `static` cells stay apart even where their configured cases agree, because the
+    /// name a finding uses is how a reader learns which of the two keys to set.
     fn field_cell(field: &SyntaxNode, table: &NamingTable) -> (Case, &'static str) {
         let modifiers = field.children().find(|c| c.kind() == MODIFIERS);
         let has = |kind| modifiers.as_ref().is_some_and(|m| Self::has_token(m, kind));

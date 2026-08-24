@@ -230,38 +230,44 @@ fn naming_field_flagged() {
 
 #[test]
 fn naming_static_field_flagged_under_its_own_cell() {
-    // A `static` without `final` is neither a constant nor an instance field: it is the `statics`
-    // cell, and the message names it so the reader knows which key to reach for.
+    // The name is what an instance field would be written as, so this only reports at all because
+    // a `static` without `final` reads the `statics` cell and not `fields` — and the message names
+    // that cell, so the reader knows which of the two keys to reach for.
     check(
-        "class Foo { static int my_static; }",
+        "class Foo { static int itemCount; }",
         expect![[r"
-            naming-convention:23..32: static field name `my_static` should be lowerCamelCase
+            naming-convention:23..32: static field name `itemCount` should be UPPER_SNAKE_CASE
         "]],
     );
 }
 
 #[test]
-fn a_camel_case_static_field_is_clean_by_default() {
-    // The built-in reading of rustc's `non_upper_case_globals`: a mutable global is written in an
-    // instance field's case, so the logger every Java codebase declares is not a finding. A
-    // project wanting the rustc reading opts in below.
-    check("class Foo { static Object logger; }", expect![""]);
+fn a_mutable_global_is_upper_snake_case_by_default() {
+    // The built-in takes rustc's `non_upper_case_globals` reading: a `static` is a global whether
+    // or not it is `final`, so the logger every Java codebase declares is a finding out of the
+    // box. Google Java Style §5.2.4 says otherwise, and that reading is the opt-out below.
+    check(
+        "class Foo { static Object logger; }",
+        expect![[r"
+            naming-convention:26..32: static field name `logger` should be UPPER_SNAKE_CASE
+        "]],
+    );
 }
 
 #[test]
-fn statics_screaming_snake_case_gives_the_rustc_reading() {
-    // `statics = "screaming-snake-case"` is what makes `non_upper_case_globals` cover the mutable
-    // globals too — and only those: the constant and the instance field beside it keep their own
-    // cells, which is the whole reason this is a third key rather than a widening of `constants`.
+fn statics_lower_camel_case_gives_the_google_java_style_reading() {
+    // §5.2.4 writes every non-constant field in `lowerCamelCase` however it is scoped. Taking that
+    // line moves `logger` and nothing else: the misspelled constant beside it is still reported,
+    // which is the whole reason `statics` is its own key rather than part of `constants`.
     let config: Config =
-        toml::from_str("[naming.naming-convention]\nstatics = \"screaming-snake-case\"\n").unwrap();
+        toml::from_str("[naming.naming-convention]\nstatics = \"lower-camel-case\"\n").unwrap();
     let out = jals_exec::block_on_inline(LintOutput::lint_source(
-        "class Foo { static Object logger; static final int MAX = 1; int count; }",
+        "class Foo { static Object logger; static final int maxValue = 1; int count; }",
         &config,
     ));
     assert_eq!(
         render(&out),
-        "naming-convention:26..32: static field name `logger` should be UPPER_SNAKE_CASE\n"
+        "naming-convention:51..59: constant name `maxValue` should be UPPER_SNAKE_CASE\n"
     );
 }
 
