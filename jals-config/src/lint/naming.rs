@@ -3,8 +3,29 @@
 //! One rule with one option per kind of declaration, rather than one rule per kind. The kinds are
 //! not independent policies a project mixes and matches: they are the cells of a single table
 //! every Java style guide states as a table, and a project that changes one cell has not changed
-//! rules, it has changed the table. Splitting them into six rules would also make the level
-//! six-valued for no gain — nobody wants `field` names to be an error and `local` names a warning.
+//! rules, it has changed the table. Splitting them into seven rules would also make the level
+//! seven-valued for no gain — nobody wants `field` names to be an error and `local` names a
+//! warning.
+//!
+//! # Why a field is three cells, and why two of them share a built-in
+//!
+//! [`fields`](NamingConvention::fields), [`constants`](NamingConvention::constants) and
+//! [`statics`](NamingConvention::statics) partition the field declarations. The built-in table
+//! writes both `static` cells `SCREAMING_SNAKE_CASE`, which is rustc's reading in
+//! `non_upper_case_globals`: what a global's name has to carry is that the binding belongs to the
+//! class and outlives every object, and whether it can be reassigned does not change that.
+//!
+//! This is deliberately stricter than the guide the rest of the table follows. Google Java Style
+//! §5.2.4 says *every constant is a `static final` field, but not all `static final` fields are
+//! constants*, and writes every non-constant field in `lowerCamelCase` however it is scoped — so
+//! under the letter of that guide a `static` without `final` is `lowerCamelCase`. jals takes the
+//! stricter reading as its built-in and leaves the other one a config line:
+//! `statics = "lower-camel-case"`.
+//!
+//! That is also the answer to why `constants` and `statics` are two keys when their built-ins
+//! agree. They agree *here*; they are exactly where the two readings come apart, so folding them
+//! into one cell would leave a project no way to take Google's line on mutable globals without
+//! also unspelling its constants.
 //!
 //! # Why `any` and not an absent key
 //!
@@ -47,10 +68,16 @@ pub struct NamingConvention {
     /// Method declarations. A constructor is never checked: its name *is* the type's, so a wrong
     /// case is already reported once, against the type.
     pub methods: Case,
-    /// Non-constant field declarations.
+    /// Instance field declarations — a field declared without `static`.
     pub fields: Case,
     /// `static final` field declarations — the Java spelling of a constant.
     pub constants: Case,
+    /// `static` field declarations that are not `final` — a class's mutable globals. The built-in
+    /// is `SCREAMING_SNAKE_CASE`, the reading rustc's `non_upper_case_globals` takes, and it is
+    /// stricter than Google Java Style §5.2.4, which writes these in `lowerCamelCase`. A project
+    /// holding to that guide sets `statics = "lower-camel-case"` — which is the whole reason this
+    /// is its own cell rather than part of `constants`.
+    pub statics: Case,
     /// Method, constructor and lambda parameters.
     pub parameters: Case,
     /// Local variable declarations.
@@ -64,6 +91,7 @@ impl Default for NamingConvention {
             methods: Case::LowerCamelCase,
             fields: Case::LowerCamelCase,
             constants: Case::ScreamingSnakeCase,
+            statics: Case::ScreamingSnakeCase,
             parameters: Case::LowerCamelCase,
             locals: Case::LowerCamelCase,
         }

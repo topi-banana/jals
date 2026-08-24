@@ -229,6 +229,49 @@ fn naming_field_flagged() {
 }
 
 #[test]
+fn naming_static_field_flagged_under_its_own_cell() {
+    // The name is what an instance field would be written as, so this only reports at all because
+    // a `static` without `final` reads the `statics` cell and not `fields` — and the message names
+    // that cell, so the reader knows which of the two keys to reach for.
+    check(
+        "class Foo { static int itemCount; }",
+        expect![[r"
+            naming-convention:23..32: static field name `itemCount` should be UPPER_SNAKE_CASE
+        "]],
+    );
+}
+
+#[test]
+fn a_mutable_global_is_upper_snake_case_by_default() {
+    // The built-in takes rustc's `non_upper_case_globals` reading: a `static` is a global whether
+    // or not it is `final`, so the logger every Java codebase declares is a finding out of the
+    // box. Google Java Style §5.2.4 says otherwise, and that reading is the opt-out below.
+    check(
+        "class Foo { static Object logger; }",
+        expect![[r"
+            naming-convention:26..32: static field name `logger` should be UPPER_SNAKE_CASE
+        "]],
+    );
+}
+
+#[test]
+fn statics_lower_camel_case_gives_the_google_java_style_reading() {
+    // §5.2.4 writes every non-constant field in `lowerCamelCase` however it is scoped. Taking that
+    // line moves `logger` and nothing else: the misspelled constant beside it is still reported,
+    // which is the whole reason `statics` is its own key rather than part of `constants`.
+    let config: Config =
+        toml::from_str("[naming.naming-convention]\nstatics = \"lower-camel-case\"\n").unwrap();
+    let out = jals_exec::block_on_inline(LintOutput::lint_source(
+        "class Foo { static Object logger; static final int maxValue = 1; int count; }",
+        &config,
+    ));
+    assert_eq!(
+        render(&out),
+        "naming-convention:51..59: constant name `maxValue` should be UPPER_SNAKE_CASE\n"
+    );
+}
+
+#[test]
 fn naming_clean_ok() {
     check(
         "class Foo { static final int MAX_VALUE = 1; int count; void doThing(int itemId) { use(itemId); } }",
