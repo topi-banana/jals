@@ -55,6 +55,7 @@ types = "upper-camel-case"
 methods = "lower-camel-case"
 fields = "lower-camel-case"
 constants = "screaming-snake-case"
+statics = "lower-camel-case"
 parameters = "lower-camel-case"
 locals = "lower-camel-case"
 

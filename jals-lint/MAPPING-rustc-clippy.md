@@ -112,7 +112,7 @@ const 評価・target 固有の制約は言語実装そのものの都合であ�
   Java にも「リリース間の非互換」はあるが、それは jals では `[compatibility]` section の関心事であり、
   edition という機構の写しではない。
 
-**境界例を 2 つ明示しておく。**
+**境界例を 3 つ明示しておく。**
 
 - `rustc::while-true` は R でも X でもなく **D** である。Java にも `while (true)` は書けるので構文の
   問題ではない。採らないのは、**Java には `loop` に当たる代替表現が無く、`while (true)` が唯一の
@@ -122,6 +122,12 @@ const 評価・target 固有の制約は言語実装そのものの都合であ�
   固定診断 `cfg` である。jals の `#[cfg(...)]` は方言構文なので「Rust 固有」ではないが、構造的に壊れた
   attribute はビルドを止めるエラーであって設定可能な lint ではない。台帳がその写り先を名指しできる
   ように、`tests/inventory.rs` は `cfg` を「実装済みの名前」に含めている。
+- `rustc::non-upper-case-globals` は **M** だが、写り先の `naming-convention` が既定で写すのは
+  `static final`（`constants` cell）までである。Java の慣習では `final` の付かない `static` は
+  定数ではなく `lowerCamelCase` で書く（Google Java Style §5.2.4）ので、`statics` cell の既定は
+  `lower-camel-case` であり、rustc と同じ読み（可変なグローバルも `SCREAMING_SNAKE_CASE`）は
+  `statics = "screaming-snake-case"` で得る。M が主張するのは「写る rule がある」ことであって
+  「既定値まで一致する」ことではない、という線がここに出ている。
 
 ---
 

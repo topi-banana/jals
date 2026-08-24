@@ -31,6 +31,7 @@ class Sink {
   private static final int Bad_Constant = 1;
   private int Bad_Field = 2;
   @Deprecated private int injected = 3;
+  private static int Bad_Static = 4;
 
   int Bad_Method(int Bad_Param) {
     int Bad_Local = 0;

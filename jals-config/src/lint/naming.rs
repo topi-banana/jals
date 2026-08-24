@@ -3,8 +3,21 @@
 //! One rule with one option per kind of declaration, rather than one rule per kind. The kinds are
 //! not independent policies a project mixes and matches: they are the cells of a single table
 //! every Java style guide states as a table, and a project that changes one cell has not changed
-//! rules, it has changed the table. Splitting them into six rules would also make the level
-//! six-valued for no gain — nobody wants `field` names to be an error and `local` names a warning.
+//! rules, it has changed the table. Splitting them into seven rules would also make the level
+//! seven-valued for no gain — nobody wants `field` names to be an error and `local` names a
+//! warning.
+//!
+//! # Why a field is three cells and not one
+//!
+//! [`fields`](NamingConvention::fields), [`constants`](NamingConvention::constants) and
+//! [`statics`](NamingConvention::statics) partition the field declarations, because the case Java
+//! conventionally writes one in is not the case it writes another in: a `static final` field is
+//! the language's spelling of a constant and is `SCREAMING_SNAKE_CASE`, while every other field —
+//! `static` or not — is `lowerCamelCase`. Google Java Style §5.2.4 states exactly that split:
+//! *every constant is a `static final` field, but not all `static final` fields are constants*.
+//! A project that reads rustc's `non_upper_case_globals` as covering mutable globals too sets
+//! `statics = "screaming-snake-case"`; the cell exists so that is a config change rather than a
+//! second rule.
 //!
 //! # Why `any` and not an absent key
 //!
@@ -47,10 +60,15 @@ pub struct NamingConvention {
     /// Method declarations. A constructor is never checked: its name *is* the type's, so a wrong
     /// case is already reported once, against the type.
     pub methods: Case,
-    /// Non-constant field declarations.
+    /// Instance field declarations: every field that is neither `static final` nor `static`.
     pub fields: Case,
     /// `static final` field declarations — the Java spelling of a constant.
     pub constants: Case,
+    /// `static` field declarations that are not `final` — a class's mutable globals, which Java
+    /// writes in an instance field's case rather than a constant's. This is the cell rustc's
+    /// `non_upper_case_globals` would read as `SCREAMING_SNAKE_CASE`; the built-in is the Java
+    /// convention, so a project wanting that parity asks for it.
+    pub statics: Case,
     /// Method, constructor and lambda parameters.
     pub parameters: Case,
     /// Local variable declarations.
@@ -64,6 +82,7 @@ impl Default for NamingConvention {
             methods: Case::LowerCamelCase,
             fields: Case::LowerCamelCase,
             constants: Case::ScreamingSnakeCase,
+            statics: Case::LowerCamelCase,
             parameters: Case::LowerCamelCase,
             locals: Case::LowerCamelCase,
         }
