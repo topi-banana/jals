@@ -289,6 +289,44 @@ public class CloneNotSupportedException extends Exception {
     public CloneNotSupportedException();
     public CloneNotSupportedException(String message);
 }
+
+// Reflection's checked exceptions, which is the one corner of `java.lang` a file reaches for
+// without reaching for `java.lang.reflect`: `Class.forName`, `Class.getField` and `getMethod` are
+// declared on `Class` itself, so their `throws` clause lands in a file whose only import is the
+// implicit one. They are checked, so naming one in a `catch` is not optional — leaving them out
+// made a correct file report `cannot-resolve` on the type it is required to write.
+//
+// The common supertype is spelled out rather than flattened onto `Exception`, because it is what
+// a single `catch (ReflectiveOperationException e)` binds through.
+public class ReflectiveOperationException extends Exception {
+    public ReflectiveOperationException();
+    public ReflectiveOperationException(String message);
+}
+
+public class ClassNotFoundException extends ReflectiveOperationException {
+    public ClassNotFoundException();
+    public ClassNotFoundException(String message);
+}
+
+public class IllegalAccessException extends ReflectiveOperationException {
+    public IllegalAccessException();
+    public IllegalAccessException(String message);
+}
+
+public class InstantiationException extends ReflectiveOperationException {
+    public InstantiationException();
+    public InstantiationException(String message);
+}
+
+public class NoSuchFieldException extends ReflectiveOperationException {
+    public NoSuchFieldException();
+    public NoSuchFieldException(String message);
+}
+
+public class NoSuchMethodException extends ReflectiveOperationException {
+    public NoSuchMethodException();
+    public NoSuchMethodException(String message);
+}
 ";
 
 /// The `java.util` containers, as one compilation unit. Top-level types here become `java.util.<Name>`.
