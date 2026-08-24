@@ -3,7 +3,7 @@ description: "Install the jals Java toolchain (formatter, linter, LSP, build fro
 author: "topi-banana"
 
 branding:
-  icon: "coffee"
+  icon: "terminal"
   color: "orange"
 
 inputs:
