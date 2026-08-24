@@ -215,3 +215,29 @@ fn the_finding_names_the_exception() {
     // The wording is `jals-lint`'s (`unreported-exception`); what this crate owes is the name.
     assert_eq!(found[0].name, "MyEx");
 }
+
+#[test]
+fn a_reflective_checked_exception_is_reported() {
+    // `ReflectiveOperationException` and its subclasses are checked, so a file that names one is
+    // required to handle it. Classifying them needs the stubs to model the hierarchy, not just the
+    // leaves: a `catch` of one subclass does not admit the supertype a callee declares.
+    let src = "class C {
+        void g() throws ReflectiveOperationException {}
+        void f() { try { g(); } catch (ClassNotFoundException e) {} }
+        void h() { throw new NoSuchMethodException(); }
+    }";
+    let mut found = reported(src);
+    found.sort();
+    assert_eq!(
+        found,
+        ["NoSuchMethodException", "ReflectiveOperationException"]
+    );
+}
+
+#[test]
+fn catching_the_reflective_supertype_admits_a_subclass() {
+    // Why the common supertype is spelled out rather than flattened onto `Exception`: one
+    // `catch (ReflectiveOperationException e)` is what the whole family binds through.
+    let src = "class C { void f() { try { throw new ClassNotFoundException(); } catch (ReflectiveOperationException e) {} } }";
+    assert!(reported(src).is_empty(), "{:?}", reported(src));
+}

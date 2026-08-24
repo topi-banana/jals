@@ -2713,6 +2713,13 @@ impl ProjectIndex {
     /// Whether `name` is a commonly-used implicit `java.lang` type (imported into every file). Kept
     /// small and conservative: it only needs to cover the names that would otherwise produce false
     /// "cannot resolve" diagnostics in files with no imports.
+    ///
+    /// This is the fallback for an index built without [`with_stdlib`](ProjectIndexBuilder::with_stdlib);
+    /// with the stubs indexed, step 5 above binds the name to a real [`Item`] and never reaches here.
+    /// A name listed here resolves as [`External`](TypeResolution::External), so the list can only
+    /// ever *suppress* a diagnostic — an entry that is wrong costs a missed report, never a false
+    /// one. Which is why it should not lag [`crate::stdlib`]: every type the stubs declare belongs
+    /// here too, or the same source reports differently depending on how the index was built.
     fn is_java_lang(name: &str) -> bool {
         const JAVA_LANG: &[&str] = &[
             "Object",
@@ -2760,6 +2767,13 @@ impl ProjectIndex {
             "NegativeArraySizeException",
             "InterruptedException",
             "CloneNotSupportedException",
+            "AssertionError",
+            "ReflectiveOperationException",
+            "ClassNotFoundException",
+            "IllegalAccessException",
+            "InstantiationException",
+            "NoSuchFieldException",
+            "NoSuchMethodException",
             "Override",
             "Deprecated",
             "SuppressWarnings",

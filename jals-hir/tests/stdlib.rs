@@ -334,3 +334,37 @@ fn builder_with_stdlib_never_panics_and_project_items_are_in_bounds() {
         );
     }
 }
+
+#[test]
+fn every_java_lang_stub_resolves_without_the_stubs_too() {
+    // Drift guard for the two lists that answer the same question. `ProjectIndex::is_java_lang` is
+    // what a *default*-built index resolves an unimported `java.lang` name through; the stubs are
+    // what a `with_stdlib` one binds it to. A type the stubs declare and that list omits therefore
+    // makes one source report `cannot-resolve` in one build and not the other — which is how
+    // `AssertionError` came to resolve with the stubs indexed and not without them.
+    let fixture = Fixture::new("class C { }");
+    let declared: Vec<String> = fixture
+        .index
+        .items()
+        .filter(|(_, item)| item.origin == ItemOrigin::Stdlib)
+        .filter_map(|(_, item)| {
+            let fqn = item.fqn.to_string();
+            // Top-level `java.lang` types only: a nested one is never named bare.
+            let name = fqn.strip_prefix("java.lang.")?;
+            (!name.contains('.')).then(|| name.to_owned())
+        })
+        .collect();
+    assert!(
+        declared.len() > 30,
+        "expected the java.lang stubs to be enumerable: {declared:?}"
+    );
+
+    let bare = jals_exec::block_on_inline(ProjectIndex::builder(&nodes(&["class C { }"])).build());
+    for name in declared {
+        assert_eq!(
+            bare.resolve_type_name(FileId(0), &name, None),
+            TypeResolution::External,
+            "`{name}` is declared by the java.lang stubs but missing from the implicit-import list",
+        );
+    }
+}
