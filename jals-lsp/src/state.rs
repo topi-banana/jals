@@ -900,7 +900,9 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             std::fs::write(
                 dir.path().join("Main.java"),
-                "class Main { void run() { Box b = new Box(); use(b); } }",
+                // `use` is declared: an undeclared name is a `cannot-resolve` finding of its own
+                // now, and this asserts on the *type* half.
+                "class Main { void run() { Box b = new Box(); use(b); } void use(Box b) {} }",
             )
             .unwrap();
             let box_class = jals_classfile::ClassFile::read(

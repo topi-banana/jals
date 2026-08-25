@@ -483,7 +483,10 @@ mod tests {
     fn a_supplied_resolution_matches_computing_one() {
         // The caller's cached resolution is shared with every rule rather than recomputed; passing
         // it must not change a single finding.
-        let src = "class C { void m() { int unused = 1; if (true) { a(); } else { b(); } } }";
+        // Every name the fixture spells is declared: with an index supplied, `cannot-resolve` would
+        // otherwise report the calls and the two sides would differ over the *index*, which is not
+        // what this is measuring.
+        let src = "class C { void m() { int unused = 1; if (true) { a(); } else { b(); } } void a() {} void b() {} }";
         let cfg = Config::default();
         let parse = block_on_inline(jals_syntax::Parse::parse(src));
         let analysis = block_on_inline(jals_hir::FileAnalysis::of(&parse.syntax()));
@@ -702,6 +705,35 @@ mod tests {
         // An unresolvable name is not a style question, so it is an error by default — the one rule
         // here that is.
         assert_eq!(found[0].severity, LintLevel::Error);
+    }
+
+    #[test]
+    fn cannot_resolve_covers_the_value_and_method_name_spaces() {
+        // The same rule answers javac's "cannot find symbol" for a variable and for a call, and
+        // words the two apart the way javac's detail line does.
+        let src = "package a; class Bar { void m() { int x = nope; alsoNope(); } }";
+        let found: Vec<_> = indexed(src, &Config::default())
+            .into_iter()
+            .filter(|d| d.rule == "cannot-resolve")
+            .collect();
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert_eq!(found[0].message, "cannot resolve symbol `nope`");
+        assert_eq!(found[1].message, "cannot resolve method `alsoNope`");
+        assert!(found.iter().all(|d| d.severity == LintLevel::Error));
+    }
+
+    #[test]
+    fn an_unresolved_name_is_suppressible_like_any_other_finding() {
+        // It reaches the suppression map on the way to becoming a diagnostic, so the rule name and
+        // its `[correctness]` section both silence it — nothing about `error` is special here.
+        let src = "package a; class Bar { @SuppressWarnings(\"cannot-resolve\") void m() { int x = nope; } }";
+        assert!(
+            indexed(src, &Config::default())
+                .iter()
+                .all(|d| d.rule != "cannot-resolve"),
+            "{:?}",
+            indexed(src, &Config::default())
+        );
     }
 
     #[test]
