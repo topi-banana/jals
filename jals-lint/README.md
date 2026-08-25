@@ -40,7 +40,7 @@ and it is the `jalslint.toml` table the rule is configured under. Every rule is 
 | `naming-convention` | `[naming]` | `warn` | a declaration against the project's casing table |
 | `empty-javadoc` | `[documentation]` | `warn` | a `/** … */` whose content is only whitespace |
 | `print-to-console` | `[restriction]` | `allow` | a call on `System.out` / `System.err` |
-| `implicit-this` | `[restriction]` | `allow` | an instance field named without the `this.` qualifier |
+| `implicit-this` | `[restriction]` | `warn` | an instance field named without the `this.` qualifier |
 
 There is one diagnostic outside the table: `cfg`, a structurally malformed `#[cfg(…)]`. It is fixed
 at `error` and is not configurable, because it is the same failure the compile frontend rejects a

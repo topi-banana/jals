@@ -706,7 +706,6 @@ fn print_to_console_reports_the_configured_streams() {
 /// expectations should not carry.
 fn implicit_this(src: &str, scope: ThisScope) -> String {
     let mut config = Config::default();
-    config.restriction.implicit_this.level = LintLevel::Warn;
     config.restriction.implicit_this.options.scope = scope;
     let out = jals_exec::block_on_inline(LintOutput::lint_source(src, &config));
     let mut s = String::new();
@@ -722,10 +721,12 @@ fn check_this(src: &str, expected: Expect) {
 }
 
 #[test]
-fn implicit_this_is_off_by_default() {
-    // Every `[restriction]` rule is: `this.` everywhere is a project's convention, not a defect.
+fn implicit_this_is_on_by_default() {
+    // The one `[restriction]` rule that is not `allow`. The section no longer decides a level for
+    // every rule it holds: an unqualified field is a name a reader can take for a local, which is
+    // a hazard before it is a policy.
     let out = lint("class C { int count; void m() { count++; } }");
-    assert!(!out.contains("implicit-this"), "{out}");
+    assert!(out.contains("implicit-this"), "{out}");
 }
 
 #[test]
@@ -1393,7 +1394,9 @@ fn a_member_used_only_inside_a_disabled_host_is_not_flagged() {
     // same file does use it. Reporting it with the flag off asks for a deletion that breaks the
     // build the flag turns on. The resolver still binds nothing inside the host — the name is kept
     // as a mention, which is evidence without being resolution.
-    let src = "class C {\n    private int f;\n    private void helper() {}\n    #[cfg(feature = \"x\")]\n    void m() { helper(); f = 1; }\n}";
+    // The field write is qualified because `implicit-this` is on by default and would report the
+    // bare `f` — a finding about this fixture's spelling rather than about `cfg`.
+    let src = "class C {\n    private int f;\n    private void helper() {}\n    #[cfg(feature = \"x\")]\n    void m() { helper(); this.f = 1; }\n}";
     assert_eq!(lint_with_cfg(src, &[]), "");
     assert_eq!(lint_with_cfg(src, &["x"]), "");
 }

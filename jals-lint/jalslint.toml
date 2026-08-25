@@ -63,7 +63,8 @@ locals = "lower-camel-case"
 [documentation]
 empty-javadoc = "warn"
 
-# Correct, idiomatic, fast code a project has chosen to ban anyway. Always "allow" by default.
+# Correct, idiomatic, fast code a project has chosen to ban anyway. Each rule here carries its
+# own built-in level rather than the section deciding one for all of them.
 [restriction]
 print-to-console = { level = "allow", streams = "both" }
-implicit-this = { level = "allow", scope = "always" }
+implicit-this = { level = "warn", scope = "always" }

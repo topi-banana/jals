@@ -106,7 +106,6 @@ fn variant(section: &str, rule: &str, key: &str) -> Value {
 fn all_enabled() -> Config {
     let mut config = Config::default().with_features(FeatureSet::resolve(&[Feature::Java25]));
     config.restriction.print_to_console.level = LintLevel::Warn;
-    config.restriction.implicit_this.level = LintLevel::Warn;
     config
 }
 
@@ -153,20 +152,6 @@ fn no_rule_is_named_cfg() {
 }
 
 #[test]
-fn every_restriction_rule_is_allow_by_default() {
-    // A property of the category and not of any one rule: a restriction nobody asked for is not a
-    // finding. `jals_config::lint::restriction`'s module docs state it; this holds it.
-    for rule in RuleInfo::all().filter(|rule| rule.category == Category::Restriction) {
-        assert_eq!(
-            rule.default_level,
-            LintLevel::Allow,
-            "`{}` is a restriction rule",
-            rule.name
-        );
-    }
-}
-
-#[test]
 fn the_default_config_enables_exactly_these_rules() {
     // Changing a built-in level is an edit to this list, never a silent drift. `error` is for a
     // finding the compiler itself would refuse; everything else that is on is `warn`.
@@ -197,6 +182,7 @@ fn the_default_config_enables_exactly_these_rules() {
             "dead-code",
             "empty-catch",
             "empty-javadoc",
+            "implicit-this",
             "missing-braces",
             "naming-convention",
             "type-mismatch",
@@ -206,10 +192,7 @@ fn the_default_config_enables_exactly_these_rules() {
             "wildcard-import",
         ]
     );
-    assert_eq!(
-        level_of(LintLevel::Allow),
-        ["implicit-this", "print-to-console"]
-    );
+    assert_eq!(level_of(LintLevel::Allow), ["print-to-console"]);
 }
 
 #[test]
