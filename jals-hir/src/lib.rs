@@ -23,7 +23,9 @@
 //! - **Project-wide** ([`ProjectIndex`]): a symbol index over many files. It resolves the
 //!   type-name references the file-local pass left [`Unresolved`](Resolution::Unresolved) against
 //!   the project's other source files — the basis for cross-file go-to-definition and "cannot
-//!   resolve symbol".
+//!   resolve symbol". The same index settles the *value* and *method* half of that diagnostic
+//!   ([`FileSemantics::unresolved_names`]) by walking the supertype chain a bare name may bind
+//!   through.
 //! - **Bound and typed** ([`FileSemantics`] → [`TypedFile`]): a [`FileAnalysis`] bound to a
 //!   [`ProjectIndex`] with [`in_project`](FileAnalysis::in_project), which assigns each declaration
 //!   and expression a structural [`Ty`] from both. It covers the structural / local subset
@@ -60,6 +62,7 @@ mod dead_if;
 mod def;
 mod imports;
 mod infer;
+mod names;
 mod project;
 mod reference;
 mod resolve;
@@ -73,6 +76,7 @@ pub use dead_if::DeadIf;
 pub use def::{Def, DefId, DefKind, Namespace};
 pub use imports::UnusedImport;
 pub use infer::{Completion, MismatchKind, Signature, SignatureHelp, TypeMismatch};
+pub use names::UnresolvedName;
 pub use project::{
     FileFacts, FileId, Fqn, Item, ItemId, ItemOrigin, LoweredClasspath, Member, MemberId,
     MemberModifiers, MemberType, Param, ProjectIndex, ProjectIndexBuilder, SourceLocations,

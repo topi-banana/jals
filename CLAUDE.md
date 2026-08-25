@@ -253,14 +253,16 @@ filesystem reads into portable interfaces.
   which is what keeps `jals-javac`'s lowering synchronous.
 
   `jals-hir` states *facts* (`DeadIf`, `UnreportedException`, `TypeMismatch` with its
-  `MismatchKind`, `UnresolvedType`, `UnusedImport`, and the `unused_defs` a `Def`'s `is_private` /
-  `is_annotated` let a consumer narrow); the **wording** of every semantic diagnostic belongs to the
-  `jals-lint` rule that reports it. A negative fact — "nothing uses this" — over-approximates *use*:
-  a member name spelled where the file-local pass cannot bind it (`this.x`, `Outer.Inner`,
-  `X.class`, `@Anno`, the ambiguous-name qualifier of JLS §6.5.2, and anything inside a
-  `cfg`-disabled host — which binds nothing but serves the *other* feature set) counts as a use, and
-  a method's evidence is its **name** rather than its declaration, because the scope chain binds a
-  call to *an* overload rather than to the one the arguments select.
+  `MismatchKind`, `UnresolvedType` and its value/method sibling `UnresolvedName`, `UnusedImport`,
+  and the `unused_defs` a `Def`'s `is_private` / `is_annotated` let a consumer narrow); the
+  **wording** of every semantic diagnostic belongs to the `jals-lint` rule that reports it. A
+  negative fact — "nothing uses this" — over-approximates *use*: a member name spelled where the
+  file-local pass cannot bind it (`this.x`, `Outer.Inner`, `X.class`, `@Anno`, the ambiguous-name
+  qualifier of JLS §6.5.2, and anything inside a `cfg`-disabled host — which binds nothing but
+  serves the *other* feature set) counts as a use, and a method's evidence is its **name** rather
+  than its declaration, because the scope chain binds a call to *an* overload rather than to the one
+  the arguments select. The mirror fact — "nothing *defines* this" — under-approximates definition
+  for the same reason, so `UnresolvedName` stands down in each of those positions instead.
 - `jals-lint`: the rule engine. A rule is a name, a `Category` (the `jalslint.toml` section it is
   configured under), a level accessor into `jals_config::lint`, and a checker; `RuleInfo::all()`
   publishes the registry so a consumer enumerates rules instead of restating them. **The rule name

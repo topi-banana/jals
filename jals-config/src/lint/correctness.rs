@@ -10,19 +10,22 @@
 //!
 //! Because a false positive here is expensive and inference over an incomplete classpath is
 //! approximate. `cannot-resolve` fires on a fact the index settles — the name is indexed or it is
-//! not — so it defaults to [`Error`](super::LintLevel::Error). `type-mismatch` and
-//! `unreported-exception` both narrow through the stdlib hierarchy and stand down where it is
-//! unknown, so they default to [`Warn`](super::LintLevel::Warn): a project that trusts its
-//! classpath raises them, and one linting a partial tree is not stopped by them.
+//! not, and where the index cannot settle it (a supertype outside the project, a partial stub, a
+//! name that binds against something other than a scope) it stands down rather than guesses — so
+//! it defaults to [`Error`](super::LintLevel::Error). `type-mismatch` and `unreported-exception`
+//! both narrow through the stdlib hierarchy and stand down where it is unknown, so they default to
+//! [`Warn`](super::LintLevel::Warn): a project that trusts its classpath raises them, and one
+//! linting a partial tree is not stopped by them.
 
 use super::NoOptions;
 
 lint_section! {
     /// `[correctness]` — findings a reader would call a bug.
     Correctness: Correctness {
-        /// `cannot-resolve` — a type, member or name that the project index does not define.
-        /// Reports nothing without a project (a file linted on its own has no index to miss from)
-        /// and nothing on a broken parse.
+        /// `cannot-resolve` — a type, variable or method that the project index does not define:
+        /// javac's "cannot find symbol", in all three name-spaces. Reports nothing without a
+        /// project (a file linted on its own has no index to miss from) and nothing on a broken
+        /// parse.
         "cannot-resolve" => cannot_resolve: NoOptions = Error,
         /// `type-mismatch` — a value written into a slot its type cannot inhabit: a narrowing
         /// assignment, an incompatible `return`, an argument the selected overload does not take.

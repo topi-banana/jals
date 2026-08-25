@@ -14,13 +14,15 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use hashbrown::HashSet;
-use jals_syntax::SyntaxKind::{CALL_EXPR, CLASS_LITERAL, FIELD_ACCESS, METHOD_REF_EXPR};
+use jals_syntax::SyntaxKind::{
+    CALL_EXPR, CLASS_LITERAL, FIELD_ACCESS, METHOD_REF_EXPR, SWITCH_LABEL,
+};
 use jals_syntax::ast::{self, AstNode};
 use jals_syntax::cfg::CfgMap;
 use jals_syntax::{SyntaxNode, SyntaxToken};
 
 use crate::def::{Def, DefId, DefKind, Namespace};
-use crate::reference::{Reference, Resolution};
+use crate::reference::{RefPosition, Reference, Resolution};
 use crate::scope::{Scope, ScopeId, ScopeKind};
 use collect::Collect;
 
@@ -223,6 +225,8 @@ struct RawRef {
     scope: ScopeId,
     /// The full dotted text of a qualified type reference (`a.b.C`); `None` for a simple name.
     qualified: Option<String>,
+    /// Where the reference is written; see [`RefPosition`].
+    position: RefPosition,
 }
 
 /// Builds the scope tree and resolves references for one file.
@@ -297,6 +301,7 @@ impl Resolver {
                 namespace: raw.namespace,
                 resolution,
                 qualified: raw.qualified,
+                position: raw.position,
             });
         }
         references.sort_by_key(|r| r.range.start);
@@ -379,18 +384,38 @@ impl Resolver {
         // left-hand side is a *type* and nothing else (JLS §15.8.2), and the grammar spells a bare
         // one as a `NAME_REF` — so the value-namespace lookup above can only miss, and without the
         // mention every `private` nested type reached solely through `X.class` reads as dead.
-        if matches!(parent, Some(FIELD_ACCESS | METHOD_REF_EXPR | CLASS_LITERAL))
-            && !self.mentions.contains(&name)
-        {
+        let qualifier = matches!(parent, Some(FIELD_ACCESS | METHOD_REF_EXPR | CLASS_LITERAL));
+        if qualifier && !self.mentions.contains(&name) {
             self.mentions.insert(name.clone());
         }
+        // The two non-plain positions cannot both apply: a `case` label's constant is written as a
+        // bare `NAME_REF`, and a qualified one (`Color.RED`) makes the *left* name the ambiguous
+        // one, so the qualifier verdict is what reaches this.
+        let position = if qualifier {
+            RefPosition::Qualifier
+        } else if Self::in_case_label(node) {
+            RefPosition::CaseLabel
+        } else {
+            RefPosition::Plain
+        };
         self.raw_refs.push(RawRef {
             range: Collect::byte_range(&tok),
             name,
             namespace,
             scope,
             qualified: None,
+            position,
         });
+    }
+
+    /// Whether `node` is written inside a `case` label, where an `enum` constant may be spelled
+    /// unqualified (JLS §14.11).
+    ///
+    /// A label is a child of its `SWITCH_RULE` / `SWITCH_GROUP` rather than an ancestor of the arm
+    /// body, so walking up from a name in the body reaches the rule and never the label — no
+    /// stop-node is needed to keep the two apart.
+    fn in_case_label(node: &SyntaxNode) -> bool {
+        node.ancestors().any(|a| a.kind() == SWITCH_LABEL)
     }
 
     /// Records the type named by the `TYPE` `node` as a [`Namespace::Type`] reference in `scope`.
@@ -421,6 +446,9 @@ impl Resolver {
             namespace: Namespace::Type,
             scope,
             qualified,
+            // A type name is never an ambiguous name: the grammar already put it in a `TYPE` node,
+            // which is the reclassification JLS §6.5.2 describes, already done.
+            position: RefPosition::Plain,
         });
     }
 
