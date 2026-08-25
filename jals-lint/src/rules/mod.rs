@@ -31,6 +31,7 @@ mod dead_code;
 mod empty_catch;
 mod empty_javadoc;
 mod grouped_import;
+mod implicit_this;
 mod missing_braces;
 mod module_import;
 mod naming;
@@ -311,4 +312,5 @@ pub(crate) const RULES: &[RuleMeta] = &[
     empty_javadoc::RULE,
     // [restriction]
     print_to_console::RULE,
+    implicit_this::RULE,
 ];

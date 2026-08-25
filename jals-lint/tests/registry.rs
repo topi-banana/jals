@@ -36,6 +36,7 @@ class Sink {
   int Bad_Method(int Bad_Param) {
     int Bad_Local = 0;
     int _unused = 1;
+    Bad_Field = Bad_Local;
     if (Bad_Param > 0) if (Bad_Local > 0) System.out.println("x");
     if (Bad_Param > 1)
       return 1;
@@ -95,6 +96,7 @@ fn variant(section: &str, rule: &str, key: &str) -> Value {
         ("style", "missing-braces", "policy") => Value::from("multi-line"),
         ("naming", "naming-convention", _) => Value::from("any"),
         ("restriction", "print-to-console", "streams") => Value::from("stderr"),
+        ("restriction", "implicit-this", "scope") => Value::from("shadowed-only"),
         _ => panic!("no non-default value known for [{section}] {rule}.{key}"),
     }
 }
@@ -150,20 +152,6 @@ fn no_rule_is_named_cfg() {
 }
 
 #[test]
-fn every_restriction_rule_is_allow_by_default() {
-    // A property of the category and not of any one rule: a restriction nobody asked for is not a
-    // finding. `jals_config::lint::restriction`'s module docs state it; this holds it.
-    for rule in RuleInfo::all().filter(|rule| rule.category == Category::Restriction) {
-        assert_eq!(
-            rule.default_level,
-            LintLevel::Allow,
-            "`{}` is a restriction rule",
-            rule.name
-        );
-    }
-}
-
-#[test]
 fn the_default_config_enables_exactly_these_rules() {
     // Changing a built-in level is an edit to this list, never a silent drift. `error` is for a
     // finding the compiler itself would refuse; everything else that is on is `warn`.
@@ -194,6 +182,7 @@ fn the_default_config_enables_exactly_these_rules() {
             "dead-code",
             "empty-catch",
             "empty-javadoc",
+            "implicit-this",
             "missing-braces",
             "naming-convention",
             "type-mismatch",

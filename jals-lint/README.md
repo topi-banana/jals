@@ -16,7 +16,7 @@ exception: they belong to the parse, and a caller reads them from `Parse::errors
 
 ## The rule set
 
-**19 rules in 10 sections.** A section is a **defect class** — what kind of thing the rule found —
+**20 rules in 10 sections.** A section is a **defect class** — what kind of thing the rule found —
 and it is the `jalslint.toml` table the rule is configured under. Every rule is in exactly one.
 
 | rule | section | default | what it reports |
@@ -40,6 +40,7 @@ and it is the `jalslint.toml` table the rule is configured under. Every rule is 
 | `naming-convention` | `[naming]` | `warn` | a declaration against the project's casing table |
 | `empty-javadoc` | `[documentation]` | `warn` | a `/** … */` whose content is only whitespace |
 | `print-to-console` | `[restriction]` | `allow` | a call on `System.out` / `System.err` |
+| `implicit-this` | `[restriction]` | `warn` | an instance field named without the `this.` qualifier |
 
 There is one diagnostic outside the table: `cfg`, a structurally malformed `#[cfg(…)]`. It is fixed
 at `error` and is not configurable, because it is the same failure the compile frontend rejects a
@@ -166,10 +167,11 @@ Java question — clippy's `shadow_same` / `shadow_reuse` / `shadow_unrelated` a
 with a `kinds` key, and its `print_stdout` / `print_stderr` are the one `print-to-console` that is
 already implemented.
 
-Ten of today's nineteen rules have **no** rustc or clippy ancestor and are jals's own: the four
+Eleven of today's twenty rules have **no** rustc or clippy ancestor and are jals's own: the four
 `[compatibility]` feature gates (no other tool has this dialect to gate), the three
 `[correctness]` rules that are Java semantics rustc has no analogue for, and `constant-condition`,
-`empty-catch` and `missing-braces`.
+`empty-catch`, `missing-braces` and `implicit-this` — the last because Rust has no implicit
+receiver to leave out.
 
 ### Prerequisite: in-source suppression — **done**
 

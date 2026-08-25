@@ -187,7 +187,7 @@ pub use level::{Lint, LintLevel, NoOptions, UnknownKeys};
 pub(crate) use level::{LintOptions, LintPatch};
 pub use naming::{Case, Naming, NamingConvention};
 pub use performance::Performance;
-pub use restriction::{ConsoleStreams, PrintToConsole, Restriction};
+pub use restriction::{ConsoleStreams, ImplicitThis, PrintToConsole, Restriction, ThisScope};
 pub use style::{BracePolicy, MissingBraces, StaticWildcard, Style, WildcardImport};
 pub use suspicious::{EmptyCatch, IgnoredCatch, Suspicious};
 pub use unused::{AnnotatedMembers, DeadCode, Unused, UnusedVariables};
@@ -219,8 +219,10 @@ pub enum Category {
     /// A doc comment is missing, empty, or disagrees with what it documents.
     Documentation,
     /// The code is correct, idiomatic and fast, and the project has chosen to ban the construct
-    /// anyway. Every rule here is [`Allow`](LintLevel::Allow) by default: a restriction nobody
-    /// asked for is not a defect.
+    /// anyway. A rule here carries its own built-in level: `print-to-console` is
+    /// [`Allow`](LintLevel::Allow), because a restriction nobody asked for is not a defect, and
+    /// `implicit-this` is [`Warn`](LintLevel::Warn), because the name it reports is one a reader
+    /// can take for a local.
     Restriction,
 }
 

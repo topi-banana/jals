@@ -86,11 +86,13 @@ fn an_unknown_key_is_kept_and_named() {
 }
 
 #[test]
-fn every_restriction_rule_is_allow_by_default() {
-    // A property of the category, not of any one rule: see the section's module docs.
+fn each_restriction_rule_carries_its_own_built_in_level() {
+    // The section once gave every rule `Allow`; it no longer does, so the levels are per rule and
+    // `jals-lint/tests/registry.rs` pins the whole set. See the section's module docs.
     let restriction = Restriction::default();
     assert_eq!(restriction.print_to_console.level, LintLevel::Allow);
-    assert_eq!(Restriction::RULES, ["print-to-console"]);
+    assert_eq!(restriction.implicit_this.level, LintLevel::Warn);
+    assert_eq!(Restriction::RULES, ["print-to-console", "implicit-this"]);
 }
 
 #[test]
