@@ -54,7 +54,7 @@ linter・language server（LSP）を提供しており、いずれも名前解�
 | [`jals-editor`](jals-editor)         | definition・references・hover・completion・signature help・highlight の protocol-neutral な意味論と、UTF-8 バイト／UTF-16 座標変換。LSP とブラウザ playground で共有します。                                                                                                                                                                                    |
 | [`jals-syntax`](jals-syntax)         | 無損失な Java lexer とエラー耐性のある CST parser（`rowan`）、および CST 上の型付き AST 層。すべてのツールの共通基盤です。                                                                                                                                                                                                                                      |
 | [`jals-fmt`](jals-fmt)               | **WIP（作り直し中）。** `jals-syntax` の CST を入力とする Wadler/Prettier 方式の pretty-printer。現状は入力をそのまま返す no-op。                                                                                                                                                                                                                               |
-| [`jals-lint`](jals-lint)             | linter（`jals-cli` 経由の `jals lint`）。CST と `jals-hir` に基づくルールレジストリで、欠陥クラス別の 10 section・19 rule を `jalslint.toml` から名前で設定します。rustc/clippy の全 lint を jals rule か「採らない理由」に対応付けた台帳を持ちます。                                                                                                                        |
+| [`jals-lint`](jals-lint)             | linter（`jals-cli` 経由の `jals lint`）。CST と `jals-hir` に基づくルールレジストリで、欠陥クラス別の 10 section・20 rule を `jalslint.toml` から名前で設定します。rustc/clippy の全 lint を jals rule か「採らない理由」に対応付けた台帳を持ちます。                                                                                                                        |
 | [`jals-hir`](jals-hir)               | CST 上での名前解決・ファイル横断の型インデックス・型推論/型検査。linter と LSP が拠り所とするセマンティック層で、コンパイル済み classpath からの外部型の橋渡しも行います。                                                                                                                                                                                      |
 | [`jals-classfile`](jals-classfile)   | JVM の `.class` ファイル形式（JVMS 第 4 章）を完全にバイト一致で読み書きするモデル。                                                                                                                                                                                                                                                                            |
 | [`jals-decompile`](jals-decompile)   | パース済みの `.class` から読める Java を再構築します。型/シグネチャのレンダリング、初期化子、宣言された `throws`、そして（段階的に）バイトコードからのメソッド本体の完全な逆コンパイル。                                                                                                                                                                        |
@@ -243,7 +243,7 @@ jals lint src/Main.java src/Util.java
 jals lint src/
 ```
 
-`jals lint` は **10 section・19 rule** を、名前解決と型推論（`jals-hir`）を使って検出します。単なる
+`jals lint` は **10 section・20 rule** を、名前解決と型推論（`jals-hir`）を使って検出します。単なる
 構文木上のパターンマッチではありません。解決できない名前・型不一致・報告されていない検査例外
 （`[correctness]`）、`[package] features` に応じたプレビュー機能と方言構文（`[compatibility]`）、
 定数条件による到達不能分岐と握り潰された例外（`[suspicious]`）、未使用の束縛・import・`private`

@@ -66,3 +66,4 @@ empty-javadoc = "warn"
 # Correct, idiomatic, fast code a project has chosen to ban anyway. Always "allow" by default.
 [restriction]
 print-to-console = { level = "allow", streams = "both" }
+implicit-this = { level = "allow", scope = "always" }

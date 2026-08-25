@@ -187,7 +187,7 @@ pub use level::{Lint, LintLevel, NoOptions, UnknownKeys};
 pub(crate) use level::{LintOptions, LintPatch};
 pub use naming::{Case, Naming, NamingConvention};
 pub use performance::Performance;
-pub use restriction::{ConsoleStreams, PrintToConsole, Restriction};
+pub use restriction::{ConsoleStreams, ImplicitThis, PrintToConsole, Restriction, ThisScope};
 pub use style::{BracePolicy, MissingBraces, StaticWildcard, Style, WildcardImport};
 pub use suspicious::{EmptyCatch, IgnoredCatch, Suspicious};
 pub use unused::{AnnotatedMembers, DeadCode, Unused, UnusedVariables};

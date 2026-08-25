@@ -29,7 +29,7 @@
 | rustc lint 一覧 | 出力の "Lint checks provided by rustc" — **244 lint** |
 | clippy lint 一覧 | 出力の "Lint checks loaded by this crate" — **815 lint** |
 | clippy group | 出力の "Lint groups loaded by this crate"（`clippy::all` を除く 9 group、排他） |
-| jals 側 | `jals_lint::RuleInfo::all()` — 10 section **19 rule**（`jals-lint/tests/registry.rs` が固定） |
+| jals 側 | `jals_lint::RuleInfo::all()` — 10 section **20 rule**（`jals-lint/tests/registry.rs` が固定） |
 
 **なぜ `clippy-driver -Whelp` なのか。** clippy の lint 定義はソースツリー上では `declare_clippy_lint!`
 マクロに散っていて、group 所属は宣言の第 1 引数にある。ドライバに聞けば「このバージョンが実際に
@@ -51,11 +51,11 @@
 本作業はその向きを逆にする。**両ツールの全 lint を母数に取り、jals 側に何が無いかを数える**。結果として
 分かったことが 2 つある。
 
-1. 既存 19 rule のうち **10 rule には rustc/clippy の祖先が無い**（§6）。方言の feature gate 4 つ、
+1. 既存 20 rule のうち **11 rule には rustc/clippy の祖先が無い**（§6）。方言の feature gate 4 つ、
    Java の意味論そのものである `[correctness]` 3 つ、そして `constant-condition` / `empty-catch` /
-   `missing-braces`。これは「移植し忘れ」ではなく、**Java の lint には Rust の lint に対応物が無い領域が
+   `missing-braces` / `implicit-this`。これは「移植し忘れ」ではなく、**Java の lint には Rust の lint に対応物が無い領域が
    ある**という事実である。
-2. 移植可能で未実装のものが **376 行 = 286 rule** ある（§7）。既存 19 rule の 15 倍であり、
+2. 移植可能で未実装のものが **376 行 = 286 rule** ある（§7）。既存 20 rule の 14 倍であり、
    `jalslint.toml` の schema をこの規模に耐える形に作り直したのは、この数を見たからである。
 
 ---
@@ -146,7 +146,7 @@ const 評価・target 固有の制約は言語実装そのものの都合であ�
 | `clippy::empty-docs` | suspicious | `empty-javadoc` |
 | `clippy::extra-unused-type-parameters` | complexity | `unused-variables` |
 
-**逆向き**: 既存 19 rule のうち、ここに現れないのは次の 10 個。いずれも rustc/clippy に祖先が無い
+**逆向き**: 既存 20 rule のうち、ここに現れないのは次の 11 個。いずれも rustc/clippy に祖先が無い
 jals 固有の rule であり、`tests/inventory.rs` の `JALS_NATIVE` がその一覧を保持している
 （新しい rule を「祖先無し」にするのは、そこへの明示的な追記を要求する）。
 
@@ -157,6 +157,7 @@ jals 固有の rule であり、`tests/inventory.rs` の `JALS_NATIVE` がその
 | `constant-condition` | rustc の `unconditional-panic` 等は別の事実を見ている。定数畳み込みで死ぬ分岐を報告する lint は両ツールに無い |
 | `empty-catch` | Rust に `catch` 節が無い |
 | `missing-braces` | Rust は本体が常にブロックで、省略できない |
+| `implicit-this` | Rust の `self` は必須で、暗黙の受け手という状態が存在しない |
 
 ---
 

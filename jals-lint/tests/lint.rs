@@ -1,7 +1,7 @@
 use std::fmt::Write;
 
 use expect_test::{Expect, expect};
-use jals_config::lint::{AnnotatedMembers, BracePolicy, Config, ConsoleStreams};
+use jals_config::lint::{AnnotatedMembers, BracePolicy, Config, ConsoleStreams, ThisScope};
 use jals_config::{Feature, FeatureSet, LintLevel};
 use jals_lint::{LintOutput, LintRequest};
 
@@ -695,6 +695,207 @@ fn print_to_console_reports_the_configured_streams() {
         .collect();
     assert_eq!(messages.len(), 1, "{err_only:?}");
     assert!(messages[0].contains("System.err"), "{messages:?}");
+}
+
+// ===== implicit-this =====
+
+/// The `implicit-this` findings alone, as `start..end: message` lines.
+///
+/// The rule is `allow` by default, so a test has to raise it — and a fixture that exercises it
+/// trips `dead-code` and `naming-convention` on the same fields, which is noise this rule's
+/// expectations should not carry.
+fn implicit_this(src: &str, scope: ThisScope) -> String {
+    let mut config = Config::default();
+    config.restriction.implicit_this.level = LintLevel::Warn;
+    config.restriction.implicit_this.options.scope = scope;
+    let out = jals_exec::block_on_inline(LintOutput::lint_source(src, &config));
+    let mut s = String::new();
+    for d in out.diagnostics.iter().filter(|d| d.rule == "implicit-this") {
+        writeln!(s, "{}..{}: {}", d.range.start, d.range.end, d.message).unwrap();
+    }
+    s
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn check_this(src: &str, expected: Expect) {
+    expected.assert_eq(&implicit_this(src, ThisScope::Always));
+}
+
+#[test]
+fn implicit_this_is_off_by_default() {
+    // Every `[restriction]` rule is: `this.` everywhere is a project's convention, not a defect.
+    let out = lint("class C { int count; void m() { count++; } }");
+    assert!(!out.contains("implicit-this"), "{out}");
+}
+
+#[test]
+fn every_non_static_context_is_checked() {
+    // The four places an instance field can be reached without a receiver: a method, a
+    // constructor, an instance initializer, and — the one checkstyle also checks — another
+    // field's initializer.
+    check_this(
+        "class C {\n  int a;\n  int b = a + 1;\n  C() { a = 0; }\n  { a = 1; }\n  void m() { a = 2; }\n}",
+        expect![[r"
+            29..30: field `a` should be qualified with `this.`
+            44..45: field `a` should be qualified with `this.`
+            57..58: field `a` should be qualified with `this.`
+            79..80: field `a` should be qualified with `this.`
+        "]],
+    );
+}
+
+#[test]
+fn a_qualified_reference_is_what_the_rule_asks_for() {
+    // `this.a` parses as a FIELD_ACCESS whose member name is a bare IDENT, so `jals-hir` records
+    // no reference for it at all — the rule's whole detection rests on that.
+    check_this("class C { int a; void m() { this.a = 1; } }", expect![""]);
+}
+
+#[test]
+fn a_static_context_is_not_reported() {
+    // `this` does not exist there, so there is no qualifier to ask for.
+    check_this(
+        "class C {\n  static int s;\n  static { s = 1; }\n  static void m() { s = 2; }\n}",
+        expect![""],
+    );
+}
+
+#[test]
+fn a_static_field_is_not_reported_from_an_instance_method() {
+    // Reachable without a receiver, but `this.` is not the qualifier Java wants for it — the type
+    // name is.
+    check_this("class C { static int s; void m() { s = 1; } }", expect![""]);
+}
+
+#[test]
+fn an_interface_field_is_implicitly_static() {
+    // JLS §9.3: a field declared in an interface is `public static final` with none of the three
+    // spelled, so reading the modifiers alone would have called it an instance field.
+    check_this(
+        "interface I { int MAX = 1; default int m() { return MAX; } }",
+        expect![""],
+    );
+}
+
+#[test]
+fn a_local_shadowing_the_field_never_reaches_this_rule() {
+    // The scope chain stops at the innermost match, so `a` here is the local. Reporting it would
+    // ask for a qualifier that changes which binding the name denotes.
+    check_this(
+        "class C { int a; void m() { int a = 1; a = 2; } }",
+        expect![""],
+    );
+}
+
+#[test]
+fn a_lambda_body_is_still_the_enclosing_instance() {
+    // A lambda introduces no type, so `this` inside one is the same instance — the qualifier is
+    // available and the rule asks for it.
+    check_this(
+        "class C {\n  int a;\n  Runnable r = () -> a++;\n}",
+        expect![[r"
+            40..41: field `a` should be qualified with `this.`
+        "]],
+    );
+}
+
+#[test]
+fn an_anonymous_class_is_a_different_instance() {
+    // `this.a` inside the anonymous body would denote the anonymous instance, which has no `a`.
+    // The qualifier Java wants is `C.this.a`, which this rule does not ask for.
+    check_this(
+        "class C {\n  int a;\n  Runnable r = new Runnable() { public void run() { a++; } };\n}",
+        expect![""],
+    );
+}
+
+#[test]
+fn a_nested_class_is_a_different_instance() {
+    // Same reason as the anonymous one, and the same for a class declared inside a method body.
+    check_this(
+        "class C {\n  int a;\n  class Inner { void m() { a++; } }\n  void outer() { class Local { void m() { a++; } } }\n}",
+        expect![""],
+    );
+}
+
+#[test]
+fn a_record_component_is_a_field_outside_the_compact_constructor() {
+    // A component *is* the record's `private final` field, so `this.x` is right in an ordinary
+    // method. Inside `Point { ... }` the same spelling is the implicit parameter, which no
+    // qualifier can name — and the resolver registers no parameter there, so without the skip it
+    // would bind to the component and be reported.
+    check_this(
+        "record Point(int x) {\n  Point { if (x < 0) { x = 0; } }\n  int doubled() { return x * 2; }\n}",
+        expect![[r"
+            81..82: field `x` should be qualified with `this.`
+        "]],
+    );
+}
+
+#[test]
+fn an_inherited_field_is_out_of_reach() {
+    // The documented limit: a superclass field stays unresolved in the file-local pass, so it is
+    // silently not reported. Binding it would need a `ProjectIndex`, and a `Checker::Semantic`
+    // rule reports nothing at all when a host supplies no project.
+    check_this(
+        "class Base { protected int a; }\nclass C extends Base { void m() { a = 1; } }",
+        expect![""],
+    );
+}
+
+#[test]
+fn an_enum_member_is_checked_and_a_constant_body_is_not() {
+    // `ENUM_BODY` is deliberately not one of the type-introducing kinds — an enum's own members
+    // sit under it and the walk falls through to `ENUM_DECL`, which is what makes `hits` here the
+    // enclosing type's field. A constant *with a body* does introduce a type, so reaching `hits`
+    // from inside one is the deliberate miss the module docs claim: the qualifier Java wants
+    // there is `E.this.`.
+    check_this(
+        "enum E {\n  A,\n  B { void go() { hits++; } };\n  int hits;\n  void bump() { hits++; }\n  void go() {}\n}",
+        expect![[r"
+            73..77: field `hits` should be qualified with `this.`
+        "]],
+    );
+}
+
+#[test]
+fn every_declarator_of_a_multi_field_is_in_the_table() {
+    // `int a, b;` binds two fields off one declaration, and the table this rule builds is keyed on
+    // the same `FieldDecl::names()` tokens the resolver registers its defs from. A key that drifted
+    // would read as `static` — a silent false negative — so the agreement is pinned here.
+    check_this(
+        "class C { int a, b; void m() { a = b; } }",
+        expect![[r"
+            31..32: field `a` should be qualified with `this.`
+            35..36: field `b` should be qualified with `this.`
+        "]],
+    );
+}
+
+#[test]
+fn shadowed_only_reports_where_the_executable_also_declares_the_name() {
+    // checkstyle's `validateOnlyOverlapping`: the sites where the spelling alone no longer says
+    // which binding a reader is looking at. `inc` has no local named `count`, so it goes quiet;
+    // `reset` does, and its `count = 0` — which JLS §6.3 binds to the *field*, the local not yet
+    // being in scope — is exactly the confusing site.
+    let src = "class C {\n  int count;\n  void inc() { count++; }\n  void reset() { count = 0; int count = 1; use(count); }\n}";
+    let always = implicit_this(src, ThisScope::Always);
+    assert_eq!(always.lines().count(), 2, "{always}");
+    expect![[r"
+        66..71: field `count` should be qualified with `this.`
+    "]]
+    .assert_eq(&implicit_this(src, ThisScope::ShadowedOnly));
+}
+
+#[test]
+fn implicit_this_is_suppressible_by_rule_and_by_section() {
+    // Nothing in `suppress.rs` names a rule: it reads `RuleMeta`'s own name and category, so a
+    // rule added later is suppressible the day it lands.
+    for name in ["implicit-this", "restriction", "all"] {
+        let src =
+            format!("class C {{ int a; @SuppressWarnings(\"{name}\") void m() {{ a = 1; }} }}");
+        assert_eq!(implicit_this(&src, ThisScope::Always), "", "@{name}");
+    }
 }
 
 // ===== rule options =====

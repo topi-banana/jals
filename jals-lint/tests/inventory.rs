@@ -201,6 +201,8 @@ fn every_implemented_rule_that_ports_one_is_reachable_from_the_ledger() {
         "constant-condition",
         "empty-catch",
         "missing-braces",
+        // Rust has no implicit receiver, so leaving one out is not a thing its lints can name.
+        "implicit-this",
     ];
     let mut mapped: BTreeSet<String> = BTreeSet::new();
     for row in rustc_rows().iter().chain(clippy_rows().iter()) {

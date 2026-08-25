@@ -36,6 +36,7 @@ class Sink {
   int Bad_Method(int Bad_Param) {
     int Bad_Local = 0;
     int _unused = 1;
+    Bad_Field = Bad_Local;
     if (Bad_Param > 0) if (Bad_Local > 0) System.out.println("x");
     if (Bad_Param > 1)
       return 1;
@@ -95,6 +96,7 @@ fn variant(section: &str, rule: &str, key: &str) -> Value {
         ("style", "missing-braces", "policy") => Value::from("multi-line"),
         ("naming", "naming-convention", _) => Value::from("any"),
         ("restriction", "print-to-console", "streams") => Value::from("stderr"),
+        ("restriction", "implicit-this", "scope") => Value::from("shadowed-only"),
         _ => panic!("no non-default value known for [{section}] {rule}.{key}"),
     }
 }
@@ -104,6 +106,7 @@ fn variant(section: &str, rule: &str, key: &str) -> Value {
 fn all_enabled() -> Config {
     let mut config = Config::default().with_features(FeatureSet::resolve(&[Feature::Java25]));
     config.restriction.print_to_console.level = LintLevel::Warn;
+    config.restriction.implicit_this.level = LintLevel::Warn;
     config
 }
 
@@ -203,7 +206,10 @@ fn the_default_config_enables_exactly_these_rules() {
             "wildcard-import",
         ]
     );
-    assert_eq!(level_of(LintLevel::Allow), ["print-to-console"]);
+    assert_eq!(
+        level_of(LintLevel::Allow),
+        ["implicit-this", "print-to-console"]
+    );
 }
 
 #[test]

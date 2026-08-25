@@ -38,8 +38,37 @@ pub struct PrintToConsole {
     pub streams: ConsoleStreams,
 }
 
+/// Which instance-field references `implicit-this` requires the `this.` qualifier on.
+///
+/// Checkstyle spells the same choice as `RequireThis`'s `validateOnlyOverlapping` flag, a boolean
+/// whose `false` means "check more" — the wrong way round for a reader, and unreadable beside the
+/// rule's other boolean. Naming both answers says which code each one is about.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ThisScope {
+    /// Every instance-field reference in a non-static context. The default: a project adopts this
+    /// rule for `this.` everywhere, not for `this.` only where the compiler would force it.
+    #[default]
+    Always,
+    /// Only a reference inside an executable that also declares a local, parameter or pattern
+    /// variable of the same name — the sites where the spelling alone no longer says which
+    /// binding a reader is looking at.
+    ShadowedOnly,
+}
+
+/// `implicit-this` options.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct ImplicitThis {
+    /// Which references require the qualifier.
+    pub scope: ThisScope,
+}
+
 /// See [`LintOptions`]: this rule takes options, so it always serializes as a table.
 impl LintOptions for PrintToConsole {}
+
+/// See [`LintOptions`]: this rule takes options, so it always serializes as a table.
+impl LintOptions for ImplicitThis {}
 
 lint_section! {
     /// `[restriction]` — constructs a project has chosen to ban.
@@ -49,5 +78,10 @@ lint_section! {
         /// `clippy::print_stdout` and `clippy::print_stderr` as one rule with a
         /// [`streams`](PrintToConsole::streams) key.
         "print-to-console" => print_to_console: PrintToConsole = Allow,
+        /// `implicit-this` — an instance field read or written by simple name where `this.` would
+        /// qualify it, for a project that wants a field distinguishable from a local by the
+        /// spelling alone. Checkstyle's `RequireThis`; neither rustc nor clippy carries an
+        /// analogue, because Rust has no implicit receiver to leave out.
+        "implicit-this" => implicit_this: ImplicitThis = Allow,
     }
 }

@@ -90,7 +90,8 @@ fn every_restriction_rule_is_allow_by_default() {
     // A property of the category, not of any one rule: see the section's module docs.
     let restriction = Restriction::default();
     assert_eq!(restriction.print_to_console.level, LintLevel::Allow);
-    assert_eq!(Restriction::RULES, ["print-to-console"]);
+    assert_eq!(restriction.implicit_this.level, LintLevel::Allow);
+    assert_eq!(Restriction::RULES, ["print-to-console", "implicit-this"]);
 }
 
 #[test]
