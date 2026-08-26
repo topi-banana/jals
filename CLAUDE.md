@@ -150,6 +150,15 @@ filesystem reads into portable interfaces.
     classpath` is an input to one and not the other. Each task execution is memoized in
     `CacheNamespace::BuildTaskState` under the node identity, plan digest, and resolved features,
     and re-verified before reuse.
+  - `[build] resource-dirs` files reach the jar through `resource.rs`, which owns both halves of
+    resource templating: the `ResourcePlan` that answers which files are rendered, and the
+    Jinja-subset engine that renders them. Both are crate-internal because `RemapPlan` is their
+    only consumer, and the engine is in-house because every template crate on crates.io needs
+    `std` while this crate is `no_std + alloc`. Selection is by
+    *declaration* and never by content, so a resource nobody named is never decoded — which is what
+    keeps a PNG a PNG. The snapshot scope that captures them stays feature-independent
+    (`jals-classpath`'s `snapshot_scopes`): capture is unconditional, rendering is where a feature
+    selection applies.
   - `ProjectAssembly` owns the **order and preconditions** of the whole procedure, and a host
     **cannot sequence the steps itself**: it calls `ProjectAssembly::script` for the root build
     script and its task plan, then `ProjectScript::resolve_memory` / `resolve_native` for

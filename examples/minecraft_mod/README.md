@@ -149,6 +149,10 @@ declare. No `"compatibilityLevel"` either: it must be at least the class-file ve
 produced, and this project leaves `[build] release` unset (below), so setting the two is one paired
 decision left to whoever adapts this.
 
+This example declares no `[build.resources] template`, so its resources are packaged byte for byte —
+the default. A project that wants `[package] version` or the active features rendered into a
+resource names it there instead; see [the build crate's README](../../jals-build/README.md#resource-templates).
+
 Resources are authored project files, so they are read from the project snapshot rather than walked
 off disk, and they reach the **jar only** — `jals run` executes `classes-dir`, which is compiler
 output and never receives them.

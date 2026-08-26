@@ -111,6 +111,9 @@ release = 21                       # javac --release N
 classpath = ["libs/guava.jar"]    # -classpath entries (jars or dirs)
 javac-flags = ["-Xlint:all"]      # appended verbatim, before the source files
 
+# [build.resources]                # a sub-table, so it goes *after* every bare [build] key above
+# template = ["fabric.mod.json"]   # globs naming which resources are rendered as templates
+
 # [toolchain]                       # which javac/java to use (defaults to the system tools)
 # compiler = { distribution = { name = "temurin", version = 21 } }  # discover an installed JDK
 # runtime  = "system"               # "system" | "builtin" | { path = "…" } | { distribution = { … } }
@@ -218,6 +221,72 @@ nothing still leaves every dependency script cached.
 | `target`        | integer          | —                        | `--target N` — only when `release` is unset                                                                                                                     |
 | `classpath`     | array of strings | `[]`                     | `-classpath` (joined with the platform separator); omitted entirely when empty                                                                                  |
 | `javac-flags`   | array of strings | `[]`                     | appended **verbatim** after the generated flags, before the source files — an escape hatch for anything the manifest does not model yet                         |
+| `resources`     | sub-table        | `{ template = [] }`      | how resources become jar members; `template` is the globs rendered rather than copied (see below). A sub-table, so it goes after every bare `[build]` key       |
+
+### Resource templates
+
+`resource-dirs` says *where* the resources are; `[build.resources] template` says *which of them*
+are rendered on the way into the jar. Everything else is copied byte for byte — which is the point,
+because a resource is whatever the author put there, and rendering a PNG through a template engine
+corrupts it. A project that declares nothing gets exactly the bytes it always did.
+
+```toml
+[build.resources]
+template = ["fabric.mod.json", "META-INF/**/*.xml"]
+```
+
+A glob is matched against a resource's path **below** the `resource-dirs` entry it was found under —
+the same address it takes as a jar member — so `"fabric.mod.json"` names the file at the root of a
+resource directory whatever that directory is called. `*` matches any run of characters within one
+segment, `?` matches exactly one, and `**` is a whole segment matching **zero or more** segments, so
+`META-INF/**/*.xml` reaches `META-INF/a.xml` as well as `META-INF/x/y.xml`. A pattern that matches
+nothing fails the build rather than shipping the file unrendered: unlike `resource-dirs`, whose
+default lands on every project, a pattern here was written on purpose.
+
+Two namespaces are readable, and nothing else. Environment variables are deliberately absent — a
+value read from the ambient environment is part of no cache identity here.
+
+| Expression | Reads |
+| --- | --- |
+| `{{ package.name }}` / `{{ package.version }}` | `[package]` metadata |
+| `{% if features.server %}` | whether a build feature is active under this `--features` selection |
+| `{{ features["1.20.1"] }}` | the same, for a feature name no `a.b` path can spell |
+| `{% for f in features %}` | the active feature set, in sorted order; `loop.index`, `index0`, `first`, `last`, `length` |
+| `{{ package.version \| default("0.0.0") }}` | a fallback for a `[package]` key that is not set |
+| `{# … #}` | a comment, which renders to nothing |
+
+The bracket spelling is not sugar: a Minecraft-style project declares features called `1.20.1` and
+`mixin-extras`, and neither is a name a dotted path can carry.
+
+```json
+{
+  "id": "{{ package.name }}",
+  "version": "{{ package.version }}",
+{% if features.server %}
+  "environment": "server",
+{% else %}
+  "environment": "*",
+{% endif %}
+  "entrypoints": { "main": ["com.example.HelloMod"] }
+}
+```
+
+Three things diverge from Jinja on purpose:
+
+- **A block tag alone on its line takes the line with it** (Jinja's `trim_blocks` plus
+  `lstrip_blocks`, always on). The example above renders as valid JSON with no blank lines left
+  behind. There is no `{%- -%}` spelling — one rule rather than two. A tag sharing its line with
+  anything keeps every byte around it.
+- **Emitting a value that is not set is an error**, not the empty string. In a build tool an
+  undefined name is a typo far more often than an intention, and `"version": ""` reaches the jar and
+  fails at load time instead of at build time. `| default("…")` is how the intentional case is
+  written. Asking `features.anything` is never an error, though: features are additive, so "is X
+  on" is a well-formed question about any name and answers `false`.
+- **A lone `{` is never a delimiter**, so JSON and XML are written exactly as they are read. To
+  emit a literal delimiter, use a string literal: `{{ "{{" }}`.
+
+Rendered resources reach the **jar only**, exactly as unrendered ones do, and only when
+`[build] remap` declares the packaging step.
 
 ### Rhai build scripts
 

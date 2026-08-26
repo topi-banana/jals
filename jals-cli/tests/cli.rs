@@ -2836,6 +2836,106 @@ fn resources_are_packaged_into_the_jar() {
     assert!(!dir.path().join("target/classes/mixins.json").exists());
 }
 
+/// The same packaging shape, with one resource declared as a template and two left alone.
+///
+/// A separate fixture on purpose: `packaging_project` and the tests over it are what assert that a
+/// project declaring no `[build.resources]` still gets the byte-for-byte copy it always did, so
+/// they are exactly the thing this feature must not disturb.
+fn templated_project() -> tempfile::TempDir {
+    let dir = project(
+        "[package]\nname = \"templated\"\nversion = \"0.1.0\"\n\
+         [features]\nserver = []\n\
+         [build]\nbackend = { type = \"jals\" }\nremap = { with = \"mojmap\" }\n\
+         [mappings.mojmap]\nfile = \"maps/server.txt\"\n\
+         [build.resources]\ntemplate = [\"meta.json\"]\n",
+    );
+    std::fs::create_dir_all(dir.path().join("maps")).unwrap();
+    std::fs::write(
+        dir.path().join("maps/server.txt"),
+        "com.example.Main -> a:\n",
+    )
+    .unwrap();
+    let resources = dir.path().join("src/main/resources");
+    std::fs::create_dir_all(&resources).unwrap();
+    std::fs::write(
+        resources.join("meta.json"),
+        "{\"version\":\"{{ package.version }}\",\
+         \"env\":\"{% if features.server %}server{% else %}*{% endif %}\"}",
+    )
+    .unwrap();
+    // Undeclared, and it spells a template on purpose.
+    std::fs::write(resources.join("keep.txt"), "{{ package.version }}").unwrap();
+    // Undeclared and not even text: nothing may decode it.
+    std::fs::write(
+        resources.join("icon.bin"),
+        [0x89, 0x50, 0x4e, 0x47, 0xff, 0xfe],
+    )
+    .unwrap();
+    dir
+}
+
+#[cfg(unix)]
+#[test]
+fn a_declared_resource_template_is_rendered_and_everything_else_keeps_its_bytes() {
+    let dir = templated_project();
+    let manifest = dir.path().join("jals.toml");
+    let manifest = manifest.to_str().unwrap();
+    let jar = dir.path().join("target/jals/remap/templated-0.1.0.jar");
+
+    let (stdout, stderr, code) = run_full(&["build", "--manifest-path", manifest]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert_eq!(
+        jar_member(&jar, "meta.json"),
+        b"{\"version\":\"0.1.0\",\"env\":\"*\"}".to_vec()
+    );
+    // Selection is by declaration and never by content, so an undeclared resource keeps its bytes
+    // even when they spell a template — and a resource that is not text is never decoded at all.
+    assert_eq!(
+        jar_member(&jar, "keep.txt"),
+        b"{{ package.version }}".to_vec()
+    );
+    assert_eq!(
+        jar_member(&jar, "icon.bin"),
+        vec![0x89, 0x50, 0x4e, 0x47, 0xff, 0xfe]
+    );
+
+    // The same project under a different selection renders a different member. Nothing else moves.
+    let (stdout, stderr, code) =
+        run_full(&["build", "--manifest-path", manifest, "--features", "server"]);
+    assert_eq!(code, 0, "{stdout}{stderr}");
+    assert_eq!(
+        jar_member(&jar, "meta.json"),
+        b"{\"version\":\"0.1.0\",\"env\":\"server\"}".to_vec()
+    );
+    assert_eq!(
+        jar_member(&jar, "keep.txt"),
+        b"{{ package.version }}".to_vec()
+    );
+}
+
+#[test]
+fn a_resource_template_that_matches_nothing_fails_the_build() {
+    // A `resource-dirs` entry that is not there is tolerated because the default lands on every
+    // project. A pattern was written on purpose, so a typo fails rather than quietly shipping the
+    // file unrendered.
+    let dir = templated_project();
+    let manifest_path = dir.path().join("jals.toml");
+    let manifest = std::fs::read_to_string(&manifest_path).unwrap();
+    std::fs::write(
+        &manifest_path,
+        manifest.replace("\"meta.json\"", "\"meta.jsonn\""),
+    )
+    .unwrap();
+
+    let (stdout, stderr, code) =
+        run_full(&["build", "--manifest-path", manifest_path.to_str().unwrap()]);
+    assert_ne!(code, 0, "{stdout}{stderr}");
+    assert!(
+        stderr.contains("`meta.jsonn` matched no file"),
+        "the message has to name the pattern: {stderr}"
+    );
+}
+
 /// One member of a stored jar, as bytes.
 #[cfg(unix)]
 fn jar_member(path: &Path, name: &str) -> Vec<u8> {

@@ -16,9 +16,11 @@ use jals_classpath::{
 use jals_config::{AmbiguousMapping, BackendKind, Manifest, ResolvedBuildFeatures};
 use jals_exec::Exec;
 use jals_storage::{
-    CacheBackend, CacheKey, CacheNamespace, ContentDigest, DirKey, ProjectStorage, ProjectView,
-    ProvenanceFold, RelativePath, SourceBackend,
+    CacheBackend, CacheKey, CacheNamespace, ContentDigest, ProjectStorage, ProvenanceFold,
+    RelativePath, SourceBackend,
 };
+
+use crate::resource::ResourcePlan;
 
 /// Whether this project asks for a post-compile remap, and whether its backend can supply one.
 ///
@@ -71,9 +73,10 @@ pub struct RemapPlan {
     /// The mapping set, or `None` when no alternative of the named entry is active under this
     /// selection — the jar is packaged and its names are left alone.
     mapping: Option<MappingSpec>,
-    /// The `[build] resource-dirs` whose files are packaged alongside the classes, lowered. A
+    /// The `[build] resource-dirs` whose files are packaged alongside the classes, lowered
+    /// together with the `[build.resources]` declarations that say which of them are rendered. A
     /// directory that does not exist in the snapshot is skipped when the jar is written.
-    resources: Vec<DirKey>,
+    resources: ResourcePlan,
     /// The output jar, as the project-relative path `[build] remap` resolved to.
     pub jar: String,
 }
@@ -111,18 +114,9 @@ impl RemapSelection {
             Ok(mapping) => mapping,
             Err(ambiguous) => return Self::Ambiguous(ambiguous),
         };
-        // A `resource-dirs` entry `Manifest::validate` accepted always parses; one that does not is
-        // a manifest that reached here unvalidated, and dropping it is the same answer the missing
-        // directory below gets.
-        let resources = manifest
-            .build
-            .resource_dirs
-            .iter()
-            .filter_map(|dir| DirKey::parse(dir).ok())
-            .collect();
         Self::Requested(RemapPlan {
             mapping,
-            resources,
+            resources: ResourcePlan::lower(manifest, features),
             jar: remap.jar_path(&manifest.package),
         })
     }
@@ -188,7 +182,7 @@ impl RemapPlan {
         // step portable — and a remap leaves every non-class member untouched, so they survive it
         // byte for byte.
         let mut entries = classes.to_vec();
-        entries.extend(self.resource_entries(&view));
+        entries.extend(self.resources.entries(&view)?);
         let staged = JarPackage::write(&entries, main_class)?;
 
         // No active mapping is the whole answer: the packaged jar already carries the names the
@@ -229,38 +223,6 @@ impl RemapPlan {
             .ok_or_else(|| "the remapped jar is not cached".to_owned())
     }
 
-    /// Every `[build] resource-dirs` file in `view`, addressed by its path below the directory it
-    /// was declared under — exactly as a class is addressed below `classes-dir`.
-    ///
-    /// Sorted by that path, per directory, because the jar's member order is part of its bytes.
-    fn resource_entries(&self, view: &ProjectView) -> Vec<(RelativePath, Vec<u8>)> {
-        let mut entries = Vec::new();
-        for dir in &self.resources {
-            // A declared directory that is not there is not a mistake: `[build] resource-dirs`
-            // defaults onto every project, and most projects have no resources.
-            if view.directory(dir).is_err() {
-                continue;
-            }
-            let mut found: Vec<_> = view
-                .tree()
-                .files_under(dir)
-                .filter_map(|file| {
-                    let path = RelativePath::new(
-                        file.key()
-                            .path()
-                            .segments()
-                            .skip(dir.path().segments().len())
-                            .cloned(),
-                    );
-                    (!path.is_root()).then(|| (path, file.bytes().to_vec()))
-                })
-                .collect();
-            found.sort_by_key(|(path, _)| path.to_string());
-            entries.extend(found);
-        }
-        entries
-    }
-
     /// The cache key the staged (pre-remap) jar is published under.
     ///
     /// Content-addressed with no provenance beyond the step's own tag: the same compiled classes
@@ -293,6 +255,8 @@ impl CompiledClasses {
 
 #[cfg(test)]
 mod tests {
+    use jals_storage::DirKey;
+
     use super::*;
 
     fn manifest(source: &str) -> Manifest {
@@ -373,8 +337,8 @@ mod tests {
         // The default, lowered — the plan carries the directories rather than the host re-reading
         // `[build] resource-dirs` when it packages.
         assert_eq!(
-            plan.resources,
-            alloc::vec![DirKey::parse("src/main/resources").expect("constant is portable")]
+            plan.resources.dirs(),
+            [DirKey::parse("src/main/resources").expect("constant is portable")]
         );
 
         let none = "[build]\nremap = { with = \"m\" }\nresource-dirs = []\n\
@@ -382,7 +346,7 @@ mod tests {
         let RemapSelection::Requested(plan) = selection(none, &[]) else {
             panic!("declared and active");
         };
-        assert!(plan.resources.is_empty());
+        assert!(plan.resources.dirs().is_empty());
     }
 
     #[test]
