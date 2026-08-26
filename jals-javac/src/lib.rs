@@ -22,7 +22,9 @@
 //!
 //! - `facts` — the source facts both lowerings read: the span the inference memo is keyed on, the
 //!   definition a name binds to, the constant a `case` label names, whether one method overrides
-//!   another. Derived from the CST plus [`jals_hir`] and nothing else, so it names no instruction.
+//!   another, which operator a token run spells, what two operands promote to (JLS §5.6), and
+//!   whether a class holds an enclosing instance. Derived from the CST plus [`jals_hir`] and
+//!   nothing else, so it names no instruction.
 //!   Crate-internal: it answers *about the source*, and a consumer wanting that should ask
 //!   [`jals_hir`] rather than reach through a compiler.
 //! - [`desc`] — erasure: a resolved [`jals_hir::Ty`] to the class file's internal names and

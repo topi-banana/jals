@@ -345,9 +345,8 @@ impl Stmt {
             match clause.binding() {
                 Some(name) => {
                     let id = context
-                        .typed
-                        .analysis()
-                        .symbol_at(usize::from(name.text_range().start()))
+                        .facts()
+                        .def_at_token(&name)
                         .ok_or_else(|| LowerError::Unresolved(name.text().into()))?;
                     let slot = emit.slots.declare(id, 1);
                     emit.asm.store(slot)?;
@@ -478,9 +477,8 @@ impl Stmt {
         let slot = match resource.binding() {
             Some(name) => {
                 let id = context
-                    .typed
-                    .analysis()
-                    .symbol_at(usize::from(name.text_range().start()))
+                    .facts()
+                    .def_at_token(&name)
                     .ok_or_else(|| LowerError::Unresolved(name.text().into()))?;
                 emit.slots.declare(id, 1)
             }
@@ -600,9 +598,8 @@ impl Stmt {
         // unwritten, which the verifier rejects on the first read of `b`.
         for (name, value) in Facts::declarators(declaration.syntax()) {
             let id = context
-                .typed
-                .analysis()
-                .symbol_at(usize::from(name.text_range().start()))
+                .facts()
+                .def_at_token(&name)
                 .ok_or_else(|| LowerError::Unresolved(name.text().into()))?;
             let ty = context.typed.type_of_def(id).clone();
             let slot = emit.slots.declare(id, Slots::ty_width(&ty));
@@ -1083,9 +1080,8 @@ impl Stmt {
             .name_token()
             .ok_or(LowerError::Unsupported("a `for`-each with no variable"))?;
         context
-            .typed
-            .analysis()
-            .symbol_at(usize::from(name.text_range().start()))
+            .facts()
+            .def_at_token(&name)
             .ok_or_else(|| LowerError::Unresolved(name.text().into()))
     }
 

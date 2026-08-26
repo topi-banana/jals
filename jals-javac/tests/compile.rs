@@ -6007,3 +6007,21 @@ public class Target {
     }
     assert_eq!(run(source, "Target").trim(), "aa\n6\n13");
 }
+
+/// `a.length = 1` is refused as an assignment, not reported as an unresolved name.
+///
+/// The JVM twin of `an_assignment_to_an_arrays_length_says_what_is_wrong` in `wasm.rs`. Both
+/// backends classify `a.length` through one shared fact now, so both refuse this in the same words
+/// — where before each fell through to its own member lookup and blamed the name.
+#[test]
+fn an_assignment_to_an_arrays_length_says_what_is_wrong() {
+    let source = "public class L { public static void m(int[] a) { a.length = 1; } }";
+    let error = compile(source).expect_err("an array's length is not assignable");
+    assert!(
+        matches!(
+            error,
+            LowerError::Unsupported("an assignment to an array's length")
+        ),
+        "got {error}"
+    );
+}
