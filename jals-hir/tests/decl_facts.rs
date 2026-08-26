@@ -105,8 +105,7 @@ fn the_file_local_fold_agrees_with_the_project_index() {
                class Box { static int s; int i; }";
     let node = jals_exec::block_on_inline(jals_syntax::Parse::parse(src)).syntax();
     let analysis = jals_exec::block_on_inline(FileAnalysis::of(&node));
-    let index =
-        jals_exec::block_on_inline(ProjectIndex::builder(&[(FileId(0), node)]).build());
+    let index = jals_exec::block_on_inline(ProjectIndex::builder(&[(FileId(0), node)]).build());
 
     let project_static = |ty: &str, member: &str, namespace| {
         let owner = index
