@@ -29,14 +29,12 @@ use alloc::vec::Vec;
 
 use jals_hir::DefKind;
 use jals_syntax::SyntaxKind::{
-    AMP, AMP_AMP, BANG, BANG_EQ, CARET, CHAR_LITERAL, EQ, EQ_EQ, FALSE_KW, FLOAT_LITERAL, GT,
-    IDENT, INT_LITERAL, LSHIFT, LT, LT_EQ, MINUS, PERCENT, PIPE, PIPE_PIPE, PLUS, SLASH, STAR,
-    STRING_LITERAL, TRUE_KW,
+    CHAR_LITERAL, FALSE_KW, FLOAT_LITERAL, IDENT, INT_LITERAL, STRING_LITERAL, TRUE_KW,
 };
 use jals_syntax::ast::{self, AstNode as _};
 
 use super::literal::{Literal, Width};
-use super::{FactError, Facts, Result};
+use super::{FactError, Facts, Numeric, Operator, Result, Unary};
 
 /// A constant expression's value, at the width Java gives it.
 #[derive(Debug, Clone, PartialEq)]
@@ -183,7 +181,6 @@ impl Const<'_> {
     }
 
     fn unary(&mut self, node: &ast::UnaryExpr) -> Result<ConstValue> {
-        use jals_syntax::SyntaxKind::TILDE;
         let operand = node
             .operand()
             .ok_or(FactError::Unsupported("a unary with no operand"))?;
@@ -191,25 +188,30 @@ impl Const<'_> {
         // The token *run*, matched exactly. `--` is its own `MINUS_MINUS` kind, so a rule that
         // merely asks whether a `MINUS` is present reads `--5` as a negation — which is how one
         // backend compiled `case --5:` as `5`.
-        match Facts::operator(node.syntax()).as_slice() {
-            [PLUS] => Ok(Self::promote(value)),
-            [MINUS] => match Self::promote(value) {
+        match Unary::of(node.syntax())
+            .ok_or(FactError::Unsupported("a `case` this cannot evaluate"))?
+        {
+            Unary::Plus => Ok(Self::promote(value)),
+            Unary::Minus => match Self::promote(value) {
                 ConstValue::Int(v) => Ok(ConstValue::Int(v.wrapping_neg())),
                 ConstValue::Long(v) => Ok(ConstValue::Long(v.wrapping_neg())),
                 ConstValue::Float(v) => Ok(ConstValue::Float(-v)),
                 ConstValue::Double(v) => Ok(ConstValue::Double(-v)),
                 _ => Err(FactError::Unsupported("a `-` on a non-numeric constant")),
             },
-            [TILDE] => match Self::promote(value) {
+            Unary::BitNot => match Self::promote(value) {
                 ConstValue::Int(v) => Ok(ConstValue::Int(!v)),
                 ConstValue::Long(v) => Ok(ConstValue::Long(!v)),
                 _ => Err(FactError::Unsupported("a `~` on a non-integral constant")),
             },
-            [BANG] => match value {
+            Unary::Not => match value {
                 ConstValue::Bool(v) => Ok(ConstValue::Bool(!v)),
                 _ => Err(FactError::Unsupported("a `!` on a non-boolean constant")),
             },
-            _ => Err(FactError::Unsupported("a `case` this cannot evaluate")),
+            // A prefix `++` / `--` is an assignment, which is not a constant expression at all.
+            Unary::Increment | Unary::Decrement => {
+                Err(FactError::Unsupported("a `case` this cannot evaluate"))
+            }
         }
     }
 
@@ -253,7 +255,12 @@ impl Const<'_> {
 }
 
 impl Const<'_> {
-    /// Unary numeric promotion (§5.6.1): everything narrower than an `int` becomes one.
+    /// Unary numeric promotion (§5.6.1) applied to a *value*, not to a type.
+    ///
+    /// [`Numeric::promote_one`](super::Numeric::promote_one) is the rule; this is what it means for
+    /// a folded constant. Only `char` is left to widen, because a `byte` and a `short` are already
+    /// held as [`ConstValue::Int`] — so the two are not a duplicated answer even though they share a
+    /// name, and the §5.6.2 lattice they both feed is asked from one place either way.
     fn promote(value: ConstValue) -> ConstValue {
         match value {
             ConstValue::Char(c) => ConstValue::Int(c as i32),
@@ -321,7 +328,8 @@ enum Promoted {
 
 impl Const<'_> {
     fn binary(&mut self, node: &ast::BinaryExpr) -> Result<ConstValue> {
-        let operator = Facts::operator(node.syntax());
+        let operator = Operator::binary(node.syntax())
+            .ok_or(FactError::Unsupported("a `case` this cannot evaluate"))?;
         let left = node
             .lhs()
             .ok_or(FactError::Unsupported("a binary with no left operand"))?;
@@ -332,20 +340,20 @@ impl Const<'_> {
 
         // A `+` with a `String` operand is concatenation, and it is the one operator that reads a
         // `char` as a character rather than as its code.
-        if operator.as_slice() == [PLUS]
+        if operator == Operator::Add
             && matches!(a, ConstValue::Text(_)) | matches!(b, ConstValue::Text(_))
         {
             return Self::concat(&a, &b);
         }
         if let (ConstValue::Bool(x), ConstValue::Bool(y)) = (&a, &b) {
             let (x, y) = (*x, *y);
-            return match operator.as_slice() {
+            return match operator {
                 // `&`, `|`, and `^` are also the boolean operators, without short-circuiting.
-                [AMP | AMP_AMP] => Ok(ConstValue::Bool(x && y)),
-                [PIPE | PIPE_PIPE] => Ok(ConstValue::Bool(x || y)),
+                Operator::And | Operator::AndAnd => Ok(ConstValue::Bool(x && y)),
+                Operator::Or | Operator::OrOr => Ok(ConstValue::Bool(x || y)),
                 // `^` and `!=` are the same operation on two booleans.
-                [CARET | BANG_EQ] => Ok(ConstValue::Bool(x != y)),
-                [EQ_EQ] => Ok(ConstValue::Bool(x == y)),
+                Operator::Xor | Operator::Ne => Ok(ConstValue::Bool(x != y)),
+                Operator::Eq => Ok(ConstValue::Bool(x == y)),
                 _ => Err(FactError::Unsupported("this operator on a `boolean`")),
             };
         }
@@ -357,15 +365,15 @@ impl Const<'_> {
 
         // A shift promotes each side on its own (§5.6.1 twice, not §5.6.2 once): the result has the
         // *left* operand's promoted type, and the distance is masked.
-        match operator.as_slice() {
-            [LSHIFT] | [GT, GT] | [GT, GT, GT] => {
-                return Self::shift(&Self::promote(a), &Self::promote(b), operator.as_slice());
+        match operator {
+            Operator::Shl | Operator::Shr | Operator::Ushr => {
+                return Self::shift(&Self::promote(a), &Self::promote(b), operator);
             }
             _ => {}
         }
 
         let (x, y, kind) = Self::numeric(Self::promote(a), Self::promote(b))?;
-        Self::arithmetic(&x, &y, kind, operator.as_slice())
+        Self::arithmetic(&x, &y, kind, operator)
     }
 
     /// The constant a name refers to — a `final` variable initialised with a constant expression,
@@ -436,16 +444,28 @@ impl Const<'_> {
 impl Const<'_> {
     /// Binary numeric promotion (§5.6.2), with both operands already unary-promoted.
     fn numeric(a: ConstValue, b: ConstValue) -> Result<(ConstValue, ConstValue, Promoted)> {
-        let kind = match (&a, &b) {
-            (ConstValue::Double(_), _) | (_, ConstValue::Double(_)) => Promoted::Double,
-            (ConstValue::Float(_), _) | (_, ConstValue::Float(_)) => Promoted::Float,
-            (ConstValue::Long(_), _) | (_, ConstValue::Long(_)) => Promoted::Long,
-            (ConstValue::Int(_), ConstValue::Int(_)) => Promoted::Int,
-            _ => {
-                return Err(FactError::Unsupported(
-                    "an operator on a non-numeric constant",
-                ));
-            }
+        // The *type* each value already has. `byte` and `short` are held as `Int` and a `Char` has
+        // been widened by [`promote`](Self::promote) (§5.6.1), so nothing narrower reaches here.
+        let of = |value: &ConstValue| match value {
+            ConstValue::Int(_) => Some(Numeric::Int),
+            ConstValue::Long(_) => Some(Numeric::Long),
+            ConstValue::Float(_) => Some(Numeric::Float),
+            ConstValue::Double(_) => Some(Numeric::Double),
+            ConstValue::Char(_) | ConstValue::Bool(_) | ConstValue::Text(_) => None,
+        };
+        let (Some(left), Some(right)) = (of(&a), of(&b)) else {
+            return Err(FactError::Unsupported(
+                "an operator on a non-numeric constant",
+            ));
+        };
+        // The lattice itself is asked, not restated: this used to be a fourth copy of the §5.6.2
+        // arms — inside `facts`, the module whose whole job is that there is one.
+        let kind = match Numeric::promote(left, right) {
+            Numeric::Double => Promoted::Double,
+            Numeric::Float => Promoted::Float,
+            Numeric::Long => Promoted::Long,
+            // Binary promotion never answers narrower than `int`.
+            Numeric::Byte | Numeric::Short | Numeric::Char | Numeric::Int => Promoted::Int,
         };
         Ok((a, b, kind))
     }
@@ -455,7 +475,7 @@ impl Const<'_> {
         a: &ConstValue,
         b: &ConstValue,
         kind: Promoted,
-        operator: &[jals_syntax::SyntaxKind],
+        operator: Operator,
     ) -> Result<ConstValue> {
         let unsupported = || FactError::Unsupported("a `case` this cannot evaluate");
         let zero = || FactError::Unsupported("a constant division by zero");
@@ -469,15 +489,15 @@ impl Const<'_> {
                     return Ok(ConstValue::Bool(compared));
                 }
                 let value = match operator {
-                    [PLUS] => x.wrapping_add(y),
-                    [MINUS] => x.wrapping_sub(y),
-                    [STAR] => x.wrapping_mul(y),
-                    [SLASH | PERCENT] if y == 0 => return Err(zero()),
-                    [SLASH] => x.wrapping_div(y),
-                    [PERCENT] => x.wrapping_rem(y),
-                    [AMP] => x & y,
-                    [PIPE] => x | y,
-                    [CARET] => x ^ y,
+                    Operator::Add => x.wrapping_add(y),
+                    Operator::Sub => x.wrapping_sub(y),
+                    Operator::Mul => x.wrapping_mul(y),
+                    Operator::Div | Operator::Rem if y == 0 => return Err(zero()),
+                    Operator::Div => x.wrapping_div(y),
+                    Operator::Rem => x.wrapping_rem(y),
+                    Operator::And => x & y,
+                    Operator::Or => x | y,
+                    Operator::Xor => x ^ y,
                     _ => return Err(unsupported()),
                 };
                 Ok(if long {
@@ -498,10 +518,10 @@ impl Const<'_> {
                     return Ok(ConstValue::Bool(compared));
                 }
                 let value = match operator {
-                    [PLUS] => x + y,
-                    [MINUS] => x - y,
-                    [STAR] => x * y,
-                    [SLASH] => x / y,
+                    Operator::Add => x + y,
+                    Operator::Sub => x - y,
+                    Operator::Mul => x * y,
+                    Operator::Div => x / y,
                     // `%` on a float needs `fmod` from `compiler_builtins`, and no `case` label can
                     // reach one — so it is refused rather than linked for.
                     _ => return Err(unsupported()),
@@ -520,11 +540,7 @@ impl Const<'_> {
     }
 
     /// A shift, whose result takes the *left* operand's width and whose distance is masked (§15.19).
-    fn shift(
-        a: &ConstValue,
-        b: &ConstValue,
-        operator: &[jals_syntax::SyntaxKind],
-    ) -> Result<ConstValue> {
+    fn shift(a: &ConstValue, b: &ConstValue, operator: Operator) -> Result<ConstValue> {
         let Some(distance) = Self::as_i64(b) else {
             return Err(FactError::Unsupported("a shift by a non-integral constant"));
         };
@@ -537,14 +553,14 @@ impl Const<'_> {
                 )]
                 let d = (distance as u32) & 0x1f;
                 Ok(ConstValue::Int(match operator {
-                    [LSHIFT] => x.wrapping_shl(d),
-                    [GT, GT] => x.wrapping_shr(d),
+                    Operator::Shl => x.wrapping_shl(d),
+                    Operator::Shr => x.wrapping_shr(d),
                     #[expect(
                         clippy::cast_possible_wrap,
                         clippy::cast_sign_loss,
                         reason = "`>>>` is the logical shift, which is the unsigned one"
                     )]
-                    [GT, GT, GT] => ((x as u32) >> d) as i32,
+                    Operator::Ushr => ((x as u32) >> d) as i32,
                     _ => return Err(FactError::Unsupported("this shift operator")),
                 }))
             }
@@ -556,14 +572,14 @@ impl Const<'_> {
                 )]
                 let d = (distance as u32) & 0x3f;
                 Ok(ConstValue::Long(match operator {
-                    [LSHIFT] => x.wrapping_shl(d),
-                    [GT, GT] => x.wrapping_shr(d),
+                    Operator::Shl => x.wrapping_shl(d),
+                    Operator::Shr => x.wrapping_shr(d),
                     #[expect(
                         clippy::cast_possible_wrap,
                         clippy::cast_sign_loss,
                         reason = "`>>>` is the logical shift, which is the unsigned one"
                     )]
-                    [GT, GT, GT] => ((x as u64) >> d) as i64,
+                    Operator::Ushr => ((x as u64) >> d) as i64,
                     _ => return Err(FactError::Unsupported("this shift operator")),
                 }))
             }
@@ -660,19 +676,15 @@ impl Const<'_> {
     /// One table for both widths: the arms differ only in the type they compare, and two copies of an
     /// operator table is what this module exists to stop. On a floating-point operand `==` is exact —
     /// Java compares two constants bit for bit, not within a tolerance.
-    fn compare<T: PartialOrd + Copy>(
-        x: T,
-        y: T,
-        operator: &[jals_syntax::SyntaxKind],
-    ) -> Option<bool> {
+    fn compare<T: PartialOrd + Copy>(x: T, y: T, operator: Operator) -> Option<bool> {
         Some(match operator {
-            [LT] => x < y,
-            [GT] => x > y,
-            [LT_EQ] => x <= y,
+            Operator::Lt => x < y,
+            Operator::Gt => x > y,
+            Operator::Le => x <= y,
             // `>=` is two tokens, so that `List<List<T>>` still closes as two `>`.
-            [GT, EQ] => x >= y,
-            [EQ_EQ] => x == y,
-            [BANG_EQ] => x != y,
+            Operator::Ge => x >= y,
+            Operator::Eq => x == y,
+            Operator::Ne => x != y,
             _ => return None,
         })
     }

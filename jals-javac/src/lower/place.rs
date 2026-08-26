@@ -131,10 +131,15 @@ impl Place {
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
     ) -> Result<Self> {
-        let member = context
-            .typed
-            .field_target_of(Facts::span(access.syntax()))
-            .ok_or_else(|| LowerError::Unresolved(access.field().unwrap_or_default()))?;
+        // `a.length` is not a field, so there is no member for the index to have resolved.
+        // Reporting the *name* as unresolved named the wrong problem: `length` is final
+        // (JLS §10.7), so there is nothing to assign to rather than nothing to find.
+        if context.facts().is_array_length(access) {
+            return Err(LowerError::Unsupported(
+                "an assignment to an array's length",
+            ));
+        }
+        let member = context.facts().field_target(access)?;
         let (owner, name, descriptor) = Expr::field_ref(member, context)?;
         let ty = context.index.resolved_member_ty(member);
         if context.index.member(member).modifiers.is_static {

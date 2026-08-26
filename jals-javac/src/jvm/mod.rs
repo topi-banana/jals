@@ -7,4 +7,8 @@
 mod asm;
 mod frame;
 
-pub use asm::{AsmError, Assembler, BinOp, Branch, Compare, Label, Numeric, Receiver};
+/// Numeric promotion is a source fact, so the type lives in `crate::facts`; it is named here
+/// because it is what [`Assembler::convert`] takes.
+pub use crate::facts::Numeric;
+pub(crate) use asm::NumericStack;
+pub use asm::{AsmError, Assembler, BinOp, Branch, Compare, Label, Receiver};

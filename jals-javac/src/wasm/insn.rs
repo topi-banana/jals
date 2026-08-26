@@ -8,6 +8,7 @@
 //! Recovering `while` from a `goto` would mean a relooper; keeping the tree means the nesting is
 //! already right.
 
+use crate::facts::Numeric;
 use alloc::vec::Vec;
 
 use crate::wasm::encode::{Bytes, HeapType, ValType};
@@ -48,27 +49,24 @@ impl NumOp {
     }
 }
 
-/// A primitive type as a *conversion* names it, matching the JVM backend's
-/// [`Numeric`](crate::jvm::Numeric): `byte` / `short` / `char` are `i32` on the stack and three
-/// different narrowing targets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Num {
-    Byte,
-    Short,
-    Char,
-    Int,
-    Long,
-    Float,
-    Double,
+/// The representation a promoted [`Numeric`] has in a wasm local or on the stack.
+///
+/// An extension trait rather than an inherent method: the type states a *source* fact (JLS §5.6)
+/// and lives in `crate::facts`, while a `ValType` is an answer about this target. The two used to
+/// be one enum per backend, identical but for the name, each carrying its own copy of the
+/// promotion rules.
+pub(crate) trait NumericVal {
+    /// The wasm value type this occupies.
+    fn val(self) -> ValType;
 }
 
-impl Num {
-    /// The wasm value type this occupies.
-    pub(crate) const fn val(self) -> ValType {
+impl NumericVal for Numeric {
+    fn val(self) -> ValType {
         match self {
             Self::Long => ValType::I64,
             Self::Float => ValType::F32,
             Self::Double => ValType::F64,
+            // `byte` / `short` / `char` all compute as `i32` and differ only as narrowing targets.
             Self::Byte | Self::Short | Self::Char | Self::Int => ValType::I32,
         }
     }
@@ -386,8 +384,8 @@ impl Insn {
     /// on a NaN or an out-of-range value; JLS §5.1.3 requires 0 for a NaN and the nearest
     /// representable value otherwise, which is what `i32.trunc_sat_f32_s` does. Using the trapping
     /// form would turn `(int) (0.0 / 0.0)` from a 0 into a crash.
-    pub(crate) fn convert(&mut self, from: Num, to: Num) -> Option<&mut Self> {
-        use Num::{Byte, Char, Double, Float, Int, Long, Short};
+    pub(crate) fn convert(&mut self, from: Numeric, to: Numeric) -> Option<&mut Self> {
+        use Numeric::{Byte, Char, Double, Float, Int, Long, Short};
         if from.val() != to.val() {
             match (from, to) {
                 (Byte | Short | Char | Int, Long) => self.out.byte(0xAC),

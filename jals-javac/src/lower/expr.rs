@@ -25,16 +25,12 @@ use alloc::string::{String, ToString as _};
 
 use jals_classfile::MethodDescriptor;
 use jals_hir::{DefId, DefKind, ItemId, MemberId, Primitive, Ty};
-use jals_syntax::SyntaxKind::{
-    AMP, AMP_AMP, BANG, BANG_EQ, CARET, EQ_EQ, GT, INSTANCEOF_KW, LSHIFT, LT, LT_EQ, MINUS,
-    MINUS_MINUS, PERCENT, PIPE, PIPE_PIPE, PLUS, PLUS_PLUS, SLASH, STAR, TILDE,
-};
+use jals_syntax::SyntaxNode;
 use jals_syntax::ast::{self, AstNode as _};
-use jals_syntax::{SyntaxKind, SyntaxNode};
 
 use crate::desc::{DescError, Descriptor};
-use crate::facts::{Facts, Hierarchy, Literal};
-use crate::jvm::{BinOp, Branch, Compare, Numeric};
+use crate::facts::{Facts, Hierarchy, Literal, Operator, Unary};
+use crate::jvm::{BinOp, Branch, Compare, Numeric, NumericStack as _};
 use crate::lower::place::Place;
 use crate::lower::{Context, Emit, LowerError, OUTER, Result};
 
@@ -64,18 +60,10 @@ enum Repr {
 impl Repr {
     fn of(ty: &Ty) -> Result<Self> {
         Ok(match ty {
-            Ty::Primitive(Primitive::Boolean) => Self::Boolean,
-            Ty::Primitive(primitive) => Self::Number(match primitive {
-                Primitive::Byte => Numeric::Byte,
-                Primitive::Short => Numeric::Short,
-                Primitive::Char => Numeric::Char,
-                Primitive::Int => Numeric::Int,
-                Primitive::Long => Numeric::Long,
-                Primitive::Float => Numeric::Float,
-                Primitive::Double => Numeric::Double,
-                // Matched above; the compiler cannot see that from the outer arm.
-                Primitive::Boolean => return Err(DescError::Unknown.into()),
-            }),
+            // `boolean` is the one primitive that is not numeric (JLS §4.2), which is what
+            // `Numeric::of` refuses. It shares `int`'s representation and has no conversion to or
+            // from anything, so it is neither a number nor a reference here.
+            Ty::Primitive(primitive) => Numeric::of(*primitive).map_or(Self::Boolean, Self::Number),
             Ty::Class(_) | Ty::Array(_) | Ty::Null | Ty::TypeVar { .. } => Self::Reference,
             Ty::Void => return Err(DescError::Void.into()),
             Ty::Unknown => return Err(DescError::Unknown.into()),
@@ -334,25 +322,6 @@ impl Expr {
         }
     }
 
-    /// Binary numeric promotion (JLS §5.6.2): the one type both operands are converted to.
-    const fn promote(left: Numeric, right: Numeric) -> Numeric {
-        match (left, right) {
-            (Numeric::Double, _) | (_, Numeric::Double) => Numeric::Double,
-            (Numeric::Float, _) | (_, Numeric::Float) => Numeric::Float,
-            (Numeric::Long, _) | (_, Numeric::Long) => Numeric::Long,
-            // Everything narrower than `long` computes as `int`.
-            _ => Numeric::Int,
-        }
-    }
-
-    /// Unary numeric promotion (JLS §5.6.1): everything narrower than `int` becomes `int`.
-    const fn promote_one(numeric: Numeric) -> Numeric {
-        match numeric {
-            Numeric::Byte | Numeric::Short | Numeric::Char | Numeric::Int => Numeric::Int,
-            other => other,
-        }
-    }
-
     /// The numeric type `node`'s recorded type is, reported if it is not one.
     fn numeric_of(node: &SyntaxNode, context: &Context<'_>) -> Result<Numeric> {
         let ty = Self::type_of(node, context)?;
@@ -600,19 +569,16 @@ impl Expr {
         emit: &mut Emit<'_, '_>,
     ) -> Result<()> {
         // `a.length` on an array is not a field at all: the JVM answers it with an instruction, so
-        // there is no member for the index to have resolved.
-        if access.field().as_deref() == Some("length")
+        // there is no member for the index to have resolved. The *classification* is shared; the
+        // instruction is not.
+        if context.facts().is_array_length(access)
             && let Some(receiver) = access.receiver()
-            && matches!(Self::type_of(receiver.syntax(), context), Ok(Ty::Array(_)))
         {
             Self::lower(&receiver, context, emit)?;
             emit.asm.array_length()?;
             return Ok(());
         }
-        let member = context
-            .typed
-            .field_target_of(Facts::span(access.syntax()))
-            .ok_or_else(|| LowerError::Unresolved(access.field().unwrap_or_default()))?;
+        let member = context.facts().field_target(access)?;
         let (owner, name, descriptor) = Self::field_ref(member, context)?;
         if context.index.member(member).modifiers.is_static {
             emit.asm.get_static(&owner, &name, &descriptor)?;
@@ -740,11 +706,7 @@ impl Expr {
         // A `super.` qualifier: the receiver *is* `this`, and the call is not dispatched. `super`
         // parses as a name reference holding a keyword, so it has neither a definition to load nor an
         // inferred type — lowering it as an ordinary expression pushes nothing at all.
-        let super_qualified = matches!(
-            call.callee(),
-            Some(ast::Expr::FieldAccess(ref access))
-                if access.receiver().is_some_and(|r| Facts::is_super(r.syntax()))
-        );
+        let super_qualified = Facts::is_super_call(call);
         // Which class the `Methodref` names. Ordinarily it is where the member is *declared*, which
         // is what the member walk found. A `super.` call is the exception, and not an optional one:
         // JVMS §6.5 lets `invokespecial` name only the direct superclass or a *direct*
@@ -1102,7 +1064,7 @@ impl Expr {
         // has to be a second copy — made *before* the arguments go on top of it.
         emit.asm.dup()?;
         if let Some(enclosing) = &enclosing {
-            match new.qualifier() {
+            match Facts::new_qualifier(new) {
                 Some(qualifier) => Self::lower(&qualifier, context, emit)?,
                 // Not `this`: the class being compiled need not be the one the target is declared
                 // in. `new One(null)` written inside an anonymous class inside `One` passes the
@@ -1326,7 +1288,7 @@ impl Expr {
         }
         let left = Self::numeric_of(then.syntax(), context)?;
         let right = Self::numeric_of(otherwise.syntax(), context)?;
-        Ok(Self::ty_of(Self::promote(left, right)))
+        Ok(Self::ty_of(Numeric::promote(left, right)))
     }
 
     /// The [`Ty`] a numeric type is, for handing back to a conversion that speaks in types.
@@ -1344,20 +1306,26 @@ impl Expr {
 
     fn unary(unary: &ast::UnaryExpr, context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
         let operand = Self::inner(unary.operand())?;
-        match Facts::operator(unary.syntax()).as_slice() {
+        let operator =
+            Unary::of(unary.syntax()).ok_or(LowerError::Unsupported("this unary operator"))?;
+        // A prefix `++` / `--` is an assignment, not an operator on a value.
+        if let Some(step) = operator.step() {
+            return Self::update(&operand, step, true, context, emit);
+        }
+        match operator {
             // `+` is not a no-op: unary numeric promotion still applies, so `+aByte` is an `int`.
-            [PLUS] => {
-                let promoted = Self::promote_one(Self::numeric_of(operand.syntax(), context)?);
+            Unary::Plus => {
+                let promoted = Numeric::promote_one(Self::numeric_of(operand.syntax(), context)?);
                 Self::lower_to(&operand, promoted, context, emit)
             }
-            [MINUS] => {
-                let promoted = Self::promote_one(Self::numeric_of(operand.syntax(), context)?);
+            Unary::Minus => {
+                let promoted = Numeric::promote_one(Self::numeric_of(operand.syntax(), context)?);
                 Self::lower_to(&operand, promoted, context, emit)?;
                 Ok(emit.asm.negate(&promoted.stack())?)
             }
             // `!b` is `b ^ 1`, which is what javac emits too. Verified code guarantees a canonical
             // 0 / 1 in a `boolean`, so the flip is exact and needs no branch.
-            [BANG] => {
+            Unary::Not => {
                 Self::lower(&operand, context, emit)?;
                 emit.asm.const_int(1)?;
                 Ok(emit
@@ -1365,8 +1333,8 @@ impl Expr {
                     .binary(BinOp::Xor, &jals_classfile::VerificationType::Integer)?)
             }
             // `~n` is `n ^ -1`, at the promoted width.
-            [TILDE] => {
-                let promoted = Self::promote_one(Self::numeric_of(operand.syntax(), context)?);
+            Unary::BitNot => {
+                let promoted = Numeric::promote_one(Self::numeric_of(operand.syntax(), context)?);
                 Self::lower_to(&operand, promoted, context, emit)?;
                 if promoted == Numeric::Long {
                     emit.asm.const_long(-1)?;
@@ -1375,9 +1343,10 @@ impl Expr {
                 }
                 Ok(emit.asm.binary(BinOp::Xor, &promoted.stack())?)
             }
-            [PLUS_PLUS] => Self::update(&operand, 1, true, context, emit),
-            [MINUS_MINUS] => Self::update(&operand, -1, true, context, emit),
-            _ => Err(LowerError::Unsupported("this unary operator")),
+            // The two assignment forms returned above.
+            Unary::Increment | Unary::Decrement => {
+                Err(LowerError::Unsupported("this unary operator"))
+            }
         }
     }
 
@@ -1387,11 +1356,12 @@ impl Expr {
         emit: &mut Emit<'_, '_>,
     ) -> Result<()> {
         let operand = Self::inner(postfix.operand())?;
-        match Facts::operator(postfix.syntax()).as_slice() {
-            [PLUS_PLUS] => Self::update(&operand, 1, false, context, emit),
-            [MINUS_MINUS] => Self::update(&operand, -1, false, context, emit),
-            _ => Err(LowerError::Unsupported("this postfix operator")),
-        }
+        // The same two tokens as the prefix forms — what differs is the node's kind, not the
+        // operator's, which is why `Unary` carries no position.
+        Unary::of(postfix.syntax()).and_then(Unary::step).map_or(
+            Err(LowerError::Unsupported("this postfix operator")),
+            |step| Self::update(&operand, step, false, context, emit),
+        )
     }
 
     /// `++x` / `x++` / `--x` / `x--`.
@@ -1437,7 +1407,7 @@ impl Expr {
             // the address now — the same move an assignment makes for the value it wrote.
             emit.asm.dup_below(place.words())?;
         }
-        let promoted = Self::promote_one(declared);
+        let promoted = Numeric::promote_one(declared);
         emit.asm.convert(declared, promoted)?;
         match promoted {
             Numeric::Long => emit.asm.const_long(i64::from(delta))?,
@@ -1455,38 +1425,25 @@ impl Expr {
         context: &Context<'_>,
         emit: &mut Emit<'_, '_>,
     ) -> Result<()> {
-        let operator = Facts::operator(binary.syntax());
+        let operator = Operator::binary(binary.syntax())
+            .ok_or(LowerError::Unsupported("this binary operator"))?;
         // `instanceof` has no right *operand*: its right-hand side is a type or a pattern, so it is
         // recognised before the two operands are taken apart.
-        if operator.first() == Some(&INSTANCEOF_KW) {
+        if operator == Operator::InstanceOf {
             return Self::instance_of(binary, context, emit);
         }
         let (left, right) = (Self::inner(binary.lhs())?, Self::inner(binary.rhs())?);
-        match operator.as_slice() {
-            [AMP_AMP] => return Self::short_circuit(&left, &right, true, context, emit),
-            [PIPE_PIPE] => return Self::short_circuit(&left, &right, false, context, emit),
+        match operator {
+            Operator::AndAnd => return Self::short_circuit(&left, &right, true, context, emit),
+            Operator::OrOr => return Self::short_circuit(&left, &right, false, context, emit),
             _ => {}
         }
-        if let Some(compare) = Self::comparison(&operator) {
+        if let Some(compare) = Self::comparison(operator) {
             return Self::compare(&left, &right, compare, context, emit);
         }
 
-        let operation = match operator.as_slice() {
-            [PLUS] => BinOp::Add,
-            [MINUS] => BinOp::Sub,
-            [STAR] => BinOp::Mul,
-            [SLASH] => BinOp::Div,
-            [PERCENT] => BinOp::Rem,
-            [AMP] => BinOp::And,
-            [PIPE] => BinOp::Or,
-            [CARET] => BinOp::Xor,
-            [LSHIFT] => BinOp::Shl,
-            // `>>` and `>>>` are separate `>` tokens: the lexer never joins a `>` to what follows,
-            // so that `List<List<T>>` still closes as two of them.
-            [GT, GT] => BinOp::Shr,
-            [GT, GT, GT] => BinOp::Ushr,
-            _ => return Err(LowerError::Unsupported("this binary operator")),
-        };
+        let operation =
+            Self::binary_op(operator).ok_or(LowerError::Unsupported("this binary operator"))?;
 
         // `&`, `|`, and `^` are also the *boolean* operators, evaluated without short-circuiting.
         // Both operands are already the same `int` on the stack, so there is no promotion to do.
@@ -1518,13 +1475,13 @@ impl Expr {
             // A shift promotes each side on its own (JLS §5.6.1 twice, not §5.6.2 once): the result
             // has the *left* operand's promoted type, and the count is always an `int` because that
             // is the only thing `lshl` takes.
-            let promoted = Self::promote_one(left_numeric);
+            let promoted = Numeric::promote_one(left_numeric);
             Self::lower_to(&left, promoted, context, emit)?;
             Self::lower_to(&right, Numeric::Int, context, emit)?;
             return Ok(emit.asm.binary(operation, &promoted.stack())?);
         }
 
-        let promoted = Self::promote(left_numeric, Self::numeric_of(right.syntax(), context)?);
+        let promoted = Numeric::promote(left_numeric, Self::numeric_of(right.syntax(), context)?);
         Self::lower_to(&left, promoted, context, emit)?;
         Self::lower_to(&right, promoted, context, emit)?;
         Ok(emit.asm.binary(operation, &promoted.stack())?)
@@ -1563,7 +1520,7 @@ impl Expr {
                 return Self::append(&Self::inner(paren.expr())?, context, emit);
             }
             ast::Expr::Binary(binary)
-                if Facts::operator(binary.syntax()).as_slice() == [PLUS]
+                if Operator::binary(binary.syntax()) == Some(Operator::Add)
                     && Self::is_string(&Self::type_of(binary.syntax(), context)?, context) =>
             {
                 Self::append(&Self::inner(binary.lhs())?, context, emit)?;
@@ -1904,7 +1861,7 @@ impl Expr {
             _ => right_repr,
         };
         if let (Some(a), Some(b)) = (left_repr.number(), right_repr.number()) {
-            let promoted = Self::promote(a, b);
+            let promoted = Numeric::promote(a, b);
             Self::lower_to(left, promoted, context, emit)?;
             Self::lower_to(right, promoted, context, emit)?;
             return Ok(emit
@@ -1947,24 +1904,9 @@ impl Expr {
     /// fact's rule, and reading the run here rather than restating it is what keeps this from being
     /// the one place the rule is written a third time.
     fn compound_operator(node: &SyntaxNode) -> Result<BinOp> {
-        use jals_syntax::SyntaxKind::{
-            AMP_EQ, CARET_EQ, EQ, LSHIFT_EQ, MINUS_EQ, PERCENT_EQ, PIPE_EQ, PLUS_EQ, SLASH_EQ,
-            STAR_EQ,
-        };
-        Ok(match Facts::operator(node).as_slice() {
-            [PLUS_EQ] => BinOp::Add,
-            [MINUS_EQ] => BinOp::Sub,
-            [STAR_EQ] => BinOp::Mul,
-            [SLASH_EQ] => BinOp::Div,
-            [PERCENT_EQ] => BinOp::Rem,
-            [AMP_EQ] => BinOp::And,
-            [PIPE_EQ] => BinOp::Or,
-            [CARET_EQ] => BinOp::Xor,
-            [LSHIFT_EQ] => BinOp::Shl,
-            [GT, GT, EQ] => BinOp::Shr,
-            [GT, GT, GT, EQ] => BinOp::Ushr,
-            _ => return Err(LowerError::Unsupported("this compound assignment operator")),
-        })
+        Operator::compound(node)
+            .and_then(Self::binary_op)
+            .ok_or(LowerError::Unsupported("this compound assignment operator"))
     }
 
     /// `E1 op= E2`.
@@ -2025,9 +1967,9 @@ impl Expr {
             ));
         };
         let promoted = if operation.is_shift() {
-            Self::promote_one(declared)
+            Numeric::promote_one(declared)
         } else {
-            Self::promote(declared, Self::numeric_of(value.syntax(), context)?)
+            Numeric::promote(declared, Self::numeric_of(value.syntax(), context)?)
         };
 
         place.dup_address(emit.asm)?;
@@ -2045,17 +1987,39 @@ impl Expr {
         place.write(emit.asm, true)
     }
 
-    /// The comparison a token sequence spells, if it is one.
-    const fn comparison(operator: &[SyntaxKind]) -> Option<Compare> {
+    /// This target's branch condition for a source operator, or `None` for one that is not a
+    /// comparison.
+    ///
+    /// The JVM splits arithmetic from comparison because `iadd` and `if_icmplt` are different shapes
+    /// of instruction; wasm fuses them because `i32.add` and `i32.lt_s` are not. Both project from
+    /// the one vocabulary rather than deriving it, which is why the `>` run is read in one place.
+    const fn comparison(operator: Operator) -> Option<Compare> {
         Some(match operator {
-            [EQ_EQ] => Compare::Eq,
-            [BANG_EQ] => Compare::Ne,
-            [LT] => Compare::Lt,
-            [LT_EQ] => Compare::Le,
-            [GT] => Compare::Gt,
-            // `>=` is two tokens. The lexer never joins a `>` to what follows, so that `List<List<T>>`
-            // closes as two `>` rather than one shift operator.
-            [GT, jals_syntax::SyntaxKind::EQ] => Compare::Ge,
+            Operator::Eq => Compare::Eq,
+            Operator::Ne => Compare::Ne,
+            Operator::Lt => Compare::Lt,
+            Operator::Le => Compare::Le,
+            Operator::Gt => Compare::Gt,
+            Operator::Ge => Compare::Ge,
+            _ => return None,
+        })
+    }
+
+    /// This target's arithmetic opcode for a source operator, or `None` for one that is not an
+    /// operation over two values at a numeric width.
+    const fn binary_op(operator: Operator) -> Option<BinOp> {
+        Some(match operator {
+            Operator::Add => BinOp::Add,
+            Operator::Sub => BinOp::Sub,
+            Operator::Mul => BinOp::Mul,
+            Operator::Div => BinOp::Div,
+            Operator::Rem => BinOp::Rem,
+            Operator::And => BinOp::And,
+            Operator::Or => BinOp::Or,
+            Operator::Xor => BinOp::Xor,
+            Operator::Shl => BinOp::Shl,
+            Operator::Shr => BinOp::Shr,
+            Operator::Ushr => BinOp::Ushr,
             _ => return None,
         })
     }

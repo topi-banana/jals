@@ -40,6 +40,7 @@ use jals_classfile::{
     WideInstruction,
 };
 
+use crate::facts::Numeric;
 use crate::jvm::frame::{Slot, State};
 
 /// A jump target within one method body.
@@ -241,39 +242,25 @@ impl BinOp {
     }
 }
 
-/// A primitive type as a *conversion* names it.
+/// The representation a promoted [`Numeric`] has on the operand stack.
 ///
-/// Deliberately narrower than a [`VerificationType`]: `byte`, `char`, and `short` all live on the
-/// operand stack as `Integer` (JVMS §2.11.1), so a conversion between two of them changes the value
-/// without changing the stack type at all. A `(VerificationType, VerificationType)` pair could not
-/// say which of `i2b` / `i2c` / `i2s` was meant, because both sides would read `Integer`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Numeric {
-    /// `byte`
-    Byte,
-    /// `short`
-    Short,
-    /// `char`
-    Char,
-    /// `int`
-    Int,
-    /// `long`
-    Long,
-    /// `float`
-    Float,
-    /// `double`
-    Double,
+/// An extension trait rather than an inherent method: the type states a *source* fact (JLS §5.6)
+/// and lives in `crate::facts`, while a `VerificationType` is an answer about this target. Keeping
+/// the two apart is the whole seam — and it costs nothing at the call sites, which still write
+/// `promoted.stack()`.
+pub(crate) trait NumericStack {
+    /// The verification type a value of this type has on the operand stack.
+    fn stack(self) -> VerificationType;
 }
 
-impl Numeric {
-    /// The verification type a value of this type has on the operand stack.
-    #[must_use]
-    pub(crate) const fn stack(self) -> VerificationType {
+impl NumericStack for Numeric {
+    fn stack(self) -> VerificationType {
         match self {
             Self::Long => VerificationType::Long,
             Self::Float => VerificationType::Float,
             Self::Double => VerificationType::Double,
-            // Every integral type narrower than `long` computes as `int`.
+            // Every integral type narrower than `long` computes as `int` (JVMS §2.11.1), so a
+            // conversion between two sub-`int` types changes the value and not the stack type.
             Self::Byte | Self::Short | Self::Char | Self::Int => VerificationType::Integer,
         }
     }

@@ -1580,16 +1580,20 @@ fn the_enum_shapes_that_need_more_are_reported() {
     );
 }
 
-/// A type inside an `enum` constant's body reports that its owner has no name.
+/// A type inside an `enum` constant's body reports that its enclosing type has no name — in the
+/// *same words* the JVM backend uses.
 ///
-/// The JVM backend's twin (`a_type_in_an_enum_constant_body_has_no_enclosing_name`) covers the same
-/// shape through `Compile::enclosing_name`; this one reaches `Layout::owner_of` through `is_inner`,
-/// which takes `parent().parent()` of a nested class and so lands on the `ENUM_CONSTANT`. That is
-/// not one of the seven forms `ast::Decl` casts, so it has no name to key the layout on.
+/// The JVM twin is `a_type_in_an_enum_constant_body_has_no_enclosing_name`. The two used to reach
+/// the refusal by different routes and report it differently: this one through `Layout::owner_of`,
+/// which takes `parent().parent()` of a nested class and lands on the `ENUM_CONSTANT`, and the JVM
+/// through its own enclosing-type walk. Both now ask `Facts::enclosing_type_of`, so one program is
+/// refused once, for one reason, in one sentence.
 ///
-/// What is pinned is the narrowing. Before `Decl::name_token_of`, the scan here took the constant's
-/// own `IDENT` and looked an **item** up at a **member**'s offset; adding a variant to `ast::Decl`
-/// would put that back with nothing else in the suite disagreeing.
+/// What is pinned is the narrowing, and it was measured rather than assumed. A constant's body *is*
+/// an anonymous subclass (JLS §8.9.3) and the index does hold an item at its position, so letting
+/// the positional key through makes this compile — into a class the JVM loads and runs and which
+/// javac would have called `E$1$Inner` rather than `E$Inner`. Refusing is the honest answer until
+/// the naming layer can say what encloses what.
 #[test]
 fn a_type_in_an_enum_constant_body_has_no_owning_type() {
     let source = "public enum E { A { class Inner {} }; }";
@@ -1597,7 +1601,7 @@ fn a_type_in_an_enum_constant_body_has_no_owning_type() {
     assert!(
         matches!(
             error,
-            WasmError::Unsupported("a type declaration with no name")
+            WasmError::Unsupported("an enclosing type with no name")
         ),
         "got {error}"
     );
@@ -1887,7 +1891,7 @@ public class Outer {
 /// capture needs a synthetic constructor parameter the index knows nothing about, so its constructor would
 /// come out one parameter short of what a `new` passes.
 #[test]
-fn a_local_class_is_laid_out_unless_it_captures() {
+fn a_local_class_is_laid_out_and_so_is_one_that_captures() {
     let source = r"
 public class Host {
     public static int run(int n) {
@@ -2900,4 +2904,147 @@ public class Sup {
 ";
     // 10 + 20 + 1 + 2.
     assert_invoke(&[source], "run", &[], "33");
+}
+
+/// `x == y` stays an identity test when an operand merely *contains* a `null`.
+///
+/// The lowering used to decide "this operand is the null literal" by walking the operand's whole
+/// subtree for a `NULL_KW` token. `pick(x, null)` contains one, so `reference_equality` took the
+/// null branch, dropped that operand, and applied `ref.is_null` to the *other* one — `x == y`
+/// compiled as `y == null`. Nothing caught it: `wasm-tools` accepted the module and `wasmtime` ran
+/// it without trapping. `pick(x, null) == x` simply returned 0 where Java returns 1.
+///
+/// Both operand orders are here because the lowering tests the right side first, so a fix that
+/// corrected only one branch would still pass a test written in one order. `plainNull` and
+/// `parenNull` pin the other direction: an own-token test would answer `false` for `(null)`, which
+/// denotes null just as much as the bare literal does.
+#[test]
+fn a_null_inside_an_operand_does_not_make_the_comparison_a_null_test() {
+    let source = r"
+public class Nulls {
+    static Nulls pick(Nulls a, Nulls b) { return a; }
+
+    // The control: identity on two references, no `null` written anywhere.
+    public static int control() {
+        Nulls x = new Nulls();
+        if (x == x) { return 1; }
+        return 0;
+    }
+
+    // `pick(x, null)` evaluates to `x`, so this is Java-true.
+    public static int leftHasNull() {
+        Nulls x = new Nulls();
+        if (pick(x, null) == x) { return 1; }
+        return 0;
+    }
+
+    // The mirror: the lowering tests the right operand first.
+    public static int rightHasNull() {
+        Nulls x = new Nulls();
+        if (x == pick(x, null)) { return 1; }
+        return 0;
+    }
+
+    // A real null test still is one.
+    public static int plainNull() {
+        Nulls x = null;
+        if (x == null) { return 1; }
+        return 0;
+    }
+
+    // And so is one written with parentheses, which carries no keyword of its own.
+    public static int parenNull() {
+        Nulls x = null;
+        if (x == (null)) { return 1; }
+        return 0;
+    }
+
+    // A non-null reference against `null` is false.
+    public static int liveAgainstNull() {
+        Nulls x = new Nulls();
+        if (x == null) { return 1; }
+        return 0;
+    }
+}
+";
+    assert_invoke(&[source], "control", &[], "1");
+    assert_invoke(&[source], "leftHasNull", &[], "1");
+    assert_invoke(&[source], "rightHasNull", &[], "1");
+    assert_invoke(&[source], "plainNull", &[], "1");
+    assert_invoke(&[source], "parenNull", &[], "1");
+    assert_invoke(&[source], "liveAgainstNull", &[], "0");
+}
+
+/// A local or anonymous class declared in an *instance* method reaches its enclosing instance.
+///
+/// Every other local- and anonymous-class test in this file declares one inside a `static` method,
+/// so this path had no coverage at all — and it did not work. The layout asked
+/// `Facts::is_inner_class`, which is one of the three arms that decide whether a class holds an
+/// enclosing instance, so a local class never got the synthetic field. An uplevel *field* read then
+/// reported the field's name as unresolved, which names the wrong problem; an uplevel *call* pushed
+/// local 0 without checking whose `this` it was, and produced a module `wasm-tools` rejects — a
+/// failure that surfaces in the validator rather than as a `WasmError`, and only on a host that has
+/// one installed.
+///
+/// The uplevel *call* is exercised from a nested inner class rather than a local one. An unqualified
+/// call from a local class to an enclosing instance method does not resolve in `jals-hir` yet, and
+/// **both** backends report it identically (`` `bump()` did not resolve ``) — a resolution limit
+/// rather than a lowering one, and not this seam's to close.
+#[test]
+fn a_local_class_in_an_instance_method_reaches_the_enclosing_instance() {
+    let source = r"
+public class Uplevel {
+    int base = 40;
+
+    int viaLocalField() {
+        class Reader {
+            int read() { return base; }
+        }
+        return new Reader().read();
+    }
+
+    int viaLocalWrite() {
+        class Writer {
+            void write() { base = 7; }
+        }
+        new Writer().write();
+        return base;
+    }
+
+    int viaAnonymous() {
+        Supplier s = new Supplier() {
+            public int get() { return base + 2; }
+        };
+        return s.get();
+    }
+
+    public static int field() { return new Uplevel().viaLocalField(); }
+    public static int write() { return new Uplevel().viaLocalWrite(); }
+    public static int anonymous() { return new Uplevel().viaAnonymous(); }
+}
+";
+    let supplier = "public interface Supplier { int get(); }";
+    assert_invoke(&[source, supplier], "field", &[], "40");
+    assert_invoke(&[source, supplier], "write", &[], "7");
+    assert_invoke(&[source, supplier], "anonymous", &[], "42");
+}
+
+/// `a.length = 1` is refused as an assignment, not reported as an unresolved name.
+///
+/// `length` is not a field — both targets answer it with an instruction — so there is no member for
+/// the index to have resolved, and the write path fell through to the member lookup and reported
+/// `length` as unresolved. That names the wrong problem: `length` is `final` (JLS §10.7), so there
+/// is nothing to assign to rather than nothing to find. The read path already knew; the shared
+/// classification is what lets the write path know too.
+#[test]
+fn an_assignment_to_an_arrays_length_says_what_is_wrong() {
+    let source = "public class L { public static void m(int[] a) { a.length = 1; } }";
+    let error = compile(&[source]).expect_err("an array's length is not assignable");
+    assert!(
+        matches!(
+            error,
+            WasmError::Unsupported("an assignment to an array's length")
+        ),
+        "got {error}"
+    );
 }
