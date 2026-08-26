@@ -35,7 +35,6 @@
 //!   `Point { ... }` the same spelling denotes the implicit parameter, which no qualifier can
 //!   name.
 
-use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::vec::Vec;
 
@@ -43,11 +42,10 @@ use jals_exec::{LocalBoxFuture, Yielder};
 use jals_hir::{Def, DefKind, FileAnalysis, Namespace};
 use jals_syntax::SyntaxKind::{
     ANNOTATION_TYPE_DECL, CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL, ENUM_CONSTANT, ENUM_DECL,
-    FIELD_DECL, INITIALIZER, INTERFACE_DECL, METHOD_DECL, MODIFIERS, NAME_REF, NEW_EXPR,
-    PARAM_LIST, RECORD_COMPONENT, RECORD_DECL, STATIC_KW,
+    FIELD_DECL, INITIALIZER, INTERFACE_DECL, METHOD_DECL, MODIFIERS, NEW_EXPR, PARAM_LIST,
+    RECORD_DECL, STATIC_KW,
 };
-use jals_syntax::ast::{AstNode, FieldDecl, RecordComponent};
-use jals_syntax::{SyntaxNode, SyntaxToken};
+use jals_syntax::SyntaxNode;
 
 use jals_config::Category;
 use jals_config::lint::{Config, ThisScope};
@@ -76,50 +74,7 @@ impl ImplicitThis {
 
     async fn check_impl(analysis: &FileAnalysis, config: &Config) -> Vec<Finding> {
         let scope = config.restriction.implicit_this.options.scope;
-        let root = analysis.root();
         let mut yielder = Yielder::new();
-
-        // One walk builds both indexes: the instance fields a reference may be reported against,
-        // and the `NAME_REF` each reference sits in. Both are keyed on the identifier token's
-        // start, which is what `Def::name_range` and `Reference::range` both begin at.
-        let mut instance_fields: BTreeMap<usize, SyntaxNode> = BTreeMap::new();
-        let mut name_refs: BTreeMap<usize, SyntaxNode> = BTreeMap::new();
-        for node in root.descendants() {
-            yielder.tick().await;
-            match node.kind() {
-                FIELD_DECL => {
-                    if Self::is_static(&node) || Self::in_implicitly_static_type(&node) {
-                        continue;
-                    }
-                    if let Some(decl) = FieldDecl::cast(node.clone()) {
-                        for tok in decl.names() {
-                            instance_fields.insert(Self::start(&tok), node.clone());
-                        }
-                    }
-                }
-                // A record component is the `private final` field the record declares, and
-                // `this.x` names it — so it is an instance field like any other. Its declaration
-                // sits in the `RECORD_HEADER`, outside the body, which is why the type identity
-                // below is the *declaration* and not the body node.
-                RECORD_COMPONENT => {
-                    if let Some(tok) =
-                        RecordComponent::cast(node.clone()).and_then(|c| c.name_token())
-                    {
-                        instance_fields.insert(Self::start(&tok), node.clone());
-                    }
-                }
-                NAME_REF => {
-                    if let Some(tok) = node
-                        .children_with_tokens()
-                        .filter_map(jals_syntax::SyntaxElement::into_token)
-                        .find(|t| t.kind() == jals_syntax::SyntaxKind::IDENT)
-                    {
-                        name_refs.insert(Self::start(&tok), node.clone());
-                    }
-                }
-                _ => {}
-            }
-        }
 
         let mut out = Vec::new();
         for reference in analysis.references() {
@@ -130,24 +85,24 @@ impl ImplicitThis {
             let Some(def) = reference.resolution.def_id().map(|id| analysis.def(id)) else {
                 continue;
             };
-            if def.kind != DefKind::Field {
+            // A `static` field is qualified by its type rather than by `this`. `Def::is_static`
+            // already folds in the set JLS §9.3 implies, so an interface field needs no separate
+            // ancestor check here — and a record component, which `jals-hir` registers as a field
+            // like any other, is correctly not one.
+            if def.kind != DefKind::Field || def.is_static {
                 continue;
             }
-            // Absent from the table means `static`, and a `static` field is qualified by its type
-            // rather than by `this`.
-            let (Some(decl), Some(site)) = (
-                instance_fields.get(&def.name_range.start),
-                name_refs.get(&reference.range.start),
-            ) else {
+            let (Some(site), Some(decl)) = (analysis.site_of(reference), analysis.decl_of(def))
+            else {
                 continue;
             };
             // The declaring type must be the innermost type around the reference. This one test
             // is what keeps a nested, local or anonymous type — where `this.` denotes the inner
             // instance — out, and what lets a lambda body through, since a lambda declares no type.
-            if Self::enclosing_type(site) != Self::enclosing_type(decl) {
+            if Self::enclosing_type(&site) != Self::enclosing_type(&decl) {
                 continue;
             }
-            let Some(executable) = Self::enclosing_executable(site) else {
+            let Some(executable) = Self::enclosing_executable(&site) else {
                 continue;
             };
             if Self::is_static(&executable) || Self::is_compact_constructor(&executable) {
@@ -199,6 +154,10 @@ impl ImplicitThis {
     }
 
     /// Whether `node` writes the `static` modifier.
+    ///
+    /// Asked of the enclosing *executable*, not of the field — a field's staticness is
+    /// [`Def::is_static`]. `jals-hir` registers no definition for an `INITIALIZER`, so a `static`
+    /// initializer block has no `Def` to ask and this reads its modifiers directly.
     fn is_static(node: &SyntaxNode) -> bool {
         node.children()
             .find(|c| c.kind() == MODIFIERS)
@@ -207,13 +166,6 @@ impl ImplicitThis {
                     .filter_map(jals_syntax::SyntaxElement::into_token)
                     .any(|t| t.kind() == STATIC_KW)
             })
-    }
-
-    /// Whether `node` is declared in a type whose fields are `static` without saying so: an
-    /// interface or an annotation type (JLS §9.3, implicitly `public static final`).
-    fn in_implicitly_static_type(node: &SyntaxNode) -> bool {
-        Self::enclosing_type(node)
-            .is_some_and(|t| matches!(t.kind(), INTERFACE_DECL | ANNOTATION_TYPE_DECL))
     }
 
     /// Whether `executable` is a record's compact constructor — a `CONSTRUCTOR_DECL` with no
@@ -245,10 +197,5 @@ impl ImplicitThis {
                 && span.start <= other.name_range.start
                 && other.name_range.end <= span.end
         })
-    }
-
-    /// A token's start offset, as the byte index the analysis keys its ranges on.
-    fn start(token: &SyntaxToken) -> usize {
-        usize::from(token.text_range().start())
     }
 }

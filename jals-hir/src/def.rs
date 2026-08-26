@@ -131,6 +131,23 @@ pub struct Def {
     /// level leaves the question to a project-wide pass. Always `false` for a kind that carries no
     /// modifiers at all (a local, a lambda parameter, a pattern variable).
     pub is_private: bool,
+    /// Whether the declaration is `static` — the keyword as written, plus the set JLS §9.3 implies.
+    ///
+    /// Recorded because "is this reached through an instance?" is asked of a *definition* far more
+    /// often than the CST is walked back to, and every consumer that asked it was re-deriving the
+    /// same ancestor check. An interface field is `public static final` with none of those tokens
+    /// spelled (JLS §9.3), so a bit reporting only what the source writes would answer `false` for
+    /// the one shape whose staticness is least visible. This is the fold
+    /// [`MemberModifiers::is_static`](crate::MemberModifiers::is_static) performs on the project
+    /// side, so the file-local answer and the project-wide one agree rather than differing by a
+    /// rule one of them remembered.
+    ///
+    /// The fold is deliberately **not** what every consumer wants. `naming-convention` picks its
+    /// `fields` / `statics` / `constants` cell off the modifiers a declaration *writes* — an
+    /// interface constant reads as a `field` there on purpose — so that rule reads the tokens and
+    /// not this bit. Always `false` for a kind that carries no modifiers at all (a local, a lambda
+    /// parameter, a pattern variable).
+    pub is_static: bool,
     /// Whether the declaration carries at least one annotation.
     ///
     /// Recorded because an annotated declaration is routinely reached by something no source names:

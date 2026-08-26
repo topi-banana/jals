@@ -144,13 +144,9 @@ impl Resolver {
     }
 
     async fn build_type_decl(&mut self, node: &SyntaxNode, scope: ScopeId) {
-        let kind = match node.kind() {
-            CLASS_DECL => DefKind::Class,
-            INTERFACE_DECL => DefKind::Interface,
-            ENUM_DECL => DefKind::Enum,
-            RECORD_DECL => DefKind::Record,
-            _ => DefKind::AnnotationType,
-        };
+        // The caller reached here by the same classifier, so the fallback is unreachable rather
+        // than a default: naming the five kinds a second time is what let them drift.
+        let kind = Collect::type_decl_kind(node.kind()).unwrap_or(DefKind::AnnotationType);
         // The type's own name lives in the *enclosing* scope, visible to its siblings.
         if let Some(tok) = Collect::first_ident_token(node) {
             self.add_def(scope, kind, &tok, node);

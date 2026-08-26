@@ -242,6 +242,22 @@ fn naming_static_field_flagged_under_its_own_cell() {
 }
 
 #[test]
+fn an_interface_constant_reads_the_fields_cell_not_the_constants_one() {
+    // JLS §9.3 makes this `public static final` with none of those tokens spelled, and
+    // `jals-hir`'s `Def::is_static` folds that implication in. `naming-convention` deliberately
+    // does *not*: its three cells are read off the modifiers the declaration **writes**, so an
+    // interface field reads as `fields` and is asked for lowerCamelCase. Pinned because no other
+    // naming test uses an interface, so a rule moved onto the folded fact would change this answer
+    // with nothing failing.
+    check(
+        "interface I { int SIDES = 3; }",
+        expect![[r"
+            naming-convention:18..23: field name `SIDES` should be lowerCamelCase
+        "]],
+    );
+}
+
+#[test]
 fn a_mutable_global_is_upper_snake_case_by_default() {
     // The built-in takes rustc's `non_upper_case_globals` reading: a `static` is a global whether
     // or not it is `final`, so the logger every Java codebase declares is a finding out of the
@@ -860,10 +876,11 @@ fn an_enum_member_is_checked_and_a_constant_body_is_not() {
 }
 
 #[test]
-fn every_declarator_of_a_multi_field_is_in_the_table() {
-    // `int a, b;` binds two fields off one declaration, and the table this rule builds is keyed on
-    // the same `FieldDecl::names()` tokens the resolver registers its defs from. A key that drifted
-    // would read as `static` — a silent false negative — so the agreement is pinned here.
+fn every_declarator_of_a_multi_field_is_reported() {
+    // `int a, b;` binds two definitions off one declaration. The rule no longer keys a table of its
+    // own on those names — it asks `jals-hir` for each field's `is_static` and for the declaration
+    // behind it — but both names still have to come back, and the one declaration has to answer for
+    // both, so the behaviour stays pinned here.
     check_this(
         "class C { int a, b; void m() { a = b; } }",
         expect![[r"

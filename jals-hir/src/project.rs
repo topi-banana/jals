@@ -35,8 +35,8 @@ use hashbrown::{HashMap, HashSet};
 use jals_exec::Yielder;
 
 use jals_syntax::SyntaxKind::{
-    ABSTRACT_KW, ANNOTATION_TYPE_DECL, CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL, DEFAULT_KW,
-    ELLIPSIS, ENUM_BODY, ENUM_CONSTANT, ENUM_DECL, EXTENDS_CLAUSE, FIELD_DECL, IMPLEMENTS_CLAUSE,
+    ABSTRACT_KW, ANNOTATION_TYPE_DECL, CLASS_BODY, CONSTRUCTOR_DECL, DEFAULT_KW, ELLIPSIS,
+    ENUM_BODY, ENUM_CONSTANT, ENUM_DECL, EXTENDS_CLAUSE, FIELD_DECL, IMPLEMENTS_CLAUSE,
     INTERFACE_DECL, LAMBDA_EXPR, LBRACK, METHOD_DECL, MODIFIERS, NEW_EXPR, PRIVATE_KW, PUBLIC_KW,
     RECORD_COMPONENT, RECORD_DECL, RECORD_HEADER, STATIC_KW,
 };
@@ -2009,7 +2009,7 @@ impl SourceLocations {
         let mut stack: Vec<(SyntaxNode, Option<alloc::rc::Rc<str>>)> = vec![(root.clone(), None)];
         while let Some((node, enclosing)) = stack.pop() {
             yielder.tick().await;
-            let next_enclosing = if ProjectIndex::type_decl_kind(node.kind()).is_some()
+            let next_enclosing = if Collect::type_decl_kind(node.kind()).is_some()
                 && let Some(name_tok) = Collect::first_ident_token(&node)
             {
                 let name = jals_syntax::decoded_ident(&name_tok);
@@ -2167,7 +2167,7 @@ impl ProjectIndex {
                     raw_supertypes: Self::raw_supertypes_of(&node),
                 });
             }
-            let next_enclosing = if let Some(kind) = Self::type_decl_kind(node.kind())
+            let next_enclosing = if let Some(kind) = Collect::type_decl_kind(node.kind())
                 && let Some(name_tok) = Collect::first_ident_token(&node)
             {
                 let name = jals_syntax::decoded_ident(&name_tok);
@@ -2660,18 +2660,6 @@ impl MemberType {
 }
 
 impl ProjectIndex {
-    /// The [`DefKind`] for a type-declaration node kind, or `None` if it is not a type declaration.
-    pub(crate) const fn type_decl_kind(kind: SyntaxKind) -> Option<DefKind> {
-        match kind {
-            CLASS_DECL => Some(DefKind::Class),
-            INTERFACE_DECL => Some(DefKind::Interface),
-            ENUM_DECL => Some(DefKind::Enum),
-            RECORD_DECL => Some(DefKind::Record),
-            ANNOTATION_TYPE_DECL => Some(DefKind::AnnotationType),
-            _ => None,
-        }
-    }
-
     /// The written type of the context a lambda appears in: a declaration's type, an assignment's target's
     /// declaration, or the enclosing method's return type.
     ///

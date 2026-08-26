@@ -12,6 +12,7 @@ pub(crate) mod collect;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::ops::Range;
 
 use hashbrown::HashSet;
 use jals_syntax::SyntaxKind::{
@@ -33,6 +34,18 @@ pub(crate) struct Resolved {
     pub defs: Vec<Def>,
     /// Every scope, indexed by [`ScopeId`]; scope `0` is the file scope.
     pub scopes: Vec<Scope>,
+    /// The byte span of the node each definition was declared by, indexed by [`DefId`] — the
+    /// syntax behind [`Def`], kept so a consumer need not re-walk the tree to find it.
+    ///
+    /// A span rather than a `SyntaxNode` because [`Resolved`] derives `PartialEq` and a rowan
+    /// handle compares by tree *identity*: storing nodes would make two equal resolutions of the
+    /// same source compare unequal.
+    ///
+    /// **A multi-declarator declaration stores its span once per name, so duplicates here are
+    /// intended.** `int a, b;` is one `FIELD_DECL` binding two definitions, and both were declared
+    /// by it — the same reason [`Resolver::add_def`] reads `private` off the declaration rather
+    /// than off each name.
+    pub decl_spans: Vec<Range<usize>>,
     /// Every examined reference, sorted by start offset.
     pub references: Vec<Reference>,
     /// Simple names the file *mentions* where the file-local pass cannot bind them to a
@@ -70,6 +83,11 @@ impl Resolved {
     /// The definition with the given id.
     pub fn def(&self, id: DefId) -> &Def {
         &self.defs[id.0 as usize]
+    }
+
+    /// The byte span of the node that declared the definition with the given id.
+    pub fn decl_span(&self, id: DefId) -> &Range<usize> {
+        &self.decl_spans[id.0 as usize]
     }
 
     /// The scope with the given id.
@@ -236,6 +254,9 @@ pub(crate) struct Resolver {
     /// its whole subtree). Empty when the caller has no attributes to apply.
     cfg: CfgMap,
     defs: Vec<Def>,
+    /// Parallel to `defs`: the span of the node each was declared by. See
+    /// [`Resolved::decl_spans`].
+    decl_spans: Vec<Range<usize>>,
     scopes: Vec<Scope>,
     raw_refs: Vec<RawRef>,
     /// The names collected for [`Resolved::mentions`].
@@ -272,6 +293,7 @@ impl Resolver {
             defs: Vec::new(),
             scopes: vec![file_scope],
             raw_refs: Vec::new(),
+            decl_spans: Vec::new(),
             mentions: HashSet::new(),
             yield_left: jals_exec::Yielder::DEFAULT_PERIOD,
         }
@@ -308,6 +330,7 @@ impl Resolver {
 
         Resolved {
             defs: self.defs,
+            decl_spans: self.decl_spans,
             scopes: self.scopes,
             references,
             mentions: self.mentions,
@@ -350,9 +373,13 @@ impl Resolver {
             name: jals_syntax::decoded_ident(name_tok).into_owned(),
             name_range: Collect::byte_range(name_tok),
             is_private: facts.is_private,
+            is_static: facts.is_static,
             is_annotated: facts.is_annotated,
             scope,
         });
+        // Kept in step with `defs` by construction — the two are pushed together and nothing else
+        // appends to either.
+        self.decl_spans.push(Collect::node_span(decl));
         self.scopes[scope.0 as usize].defs.push(id);
         id
     }
