@@ -9,10 +9,10 @@ LintOutput::lint_source(src: &str, config: &Config) -> LintOutput   // the file-
 RuleInfo::all() -> impl Iterator<Item = RuleInfo>                   // the rule registry, as data
 ```
 
-**This crate produces every semantic diagnostic.** An unresolvable type name is the
-`cannot-resolve` rule here, not a separate pass in a consumer — so every diagnostic a host shows has
-a rule name, a `jalslint.toml` key, and a configurable level. The parser's own errors are the one
-exception: they belong to the parse, and a caller reads them from `Parse::errors`.
+**This crate produces every semantic diagnostic.** An unresolvable name is the `cannot-resolve`
+rule here, not a separate pass in a consumer — so every diagnostic a host shows has a rule name, a
+`jalslint.toml` key, and a configurable level. The parser's own errors are the one exception: they
+belong to the parse, and a caller reads them from `Parse::errors`.
 
 ## The rule set
 
@@ -21,7 +21,7 @@ and it is the `jalslint.toml` table the rule is configured under. Every rule is 
 
 | rule | section | default | what it reports |
 |---|---|---|---|
-| `cannot-resolve` | `[correctness]` | `error` | a name the project index does not define |
+| `cannot-resolve` | `[correctness]` | `error` | a type, variable or method the project index does not define |
 | `type-mismatch` | `[correctness]` | `warn` | a value written into a slot its type cannot inhabit |
 | `unreported-exception` | `[correctness]` | `warn` | a checked exception no `catch` or `throws` admits |
 | `compact-source-file` | `[compatibility]` | `error` | a top-level `main` / member without the feature (JEP 512) |
@@ -45,6 +45,28 @@ and it is the `jalslint.toml` table the rule is configured under. Every rule is 
 There is one diagnostic outside the table: `cfg`, a structurally malformed `#[cfg(…)]`. It is fixed
 at `error` and is not configurable, because it is the same failure the compile frontend rejects a
 build with, not a judgement about the code.
+
+### What `cannot-resolve` stands down on
+
+It is the one `error`-level rule, so it answers only where the index settles the question. Four
+positions are deliberate silences rather than gaps, and all four are **false negatives** — the rule
+misses a real undefined name rather than inventing one:
+
+- **A type that inherits from outside the project.** `class C extends java.util.ArrayList<String>`
+  may inherit anything, so no "no such member" conclusion is available anywhere in `C`. The same
+  holds for a standard-library *stub*, whose member set is deliberately partial.
+- **An on-demand static import whose owner is one of those.** `import static
+  org.junit.jupiter.api.Assertions.*;` silences every bare name in the file when `Assertions` is not
+  indexed with a complete member set — which is the usual state without a resolved classpath, and
+  the usual shape of a test file. With the classpath supplying it, the owner is complete and the
+  rule speaks again.
+- **An ambiguous name** (JLS §6.5.2). The `System` of `System.out` is syntactically a value
+  reference and only reclassification makes it a type, so a qualifier is never reported.
+- **A `case` label's constant**, which binds against the switch selector's type rather than a scope.
+
+One further property is worth stating because it is not a limit: a name whose only declaration sits
+in a `#[cfg]`-disabled host **is** reported, since the compile frontend blanks that host. The
+verdict therefore belongs to the feature set the run was given, and `--features` changes it.
 
 That the rules are *implemented*, and not merely declared, is a test rather than a claim:
 `tests/registry.rs` joins the registry against the serialized schema in both directions, pins the

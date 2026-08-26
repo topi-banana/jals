@@ -17,6 +17,11 @@
 //! to a later phase. External bytecode / the JDK classpath is not indexed; a name that *could* come
 //! from there resolves to [`TypeResolution::External`] (no diagnostic) rather than
 //! [`TypeResolution::Unresolved`], so the "cannot resolve" signal stays free of false positives.
+//!
+//! The same diagnostic in the *value* and *method* name-spaces is [`crate::names`], which is a
+//! separate pass rather than a branch here: a type name is nameable or it is not, while a bare name
+//! also has the supertype chain and the static imports behind it — and the member lookups that
+//! settle those are the ones this index publishes.
 
 use alloc::borrow::ToOwned;
 use alloc::format;
@@ -1883,9 +1888,17 @@ impl ProjectIndex {
     /// `false` for every name `Object` declares, so an edge to `Object` can contribute no overload
     /// this walk would otherwise have missed.
     pub fn method_set_complete(&self, owner: ItemId, name: &str) -> bool {
-        if Self::is_object_method(name) {
-            return false;
-        }
+        !Self::is_object_method(name) && self.member_set_complete(owner)
+    }
+
+    /// Whether the members reachable from `owner` are knowable from the index at all — the half of
+    /// [`method_set_complete`](Self::method_set_complete) that does not depend on the name.
+    ///
+    /// A *field* needs exactly this and not the name test: `Object` declares no field, so there is
+    /// no set of universally-inherited names to except, and asking the overload question about one
+    /// would except `toString` from a check it has nothing to do with. Split out rather than
+    /// duplicated so the two answers cannot disagree about which supertype makes an index partial.
+    pub(crate) fn member_set_complete(&self, owner: ItemId) -> bool {
         self.walk_supertypes_stateful(
             owner,
             false,
@@ -2695,7 +2708,7 @@ impl ProjectIndex {
 
     /// Whether `name` is a method every type inherits from `java.lang.Object`. A call to one of these
     /// may bind to `Object`'s declaration (not indexed), so the project member set for it is incomplete.
-    fn is_object_method(name: &str) -> bool {
+    pub(crate) fn is_object_method(name: &str) -> bool {
         const OBJECT_METHODS: &[&str] = &[
             "equals",
             "hashCode",
