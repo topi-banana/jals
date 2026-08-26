@@ -1843,7 +1843,7 @@ impl ProjectIndex {
                 {
                     return Some((self.member(member).owner, Some(member)));
                 }
-            } else if Self::type_decl_kind(ancestor.kind()).is_some()
+            } else if Collect::type_decl_kind(ancestor.kind()).is_some()
                 && let Some(item) = self.item_by_decl(file, start)
                 && self.is_type_param(item, name)
             {
@@ -2127,7 +2127,7 @@ impl ProjectIndex {
     fn enclosing_item(&self, file: FileId, node: &SyntaxNode) -> Option<ItemId> {
         let decl = node
             .ancestors()
-            .find(|a| Self::type_decl_kind(a.kind()).is_some())?;
+            .find(|a| Collect::type_decl_kind(a.kind()).is_some())?;
         let name = Collect::first_ident_token(&decl)?;
         self.item_by_decl(file, Collect::token_start(&name))
     }

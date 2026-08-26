@@ -32,14 +32,16 @@ use alloc::vec::Vec;
 use core::cell::OnceCell;
 use core::ops::Range;
 
-use jals_syntax::SyntaxNode;
+use jals_syntax::SyntaxKind::NAME_REF;
 use jals_syntax::cfg::CfgMap;
+use jals_syntax::{SyntaxNode, SyntaxToken, TextSize};
 
 use crate::def::{Def, DefId};
 use crate::infer::TypeInference;
 use crate::project::{FileId, MemberId, ProjectIndex};
 use crate::reference::Reference;
 use crate::resolve::Resolved;
+use crate::resolve::collect::Collect;
 use crate::ty::Ty;
 
 /// One source file, parsed and name-resolved.
@@ -114,6 +116,61 @@ impl FileAnalysis {
     /// The reference covering byte `offset`, if any.
     pub fn reference_at(&self, offset: usize) -> Option<&Reference> {
         self.resolved.reference_at(offset)
+    }
+
+    /// The `NAME_REF` node `reference` is written in.
+    ///
+    /// The syntax behind the fact: the resolver saw this node when it recorded the reference, and
+    /// every consumer that wanted it back — the "cannot resolve" pass here, the `implicit-this`
+    /// rule in `jals-lint` — was re-walking the whole file to rebuild the same offset-keyed index
+    /// the resolver had already thrown away.
+    ///
+    /// Answered by descending to the offset rather than from a map, because the map is the
+    /// expensive half: a file-wide index costs every caller a full walk, while the callers that
+    /// exist ask about a *filtered* handful of references and would leave most of it unread. That
+    /// is an implementation choice behind this signature, not a promise — a memo can replace it
+    /// without a caller noticing.
+    ///
+    /// `None` in two cases, and they mean different things. A **type** reference is recorded from
+    /// the `TYPE` node it names rather than from a `NAME_REF`, so it never has a site and asking is
+    /// simply the wrong question — every caller filters to
+    /// [`Value`](crate::Namespace::Value) / [`Method`](crate::Namespace::Method) first. Otherwise
+    /// `None` means the reference and the tree disagree, which is exactly the case not to conclude
+    /// anything from.
+    pub fn site_of(&self, reference: &Reference) -> Option<SyntaxNode> {
+        let token = Self::token_starting_at(&self.root, reference.range.start)?;
+        let site = token
+            .parent_ancestors()
+            .find(|node| node.kind() == NAME_REF)?;
+        // The site must be the one this reference *names*, not an outer `NAME_REF` that merely
+        // contains the offset.
+        let first = Collect::first_ident_token(&site)?;
+        (usize::from(first.text_range().start()) == reference.range.start).then_some(site)
+    }
+
+    /// The declaration node `def` was registered from.
+    ///
+    /// The `Def` half of [`site_of`](Self::site_of). It is the *declaration* and not the name's
+    /// parent, which is the distinction that matters for a multi-declarator: `int a, b;` is one
+    /// `FIELD_DECL` binding two definitions, and both answer with that one node.
+    pub fn decl_of(&self, def: &Def) -> Option<SyntaxNode> {
+        let span = self.resolved.decl_span(def.id);
+        let token = Self::token_starting_at(&self.root, def.name_range.start)?;
+        // The declaring node is always an ancestor of the name it binds, so the recorded span
+        // identifies it without a list of declaration kinds to keep in step with the resolver.
+        token
+            .parent_ancestors()
+            .find(|node| Collect::node_span(node) == *span)
+    }
+
+    /// The token that begins at byte `offset`, if one does.
+    ///
+    /// Right-biased because an offset on a token boundary sits *between* two tokens, and both a
+    /// `Def`'s `name_range` and a `Reference`'s `range` start at the identifier they name.
+    fn token_starting_at(root: &SyntaxNode, offset: usize) -> Option<SyntaxToken> {
+        let at = TextSize::from(u32::try_from(offset).ok()?);
+        let token = root.token_at_offset(at).right_biased()?;
+        (usize::from(token.text_range().start()) == offset).then_some(token)
     }
 
     /// The definition the cursor at byte `offset` denotes, whether the cursor sits on a

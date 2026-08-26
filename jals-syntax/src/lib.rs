@@ -42,6 +42,10 @@ mod unicode_escape;
 pub use language::{JavaLanguage, SyntaxElement, SyntaxNode, SyntaxToken};
 pub use lexer::{LexedToken, Lexer};
 pub use parser::Parse;
+// The offset type the CST already speaks: `text_range()` hands one back, so a consumer that wants
+// to *build* one — to ask for the token at a byte offset — would otherwise have to depend on
+// `rowan` (or `text_size`) itself just to name what this crate already gave it.
+pub use rowan::TextSize;
 pub use syntax_error::SyntaxError;
 pub use syntax_kind::SyntaxKind;
 pub use unicode_escape::decoded as decoded_ident;

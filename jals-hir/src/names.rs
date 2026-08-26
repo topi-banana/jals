@@ -43,9 +43,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::ops::Range;
 
-use hashbrown::HashMap;
 use jals_exec::Yielder;
-use jals_syntax::SyntaxKind::{CLASS_BODY, ENUM_CONSTANT, NAME_REF, NEW_EXPR};
+use jals_syntax::SyntaxKind::{CLASS_BODY, ENUM_CONSTANT, NEW_EXPR};
 use jals_syntax::SyntaxNode;
 
 use crate::def::Namespace;
@@ -98,7 +97,6 @@ impl crate::analysis::FileSemantics<'_> {
     pub async fn unresolved_names(&self) -> Vec<UnresolvedName> {
         let (index, file) = (self.index(), self.file());
         let mut yielder = Yielder::new();
-        let sites = Sites::of(self.root(), &mut yielder).await;
         let mut out = Vec::new();
         for r in self.analysis().references() {
             yielder.tick().await;
@@ -113,10 +111,10 @@ impl crate::analysis::FileSemantics<'_> {
             }
             // No `NAME_REF` at the recorded offset would mean the reference and the tree disagree,
             // which is exactly the case not to conclude anything from.
-            let Some(site) = sites.at(r.range.start) else {
+            let Some(site) = self.analysis().site_of(r) else {
                 continue;
             };
-            if !Sites::is_undefined(index, file, site, &r.name, r.namespace) {
+            if !Sites::is_undefined(index, file, &site, &r.name, r.namespace) {
                 continue;
             }
             out.push(UnresolvedName {
@@ -129,33 +127,15 @@ impl crate::analysis::FileSemantics<'_> {
     }
 }
 
-/// The file's `NAME_REF` nodes, keyed on the start of the identifier token each one carries —
-/// which is the offset [`Reference::range`](crate::Reference::range) begins at.
+/// The verdict helpers this pass reaches for, as a namespace.
 ///
-/// Built once per call rather than searched per reference: the walk is the file, and doing it per
-/// reference would make the pass quadratic on exactly the files that have the most to say.
-struct Sites(HashMap<usize, SyntaxNode>);
+/// It used to own an offset-keyed index of the file's `NAME_REF` nodes as well. That index was the
+/// resolver's own walk done a second time, so it moved to
+/// [`FileAnalysis::site_of`](crate::FileAnalysis::site_of) — which answers per reference instead of
+/// per file, and so is not paid for by the references the filters below discard.
+struct Sites;
 
 impl Sites {
-    /// Indexes every `NAME_REF` under `root`.
-    async fn of(root: &SyntaxNode, yielder: &mut Yielder) -> Self {
-        let mut map = HashMap::new();
-        for node in root.descendants() {
-            yielder.tick().await;
-            if node.kind() == NAME_REF
-                && let Some(tok) = Collect::first_ident_token(&node)
-            {
-                map.insert(Collect::token_start(&tok), node);
-            }
-        }
-        Self(map)
-    }
-
-    /// The `NAME_REF` whose identifier starts at `offset`.
-    fn at(&self, offset: usize) -> Option<&SyntaxNode> {
-        self.0.get(&offset)
-    }
-
     /// Whether `name` is undefined at `site` — the verdict, after the enclosing type has been
     /// found and its member set consulted.
     ///
@@ -207,7 +187,7 @@ impl Sites {
             let in_body = prev.as_ref().is_some_and(|p| p.kind() == CLASS_BODY);
             let start = match ancestor.kind() {
                 NEW_EXPR | ENUM_CONSTANT if in_body => usize::from(ancestor.text_range().start()),
-                kind if ProjectIndex::type_decl_kind(kind).is_some() => {
+                kind if Collect::type_decl_kind(kind).is_some() => {
                     let Some(tok) = Collect::first_ident_token(&ancestor) else {
                         return Enclosing::Unindexed;
                     };
