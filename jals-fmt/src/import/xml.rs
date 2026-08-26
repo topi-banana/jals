@@ -34,7 +34,7 @@ impl Xml {
     /// Normalization is pinned to [`XmlVersion::Implicit1_0`]: the two 1.0 spellings normalize
     /// identically, exported Eclipse / IntelliJ documents are never 1.1, and it is what the
     /// pre-0.41 `unescape_value` did, so no declaration needs to be tracked to reach it.
-    fn attr(element: &BytesStart<'_>, want: &[u8]) -> Result<Option<String>, ImportError> {
+    fn attr(element: &BytesStart<'_>, want: &str) -> Result<Option<String>, ImportError> {
         for attribute in element.attributes() {
             let attribute = attribute.map_err(|err| ImportError::Xml(err.to_string()))?;
             if attribute.key.as_ref() == want {
@@ -63,10 +63,10 @@ impl EclipseProfileReader {
             match event {
                 Event::Eof => break,
                 Event::Empty(element) | Event::Start(element)
-                    if element.name().as_ref() == b"setting" =>
+                    if element.name().as_ref() == "setting" =>
                 {
                     if let (Some(id), Some(value)) =
-                        (Xml::attr(&element, b"id")?, Xml::attr(&element, b"value")?)
+                        (Xml::attr(&element, "id")?, Xml::attr(&element, "value")?)
                         && id.starts_with(ECLIPSE_FORMATTER_PREFIX)
                     {
                         out.insert(id, value);
@@ -114,7 +114,7 @@ impl SchemeScan {
     /// Record one opening / empty element.
     fn visit(&mut self, element: &BytesStart<'_>) -> Result<(), ImportError> {
         match element.name().as_ref() {
-            b"option" => match (Xml::attr(element, b"name")?, Xml::attr(element, b"value")?) {
+            "option" => match (Xml::attr(element, "name")?, Xml::attr(element, "value")?) {
                 (Some(name), Some(value)) => {
                     self.raw.insert(name, value);
                 }
@@ -125,16 +125,16 @@ impl SchemeScan {
                 }
                 _ => {}
             },
-            b"package" if self.open_table.is_some() => {
+            "package" if self.open_table.is_some() => {
                 self.entries.push(ImportEntry::Package {
-                    name: Xml::attr(element, b"name")?.unwrap_or_default(),
-                    with_subpackages: Xml::attr(element, b"withSubpackages")?.as_deref()
+                    name: Xml::attr(element, "name")?.unwrap_or_default(),
+                    with_subpackages: Xml::attr(element, "withSubpackages")?.as_deref()
                         == Some("true"),
-                    is_static: Xml::attr(element, b"static")?.as_deref() == Some("true"),
-                    is_module: Xml::attr(element, b"module")?.as_deref() == Some("true"),
+                    is_static: Xml::attr(element, "static")?.as_deref() == Some("true"),
+                    is_module: Xml::attr(element, "module")?.as_deref() == Some("true"),
                 });
             }
-            b"emptyLine" if self.open_table.is_some() => self.entries.push(ImportEntry::Blank),
+            "emptyLine" if self.open_table.is_some() => self.entries.push(ImportEntry::Blank),
             _ => {}
         }
         Ok(())
@@ -234,7 +234,7 @@ impl IntellijSchemeReader {
                     }
                 }
                 Event::End(element)
-                    if scan.open_table.is_some() && element.name().as_ref() == b"option" =>
+                    if scan.open_table.is_some() && element.name().as_ref() == "option" =>
                 {
                     scan.close_table();
                 }
@@ -257,12 +257,12 @@ impl IntellijSchemeReader {
     fn is_foreign_language_block(element: &BytesStart<'_>) -> Result<bool, ImportError> {
         let name = element.name();
         let name = name.as_ref();
-        if name == b"codeStyleSettings" {
+        if name == "codeStyleSettings" {
             // Without a `language` attribute the block is not language-scoped, so read it.
-            return Ok(Xml::attr(element, b"language")?
+            return Ok(Xml::attr(element, "language")?
                 .is_some_and(|language| !language.eq_ignore_ascii_case("JAVA")));
         }
         // `codeStyleSettings` itself does not match this suffix (its leading `c` is lowercase).
-        Ok(name.ends_with(b"CodeStyleSettings") && name != b"JavaCodeStyleSettings")
+        Ok(name.ends_with("CodeStyleSettings") && name != "JavaCodeStyleSettings")
     }
 }
