@@ -22,6 +22,7 @@ mod memory;
 #[cfg(feature = "native")]
 mod native;
 mod remap;
+mod resource;
 mod task;
 mod walk;
 

@@ -18,7 +18,7 @@ use core::error::Error;
 use core::fmt;
 use core::str::FromStr;
 
-use jals_storage::{DirKey, FileKey};
+use jals_storage::{DirKey, FileKey, Name, RelativePath};
 use serde::Deserialize;
 
 use crate::toolchain::Toolchain;
@@ -1615,11 +1615,22 @@ pub struct Build {
     /// off a host filesystem. A directory that does not exist is skipped in silence: the default
     /// lands on every project, and a project with no resources is not a project with a mistake.
     ///
+    /// What is *in* those directories is copied byte for byte unless
+    /// [`resources`](Build::resources) names it, because a resource is whatever the author put
+    /// there and most of it is not text.
+    ///
     /// These reach the **jar only**. `jals run` executes `classes-dir` and does not see them; a
     /// program that must read a resource at run time wants the directory on
     /// [`classpath`](Build::classpath) as well. They also do not reach the browser playground,
     /// which refuses a declared `remap` outright.
     pub resource_dirs: Vec<String>,
+    /// How the files under [`resource-dirs`](Build::resource_dirs) are turned into jar members
+    /// (`[build.resources]`).
+    ///
+    /// Empty by default, which is the plain byte-for-byte copy every project got before this
+    /// section existed: `resource-dirs` says *where* the resources are, this says *which of them*
+    /// are rendered on the way out.
+    pub resources: BuildResources,
     /// `javac --release N`. When set it determines source level, target level, and bootclasspath
     /// together, and `source`/`target` are ignored.
     pub release: Option<u32>,
@@ -1640,6 +1651,207 @@ pub struct Build {
     /// deobfuscated classes it compiled, while the jar this produces carries the names the target
     /// runtime actually loads.
     pub remap: Option<BuildRemap>,
+}
+
+/// How `[build] resource-dirs` files become jar members (`[build.resources]`).
+///
+/// A resource is whatever the author put there — a PNG, an `.nbt`, a font — so rendering every one
+/// of them through a template engine would corrupt most projects. Nothing is rendered unless it is
+/// named here, and what is not named is copied byte for byte exactly as it always was.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
+pub struct BuildResources {
+    /// Glob patterns selecting which resources are rendered as templates.
+    ///
+    /// Matched against a resource's path *below* the `[build] resource-dirs` entry it was found
+    /// under — the same address it takes as a jar member — so `"fabric.mod.json"` names the file at
+    /// the root of a resource directory whatever that directory is called.
+    ///
+    /// `*` matches any run of characters within one segment, `?` matches one character, and `**` is
+    /// a whole segment matching zero or more segments. A pattern that matches nothing is an error
+    /// rather than a silently unrendered file: unlike `resource-dirs`, whose default lands on every
+    /// project, a pattern here was written on purpose.
+    pub template: Vec<String>,
+}
+
+/// A `[build.resources] template` entry, parsed into the segments it matches on.
+///
+/// Deliberately **not** a [`RelativePath`]: `*` is not a valid [`Name`], so a glob cannot be spelled
+/// as a portable path at all. It is also not a *path predicate* of the kind portable interfaces are
+/// forbidden to carry — nothing threads one of these through a seam. The manifest declares it, and
+/// exactly one place evaluates it, against a member path it already holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourcePattern {
+    segments: Vec<PatternSegment>,
+}
+
+/// One `/`-separated component of a [`ResourcePattern`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PatternSegment {
+    /// `**` — zero or more whole segments.
+    AnyDepth,
+    /// One segment, as the alternation of literals and wildcards it spells.
+    Within(Vec<WithinPart>),
+}
+
+/// A piece of a single-segment pattern. Neither wildcard ever crosses a `/`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WithinPart {
+    /// A run of ordinary characters, matched verbatim.
+    Literal(String),
+    /// `*` — any run of characters, including none.
+    Star,
+    /// `?` — exactly one character.
+    AnyChar,
+}
+
+/// Why a `[build.resources] template` entry is not a well-formed glob.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourcePatternError {
+    /// The entry is the empty string, which addresses nothing.
+    Empty,
+    /// A leading, trailing, or doubled `/` left a segment with no characters in it.
+    EmptySegment,
+    /// `.` or `..`, which a resource's member path never spells.
+    RelativeSegment,
+    /// `**` shares its segment with something else (`**.json`, `***`). It matches whole segments,
+    /// so it is a segment or it is nothing.
+    MalformedAnyDepth,
+    /// A backslash or a control character, neither of which a [`Name`] may contain.
+    InvalidCharacter,
+}
+
+impl fmt::Display for ResourcePatternError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => f.write_str("expected a glob, found an empty string"),
+            Self::EmptySegment => {
+                f.write_str("a leading, trailing, or doubled `/` leaves an empty segment")
+            }
+            Self::RelativeSegment => {
+                f.write_str("`.` and `..` are not segments a resource path can spell")
+            }
+            Self::MalformedAnyDepth => {
+                f.write_str("`**` matches whole segments, so it cannot share a segment")
+            }
+            Self::InvalidCharacter => {
+                f.write_str("a backslash or control character cannot appear in a resource path")
+            }
+        }
+    }
+}
+
+impl ResourcePattern {
+    /// Parse one `[build.resources] template` entry.
+    ///
+    /// `*` matches any run of characters within one segment, `?` matches exactly one, and `**` is a
+    /// whole segment matching zero or more segments. Character classes and brace expansion are
+    /// deliberately absent: the vocabulary is the one a resource layout needs, and every addition
+    /// is a shape the manifest has to keep accepting forever.
+    ///
+    /// # Errors
+    /// [`ResourcePatternError`], naming which rule the entry broke.
+    pub fn parse(pattern: &str) -> Result<Self, ResourcePatternError> {
+        if pattern.is_empty() {
+            return Err(ResourcePatternError::Empty);
+        }
+        if pattern
+            .chars()
+            .any(|ch| ch == '\\' || ch == '\0' || ch.is_control())
+        {
+            return Err(ResourcePatternError::InvalidCharacter);
+        }
+        let mut segments = Vec::new();
+        for raw in pattern.split('/') {
+            segments.push(Self::segment(raw)?);
+        }
+        Ok(Self { segments })
+    }
+
+    /// Whether this pattern matches `path`, which is a resource's path *below* the
+    /// `[build] resource-dirs` entry it was found under — the address it takes as a jar member.
+    pub fn matches(&self, path: &RelativePath) -> bool {
+        let segments: Vec<&str> = path.segments().map(Name::as_str).collect();
+        Self::walk(&self.segments, &segments)
+    }
+
+    fn segment(raw: &str) -> Result<PatternSegment, ResourcePatternError> {
+        if raw.is_empty() {
+            return Err(ResourcePatternError::EmptySegment);
+        }
+        if raw == "." || raw == ".." {
+            return Err(ResourcePatternError::RelativeSegment);
+        }
+        if raw.contains("**") {
+            if raw == "**" {
+                return Ok(PatternSegment::AnyDepth);
+            }
+            return Err(ResourcePatternError::MalformedAnyDepth);
+        }
+        let mut parts = Vec::new();
+        let mut literal = String::new();
+        for ch in raw.chars() {
+            let wildcard = match ch {
+                '*' => WithinPart::Star,
+                '?' => WithinPart::AnyChar,
+                ch => {
+                    literal.push(ch);
+                    continue;
+                }
+            };
+            if !literal.is_empty() {
+                parts.push(WithinPart::Literal(core::mem::take(&mut literal)));
+            }
+            parts.push(wildcard);
+        }
+        if !literal.is_empty() {
+            parts.push(WithinPart::Literal(literal));
+        }
+        Ok(PatternSegment::Within(parts))
+    }
+
+    fn walk(pattern: &[PatternSegment], path: &[&str]) -> bool {
+        let Some((head, rest)) = pattern.split_first() else {
+            return path.is_empty();
+        };
+        match head {
+            // Zero or more segments, so every split has to be tried — including the empty one,
+            // which is what makes `META-INF/**/*.xml` match `META-INF/a.xml`.
+            PatternSegment::AnyDepth => {
+                (0..=path.len()).any(|skip| Self::walk(rest, &path[skip..]))
+            }
+            PatternSegment::Within(parts) => path.split_first().is_some_and(|(segment, tail)| {
+                Self::within(parts, segment) && Self::walk(rest, tail)
+            }),
+        }
+    }
+
+    fn within(parts: &[WithinPart], text: &str) -> bool {
+        let Some((head, rest)) = parts.split_first() else {
+            return text.is_empty();
+        };
+        match head {
+            WithinPart::Literal(literal) => text
+                .strip_prefix(literal.as_str())
+                .is_some_and(|tail| Self::within(rest, tail)),
+            WithinPart::AnyChar => {
+                let mut chars = text.chars();
+                chars.next().is_some() && Self::within(rest, chars.as_str())
+            }
+            WithinPart::Star => {
+                if Self::within(rest, text) {
+                    return true;
+                }
+                let mut chars = text.chars();
+                while chars.next().is_some() {
+                    if Self::within(rest, chars.as_str()) {
+                        return true;
+                    }
+                }
+                false
+            }
+        }
+    }
 }
 
 /// The `[build] remap` step: which mapping set reobfuscates the compiled output, and where the jar
@@ -1815,6 +2027,7 @@ impl Default for Build {
             source_dirs: alloc::vec!["src/main/java".to_owned()],
             classes_dir: "target/classes".to_owned(),
             resource_dirs: alloc::vec!["src/main/resources".to_owned()],
+            resources: BuildResources::default(),
             release: None,
             source: None,
             target: None,
@@ -2130,6 +2343,18 @@ impl Manifest {
                     classes_dir: self.build.classes_dir.clone(),
                 });
             }
+        }
+
+        // Only the *syntax* of a template glob is decidable here: `validate` holds no snapshot, so
+        // whether a pattern names a file that exists is a question only the step that reads the
+        // tree can answer, and `ResourcePlan` answers it there.
+        for pattern in &self.build.resources.template {
+            ResourcePattern::parse(pattern).map_err(|reason| {
+                ValidationError::InvalidResourceTemplate {
+                    pattern: pattern.clone(),
+                    reason,
+                }
+            })?;
         }
 
         if let Some(BuildScript::Rhai { file }) = &self.build.script {
@@ -2623,6 +2848,13 @@ pub enum ValidationError {
         /// The `classes-dir` it sits inside.
         classes_dir: String,
     },
+    /// A `[build.resources] template` entry is not a well-formed resource glob.
+    InvalidResourceTemplate {
+        /// The malformed glob.
+        pattern: String,
+        /// Which rule it broke.
+        reason: ResourcePatternError,
+    },
     /// A `[build] script.file` is not a non-root portable project file path.
     InvalidBuildScriptFile {
         /// The invalid script file value.
@@ -2787,6 +3019,10 @@ impl fmt::Display for ValidationError {
                 f,
                 "invalid `[build] resource-dirs` entry `{dir}`: resources must be outside `[build] \
                  classes-dir` `{classes_dir}`, which the compiler writes and `jals clean` removes"
+            ),
+            Self::InvalidResourceTemplate { pattern, reason } => write!(
+                f,
+                "invalid `[build.resources] template` entry `{pattern}`: {reason}"
             ),
             Self::InvalidBuildScriptFile { file } => write!(
                 f,
@@ -4852,6 +5088,107 @@ mod tests {
                 classes_dir: "out".to_owned(),
             })
         );
+    }
+
+    #[test]
+    fn a_resource_template_declaration_is_off_by_default_and_round_trips() {
+        // Off by default is the whole compatibility story: a project that says nothing keeps the
+        // byte-for-byte copy it always had.
+        assert!(Build::default().resources.template.is_empty());
+
+        let declared: Manifest =
+            toml::from_str("[build.resources]\ntemplate = [\"fabric.mod.json\"]\n").unwrap();
+        assert_eq!(
+            declared.build.resources.template,
+            alloc::vec!["fabric.mod.json".to_owned()]
+        );
+        declared.validate().unwrap();
+    }
+
+    #[test]
+    fn an_unknown_resources_key_is_rejected() {
+        // The plural is the typo that would otherwise disable rendering in silence — the exact
+        // failure mode `[build]`'s own `deny_unknown_fields` exists to prevent.
+        assert!(toml::from_str::<Manifest>("[build.resources]\ntemplates = []\n").is_err());
+    }
+
+    #[test]
+    fn a_malformed_resource_template_is_rejected() {
+        for (pattern, reason) in [
+            ("", ResourcePatternError::Empty),
+            ("/a.json", ResourcePatternError::EmptySegment),
+            ("a/", ResourcePatternError::EmptySegment),
+            ("a//b.json", ResourcePatternError::EmptySegment),
+            ("./a.json", ResourcePatternError::RelativeSegment),
+            ("a/../b.json", ResourcePatternError::RelativeSegment),
+            ("a/***/b.json", ResourcePatternError::MalformedAnyDepth),
+            ("a/**b/c.json", ResourcePatternError::MalformedAnyDepth),
+            ("a\\b.json", ResourcePatternError::InvalidCharacter),
+        ] {
+            let manifest: Manifest = toml::from_str(&alloc::format!(
+                "[build.resources]\ntemplate = [\"{}\"]\n",
+                pattern.replace('\\', "\\\\")
+            ))
+            .unwrap();
+            assert_eq!(
+                manifest.validate(),
+                Err(ValidationError::InvalidResourceTemplate {
+                    pattern: pattern.to_owned(),
+                    reason,
+                }),
+                "{pattern}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_template_that_names_no_existing_file_still_validates() {
+        // `validate` holds no snapshot, so whether a pattern names something that is there is not a
+        // question it can answer. The step that reads the tree answers it instead.
+        let manifest: Manifest = toml::from_str(
+            "[build]\nresource-dirs = []\n[build.resources]\ntemplate = [\"x.json\"]\n",
+        )
+        .unwrap();
+        manifest.validate().unwrap();
+    }
+
+    #[test]
+    fn resource_patterns_match_the_stripped_member_path() {
+        let matches = |pattern: &str, path: &str| {
+            ResourcePattern::parse(pattern)
+                .expect("pattern parses")
+                .matches(&RelativePath::parse(path).expect("path parses"))
+        };
+
+        // A bare name is the root of a resource directory, not any file anywhere under it.
+        assert!(matches("fabric.mod.json", "fabric.mod.json"));
+        assert!(!matches("fabric.mod.json", "nested/fabric.mod.json"));
+
+        // `**` matches *zero* or more segments, which is the case everyone gets wrong.
+        assert!(matches("META-INF/**/*.xml", "META-INF/a.xml"));
+        assert!(matches("META-INF/**/*.xml", "META-INF/x/y/a.xml"));
+        assert!(!matches("META-INF/**/*.xml", "META-INF/a.json"));
+        assert!(!matches("META-INF/**/*.xml", "other/a.xml"));
+
+        // `*` never crosses a `/`.
+        assert!(matches("*.json", "a.json"));
+        assert!(!matches("*.json", "a/b.json"));
+        assert!(matches("mixins.*.json", "mixins.hellomod.json"));
+
+        // `?` is exactly one character, counted in characters rather than bytes.
+        assert!(matches("v?.json", "v1.json"));
+        assert!(!matches("v?.json", "v12.json"));
+        assert!(matches("?.txt", "\u{3042}.txt"));
+
+        // `**` alone is everything, including a file at the root.
+        assert!(matches("**", "a.json"));
+        assert!(matches("**", "a/b/c.json"));
+
+        // A leading `**` matching zero segments is the same rule as the one above, so `**/*.json`
+        // reaches a file at the root as well as one nested under it.
+        assert!(matches("**/*.json", "a.json"));
+        assert!(matches("**/*.json", "b/a.json"));
+        assert!(!matches("**/*.json", "b/a.txt"));
     }
 
     #[test]
