@@ -21,10 +21,11 @@
 //! Primitives, user-declared classes (fields, constructors, methods), and the control flow that
 //! goes with them: arithmetic with Java's numeric promotions, the bitwise and shift operators,
 //! comparisons at every width, reference identity and `instanceof`, casts, and the unary operators.
+//! Exceptions (`throw` / `try` / `catch`, over one declared tag) and interface dispatch (a
+//! `ref.test` chain over the classes this module compiles) are in too.
+//!
 //! Library types are out of scope by design — there is no `java.base` on a wasm host, and supplying
-//! one is a separate decision from compiling. So no `String`, no boxing, no exceptions, and no
-//! interface dispatch: a call resolves to exactly one function, because the static type of the
-//! receiver names exactly one method.
+//! one is a separate decision from compiling. So no `String` and no boxing.
 //!
 //! # Where wasm and the JVM genuinely differ
 //!
@@ -44,19 +45,20 @@ use alloc::vec::Vec;
 
 use jals_hir::{DefId, DefKind, ItemId, MemberId, Primitive, ProjectIndex, Ty, TypedFile};
 use jals_syntax::SyntaxKind::{
-    ANNOTATION_TYPE_DECL, CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL, ENUM_BODY, ENUM_CONSTANT,
-    ENUM_DECL, FIELD_DECL, INITIALIZER, INTERFACE_DECL, LAMBDA_EXPR, METHOD_DECL, METHOD_REF_EXPR,
-    NEW_EXPR, RECORD_DECL,
+    ANNOTATION_TYPE_DECL, CLASS_BODY, CLASS_DECL, CONSTRUCTOR_DECL, ENUM_BODY, ENUM_DECL,
+    FIELD_DECL, INITIALIZER, INTERFACE_DECL, LAMBDA_EXPR, METHOD_DECL, METHOD_REF_EXPR,
+    RECORD_DECL,
 };
 use jals_syntax::ast::{self, AstNode as _};
 use jals_syntax::{SyntaxNode, SyntaxToken};
 
 use crate::facts::{ArmLabels, Facts, Hierarchy, Literal, Overrides};
+use crate::facts::{Numeric, Operator, Unary};
 use crate::wasm::encode::{
     CompType, ExportKind, FieldType, Func, Global, HeapType, Module, RefType, StorageType, SubType,
     ValType,
 };
-use crate::wasm::insn::{Insn, Num, NumOp};
+use crate::wasm::insn::{Insn, NumOp, NumericVal as _};
 
 /// Why a project could not be compiled to wasm.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -151,18 +153,13 @@ impl CompileWasm {
         let mut interface_items = Vec::new();
         let mut inner_items = Vec::new();
         let mut captured_items = Vec::new();
-        let mut body_nodes = Vec::new();
         let classes = Self::classes_in_order(
             inputs,
             index,
             &mut interface_items,
             &mut inner_items,
             &mut captured_items,
-            &mut body_nodes,
         )?;
-        for (item, node) in body_nodes {
-            layout.bodies.insert(item, node);
-        }
         for (item, enclosing) in inner_items {
             layout.inner.insert(item, enclosing);
         }
@@ -622,7 +619,6 @@ impl CompileWasm {
         interfaces: &mut Vec<ItemId>,
         inner: &mut Vec<(ItemId, ItemId)>,
         captures: &mut Vec<(ItemId, Vec<(DefId, Ty)>)>,
-        bodies: &mut Vec<(ItemId, SyntaxNode)>,
     ) -> Result<Vec<ItemId>> {
         let mut declared = Vec::new();
         for input in inputs {
@@ -652,12 +648,18 @@ impl CompileWasm {
                 if !captured.is_empty() {
                     captures.push((item, captured));
                 }
-                bodies.push((item, node.clone()));
-                if Facts::is_inner_class(&node) {
-                    let enclosing = node.parent().and_then(|body| body.parent()).ok_or(
-                        WasmError::Unsupported("an inner class with no enclosing type"),
-                    )?;
-                    inner.push((item, Layout::owner_of(&enclosing, input, index)?));
+                // All three arms, not just the nested one. A local class and an anonymous body in
+                // an instance context hold an enclosing instance too, and asking `is_inner_class`
+                // — which is arm one alone — is what left them without one: an uplevel field read
+                // reported the name as unresolved, and an uplevel *call* pushed local 0 without
+                // checking whose `this` it was and produced a module the validator rejects.
+                //
+                // The enclosing *type* is the nearest one, found by the shared walk. The two-hop
+                // `parent().parent()` this replaces lands on a type declaration only when the class
+                // sits directly in a `CLASS_BODY`, and `Layout::owner_of` then demands a name token
+                // — neither of which a local or anonymous class has.
+                if Facts::holds_enclosing_instance(&node, item, index) {
+                    inner.push((item, Facts::enclosing_type_of(&node, input.file(), index)?));
                 }
                 declared.push(item);
             }
@@ -692,7 +694,8 @@ impl CompileWasm {
     ///
     /// A class inside a *block* is a local class, and wasm's flat type space has nothing to say about
     /// where it was written — so it is laid out like any other. What it may *not* do is capture a local:
-    /// each capture needs a synthetic constructor parameter, and `captures_a_local` reports one.
+    /// each capture becomes a synthetic field and a trailing constructor parameter, which is how a
+    /// class outlives the frame the local lived in.
     fn type_declarations(root: &SyntaxNode) -> impl Iterator<Item = SyntaxNode> + '_ {
         use jals_syntax::SyntaxKind::{
             ANNOTATION_TYPE_DECL, ENUM_DECL, INTERFACE_DECL, RECORD_DECL,
@@ -701,19 +704,9 @@ impl CompileWasm {
             matches!(
                 node.kind(),
                 CLASS_DECL | INTERFACE_DECL | ENUM_DECL | RECORD_DECL | ANNOTATION_TYPE_DECL
-            ) || Self::is_anonymous(node)
+            ) || Facts::is_anonymous_body(node)
                 || Self::is_functional(node)
         })
-    }
-
-    /// Whether `node` is an anonymous class body: a `new` with a class body of its own. It is a type
-    /// declaration with no name and no keyword, so it is recognised by shape; the index keys its item on
-    /// the `new` keyword's position, which is the only offset it can be found by.
-    fn is_anonymous(node: &SyntaxNode) -> bool {
-        // An `enum` constant with a body is the other form: an anonymous subclass of the enum, keyed on
-        // the constant's own position for the same reason — there is no name to key on.
-        matches!(node.kind(), NEW_EXPR | ENUM_CONSTANT)
-            && node.children().any(|child| child.kind() == CLASS_BODY)
     }
 
     /// Whether `node` is a lambda or a method reference — the two forms the index gives a one-method class
@@ -730,7 +723,7 @@ impl CompileWasm {
     ) -> Result<Option<ItemId>> {
         // A lambda and an anonymous body are both nameless, and the index keys each on its own start
         // offset — the only thing either has to be found by.
-        if Self::is_anonymous(node) || Self::is_functional(node) {
+        if Facts::is_anonymous_body(node) || Self::is_functional(node) {
             return Ok(index.item_by_decl(input.file(), usize::from(node.text_range().start())));
         }
         let name =
@@ -960,9 +953,6 @@ struct Layout {
     /// The function that runs a constructor-less class's initialisers, for the `new` to call. A block reads its
     /// own fields through `this`, and only a function has a slot 0 to be `this`.
     default_constructors: BTreeMap<ItemId, u32>,
-    /// Each class's declaration node, so a `new` can reach the field initialisers of a class *other* than the
-    /// one being lowered — which is the only way a class with no constructor ever runs them.
-    bodies: BTreeMap<ItemId, SyntaxNode>,
     /// Every local class and the locals it captures, in source order. Each becomes a struct field and a
     /// *trailing* constructor parameter, which is how the class outlives the frame the local lived in.
     captures: BTreeMap<ItemId, Vec<(DefId, Ty)>>,
@@ -2072,9 +2062,8 @@ impl Lowering<'_> {
         // readable.
         for (name, value) in Facts::declarators(declaration.syntax()) {
             let id = self
-                .input
-                .analysis()
-                .symbol_at(usize::from(name.text_range().start()))
+                .facts()
+                .def_at_token(&name)
                 .ok_or_else(|| WasmError::Unresolved(name.text().into()))?;
             let slot = self.declare_local(id)?;
             if let Some(value) = value {
@@ -2257,9 +2246,8 @@ impl Lowering<'_> {
         insn.i32_const(0).local_set(index);
 
         let id = self
-            .input
-            .analysis()
-            .symbol_at(usize::from(name.text_range().start()))
+            .facts()
+            .def_at_token(&name)
             .ok_or_else(|| WasmError::Unresolved(name.text().into()))?;
         let variable = self.declare_local(id)?;
 
@@ -2515,9 +2503,8 @@ impl Lowering<'_> {
                 .find_map(ast::Expr::cast)
                 .ok_or(WasmError::Unsupported("a resource with no initialiser"))?;
             let id = self
-                .input
-                .analysis()
-                .symbol_at(usize::from(name.text_range().start()))
+                .facts()
+                .def_at_token(&name)
                 .ok_or_else(|| WasmError::Unresolved(name.text().into()))?;
             let slot = self.declare_local(id)?;
             let declared = self.input.type_of_def(id).clone();
@@ -2670,9 +2657,8 @@ impl Lowering<'_> {
         // copy is therefore sound, and it is the only way to give the variable a wasm type at all: there
         // is no struct type for a bound this backend does not compute.
         let id = self
-            .input
-            .analysis()
-            .symbol_at(usize::from(name.text_range().start()))
+            .facts()
+            .def_at_token(&name)
             .ok_or_else(|| WasmError::Unresolved(name.text().into()))?;
         for ty in &types {
             let heap = self.named_type(ty)?;
@@ -3264,26 +3250,8 @@ impl Lowering<'_> {
     }
 
     /// The member a field access names, and the class that declares it.
-    ///
-    /// A `this.`-qualified access is resolved against the enclosing class directly: `this` has no
-    /// inferred type, so the analysis records no target for it.
     fn field_target(&self, access: &ast::FieldAccess) -> Result<(ItemId, MemberId)> {
-        let name = access
-            .field()
-            .ok_or(WasmError::Unsupported("a field access with no name"))?;
-        let unresolved = || WasmError::Unresolved(name.clone());
-        let member = match access.receiver() {
-            Some(receiver) if Facts::is_this(receiver.syntax()) => {
-                let owner = self.owner.ok_or_else(unresolved)?;
-                self.index
-                    .resolve_member(owner, &name, jals_hir::Namespace::Value)
-                    .ok_or_else(unresolved)?
-            }
-            _ => self
-                .input
-                .field_target_of(Facts::span(access.syntax()))
-                .ok_or_else(unresolved)?,
-        };
+        let member = self.facts().field_target(access)?;
         Ok((self.index.member(member).owner, member))
     }
 
@@ -3350,6 +3318,38 @@ impl Lowering<'_> {
         Ok(ty)
     }
 
+    /// Push the receiver an unqualified member access starts from, walking out through enclosing
+    /// instances until one is a subtype of `owner`, and report which class it landed on.
+    ///
+    /// Local 0 is `this`, and for a member of this class or one it inherits that is the whole
+    /// answer — which is why pushing local 0 unconditionally was right for as long as a local or
+    /// anonymous class never held an enclosing instance. Now that one can, a name written inside it
+    /// may name a field or a method of the class the *method* was written in, and reaching that
+    /// means reading the synthetic field out, once per level.
+    ///
+    /// The JVM lowering has walked this chain all along (`Expr::load_unqualified_receiver`,
+    /// emitting `getfield this$0`); this is the same walk over this target's struct fields.
+    fn load_unqualified_receiver(&self, owner: ItemId, insn: &mut Insn) -> Result<ItemId> {
+        let mut item = self.owner.ok_or(WasmError::Unsupported(
+            "an unqualified member in a `static` method",
+        ))?;
+        insn.local_get(0);
+        while !self.index.is_subtype(item, owner) {
+            // Every enclosing instance in reach has been walked and none of them owns the member.
+            let next = *self.layout.inner.get(&item).ok_or(WasmError::Unsupported(
+                "an unqualified member of no enclosing instance in scope",
+            ))?;
+            let slot = *self
+                .layout
+                .outer
+                .get(&item)
+                .ok_or(WasmError::Unsupported("an inner class with no outer field"))?;
+            insn.struct_get(self.layout.structs[&item], slot);
+            item = next;
+        }
+        Ok(item)
+    }
+
     fn name(&self, name: &ast::NameRef, insn: &mut Insn) -> Result<ValType> {
         let text = name.syntax().text().to_string();
         let unresolved = || WasmError::Unresolved(text.trim().into());
@@ -3383,13 +3383,12 @@ impl Lowering<'_> {
             insn.global_get(*global);
             return Ok(ty);
         }
-        let owner = self.owner.ok_or_else(unresolved)?;
+        let item = self.load_unqualified_receiver(self.index.member(member).owner, insn)?;
         let slot = self
             .layout
-            .field_slot(owner, member)
+            .field_slot(item, member)
             .ok_or_else(unresolved)?;
-        let struct_type = self.layout.structs[&owner];
-        insn.local_get(0).struct_get(struct_type, slot);
+        insn.struct_get(self.layout.structs[&item], slot);
         self.layout.val_type(&self.index.resolved_member_ty(member))
     }
 
@@ -3498,13 +3497,10 @@ impl Lowering<'_> {
     }
 
     fn field(&mut self, access: &ast::FieldAccess, insn: &mut Insn) -> Result<ValType> {
-        // `array.length` is not a field at all — wasm gives an array its own instruction.
-        if access.field().as_deref() == Some("length")
+        // `array.length` is not a field at all — wasm gives an array its own instruction. The
+        // *classification* is shared; the instruction is not.
+        if self.facts().is_array_length(access)
             && let Some(receiver) = access.receiver()
-            && matches!(
-                self.input.type_of_expr(Facts::span(receiver.syntax())),
-                Some(Ty::Array(_))
-            )
         {
             self.expr(&receiver, insn)?;
             insn.array_len();
@@ -3546,46 +3542,44 @@ impl Lowering<'_> {
         keep: bool,
         insn: &mut Insn,
     ) -> Result<Option<ValType>> {
-        use jals_syntax::SyntaxKind::{BANG, MINUS, MINUS_MINUS, PLUS, PLUS_PLUS, TILDE};
         let operand = unary
             .operand()
             .ok_or(WasmError::Unsupported("a unary with no operand"))?;
-        let operator = Facts::operator(unary.syntax());
-        match operator.as_slice() {
-            // A prefix `++` / `--` is an assignment, not an operator on a value.
-            [PLUS_PLUS] => return self.update(&operand, 1, true, keep, insn),
-            [MINUS_MINUS] => return self.update(&operand, -1, true, keep, insn),
-            _ => {}
+        let operator =
+            Unary::of(unary.syntax()).ok_or(WasmError::Unsupported("this unary operator"))?;
+        // A prefix `++` / `--` is an assignment, not an operator on a value.
+        if let Some(step) = operator.step() {
+            return self.update(&operand, step, true, keep, insn);
         }
-        let ty = match operator.as_slice() {
+        let ty = match operator {
             // `!b` flips a `boolean`, which is an `i32` that is 0 or 1 — so `i32.eqz` *is* the flip.
-            [BANG] => {
+            Unary::Not => {
                 self.expr(&operand, insn)?
                     .ok_or(WasmError::Unsupported("a `!` on nothing"))?;
                 insn.i32_eqz();
                 ValType::I32
             }
             // `+` is not a no-op: unary numeric promotion still applies.
-            [PLUS] => {
-                let promoted = Self::promote_one(self.num_of(operand.syntax())?);
+            Unary::Plus => {
+                let promoted = Numeric::promote_one(self.num_of(operand.syntax())?);
                 self.operand(&operand, promoted, insn)?;
                 promoted.val()
             }
-            [MINUS] => {
-                let promoted = Self::promote_one(self.num_of(operand.syntax())?);
+            Unary::Minus => {
+                let promoted = Numeric::promote_one(self.num_of(operand.syntax())?);
                 // wasm has no integer negation at all, so an integral `-x` is `0 - x` — which means
                 // the zero goes on the stack *before* the operand.
                 match promoted {
-                    Num::Long => {
+                    Numeric::Long => {
                         insn.i64_const(0);
                     }
-                    Num::Float | Num::Double => {}
+                    Numeric::Float | Numeric::Double => {}
                     _ => {
                         insn.i32_const(0);
                     }
                 }
                 self.operand(&operand, promoted, insn)?;
-                if matches!(promoted, Num::Float | Num::Double) {
+                if matches!(promoted, Numeric::Float | Numeric::Double) {
                     insn.neg(promoted.val())
                         .ok_or(WasmError::Unsupported("this negation"))?;
                 } else {
@@ -3595,18 +3589,21 @@ impl Lowering<'_> {
                 promoted.val()
             }
             // `~n` is `n ^ -1`, at the promoted width.
-            [TILDE] => {
-                let promoted = Self::promote_one(self.num_of(operand.syntax())?);
+            Unary::BitNot => {
+                let promoted = Numeric::promote_one(self.num_of(operand.syntax())?);
                 self.operand(&operand, promoted, insn)?;
                 match promoted {
-                    Num::Long => insn.i64_const(-1),
+                    Numeric::Long => insn.i64_const(-1),
                     _ => insn.i32_const(-1),
                 };
                 insn.numeric(NumOp::Xor, promoted.val())
                     .ok_or(WasmError::Unsupported("this complement"))?;
                 promoted.val()
             }
-            _ => return Err(WasmError::Unsupported("this unary operator")),
+            // The two assignment forms returned above.
+            Unary::Increment | Unary::Decrement => {
+                return Err(WasmError::Unsupported("this unary operator"));
+            }
         };
         Ok(Some(ty))
     }
@@ -3636,15 +3633,12 @@ impl Lowering<'_> {
     }
 
     fn binary(&mut self, binary: &ast::BinaryExpr, insn: &mut Insn) -> Result<ValType> {
-        use jals_syntax::SyntaxKind::{
-            AMP, AMP_AMP, BANG_EQ, CARET, EQ, EQ_EQ, GT, INSTANCEOF_KW, LSHIFT, LT, LT_EQ, MINUS,
-            PERCENT, PIPE, PIPE_PIPE, PLUS, SLASH, STAR,
-        };
-        let operator = Facts::operator(binary.syntax());
+        let operator = Operator::binary(binary.syntax())
+            .ok_or(WasmError::Unsupported("this binary operator"))?;
 
         // Before the operands: an `instanceof` whose right side is a *pattern* has no right operand at
         // all — the pattern is a binding, not an expression, and asking for one reported the wrong thing.
-        if operator.first() == Some(&INSTANCEOF_KW) {
+        if operator == Operator::InstanceOf {
             return self.instance_of(binary, insn);
         }
         let left = binary
@@ -3655,33 +3649,12 @@ impl Lowering<'_> {
             .ok_or(WasmError::Unsupported("a binary with no right operand"))?;
 
         // `&&` and `||` are not operators over two values: the right operand may not run at all.
-        match operator.as_slice() {
-            [AMP_AMP] => return self.short_circuit(&left, &right, true, insn),
-            [PIPE_PIPE] => return self.short_circuit(&left, &right, false, insn),
+        match operator {
+            Operator::AndAnd => return self.short_circuit(&left, &right, true, insn),
+            Operator::OrOr => return self.short_circuit(&left, &right, false, insn),
             _ => {}
         }
-        let op = match operator.as_slice() {
-            [PLUS] => NumOp::Add,
-            [MINUS] => NumOp::Sub,
-            [STAR] => NumOp::Mul,
-            [SLASH] => NumOp::Div,
-            [PERCENT] => NumOp::Rem,
-            [EQ_EQ] => NumOp::Eq,
-            [BANG_EQ] => NumOp::Ne,
-            [LT] => NumOp::Lt,
-            [LT_EQ] => NumOp::Le,
-            [GT] => NumOp::Gt,
-            // `>=` is two tokens, so that `List<List<T>>` still closes as two `>`.
-            [GT, EQ] => NumOp::Ge,
-            [AMP] => NumOp::And,
-            [PIPE] => NumOp::Or,
-            [CARET] => NumOp::Xor,
-            [LSHIFT] => NumOp::Shl,
-            // `>>` and `>>>` are separate `>` tokens, for the same reason `>=` is.
-            [GT, GT] => NumOp::Shr,
-            [GT, GT, GT] => NumOp::Ushr,
-            _ => return Err(WasmError::Unsupported("this binary operator")),
-        };
+        let op = Self::num_op(operator).ok_or(WasmError::Unsupported("this binary operator"))?;
 
         // A reference `==` / `!=` is identity, not arithmetic, and wasm spells it `ref.eq`.
         if matches!(op, NumOp::Eq | NumOp::Ne) && self.is_reference(left.syntax()) {
@@ -3693,7 +3666,7 @@ impl Lowering<'_> {
             // A shift promotes each side on its own, and wasm wants the *count* at the left operand's
             // own width: `i64.shl` takes two `i64`s where `lshl` takes a `long` and an `int`. So the
             // count is converted to the result's type rather than to `int`.
-            let promoted = Self::promote_one(left_num);
+            let promoted = Numeric::promote_one(left_num);
             self.operand(&left, promoted, insn)?;
             self.operand(&right, promoted, insn)?;
             insn.numeric(op, promoted.val())
@@ -3703,7 +3676,7 @@ impl Lowering<'_> {
 
         // Both operands share one type, because one opcode names one: `i64.add` over an `i32` is a
         // module the validator rejects. Java's binary numeric promotion says which.
-        let promoted = Self::promote(left_num, self.num_of(right.syntax())?);
+        let promoted = Numeric::promote(left_num, self.num_of(right.syntax())?);
         self.operand(&left, promoted, insn)?;
         self.operand(&right, promoted, insn)?;
         insn.numeric(op, promoted.val())
@@ -3716,7 +3689,7 @@ impl Lowering<'_> {
     }
 
     /// Emit `expr` and convert its value to `target`.
-    fn operand(&mut self, expr: &ast::Expr, target: Num, insn: &mut Insn) -> Result<()> {
+    fn operand(&mut self, expr: &ast::Expr, target: Numeric, insn: &mut Insn) -> Result<()> {
         let source = self.num_of(expr.syntax())?;
         self.expr(expr, insn)?
             .ok_or(WasmError::Unsupported("an operand that produced no value"))?;
@@ -3728,7 +3701,7 @@ impl Lowering<'_> {
     }
 
     /// The numeric type `node`'s recorded type is.
-    fn num_of(&self, node: &SyntaxNode) -> Result<Num> {
+    fn num_of(&self, node: &SyntaxNode) -> Result<Numeric> {
         let ty = self
             .input
             .type_of_expr(Facts::span(node))
@@ -3736,17 +3709,11 @@ impl Lowering<'_> {
         let Ty::Primitive(primitive) = ty else {
             return Err(WasmError::Unsupported("an arithmetic operand of this type"));
         };
-        Ok(match primitive {
-            Primitive::Byte => Num::Byte,
-            Primitive::Short => Num::Short,
-            Primitive::Char => Num::Char,
-            // A `boolean` shares `int`'s representation, and the only operators it reaches are the
-            // bitwise ones, where that is exactly right.
-            Primitive::Int | Primitive::Boolean => Num::Int,
-            Primitive::Long => Num::Long,
-            Primitive::Float => Num::Float,
-            Primitive::Double => Num::Double,
-        })
+        // A `boolean` is not a numeric type (JLS §4.2), so the shared rule refuses it. On *this*
+        // target it shares `int`'s representation, and the only operators it reaches are the bitwise
+        // ones, where that is exactly right — a statement about wasm, made where wasm decides its
+        // own layout rather than folded into the language rule.
+        Ok(Numeric::of(*primitive).unwrap_or(Numeric::Int))
     }
 
     /// Whether `node`'s recorded type is a reference.
@@ -3755,24 +3722,6 @@ impl Lowering<'_> {
             self.input.type_of_expr(Facts::span(node)),
             Some(Ty::Class(_) | Ty::Array(_) | Ty::Null)
         )
-    }
-
-    /// Binary numeric promotion (JLS §5.6.2).
-    const fn promote(left: Num, right: Num) -> Num {
-        match (left, right) {
-            (Num::Double, _) | (_, Num::Double) => Num::Double,
-            (Num::Float, _) | (_, Num::Float) => Num::Float,
-            (Num::Long, _) | (_, Num::Long) => Num::Long,
-            _ => Num::Int,
-        }
-    }
-
-    /// Unary numeric promotion (JLS §5.6.1).
-    const fn promote_one(num: Num) -> Num {
-        match num {
-            Num::Byte | Num::Short | Num::Char | Num::Int => Num::Int,
-            other => other,
-        }
     }
 
     /// `a == b` / `a != b` over two references, which is identity.
@@ -3785,9 +3734,10 @@ impl Lowering<'_> {
     ) -> Result<ValType> {
         // `x == null` has no second reference to compare: `ref.null` would need the *other* side's
         // type, and `ref.is_null` asks the question directly.
-        let (value, other) = if Self::is_null_literal(right.syntax()) {
+        let facts = self.facts();
+        let (value, other) = if facts.denotes_null(right.syntax()) {
             (left, None)
-        } else if Self::is_null_literal(left.syntax()) {
+        } else if facts.denotes_null(left.syntax()) {
             (right, None)
         } else {
             (left, Some(right))
@@ -3808,12 +3758,6 @@ impl Lowering<'_> {
             insn.i32_eqz();
         }
         Ok(ValType::I32)
-    }
-
-    /// Whether `node` is the `null` literal.
-    fn is_null_literal(node: &SyntaxNode) -> bool {
-        node.descendants_with_tokens()
-            .any(|element| element.kind() == jals_syntax::SyntaxKind::NULL_KW)
     }
 
     /// `e instanceof T`.
@@ -4048,24 +3992,42 @@ impl Lowering<'_> {
 
     /// The operator a compound assignment applies. `=` is not one of them.
     fn compound_operator(node: &SyntaxNode) -> Result<NumOp> {
-        use jals_syntax::SyntaxKind::{
-            AMP_EQ, CARET_EQ, EQ, GT, LSHIFT_EQ, MINUS_EQ, PERCENT_EQ, PIPE_EQ, PLUS_EQ, SLASH_EQ,
-            STAR_EQ,
-        };
-        Ok(match Facts::operator(node).as_slice() {
-            [PLUS_EQ] => NumOp::Add,
-            [MINUS_EQ] => NumOp::Sub,
-            [STAR_EQ] => NumOp::Mul,
-            [SLASH_EQ] => NumOp::Div,
-            [PERCENT_EQ] => NumOp::Rem,
-            [AMP_EQ] => NumOp::And,
-            [PIPE_EQ] => NumOp::Or,
-            [CARET_EQ] => NumOp::Xor,
-            [LSHIFT_EQ] => NumOp::Shl,
-            // `>>=` and `>>>=` are separate `>` tokens, so that `List<List<T>>` still closes.
-            [GT, GT, EQ] => NumOp::Shr,
-            [GT, GT, GT, EQ] => NumOp::Ushr,
-            _ => return Err(WasmError::Unsupported("this compound assignment operator")),
+        // The token run is read once, in `facts`; what is left here is the projection onto this
+        // target's opcode vocabulary. A compound assignment never spells a comparison, so the
+        // arms a comparison would need are unreachable rather than missing.
+        Operator::compound(node)
+            .and_then(Self::num_op)
+            .ok_or(WasmError::Unsupported("this compound assignment operator"))
+    }
+
+    /// This target's opcode for a source operator, or `None` for one that is not an operation over
+    /// two values.
+    ///
+    /// wasm fuses arithmetic and comparison — `i32.add` and `i32.lt_s` are the same shape of
+    /// instruction — where the JVM splits them, so the two backends project the one vocabulary
+    /// differently. That difference is emission and stays here.
+    const fn num_op(operator: Operator) -> Option<NumOp> {
+        Some(match operator {
+            Operator::Add => NumOp::Add,
+            Operator::Sub => NumOp::Sub,
+            Operator::Mul => NumOp::Mul,
+            Operator::Div => NumOp::Div,
+            Operator::Rem => NumOp::Rem,
+            Operator::And => NumOp::And,
+            Operator::Or => NumOp::Or,
+            Operator::Xor => NumOp::Xor,
+            Operator::Shl => NumOp::Shl,
+            Operator::Shr => NumOp::Shr,
+            Operator::Ushr => NumOp::Ushr,
+            Operator::Eq => NumOp::Eq,
+            Operator::Ne => NumOp::Ne,
+            Operator::Lt => NumOp::Lt,
+            Operator::Le => NumOp::Le,
+            Operator::Gt => NumOp::Gt,
+            Operator::Ge => NumOp::Ge,
+            // Not operations over two values: the short-circuits may not evaluate their right
+            // operand at all, and `instanceof`'s right side is a type or a pattern.
+            Operator::AndAnd | Operator::OrOr | Operator::InstanceOf => return None,
         })
     }
 
@@ -4088,9 +4050,9 @@ impl Lowering<'_> {
         place.address(insn);
         place.read(insn);
         let promoted = if operation.is_shift() {
-            Self::promote_one(declared)
+            Numeric::promote_one(declared)
         } else {
-            Self::promote(declared, self.num_of(value.syntax())?)
+            Numeric::promote(declared, self.num_of(value.syntax())?)
         };
         if declared != promoted {
             insn.convert(declared, promoted)
@@ -4133,7 +4095,7 @@ impl Lowering<'_> {
 
         // `++` is `+= 1` with the same promotion and narrowing (§15.14.2), so a `char c; c++` adds as
         // `i32` and truncates back into a `char`.
-        let promoted = Self::promote_one(declared);
+        let promoted = Numeric::promote_one(declared);
         place.address(insn);
         place.read(insn);
         if declared != promoted {
@@ -4161,12 +4123,14 @@ impl Lowering<'_> {
     }
 
     /// The `1` (or `-1`) an increment adds, at the promoted type.
-    fn one(delta: i8, promoted: Num, insn: &mut Insn) {
+    fn one(delta: i8, promoted: Numeric, insn: &mut Insn) {
         match promoted {
-            Num::Long => insn.i64_const(i64::from(delta)),
-            Num::Float => insn.f32_const(f32::from(delta)),
-            Num::Double => insn.f64_const(f64::from(delta)),
-            Num::Byte | Num::Short | Num::Char | Num::Int => insn.i32_const(i32::from(delta)),
+            Numeric::Long => insn.i64_const(i64::from(delta)),
+            Numeric::Float => insn.f32_const(f32::from(delta)),
+            Numeric::Double => insn.f64_const(f64::from(delta)),
+            Numeric::Byte | Numeric::Short | Numeric::Char | Numeric::Int => {
+                insn.i32_const(i32::from(delta))
+            }
         };
     }
 
@@ -4203,7 +4167,7 @@ impl Lowering<'_> {
                 ))?;
                 let array_slot = self.scratch(array_value);
                 insn.local_set(array_slot);
-                self.operand(&index, Num::Int, insn)?;
+                self.operand(&index, Numeric::Int, insn)?;
                 let index_slot = self.scratch(ValType::I32);
                 insn.local_set(index_slot);
                 Ok(Place::Element {
@@ -4214,6 +4178,12 @@ impl Lowering<'_> {
                 })
             }
             ast::Expr::FieldAccess(access) => {
+                // `a.length` is not a field, so there is no member for the index to have resolved.
+                // Reporting the *name* as unresolved named the wrong problem: `length` is final
+                // (JLS §10.7), so there is nothing to assign to rather than nothing to find.
+                if self.facts().is_array_length(access) {
+                    return Err(WasmError::Unsupported("an assignment to an array's length"));
+                }
                 let (owner, member) = self.field_target(access)?;
                 if self.index.member(member).modifiers.is_static {
                     let global =
@@ -4265,13 +4235,35 @@ impl Lowering<'_> {
                     return Ok(Place::Global { index: global, ty });
                 }
                 let owner = self.owner.ok_or_else(unresolved)?;
+                let declared = self.index.member(member).owner;
+                // The common case: the field is this class's own or one it inherits, and local 0 is
+                // a stable receiver already — no spill, exactly as before.
+                if self.index.is_subtype(owner, declared) {
+                    let slot = self
+                        .layout
+                        .field_slot(owner, member)
+                        .ok_or_else(unresolved)?;
+                    return Ok(Place::Field {
+                        receiver: 0,
+                        struct_type: self.layout.structs[&owner],
+                        slot,
+                        ty,
+                    });
+                }
+                // Otherwise the name reaches out through enclosing instances. The walk leaves the
+                // receiver on the stack and a place needs it in a local, because the value being
+                // assigned is evaluated *after* the place is resolved.
+                let item = self.load_unqualified_receiver(declared, insn)?;
                 let slot = self
                     .layout
-                    .field_slot(owner, member)
+                    .field_slot(item, member)
                     .ok_or_else(unresolved)?;
+                let receiver_ty = self.layout.class_ref(item)?;
+                let receiver = self.scratch(receiver_ty);
+                insn.local_set(receiver);
                 Ok(Place::Field {
-                    receiver: 0,
-                    struct_type: self.layout.structs[&owner],
+                    receiver,
+                    struct_type: self.layout.structs[&item],
                     slot,
                     ty,
                 })
@@ -4323,12 +4315,12 @@ impl Lowering<'_> {
     }
 
     /// The numeric type a `ValType` is, for converting into a type an expression already has.
-    const fn num_for(ty: ValType) -> Result<Num> {
+    const fn num_for(ty: ValType) -> Result<Numeric> {
         Ok(match ty {
-            ValType::I32 => Num::Int,
-            ValType::I64 => Num::Long,
-            ValType::F32 => Num::Float,
-            ValType::F64 => Num::Double,
+            ValType::I32 => Numeric::Int,
+            ValType::I64 => Numeric::Long,
+            ValType::F32 => Numeric::Float,
+            ValType::F64 => Numeric::Double,
             ValType::Ref(_) => return Err(WasmError::Unsupported("a numeric reference")),
         })
     }
@@ -4382,7 +4374,7 @@ impl Lowering<'_> {
             return Ok(ty);
         }
         // An anonymous class is its own type, and the `new` builds *that* rather than the type it named.
-        let anonymous = CompileWasm::is_anonymous(new.syntax());
+        let anonymous = Facts::is_anonymous_body(new.syntax());
         let item = if anonymous {
             self.index
                 .item_by_decl(self.input.file(), Facts::span(new.syntax()).start)
@@ -4414,7 +4406,7 @@ impl Lowering<'_> {
         // `outer.new Inner()` names the enclosing instance explicitly; the qualifier is an expression
         // sitting *before* the `new` keyword. Unqualified, it is `this`, which a `static` method has not
         // got.
-        let qualifier = encloses.and_then(|_| Self::new_qualifier(new));
+        let qualifier = encloses.and_then(|_| Facts::new_qualifier(new));
         if encloses.is_some() && qualifier.is_none() && self.owner.is_none() {
             return Err(WasmError::Unsupported(
                 "a `new` of an inner class outside an instance method",
@@ -4452,8 +4444,8 @@ impl Lowering<'_> {
                 let slot = self.scratch(ty);
                 insn.local_set(slot).local_get(slot);
                 // The enclosing instance is the constructor's first declared argument.
-                if encloses.is_some() {
-                    self.enclosing_instance(qualifier.as_ref(), insn)?;
+                if let Some(encloses) = encloses {
+                    self.enclosing_instance(qualifier.as_ref(), encloses, insn)?;
                 }
                 for argument in &arguments {
                     self.expr(argument, insn)?;
@@ -4511,7 +4503,9 @@ impl Lowering<'_> {
                         .ok_or(WasmError::Unsupported("an inner class with no outer field"))?;
                     insn.local_set(slot);
                     insn.local_get(slot);
-                    self.enclosing_instance(qualifier.as_ref(), insn)?;
+                    let encloses = encloses
+                        .ok_or(WasmError::Unsupported("an inner class with no outer field"))?;
+                    self.enclosing_instance(qualifier.as_ref(), encloses, insn)?;
                     insn.struct_set(struct_type, field);
                     insn.local_get(slot);
                 }
@@ -4593,11 +4587,10 @@ impl Lowering<'_> {
             self.expr(&receiver, insn)?
                 .ok_or(WasmError::Unsupported("a receiver with no value"))?
         } else {
-            let owner = self
-                .owner
-                .ok_or(WasmError::Unsupported("a bare call in a `static` method"))?;
-            insn.local_get(0);
-            self.layout.class_ref(owner)?
+            // A bare call in an instance method is an implicit `this` — or, from a class that holds
+            // an enclosing instance, whichever enclosing instance owns the method.
+            let item = self.load_unqualified_receiver(self.index.member(member).owner, insn)?;
+            self.layout.class_ref(item)?
         };
         let receiver = self.scratch(receiver_ty);
         insn.local_set(receiver);
@@ -4656,30 +4649,25 @@ impl Lowering<'_> {
         Ok(ty)
     }
 
-    /// The expression a qualified `new` names as its enclosing instance: the one sitting *before* the
-    /// `new` keyword. `None` for the unqualified form.
-    fn new_qualifier(new: &ast::NewExpr) -> Option<ast::Expr> {
-        let keyword = new
-            .syntax()
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .find(|token| token.kind() == jals_syntax::SyntaxKind::NEW_KW)?;
-        new.syntax()
-            .children()
-            .filter(|child| child.text_range().end() <= keyword.text_range().start())
-            .find_map(ast::Expr::cast)
-    }
-
     /// Push the enclosing instance an inner class's constructor takes: the qualifier when the source
     /// wrote one, `this` otherwise.
-    fn enclosing_instance(&mut self, qualifier: Option<&ast::Expr>, insn: &mut Insn) -> Result<()> {
+    fn enclosing_instance(
+        &mut self,
+        qualifier: Option<&ast::Expr>,
+        encloses: ItemId,
+        insn: &mut Insn,
+    ) -> Result<()> {
         match qualifier {
             Some(expr) => {
                 self.expr(expr, insn)?
                     .ok_or(WasmError::Unsupported("a qualified `new` with no receiver"))?;
             }
+            // Not local 0: the class being compiled need not be the one the target is declared in.
+            // A `new Inner()` written inside another class nested in the same outer one passes the
+            // *enclosing* instance, which this class reaches through its own synthetic field. The
+            // JVM lowering takes the same walk at the same place, and for the same reason.
             None => {
-                insn.local_get(0);
+                self.load_unqualified_receiver(encloses, insn)?;
             }
         }
         Ok(())
@@ -4764,15 +4752,10 @@ impl Lowering<'_> {
 
         let arguments: Vec<ast::Expr> = call.args().into_iter().flat_map(|l| l.args()).collect();
         // A `super.` qualifier names one body in particular — the superclass's — so the call is not
-        // dispatched at all. The same fact from the same place as the JVM lowering's `invokespecial`:
-        // `Facts::is_super` sits in the shared layer so the two backends cannot answer differently,
-        // and letting the `ref.test` chain select by *runtime* type here is how an override calling
+        // dispatched at all. The whole question sits in the shared layer, not just the `super` leaf:
+        // letting the `ref.test` chain select by *runtime* type here is how an override calling
         // `super.f()` would call itself.
-        let super_qualified = matches!(
-            call.callee(),
-            Some(ast::Expr::FieldAccess(ref access))
-                if access.receiver().is_some_and(|r| Facts::is_super(r.syntax()))
-        );
+        let super_qualified = Facts::is_super_call(call);
         let overriders = if is_static || super_qualified {
             Vec::new()
         } else {
@@ -4803,9 +4786,12 @@ impl Lowering<'_> {
                         .ok_or(WasmError::Unsupported("a call with no receiver"))?;
                     self.expr(&receiver, insn)?;
                 }
-                // A bare call in an instance method is an implicit `this`.
+                // A bare call in an instance method is an implicit `this` — but not necessarily
+                // *this* `this`. From a class that holds an enclosing instance the method may be an
+                // enclosing class's, and pushing local 0 there hands the callee an object of the
+                // wrong type: bytes the emitter produces happily and the validator rejects.
                 _ => {
-                    insn.local_get(0);
+                    self.load_unqualified_receiver(self.index.member(member).owner, insn)?;
                 }
             }
         }

@@ -317,7 +317,7 @@ impl Compile {
         class_version: u16,
     ) -> Result<CompiledClass> {
         let (index, file) = (typed.index(), typed.file());
-        let encloses = Self::holds_enclosing_instance(node, item, index)
+        let encloses = Facts::holds_enclosing_instance(node, item, index)
             .then(|| Self::enclosing_of(node, index, file))
             .transpose()?;
         let internal_name = Descriptor::internal_name_of(item, index);
@@ -1297,7 +1297,7 @@ impl Compile {
             let Some(item) = keyed_at.and_then(|at| index.item_by_decl(file, at)) else {
                 continue;
             };
-            if !Self::holds_enclosing_instance(&declaration, item, index) {
+            if !Facts::holds_enclosing_instance(&declaration, item, index) {
                 continue;
             }
             if let Ok(enclosing) = Self::enclosing_of(&declaration, index, file) {
@@ -1456,107 +1456,13 @@ impl Compile {
         })
     }
 
-    /// Whether a class holds an instance of the class it is declared inside.
-    ///
-    /// Three shapes do, and for one reason: their bodies can name the enclosing instance's members.
-    ///
-    /// - an **inner** class — a non-`static` class declared directly in another's body;
-    /// - a **local** class, declared in a method body that is not `static`;
-    /// - an **anonymous** class body, created somewhere that is not `static`.
-    ///
-    /// A nested interface, `@interface`, `enum`, and `record` are implicitly `static` and hold none,
-    /// which the [`DefKind::Class`] test covers — and so is an `enum` constant's body, which is an
-    /// anonymous subclass of the `enum` itself and therefore excluded by its node kind.
-    ///
-    /// The last two used to be excluded outright, and that is precisely what made an uplevel access
-    /// from one a class file the JVM refuses: the field was there to reach the enclosing instance
-    /// through, and the class had no such field, so the access was emitted against `this`.
-    ///
-    /// Every constructor of such a class takes the enclosing instance as an extra *first* parameter,
-    /// so this answer has to match what a `new` of the class passes — [`Self::inner_classes_of`]
-    /// answers that side and the two ask the same question of the same node.
-    fn holds_enclosing_instance(node: &SyntaxNode, item: ItemId, index: &ProjectIndex) -> bool {
-        if !matches!(index.item(item).kind, DefKind::Class) {
-            return false;
-        }
-        match node.kind() {
-            // Declared directly in another type's body: the `static` modifier is what decides, and
-            // it is written or not written on the declaration itself.
-            CLASS_DECL if Facts::is_nested(node) => Facts::is_inner_class(node),
-            // A local class, nested inside a method body rather than a class body. It cannot write
-            // `static`, so what decides is where it sits.
-            CLASS_DECL => !Facts::in_static_context(node),
-            // An anonymous class body, with one extra condition. A *qualified* creation
-            // (`outer.new Inner() {}`) already hands the class an enclosing instance — the one its
-            // supertype's constructor needs — and there is a single such parameter, so it cannot
-            // also carry the lexically enclosing one. (An `enum` constant's body is an anonymous
-            // class too, but of the `enum`, which is implicitly `static`.)
-            jals_syntax::SyntaxKind::NEW_EXPR => {
-                !Facts::in_static_context(node)
-                    && ast::NewExpr::cast(node.clone()).is_none_or(|new| new.qualifier().is_none())
-            }
-            _ => false,
-        }
-    }
-
-    /// The class a nested, local, or anonymous declaration sits inside.
     fn enclosing_of(node: &SyntaxNode, index: &ProjectIndex, file: FileId) -> Result<Enclosing> {
-        // The nearest enclosing *type*, not the parent's parent: a local class's parent chain runs
-        // through a block and a method, and an anonymous class's through whatever expression created
-        // it. For a class declared directly in another's body the two agree.
-        //
-        // An `enum` constant's body is in this list because it *is* the nearest enclosing type — an
-        // anonymous subclass of the `enum` — and it has no name to key an item on, which is the
-        // report that comes out below rather than a walk that skips past it to the `enum` and
-        // silently names the wrong enclosing class.
-        //
-        // An **anonymous class body** is in it for the same reason and was missing: a class declared
-        // inside `new Object() { class Local {} }` is `Local` of the *anonymous* class, not of the
-        // file's outer one. Walking past it named `Outer` as the enclosing type, so `Local`'s
-        // constructor took an `Outer` while every `new Local()` inside the body pushed the anonymous
-        // `this` — a class file the JVM refuses at the first creation.
-        let declaration = node
-            .ancestors()
-            .skip(1)
-            .find(|ancestor| {
-                matches!(
-                    ancestor.kind(),
-                    CLASS_DECL
-                        | INTERFACE_DECL
-                        | ENUM_DECL
-                        | ANNOTATION_TYPE_DECL
-                        | RECORD_DECL
-                        | jals_syntax::SyntaxKind::ENUM_CONSTANT
-                ) || Self::is_anonymous_body(ancestor)
-            })
-            .ok_or(LowerError::Unsupported(
-                "an inner class with no enclosing type",
-            ))?;
-        // An anonymous class has no name, so its item is keyed on where its `new` starts — the same
-        // key `inner_classes_of` uses, because the two have to agree about which item this is.
-        let item = if Self::is_anonymous_body(&declaration) {
-            index
-                .item_by_decl(file, usize::from(declaration.text_range().start()))
-                .ok_or(LowerError::Unsupported(
-                    "an anonymous enclosing class that is not indexed",
-                ))?
-        } else {
-            let name = ast::Decl::name_token_of(&declaration)
-                .ok_or(LowerError::Unsupported("an enclosing type with no name"))?;
-            index
-                .item_by_decl(file, usize::from(name.text_range().start()))
-                .ok_or_else(|| LowerError::Unresolved(name.text().into()))?
-        };
+        // Which type encloses it is the shared fact; what it is *called* is this target's.
+        let item = Facts::enclosing_type_of(node, file, index)?;
         Ok(Enclosing {
             item,
             name: Descriptor::internal_name_of(item, index),
         })
-    }
-
-    /// Whether `node` is a `new` that carries a class body — an anonymous class declaration.
-    fn is_anonymous_body(node: &SyntaxNode) -> bool {
-        node.kind() == jals_syntax::SyntaxKind::NEW_EXPR
-            && node.children().any(|child| child.kind() == CLASS_BODY)
     }
 
     /// The synthetic field an inner class holds its enclosing instance in.

@@ -38,6 +38,35 @@
 //! A fact both backends need goes here. One that names an instruction does not — and
 //! `facts-names-no-instruction` is what keeps that sentence from going back to being prose.
 //!
+//! # What the ratchets could not see
+//!
+//! The three ast-grep rules around this layer stop a backend *naming* the other one, or naming a
+//! target's vocabulary from here. None of them stops a backend re-implementing a fact **inline**,
+//! and ten of them were, with all three rules green the whole time:
+//!
+//! - Whether an operand **denotes `null`**, answered by walking an operand's entire subtree for the
+//!   keyword. `f(null) == y` therefore read as a null test on `y`, so `x == y` compiled as
+//!   `y == null` — a module `wasm-tools` accepts and `wasmtime` runs, returning the wrong answer.
+//! - Whether a class **holds an enclosing instance**, in three arms on one side and one on the
+//!   other. The layout and the creation site stayed consistent, so nothing miscompiled by that
+//!   route; what it cost was an uplevel field read reported as an unresolved *name* and an uplevel
+//!   call that pushed the wrong `this` and failed in the validator.
+//! - Which member a **field access** names, where one side bypassed the memo for a `this.`
+//!   qualifier and re-resolved by name — the answer a `super.` qualifier would have got wrong.
+//! - Whether a node is an **anonymous class body**, spelled three ways between the two backends and
+//!   four ways within one of them.
+//! - And six that agreed: a `super.`-qualified call, the operator a token run spells (eight
+//!   decoders, with the sentence explaining the `>` split copied beside four of them), numeric
+//!   promotion (JLS §5.6, written *three* times — twice in the backends and once privately in
+//!   [`constant`]), `a.length`, a `for`-each's loop variable (one of eight declaration bindings
+//!   that reached past this layer to spell the offset key by hand), and a qualified `new`'s
+//!   qualifier, where the answer that was right lived in a backend and the one the syntax layer
+//!   published was the fragile one.
+//!
+//! What makes a fact single-sourced is that there is one place to ask **and it has a test**. Every
+//! one of the ten is asked here now, and every one is tested here — with no JDK and no engine in
+//! reach, because this crate's tests run under `wasm32-wasip1` in CI, where there is neither.
+//!
 //! # What it deliberately does not do
 //!
 //! It does not check. A fact this layer cannot establish is *reported* ([`FactError`]) rather than
@@ -48,21 +77,26 @@
 //! lets a [`Facts`] be passed exactly like the [`TypedFile`] it wraps.
 
 mod constant;
+mod enclosing;
 mod inherit;
 mod literal;
 mod method_ref;
+mod numeric;
+mod operator;
 mod switch;
 
 pub(crate) use constant::CaseKey;
 pub(crate) use inherit::{Hierarchy, Overrides};
 pub(crate) use literal::Literal;
 pub(crate) use method_ref::RefReceiver;
+pub use numeric::Numeric;
+pub(crate) use operator::{Operator, Unary};
 pub(crate) use switch::ArmLabels;
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use jals_hir::{DefId, DefKind, FileId, MemberId, ProjectIndex, TypedFile};
+use jals_hir::{DefId, DefKind, FileId, MemberId, ProjectIndex, Ty, TypedFile};
 use jals_syntax::ast::{self, AstNode as _};
 use jals_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
@@ -143,13 +177,13 @@ impl<'a> Facts<'a> {
     ///
     /// A run rather than one kind because the lexer never joins a `>` to what follows, so that
     /// `List<List<T>>` still closes as two of them: `>>` is `[GT, GT]`, `>>>` is `[GT, GT, GT]`,
-    /// and `>=` is `[GT, EQ]`. Both backends decode operators from this, and each used to carry its
-    /// own copy of the rule together with the comment explaining it.
+    /// and `>=` is `[GT, EQ]`.
     ///
-    /// Matching the run *exactly* is also what keeps `--5` from reading as a negation: `--` is its
-    /// own `MINUS_MINUS` kind, so a rule that merely asks whether a `MINUS` is present answers
-    /// wrongly, which is how one backend compiled `case --5:` as `5`.
-    pub(crate) fn operator(node: &SyntaxNode) -> Vec<SyntaxKind> {
+    /// Private, and that is the point. Both backends used to read the run and decode it themselves —
+    /// eight matches between them, with the sentence above copied beside four. The run now has
+    /// exactly three readers, all in [`operator`](super::operator), and what leaves this module is
+    /// the decoded [`Operator`] rather than the tokens.
+    fn operator(node: &SyntaxNode) -> Vec<SyntaxKind> {
         node.children_with_tokens()
             .filter_map(jals_syntax::SyntaxElement::into_token)
             .map(|token| token.kind())
@@ -181,6 +215,52 @@ impl<'a> Facts<'a> {
     /// is not dispatched at all.
     pub(crate) fn is_super(node: &SyntaxNode) -> bool {
         Self::has_keyword(node, SyntaxKind::SUPER_KW)
+    }
+
+    /// Whether a call is `super.`-qualified: its callee is a field access whose receiver is the
+    /// bare `super`.
+    ///
+    /// The composition, not just the leaf. [`is_super`](Self::is_super) was already shared and both
+    /// backends still built this same five-line `matches!` on top of it — character for character,
+    /// with the wasm copy carrying a comment saying the fact came "from the same place" as the JVM
+    /// one. The atom was shared; the question was not.
+    ///
+    /// What it decides is whether the call is dispatched at all. `super.f()` names one body in
+    /// particular — the superclass's — so selecting by the receiver's *runtime* type is how an
+    /// override calling `super.f()` calls itself forever.
+    ///
+    /// Not `Iface.super.m()` (JLS §15.12.1): that receiver is a qualified name rather than the bare
+    /// keyword, and neither backend emits it.
+    pub(crate) fn is_super_call(call: &ast::CallExpr) -> bool {
+        matches!(
+            call.callee(),
+            Some(ast::Expr::FieldAccess(ref access))
+                if access.receiver().is_some_and(|receiver| Self::is_super(receiver.syntax()))
+        )
+    }
+
+    /// The expression a qualified `new` names as its enclosing instance — the one written *before*
+    /// the `new` keyword. `None` for the unqualified form.
+    ///
+    /// The position filter is the whole content. `NewExpr::qualifier()` is a generated accessor and
+    /// takes the first child castable to an `Expr` with no filter at all, but the grammar puts an
+    /// array creation's dimension expression directly under `NEW_EXPR` too — so `new int[n]` hands
+    /// back `n` as a "qualifier". Nothing miscompiles today only because both callers of the
+    /// generated accessor are guarded against reaching an array creation, and one of those guards
+    /// is a `CLASS_BODY` test written for an unrelated reason.
+    ///
+    /// So the answer that was *right* lived in the wasm backend and the one the syntax layer
+    /// published was the fragile one. This is the right answer, in the layer both backends ask.
+    pub(crate) fn new_qualifier(new: &ast::NewExpr) -> Option<ast::Expr> {
+        let keyword = new
+            .syntax()
+            .children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .find(|token| token.kind() == SyntaxKind::NEW_KW)?;
+        new.syntax()
+            .children()
+            .filter(|child| child.text_range().end() <= keyword.text_range().start())
+            .find_map(ast::Expr::cast)
     }
 
     /// Whether a method reference names `new` rather than a method.
@@ -223,10 +303,11 @@ impl<'a> Facts<'a> {
     /// a backend that answers this differently from the other emits constructors one parameter
     /// short — a `NoSuchMethodError` at the first `new`, not a missing convenience.
     ///
-    /// Pure CST, deliberately: the JVM backend additionally asks the index whether the item is a
-    /// `DefKind::Class`, and folding an index lookup in here would make one caller's extra
-    /// precondition part of the shared answer.
-    pub(crate) fn is_inner_class(node: &SyntaxNode) -> bool {
+    /// Arm one of three. It is private because it is no longer the whole question anyone asks:
+    /// [`holds_enclosing_instance`](Self::holds_enclosing_instance) composes it with the local- and
+    /// anonymous-class arms, and asking this one alone is exactly what left a local class without an
+    /// enclosing instance.
+    fn is_inner_class(node: &SyntaxNode) -> bool {
         node.kind() == SyntaxKind::CLASS_DECL
             && Self::is_nested(node)
             && !Self::has_modifier(node, SyntaxKind::STATIC_KW)
@@ -251,7 +332,7 @@ impl<'a> Facts<'a> {
     /// `super()` returns, so `this` does not exist yet (JLS §8.8.7.1). javac skips the enclosing
     /// instance for an anonymous class created there for exactly this reason (JDK-8166108), and a
     /// backend that passes one emits `super(this)` from a frame whose `this` is `UninitializedThis`.
-    pub(crate) fn in_static_context(node: &SyntaxNode) -> bool {
+    fn in_static_context(node: &SyntaxNode) -> bool {
         for ancestor in node.ancestors() {
             if Self::is_explicit_constructor_invocation(&ancestor) {
                 return true;
@@ -448,7 +529,26 @@ impl<'a> Facts<'a> {
     /// a `PARAM` node answers with the definition it declares. Slot allocation depends on it, and
     /// dropping it makes every parameter silently unresolvable.
     pub(crate) fn def_at(self, node: &SyntaxNode) -> Option<DefId> {
-        let start = Self::first_name(node)?;
+        self.def_at_token(&Self::name_token(node)?)
+    }
+
+    /// The definition a name *token* binds to — [`def_at`](Self::def_at) for a name that has no
+    /// node of its own.
+    ///
+    /// Four declarations are spelled that way, and every one of them is a bare `IDENT` with nothing
+    /// to hand `def_at`: a local variable's declarator, a `for`-each's loop variable, a
+    /// try-with-resources binding, and a `catch` parameter. Both backends therefore reached *past*
+    /// this layer for all four and called `analysis().symbol_at(offset)` themselves — eight copies
+    /// of one lookup, each spelling the offset key by hand. They agreed, which is the only reason
+    /// it never showed; `Facts::span`'s whole reason for existing is that a key spelled twice is a
+    /// key that can be spelled differently.
+    ///
+    /// The `reference_at`-then-`symbol_at` order is [`def_at`](Self::def_at)'s, and it is
+    /// single-sourced here rather than restated — `def_at` now goes through this. A declaration site
+    /// has no reference, so it falls through to `symbol_at` and all eight callers keep the answer
+    /// they had.
+    pub(crate) fn def_at_token(self, token: &SyntaxToken) -> Option<DefId> {
+        let start = usize::from(token.text_range().start());
         self.typed
             .analysis()
             .reference_at(start)
@@ -468,9 +568,96 @@ impl<'a> Facts<'a> {
             .find(|token| token.kind() == SyntaxKind::IDENT)
     }
 
-    /// Where a node's own first identifier token starts. Direct children only.
-    fn first_name(node: &SyntaxNode) -> Option<usize> {
-        Self::name_token(node).map(|token| usize::from(token.text_range().start()))
+    /// Whether an expression *denotes* `null` — its only possible value is the null reference.
+    ///
+    /// Asked of the inference, not of the syntax, because that is the question a reference
+    /// comparison needs answered: `x == <anything whose type is null>` is a null test, and
+    /// `x == <anything else>` is an identity test. `Ty::Null` is the type of the null literal
+    /// (JLS §4.1) and nothing else has it, so the memo is exactly this predicate.
+    ///
+    /// It is strictly better than either thing that was here before, and both were wrong in
+    /// opposite directions:
+    ///
+    /// - A **subtree** walk for a `NULL_KW` token — what the wasm backend had — says `true` for any
+    ///   operand that merely *contains* a `null` somewhere. `f(null) == y` took that branch, so the
+    ///   left operand was dropped and `ref.is_null` was applied to `y`: `x == y` compiled as
+    ///   `y == null`. It validated, it did not trap, and it returned the wrong answer.
+    /// - A **own-token** test says `false` for `(null)` and for `(c ? null : null)`, both of which
+    ///   denote null and neither of which has the keyword as a direct child.
+    ///
+    /// The own-token fallback is only for a node the inference recorded nothing against; it can
+    /// only ever add the bare literal, never a subtree.
+    ///
+    /// Distinct from the `NULL_KW` arm in each backend's *literal* dispatch, which asks which of
+    /// the seven literal kinds a token is on the way to emitting one. That is a question about a
+    /// token, and this is a question about an expression.
+    pub(crate) fn denotes_null(self, node: &SyntaxNode) -> bool {
+        self.typed.type_of_expr(Self::span(node)).map_or_else(
+            || Self::has_keyword(node, SyntaxKind::NULL_KW),
+            |ty| matches!(ty, Ty::Null),
+        )
+    }
+
+    /// The indexed member a field access names.
+    ///
+    /// The inference memo, unconditionally. It was worth measuring rather than assuming, because
+    /// the two backends disagreed about whether it could be: the wasm copy carried a comment saying
+    /// "`this` has no inferred type, so the analysis records no target for it" and re-resolved a
+    /// `this.`-qualified access **by name** on the enclosing class instead. That comment is not
+    /// true. The memo answers `this.x` in every shape there is — a field that hides an inherited
+    /// one, an inherited one, an interface constant, and one reached from an inner, a `static`
+    /// nested, or a local class.
+    ///
+    /// Where the two *do* differ, the memo is the one that is right. `super.x` names the hidden
+    /// field and a name lookup on the enclosing class names the hiding one, because a field is
+    /// hidden rather than overridden (JLS §15.11.2) and both targets name where the field is
+    /// declared. The name lookup only ever agreed because nothing asked it about `super`.
+    pub(crate) fn field_target(self, access: &ast::FieldAccess) -> Result<MemberId> {
+        self.typed
+            .field_target_of(Self::span(access.syntax()))
+            .ok_or_else(|| {
+                FactError::Unresolved(
+                    Self::field_token(access).map_or_else(String::new, |token| token.text().into()),
+                )
+            })
+    }
+
+    /// A field access's own name token — the `IDENT` after the dot.
+    ///
+    /// The *last* one, matching `FieldAccess::field`: a receiver is a node rather than a token, so
+    /// there is normally only one, and taking the last is what survives a tree where there is not.
+    fn field_token(access: &ast::FieldAccess) -> Option<SyntaxToken> {
+        access
+            .syntax()
+            .children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .filter(|token| token.kind() == SyntaxKind::IDENT)
+            .last()
+    }
+
+    /// Whether a field access is really the array-length operator.
+    ///
+    /// `a.length` on an array is not a member access at all — both targets answer it with an
+    /// instruction, so the index resolved no member and there is nothing for a field lookup to
+    /// find. The *classification* is a source question and the two emissions are not, which is why
+    /// only this half is shared.
+    ///
+    /// The name is compared decoded. `FieldAccess::field` hands back the token's raw text, so both
+    /// backends' `== Some("length")` missed `a.length` — legal Java (JLS §3.3) that then took
+    /// the member path and reported `length` as unresolved.
+    pub(crate) fn is_array_length(self, access: &ast::FieldAccess) -> bool {
+        let Some(token) = Self::field_token(access) else {
+            return false;
+        };
+        if jals_syntax::decoded_ident(&token) != "length" {
+            return false;
+        }
+        access.receiver().is_some_and(|receiver| {
+            matches!(
+                self.typed.type_of_expr(Self::span(receiver.syntax())),
+                Some(Ty::Array(_))
+            )
+        })
     }
 
     /// The indexed member a file-local definition declares.
@@ -659,6 +846,242 @@ mod tests {
                 ("b".to_owned(), Some("null".to_owned())),
                 ("c".to_owned(), None),
             ]
+        );
+    }
+
+    /// Whether each call in `source` is `super.`-qualified, in source order.
+    fn super_calls(source: &str) -> Vec<bool> {
+        block_on_inline(jals_syntax::Parse::parse(source))
+            .syntax()
+            .descendants()
+            .filter_map(ast::CallExpr::cast)
+            .map(|call| Facts::is_super_call(&call))
+            .collect()
+    }
+
+    /// Only the bare `super` receiver counts — not `this.`, not a name that merely spells it.
+    ///
+    /// Both backends built this same `matches!` on top of the shared `Facts::is_super`, character
+    /// for character. The atom was shared and the composition was not, which is the shape the three
+    /// ast-grep ratchets cannot see: neither copy named the other backend.
+    ///
+    /// What it decides is whether the call is dispatched. Answer `true` for `this.f()` and an
+    /// override stops being reachable; answer `false` for `super.f()` and an override that calls it
+    /// calls itself forever.
+    #[test]
+    fn only_a_bare_super_receiver_makes_a_call_undispatched() {
+        assert_eq!(
+            super_calls(
+                "class C extends B { void m(C sup) { super.f(); this.f(); f(); sup.f(); } }"
+            ),
+            [true, false, false, false]
+        );
+    }
+
+    /// What each `new` in `source` names as its qualifier, as written.
+    fn qualifiers(source: &str) -> Vec<Option<String>> {
+        block_on_inline(jals_syntax::Parse::parse(source))
+            .syntax()
+            .descendants()
+            .filter_map(ast::NewExpr::cast)
+            .map(|new| {
+                Facts::new_qualifier(&new)
+                    .map(|expr| expr.syntax().text().to_string().trim().to_owned())
+            })
+            .collect()
+    }
+
+    /// The qualifier is what sits *before* the `new` keyword, and an array's dimension does not.
+    ///
+    /// `NewExpr::qualifier()` is generated as "the first child castable to an `Expr`" with no
+    /// position filter, but the grammar puts an array creation's dimension expression directly under
+    /// `NEW_EXPR` — so it answers `n` for `new int[n]`. Nothing miscompiles today only because both
+    /// of its callers are guarded against reaching an array creation, one of them by a `CLASS_BODY`
+    /// test written for an unrelated reason. The answer that was right lived in the wasm backend;
+    /// this is that answer, in the layer both backends ask.
+    #[test]
+    fn a_qualifier_is_what_precedes_the_new_keyword() {
+        assert_eq!(
+            qualifiers(
+                "class C { void m(C outer) { outer.new Inner(); new Inner(); new int[n]; } }"
+            ),
+            [Some("outer".to_owned()), None, None]
+        );
+    }
+
+    /// `source` analysed and bound, ready to ask a resolution fact of.
+    ///
+    /// The chain is spelled out rather than hidden behind a helper returning a [`Facts`]: a
+    /// `TypedFile` borrows the binding, which borrows the analysis *and* the index, so nothing
+    /// shorter than the whole chain can be handed back. Each test therefore writes it, and the
+    /// stdlib stubs are folded in because they are compile-time constants parsed in memory rather
+    /// than a host read.
+    macro_rules! bound {
+        ($source:expr, $facts:ident, $root:ident => $body:block) => {{
+            let $root = block_on_inline(jals_syntax::Parse::parse($source)).syntax();
+            let analysis = block_on_inline(jals_hir::FileAnalysis::of(&$root));
+            let index = block_on_inline(
+                jals_hir::ProjectIndex::builder(&[(jals_hir::FileId(0), $root.clone())])
+                    .with_stdlib()
+                    .build(),
+            );
+            let semantics = analysis.in_project(&index, jals_hir::FileId(0));
+            let $facts = Facts::of(block_on_inline(semantics.typed()));
+            $body
+        }};
+    }
+
+    /// A `for`-each's loop variable is a bare token, and it still binds.
+    ///
+    /// The grammar gives it an `IDENT` with no node of its own, so `def_at` has nothing to take.
+    /// Both backends therefore called `analysis().symbol_at(offset)` directly — the one name binding
+    /// in either of them that spelled its own key, written twice and agreeing only by luck.
+    #[test]
+    fn a_for_each_variable_binds_through_its_own_token() {
+        bound!(
+            "class C { int m(int[] xs) { int t = 0; for (int v : xs) { t += v; } return t; } }",
+            facts,
+            root => {
+                let statement = root
+                    .descendants()
+                    .find_map(ast::ForEachStmt::cast)
+                    .expect("the `for`-each is present");
+                let name = statement.name_token().expect("the variable has a name");
+                let id = facts
+                    .def_at_token(&name)
+                    .expect("the loop variable binds to its own declaration");
+                assert_eq!(facts.typed().analysis().def(id).name, "v");
+            }
+        );
+    }
+
+    /// Whether each operand of each `==` in `source` denotes null, left then right, in order.
+    fn null_operands(source: &str) -> Vec<(bool, bool)> {
+        bound!(source, facts, root => {
+            root.descendants()
+                .filter_map(ast::BinaryExpr::cast)
+                .filter(|binary| {
+                    super::Operator::binary(binary.syntax()) == Some(super::Operator::Eq)
+                })
+                .map(|binary| {
+                    let side = |expr: Option<ast::Expr>| {
+                        expr.is_some_and(|expr| facts.denotes_null(expr.syntax()))
+                    };
+                    (side(binary.lhs()), side(binary.rhs()))
+                })
+                .collect()
+        })
+    }
+
+    /// Denoting null is a question about the *expression*, not about whether a `null` is written
+    /// anywhere inside it.
+    ///
+    /// This is the shape of a confirmed miscompile. The wasm backend asked it by walking the whole
+    /// subtree for a `NULL_KW` token, so `pick(x, null) == y` answered `true` on the **left** — and
+    /// `reference_equality` then dropped that operand and applied `ref.is_null` to `y`. `x == y`
+    /// compiled as `y == null`: the module validated, `wasmtime` did not trap, and the answer was
+    /// simply wrong. `pick(x, null) == x` returned 0 where Java returns 1.
+    ///
+    /// The opposite error is just as available: an own-token test misses `(null)` and
+    /// `(c ? null : null)`, both of which denote null and neither of which carries the keyword as a
+    /// direct child. Only the inference answers all five rows, which is why this asks the memo.
+    ///
+    /// Both operand orders are asserted because the lowering tests the right side first — a fix that
+    /// only corrected one branch would still pass a test written in one order.
+    #[test]
+    fn denoting_null_is_about_the_expression_not_a_token_somewhere_inside_it() {
+        assert_eq!(
+            null_operands(
+                "class N {
+                     static N pick(N a, N b) { return a; }
+                     static boolean m(N x, N y, boolean c) {
+                         return x == null
+                             || x == (null)
+                             || x == (c ? null : null)
+                             || pick(x, null) == y
+                             || x == pick(y, null)
+                             || x == y;
+                     }
+                 }"
+            ),
+            [
+                (false, true),  // x == null
+                (false, true),  // x == (null)          — an own-token test misses this
+                (false, true),  // x == (c ? null : null) — and this
+                (false, false), // pick(x, null) == y   — the subtree walk said `true` here
+                (false, false), // x == pick(y, null)   — and here, in the mirror order
+                (false, false), // x == y
+            ]
+        );
+    }
+
+    /// Which class declares the member each field access names, in source order.
+    fn field_owners(source: &str) -> Vec<String> {
+        bound!(source, facts, root => {
+            root.descendants()
+                .filter_map(ast::FieldAccess::cast)
+                .map(|access| {
+                    facts.field_target(&access).map_or_else(
+                        |error| alloc::format!("{error}"),
+                        |member| facts.index().item(facts.index().member(member).owner).fqn.to_string(),
+                    )
+                })
+                .collect()
+        })
+    }
+
+    /// `this.x` and `super.x` name *different* fields when one hides the other, and the memo is
+    /// what knows which.
+    ///
+    /// A field is hidden rather than overridden (JLS §15.11.2), and both targets name the class
+    /// where the field is declared — so getting this wrong reads the wrong object's slot, silently.
+    ///
+    /// One backend re-resolved a `this.`-qualified access **by name** on the enclosing class,
+    /// behind a comment claiming the analysis records no target for `this`. It does. The name
+    /// lookup happens to agree for `this.x`, and it answers `Sub` for `super.x` — the hiding field
+    /// rather than the hidden one. It never showed because that branch tested for `this` and
+    /// `super.x` fell through to the memo; a branch widened to cover both would have been a
+    /// miscompile the day it was written.
+    #[test]
+    fn a_hidden_field_is_named_by_the_memo_and_not_by_a_name_lookup() {
+        assert_eq!(
+            field_owners(
+                "class Base { int x = 1; int inherited = 7; }
+                 class Sub extends Base {
+                     int x = 2;
+                     int a() { return this.x; }
+                     int b() { return super.x; }
+                     int c() { return this.inherited; }
+                 }"
+            ),
+            ["Sub", "Base", "Base"]
+        );
+    }
+
+    /// Whether each field access in `source` is the array-length operator, in source order.
+    fn array_lengths(source: &str) -> Vec<bool> {
+        bound!(source, facts, root => {
+            root.descendants()
+                .filter_map(ast::FieldAccess::cast)
+                .map(|access| facts.is_array_length(&access))
+                .collect()
+        })
+    }
+
+    /// `a.length` is the operator only when the receiver really is an array — and the name is
+    /// compared *decoded*.
+    ///
+    /// `FieldAccess::field` hands back the token's raw text, so both backends' `== Some("length")`
+    /// missed `a.length` written with a unicode escape. That is legal Java (JLS §3.3): the escape is
+    /// resolved before the lexer runs, so `length` *is* the identifier `length`. Taking the
+    /// member path instead reports `length` as unresolved on a program javac compiles.
+    #[test]
+    fn an_array_length_is_the_operator_and_the_name_is_decoded() {
+        assert_eq!(
+            array_lengths(
+                "class C { int[] a; C c; int m() { return a.length + c.length + a.\\u006cength; } }"
+            ),
+            [true, false, true]
         );
     }
 }
