@@ -58,7 +58,7 @@ use crate::wasm::encode::{
     CompType, ExportKind, FieldType, Func, Global, HeapType, Module, RefType, StorageType, SubType,
     ValType,
 };
-use crate::wasm::insn::{Insn, NumOp, NumericVal as _};
+use crate::wasm::insn::{Insn, Instr, NumOp, NumericVal as _};
 
 /// Why a project could not be compiled to wasm.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,8 +141,24 @@ struct Method {
 pub struct CompileWasm;
 
 impl CompileWasm {
-    /// Emit the module. `index` must have been built over exactly `inputs`.
+    /// Emit the module's bytes. `index` must have been built over exactly `inputs`.
+    ///
+    /// [`module`](Self::module) with its encoding run; a module whose own lengths do not fit the
+    /// `u32` the format spells them with is refused rather than truncated.
     pub fn project(inputs: &[TypedFile<'_>], index: &ProjectIndex) -> Result<Vec<u8>> {
+        Self::module(inputs, index)?
+            .finish()
+            .ok_or(WasmError::TooLarge)
+    }
+
+    /// Emit the module, before it becomes bytes. `index` must have been built over exactly `inputs`.
+    ///
+    /// The whole project is one module: the target has no dynamic loading and no classpath, so
+    /// there is nothing for a second one to be. Handing back the [`Module`] rather than only its
+    /// encoding is what lets a caller ask what was emitted — the same footing
+    /// [`Assembler`](crate::jvm::Assembler) gives the other backend, and the only way to assert a
+    /// lowering without an engine to run it.
+    pub fn module(inputs: &[TypedFile<'_>], index: &ProjectIndex) -> Result<Module> {
         let mut module = Module::new();
         let mut layout = Layout::default();
 
@@ -314,7 +330,7 @@ impl CompileWasm {
             });
             module.start = Some(start);
         }
-        module.finish().ok_or(WasmError::TooLarge)
+        Ok(module)
     }
 
     /// Give every class with static state a function index and a "has run" flag.
@@ -1181,7 +1197,7 @@ impl Layout {
     /// No initialiser is the type's default, which is exactly Java's rule (§4.12.5). A literal folds
     /// into the same shape. Anything else — including a literal that would need a widening conversion,
     /// since a constant expression cannot hold one — is reported rather than replaced by the default.
-    fn constant_init(value: Option<&ast::Expr>, ty: ValType) -> (Vec<u8>, bool) {
+    fn constant_init(value: Option<&ast::Expr>, ty: ValType) -> (Vec<Instr>, bool) {
         use jals_syntax::SyntaxKind::{
             CHAR_LITERAL, FALSE_KW, FLOAT_LITERAL, INT_LITERAL, NULL_KW, TRUE_KW,
         };
@@ -1379,7 +1395,7 @@ enum StaticStep<'a> {
 /// One method body being lowered.
 struct Body {
     locals: Vec<ValType>,
-    code: Vec<u8>,
+    code: Vec<Instr>,
 }
 
 impl Body {

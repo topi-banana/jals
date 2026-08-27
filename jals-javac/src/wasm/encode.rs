@@ -13,6 +13,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use crate::wasm::insn::Instr;
+
 /// A little-endian byte writer with the LEB128 integer encodings WebAssembly uses.
 #[derive(Debug, Default)]
 pub(crate) struct Bytes {
@@ -26,7 +28,7 @@ pub(crate) struct Bytes {
 }
 
 impl Bytes {
-    pub(crate) const fn new() -> Self {
+    const fn new() -> Self {
         Self {
             out: Vec::new(),
             overflow: false,
@@ -103,7 +105,7 @@ impl Bytes {
         self.out.len()
     }
 
-    pub(crate) fn into_vec(self) -> Vec<u8> {
+    fn into_vec(self) -> Vec<u8> {
         self.out
     }
 }
@@ -114,7 +116,7 @@ impl Bytes {
 /// the *negative* range of the same encoding, and this backend has no use for them: every Java
 /// reference is a reference to a declared class or array type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HeapType {
+pub enum HeapType {
     /// A declared type, by index.
     Concrete(u32),
     /// The top of the internal reference hierarchy: every struct and array reference is one.
@@ -147,13 +149,13 @@ impl HeapType {
 
 /// A reference type: a heap type plus whether `null` inhabits it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct RefType {
-    pub(crate) nullable: bool,
-    pub(crate) heap: HeapType,
+pub struct RefType {
+    pub nullable: bool,
+    pub heap: HeapType,
 }
 
 impl RefType {
-    pub(crate) const fn nullable(heap: HeapType) -> Self {
+    pub const fn nullable(heap: HeapType) -> Self {
         Self {
             nullable: true,
             heap,
@@ -168,7 +170,7 @@ impl RefType {
 
 /// A value type: what a local, a parameter, or a stack slot holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ValType {
+pub enum ValType {
     I32,
     I64,
     F32,
@@ -202,7 +204,7 @@ impl ValType {
 /// costs a byte per element rather than four; the packed forms need `array.get_s` / `array.get_u`
 /// to read back, so they arrive together with those.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StorageType {
+pub enum StorageType {
     Val(ValType),
 }
 
@@ -216,9 +218,9 @@ impl StorageType {
 
 /// A field of a struct or the element of an array.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct FieldType {
-    pub(crate) storage: StorageType,
-    pub(crate) mutable: bool,
+pub struct FieldType {
+    pub storage: StorageType,
+    pub mutable: bool,
 }
 
 impl FieldType {
@@ -230,7 +232,7 @@ impl FieldType {
 
 /// A composite type: the three shapes a declared type can take.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CompType {
+pub enum CompType {
     Func {
         params: Vec<ValType>,
         results: Vec<ValType>,
@@ -273,14 +275,14 @@ impl CompType {
 /// makes a `(ref $Sub)` usable where a `(ref $Super)` is expected, which is the whole reason Java
 /// inheritance can ride on the host's type system rather than on a hand-built vtable walk.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SubType {
-    pub(crate) is_final: bool,
-    pub(crate) supertype: Option<u32>,
-    pub(crate) comp: CompType,
+pub struct SubType {
+    pub is_final: bool,
+    pub supertype: Option<u32>,
+    pub comp: CompType,
 }
 
 impl SubType {
-    pub(crate) const fn plain(comp: CompType) -> Self {
+    pub const fn plain(comp: CompType) -> Self {
         Self {
             is_final: true,
             supertype: None,
@@ -310,39 +312,42 @@ impl SubType {
 /// What an export names. Only functions are exported today: a module's surface is the `public
 /// static` methods it compiled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ExportKind {
+pub enum ExportKind {
     Func,
 }
 
 /// A defined function: its declared locals (beyond the parameters) and its encoded body.
 #[derive(Debug, Clone)]
-pub(crate) struct Func {
+pub struct Func {
     /// Index into the type section.
-    pub(crate) type_index: u32,
+    pub type_index: u32,
     /// The locals following the parameters, one entry per local (no run-length grouping).
-    pub(crate) locals: Vec<ValType>,
+    pub locals: Vec<ValType>,
     /// The body's instructions, *without* the terminating `end`.
-    pub(crate) body: Vec<u8>,
+    ///
+    /// Kept as instructions rather than as encoded bytes so that a finished module can still be
+    /// asked what it holds; [`Module::finish`] is where they become bytes.
+    pub body: Vec<Instr>,
 }
 
 /// A module under construction.
 #[derive(Debug, Default)]
-pub(crate) struct Module {
+pub struct Module {
     /// Declared types. All of them go in one recursive group so that any two may reference each
     /// other — a class whose method takes its own type, or two mutually-referencing classes, would
     /// otherwise be unorderable.
     types: Vec<SubType>,
-    pub(crate) funcs: Vec<Func>,
+    pub funcs: Vec<Func>,
     /// Exception tags, by the index of the function type that gives each one's payload. One tag is
     /// enough for Java: every thrown value is a reference, so the payload type is the same for all of
     /// them and the *class* of the reference is what a `catch` tests.
-    pub(crate) tags: Vec<u32>,
-    pub(crate) globals: Vec<Global>,
-    pub(crate) exports: Vec<(String, ExportKind, u32)>,
+    pub tags: Vec<u32>,
+    pub globals: Vec<Global>,
+    pub exports: Vec<(String, ExportKind, u32)>,
     /// The function an engine runs before anything else, if the module has one. This is where a Java
     /// `static` initialiser lives: a global's own initialiser is a constant expression and cannot
     /// compute anything.
-    pub(crate) start: Option<u32>,
+    pub start: Option<u32>,
 }
 
 /// A module-level mutable variable, which is what a Java `static` field is.
@@ -350,14 +355,14 @@ pub(crate) struct Module {
 /// Its initialiser is a *constant expression* — the format allows only a handful of instructions
 /// there, so anything a `<clinit>` would have to compute cannot live here.
 #[derive(Debug)]
-pub(crate) struct Global {
-    pub(crate) ty: ValType,
-    /// The encoded constant expression, without its terminating `end`.
-    pub(crate) init: Vec<u8>,
+pub struct Global {
+    pub ty: ValType,
+    /// The constant expression, without its terminating `end`.
+    pub init: Vec<Instr>,
 }
 
 impl Module {
-    pub(crate) const fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             types: Vec::new(),
             funcs: Vec::new(),
@@ -373,7 +378,7 @@ impl Module {
     /// A saturated index would be wrong, but it is also unreachable *and* caught: a type section
     /// with more than `u32::MAX` entries cannot write its own count either, so
     /// [`finish`](Self::finish) refuses the module before an index that large can be read.
-    pub(crate) fn add_type(&mut self, ty: SubType) -> u32 {
+    pub fn add_type(&mut self, ty: SubType) -> u32 {
         self.types.push(ty);
         u32::try_from(self.types.len() - 1).unwrap_or(u32::MAX)
     }
@@ -401,14 +406,14 @@ impl Module {
     /// The index a defined function will have. Nothing is imported yet, so the function index
     /// space starts at the definitions; a host import would occupy the low indices and shift these,
     /// which is why the mapping is written out rather than assumed at the call site.
-    pub(crate) fn func_index(defined: usize) -> u32 {
+    pub fn func_index(defined: usize) -> u32 {
         u32::try_from(defined).unwrap_or(u32::MAX)
     }
 
     /// Encode the whole module, or `None` when a length did not fit the `u32` the format spells it
     /// with — a module whose own lengths are wrong is not a smaller module, it is bytes an engine
     /// reads as something else.
-    pub(crate) fn finish(&self) -> Option<Vec<u8>> {
+    pub fn finish(&self) -> Option<Vec<u8>> {
         let mut out = Bytes::new();
         out.raw(b"\0asm").raw(&1u32.to_le_bytes());
 
@@ -449,7 +454,10 @@ impl Module {
                 global.ty.write(&mut section);
                 // Every Java `static` field is assignable, so every global is mutable.
                 section.byte(0x01);
-                section.raw(&global.init).byte(0x0B);
+                for instruction in &global.init {
+                    instruction.write(&mut section);
+                }
+                section.byte(0x0B);
             }
             Self::section(&mut out, 6, &section);
         }
@@ -484,7 +492,10 @@ impl Module {
                     body.u32(1);
                     local.write(&mut body);
                 }
-                body.raw(&func.body).byte(0x0B);
+                for instruction in &func.body {
+                    instruction.write(&mut body);
+                }
+                body.byte(0x0B);
                 section.count(body.len());
                 section.append(&body);
             }
@@ -498,5 +509,66 @@ impl Module {
     fn section(out: &mut Bytes, id: u8, content: &Bytes) {
         out.byte(id).count(content.len());
         out.append(content);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Bytes, HeapType, RefType, ValType};
+
+    /// LEB128 is where a hand-written encoder goes wrong first: the signed form has to stop on the
+    /// sign bit, not on a zero remainder.
+    #[test]
+    fn the_integer_encodings_round_trip_through_the_spec() {
+        let encode_u32 = |value: u32| {
+            let mut bytes = Bytes::new();
+            bytes.u32(value);
+            bytes.into_vec()
+        };
+        assert_eq!(encode_u32(0), [0x00]);
+        assert_eq!(encode_u32(127), [0x7F]);
+        assert_eq!(encode_u32(128), [0x80, 0x01]);
+        assert_eq!(encode_u32(624_485), [0xE5, 0x8E, 0x26]);
+
+        let encode_i32 = |value: i32| {
+            let mut bytes = Bytes::new();
+            bytes.i32(value);
+            bytes.into_vec()
+        };
+        assert_eq!(encode_i32(0), [0x00]);
+        assert_eq!(encode_i32(-1), [0x7F]);
+        assert_eq!(encode_i32(63), [0x3F]);
+        // 64 needs a second byte precisely because 0x40 would read back as -64.
+        assert_eq!(encode_i32(64), [0xC0, 0x00]);
+        assert_eq!(encode_i32(-64), [0x40]);
+        assert_eq!(encode_i32(-123_456), [0xC0, 0xBB, 0x78]);
+    }
+
+    /// Unused today, but part of the encoder's surface and cheap to keep honest.
+    #[test]
+    fn reference_types_encode_their_nullability() {
+        let encode = |ty: ValType| {
+            let mut bytes = Bytes::new();
+            ty.write(&mut bytes);
+            bytes.into_vec()
+        };
+        // `(ref null $3)` and `(ref $3)` differ only in the leading byte.
+        assert_eq!(
+            encode(ValType::Ref(RefType::nullable(HeapType::Concrete(3)))),
+            [0x63, 0x03]
+        );
+        assert_eq!(
+            encode(ValType::Ref(RefType {
+                nullable: false,
+                heap: HeapType::Concrete(3),
+            })),
+            [0x64, 0x03]
+        );
+        // A concrete heap type is a *signed* LEB, so index 64 needs a second byte where 63 does
+        // not — the abstract heap types live in the negative range of the same encoding.
+        assert_eq!(
+            encode(ValType::Ref(RefType::nullable(HeapType::Concrete(64)))),
+            [0x63, 0xC0, 0x00]
+        );
     }
 }

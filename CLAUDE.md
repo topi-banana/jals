@@ -240,6 +240,17 @@ filesystem reads into portable interfaces.
     and the `StackMapTable`, which is emitted as `full_frame` only. On the wasm side the host's
     collector owns every object — `struct.new_default`, declared subtyping, no `memory` section,
     and no allocator or collector of its own.
+  - **Both backends publish the layer beneath their entry point, and neither materializes bytes
+    before `finish`.** `jvm` exports `Assembler`, which records items and resolves them in
+    `finish`; `wasm` exports `Insn`/`Instr` and `Module`, which hold a body as instructions until
+    `Module::finish` encodes it, with `CompileWasm::module` handing back that module where
+    `CompileWasm::project` hands back its bytes. The symmetry is what lets `tests/asm.rs`,
+    `tests/wasm_asm.rs`, and `tests/wasm_lower.rs` assert an emission *without* a JVM or a wasm
+    engine — which matters most on the wasm side, because CI's wasm cell runs this crate's tests
+    under `wasm32-wasip1`, where a process cannot be spawned and every engine-backed assertion in
+    `tests/wasm.rs` stands down. Keep the two seams exercised: `hawk::unnecessary_public` reports a
+    published builder no test drives, so a widened vocabulary and the test that uses it land
+    together.
   - The two lowerings share one layer and it has a name: `facts` answers what the *source* says —
     the span the inference memo is keyed on, the definition a name binds to, the locals a class
     captures, the constant a `case` label denotes (a full JLS §15.29 evaluator, `static final`
