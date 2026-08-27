@@ -52,36 +52,50 @@ mod ty {
 /// The `declaration` modifier (bit 0, the only entry in the legend's `token_modifiers`).
 const MOD_DECLARATION: u32 = 1 << 0;
 
-/// The LSP rendering of every neutral query payload. Stateless — one shared unit value drives all
-/// requests.
+/// The LSP rendering of every neutral query payload.
+///
+/// The rendering itself is stateless; what the host carries is the one thing a `FileKey` cannot
+/// answer on its own — the URL that addresses it. The shared rootless const
+/// ([`LspHost`](const@LspHost)) drives every request that renders no location.
 pub(crate) struct LspHost {
     root: PathBuf,
-    /// Host locations of navigation sources materialized out of the artifact cache (mounted
-    /// under `.jals/…` in the workspace overlay, where no real file exists). Consulted before
-    /// the root join so their `file://` URLs point at readable files.
-    materialized: BTreeMap<FileKey, PathBuf>,
+    /// The URLs of keys whose address is *not* derived from the root: navigation sources
+    /// materialized out of the artifact cache (mounted under `.jals/…`, where no real file sits
+    /// at the mount path), and the documents a detached group mounts under `.jals/lsp/…`, whose
+    /// address is the URI the client opened them with — `untitled:` included, which no host path
+    /// can spell.
+    urls: BTreeMap<FileKey, Url>,
 }
 
 #[allow(non_upper_case_globals)]
 pub(crate) const LspHost: LspHost = LspHost {
     root: PathBuf::new(),
-    materialized: BTreeMap::new(),
+    urls: BTreeMap::new(),
 };
 
 impl LspHost {
     pub(crate) const fn for_root(root: PathBuf) -> Self {
         Self {
             root,
-            materialized: BTreeMap::new(),
+            urls: BTreeMap::new(),
         }
     }
 
-    /// Register the host locations of materialized navigation sources (see
-    /// [`materialized`](Self::materialized)).
+    /// Register the URLs of keys the root join cannot address (see [`urls`](Self::urls)).
     #[must_use]
-    pub(crate) fn with_materialized(mut self, materialized: BTreeMap<FileKey, PathBuf>) -> Self {
-        self.materialized = materialized;
+    pub(crate) fn with_urls(mut self, urls: BTreeMap<FileKey, Url>) -> Self {
+        self.urls = urls;
         self
+    }
+
+    /// Register one key's URL, for a workspace that gains documents after it is loaded.
+    pub(crate) fn insert_url(&mut self, key: FileKey, url: Url) {
+        self.urls.insert(key, url);
+    }
+
+    /// Forget one key's URL, for a workspace that drops a document.
+    pub(crate) fn remove_url(&mut self, key: &FileKey) {
+        self.urls.remove(key);
     }
     /// Convert a byte offset in `doc` to an LSP position through the document's cached index.
     pub(crate) fn position(doc: &Document, offset: usize) -> Position {
@@ -97,24 +111,18 @@ impl LspHost {
         }
     }
 
-    /// The `file://` URL of a workspace virtual path, resolved against this host's project root.
+    /// The URL of a workspace virtual path: an explicit override when one is registered, else the
+    /// `file://` URL of the path resolved against this host's project root.
     ///
-    /// # Panics
-    /// Panics when the resolved path cannot be encoded as a file URL. A rooted host
-    /// ([`for_root`](Self::for_root)) always resolves to an absolute path, so this only fires if
-    /// a location is ever rendered through the rootless shared const — which must not happen.
-    fn url(&self, key: &FileKey) -> Url {
-        let path = self
-            .materialized
-            .get(key)
-            .cloned()
-            .unwrap_or_else(|| key.path().to_host_path(&self.root));
-        Url::from_file_path(&path).unwrap_or_else(|()| {
-            panic!(
-                "project path cannot be encoded as a file URI: {}",
-                path.display()
-            )
-        })
+    /// `None` when neither applies — the rootless shared const (whose root-relative join is not an
+    /// absolute path), or a path that cannot be encoded as a file URL. Answering `None` rather than
+    /// fabricating one is the workspace invariant "do not generate fallback file URIs for paths
+    /// that cannot be represented"; a target this host cannot name is simply not offered.
+    fn url(&self, key: &FileKey) -> Option<Url> {
+        if let Some(url) = self.urls.get(key) {
+            return Some(url.clone());
+        }
+        Url::from_file_path(key.path().to_host_path(&self.root)).ok()
     }
 
     /// The LSP symbol kind for an outline node's `DefKind`.
@@ -291,11 +299,11 @@ impl EditorHost for LspHost {
         Self::byte_range(doc, &range)
     }
 
-    fn location(&self, path: &FileKey, doc: &Document, range: Range<usize>) -> Location {
-        Location {
-            uri: self.url(path),
+    fn location(&self, path: &FileKey, doc: &Document, range: Range<usize>) -> Option<Location> {
+        Some(Location {
+            uri: self.url(path)?,
             range: Self::byte_range(doc, &range),
-        }
+        })
     }
 
     fn diagnostic(&self, doc: &Document, diagnostic: FileDiagnostic) -> Diagnostic {
@@ -671,11 +679,9 @@ mod tests {
     #[test]
     fn locations_carry_file_urls() {
         let document = doc("class C {}");
-        let location = LspHost::for_root(PathBuf::from(ROOT)).location(
-            &FileKey::parse("src/C.java").unwrap(),
-            &document,
-            6..7,
-        );
+        let location = LspHost::for_root(PathBuf::from(ROOT))
+            .location(&FileKey::parse("src/C.java").unwrap(), &document, 6..7)
+            .expect("a rooted host addresses a path under its root");
         assert_eq!(
             location.uri,
             Url::from_file_path(Path::new(ROOT).join("src/C.java")).unwrap()
@@ -690,15 +696,45 @@ mod tests {
         let document = doc("class Lib {}");
         let key = FileKey::parse(".jals/library/dep/Lib.java").unwrap();
         let target = Path::new(ROOT).join("target/jals/cache/source-view/aa/bb/dep/Lib.java");
+        let url = Url::from_file_path(&target).unwrap();
         let host = LspHost::for_root(PathBuf::from(ROOT))
-            .with_materialized(BTreeMap::from([(key.clone(), target.clone())]));
-        let location = host.location(&key, &document, 6..9);
-        assert_eq!(location.uri, Url::from_file_path(&target).unwrap());
+            .with_urls(BTreeMap::from([(key.clone(), url.clone())]));
+        let location = host.location(&key, &document, 6..9).expect("a mapped key");
+        assert_eq!(location.uri, url);
         // Unmapped keys still resolve against the project root.
-        let plain = host.location(&FileKey::parse("src/C.java").unwrap(), &document, 0..1);
+        let plain = host
+            .location(&FileKey::parse("src/C.java").unwrap(), &document, 0..1)
+            .expect("a rooted host addresses a path under its root");
         assert_eq!(
             plain.uri,
             Url::from_file_path(Path::new(ROOT).join("src/C.java")).unwrap()
+        );
+    }
+
+    /// The registered URL is the whole address, so a scheme no host path can spell — the one an
+    /// unsaved buffer carries — round-trips. This is what the old `PathBuf` map could not express.
+    #[test]
+    fn a_registered_url_may_carry_any_scheme() {
+        let document = doc("class C {}");
+        let key = FileKey::parse(".jals/lsp/0/untitled.java").unwrap();
+        let url = Url::parse("untitled:Untitled-1").unwrap();
+        let host = LspHost::for_root(PathBuf::from(ROOT))
+            .with_urls(BTreeMap::from([(key.clone(), url.clone())]));
+        let location = host.location(&key, &document, 6..7).expect("a mapped key");
+        assert_eq!(location.uri, url);
+    }
+
+    /// The shared rootless const renders no location at all: a root-relative join is not an
+    /// absolute path, and inventing one would name a file that does not exist. It is only ever
+    /// used by requests that render no location, and this is what keeps that a fact rather than a
+    /// convention.
+    #[test]
+    fn the_rootless_const_addresses_nothing() {
+        let document = doc("class C {}");
+        assert!(
+            LspHost
+                .location(&FileKey::parse("src/C.java").unwrap(), &document, 0..1)
+                .is_none()
         );
     }
 

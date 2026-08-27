@@ -129,11 +129,12 @@ impl EditorHost for MonacoHost {
         MonacoRange::of(&doc.line_index, &doc.text, &range)
     }
 
-    fn location(&self, path: &FileKey, doc: &Document, range: Range<usize>) -> Target {
-        Target {
+    /// Always addressable: this host names a file by its workspace path, which every key has.
+    fn location(&self, path: &FileKey, doc: &Document, range: Range<usize>) -> Option<Target> {
+        Some(Target {
             path: path.to_string(),
             range: self.range(doc, range),
-        }
+        })
     }
 
     fn diagnostic(&self, doc: &Document, diagnostic: FileDiagnostic) -> PlaygroundDiagnostic {

@@ -30,13 +30,16 @@ pub use host::{EditorHost, FoldingHost, SelectionHost, SemanticTokensHost};
 pub use jals_config::DiagnosticSeverity;
 pub use outline::{Outline, OutlineNode};
 pub use queries::{
-    Completion, CompletionKind, FileRange, Highlight, HighlightKind, Ident, ProjectQueries,
-    QueryFile, SignatureHelpUtf16, SignatureUtf16,
+    Completion, CompletionKind, Highlight, HighlightKind, Ident, SignatureHelpUtf16, SignatureUtf16,
 };
 pub use selection::SelectionChains;
 pub use semantic::{SemanticToken, SemanticTokenKind, SemanticTokens};
-pub use workspace::{ProjectLayout, SingleFileProject, Workspace};
+pub use workspace::{ProjectLayout, Workspace};
 
+/// The neutral query layer, crate-internal: the only public way in is [`Editor`], whose host
+/// renders every answer into a protocol's own types. Publishing these would publish a second,
+/// unrendered way to ask the same questions.
+pub(crate) use queries::{FileRange, ProjectQueries, QueryFile};
 pub(crate) use ranges::{byte_range, sat_text_size};
 
 /// `text_size` ↔ byte-range conversions shared by the query modules.

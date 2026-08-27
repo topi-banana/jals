@@ -14,10 +14,10 @@ use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 
 use async_lsp::lsp_types::{
-    CompletionItem, CompletionResponse, Diagnostic, DiagnosticSeverity,
-    DidChangeTextDocumentParams, DidChangeWatchedFilesParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DocumentHighlight, DocumentSymbolResponse, FileChangeType,
-    FoldingRange, GotoDefinitionResponse, Hover, Location, MessageType, NumberOrString, Position,
+    CompletionResponse, Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams,
+    DidChangeWatchedFilesParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    DocumentHighlight, DocumentSymbolResponse, FileChangeType, FoldingRange,
+    GotoDefinitionResponse, Hover, Location, MessageType, NumberOrString, Position,
     PrepareRenameResponse, PublishDiagnosticsParams, Range, SelectionRange, SemanticToken,
     SemanticTokens, SemanticTokensDelta, SemanticTokensFullDeltaResult, SemanticTokensResult,
     ShowMessageParams, SignatureHelp, TextEdit, Url, WorkspaceEdit, notification,
@@ -31,7 +31,6 @@ use jals_build::{
 use jals_config::{BuildScript, Dependency, FeatureSet, Manifest, ResolvedBuildFeatures};
 use jals_editor::{
     EditorHost, FoldingHost, Folds, Ident, LineIndex, Outline, SelectionChains, SelectionHost,
-    SemanticTokensHost, SignatureHelpUtf16, SingleFileProject,
 };
 use jals_exec::Exec;
 use jals_project::{
@@ -44,7 +43,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::formatting::Formatting;
 use crate::host::LspHost;
-use crate::state::{Document, DocumentStore, ProjectWorkspace, UriConfigs};
+use crate::state::{DetachedWorkspaces, DocumentStore, OpenDocument, ProjectWorkspace, UriConfigs};
 
 /// The reply channel of one request command: the response payload, or a protocol error the
 /// frontend forwards verbatim.
@@ -388,9 +387,15 @@ pub(crate) struct Actor {
     /// One slot per `jals.toml` project a client has a file open in. Populated lazily on
     /// `didOpen` by walking up from the file to its manifest (see
     /// [`ensure_workspace_for`](Self::ensure_workspace_for)), so the server only ever indexes a
-    /// real project's source roots, never a whole git checkout. Empty for files that belong to no
-    /// manifest, which fall back to one-file resolution.
+    /// real project's source roots, never a whole git checkout.
     workspaces: Vec<WorkspaceSlot>,
+    /// Every open document that no slot above owns — one that belongs to no manifest, or whose
+    /// project is still assembling — grouped by parent directory. Held beside the project slots
+    /// rather than among them because a slot is identified by its manifest root and drives
+    /// assembly, watching, and reassembly generations off it, none of which a directory without a
+    /// manifest has. Together the two make [`workspace_for`](Self::workspace_for) total over the
+    /// open Java documents, which is what leaves `None` meaning "no analysis" and nothing else.
+    detached: DetachedWorkspaces,
     /// The last semantic-tokens response published per document — its `result_id` and the
     /// delta-encoded token array — so a `textDocument/semanticTokens/full/delta` request can be
     /// answered with just the edits turning the client's copy into the current one. Evicted on
@@ -451,6 +456,7 @@ impl Actor {
             discovery: UriConfigs::default(),
             lint_discovery: UriConfigs::default(),
             workspaces: Vec::new(),
+            detached: DetachedWorkspaces::default(),
             semantic_tokens_cache: HashMap::new(),
             semantic_tokens_result_id: 0,
             workspace_assembly_generation: 0,
@@ -523,7 +529,7 @@ impl Actor {
                 })
                 .await;
             }
-            Cmd::DidClose(params) => Self::guard(async { self.did_close(params) }).await,
+            Cmd::DidClose(params) => Self::guard(self.did_close(params)).await,
             Cmd::DidChangeWatchedFiles(params) => {
                 Self::guard(self.watched_files_changed(&params)).await;
             }
@@ -642,16 +648,24 @@ impl Actor {
         if self.is_assembly_diagnostic_uri(uri) {
             return;
         }
-        self.refresh_workspace_overlay(uri).await;
+        self.route_document(uri).await;
         self.publish_diagnostics(uri).await;
     }
 
-    fn did_close(&mut self, params: DidCloseTextDocumentParams) {
+    async fn did_close(&mut self, params: DidCloseTextDocumentParams) {
         let uri = params.text_document.uri;
         let assembly_diagnostics_are_authoritative = self.is_assembly_diagnostic_uri(&uri);
         self.store.remove(&uri);
         // Drop the cached semantic-tokens baseline; a reopened document starts a fresh result id.
         self.semantic_tokens_cache.remove(&uri);
+        // A detached group *is* its open documents, so a closed one leaves it — otherwise every
+        // directory the user ever looked at would keep every text and CST it ever held, and a
+        // deleted sibling would go on resolving. The survivors are republished because losing a
+        // sibling can unresolve a name in them. A project workspace keeps its overlay instead:
+        // that aggregate reclaims it on the next reassembly, and its membership is the manifest's
+        // to decide, not the editor's.
+        let survivors = self.detached.forget(std::slice::from_ref(&uri)).await;
+        self.republish(survivors).await;
         // Clear stale diagnostics for the now-closed document.
         if !assembly_diagnostics_are_authoritative {
             let _ =
@@ -1148,11 +1162,19 @@ impl Actor {
             assembly: None,
             watch_policy,
         };
-        let open: Vec<Url> = self.store.uris().cloned().collect();
-        for uri in open {
-            if uri.to_file_path().is_ok_and(|path| path.starts_with(&root)) {
-                self.refresh_and_publish(&uri).await;
-            }
+        let under_root: Vec<Url> = self
+            .store
+            .uris()
+            .filter(|uri| uri.to_file_path().is_ok_and(|path| path.starts_with(&root)))
+            .cloned()
+            .collect();
+        // Evict the whole batch before replaying it. Every one of these documents was answered by
+        // a detached group until now, and dropping them one at a time would rebuild a shrinking
+        // group once per file.
+        let survivors = self.detached.forget(&under_root).await;
+        self.republish(survivors).await;
+        for uri in under_root {
+            self.refresh_and_publish(&uri).await;
         }
     }
 
@@ -1200,57 +1222,81 @@ impl Actor {
         })
     }
 
-    /// The loaded workspace that owns `uri`, if any. A still-loading slot never matches: its
-    /// files keep the one-file fallback until `WorkspaceReady`.
-    fn workspace_for(&self, uri: &Url) -> Option<&ProjectWorkspace> {
+    /// The analysis that answers for `uri`.
+    ///
+    /// A loaded project slot that owns it, else the detached group it was routed into. Total over
+    /// the open documents this server treats as Java, because [`route_document`](Self::route_document)
+    /// puts every one of them in exactly one of those two places — so `None` here means this
+    /// server holds no analysis for that URI, and never "it is not a project file".
+    ///
+    /// Project first: a document opened before its project finished assembling is mounted
+    /// detached, and the project workspace takes over the moment it is installed.
+    fn workspace_for(&self, uri: &Url) -> Option<OpenDocument<'_>> {
         self.workspaces
             .iter()
             .filter_map(WorkspaceSlot::ready)
-            .find(|workspace| workspace.owns_uri(uri))
+            .find_map(|workspace| workspace.open(uri))
+            .or_else(|| self.detached.open(uri))
     }
 
-    /// Reflect the open document at `uri` into the project index of the workspace that owns it,
-    /// if any.
-    async fn refresh_workspace_overlay(&mut self, uri: &Url) {
+    /// Route the open document at `uri` to the analysis that answers for it, and reflect its
+    /// current text there.
+    ///
+    /// A loaded project workspace that owns it takes it; anything else — a file under no manifest,
+    /// an unsaved buffer, a project file whose assembly is still in flight — is mounted into the
+    /// detached group for its directory. This is the one place that decision is made.
+    ///
+    /// Membership changes republish the affected group: gaining or losing a sibling changes what
+    /// the *other* documents in it resolve, and nothing else would go back and say so. An edit to
+    /// a document already routed changes only that document, and republishes nothing extra.
+    async fn route_document(&mut self, uri: &Url) {
         let Some(doc) = self.store.get(uri) else {
             return;
         };
-        if let Some(workspace) = self
+        let owned = self
             .workspaces
             .iter_mut()
             .filter_map(WorkspaceSlot::ready_mut)
-            .find(|workspace| workspace.owns_uri(uri))
-        {
+            .find(|workspace| workspace.owns_uri(uri));
+        let republish = if let Some(workspace) = owned {
             workspace.set_overlay(uri, &doc).await;
+            // It may have been answered detached until now — while its project was assembling, or
+            // before a source root grew to cover it.
+            self.detached.forget(std::slice::from_ref(uri)).await
+        } else {
+            self.detached.mount(uri, &doc.content).await
+        };
+        self.republish(republish).await;
+    }
+
+    /// Publish diagnostics for documents whose analysis changed for a reason of their own — a
+    /// sibling arriving or leaving their group — rather than an edit to themselves.
+    ///
+    /// Not observed by any test: the actor's tests drive a `ClientSocket::new_closed()`, which
+    /// swallows every notification, so they can only assert that the *analysis* changed (by asking
+    /// it again) and not that the client was told. Changing this is therefore a change no test
+    /// will catch.
+    async fn republish(&mut self, uris: Vec<Url>) {
+        for uri in uris {
+            self.publish_diagnostics(&uri).await;
         }
     }
 
     /// Compute and push diagnostics for `uri` (a no-op if the document is not open).
     ///
     /// The assembly policy (syntax + lint + cross-file resolution, ordering, suppression) is
-    /// [`jals_editor::FileDiagnostics`], driven through the owning workspace (which folds in the
-    /// project index and its resolved feature set). A file outside any workspace runs the same
-    /// policy over an index-aware one-file project ([`SingleFileProject`]), so in-file subtyping
-    /// and stdlib-classified exceptions still check.
+    /// [`jals_editor::FileDiagnostics`], driven through the analysis that owns the document —
+    /// which folds in that analysis's index and resolved feature set. A file under no manifest is
+    /// answered by its detached group, so in-file subtyping and stdlib-classified exceptions check
+    /// there exactly as they do in a project.
     async fn publish_diagnostics(&mut self, uri: &Url) {
         let Some(doc) = self.store.get(uri) else {
             return;
         };
         let config = self.lint_discovery.for_uri(uri).await;
-        let workspace_diagnostics = match self.workspace_for(uri) {
-            Some(workspace) => workspace.diagnostics(uri, &config).await,
-            None => None,
-        };
-        let diagnostics = if let Some(diagnostics) = workspace_diagnostics {
-            diagnostics
-        } else {
-            let project = SingleFileProject::new(&doc.content.parse).await;
-            project
-                .diagnostics(&doc.content.parse, &config)
-                .await
-                .into_iter()
-                .map(|diagnostic| LspHost.diagnostic(&doc.content, diagnostic))
-                .collect()
+        let diagnostics = match self.workspace_for(uri) {
+            Some(workspace) => workspace.diagnostics(&config).await,
+            None => Vec::new(),
         };
         let _ = self
             .client
@@ -1283,15 +1329,10 @@ impl Actor {
         uri: &Url,
         position: Position,
     ) -> Result<Option<Vec<DocumentHighlight>>, ResponseError> {
-        if let Some(workspace) = self.workspace_for(uri)
-            && let Some(highlights) = workspace.document_highlight(uri, position).await
-        {
-            return Ok(Some(highlights));
-        }
-        let Some(doc) = self.store.get(uri) else {
+        let Some(workspace) = self.workspace_for(uri) else {
             return Ok(None);
         };
-        Ok(Some(Self::fallback_highlights(&doc, position).await))
+        Ok(Some(workspace.document_highlight(position).await))
     }
 
     /// A file in the project index resolves cross-file (and file-locally) through the workspace.
@@ -1301,15 +1342,11 @@ impl Actor {
         uri: &Url,
         position: Position,
     ) -> Result<Option<GotoDefinitionResponse>, ResponseError> {
-        if let Some(workspace) = self.workspace_for(uri)
-            && let Some(location) = workspace.goto_definition(uri, position).await
-        {
-            return Ok(Some(GotoDefinitionResponse::Scalar(location)));
-        }
-        let Some(doc) = self.store.get(uri) else {
+        let Some(workspace) = self.workspace_for(uri) else {
             return Ok(None);
         };
-        Ok(Self::fallback_definition(&doc, uri, position)
+        Ok(workspace
+            .definition(position)
             .await
             .map(GotoDefinitionResponse::Scalar))
     }
@@ -1323,18 +1360,11 @@ impl Actor {
         position: Position,
         include_declaration: bool,
     ) -> Result<Option<Vec<Location>>, ResponseError> {
-        if let Some(workspace) = self.workspace_for(uri)
-            && let Some(locations) = workspace
-                .references(uri, position, include_declaration)
-                .await
-        {
-            return Ok(Some(locations));
-        }
-        let Some(doc) = self.store.get(uri) else {
+        let Some(workspace) = self.workspace_for(uri) else {
             return Ok(None);
         };
         Ok(Some(
-            Self::fallback_references(&doc, uri, position, include_declaration).await,
+            workspace.references(position, include_declaration).await,
         ))
     }
 
@@ -1345,15 +1375,11 @@ impl Actor {
         uri: &Url,
         position: Position,
     ) -> Result<Option<PrepareRenameResponse>, ResponseError> {
-        if let Some(workspace) = self.workspace_for(uri)
-            && let Some(range) = workspace.prepare_rename(uri, position).await
-        {
-            return Ok(Some(PrepareRenameResponse::Range(range)));
-        }
-        let Some(doc) = self.store.get(uri) else {
+        let Some(workspace) = self.workspace_for(uri) else {
             return Ok(None);
         };
-        Ok(Self::fallback_prepare_rename(&doc, position)
+        Ok(workspace
+            .prepare_rename(position)
             .await
             .map(PrepareRenameResponse::Range))
     }
@@ -1374,15 +1400,10 @@ impl Actor {
                 format!("`{new_name}` is not a valid Java identifier"),
             ));
         }
-        if let Some(workspace) = self.workspace_for(uri)
-            && let Some(edit) = workspace.rename(uri, position, new_name).await
-        {
-            return Ok(Some(edit));
-        }
-        let Some(doc) = self.store.get(uri) else {
+        let Some(workspace) = self.workspace_for(uri) else {
             return Ok(None);
         };
-        Ok(Self::fallback_rename(&doc, uri, position, new_name).await)
+        Ok(workspace.rename(position, new_name).await)
     }
 
     /// A file in the project index completes members with cross-file type names through the
@@ -1392,31 +1413,21 @@ impl Actor {
         uri: &Url,
         position: Position,
     ) -> Result<Option<CompletionResponse>, ResponseError> {
-        if let Some(workspace) = self.workspace_for(uri)
-            && let Some(items) = workspace.completions(uri, position).await
-        {
-            return Ok(Some(CompletionResponse::Array(items)));
-        }
-        let Some(doc) = self.store.get(uri) else {
+        let Some(workspace) = self.workspace_for(uri) else {
             return Ok(None);
         };
         Ok(Some(CompletionResponse::Array(
-            Self::fallback_completions(&doc, position).await,
+            workspace.completions(position).await,
         )))
     }
 
     /// A file in the project index infers with cross-file type names through the workspace; any
     /// other document falls back to one-file inference against the open document alone.
     async fn hover(&self, uri: &Url, position: Position) -> Result<Option<Hover>, ResponseError> {
-        if let Some(workspace) = self.workspace_for(uri)
-            && let Some(hover) = workspace.hover(uri, position).await
-        {
-            return Ok(Some(hover));
-        }
-        let Some(doc) = self.store.get(uri) else {
+        let Some(workspace) = self.workspace_for(uri) else {
             return Ok(None);
         };
-        Ok(Self::fallback_hover(&doc, position).await)
+        Ok(workspace.hover(position).await)
     }
 
     /// A file in the project index resolves overloads with cross-file type names through the
@@ -1426,15 +1437,10 @@ impl Actor {
         uri: &Url,
         position: Position,
     ) -> Result<Option<SignatureHelp>, ResponseError> {
-        if let Some(workspace) = self.workspace_for(uri)
-            && let Some(help) = workspace.signature_help(uri, position).await
-        {
-            return Ok(Some(help));
-        }
-        let Some(doc) = self.store.get(uri) else {
+        let Some(workspace) = self.workspace_for(uri) else {
             return Ok(None);
         };
-        Ok(Self::fallback_signature_help(&doc, position).await)
+        Ok(workspace.signature_help(position).await)
     }
 
     async fn formatting(&mut self, uri: &Url) -> Result<Option<Vec<TextEdit>>, ResponseError> {
@@ -1445,10 +1451,11 @@ impl Actor {
         // The dialect the *owning project* enabled, not the server's: a document outside every
         // workspace has no manifest to answer for it, and the empty set is what the formatter
         // reads as "do not write dialect syntax".
-        let features = self.workspace_for(uri).map_or_else(
-            jals_config::FeatureSet::default,
-            ProjectWorkspace::feature_set,
-        );
+        let features = self
+            .workspace_for(uri)
+            .map_or_else(jals_config::FeatureSet::default, |workspace| {
+                workspace.feature_set()
+            });
         let formatted = Formatting::formatting_edits(&doc.content, &config, features).await;
         // No edits is the *same* response as "already formatted", so a refusal has to say so out of
         // band or the command looks like it did nothing. `window/showMessage` rather than a
@@ -1493,134 +1500,12 @@ impl Actor {
         })
     }
 
-    // ---- One-file fallbacks ---------------------------------------------------------------------
-    //
-    // Requests on a document outside any indexed workspace drive the same [`SingleFileProject`]
-    // query surface the workspace path uses, mapped through [`LspHost`]. A stdlib-aware one-file
-    // index is built per request; targets outside the open document (a source-less stdlib member
-    // keeps a reserved file id) are never mapped onto its text.
-
-    /// Go-to-definition over the open document alone.
-    async fn fallback_definition(
-        doc: &Document,
-        uri: &Url,
-        position: Position,
-    ) -> Option<Location> {
-        let project = SingleFileProject::new(&doc.content.parse).await;
-        let target = project
-            .queries()
-            .definition(LspHost.offset(&doc.content, &position))
-            .await?;
-        (target.file == SingleFileProject::FILE).then(|| Location {
-            uri: uri.clone(),
-            range: LspHost.range(&doc.content, target.range),
-        })
-    }
-
-    /// Find-references over the open document alone, each as a `Location` under `uri`.
-    async fn fallback_references(
-        doc: &Document,
-        uri: &Url,
-        position: Position,
-        include_declaration: bool,
-    ) -> Vec<Location> {
-        let project = SingleFileProject::new(&doc.content.parse).await;
-        project
-            .queries()
-            .references(
-                LspHost.offset(&doc.content, &position),
-                include_declaration,
-                [project.file()],
-            )
-            .into_iter()
-            .map(|target| Location {
-                uri: uri.clone(),
-                range: LspHost.range(&doc.content, target.range),
-            })
-            .collect()
-    }
-
-    /// prepareRename over the open document alone.
-    async fn fallback_prepare_rename(doc: &Document, position: Position) -> Option<Range> {
-        let project = SingleFileProject::new(&doc.content.parse).await;
-        let range = project
-            .queries()
-            .renamable_range(LspHost.offset(&doc.content, &position))?;
-        Some(LspHost.range(&doc.content, range))
-    }
-
-    /// Rename over the open document alone: gate on renamability, then rewrite every occurrence.
-    async fn fallback_rename(
-        doc: &Document,
-        uri: &Url,
-        position: Position,
-        new_name: &str,
-    ) -> Option<WorkspaceEdit> {
-        Self::fallback_prepare_rename(doc, position).await?;
-        LspHost::workspace_edit(
-            Self::fallback_references(doc, uri, position, true).await,
-            new_name,
-        )
-    }
-
-    /// Hover over the open document alone.
-    async fn fallback_hover(doc: &Document, position: Position) -> Option<Hover> {
-        let project = SingleFileProject::new(&doc.content.parse).await;
-        let markdown = project
-            .queries()
-            .hover_markdown(LspHost.offset(&doc.content, &position))
-            .await?;
-        Some(LspHost.hover(markdown))
-    }
-
-    /// Completions over the open document alone.
-    async fn fallback_completions(doc: &Document, position: Position) -> Vec<CompletionItem> {
-        let project = SingleFileProject::new(&doc.content.parse).await;
-        project
-            .queries()
-            .completions(LspHost.offset(&doc.content, &position))
-            .await
-            .into_iter()
-            .map(|completion| LspHost.completion(completion))
-            .collect()
-    }
-
-    /// Occurrence highlights over the open document alone.
-    async fn fallback_highlights(doc: &Document, position: Position) -> Vec<DocumentHighlight> {
-        let project = SingleFileProject::new(&doc.content.parse).await;
-        project
-            .queries()
-            .highlights(LspHost.offset(&doc.content, &position))
-            .into_iter()
-            .map(|highlight| LspHost.highlight(&doc.content, highlight))
-            .collect()
-    }
-
-    /// Signature help over the open document alone.
-    async fn fallback_signature_help(doc: &Document, position: Position) -> Option<SignatureHelp> {
-        let project = SingleFileProject::new(&doc.content.parse).await;
-        let help = project
-            .queries()
-            .signature_help(LspHost.offset(&doc.content, &position))
-            .await?;
-        Some(LspHost.signature_help(SignatureHelpUtf16::of(&help)))
-    }
-
     // ---- Semantic tokens ------------------------------------------------------------------------
 
-    /// The document's delta-encoded semantic tokens: cross-file-aware through the workspace that
-    /// owns `uri` when there is one, otherwise a file-local classification over the open document
-    /// alone. `None` if the document is not open.
+    /// The document's delta-encoded semantic tokens, classified against the index of whichever
+    /// analysis owns it. `None` if this server holds no analysis for `uri`.
     async fn compute_semantic_tokens(&self, uri: &Url) -> Option<Vec<SemanticToken>> {
-        if let Some(workspace) = self.workspace_for(uri)
-            && let Some(tokens) = workspace.semantic_tokens(uri).await
-        {
-            return Some(tokens.data);
-        }
-        let doc = self.store.get(uri)?;
-        let classified =
-            jals_editor::SemanticTokens::classify(&doc.content.parse.syntax(), None).await;
-        Some(LspHost.semantic_tokens(&doc.content, classified).data)
+        Some(self.workspace_for(uri)?.semantic_tokens().await?.data)
     }
 
     /// Mint a fresh `result_id` for a semantic-tokens response.
@@ -2268,8 +2153,8 @@ impl AssembledWorkspace {
 #[cfg(test)]
 mod tests {
     use async_lsp::lsp_types::{
-        FileChangeType, FileEvent, TextDocumentContentChangeEvent, TextDocumentItem,
-        VersionedTextDocumentIdentifier,
+        FileChangeType, FileEvent, TextDocumentContentChangeEvent, TextDocumentIdentifier,
+        TextDocumentItem, VersionedTextDocumentIdentifier,
     };
     use jals_build::build_script::{BuildScriptDiagnostic, BuildScriptError};
     use jals_exec::block_on_inline;
@@ -2370,6 +2255,323 @@ mod tests {
         drain(actor, receiver).await;
     }
 
+    /// Open `uri` with `text` without writing anything to disk — the only way to open a document
+    /// that has no host path at all.
+    async fn open_uri(
+        actor: &mut Actor,
+        receiver: &mut mpsc::UnboundedReceiver<Cmd>,
+        uri: &Url,
+        text: &str,
+    ) {
+        actor
+            .process(Cmd::DidOpen(DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: "java".into(),
+                    version: 1,
+                    text: text.into(),
+                },
+            }))
+            .await;
+        drain(actor, receiver).await;
+    }
+
+    async fn close(actor: &mut Actor, uri: &Url) {
+        actor
+            .process(Cmd::DidClose(DidCloseTextDocumentParams {
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+            }))
+            .await;
+    }
+
+    /// The codes of the diagnostics the owning analysis reports for `uri`.
+    async fn codes(actor: &Actor, uri: &Url) -> Vec<String> {
+        let Some(workspace) = actor.workspace_for(uri) else {
+            return Vec::new();
+        };
+        workspace
+            .diagnostics(&jals_config::lint::Config::default())
+            .await
+            .iter()
+            .filter_map(|diagnostic| diagnostic_code(diagnostic).map(str::to_owned))
+            .collect()
+    }
+
+    // ---- Routing: every open document reaches an analysis --------------------------------------
+
+    /// The invariant the whole routing seam buys: a document the server treats as Java is always
+    /// answered by *some* workspace. Whether it is a project's or a detached group's is the
+    /// server's business, not the request handler's — which is why no handler asks any more.
+    #[test]
+    fn every_open_java_document_has_a_workspace() {
+        block_on_inline(async {
+            let (mut actor, mut receiver, _sender) = actor();
+
+            // A project, opened but not yet assembled: the slot is still `Loading`.
+            let project = tempfile::tempdir().unwrap();
+            write(
+                project.path(),
+                "jals.toml",
+                "[build]\nsource-dirs = [\"src\"]\n",
+            );
+            write(project.path(), "src/Main.java", "class Main {}");
+            let main = Url::from_file_path(project.path().join("src/Main.java")).unwrap();
+            actor
+                .process(Cmd::DidOpen(DidOpenTextDocumentParams {
+                    text_document: TextDocumentItem {
+                        uri: main.clone(),
+                        language_id: "java".into(),
+                        version: 1,
+                        text: "class Main {}".into(),
+                    },
+                }))
+                .await;
+            assert!(
+                actor.workspace_for(&main).is_some(),
+                "a project file answers while its project is still assembling"
+            );
+            drain(&mut actor, &mut receiver).await;
+            assert!(
+                actor.workspace_for(&main).is_some(),
+                "and still answers once the project is installed"
+            );
+
+            // A file under the project root but outside every source root: no source root covers
+            // it, so the project workspace does not own it and it stays detached.
+            let stray = project.path().join("Stray.java");
+            open(&mut actor, &mut receiver, stray.clone(), "class Stray {}").await;
+
+            // Two files in one directory under no manifest, and an unsaved buffer.
+            let loose = tempfile::tempdir().unwrap();
+            open(
+                &mut actor,
+                &mut receiver,
+                loose.path().join("A.java"),
+                "class A {}",
+            )
+            .await;
+            open(
+                &mut actor,
+                &mut receiver,
+                loose.path().join("B.java"),
+                "class B {}",
+            )
+            .await;
+            let untitled = Url::parse("untitled:Untitled-1").unwrap();
+            open_uri(&mut actor, &mut receiver, &untitled, "class Draft {}").await;
+
+            let open_uris: Vec<Url> = actor.store.uris().cloned().collect();
+            assert_eq!(open_uris.len(), 5);
+            for uri in open_uris {
+                assert!(
+                    actor.workspace_for(&uri).is_some(),
+                    "no analysis answers for {uri}"
+                );
+            }
+            // One group for the loose directory, one for the stray file's directory (the project
+            // root), one for the buffer that has no directory at all.
+            assert_eq!(actor.detached.len(), 3);
+            assert!(actor.detached.holds(&Url::from_file_path(&stray).unwrap()));
+            assert!(actor.detached.holds(&untitled));
+        });
+    }
+
+    /// Two files in one directory are one Java package, so each is a typing authority for the
+    /// other. This is the whole reason a detached group is a directory and not a document.
+    #[test]
+    fn siblings_in_one_directory_resolve_each_other() {
+        block_on_inline(async {
+            let (mut actor, mut receiver, _sender) = actor();
+            let dir = tempfile::tempdir().unwrap();
+            let a = dir.path().join("A.java");
+            let a_uri = Url::from_file_path(&a).unwrap();
+            let b = dir.path().join("B.java");
+            let b_uri = Url::from_file_path(&b).unwrap();
+
+            open(&mut actor, &mut receiver, a.clone(), "class A { B b; }").await;
+            assert!(
+                codes(&actor, &a_uri)
+                    .await
+                    .iter()
+                    .any(|c| c == "cannot-resolve"),
+                "nothing declares B yet"
+            );
+
+            open(&mut actor, &mut receiver, b, "class B {}").await;
+            assert!(
+                !codes(&actor, &a_uri)
+                    .await
+                    .iter()
+                    .any(|c| c == "cannot-resolve"),
+                "opening the sibling that declares B resolves it"
+            );
+
+            // And the reference navigates across the two files.
+            let location = actor
+                .workspace_for(&a_uri)
+                .expect("A.java is routed")
+                .definition(Position::new(0, "class A { ".len() as u32))
+                .await
+                .expect("B resolves to its declaration");
+            assert_eq!(
+                location.uri, b_uri,
+                "the location carries the sibling's URI"
+            );
+
+            // A rename in the group rewrites the sibling too. This is the change most likely to
+            // surprise: the edit touches a file the user never focused.
+            let edit = actor
+                .rename(
+                    &a_uri,
+                    Position::new(0, "class A { ".len() as u32),
+                    "Renamed",
+                )
+                .await
+                .expect("rename is answered")
+                .expect("B is a renamable type of this group");
+            let changes = edit.changes.expect("a plain-edit workspace edit");
+            assert_eq!(
+                changes.keys().collect::<BTreeSet<_>>(),
+                BTreeSet::from([&a_uri, &b_uri]),
+                "the reference and the declaration are in different files"
+            );
+            assert!(changes.values().flatten().all(|e| e.new_text == "Renamed"));
+
+            // Closing the sibling takes the declaration away again.
+            close(&mut actor, &b_uri).await;
+            assert!(
+                codes(&actor, &a_uri)
+                    .await
+                    .iter()
+                    .any(|c| c == "cannot-resolve"),
+                "closing the sibling unresolves B"
+            );
+        });
+    }
+
+    /// A group is exactly its open documents, so the last close takes the group with it — nothing
+    /// is kept alive by a directory the user merely looked at once.
+    #[test]
+    fn a_detached_group_drops_when_its_last_document_closes() {
+        block_on_inline(async {
+            let (mut actor, mut receiver, _sender) = actor();
+            let dir = tempfile::tempdir().unwrap();
+            let a = Url::from_file_path(dir.path().join("A.java")).unwrap();
+            let b = Url::from_file_path(dir.path().join("B.java")).unwrap();
+            open(
+                &mut actor,
+                &mut receiver,
+                dir.path().join("A.java"),
+                "class A {}",
+            )
+            .await;
+            open(
+                &mut actor,
+                &mut receiver,
+                dir.path().join("B.java"),
+                "class B {}",
+            )
+            .await;
+            assert_eq!(actor.detached.len(), 1);
+
+            close(&mut actor, &a).await;
+            assert_eq!(actor.detached.len(), 1, "B.java still holds the group open");
+            assert!(!actor.detached.holds(&a));
+            assert!(actor.detached.holds(&b));
+
+            close(&mut actor, &b).await;
+            assert!(actor.detached.is_empty(), "the last close drops the group");
+        });
+    }
+
+    /// An unsaved buffer has no host path, so its group is itself and its address is the URI the
+    /// client opened it with — which a location has to come back carrying.
+    #[test]
+    fn an_untitled_document_answers_from_its_own_group() {
+        block_on_inline(async {
+            let (mut actor, mut receiver, _sender) = actor();
+            let uri = Url::parse("untitled:Untitled-1").unwrap();
+            let text = "class Draft { void run() { Draft d = new Draft(); } }";
+            open_uri(&mut actor, &mut receiver, &uri, text).await;
+
+            let location = actor
+                .workspace_for(&uri)
+                .expect("the buffer is routed")
+                .definition(Position::new(0, text.find("Draft d").unwrap() as u32))
+                .await
+                .expect("the self-reference resolves");
+            assert_eq!(
+                location.uri, uri,
+                "a mounted key renders back as the URI it was opened with"
+            );
+            let hover = actor
+                .workspace_for(&uri)
+                .unwrap()
+                .hover(Position::new(0, text.find("new Draft").unwrap() as u32))
+                .await
+                .expect("an unsaved buffer still infers types");
+            assert!(format!("{hover:?}").contains("Draft"), "{hover:?}");
+        });
+    }
+
+    /// A project file opened before its assembly finishes is answered detached, then hands over.
+    /// Both halves matter: the immediate answer, and that the detached mount does not linger.
+    #[test]
+    fn a_document_migrates_from_its_detached_group_to_its_project() {
+        block_on_inline(async {
+            let (mut actor, mut receiver, _sender) = actor();
+            let dir = tempfile::tempdir().unwrap();
+            write(
+                dir.path(),
+                "jals.toml",
+                "[build]\nsource-dirs = [\"src\"]\n",
+            );
+            write(dir.path(), "src/Main.java", "class Main { Helper h; }");
+            write(dir.path(), "src/Helper.java", "class Helper {}");
+            let main = Url::from_file_path(dir.path().join("src/Main.java")).unwrap();
+
+            actor
+                .process(Cmd::DidOpen(DidOpenTextDocumentParams {
+                    text_document: TextDocumentItem {
+                        uri: main.clone(),
+                        language_id: "java".into(),
+                        version: 1,
+                        text: "class Main { Helper h; }".into(),
+                    },
+                }))
+                .await;
+            assert!(
+                actor.detached.holds(&main),
+                "the assembly is still in flight, so the document is answered detached"
+            );
+            // Detached, only the open document is indexed, so its unopened sibling is unresolved.
+            assert!(
+                codes(&actor, &main)
+                    .await
+                    .iter()
+                    .any(|c| c == "cannot-resolve")
+            );
+
+            drain(&mut actor, &mut receiver).await;
+            assert!(
+                !actor.detached.holds(&main),
+                "installing the project workspace evicts the detached mount"
+            );
+            assert!(actor.detached.is_empty(), "and drops the emptied group");
+            assert!(
+                actor.workspace_for(&main).is_some(),
+                "the project workspace answers now"
+            );
+            // The project indexes its whole source root, so the unopened sibling resolves.
+            assert!(
+                !codes(&actor, &main)
+                    .await
+                    .iter()
+                    .any(|c| c == "cannot-resolve")
+            );
+        });
+    }
+
     /// `did_open` builds at most one workspace per `jals.toml` project, reuses it for later files
     /// in the same project, and builds none for a file under no manifest — so opening a file in a
     /// manifestless folder never triggers a whole-tree index walk (the Helix freeze regression).
@@ -2434,6 +2636,10 @@ mod tests {
                 "a file in a different project adds a second workspace"
             );
 
+            assert!(
+                actor.detached.is_empty(),
+                "every file so far belongs to a project"
+            );
             open(
                 &mut actor,
                 &mut receiver,
@@ -2444,7 +2650,12 @@ mod tests {
             assert_eq!(
                 actor.workspaces.len(),
                 2,
-                "a file under no manifest builds no workspace"
+                "a file under no manifest builds no project workspace"
+            );
+            assert_eq!(
+                actor.detached.len(),
+                1,
+                "it is answered by a detached group instead — one file mounted, no tree walk"
             );
         });
     }
@@ -3018,10 +3229,7 @@ mod tests {
             let location = actor
                 .workspace_for(&main_uri)
                 .expect("the project workspace loaded")
-                .goto_definition(
-                    &main_uri,
-                    Position::new(0, main.find("Generated").unwrap() as u32),
-                )
+                .definition(Position::new(0, main.find("Generated").unwrap() as u32))
                 .await
                 .expect("the generated type resolves");
             assert_eq!(location.uri, generated_uri);
@@ -3029,10 +3237,7 @@ mod tests {
                 actor
                     .workspace_for(&main_uri)
                     .unwrap()
-                    .goto_definition(
-                        &main_uri,
-                        Position::new(0, main.find("Sibling").unwrap() as u32),
-                    )
+                    .definition(Position::new(0, main.find("Sibling").unwrap() as u32),)
                     .await
                     .is_none(),
                 "an unselected generated sibling is not a project source"
@@ -3097,10 +3302,7 @@ mod tests {
             let location = actor
                 .workspace_for(&main_uri)
                 .expect("the graph-backed workspace loaded")
-                .goto_definition(
-                    &main_uri,
-                    Position::new(0, main.find("Generated").unwrap() as u32),
-                )
+                .definition(Position::new(0, main.find("Generated").unwrap() as u32))
                 .await
                 .expect("the generated dependency type resolves");
             let path = location.uri.to_file_path().unwrap();
@@ -3388,10 +3590,7 @@ mod tests {
             let location = actor
                 .workspace_for(&main_uri)
                 .expect("script failure did not discard the workspace")
-                .goto_definition(
-                    &main_uri,
-                    Position::new(0, main.find("Foo").unwrap() as u32),
-                )
+                .definition(Position::new(0, main.find("Foo").unwrap() as u32))
                 .await
                 .expect("ordinary project sources still resolve");
             assert_eq!(location.uri, foo_uri);
@@ -3441,10 +3640,7 @@ mod tests {
                 actor
                     .workspace_for(&main_uri)
                     .unwrap()
-                    .goto_definition(
-                        &main_uri,
-                        Position::new(0, main.find("Second").unwrap() as u32),
-                    )
+                    .definition(Position::new(0, main.find("Second").unwrap() as u32),)
                     .await
                     .is_none(),
                 "the initial script output declares only First"
@@ -3494,10 +3690,7 @@ mod tests {
             let location = actor
                 .workspace_for(&main_uri)
                 .expect("the replacement workspace loaded")
-                .goto_definition(
-                    &main_uri,
-                    Position::new(0, main.find("Second").unwrap() as u32),
-                )
+                .definition(Position::new(0, main.find("Second").unwrap() as u32))
                 .await
                 .expect("the changed input reran the script");
             assert_eq!(
@@ -3511,14 +3704,15 @@ mod tests {
     #[test]
     fn semantic_tokens_delta_reflects_edits_and_falls_back_when_stale() {
         block_on_inline(async {
-            let (mut actor, _receiver, _sender) = actor();
-            // A path under no manifest, so no workspace is built and tokens come from the open
-            // document.
-            let uri = Url::parse("file:///no-manifest/A.java").unwrap();
-            actor
-                .store
-                .upsert(uri.clone(), "class A {}".into(), 1)
-                .await;
+            let (mut actor, mut receiver, _sender) = actor();
+            // A directory under no manifest: the document is answered by a detached group, which
+            // is what every open document goes through. It is opened rather than pushed straight
+            // into the store precisely so it is routed — an unrouted document has no analysis and
+            // so no tokens to take a delta of.
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("A.java");
+            open(&mut actor, &mut receiver, path.clone(), "class A {}").await;
+            let uri = Url::from_file_path(&path).unwrap();
 
             // A full request tags the response with a result id and caches it as the delta
             // baseline.
@@ -3531,10 +3725,7 @@ mod tests {
 
             // Edit the document, then ask for a delta against the baseline the client still
             // holds.
-            actor
-                .store
-                .upsert(uri.clone(), "class A { int x; }".into(), 2)
-                .await;
+            open(&mut actor, &mut receiver, path, "class A { int x; }").await;
             match actor.semantic_tokens_delta_response(&uri, &baseline).await {
                 Some(SemanticTokensFullDeltaResult::TokensDelta(delta)) => {
                     assert!(
@@ -3731,7 +3922,11 @@ mod tests {
             // `fancy` is not in the manifest's `default` list, so `Gated` is disabled and the
             // cross-file reference cannot resolve.
             let workspace = actor.workspaces[0].ready().expect("workspace is ready");
-            let diags = workspace.diagnostics(&main_uri, &config).await.unwrap();
+            let diags = workspace
+                .open(&main_uri)
+                .unwrap()
+                .diagnostics(&config)
+                .await;
             assert!(
                 diags
                     .iter()
@@ -3739,7 +3934,11 @@ mod tests {
                 "{diags:?}"
             );
             let gated_uri = Url::from_file_path(dir.path().join("src/Gated.java")).unwrap();
-            let diags = workspace.diagnostics(&gated_uri, &config).await.unwrap();
+            let diags = workspace
+                .open(&gated_uri)
+                .unwrap()
+                .diagnostics(&config)
+                .await;
             assert!(
                 diags.iter().any(|d| diagnostic_code(d) == Some("cfg")
                     && d.tags.as_ref().is_some_and(
@@ -3757,7 +3956,11 @@ mod tests {
                 .await;
             drain(&mut actor, &mut receiver).await;
             let workspace = actor.workspaces[0].ready().expect("workspace reassembled");
-            let diags = workspace.diagnostics(&main_uri, &config).await.unwrap();
+            let diags = workspace
+                .open(&main_uri)
+                .unwrap()
+                .diagnostics(&config)
+                .await;
             assert!(
                 !diags
                     .iter()

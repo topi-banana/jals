@@ -18,7 +18,7 @@ use jals_syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
 /// cache and a project-wide scan reads every file's resolution without re-analysing any of them —
 /// and, because nothing here is bound to the index, without running a single type inference.
 #[derive(Clone, Copy)]
-pub struct QueryFile<'a> {
+pub(crate) struct QueryFile<'a> {
     /// Stable identity within the associated [`ProjectIndex`].
     file: FileId,
     /// The file's CST and name resolution.
@@ -35,9 +35,9 @@ impl<'a> QueryFile<'a> {
 /// A byte range in a file. Adapters map the file id to a URI/path and the byte range to their
 /// coordinate system.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FileRange {
-    pub file: FileId,
-    pub range: Range<usize>,
+pub(crate) struct FileRange {
+    pub(crate) file: FileId,
+    pub(crate) range: Range<usize>,
 }
 
 /// Protocol-neutral completion categories.
@@ -91,7 +91,7 @@ enum ReferenceAnchor {
 /// file's type inference is memoized, so a host that answers several questions from one
 /// `ProjectQueries` runs the inference once. Building a fresh binding per query would silently
 /// restore the per-question inference this seam removed.
-pub struct ProjectQueries<'a> {
+pub(crate) struct ProjectQueries<'a> {
     current: FileSemantics<'a>,
 }
 
@@ -117,7 +117,7 @@ impl<'a> ProjectQueries<'a> {
     }
 
     /// Resolve a definition in file-local → project type → inferred member order.
-    pub async fn definition(&self, offset: usize) -> Option<FileRange> {
+    pub(crate) async fn definition(&self, offset: usize) -> Option<FileRange> {
         if let Some((file, range)) = self.current.definition_at(offset) {
             return Some(FileRange { file, range });
         }
@@ -129,7 +129,7 @@ impl<'a> ProjectQueries<'a> {
     ///
     /// `files` is consumed only for a project type. A local binding returns before touching it,
     /// allowing a host to supply lazily resolved project files.
-    pub fn references<'b>(
+    pub(crate) fn references<'b>(
         &self,
         offset: usize,
         include_declaration: bool,
@@ -203,7 +203,7 @@ impl<'a> ProjectQueries<'a> {
 
     /// The [`hover`](Self::hover) type rendered as the Markdown both hosts show — a fenced
     /// ` ```java ` block.
-    pub async fn hover_markdown(&self, offset: usize) -> Option<String> {
+    pub(crate) async fn hover_markdown(&self, offset: usize) -> Option<String> {
         let ty = self.hover(offset).await?;
         Some(alloc::format!("```java\n{ty}\n```"))
     }
@@ -218,7 +218,7 @@ impl<'a> ProjectQueries<'a> {
     /// or a `git`/`path` library-source type — does not qualify: those have no host-editable
     /// project file. Mirrors what [`references`](Self::references) actually rewrites, so a
     /// renamable symbol always has a complete, in-project occurrence set.
-    pub fn renamable_range(&self, offset: usize) -> Option<Range<usize>> {
+    pub(crate) fn renamable_range(&self, offset: usize) -> Option<Range<usize>> {
         let ident = self.ident_at(offset)?;
         let anchor = usize::from(ident.text_range().start());
         let renamable = self.analysis().symbol_at(anchor).map_or_else(
@@ -240,7 +240,7 @@ impl<'a> ProjectQueries<'a> {
     }
 
     /// Member completions after `.`, otherwise scope completions followed by Java keywords.
-    pub async fn completions(&self, offset: usize) -> Vec<Completion> {
+    pub(crate) async fn completions(&self, offset: usize) -> Vec<Completion> {
         let at_member_access = self.analysis().at_member_access(offset);
         let semantic = if at_member_access {
             self.current.member_completions(offset).await
@@ -266,12 +266,12 @@ impl<'a> ProjectQueries<'a> {
     }
 
     /// Signature help for the call containing `offset`.
-    pub async fn signature_help(&self, offset: usize) -> Option<jals_hir::SignatureHelp> {
+    pub(crate) async fn signature_help(&self, offset: usize) -> Option<jals_hir::SignatureHelp> {
         self.current.signature_help(offset).await
     }
 
     /// Highlights for the symbol at `offset`, in document order.
-    pub fn highlights(&self, offset: usize) -> Vec<Highlight> {
+    pub(crate) fn highlights(&self, offset: usize) -> Vec<Highlight> {
         let Some(target) = self.ident_at(offset) else {
             return Vec::new();
         };
@@ -449,7 +449,7 @@ pub struct SignatureHelpUtf16 {
 
 impl SignatureHelpUtf16 {
     /// Convert `jals-hir`'s byte-offset signature help into UTF-16 label offsets.
-    pub fn of(help: &jals_hir::SignatureHelp) -> Self {
+    pub(crate) fn of(help: &jals_hir::SignatureHelp) -> Self {
         /// The number of UTF-16 code units in `s` (a label is nowhere near 2³² units).
         fn utf16_len(s: &str) -> u32 {
             u32::try_from(s.encode_utf16().count()).unwrap_or(u32::MAX)

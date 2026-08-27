@@ -43,6 +43,17 @@ impl<S: SourceBackend, C: CacheBackend, H: EditorHost> Editor<S, C, H> {
         &mut self.workspace
     }
 
+    /// The rendering half, mutably — so a host can register the address of a key the workspace
+    /// has just gained.
+    ///
+    /// This is the facade's only mutable escape hatch, and it exists for that one reason: a host
+    /// whose files arrive after `load` (an editor mounting an open document into a workspace of
+    /// its own) has no other way to tell the rendering how to name them. It is not a way to
+    /// reconfigure a host that is already driving queries.
+    pub const fn host_mut(&mut self) -> &mut H {
+        &mut self.host
+    }
+
     /// The file id and cached document of `path`, when it is an indexed project file.
     fn doc(&self, path: &FileKey) -> Option<(FileId, &Document)> {
         let file = self.workspace.file_id(path)?;
@@ -56,11 +67,11 @@ impl<S: SourceBackend, C: CacheBackend, H: EditorHost> Editor<S, C, H> {
     }
 
     /// Map a neutral cross-file target to the host's location, suppressing source-less targets
-    /// (a classpath member with no extracted source).
+    /// (a classpath member with no extracted source) and targets the host cannot address.
     fn location(&self, target: &FileRange) -> Option<H::Location> {
         let path = self.workspace.path_of(target.file)?;
         let doc = self.workspace.document(target.file)?;
-        Some(self.host.location(path, doc, target.range.clone()))
+        self.host.location(path, doc, target.range.clone())
     }
 
     /// The canonical diagnostics of `path` under `config` (the project's feature set and index
@@ -241,8 +252,13 @@ mod tests {
         fn range(&self, _doc: &Document, range: Range<usize>) -> Range<usize> {
             range
         }
-        fn location(&self, path: &FileKey, _doc: &Document, range: Range<usize>) -> Self::Location {
-            (path.to_string(), range)
+        fn location(
+            &self,
+            path: &FileKey,
+            _doc: &Document,
+            range: Range<usize>,
+        ) -> Option<Self::Location> {
+            Some((path.to_string(), range))
         }
         fn diagnostic(&self, _doc: &Document, diagnostic: FileDiagnostic) -> String {
             diagnostic.message
@@ -304,6 +320,116 @@ mod tests {
             TupleHost,
         )
         .await
+    }
+
+    /// A host that can address nothing — the shape of a rendering asked for a key it holds no
+    /// address for.
+    struct UnaddressableHost;
+
+    impl EditorHost for UnaddressableHost {
+        type Position = <TupleHost as EditorHost>::Position;
+        type Range = <TupleHost as EditorHost>::Range;
+        type Location = <TupleHost as EditorHost>::Location;
+        type Diagnostic = <TupleHost as EditorHost>::Diagnostic;
+        type Symbol = <TupleHost as EditorHost>::Symbol;
+        type Completion = <TupleHost as EditorHost>::Completion;
+        type Highlight = <TupleHost as EditorHost>::Highlight;
+        type Hover = <TupleHost as EditorHost>::Hover;
+        type SignatureHelp = <TupleHost as EditorHost>::SignatureHelp;
+
+        fn offset(&self, doc: &Document, position: &(u32, u32)) -> usize {
+            TupleHost.offset(doc, position)
+        }
+        fn range(&self, doc: &Document, range: Range<usize>) -> Range<usize> {
+            TupleHost.range(doc, range)
+        }
+        fn location(
+            &self,
+            _path: &FileKey,
+            _doc: &Document,
+            _range: Range<usize>,
+        ) -> Option<Self::Location> {
+            None
+        }
+        fn diagnostic(&self, doc: &Document, diagnostic: FileDiagnostic) -> String {
+            TupleHost.diagnostic(doc, diagnostic)
+        }
+        fn symbol(
+            &self,
+            doc: &Document,
+            node: OutlineNode,
+            children: Vec<Self::Symbol>,
+        ) -> Self::Symbol {
+            TupleHost.symbol(doc, node, children)
+        }
+        fn completion(&self, completion: Completion) -> String {
+            TupleHost.completion(completion)
+        }
+        fn highlight(&self, doc: &Document, highlight: Highlight) -> (Range<usize>, bool) {
+            TupleHost.highlight(doc, highlight)
+        }
+        fn hover(&self, markdown: String) -> String {
+            TupleHost.hover(markdown)
+        }
+        fn signature_help(&self, help: SignatureHelpUtf16) -> (u32, u32) {
+            TupleHost.signature_help(help)
+        }
+    }
+
+    /// A target the host cannot address is not offered. The alternative — inventing an address
+    /// that resolves to nothing — is what the fallible `location` exists to make impossible, and
+    /// the suppression has to happen for *every* query that carries a cross-file target, not just
+    /// the one that was tested when it was written.
+    #[test]
+    fn an_unaddressable_target_is_suppressed() {
+        block_on_inline(async {
+            let storage = memory(&[
+                (
+                    "src/Greeter.java",
+                    "public class Greeter { public String greet(String name) { return name; } }",
+                ),
+                (
+                    "src/Main.java",
+                    "public class Main { void run() { Greeter g = new Greeter(); } }",
+                ),
+            ]);
+            let editor = Editor::load(
+                storage,
+                ProjectLayout::new(vec![DirKey::parse("src").unwrap()]),
+                UnaddressableHost,
+            )
+            .await;
+            let main = "public class Main { void run() { Greeter g = new Greeter(); } }";
+            let at = pos_of(main, "Greeter g");
+            assert!(
+                editor
+                    .definition(&key("src/Main.java"), &at)
+                    .await
+                    .is_none()
+            );
+            assert!(
+                editor
+                    .references(&key("src/Main.java"), &at, true)
+                    .await
+                    .is_empty()
+            );
+            assert_eq!(
+                editor
+                    .rename_targets(&key("src/Main.java"), &at)
+                    .await
+                    .as_deref(),
+                Some(&[][..]),
+                "the symbol is still renamable; it just has no addressable occurrence"
+            );
+            // Queries anchored on the queried file alone are unaffected.
+            let expression = pos_of(main, "new Greeter");
+            assert!(
+                editor
+                    .hover(&key("src/Main.java"), &expression)
+                    .await
+                    .is_some()
+            );
+        });
     }
 
     /// The `(line, character)` of `needle`'s first occurrence in `text` (single-line samples).

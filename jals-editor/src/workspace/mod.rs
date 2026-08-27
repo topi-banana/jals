@@ -376,7 +376,10 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
             by_path: BTreeMap::new(),
             library_files,
             source_dep_files,
-            index: ProjectIndex::builder(&[]).with_stdlib().build().await,
+            // A placeholder, deliberately stub-free: `reload_project_files` below overwrites it
+            // through `rebuild_index` before anything can read it, and folding the stubs in here
+            // would parse them a second time for nothing (`stub_facts` already holds them).
+            index: ProjectIndex::builder(&[]).build().await,
             classpath: spec.classpath,
             source_locations,
             feature_set: spec.feature_set,
@@ -868,8 +871,9 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
     ///
     /// The one query that takes no cursor position, and therefore the one that needs no
     /// [`EditorHost`](crate::EditorHost) to decode one: it answers in the neutral
-    /// [`FileDiagnostic`], exactly as [`SingleFileProject::diagnostics`] does for a document
-    /// outside any workspace. Every *positional* query stays behind [`Editor`](crate::Editor),
+    /// [`FileDiagnostic`], which is how `jals lint` joins this seam without implementing the
+    /// positional host methods it has no cursor for. Every *positional* query stays behind
+    /// [`Editor`](crate::Editor),
     /// whose host owns that decoding — which is why this is keyed by [`FileKey`], like the rest of
     /// the public surface ([`file_id`](Self::file_id), [`owns_path`](Self::owns_path),
     /// [`set_overlay`](Self::set_overlay)), and the `FileId`-keyed form stays internal.
@@ -929,64 +933,6 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
 
     fn under(file: &FileKey, dir: &DirKey) -> bool {
         file.path().starts_with(dir.path())
-    }
-}
-
-/// The semantic inputs for a document outside any indexed workspace.
-///
-/// A one-file, stdlib-aware project model: the LSP's fallback for files that belong to no
-/// `jals.toml` project. Every fallback request drives the same [`ProjectQueries`] the workspace
-/// does.
-pub struct SingleFileProject {
-    analysis: FileAnalysis,
-    index: ProjectIndex,
-}
-
-impl SingleFileProject {
-    /// The single [`FileId`] every one-file query resolves against — the open document itself. A
-    /// query target carrying any other id (a source-less library stub keeps a reserved id) is not
-    /// openable in this document and must not be mapped onto its text.
-    pub const FILE: FileId = FileId(0);
-
-    /// Build the one-file project over an already-parsed document.
-    pub async fn new(parse: &Parse) -> Self {
-        let root = parse.syntax();
-        let analysis = FileAnalysis::of(&root).await;
-        let index = ProjectIndex::builder(&[(Self::FILE, root)])
-            .with_stdlib()
-            .build()
-            .await;
-        Self { analysis, index }
-    }
-
-    /// The query module over this one file.
-    ///
-    /// Synchronous, because binding an analysis to an index is: the detached document's inference
-    /// still runs lazily, inside the returned value, only if a query needs it.
-    pub const fn queries(&self) -> ProjectQueries<'_> {
-        ProjectQueries::new(self.analysis.in_project(&self.index, Self::FILE))
-    }
-
-    /// The file's query inputs (for the project-files iterator of a references query).
-    pub const fn file(&self) -> QueryFile<'_> {
-        QueryFile::new(Self::FILE, &self.analysis)
-    }
-
-    /// The canonical diagnostics of the file under `config`, with the one-file index folded in
-    /// (so in-file subtyping and stdlib-classified exceptions still check).
-    pub async fn diagnostics(
-        &self,
-        parse: &Parse,
-        config: &jals_config::lint::Config,
-    ) -> Vec<FileDiagnostic> {
-        FileDiagnostics::assemble(
-            parse,
-            Some(&self.analysis.in_project(&self.index, Self::FILE)),
-            config,
-            // A single detached file has no manifest, so no `attributes` dialect and no `cfg`.
-            None,
-        )
-        .await
     }
 }
 
@@ -1529,29 +1475,6 @@ mod tests {
                     .await
                     .is_empty(),
                 "an unindexed path is empty, not an error"
-            );
-        });
-    }
-
-    #[test]
-    fn single_file_project_answers_the_same_queries() {
-        block_on_inline(async {
-            let text = "class C { int f; void m() { int x = f; } }";
-            let parse = Parse::parse(text).await;
-            let project = SingleFileProject::new(&parse).await;
-            let offset = text.rfind('f').unwrap();
-            let target = project
-                .queries()
-                .definition(offset)
-                .await
-                .expect("definition");
-            assert_eq!(target.file, SingleFileProject::FILE);
-            let diags = project
-                .diagnostics(&parse, &jals_config::lint::Config::default())
-                .await;
-            assert!(
-                diags.iter().any(|d| d.code == Some("unused-variables")),
-                "{diags:?}"
             );
         });
     }
