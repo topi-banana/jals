@@ -173,7 +173,7 @@ jobs:
           # that passes by checking less — the same failure mode the `wasm-tools` note below guards
           # against.
           - name: Set up JDK (for generated-source type checks)
-            uses: actions/setup-java@v5
+            uses: actions/setup-java@v6
             with:
               distribution: temurin
               java-version: "25"
@@ -531,7 +531,7 @@ jobs:
           # selected. A current JDK reads all of them, so one version serves every cell — the same
           # one the `test` job installs.
           - name: Set up JDK (the examples compile and run with javac/java)
-            uses: actions/setup-java@v5
+            uses: actions/setup-java@v6
             with:
               distribution: temurin
               java-version: "25"
@@ -856,7 +856,7 @@ jobs:
               fetch-depth: 1
           - uses: dtolnay/rust-toolchain@stable
           - name: Set up JDK (for google-java-format, Eclipse JDT and the javac corpus)
-            uses: actions/setup-java@v5
+            uses: actions/setup-java@v6
             with:
               distribution: temurin
               # The compiler corpus's pin, so this job's javac and its `ct.sym` are the ones
