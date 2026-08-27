@@ -1,7 +1,16 @@
 {
   "required": true,
   "minVersion": "0.8",
-  "package": "com.example.hellomod.mixin",
+  "package": "com.example.{{ package.name }}.mixin",
+{% if features["since-1.20.5"] %}
+  "compatibilityLevel": "JAVA_21",
+{% elif features["since-1.18"] %}
+  "compatibilityLevel": "JAVA_17",
+{% elif features["since-1.17"] %}
+  "compatibilityLevel": "JAVA_16",
+{% else %}
+  "compatibilityLevel": "JAVA_8",
+{% endif %}
   "mixins": ["HelloMixin"],
   "injectors": { "defaultRequire": 1 }
 }

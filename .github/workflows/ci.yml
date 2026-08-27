@@ -479,9 +479,11 @@ jobs:
     # step is written once:
     #
     # - `features`: the selection the README's own command line uses. It is passed to `lint` as well
-    #   as to `build`, because an unset selection resolves to the manifest's `default` list — for
-    #   `minecraft_mod` a *different* release from the one just built, whose artifacts no offline
-    #   analysis could then find.
+    #   as to `build`, because an unset selection is a different project: for `minecraft_mod` it is
+    #   rejected outright (its `build.rhai` requires a release to be named), and for the SDK it
+    #   resolves to a *different* release from the one just built, whose artifacts no offline
+    #   analysis could then find. Two cells may name the same `dir` with different selections; the
+    #   `name` is what separates them, and `minecraft_mod` uses that below.
     # - `run`: whether `[run] main-class` is something the example can actually run. It is a promise
     #   the manifest makes, and running it is the only thing that checks it.
     # - `publications`: set only for the SDK example, whose `jals build` is documented to end in
@@ -520,9 +522,19 @@ jobs:
             dir: examples/minecraft
             features: --features 1.20.1
             publications: net/minecraft org/spongepowered com/llamalad7
-          - name: minecraft_mod
+          # One cell per side of the `#[cfg(feature = "since-1.21.6")]` branch in the mod's own
+          # source: 1.20.1 compiles the `getName()` spelling and 1.21.11 the `name()` one, and a
+          # matrix that built only one of them would let the other rot until someone selected it by
+          # hand. They differ in nothing else — same tree, same gates — so the second cell is the
+          # whole cost of keeping a conditional honest. The other 41 releases are not cells: they
+          # reach the same two branches through the same threshold, and each one is a ~50 MiB fetch
+          # and a whole-game remap.
+          - name: minecraft_mod (1.20.1)
             dir: examples/minecraft_mod
             features: --features 1.20.1
+          - name: minecraft_mod (1.21.11)
+            dir: examples/minecraft_mod
+            features: --features 1.21.11
     steps:
       - parallel:
           - uses: actions/checkout@v7

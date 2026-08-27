@@ -1,15 +1,15 @@
 # A Minecraft mixin mod, built for every release from 1.14.4 to 26.2
 
-One mixin, one resource, one jar. It prints `Hello, world` as the dedicated server object finishes
-construction, and it builds against any of the 43 releases
-[`examples/minecraft`](../minecraft) knows:
+One mixin, one resource, one jar — and **one source tree** for all 43 releases
+[`examples/minecraft`](../minecraft) knows. It prints a line naming the running game as the
+dedicated server object finishes construction:
 
 ```sh
 cargo run -p jals-cli -- build --manifest-path examples/minecraft_mod/jals.toml --features 1.20.1
 # → examples/minecraft_mod/target/jals/remap/hellomod-0.1.0.jar
 ```
 
-Three declarations in `jals.toml` carry the whole thing:
+Six declarations in `jals.toml` carry the whole thing:
 
 - **`[dependencies] minecraft`** — a `path` dependency on the SDK example. Its build script fetches
   the release, remaps it with the official mappings, and puts the game jar, `mixin-0.8.7.jar` and
@@ -19,9 +19,139 @@ Three declarations in `jals.toml` carry the whole thing:
   obfuscated.
 - **`[build] remap`** — reobfuscate the compiled classes with whichever alternative the selection
   activates, and package them, resources included, into a jar.
+- **`[package] features = ["attributes"]`** — the jals dialect's `#[cfg(...)]`. Mojang renamed one
+  API this mixin uses, so the source carries both spellings as live branches instead of the project
+  carrying two source trees.
+- **`[build] script`** — a Rhai script deriving the class-file level `javac` compiles at, which is
+  one of the two things that vary with the release and are not names.
+- **`[build.resources] template`** — the other one: the `compatibilityLevel` the mixin configuration
+  declares, rendered into the resource on its way into the jar.
 
 **Building the jar is the deliverable.** Loading it needs a Mixin-capable launcher, which jals is
 not and this example does not ship — see [Running it](#running-it).
+
+## One source tree, 43 releases
+
+The mixin asks the game what version it is. That call has three shapes across the range, and only
+one of the two differences between them is one the source has to spell out:
+
+```java
+@Inject(method = "<init>", at = @At("RETURN"), remap = false)
+private void hellomod$helloWorld(CallbackInfo callback) {
+    #[cfg(feature = "since-1.21.6")] String version =
+        SharedConstants.getCurrentVersion().name();
+    #[cfg(not(feature = "since-1.21.6"))] String version =
+        SharedConstants.getCurrentVersion().getName();
+    System.out.println("Hello, world from Minecraft " + version);
+}
+```
+
+1.21.6 turned `WorldVersion`'s getters into record-style accessors, so `getName()` became `name()`.
+That is a rename in the game's **source**, not in its namespace: no mapping set relates the two, and
+a mod that spelled one of them would simply not compile against the other half of the range. The
+other difference is invisible here — 1.18 replaced the interface that call returns, and the source
+gets away with it by never naming the type. See [What one selection produces](#what-one-selection-produces).
+
+Both branches are live source. Whichever release is selected, the other is still parsed, formatted
+and navigable in an editor; the compile frontend strips the attributes before `javac` sees the file
+and blanks the disabled branch in place, length-preservingly, so a line number in a stack trace
+still names the line that was written. `jals lint` says which branch that was, as advice rather
+than as a finding, so it reports it and still exits 0:
+
+```
+[cfg] Advice: disabled by `cfg` under the current feature selection
+    ╭─[ src/main/java/com/example/hellomod/mixin/HelloMixin.java:56:9 ]
+```
+
+The predicate is a **threshold feature**, not a version. `jals.toml` declares two kinds of name:
+
+- a **version feature** (`1.20.1`) — one release. It routes its own name into the SDK, gates one
+  `[[mappings.mojmap]]` alternative, and enables the highest threshold that release satisfies.
+- a **threshold feature** (`since-1.18`) — what everything else reads. Each enables its
+  predecessor, so naming the highest turns on the whole chain and `feature = "since-1.18"` is true
+  for every release from 1.18 up without any of the thirty-odd releases above it listing more than
+  one name.
+
+There are five thresholds rather than forty-three, because a threshold exists only where something
+branches on it:
+
+| threshold      | what branches on it                                          |
+| -------------- | ------------------------------------------------------------ |
+| `since-1.14.4` | `build.rhai`: was a release named at all?                     |
+| `since-1.17`   | `--release 16`, `compatibilityLevel: JAVA_16`                 |
+| `since-1.18`   | `--release 17`, `compatibilityLevel: JAVA_17`                 |
+| `since-1.20.5` | `--release 21`, `compatibilityLevel: JAVA_21`                 |
+| `since-1.21.6` | `WorldVersion.getName()` → `name()`                           |
+
+Three of them are the steps the game's own JVM took, which is the era table
+[below](#jdk-requirement); one is the API rename above; and the fifth is the bottom of the chain,
+which exists so that "no release named" stays distinguishable from "the oldest release named".
+
+**A release has to be named.** `jals build` with no `--features` used to build against 26.2, because
+`[dependencies] minecraft` leaves `default-features` at its `true` and the SDK falls back to its own
+newest release. That is no longer a build this project can do: the SDK would fall back while every
+threshold here stayed off, and the source would take its oldest branch against the newest game. So
+`build.rhai` says so instead of letting `javac` say it:
+
+```
+$ cargo run -p jals-cli -- build --manifest-path examples/minecraft_mod/jals.toml
+error[build-script]: select a Minecraft version feature, e.g. `--features 26.2`. There is
+deliberately no default: a release chooses the game jar, the mapping set and every `#[cfg]` branch
+at once, and this project cannot see which release the SDK fell back to.
+error: the build script failed
+```
+
+There is no `default` naming a version either, and there cannot be: `[features]` resolution is
+additive, so a default version would survive `--features 1.20.1` and be a *second* release — which
+is exactly what the SDK rejects.
+
+Only the *build* needs the selection. `jals fmt` never had a use for one, and `jals lint` without one
+still analyses the file and exits 0: the script's error is a build-time diagnostic, so an editor
+opened on this project with nothing selected reports it and goes on indexing.
+
+## What one selection produces
+
+Five selections, one source tree, and every column below read back off the packaged jar with
+`javap -v`:
+
+| selection  | `@Mixin(value = …)`      | version call              | accessor                    | class-file major | `compatibilityLevel` |
+| ---------- | ------------------------ | ------------------------- | --------------------------- | ---------------- | -------------------- |
+| `1.14.4`   | `Luk;`                   | `o.a()`                   | `GameVersion.getName()`     | 52         | `JAVA_8`             |
+| `1.17.1`   | `Laas;`                  | `ab.b()`                  | `GameVersion.getName()`     | 60         | `JAVA_16`            |
+| `1.20.1`   | `Lahe;`                  | `aa.b()`                  | `ad.c()`                    | 61         | `JAVA_17`            |
+| `1.21.11`  | `Lary;`                  | `w.b()`                   | `aa.c()`                    | 65         | `JAVA_21`            |
+| `26.2`     | `…/DedicatedServer;`     | `SharedConstants.…()`     | `WorldVersion.name()`       | 65         | `JAVA_21`            |
+
+Three separate mechanisms are visible in that table, and it is worth naming which is which.
+
+The first three columns of the 26.2 row are the point of the mappings design rather than a hole in
+it: those four releases ship deobfuscated and declare no mappings download, so no alternative names
+them and `[build] remap` packages without rewriting — which is exactly the right jar, because the
+names already in it are the ones that runtime loads. "This selection ships no mappings" says *do not
+rewrite the names*, not *produce nothing*.
+
+`GameVersion` staying `com.mojang.bridge.game.GameVersion` on the two oldest rows is the same
+property from the other side: it is a Mojang *library* type, not a game class, so it appears in no
+mapping set and the pass leaves it alone. Up to 1.17.1 `SharedConstants.getCurrentVersion()` returned
+it; 1.18 replaced it with `net.minecraft.WorldVersion`, which is obfuscated like everything else and
+comes out as `Lad;` on 1.20.1. Neither change is anything the source has to know about — only the
+1.21.6 rename is.
+
+And the last two columns are the build script and the resource template, reading the same threshold
+chain in their own vocabularies.
+
+The jar's member list is identical in every row:
+
+```sh
+$ unzip -l target/jals/remap/hellomod-0.1.0.jar
+  META-INF/MANIFEST.MF
+  com/example/hellomod/mixin/HelloMixin.class
+  mixins.hellomod.json
+```
+
+CI builds two of the five rows — `1.20.1` and `1.21.11`, one on each side of the `since-1.21.6`
+branch — and runs `jals fmt --check` and `jals lint` over the tracked source under each. The other
+three are checked by hand; the commands are the ones above.
 
 ## Why 39 mappings under one name
 
@@ -51,6 +181,13 @@ any two alternatives whose `required-features` are comparable by inclusion are r
 some selection would activate both. Here each names exactly one version feature, so the 39 sets are
 pairwise incomparable and the table is accepted.
 
+They gate on the **version** features and never on the thresholds, and the difference is not
+cosmetic. That static check compares the lists as they are written, not as the feature graph closes
+them, so a pair gated on `since-1.18` and `since-1.20.5` would pass it — and then fail at build time
+on every release from 1.20.5 up, where a selection satisfies both at once and `jals` refuses to
+guess which mapping set rewrote the jar. One version feature per alternative is what makes the 39
+sets incomparable under the chain as well as on the page.
+
 Every URL is content-addressed by the same SHA-1 it is checked against, so one digest pins both the
 address and the bytes. `max-bytes` is the published size rounded up to the next MiB; the digest is
 what guarantees the content, so pinning an exact byte count would only ever break on a re-serve of
@@ -61,54 +198,30 @@ whose `obfuscated?` flag is true, fetch
 `https://piston-meta.mojang.com/v1/packages/<metadata sha1>/<version>.json` and project
 `downloads.server_mappings.{url, sha1, size}`.
 
-## The two jars
-
-| selection                  | mapping    | what comes out                                            |
-| -------------------------- | ---------- | --------------------------------------------------------- |
-| `jals build` (26.2)        | none active | classes packaged under their own names                    |
-| `--features 1.21.11`       | active      | `@Mixin(ary.class)`                                        |
-| `--features 1.20.1`        | active      | `@Mixin(ahe.class)`                                        |
-| `--features 1.14.4`        | active      | `@Mixin(uk.class)`                                         |
-
-The 26.x row is the point of the design rather than a hole in it. Those four releases ship
-deobfuscated and declare no mappings download, so no alternative names them and the step packages
-without rewriting — which is exactly the right jar, because the names already in it are the ones
-that runtime loads. "This selection ships no mappings" says *do not rewrite the names*, not *produce
-nothing*.
-
-```sh
-$ unzip -l target/jals/remap/hellomod-0.1.0.jar
-  META-INF/MANIFEST.MF
-  com/example/hellomod/mixin/HelloMixin.class
-  mixins.hellomod.json
-```
-
-The member list is identical in both branches: only the *contents* of `HelloMixin.class` differ, and
-`mixins.hellomod.json` rides through untouched because a remap rewrites class files and leaves every
-other archive member alone.
-
 ## Why `remap = false`, and where the line is
 
 ```java
 @Mixin(value = DedicatedServer.class, remap = false)
 public class HelloMixin {
     @Inject(method = "<init>", at = @At("RETURN"), remap = false)
-    private void hellomod$helloWorld(CallbackInfo callback) {
-        System.out.println("Hello, world");
-    }
+    private void hellomod$helloWorld(CallbackInfo callback) { … }
 }
 ```
 
-jals rewrites annotation **`Class`** values and never annotation **strings**, and it generates no
-refmap. Everything about this mixin follows from that:
+jals rewrites two kinds of reference and not a third, and it generates no refmap. Everything about
+this mixin follows from that:
 
-- `@Mixin`'s `value` is a `Class` value, so `[build] remap` rewrites it. On 1.20.1 `javap -v` on the
-  packaged class reads `org.spongepowered.asm.mixin.Mixin(value=[class Lahe;], remap=false)`. The
-  rewrite covers `RuntimeInvisibleAnnotations` as well as the visible ones, which is load-bearing
-  here: `@Mixin` is `CLASS`-retained and `@Inject` is `RUNTIME`-retained, so this one mixin uses
-  both attributes.
-- `method = "<init>"` names a constructor, which is `<init>` in every namespace and appears in no
-  mapping. `@At("RETURN")` names an injection point, not a member. Neither needs a refmap.
+- An **annotation `Class` value** is rewritten. `@Mixin`'s `value` is one, which is why `javap -v` on
+  the packaged class reads `org.spongepowered.asm.mixin.Mixin(value=[class Lahe;], remap=false)` on
+  1.20.1. The rewrite covers `RuntimeInvisibleAnnotations` as well as the visible ones, which is
+  load-bearing here: `@Mixin` is `CLASS`-retained and `@Inject` is `RUNTIME`-retained, so this one
+  mixin uses both attributes.
+- An **ordinary reference in code** is rewritten too — it is a constant-pool entry like any other.
+  `SharedConstants.getCurrentVersion().getName()` comes out of the pass as `aa.b()` and `ad.c()` on
+  1.20.1, which is why the mixin may call the game at all.
+- An **annotation string** is not. `method = "<init>"` names a constructor, which is `<init>` in
+  every namespace and appears in no mapping; `@At("RETURN")` names an injection point, not a member.
+  Neither needs a refmap, and neither would get one.
 - `remap = false` is correct in **both** branches: on an obfuscated release the class literal already
   carries the obfuscated name, and on 26.x nothing was rewritten because the game ships
   deobfuscated. Either way the reference is already right and Mixin must take it verbatim.
@@ -128,30 +241,94 @@ mixin aimed at either would round-trip unchanged and demonstrate nothing — and
 appear in the mappings at all before 1.16. See the table in
 [the SDK's README](../minecraft/README.md#writing-a-mod-against-this).
 
+## The build script
+
+`build.rhai` derives what `javac` needs that varies with the release, and it holds **no table of
+releases**. `jals.toml` already routes 43 version features into the SDK, and the SDK's own build
+script is what rejects a second one; a catalog here would be a second copy of that rule and the
+first of the two to drift. So the script reads the threshold chain instead — which is also why a
+release added to `jals.toml` needs nothing here at all:
+
+```rhai
+let release = 8;
+if build.feature("since-1.20.5") {
+    release = 21;
+} else if build.feature("since-1.18") {
+    release = 17;
+} else if build.feature("since-1.17") {
+    release = 16;
+}
+build.add_javac_arg("--release");
+build.add_javac_arg("" + release);
+```
+
+`--release` rather than `source`/`target`, because only `--release` also pins the platform API the
+mod may reach for. The level follows the game's own JVM, and it **stops at 21** rather than
+continuing to 25 for the 26.x releases: the framework this mod compiles against is SpongePowered
+Mixin 0.8.7, whose `compatibilityLevel` vocabulary ends at `JAVA_21`, and a mixin class Mixin cannot
+name a level for is one it refuses to apply. Capping costs the mod nothing — a Java 21 class file
+loads on the Java 25 JVM 26.x runs on, and this mixin needs no language feature above Java 8 anyway.
+
+Two more arguments, for reasons that are not about this mod:
+
+- `-Xlint:-options` when the level is 8, because a current JDK compiles at 8 but says twice on every
+  build that it is obsolete. The warning is about the option, not about this project.
+- `-proc:none`, always. `mixin-0.8.7.jar` registers two annotation processors in `META-INF/services`
+  and the SDK puts that jar on the compile classpath. Nothing here wants them — their job is the
+  refmap this example deliberately ships none of — and whether a `javac` starts a processor it
+  merely *found* on the class path is a property of the JDK: a JDK 25 does not, an older one may.
+  Saying so here is what keeps the build from depending on which JDK a reader happens to have
+  installed.
+
 ## Resources
 
 `[build] resource-dirs` (defaulting to `["src/main/resources"]`) names the directories packaged into
 the jar alongside the classes. Mixin has to read `mixins.hellomod.json` at load time, so without it
 the jar is a jar of class files nothing will ever apply.
 
+One field of that file is per-release, so it is **rendered rather than copied**:
+
 ```json
 {
   "required": true,
   "minVersion": "0.8",
-  "package": "com.example.hellomod.mixin",
+  "package": "com.example.{{ package.name }}.mixin",
+{% if features["since-1.20.5"] %}
+  "compatibilityLevel": "JAVA_21",
+{% elif features["since-1.18"] %}
+  "compatibilityLevel": "JAVA_17",
+{% elif features["since-1.17"] %}
+  "compatibilityLevel": "JAVA_16",
+{% else %}
+  "compatibilityLevel": "JAVA_8",
+{% endif %}
   "mixins": ["HelloMixin"],
   "injectors": { "defaultRequire": 1 }
 }
 ```
 
-No `"refmap"` — declaring one that is absent logs a warning on every load, and there is none to
-declare. No `"compatibilityLevel"` either: it must be at least the class-file version `javac`
-produced, and this project leaves `[build] release` unset (below), so setting the two is one paired
-decision left to whoever adapts this.
+`compatibilityLevel` must be at least the class-file version `javac` produced, and `build.rhai`
+produces one of four. The two derivations read the same threshold chain in their own vocabularies —
+`--release 17` there, `JAVA_17` here — which is one table rather than two: the chain is in
+`jals.toml`, and neither site has a list of releases in it.
 
-This example declares no `[build.resources] template`, so its resources are packaged byte for byte —
-the default. A project that wants `[package] version` or the active features rendered into a
-resource names it there instead; see [the build crate's README](../../jals-build/README.md#resource-templates).
+`[build.resources] template` is what turns rendering on, and it names files rather than switching a
+mode:
+
+```toml
+[build.resources]
+template = ["mixins.hellomod.json"]
+```
+
+Everything else under a resource directory is still packaged byte for byte, which is the point — a
+resource is whatever the author put there, and a mod icon through a template engine is a corrupt
+PNG. A block tag alone on its line takes the line with it, so the rendered file is valid JSON with
+no blank lines left behind; see [the build crate's
+README](../../jals-build/README.md#resource-templates) for the two readable namespaces and the three
+deliberate divergences from Jinja.
+
+There is still no `"refmap"` key: declaring one that is absent logs a warning on every load, and
+there is none to declare.
 
 Resources are authored project files, so they are read from the project snapshot rather than walked
 off disk, and they reach the **jar only** — `jals run` executes `classes-dir`, which is compiler
@@ -159,22 +336,18 @@ output and never receives them.
 
 ## Features
 
-The 43 version features and the four SDK axes are declared here as *local* names that route into the
-dependency:
+The 43 version features, the five thresholds and the four SDK axes are all declared here; the two
+kinds and what reads them are [above](#one-source-tree-43-releases). Two things about the table are
+worth adding on their own.
 
 ```toml
 [features]
 server = ["minecraft/server"]
-"1.20.1" = ["minecraft/1.20.1"]
+"1.20.1" = ["since-1.18", "minecraft/1.20.1"]
 ```
 
-Declaring them locally is what lets `[[mappings.mojmap]]` gate on them; the `minecraft/…` entry is
-pure routing and is never queryable in this project.
-
-There is no `default` list. `[dependencies] minecraft` leaves `default-features` at its `true`, so
-the SDK resolves its own `default = ["server", "mixin", "mixinextras"]` and falls back to its own
-newest release. `jals build` with no flags therefore builds against 26.2, with Mixin and MixinExtras
-on the classpath.
+Declaring the version names locally is what lets `[[mappings.mojmap]]` gate on them; the
+`minecraft/…` entry is pure routing and is never queryable in this project.
 
 **Version exclusivity is not restated here.** The forwarded selection reaches the SDK's own build
 script, whose `build.error` rejects a second version before any download:
@@ -196,21 +369,26 @@ snapshot this project does not own.
 
 ## JDK requirement
 
-`[build] release` is deliberately unset. `--release N` cannot relax the binding constraint anyway:
-to compile against the SDK's classpath `javac` must be able to **read** the game's class files, and
-a JDK 21 `javac` rejects a Java 25 class outright. Your JDK must be at least:
+`build.rhai` decides what the mod is compiled *to*; your JDK still decides what can be compiled *at
+all*, and the two are separate constraints. `--release 17` cannot relax the binding one: to compile
+against the SDK's classpath `javac` must be able to **read** the game's class files, and a JDK 21
+`javac` rejects a Java 25 class outright. So your JDK must be at least:
 
-| releases         | JDK |
-| ---------------- | --- |
-| 1.14.4 – 1.16.5  | 8   |
-| 1.17 – 1.17.1    | 16  |
-| 1.18 – 1.20.4    | 17  |
-| 1.20.5 – 1.21.11 | 21  |
-| 26.x             | 25  |
+| releases         | JDK | `--release` |
+| ---------------- | --- | ----------- |
+| 1.14.4 – 1.16.5  | 9   | 8           |
+| 1.17 – 1.17.1    | 16  | 16          |
+| 1.18 – 1.20.4    | 17  | 17          |
+| 1.20.5 – 1.21.11 | 21  | 21          |
+| 26.x             | 25  | 21          |
 
-The mixin itself needs nothing above Java 8, so leaving the output at the JDK's default is the
-honest position. Set `[build] release` yourself if you care, together with the mixin config's
-`compatibilityLevel`.
+The oldest row is the one place the two columns disagree about which number is binding: those game
+jars are Java 8 class files, but `--release` did not exist before JDK 9, so 9 is the floor for
+building them here.
+
+A newer JDK is always fine — `javac` accepts any `--release` between the oldest it still supports (8
+today) and its own version, and reads a *classpath* class newer than that release without complaint
+— so one JDK 25 builds all 43. CI installs exactly that one.
 
 ## Running it
 
@@ -223,7 +401,10 @@ validates loader metadata, and this example ships none (no `fabric.mod.json`, no
 If you adapt this for a specific loader, note that the reobfuscation target here is **vanilla's own
 obfuscated namespace**. A loader that deobfuscates the game to some other namespace at runtime
 (Fabric's intermediary, older Forge's SRG) wants a different mapping set on the `[build] remap`
-line, not a different mixin.
+line, not a different mixin. Such a loader also ships its own Mixin, usually newer than the 0.8.7 the
+SDK puts on the classpath — and 0.8.7's `CompatibilityLevel` ending at `JAVA_21` is the whole of what
+the `--release` cap above answers to, so a build against a Mixin that names a higher level would
+raise it.
 
 ## Legal note
 
