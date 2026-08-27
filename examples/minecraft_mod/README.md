@@ -149,9 +149,12 @@ $ unzip -l target/jals/remap/hellomod-0.1.0.jar
   mixins.hellomod.json
 ```
 
-CI builds two of the five rows — `1.20.1` and `1.21.11`, one on each side of the `since-1.21.6`
-branch — and runs `jals fmt --check` and `jals lint` over the tracked source under each. The other
-three are checked by hand; the commands are the ones above.
+CI builds **all 43**, one cell per release, and merges the jars into a single `hellomod-jars`
+artifact attached to the run — so the five rows above are a sample of what a run produces rather
+than a claim about the releases someone remembered to check. Two of them, `1.20.1` and `1.21.11`,
+one on each side of the `since-1.21.6` branch, are additionally run through `jals fmt --check` and
+`jals lint`, which is the half a jar does not prove: the linter evaluates the same `cfg` the
+frontend does, so each side needs its own selection to be looked at.
 
 ## Why 39 mappings under one name
 
