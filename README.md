@@ -369,7 +369,9 @@ The source-archive task shape is shown in
 [`examples/minecraft`](examples/minecraft), and
 [`examples/minecraft_mod`](examples/minecraft_mod) builds a Mixin mod on top of it — declarative
 `[mappings]` alternatives plus `[build] remap`, packaging a jar for all 43 releases and
-reobfuscating it for the 39 that ship obfuscated.
+reobfuscating it for the 39 that ship obfuscated. One source tree covers all 43: the dialect's
+`#[cfg]` carries the one API Mojang renamed inside that range, over a chain of threshold features
+that a build script and a resource template read too.
 
 The root Rhai phase itself is capability-limited, but its compiler/JVM arguments, classpath entries,
 and subprocess environment directives intentionally affect the later explicit `jals build`/`run`

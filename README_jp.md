@@ -357,7 +357,9 @@ remap 済み Minecraft の例は [`examples/minecraft`](examples/minecraft)
 にあります。その上に Mixin mod を組み立てる例が
 [`examples/minecraft_mod`](examples/minecraft_mod) で、宣言的な `[mappings]` の代替と
 `[build] remap` により全 43 リリース向けに jar を package し、そのうち難読化された 39
-リリースでは再難読化します。
+リリースでは再難読化します。source tree は 43 リリースで 1 つです。その範囲内で Mojang が
+rename した唯一の API を dialect の `#[cfg]` が引き受け、その述語である threshold feature の
+chain は build script と resource template も読みます。
 
 root Rhai phase 自体は capability 制限されていますが、その compiler/JVM 引数、classpath、subprocess
 environment directive は、後続の明示的な `jals build` / `run` による JDK process へ意図的に反映され

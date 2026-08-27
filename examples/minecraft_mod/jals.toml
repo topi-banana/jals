@@ -1,16 +1,42 @@
 [package]
 name = "hellomod"
 version = "0.1.0"
+# The jals dialect's conditional compilation, and the only reason this project declares a package
+# feature at all. `attributes` is what makes an `#[cfg(feature = "…")]` in `src/main/java` a
+# directive rather than a syntax error: the compile frontend strips every attribute before `javac`
+# sees the source, and blanks — length-preservingly, so a line number in a stack trace still names
+# the line the author wrote — every declaration or statement whose predicate is false.
+features = ["attributes"]
 
-# Every axis of the SDK, forwarded. A name declared here is a *local* build feature — which is what
-# lets the `[[mappings.mojmap]]` alternatives below gate on it — whose list routes the same name into
-# the dependency. Nothing here is queryable in this project: a `<dependency>/<feature>` entry is
-# routing only.
+# Two kinds of name live here, and only the first is ever selected on a command line.
 #
-# There is deliberately no `default`. `[dependencies] minecraft` leaves `default-features` at its
-# `true`, so the SDK resolves its own `default = ["server", "mixin", "mixinextras"]` and its build
-# script falls back to its own newest release. `jals build` with no flags therefore builds against
-# 26.2 — which ships deobfuscated — and packages a jar with no reobfuscation pass at all.
+# A **version feature** (`1.20.1`) is one Minecraft release. It routes its own name into the SDK and
+# enables the highest *threshold* feature that release satisfies. The `minecraft/…` entry is
+# routing only and is never queryable in this project; declaring the name locally is also what lets
+# the `[[mappings.mojmap]]` alternatives below gate on it.
+#
+# A **threshold feature** (`since-1.18`) is what everything else reads: the `#[cfg]` predicates in
+# the source, the compatibility level `mixins.hellomod.json` renders, and the `--release` derived in
+# `build.rhai`. Each one enables its predecessor, so naming the highest enables the whole chain
+# below it — `#[cfg(feature = "since-1.18")]` is true for every release from 1.18 up, and no
+# release has to list more than one name.
+#
+# A threshold exists only where something branches on it, which is why there are five rather than
+# forty-three. Three are the steps the game's own JVM took, the era table in `README.md`: 1.17 needs
+# Java 16, 1.18 needs 17, 1.20.5 needs 21. The fourth is the single API rename this mod's source has
+# to survive — at 1.21.6 `WorldVersion`'s getters became record-style accessors, so `getName()` is
+# `name()`. Adding a threshold means adding a link to the chain and pointing the affected releases
+# at it, never editing the releases below it.
+#
+# The fifth, `since-1.14.4`, is the bottom of the chain and the one every release reaches: it is
+# how a selection that named *no* release stays distinguishable from one that named the oldest.
+# `build.rhai` is what branches on it, and it rejects the build rather than compiling something.
+# That is a change this example did not need before it had `#[cfg]`: `[dependencies] minecraft`
+# leaves `default-features` at its `true`, so with no version feature the SDK still resolves its own
+# `default` and falls back to its newest release — but the thresholds here would all be off, and the
+# source would take its oldest branch against the newest game. There is deliberately no `default`
+# naming a version either, because `[features]` resolution is additive: a default version would
+# survive `--features 1.20.1` and be a second release, which is exactly what the SDK rejects.
 #
 # The version features are mutually exclusive, and this project does not re-enforce that: the
 # forwarded selection reaches the SDK's own build script, whose `build.error` rejects a second
@@ -20,49 +46,54 @@ server = ["minecraft/server"]
 client = ["minecraft/client"]
 mixin = ["minecraft/mixin"]
 mixinextras = ["minecraft/mixinextras"]
-"26.2" = ["minecraft/26.2"]
-"26.1.2" = ["minecraft/26.1.2"]
-"26.1.1" = ["minecraft/26.1.1"]
-"26.1" = ["minecraft/26.1"]
-"1.21.11" = ["minecraft/1.21.11"]
-"1.21.10" = ["minecraft/1.21.10"]
-"1.21.9" = ["minecraft/1.21.9"]
-"1.21.8" = ["minecraft/1.21.8"]
-"1.21.7" = ["minecraft/1.21.7"]
-"1.21.6" = ["minecraft/1.21.6"]
-"1.21.5" = ["minecraft/1.21.5"]
-"1.21.4" = ["minecraft/1.21.4"]
-"1.21.3" = ["minecraft/1.21.3"]
-"1.21.2" = ["minecraft/1.21.2"]
-"1.21.1" = ["minecraft/1.21.1"]
-"1.21" = ["minecraft/1.21"]
-"1.20.6" = ["minecraft/1.20.6"]
-"1.20.5" = ["minecraft/1.20.5"]
-"1.20.4" = ["minecraft/1.20.4"]
-"1.20.3" = ["minecraft/1.20.3"]
-"1.20.2" = ["minecraft/1.20.2"]
-"1.20.1" = ["minecraft/1.20.1"]
-"1.20" = ["minecraft/1.20"]
-"1.19.4" = ["minecraft/1.19.4"]
-"1.19.3" = ["minecraft/1.19.3"]
-"1.19.2" = ["minecraft/1.19.2"]
-"1.19.1" = ["minecraft/1.19.1"]
-"1.19" = ["minecraft/1.19"]
-"1.18.2" = ["minecraft/1.18.2"]
-"1.18.1" = ["minecraft/1.18.1"]
-"1.18" = ["minecraft/1.18"]
-"1.17.1" = ["minecraft/1.17.1"]
-"1.17" = ["minecraft/1.17"]
-"1.16.5" = ["minecraft/1.16.5"]
-"1.16.4" = ["minecraft/1.16.4"]
-"1.16.3" = ["minecraft/1.16.3"]
-"1.16.2" = ["minecraft/1.16.2"]
-"1.16.1" = ["minecraft/1.16.1"]
-"1.16" = ["minecraft/1.16"]
-"1.15.2" = ["minecraft/1.15.2"]
-"1.15.1" = ["minecraft/1.15.1"]
-"1.15" = ["minecraft/1.15"]
-"1.14.4" = ["minecraft/1.14.4"]
+"since-1.14.4" = []
+"since-1.17" = ["since-1.14.4"]
+"since-1.18" = ["since-1.17"]
+"since-1.20.5" = ["since-1.18"]
+"since-1.21.6" = ["since-1.20.5"]
+"26.2" = ["since-1.21.6", "minecraft/26.2"]
+"26.1.2" = ["since-1.21.6", "minecraft/26.1.2"]
+"26.1.1" = ["since-1.21.6", "minecraft/26.1.1"]
+"26.1" = ["since-1.21.6", "minecraft/26.1"]
+"1.21.11" = ["since-1.21.6", "minecraft/1.21.11"]
+"1.21.10" = ["since-1.21.6", "minecraft/1.21.10"]
+"1.21.9" = ["since-1.21.6", "minecraft/1.21.9"]
+"1.21.8" = ["since-1.21.6", "minecraft/1.21.8"]
+"1.21.7" = ["since-1.21.6", "minecraft/1.21.7"]
+"1.21.6" = ["since-1.21.6", "minecraft/1.21.6"]
+"1.21.5" = ["since-1.20.5", "minecraft/1.21.5"]
+"1.21.4" = ["since-1.20.5", "minecraft/1.21.4"]
+"1.21.3" = ["since-1.20.5", "minecraft/1.21.3"]
+"1.21.2" = ["since-1.20.5", "minecraft/1.21.2"]
+"1.21.1" = ["since-1.20.5", "minecraft/1.21.1"]
+"1.21" = ["since-1.20.5", "minecraft/1.21"]
+"1.20.6" = ["since-1.20.5", "minecraft/1.20.6"]
+"1.20.5" = ["since-1.20.5", "minecraft/1.20.5"]
+"1.20.4" = ["since-1.18", "minecraft/1.20.4"]
+"1.20.3" = ["since-1.18", "minecraft/1.20.3"]
+"1.20.2" = ["since-1.18", "minecraft/1.20.2"]
+"1.20.1" = ["since-1.18", "minecraft/1.20.1"]
+"1.20" = ["since-1.18", "minecraft/1.20"]
+"1.19.4" = ["since-1.18", "minecraft/1.19.4"]
+"1.19.3" = ["since-1.18", "minecraft/1.19.3"]
+"1.19.2" = ["since-1.18", "minecraft/1.19.2"]
+"1.19.1" = ["since-1.18", "minecraft/1.19.1"]
+"1.19" = ["since-1.18", "minecraft/1.19"]
+"1.18.2" = ["since-1.18", "minecraft/1.18.2"]
+"1.18.1" = ["since-1.18", "minecraft/1.18.1"]
+"1.18" = ["since-1.18", "minecraft/1.18"]
+"1.17.1" = ["since-1.17", "minecraft/1.17.1"]
+"1.17" = ["since-1.17", "minecraft/1.17"]
+"1.16.5" = ["since-1.14.4", "minecraft/1.16.5"]
+"1.16.4" = ["since-1.14.4", "minecraft/1.16.4"]
+"1.16.3" = ["since-1.14.4", "minecraft/1.16.3"]
+"1.16.2" = ["since-1.14.4", "minecraft/1.16.2"]
+"1.16.1" = ["since-1.14.4", "minecraft/1.16.1"]
+"1.16" = ["since-1.14.4", "minecraft/1.16"]
+"1.15.2" = ["since-1.14.4", "minecraft/1.15.2"]
+"1.15.1" = ["since-1.14.4", "minecraft/1.15.1"]
+"1.15" = ["since-1.14.4", "minecraft/1.15"]
+"1.14.4" = ["since-1.14.4", "minecraft/1.14.4"]
 
 # The SDK. Its build script puts the resolved game jar, `mixin-0.8.7.jar` and
 # `mixinextras-common-0.5.4.jar` on this project's compile classpath, and publishes the matching
@@ -72,6 +103,9 @@ mixinextras = ["minecraft/mixinextras"]
 minecraft = { path = "../minecraft" }
 
 [build]
+# Everything `javac` needs that varies with the release, derived from the threshold chain rather
+# than from a second table of versions — see `build.rhai`.
+script = { type = "rhai", file = "build.rhai" }
 # The default value, written out because it is one of the two things this example demonstrates:
 # `mixins.hellomod.json` has to be *in* the jar or Mixin has nothing to read.
 resource-dirs = ["src/main/resources"]
@@ -81,6 +115,17 @@ resource-dirs = ["src/main/resources"]
 # table where that could fail. The four 26.x releases name no alternative at all, so there the step
 # packages the jar and rewrites nothing, which is exactly right: they ship deobfuscated.
 remap = { with = "mojmap" }
+
+# The one resource is rendered rather than copied, because one field of it is per-release: Mixin
+# refuses a mixin class whose class-file version exceeds the declared `compatibilityLevel`, and
+# `build.rhai` compiles at the release the game's own JVM asks for. Both read the same threshold
+# chain, each in its own vocabulary — `--release 17` there, `JAVA_17` here.
+#
+# Naming the file is what turns rendering on. Everything else under a resource directory is still
+# packaged byte for byte, which is the point: a resource is whatever the author put there, and a
+# mod icon through a template engine is a corrupt PNG.
+[build.resources]
+template = ["mixins.hellomod.json"]
 
 # One mapping set per obfuscated release, gated on that release's feature. Each URL is
 # content-addressed by the same SHA-1 it is checked against, so one digest pins both the address and

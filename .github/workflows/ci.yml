@@ -479,9 +479,11 @@ jobs:
     # step is written once:
     #
     # - `features`: the selection the README's own command line uses. It is passed to `lint` as well
-    #   as to `build`, because an unset selection resolves to the manifest's `default` list — for
-    #   `minecraft_mod` a *different* release from the one just built, whose artifacts no offline
-    #   analysis could then find.
+    #   as to `build`, because an unset selection is a different project: for `minecraft_mod` it is
+    #   rejected outright (its `build.rhai` requires a release to be named), and for the SDK it
+    #   resolves to a *different* release from the one just built, whose artifacts no offline
+    #   analysis could then find. Two cells may name the same `dir` with different selections; the
+    #   `name` is what separates them, and `minecraft_mod` uses that below.
     # - `run`: whether `[run] main-class` is something the example can actually run. It is a promise
     #   the manifest makes, and running it is the only thing that checks it.
     # - `publications`: set only for the SDK example, whose `jals build` is documented to end in
@@ -520,9 +522,19 @@ jobs:
             dir: examples/minecraft
             features: --features 1.20.1
             publications: net/minecraft org/spongepowered com/llamalad7
-          - name: minecraft_mod
+          # One cell per side of the `#[cfg(feature = "since-1.21.6")]` branch in the mod's own
+          # source: 1.20.1 compiles the `getName()` spelling and 1.21.11 the `name()` one, and a
+          # matrix that built only one of them would let the other rot until someone selected it by
+          # hand. They differ in nothing else — same tree, same gates — so the second cell is the
+          # whole cost of keeping a conditional honest. The other 41 releases are not cells: they
+          # reach the same two branches through the same threshold, and each one is a ~50 MiB fetch
+          # and a whole-game remap.
+          - name: minecraft_mod (1.20.1)
             dir: examples/minecraft_mod
             features: --features 1.20.1
+          - name: minecraft_mod (1.21.11)
+            dir: examples/minecraft_mod
+            features: --features 1.21.11
     steps:
       - parallel:
           - uses: actions/checkout@v7
@@ -605,6 +617,149 @@ jobs:
           printf 'checking %s\n' "${sources[@]}"
           jals fmt --check "${sources[@]}"
           jals lint ${{ matrix.example.features }} "${sources[@]}"
+
+  mod-jar-setup:
+    # The two things all 43 cells below need and neither should produce forty-three times: the list
+    # of releases, and the `jals` that builds them.
+    #
+    # The list is `examples/minecraft_mod/jals.toml`'s own, read out of the manifest rather than
+    # written down again here. A 43-row copy in this file would be the copy that drifts — which is
+    # the argument the example's own `build.rhai` makes for holding no catalog — and the manifest is
+    # where a release is added, so a new release gets a jar with no edit to this workflow at all.
+    # The version features are the `[features]` keys that start with a digit; the thresholds
+    # (`since-…`) and the SDK axes (`server`, `mixin`, …) do not, and `tomllib` is in the runner's
+    # standard library, so this reads the same file `jals` does rather than a grep of it.
+    #
+    # The binary is built once and handed down as an artifact. The `examples` job above builds its
+    # own per cell, which is right at seven; at forty-three it would be forty-three cargo builds to
+    # produce one binary that is bit-identical in every one of them.
+    name: mod jar setup
+    runs-on: ubuntu-latest
+    outputs:
+      versions: ${{ steps.versions.outputs.versions }}
+    steps:
+      - parallel:
+          - uses: actions/checkout@v7
+          - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: mod-jar
+      - name: Read the release list out of the example's manifest
+        id: versions
+        run: |
+          set -euo pipefail
+          versions=$(python3 -c '
+          import json, tomllib
+
+          manifest = tomllib.load(open("examples/minecraft_mod/jals.toml", "rb"))
+          print(json.dumps([k for k in manifest["features"] if k[0].isdigit()]))
+          ')
+          echo "${versions}"
+          echo "versions=${versions}" >>"$GITHUB_OUTPUT"
+      # Release, not debug: every cell below decompresses, remaps and decompiles a whole game jar,
+      # and an unoptimized build turns that from a step into the job.
+      - name: Build the jals binary
+        run: cargo build --release --package jals-cli
+      - name: Upload the jals binary for the matrix
+        uses: actions/upload-artifact@v7
+        with:
+          name: mod-jar-jals
+          path: target/release/jals
+          if-no-files-found: error
+          # Scaffolding for one run, not a deliverable: the jars are what a reader downloads.
+          retention-days: 1
+
+  mod-jar:
+    # One jar per Minecraft release, all from the one source tree in `examples/minecraft_mod`. The
+    # `example (minecraft_mod (…))` cells above gate `fmt` and `lint` on each side of that source's
+    # `#[cfg]`; this job is the other half of what its README claims — that **all** 43 releases
+    # compile — and it is what puts the jars somewhere a reader can download them.
+    #
+    # One cell per release rather than one cell looping over the list: the wall clock is then a
+    # single build instead of forty-three of them, and a release that breaks is a red cell carrying
+    # its own version number rather than a line in a very long log. `fail-fast: false` for the
+    # second half of that reason — one broken release must not hide the state of the other
+    # forty-two.
+    #
+    # Nothing is cached between runs, for the reason the `examples` job gives: build-task results
+    # are memoized under a plan digest no jals version participates in, so a restored `target/jals`
+    # would let a change to this workspace reuse the artifacts that change was supposed to
+    # regenerate — a green cell that ran nothing.
+    name: mod jar (${{ matrix.minecraft }})
+    needs: mod-jar-setup
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        minecraft: ${{ fromJSON(needs.mod-jar-setup.outputs.versions) }}
+    steps:
+      - parallel:
+          - uses: actions/checkout@v7
+          # One JDK for all 43 cells. `javac` accepts any `--release` between the oldest it still
+          # supports and its own version, and reads a *classpath* class newer than that release
+          # without complaint, so 25 covers the whole range — `--release 8` against 1.14.4's Java 8
+          # class files through the Java 25 ones 26.x ships.
+          - name: Set up JDK (the mod compiles against the game's class files)
+            uses: actions/setup-java@v6
+            with:
+              distribution: temurin
+              java-version: "25"
+          # Into the runner temp rather than the workspace, which is what lets it share this group
+          # with the checkout that recreates the workspace.
+          - name: Download the jals binary built once for this matrix
+            uses: actions/download-artifact@v7
+            with:
+              name: mod-jar-jals
+              path: ${{ runner.temp }}/jals-bin
+      # An artifact carries no mode bits, so the binary comes back readable and not executable.
+      - name: Put jals on PATH
+        run: |
+          set -euo pipefail
+          chmod +x "${RUNNER_TEMP}/jals-bin/jals"
+          echo "${RUNNER_TEMP}/jals-bin" >>"$GITHUB_PATH"
+      - name: Build the mod
+        working-directory: examples/minecraft_mod
+        run: jals build --features ${{ matrix.minecraft }}
+      # Every release produces the same file name — the jar is named after `[package]`, which does
+      # not vary with the selection — so the release has to enter the name here, before forty-three
+      # of them meet inside one artifact. The stem is taken from the jar rather than spelled out, so
+      # bumping the example's `[package] version` needs no edit here either.
+      - name: Name the jar after the release it was built for
+        working-directory: examples/minecraft_mod
+        run: |
+          set -euo pipefail
+          jar=$(ls -1 target/jals/remap/*.jar)
+          mkdir -p "${GITHUB_WORKSPACE}/dist"
+          cp "${jar}" "${GITHUB_WORKSPACE}/dist/$(basename "${jar%.jar}")+mc${{ matrix.minecraft }}.jar"
+      - name: Upload this release's jar
+        uses: actions/upload-artifact@v7
+        with:
+          # `hellomod-jar-…`, not `mod-jar-…`: the pattern the merge below matches must not also
+          # match `mod-jar-jals`, or the binary that built these would be merged in beside them and
+          # then deleted with them.
+          name: hellomod-jar-${{ matrix.minecraft }}
+          path: dist/
+          if-no-files-found: error
+
+  mod-jars:
+    # The one artifact all of that exists for: every release's jar in a single download, with the
+    # per-cell uploads deleted behind it so a run leaves exactly one thing to take.
+    #
+    # It runs when the matrix ran at all, not only when every cell passed: a release that fails to
+    # build still reds its own cell and the workflow, and the jars that did build are more useful
+    # attached to that run than withheld from it. Skipped and cancelled are the two states with
+    # nothing to merge, and naming the two that do have something is how they stay excluded.
+    name: mod jars
+    needs: mod-jar
+    if: ${{ needs.mod-jar.result == 'success' || needs.mod-jar.result == 'failure' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Merge every release's jar into one artifact
+        uses: actions/upload-artifact/merge@v7
+        with:
+          name: hellomod-jars
+          pattern: hellomod-jar-*
+          delete-merged: true
 
   setup-action:
     # The repository-root `action.yml` claims a consumer installs `jals` in one step. A claim is
