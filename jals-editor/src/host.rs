@@ -55,7 +55,17 @@ pub trait EditorHost {
     fn range(&self, doc: &Document, range: Range<usize>) -> Self::Range;
     /// Encode a byte range in the file at `path` (whose cached document is `doc`) as a host
     /// cross-file target.
-    fn location(&self, path: &FileKey, doc: &Document, range: Range<usize>) -> Self::Location;
+    ///
+    /// `None` when this host cannot address `path` at all — a mounted key it holds no URI for, a
+    /// virtual path its protocol cannot spell. Fallible because the alternative is fabricating an
+    /// address that resolves to nothing: a target the host cannot name is a target it must not
+    /// offer.
+    fn location(
+        &self,
+        path: &FileKey,
+        doc: &Document,
+        range: Range<usize>,
+    ) -> Option<Self::Location>;
     /// Render one neutral diagnostic of `doc`.
     fn diagnostic(&self, doc: &Document, diagnostic: FileDiagnostic) -> Self::Diagnostic;
     /// Render one outline node of `doc`, whose children are already rendered.

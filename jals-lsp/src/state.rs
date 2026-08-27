@@ -14,7 +14,9 @@ use jals_editor::{Editor, ProjectLayout, Utf16Position};
 use jals_exec::Exec;
 use jals_exec::tokio_rt::on_blocking_pool;
 use jals_storage::{
-    DirKey, FileKey, NativeCache, NativeScope, NativeSource, NativeStorage, RelativePath,
+    CacheBackend, CodeTree, DirKey, FileKey, MemoryCache, MemorySource, MemoryStorage, Name,
+    NativeCache, NativeScope, NativeSource, NativeStorage, ProjectStorage, RelativePath,
+    SourceBackend,
 };
 
 use crate::host::LspHost;
@@ -124,9 +126,157 @@ impl DocumentStore {
     }
 }
 
-/// One `jals.toml` project's analysis: the protocol-neutral [`jals_editor::Workspace`] (driven
-/// through the [`Editor`] facade with the [`LspHost`] rendering) plus the URI ↔ virtual-path
-/// mapping that is the LSP's only remaining responsibility.
+/// The analysis half of a workspace: every query this server answers, keyed by the workspace's
+/// own [`FileKey`].
+///
+/// Generic over the storage backends because that is the only thing the two kinds of workspace
+/// differ in — a project's analysis reads the host filesystem, a detached group holds nothing but
+/// the documents the client opened. The query surface is identical, so it is written once here
+/// and neither of them restates it.
+///
+/// What is deliberately *absent* is how a `Url` becomes a `FileKey`: that rule belongs to the
+/// owner (a path computation for a project, a mount table for a detached group), and
+/// [`OpenDocument`] is where the two meet.
+struct Analysis<S: SourceBackend, C: CacheBackend> {
+    editor: Editor<S, C, LspHost>,
+}
+
+impl<S: SourceBackend, C: CacheBackend> Analysis<S, C> {
+    async fn load(storage: ProjectStorage<S, C>, spec: ProjectLayout, host: LspHost) -> Self {
+        Self {
+            editor: Editor::load(storage, spec, host).await,
+        }
+    }
+
+    /// Whether `path` belongs here: indexed, selected exactly, or under a source root.
+    fn owns_path(&self, path: &FileKey) -> bool {
+        self.editor.workspace().owns_path(path)
+    }
+
+    /// The project's resolved `[package] features`.
+    const fn feature_set(&self) -> FeatureSet {
+        self.editor.workspace().feature_set()
+    }
+
+    /// Replace the exact file membership.
+    ///
+    /// Must precede the [`set_overlay`](Self::set_overlay) of a key under no source root — which
+    /// is every key a detached group mounts. Skipping it makes `set_overlay` refuse silently, and
+    /// the document is then routed here and answers nothing.
+    fn set_project_sources(&mut self, sources: Vec<FileKey>) {
+        self.editor.workspace_mut().set_project_sources(sources);
+    }
+
+    /// The rendering, mutably — a detached group registers each mounted key's URI here.
+    const fn host_mut(&mut self) -> &mut LspHost {
+        self.editor.host_mut()
+    }
+
+    /// Publish a fresh snapshot and rebuild the index while preserving editor overlays.
+    async fn refresh(&mut self) {
+        let _ = self.editor.workspace_mut().refresh().await;
+    }
+
+    /// Re-read the current membership into the index, dropping whatever left it.
+    ///
+    /// The surviving files are re-parsed from their overlay text rather than reusing their cached
+    /// parses. That is the cost of dropping a file at all — the index is a `Vec` addressed by file
+    /// id, so removing one entry renumbers the rest — and it is paid only when a document leaves a
+    /// group, which is rare and over a handful of files.
+    async fn reload(&mut self) {
+        self.editor.workspace_mut().reload_project_files().await;
+    }
+
+    /// Reflect an open document's current text into the index.
+    ///
+    /// `false` when `path` belongs to no part of this analysis; the caller must not ignore it,
+    /// because a document routed here that was never indexed answers every query with nothing.
+    async fn set_overlay(&mut self, path: &FileKey, doc: &jals_editor::Document) -> bool {
+        self.editor
+            .workspace_mut()
+            .set_overlay(path, doc)
+            .await
+            .unwrap_or(false)
+    }
+
+    /// Drop one file's overlay, so a closed document's bytes do not outlive it.
+    fn remove_overlay(&mut self, path: &FileKey) {
+        let storage = self.editor.workspace_mut().storage_mut();
+        let revision = storage.revision();
+        let _ = storage.remove_overlay(revision, path);
+    }
+
+    // ---- Queries ---------------------------------------------------------------------------
+    //
+    // Each answers for a file this analysis has indexed. `None` / an empty vector means the
+    // analysis found nothing — never "not my file", which the caller settled by resolving the key
+    // at all.
+
+    async fn definition(&self, path: &FileKey, position: Position) -> Option<Location> {
+        self.editor.definition(path, &position).await
+    }
+
+    async fn hover(&self, path: &FileKey, position: Position) -> Option<Hover> {
+        self.editor.hover(path, &position).await
+    }
+
+    async fn signature_help(&self, path: &FileKey, position: Position) -> Option<SignatureHelp> {
+        self.editor.signature_help(path, &position).await
+    }
+
+    async fn prepare_rename(&self, path: &FileKey, position: Position) -> Option<Range> {
+        self.editor.prepare_rename(path, &position).await
+    }
+
+    async fn semantic_tokens(&self, path: &FileKey) -> Option<SemanticTokens> {
+        self.editor.semantic_tokens(path).await
+    }
+
+    async fn completions(&self, path: &FileKey, position: Position) -> Vec<CompletionItem> {
+        self.editor.completions(path, &position).await
+    }
+
+    async fn document_highlight(
+        &self,
+        path: &FileKey,
+        position: Position,
+    ) -> Vec<DocumentHighlight> {
+        self.editor.highlights(path, &position).await
+    }
+
+    async fn references(
+        &self,
+        path: &FileKey,
+        position: Position,
+        include_declaration: bool,
+    ) -> Vec<Location> {
+        self.editor
+            .references(path, &position, include_declaration)
+            .await
+    }
+
+    async fn diagnostics(
+        &self,
+        path: &FileKey,
+        config: &jals_config::lint::Config,
+    ) -> Vec<Diagnostic> {
+        self.editor.diagnostics(path, config).await
+    }
+
+    /// The edit a rename produces. The caller validates `new_name` is a legal identifier.
+    async fn rename(
+        &self,
+        path: &FileKey,
+        position: Position,
+        new_name: &str,
+    ) -> Option<WorkspaceEdit> {
+        let targets = self.editor.rename_targets(path, &position).await?;
+        LspHost::workspace_edit(targets, new_name)
+    }
+}
+
+/// One `jals.toml` project's analysis, plus the URI ↔ virtual-path mapping that is the LSP's only
+/// remaining responsibility.
 ///
 /// The actor holds one of these per project a client has a file open in (see
 /// [`Actor`](crate::actor)), discovered lazily by walking up from each opened file — so it
@@ -136,7 +286,7 @@ pub(crate) struct ProjectWorkspace {
     /// a later open in the same project reuses it instead of building a duplicate.
     project_root: PathBuf,
     /// The neutral workspace paired with the LSP rendering; owns all analysis state.
-    editor: Editor<NativeSource, NativeCache, LspHost>,
+    analysis: Analysis<NativeSource, NativeCache>,
 }
 
 impl ProjectWorkspace {
@@ -193,6 +343,10 @@ impl ProjectWorkspace {
     /// A workspace over `root` alone — its own lone source root; no classpath, libraries, or
     /// features. The fallback when a manifest is missing, unparsable, or its inputs fail to
     /// assemble.
+    ///
+    /// This is *not* how a document outside every project is analysed: a bare workspace indexes
+    /// its whole directory tree, which is only warranted once a real manifest has been found there
+    /// (see [`DetachedWorkspace`], which mounts one file at a time and walks nothing).
     pub(crate) async fn bare(root: &Path, exec: Exec) -> Self {
         let root = root.to_path_buf();
         Self::load(
@@ -238,10 +392,18 @@ impl ProjectWorkspace {
         }
         .with_classpath(classfiles)
         .await;
-        let host = LspHost::for_root(project_root.clone()).with_materialized(materialized);
+        // The materialized paths are host facts; the host renders addresses. Convert once, here,
+        // at the boundary between them. A path that cannot be encoded as a file URL is dropped
+        // rather than carried forward as an address that resolves to nothing — navigation into
+        // that one file yields no target, and every other one is unaffected.
+        let urls = materialized
+            .into_iter()
+            .filter_map(|(key, path)| Url::from_file_path(path).ok().map(|url| (key, url)))
+            .collect();
+        let host = LspHost::for_root(project_root.clone()).with_urls(urls);
         Self {
             project_root,
-            editor: Editor::load(storage, spec, host).await,
+            analysis: Analysis::load(storage, spec, host).await,
         }
     }
 
@@ -261,34 +423,29 @@ impl ProjectWorkspace {
         Self::file_key(&self.project_root, &uri.to_file_path().ok()?)
     }
 
-    /// The virtual path of `uri` when it addresses an *indexed* file of this workspace, so a
-    /// query wrapper can answer `None` (and the actor fall back) for anything else.
-    fn indexed_path(&self, uri: &Url) -> Option<FileKey> {
-        let path = self.key(uri)?;
-        self.editor.workspace().file_id(&path)?;
-        Some(path)
-    }
-
     /// The `jals.toml` project root this workspace was loaded from.
     pub(crate) fn project_root(&self) -> &Path {
         &self.project_root
     }
 
-    /// The project's resolved `[package] features`, for the formatter's one dialect-emitting rule.
-    pub(crate) const fn feature_set(&self) -> FeatureSet {
-        self.editor.workspace().feature_set()
-    }
-
     /// Publish a fresh native snapshot and rebuild the index while preserving editor overlays.
     pub(crate) async fn refresh(&mut self) {
-        let _ = self.editor.workspace_mut().refresh().await;
+        self.analysis.refresh().await;
     }
 
     /// Whether `uri` belongs to this workspace: a file already indexed, or a path under one of
     /// its source roots (so a project file the editor hasn't opened yet still resolves here).
     pub(crate) fn owns_uri(&self, uri: &Url) -> bool {
         self.key(uri)
-            .is_some_and(|path| self.editor.workspace().owns_path(&path))
+            .is_some_and(|path| self.analysis.owns_path(&path))
+    }
+
+    /// This workspace's analysis of `uri`, when it owns it.
+    pub(crate) fn open(&self, uri: &Url) -> Option<OpenDocument<'_>> {
+        let key = self.key(uri)?;
+        self.analysis
+            .owns_path(&key)
+            .then(|| OpenDocument::new(key, AnalysisRef::Project(&self.analysis)))
     }
 
     /// Reflect an open document into the index: replace the cached copy of `uri` with the open
@@ -298,124 +455,355 @@ impl ProjectWorkspace {
         let Some(path) = self.key(uri) else {
             return false;
         };
-        self.editor
-            .workspace_mut()
-            .set_overlay(&path, &doc.content)
-            .await
-            .unwrap_or(false)
+        self.analysis.set_overlay(&path, &doc.content).await
+    }
+}
+
+/// Which open documents a detached group holds together.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum DetachedGroup {
+    /// Every open document in one host directory. Same directory is same Java package, so these
+    /// are exactly the files that may refer to one another by simple name.
+    Directory(PathBuf),
+    /// A document with no directory at all — an unsaved buffer, whose URI is its whole identity.
+    /// Each is its own group: two of them share no package and no path, so neither is evidence
+    /// about the other.
+    Document(Url),
+}
+
+impl DetachedGroup {
+    /// The group `uri` belongs to.
+    fn of(uri: &Url) -> Self {
+        uri.to_file_path()
+            .ok()
+            .and_then(|path| path.parent().map(Path::to_path_buf))
+            .map_or_else(|| Self::Document(uri.clone()), Self::Directory)
+    }
+}
+
+/// The analysis of the open documents that belong to no `jals.toml` project.
+///
+/// The group's directory is **never walked**: only documents the client opened are mounted, one
+/// file to one key, so this can never become an index of a whole checkout — the property
+/// [`Actor::ensure_workspace_for`](crate::actor) protects for project workspaces, kept here by
+/// construction rather than by policy.
+///
+/// The keys are synthetic, so unlike a project workspace the `Url` ↔ `FileKey` relation is a table
+/// rather than a computation. The same table is handed to the rendering, which is how a location
+/// inside a mounted file comes back out addressed as the URI the client opened it with — including
+/// a scheme no host path can spell.
+struct DetachedWorkspace {
+    keys: BTreeMap<Url, FileKey>,
+    /// Never rewinds, so a key is unique among this group's mounts for the group's whole life.
+    next_ordinal: usize,
+    analysis: Analysis<MemorySource, MemoryCache>,
+}
+
+impl DetachedWorkspace {
+    /// Where a detached document is mounted. Under no source root and captured by no snapshot
+    /// scope, so it collides with nothing a project declares — the same `.jals/` convention
+    /// `jals lint` mounts a reported file outside the project under, and this server already
+    /// mounts navigation sources under.
+    const MOUNT_ROOT: &'static str = ".jals/lsp";
+
+    async fn new() -> Self {
+        Self {
+            keys: BTreeMap::new(),
+            next_ordinal: 0,
+            analysis: Analysis::load(
+                // Memory-backed: a group holds exactly the documents the client opened, so there
+                // is nothing on disk to snapshot — and an unsaved buffer has no directory to
+                // anchor a native aggregate to at all. The `Exec::inline()` this constructor
+                // carries is right here: no I/O to overlap, over a handful of files.
+                MemoryStorage::memory(CodeTree::default()),
+                ProjectLayout::default(),
+                // Rootless: every key this group can produce is registered in the host's table as
+                // it is mounted, so the root is never consulted. Should one ever escape the table,
+                // the rootless join renders no address rather than inventing one.
+                LspHost::for_root(PathBuf::new()),
+            )
+            .await,
+        }
     }
 
-    /// Go-to-definition for the cursor at `position` in `uri`. `None` if `uri` is not in the
-    /// workspace or nothing resolves.
-    pub(crate) async fn goto_definition(&self, uri: &Url, position: Position) -> Option<Location> {
-        self.editor.definition(&self.key(uri)?, &position).await
+    fn is_empty(&self) -> bool {
+        self.keys.is_empty()
     }
 
-    /// The hover for the cursor at `position` in `uri`. `None` if `uri` is not in the workspace
-    /// or the expression has no inferred type.
-    pub(crate) async fn hover(&self, uri: &Url, position: Position) -> Option<Hover> {
-        self.editor.hover(&self.key(uri)?, &position).await
+    /// Every document in this group.
+    fn uris(&self) -> Vec<Url> {
+        self.keys.keys().cloned().collect()
     }
 
-    /// The signature help for the call at `position` in `uri`, with cross-file type resolution.
-    /// `None` if `uri` is not in the workspace or the cursor is in no resolvable call.
-    pub(crate) async fn signature_help(
-        &self,
-        uri: &Url,
-        position: Position,
-    ) -> Option<SignatureHelp> {
-        self.editor.signature_help(&self.key(uri)?, &position).await
+    /// This group's analysis of `uri`, when it holds it.
+    fn open(&self, uri: &Url) -> Option<OpenDocument<'_>> {
+        let key = self.keys.get(uri)?.clone();
+        Some(OpenDocument::new(
+            key,
+            AnalysisRef::Detached(&self.analysis),
+        ))
     }
 
-    /// Completions for the cursor at `position` in `uri`, resolved against the project. `None` if
-    /// `uri` is not an indexed file of this workspace (the actor then falls back to the one-file
-    /// project).
-    pub(crate) async fn completions(
-        &self,
-        uri: &Url,
-        position: Position,
-    ) -> Option<Vec<CompletionItem>> {
-        Some(
-            self.editor
-                .completions(&self.indexed_path(uri)?, &position)
-                .await,
-        )
+    /// Mount `uri`'s document, or refresh it in place when it is already a member.
+    ///
+    /// `true` when the membership changed, which is what tells the caller to republish the
+    /// group's other documents: a new sibling can resolve a name that was unresolved in all of
+    /// them.
+    async fn mount(&mut self, uri: &Url, doc: &jals_editor::Document) -> bool {
+        if let Some(key) = self.keys.get(uri).cloned() {
+            self.analysis.set_overlay(&key, doc).await;
+            return false;
+        }
+        let key = self.mount_key(uri);
+        // The rendering learns the address before the index can produce a location inside the
+        // file, so a `definition` landing here always has a URI to come back as.
+        self.analysis
+            .host_mut()
+            .insert_url(key.clone(), uri.clone());
+        self.keys.insert(uri.clone(), key.clone());
+        // Membership before content: `set_overlay` refuses a key that is under no source root and
+        // in no project-source list, and a refusal here would leave the document mounted but
+        // unindexed — routed to this group and answering nothing.
+        self.analysis
+            .set_project_sources(self.keys.values().cloned().collect());
+        self.analysis.set_overlay(&key, doc).await;
+        true
     }
 
-    /// Occurrence highlights for the cursor at `position` in `uri`, resolved against the project
-    /// so a cross-file type name highlights precisely. `None` if `uri` is not an indexed file of
-    /// this workspace.
-    pub(crate) async fn document_highlight(
-        &self,
-        uri: &Url,
-        position: Position,
-    ) -> Option<Vec<DocumentHighlight>> {
-        Some(
-            self.editor
-                .highlights(&self.indexed_path(uri)?, &position)
-                .await,
-        )
+    /// Drop `uris` from this group in one pass. `true` when any of them was a member.
+    ///
+    /// One rebuild for the whole batch: installing a project workspace over a directory whose
+    /// documents were all detached evicts them together, and rebuilding per document would rebuild
+    /// a shrinking group once per file.
+    async fn forget_all(&mut self, uris: &[Url]) -> bool {
+        let mut dropped = false;
+        for uri in uris {
+            let Some(key) = self.keys.remove(uri) else {
+                continue;
+            };
+            self.analysis.host_mut().remove_url(&key);
+            self.analysis.remove_overlay(&key);
+            dropped = true;
+        }
+        if !dropped {
+            return false;
+        }
+        self.analysis
+            .set_project_sources(self.keys.values().cloned().collect());
+        self.analysis.reload().await;
+        true
     }
 
-    /// Semantic tokens for `uri`, resolved against the project so a cross-file type name is
-    /// classified by its declared kind. `None` if `uri` is not in the workspace.
-    pub(crate) async fn semantic_tokens(&self, uri: &Url) -> Option<SemanticTokens> {
-        self.editor.semantic_tokens(&self.key(uri)?).await
+    /// A key under [`MOUNT_ROOT`](Self::MOUNT_ROOT) for one document.
+    ///
+    /// The ordinal gives every mount its own directory, so the file/directory collision an overlay
+    /// write rejects cannot arise between two members however they are named — which is what lets
+    /// the file name fall back freely. The name is cosmetic: the index is handed a parse and never
+    /// reads it. A basename no portable [`Name`] allows, or a URI with no path at all, takes a
+    /// fixed one.
+    fn mount_key(&mut self, uri: &Url) -> FileKey {
+        let ordinal = self.next_ordinal;
+        self.next_ordinal += 1;
+        let path = uri.to_file_path().ok();
+        // A URI with no host path at all is an unsaved buffer; one whose basename no portable
+        // `Name` allows still has a path, and only its spelling is unusable.
+        let unnamed = if path.is_some() {
+            "source.java"
+        } else {
+            "untitled.java"
+        };
+        let stem = path
+            .as_deref()
+            .and_then(Path::file_name)
+            .and_then(std::ffi::OsStr::to_str)
+            .filter(|name| Name::new(*name).is_ok())
+            .unwrap_or(unnamed);
+        let root = DirKey::parse(&format!("{}/{ordinal}", Self::MOUNT_ROOT))
+            .expect("the mount root and a decimal ordinal are portable segments");
+        root.file(Name::new(stem).expect("a checked basename, or a fixed fallback"))
+    }
+}
+
+/// Every open document that belongs to no `jals.toml` project, grouped so that the documents which
+/// may legally see one another are indexed together.
+///
+/// Kept beside the project workspaces rather than among them: a project slot is identified by its
+/// manifest root and drives assembly, watching, and reassembly generations off it, none of which
+/// means anything for a directory that has no manifest.
+#[derive(Default)]
+pub(crate) struct DetachedWorkspaces {
+    groups: BTreeMap<DetachedGroup, DetachedWorkspace>,
+}
+
+impl DetachedWorkspaces {
+    /// The analysis of `uri`, when some group holds it.
+    pub(crate) fn open(&self, uri: &Url) -> Option<OpenDocument<'_>> {
+        self.groups.get(&DetachedGroup::of(uri))?.open(uri)
     }
 
-    /// Find-references for the cursor at `position` in `uri` — project-wide for a project type,
-    /// within the file for a file-local binding. `None` if `uri` is not an indexed file of this
-    /// workspace; an empty vector if the cursor is on no resolvable symbol.
+    // The three accessors below observe grouping, which the server itself never needs to ask
+    // about — routing goes through `open`. They exist so the tests can state what the grouping
+    // rule *is*, which is the part of this that a reader has to be able to check.
+
+    /// How many groups exist.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.groups.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.groups.is_empty()
+    }
+
+    /// Whether any group holds `uri`.
+    #[cfg(test)]
+    pub(crate) fn holds(&self, uri: &Url) -> bool {
+        self.open(uri).is_some()
+    }
+
+    /// Mount `uri`'s document into its group, creating the group if this is its first document.
+    ///
+    /// Returns the group's *other* documents when the membership changed — each of those now
+    /// analyses differently and needs republishing — and nothing when this was an edit to a
+    /// document already held.
+    pub(crate) async fn mount(&mut self, uri: &Url, doc: &jals_editor::Document) -> Vec<Url> {
+        let group = DetachedGroup::of(uri);
+        if !self.groups.contains_key(&group) {
+            self.groups
+                .insert(group.clone(), DetachedWorkspace::new().await);
+        }
+        let workspace = self
+            .groups
+            .get_mut(&group)
+            .expect("the group was just inserted");
+        if !workspace.mount(uri, doc).await {
+            return Vec::new();
+        }
+        workspace
+            .uris()
+            .into_iter()
+            .filter(|held| held != uri)
+            .collect()
+    }
+
+    /// Drop `uris` from their groups, dropping a group that ends up holding nothing.
+    ///
+    /// Returns the surviving documents of every affected group: losing a sibling can unresolve a
+    /// name, so they analyse differently and need republishing.
+    pub(crate) async fn forget(&mut self, uris: &[Url]) -> Vec<Url> {
+        let mut batched: BTreeMap<DetachedGroup, Vec<Url>> = BTreeMap::new();
+        for uri in uris {
+            batched
+                .entry(DetachedGroup::of(uri))
+                .or_default()
+                .push(uri.clone());
+        }
+        let mut survivors = Vec::new();
+        for (group, evicted) in batched {
+            let Some(workspace) = self.groups.get_mut(&group) else {
+                continue;
+            };
+            if !workspace.forget_all(&evicted).await {
+                continue;
+            }
+            if workspace.is_empty() {
+                self.groups.remove(&group);
+            } else {
+                survivors.extend(workspace.uris());
+            }
+        }
+        survivors
+    }
+}
+
+/// The analysis that answers for one open document, with its key already resolved.
+///
+/// Resolving the key is the whole difference between the two kinds of workspace — a project
+/// computes it from the host path, a detached group looks it up in its mount table — so it happens
+/// once, where the document is routed, and never again per query. What remains twofold below is
+/// only the storage backend, which no query cares about.
+pub(crate) struct OpenDocument<'a> {
+    key: FileKey,
+    analysis: AnalysisRef<'a>,
+}
+
+/// The two concrete analyses, which differ only in their storage backends.
+enum AnalysisRef<'a> {
+    Project(&'a Analysis<NativeSource, NativeCache>),
+    Detached(&'a Analysis<MemorySource, MemoryCache>),
+}
+
+/// Forward one query to whichever analysis holds the document.
+///
+/// A macro rather than eleven hand-written two-arm matches: the arms differ in no way a reader
+/// should have to check, and writing them out is exactly the shape that lets one of them drift
+/// from the other — the failure this whole seam exists to remove.
+macro_rules! forward {
+    ($self:ident, $query:ident $(, $arg:expr)*) => {
+        match $self.analysis {
+            AnalysisRef::Project(analysis) => analysis.$query(&$self.key $(, $arg)*).await,
+            AnalysisRef::Detached(analysis) => analysis.$query(&$self.key $(, $arg)*).await,
+        }
+    };
+}
+
+impl<'a> OpenDocument<'a> {
+    const fn new(key: FileKey, analysis: AnalysisRef<'a>) -> Self {
+        Self { key, analysis }
+    }
+
+    /// The feature set the owning project resolved — the empty set for a detached group, which
+    /// has no manifest to answer for it.
+    pub(crate) const fn feature_set(&self) -> FeatureSet {
+        match self.analysis {
+            AnalysisRef::Project(analysis) => analysis.feature_set(),
+            AnalysisRef::Detached(analysis) => analysis.feature_set(),
+        }
+    }
+
+    pub(crate) async fn definition(&self, position: Position) -> Option<Location> {
+        forward!(self, definition, position)
+    }
+
+    pub(crate) async fn hover(&self, position: Position) -> Option<Hover> {
+        forward!(self, hover, position)
+    }
+
+    pub(crate) async fn signature_help(&self, position: Position) -> Option<SignatureHelp> {
+        forward!(self, signature_help, position)
+    }
+
+    pub(crate) async fn prepare_rename(&self, position: Position) -> Option<Range> {
+        forward!(self, prepare_rename, position)
+    }
+
+    pub(crate) async fn semantic_tokens(&self) -> Option<SemanticTokens> {
+        forward!(self, semantic_tokens)
+    }
+
+    pub(crate) async fn completions(&self, position: Position) -> Vec<CompletionItem> {
+        forward!(self, completions, position)
+    }
+
+    pub(crate) async fn document_highlight(&self, position: Position) -> Vec<DocumentHighlight> {
+        forward!(self, document_highlight, position)
+    }
+
     pub(crate) async fn references(
         &self,
-        uri: &Url,
         position: Position,
         include_declaration: bool,
-    ) -> Option<Vec<Location>> {
-        Some(
-            self.editor
-                .references(&self.indexed_path(uri)?, &position, include_declaration)
-                .await,
-        )
+    ) -> Vec<Location> {
+        forward!(self, references, position, include_declaration)
     }
 
-    /// prepareRename for the cursor at `position` in `uri`: the range of the identifier under the
-    /// cursor when it names a renamable symbol, else `None` (an external name, a keyword/literal,
-    /// or a withheld member).
-    pub(crate) async fn prepare_rename(&self, uri: &Url, position: Position) -> Option<Range> {
-        self.editor.prepare_rename(&self.key(uri)?, &position).await
+    pub(crate) async fn diagnostics(&self, config: &jals_config::lint::Config) -> Vec<Diagnostic> {
+        forward!(self, diagnostics, config)
     }
 
-    /// Rename the symbol under `position` in `uri` to `new_name`: a [`WorkspaceEdit`] rewriting
-    /// every occurrence. `None` if `uri` is not in the workspace, the cursor is on no renamable
-    /// symbol, or there is nothing to change. The caller validates `new_name` is a legal
-    /// identifier.
-    pub(crate) async fn rename(
-        &self,
-        uri: &Url,
-        position: Position,
-        new_name: &str,
-    ) -> Option<WorkspaceEdit> {
-        let targets = self
-            .editor
-            .rename_targets(&self.key(uri)?, &position)
-            .await?;
-        LspHost::workspace_edit(targets, new_name)
-    }
-
-    /// The canonical diagnostics of `uri` under `config`, with the project index and the
-    /// project's resolved feature set folded in. `None` if `uri` is not an indexed file of this
-    /// workspace (the actor then falls back to the one-file project).
-    pub(crate) async fn diagnostics(
-        &self,
-        uri: &Url,
-        config: &jals_config::lint::Config,
-    ) -> Option<Vec<Diagnostic>> {
-        Some(
-            self.editor
-                .diagnostics(&self.indexed_path(uri)?, config)
-                .await,
-        )
+    pub(crate) async fn rename(&self, position: Position, new_name: &str) -> Option<WorkspaceEdit> {
+        forward!(self, rename, position, new_name)
     }
 }
 
@@ -759,7 +1147,9 @@ mod tests {
             let bar = "package a; class Bar { Foo f; }";
             let use_col = bar.find("Foo").unwrap() as u32;
             let loc = ws
-                .goto_definition(&bar_uri, Position::new(0, use_col))
+                .open(&bar_uri)
+                .expect("Bar.java is a project file")
+                .definition(Position::new(0, use_col))
                 .await
                 .expect("Foo resolves cross-file");
             assert_eq!(loc.uri, foo_uri);
@@ -789,7 +1179,9 @@ mod tests {
 
             // `Foo` is unresolved before any file declares it.
             assert!(
-                ws.goto_definition(&bar_uri, Position::new(0, use_col))
+                ws.open(&bar_uri)
+                    .expect("Bar.java is a project file")
+                    .definition(Position::new(0, use_col))
                     .await
                     .is_none()
             );
@@ -799,7 +1191,9 @@ mod tests {
             let doc = Document::new("package a; class Foo { }".to_owned(), 1).await;
             assert!(ws.set_overlay(&foo_uri, &doc).await);
             let loc = ws
-                .goto_definition(&bar_uri, Position::new(0, use_col))
+                .open(&bar_uri)
+                .expect("Bar.java is a project file")
+                .definition(Position::new(0, use_col))
                 .await
                 .expect("Foo resolves after the overlay");
             assert_eq!(loc.uri, foo_uri);
@@ -835,7 +1229,9 @@ mod tests {
             // in every file, each to the new name.
             let decl_col = "package a; class Foo { }".find("Foo").unwrap() as u32;
             let edit = ws
-                .rename(&foo_uri, Position::new(0, decl_col), "Renamed")
+                .open(&foo_uri)
+                .expect("Foo.java is a project file")
+                .rename(Position::new(0, decl_col), "Renamed")
                 .await
                 .expect("Foo is a renamable project type");
             let changes = edit.changes.expect("a plain-edit workspace edit");
@@ -846,7 +1242,9 @@ mod tests {
 
             // prepareRename on the same position reports the identifier's range.
             let range = ws
-                .prepare_rename(&foo_uri, Position::new(0, decl_col))
+                .open(&foo_uri)
+                .expect("Foo.java is a project file")
+                .prepare_rename(Position::new(0, decl_col))
                 .await
                 .expect("Foo is renamable");
             assert_eq!(range.start, Position::new(0, decl_col));
@@ -854,39 +1252,28 @@ mod tests {
         });
     }
 
+    /// A project workspace answers for its own files and nothing else. This is the half of the
+    /// routing rule that lives here; the actor's half is choosing a detached group for whatever
+    /// comes back `None`.
     #[test]
-    fn workspace_queries_answer_none_outside_the_workspace() {
+    fn a_project_workspace_opens_only_its_own_files() {
         block_on_inline(async {
             let dir = tempfile::tempdir().unwrap();
             std::fs::write(dir.path().join("Bar.java"), "class Bar { }").unwrap();
             let ws = load_bare(dir.path()).await;
 
-            // A file elsewhere on disk, and a non-`file://` URI (no virtual path at all): every
-            // wrapper answers `None`, so the actor falls back to the one-file project.
+            // A file elsewhere on disk, and a non-`file://` URI (no virtual path at all).
             for uri in [
                 Url::parse("file:///elsewhere/Other.java").unwrap(),
                 Url::parse("untitled:Untitled-1").unwrap(),
             ] {
                 assert!(!ws.owns_uri(&uri));
-                assert!(
-                    ws.goto_definition(&uri, Position::new(0, 0))
-                        .await
-                        .is_none()
-                );
-                assert!(ws.hover(&uri, Position::new(0, 0)).await.is_none());
-                assert!(ws.completions(&uri, Position::new(0, 0)).await.is_none());
-                assert!(
-                    ws.references(&uri, Position::new(0, 0), true)
-                        .await
-                        .is_none()
-                );
-                assert!(ws.semantic_tokens(&uri).await.is_none());
-                assert!(
-                    ws.diagnostics(&uri, &jals_config::lint::Config::default())
-                        .await
-                        .is_none()
-                );
+                assert!(ws.open(&uri).is_none(), "{uri} is not this project's file");
             }
+            // Its own file does open.
+            let bar = Url::from_file_path(dir.path().join("Bar.java")).unwrap();
+            assert!(ws.owns_uri(&bar));
+            assert!(ws.open(&bar).is_some());
         });
     }
 
@@ -928,9 +1315,10 @@ mod tests {
             .await;
             let main_uri = Url::from_file_path(dir.path().join("Main.java")).unwrap();
             let diags = ws
-                .diagnostics(&main_uri, &jals_config::lint::Config::default())
-                .await
-                .expect("Main.java is indexed");
+                .open(&main_uri)
+                .expect("Main.java is a project file")
+                .diagnostics(&jals_config::lint::Config::default())
+                .await;
             assert!(
                 !diags.iter().any(|d| {
                     d.code == Some(NumberOrString::String("cannot-resolve".to_owned()))
@@ -941,9 +1329,10 @@ mod tests {
             // Without the classpath, the same reference cannot resolve.
             let bare = load_bare(dir.path()).await;
             let diags = bare
-                .diagnostics(&main_uri, &jals_config::lint::Config::default())
-                .await
-                .expect("Main.java is indexed");
+                .open(&main_uri)
+                .expect("Main.java is a project file")
+                .diagnostics(&jals_config::lint::Config::default())
+                .await;
             assert!(
                 diags.iter().any(|d| {
                     d.code == Some(NumberOrString::String("cannot-resolve".to_owned()))

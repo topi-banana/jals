@@ -184,8 +184,13 @@ filesystem reads into portable interfaces.
   cursor and stay behind `Editor`; `Workspace::diagnostics` is the one query that takes a `FileKey`
   and no position, so it is `pub` and answers in the neutral `FileDiagnostic` — which is how
   `jals lint` joins the seam without implementing the positional host methods it has no cursor for.
+  `ProjectQueries`/`QueryFile`/`FileRange` are crate-internal for the same reason `jals-hir` withholds
+  `Resolved`: publishing them would publish a second, unrendered way to ask the same questions, and a
+  host that took it would be re-implementing `Editor`.
   `ProjectLayout::with_classpath` lowers the `.class` files a host resolved, so describing a project
-  needs no `jals-hir` symbol.
+  needs no `jals-hir` symbol. A `FileKey` names a file inside a workspace and carries no address, so
+  `EditorHost::location` is fallible: a host that cannot name a target does not offer it, rather than
+  fabricating a URI for it.
 - `jals-frontend`: the compile frontend seam — project sources lowered to the Java sources a backend
   compiles. `[build.frontend]` selects the lowering, and the dialect features in
   `[package] features` (`grouped-imports`, `attributes`) override it onto `DialectFrontend`; a host
@@ -311,9 +316,21 @@ filesystem reads into portable interfaces.
   project file with the project's own index behind it rather than a detached one. This crate names
   no `jals-hir` symbol.
 - `jals-lsp`: the only URI↔native-root adapter; watched-file notifications call `refresh()`. What it
-  keeps of project assembly is diagnostic shaping, overlay mounting of navigation sources, the watch
-  policy, and its own root-only fallback (a second `resolve_native` call, deliberately not folded in
-  — it has one consumer).
+  keeps of project assembly is diagnostic shaping, overlay mounting, the watch policy, and its own
+  root-only fallback (a second `resolve_native` call, deliberately not folded in — it has one
+  consumer).
+  - It mounts two kinds of thing under `.jals/`: navigation sources materialized out of the artifact
+    cache, and — under `.jals/lsp/` — every open document no project workspace owns. **Every** open
+    Java document is answered by a `jals_editor::Workspace`; there is no second query surface, and
+    `workspace_for` returning `None` means "no analysis for that URI" and nothing else. A
+    project-less document is grouped by *parent directory* (same directory is same Java package),
+    the directory is never walked, and one file is one key — which is how the "never index a whole
+    checkout" property survives a routing rule that admits everything. A non-`file:` URI is its own
+    group; `untitled:` is precisely why `LspHost` maps a key to a `Url` rather than to a host path.
+  - A `FileKey` has no address of its own, so `EditorHost::location` is fallible and a key the host
+    cannot name yields no target. That is the "do not generate fallback file URIs" invariant below,
+    enforced by the type rather than by a comment — the rootless shared `LspHost` const renders no
+    location at all, instead of panicking if one ever reached it.
 - `jals-playground`: one `MemoryStorage` aggregate backs sidebar, editor overlays, and dependency
   artifacts. `compile.rs` is the *Build* pipeline — frontend seam, then `JalsBackend`, then
   `JarPackage` — taking sources as `(path, text)` and returning bytes, so it is host-testable and
