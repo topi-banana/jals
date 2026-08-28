@@ -58,7 +58,10 @@ const FEATURE_SEPARATOR: char = '/';
 const DEPENDENCY_ACTIVATION_PREFIX: &str = "dep:";
 
 /// A parsed `jals.toml` project manifest.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+///
+/// `PartialEq` but not `Eq`: `[test-target.screenshots] threshold` is a fraction, and a comparison
+/// tolerance is exactly the kind of value that is meaningfully approximate.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct Manifest {
     /// Project metadata (`[package]`). Informational for now.
@@ -125,6 +128,19 @@ pub struct Manifest {
     pub mappings: BTreeMap<String, MappingEntry>,
     /// `[test]`: where a test run's extra sources live and where its classes go.
     pub test: Test,
+    /// `[[test-target]]`: programs `jals test --target <name>` starts instead of the generated
+    /// harness.
+    ///
+    /// A sibling of `[test]` rather than a form of it. `[test]` configures the one shape jals
+    /// generates — `#[test]` methods, a harness, one JVM per test; a target is a *different* shape
+    /// that jals only starts and reads a report from, so the two share no key.
+    pub test_target: Vec<crate::testing::TestTarget>,
+    /// Named golden image sets (`[[golden.<name>]]`), keyed by the name a target's
+    /// `golden = { with = "…" }` references.
+    ///
+    /// Shaped like `[mappings]` and for the same reasons: the images are bytes pinned by digest,
+    /// one set per release under one name, and at most one alternative active under any selection.
+    pub golden: BTreeMap<String, crate::testing::GoldenEntry>,
     /// Toolchain selection (`[toolchain]`): which `javac` compiles the project and which `java` runs
     /// it, chosen independently (see [`Toolchain`] and its [`Compiler`](crate::Compiler) /
     /// [`Runtime`](crate::Runtime) enums). Defaults to the system tools when omitted, so an existing
@@ -2433,6 +2449,38 @@ impl Manifest {
             mappings.validate(name).map_err(ValidationError::Mapping)?;
         }
 
+        // `[[golden.<name>]]`: the same two layers as `[mappings]` — each alternative's own values,
+        // then the cross-alternative exclusivity rule.
+        for (name, golden) in &self.golden {
+            golden.validate(name).map_err(ValidationError::Golden)?;
+        }
+
+        // `[[test-target]]`: each target's own values, then the two cross-target facts a single
+        // target cannot see — that its name is unique, and that the golden set it references is
+        // declared. Both are the `[[bin]]` / `[build] remap` checks in a new place.
+        let mut seen: Vec<&str> = Vec::with_capacity(self.test_target.len());
+        for target in &self.test_target {
+            target.validate().map_err(ValidationError::TestTarget)?;
+            if seen.contains(&target.name.as_str()) {
+                return Err(ValidationError::TestTarget(
+                    crate::testing::TestTargetError::DuplicateName {
+                        name: target.name.clone(),
+                    },
+                ));
+            }
+            seen.push(&target.name);
+            if let Some(golden) = &target.golden
+                && !self.golden.contains_key(&golden.with)
+            {
+                return Err(ValidationError::TestTarget(
+                    crate::testing::TestTargetError::UnknownGolden {
+                        name: target.name.clone(),
+                        golden: golden.with.clone(),
+                    },
+                ));
+            }
+        }
+
         // `[build] remap`: the referenced mapping must exist, and the jar it writes must be a
         // portable project file outside every directory that owns its contents. `classes-dir` is
         // handed to the compiler and scanned for output; `target/jals/build` carries the build
@@ -2835,7 +2883,10 @@ impl FromStr for Manifest {
 /// `no_std`: it holds a rendered path `String` and wraps [`toml::de::Error`] (the parse failure) or
 /// [`ValidationError`] (the structural failure). `jals-build`'s host-side `ManifestError` re-stamps
 /// these with the real `PathBuf` and adds the `std::io` read failure.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `PartialEq` but not `Eq`, following [`ValidationError`]: a test target's comparison threshold is
+/// a fraction.
+#[derive(Debug, Clone, PartialEq)]
 pub enum ManifestParseError {
     /// The text contained invalid TOML.
     Parse {
@@ -2877,7 +2928,7 @@ impl Error for ManifestParseError {
 
 /// A structural problem in a manifest, found by [`Manifest::validate`] (independent of the file it
 /// came from — the host [`ManifestParseError`] / `jals-build`'s `ManifestError` add the path).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ValidationError {
     /// `[build] classes-dir` is not a non-root portable project directory path.
     InvalidClassesDir {
@@ -2926,6 +2977,10 @@ pub enum ValidationError {
         /// The compiler output directory containing the script.
         classes_dir: String,
     },
+    /// A `[[test-target]]` entry is malformed.
+    TestTarget(crate::testing::TestTargetError),
+    /// A `[[golden.<name>]]` entry is malformed.
+    Golden(crate::testing::GoldenError),
     /// Two `[[bin]]` entries share a `name`.
     DuplicateBin {
         /// The duplicated bin name.
@@ -3095,6 +3150,8 @@ impl fmt::Display for ValidationError {
                 f,
                 "invalid `[build] script.file` `{file}`: scripts must be outside `[build] classes-dir` `{classes_dir}`, which `jals clean` removes"
             ),
+            Self::TestTarget(error) => write!(f, "{error}"),
+            Self::Golden(error) => write!(f, "{error}"),
             Self::DuplicateBin { name } => {
                 write!(f, "duplicate `[[bin]]` name `{name}`")
             }

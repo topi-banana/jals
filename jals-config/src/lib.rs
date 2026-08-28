@@ -32,6 +32,7 @@ mod loader;
 pub mod fmt;
 pub mod lint;
 pub mod manifest;
+pub mod testing;
 pub mod toolchain;
 
 pub use diagnostic::DiagnosticSeverity;
