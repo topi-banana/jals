@@ -25,7 +25,7 @@ env:
   WASM_PACKAGES: >-
     --package jals-editor --package jals-syntax --package jals-classfile --package jals-hir
     --package jals-decompile --package jals-fmt --package jals-lint --package jals-storage
-    --package jals-config
+    --package jals-config --package jals-image
   # jals-classpath's HTTP/archive adapters are behind features; `--no-default-features` builds its
   # `no_std + alloc` storage-driven core. jals-build's host half (`SubprocessToolchain`, JDK
   # discovery + spawning) is likewise behind its `native` feature, so its no-`native` core is built
@@ -42,7 +42,7 @@ env:
   WASM_TEST_PACKAGES: >-
     --package jals-syntax --package jals-hir --package jals-lint --package jals-fmt
     --package jals-config --package jals-decompile --package jals-editor --package jals-frontend
-    --package jals-javac --package jals-classfile
+    --package jals-javac --package jals-classfile --package jals-image
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

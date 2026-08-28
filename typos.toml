@@ -37,3 +37,7 @@ anotation = "anotation"
 Anotation = "Anotation"
 parm = "parm"
 PARM = "PARM"
+# `Paeth` is Alan W. Paeth, whose predictor is PNG's filter type 4 (PNG 1.2 §6.6);
+# the name is the format's own spelling, not a misspelling of "path".
+Paeth = "Paeth"
+paeth = "paeth"

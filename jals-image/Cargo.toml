@@ -1,0 +1,14 @@
+[package]
+name = "jals-image"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# The zlib stream a PNG's IDAT carries, both directions. `with-alloc` is the workspace default and
+# keeps the crate `no_std`; it is the same dependency `jals-classpath`'s zip reader inflates with.
+miniz_oxide = { workspace = true }
+# A PNG chunk's trailing CRC-32, checked on read and derived on write. Also `jals-classpath`'s.
+crc32fast = { workspace = true }
+
+[lints]
+workspace = true

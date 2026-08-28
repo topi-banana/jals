@@ -1273,6 +1273,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "jals-image"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
+ "miniz_oxide 0.9.1",
+]
+
+[[package]]
 name = "jals-javac"
 version = "0.1.0"
 dependencies = [
