@@ -3058,3 +3058,272 @@ fn an_inherited_member_from_a_task_jar_is_reobfuscated() {
         "the inherited member resolves once the task jar closes the hierarchy"
     );
 }
+
+// ===== `jals test` =====
+
+/// A project whose `#[test]` methods cover every shape the runner reports differently.
+fn test_project() -> tempfile::TempDir {
+    let dir = tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("jals.toml"),
+        "[package]\nname = \"demo\"\nfeatures = [\"attributes\"]\n",
+    )
+    .unwrap();
+    let src = dir.path().join("src/main/java/com/example");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("Calc.java"),
+        "package com.example;\n\
+         public class Calc {\n\
+         \x20   static int add(int a, int b) { return a + b; }\n\
+         \x20   #[test]\n\
+         \x20   static void adds() { assert add(2, 3) == 5; }\n\
+         \x20   #[test]\n\
+         \x20   static void addsWrongly() { assert add(2, 3) == 6; }\n\
+         \x20   #[test]\n\
+         \x20   #[should_fail]\n\
+         \x20   static void divideByZero() { int n = 1 / 0; System.out.println(n); }\n\
+         \x20   #[test]\n\
+         \x20   #[ignore]\n\
+         \x20   static void parked() {}\n\
+         }\n",
+    )
+    .unwrap();
+    dir
+}
+
+/// The manifest path argument for a project directory.
+fn manifest_of(dir: &tempfile::TempDir) -> String {
+    dir.path().join("jals.toml").to_str().unwrap().to_owned()
+}
+
+#[test]
+fn test_reports_each_verdict_and_fails_the_run() {
+    if !javac_available() {
+        return;
+    }
+    let dir = test_project();
+    let (_stdout, stderr, code) = run_full(&[
+        "test",
+        "--color",
+        "never",
+        "--manifest-path",
+        &manifest_of(&dir),
+    ]);
+    // A failing test fails the command.
+    assert_eq!(code, 1, "stderr: {stderr}");
+    // `assert` is honoured, which only happens because the launcher passes `-ea`. Without it this
+    // test would report a pass and the whole suite would be vacuous.
+    assert!(
+        stderr.contains("FAIL") && stderr.contains("Calc#addsWrongly"),
+        "the failing assertion must be reported; stderr: {stderr}"
+    );
+    assert!(stderr.contains("PASS") && stderr.contains("Calc#adds"));
+    // `#[should_fail]` passes *because* its body throws.
+    assert!(stderr.contains("Calc#divideByZero"));
+    // `#[ignore]` is not run, and the count says so.
+    assert!(
+        stderr.contains("3 tests run: 2 passed, 1 failed"),
+        "unexpected summary; stderr: {stderr}"
+    );
+    assert!(!stderr.contains("PASS") || !stderr.contains("Calc#parked"));
+}
+
+#[test]
+fn test_list_is_deterministic_and_goes_to_stdout() {
+    if !javac_available() {
+        return;
+    }
+    let dir = test_project();
+    let args = [
+        "test",
+        "--list",
+        "--color",
+        "never",
+        "--manifest-path",
+        &manifest_of(&dir),
+    ];
+    let (first, _stderr, code) = run_full(&args);
+    assert_eq!(code, 0);
+    // Machine output on stdout, so a script can read it without the progress display in the way.
+    assert_eq!(
+        first.lines().collect::<Vec<_>>(),
+        [
+            "com.example.Calc#adds",
+            "com.example.Calc#addsWrongly",
+            "com.example.Calc#divideByZero",
+        ]
+    );
+    // Sorted, and the same on every run: the *report* order is a promise even though the order
+    // tests finish in is not.
+    let (second, _stderr, _code) = run_full(&args);
+    assert_eq!(first, second);
+}
+
+#[test]
+fn an_ordinary_build_compiles_no_test_method() {
+    if !javac_available() {
+        return;
+    }
+    let dir = test_project();
+    let (_stdout, stderr, code) = run_full(&["build", "--manifest-path", &manifest_of(&dir)]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    // The class exists...
+    let classes = dir.path().join("target/classes/com/example");
+    assert!(classes.join("Calc.class").is_file());
+    // ...and no harness was generated beside it.
+    assert!(!classes.join("JalsTest$Calc.class").exists());
+    assert!(
+        !dir.path()
+            .join("target/classes/JalsTestHarness.class")
+            .exists()
+    );
+    // The test methods are gone from the class file itself. Their names would appear in the
+    // constant pool if the methods had been compiled.
+    let bytes = std::fs::read(classes.join("Calc.class")).unwrap();
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("add"), "the real method must survive");
+    assert!(
+        !text.contains("addsWrongly"),
+        "a `#[test]` method reached an ordinary build's output"
+    );
+}
+
+#[test]
+fn a_test_run_and_a_build_do_not_share_an_output_directory() {
+    if !javac_available() {
+        return;
+    }
+    let dir = test_project();
+    let manifest = manifest_of(&dir);
+    // Alternating the two commands must leave both outputs intact: they lower to different
+    // staging roots and compile to different class directories.
+    run_full(&["build", "--manifest-path", &manifest]);
+    run_full(&["test", "--color", "never", "--manifest-path", &manifest]);
+    run_full(&["build", "--manifest-path", &manifest]);
+    assert!(
+        dir.path()
+            .join("target/classes/com/example/Calc.class")
+            .is_file()
+    );
+    assert!(
+        dir.path()
+            .join("target/test-classes/JalsTestHarness.class")
+            .is_file(),
+        "the test run's own output must survive a later build"
+    );
+}
+
+#[test]
+fn a_malformed_test_attribute_is_reported_before_anything_is_compiled() {
+    let dir = tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("jals.toml"),
+        "[package]\nname = \"demo\"\nfeatures = [\"attributes\"]\n",
+    )
+    .unwrap();
+    let src = dir.path().join("src/main/java/com/example");
+    std::fs::create_dir_all(&src).unwrap();
+    // Not `static`: a generated sibling class could not call it.
+    std::fs::write(
+        src.join("Bad.java"),
+        "package com.example;\n\
+         public class Bad {\n\
+         \x20   #[test]\n\
+         \x20   void notStatic() {}\n\
+         }\n",
+    )
+    .unwrap();
+    let (_stdout, stderr, code) = run_full(&[
+        "test",
+        "--color",
+        "never",
+        "--manifest-path",
+        &manifest_of(&dir),
+    ]);
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains("must be `static`"),
+        "the shape must be named; stderr: {stderr}"
+    );
+    // The same problem is an edit-time diagnostic, under the fixed `cfg` rule.
+    let (_stdout, lint_stderr, lint_code) =
+        run_full(&["lint", src.join("Bad.java").to_str().unwrap()]);
+    assert_eq!(lint_code, 1);
+    assert!(
+        lint_stderr.contains("must be `static`"),
+        "the linter must report it too; stderr: {lint_stderr}"
+    );
+}
+
+#[test]
+fn test_without_the_attributes_dialect_says_what_to_add() {
+    let dir = tempdir().unwrap();
+    std::fs::write(dir.path().join("jals.toml"), "[package]\nname = \"demo\"\n").unwrap();
+    let src = dir.path().join("src/main/java/com/example");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("Main.java"),
+        "package com.example;\npublic class Main {}\n",
+    )
+    .unwrap();
+    let (_stdout, stderr, code) = run_full(&[
+        "test",
+        "--color",
+        "never",
+        "--manifest-path",
+        &manifest_of(&dir),
+    ]);
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains("features = [\"attributes\"]"),
+        "the message must name the line to add; stderr: {stderr}"
+    );
+}
+
+#[test]
+fn test_filters_select_and_partition_covers_every_test() {
+    if !javac_available() {
+        return;
+    }
+    let dir = test_project();
+    let manifest = manifest_of(&dir);
+    // A substring filter narrows the run.
+    let (stdout, _stderr, _code) = run_full(&[
+        "test",
+        "--list",
+        "--color",
+        "never",
+        "divideByZero",
+        "--manifest-path",
+        &manifest,
+    ]);
+    assert_eq!(stdout.lines().count(), 1);
+
+    // The two halves of a partition together cover exactly what the unpartitioned run does.
+    let all: Vec<String> = run_full(&["test", "--list", "--manifest-path", &manifest])
+        .0
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    let mut sharded: Vec<String> = Vec::new();
+    for shard in ["count:1/2", "count:2/2"] {
+        sharded.extend(
+            run_full(&[
+                "test",
+                "--list",
+                "--partition",
+                shard,
+                "--manifest-path",
+                &manifest,
+            ])
+            .0
+            .lines()
+            .map(str::to_owned),
+        );
+    }
+    sharded.sort();
+    let mut expected = all;
+    expected.sort();
+    assert_eq!(sharded, expected);
+}
