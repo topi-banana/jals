@@ -276,6 +276,13 @@ struct TestArgs {
     /// "start another process", and a target run has only one.
     #[arg(long, value_name = "NAME")]
     target: Option<String>,
+    /// Package this run's screenshots as a new golden archive instead of judging them.
+    ///
+    /// Nothing is compared and nothing is written into the project: reference images are a fetched
+    /// artifact, so blessing them is publishing an archive and pinning its digest. The run writes
+    /// the archive and prints the `[[golden.<name>]]` block to paste once it is uploaded.
+    #[arg(long, requires = "target")]
+    update_golden: bool,
     /// Run one shard of the suite: `count:M/N` splits by position, `hash:M/N` by test id.
     #[arg(long, value_name = "SPEC")]
     partition: Option<String>,
@@ -1206,11 +1213,28 @@ impl TestArgs {
             return Ok(self.report_empty(&reporter, &cases));
         }
 
-        // Without a golden archive there is nothing to compare against, and every shot reports
-        // "no reference" — which is exactly the state a project is in before its first
-        // `--update-golden`, and is deliberately not a failure.
+        // The reference images, fetched and unpacked into one content-addressed directory.
+        //
+        // `None` in three cases, and none of them is a failure: the target compares nothing, the
+        // selection activates no alternative, or this run is blessing rather than judging. The
+        // first two report every shot as "no reference"; the third is `--update-golden`, where
+        // comparing what we are about to declare correct would be circular.
+        let reference_dir = match (&target.golden, self.update_golden) {
+            (Some(golden), false) => {
+                Self::golden_dir(&manifest, &root, exec, &fetcher, &features, &golden.with).await?
+            }
+            _ => None,
+        };
+        // The verifier is built even when blessing, and the difference is only what it has to
+        // compare against. A shot still has to be *recorded* — that is how `--update-golden` learns
+        // which files to package and under which names — and with no reference directory every one
+        // of them comes back as `NoReference`, which is recorded and not judged.
         let verifier = target.golden.as_ref().map(|_| {
-            jals_build::ScreenshotVerifier::new(&target.screenshots, None, scratch.join("diff"))
+            jals_build::ScreenshotVerifier::new(
+                &target.screenshots,
+                reference_dir,
+                scratch.join("diff"),
+            )
         });
 
         let reporter = self.reporter(selection.selected().len() as u64);
@@ -1235,12 +1259,151 @@ impl TestArgs {
             testrun::TestReporter::report_json(&run.outcomes);
         }
         let failed = reporter.summary(&run.outcomes, started.elapsed());
+        if self.update_golden {
+            // Blessing reports on the archive, not on the tests: a run whose *tests* failed may
+            // still have produced the pictures the author means to declare correct, and refusing to
+            // package them would make a failing assertion block an unrelated screenshot update.
+            self.bless(&run, &target, &root)?;
+            return Ok(if failed {
+                ExitCode::from(1)
+            } else {
+                ExitCode::SUCCESS
+            });
+        }
         let complained = Self::report_target_problems(&run);
         Ok(if failed || complained {
             ExitCode::from(1)
         } else {
             ExitCode::SUCCESS
         })
+    }
+
+    /// Fetch and unpack the golden set `reference` names, materialized as one directory.
+    ///
+    /// Opens the project storage a second time rather than holding the one the compile used: the
+    /// compile's aggregate is dropped once its artifacts are on disk, and re-opening is what
+    /// `jals lint` and the graph phase already do for the same reason.
+    async fn golden_dir(
+        manifest: &Manifest,
+        root: &Path,
+        exec: &Exec,
+        fetcher: &jals_classpath::ReqwestFetcher,
+        features: &jals_config::ResolvedBuildFeatures,
+        reference: &str,
+    ) -> Result<Option<PathBuf>> {
+        let mut storage = App::open_project_storage(manifest, root, exec).await?;
+        let tree = jals_classpath::GoldenSet::resolve(
+            fetcher,
+            storage.artifacts_mut(),
+            exec,
+            manifest,
+            reference,
+            features.features(),
+        )
+        .await
+        .map_err(|warning| anyhow!("{warning}"))?;
+        let Some(tree) = tree else {
+            return Ok(None);
+        };
+        let members = tree
+            .files
+            .iter()
+            .map(|source| {
+                let key = FileKey::parse(&source.path.to_string()).map_err(|_| {
+                    anyhow!(
+                        "golden set `{reference}` holds `{}`, which is not a file path",
+                        source.path
+                    )
+                })?;
+                Ok((key, source.key.clone()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let dir = storage
+            .artifacts()
+            .materialize_tree(members.iter().map(|(path, key)| (path, key)))
+            .await
+            .map_err(|error| anyhow!("materializing golden set `{reference}` failed: {error:?}"))?;
+        Ok(Some(dir))
+    }
+
+    /// Package this run's screenshots as a new golden archive and say how to declare it.
+    ///
+    /// Written to `target/` and never into the project: an author publishes the archive and pastes
+    /// the block, which is one step more than `--bless` usually is and is the price of reference
+    /// images that are not committed. What jals can do is make the step mechanical — the digest and
+    /// the cap are computed here, so the only thing left to supply is the URL.
+    fn bless(
+        &self,
+        run: &jals_build::TargetRun,
+        target: &jals_config::testing::TestTarget,
+        root: &Path,
+    ) -> Result<()> {
+        let mut entries: Vec<(RelativePath, Vec<u8>)> = Vec::new();
+        let mut names: Vec<String> = Vec::new();
+        for outcome in &run.outcomes {
+            for shot in &outcome.shots {
+                let jals_build::ShotOutcome::NoReference { name, actual } = shot else {
+                    continue;
+                };
+                let path = RelativePath::parse(&format!("{name}.png"))
+                    .map_err(|_| anyhow!("screenshot name `{name}` is not a file name"))?;
+                let bytes = std::fs::read(actual)
+                    .with_context(|| format!("reading screenshot {}", actual.display()))?;
+                entries.push((path, bytes));
+                names.push(name.clone());
+            }
+        }
+        // A blessing run that produced nothing is a mistake worth naming: the alternative is a
+        // valid, empty archive whose digest an author would paste and then wonder about.
+        if entries.is_empty() {
+            bail!(
+                "the run produced no screenshots to bless. Check that `[test-target.screenshots] \
+                 dir` matches where `{}` writes them, and that the report names them with `shot` \
+                 lines.",
+                target.main_class
+            );
+        }
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+        names.sort();
+        let archive = jals_classpath::ArchivePackage::write(&entries)
+            .map_err(|error| anyhow!("packaging the golden archive failed: {error}"))?;
+        let digest = jals_storage::ContentDigest::of(&archive);
+
+        let selection = if self.features.features.is_empty() {
+            String::new()
+        } else {
+            format!("-{}", self.features.features.join("-"))
+        };
+        let out = root
+            .join("target/jals/test/golden-update")
+            .join(format!("{}{selection}.zip", target.name));
+        std::fs::create_dir_all(out.parent().expect("the archive path has a parent"))
+            .with_context(|| format!("creating {}", out.display()))?;
+        std::fs::write(&out, &archive).with_context(|| format!("writing {}", out.display()))?;
+
+        eprintln!(
+            "    Packaged {} screenshot(s): {}",
+            entries.len(),
+            names.join(", ")
+        );
+        eprintln!("        → {} ({} bytes)", out.display(), archive.len());
+        eprintln!();
+        eprintln!("    Upload it, then declare it in jals.toml:");
+        eprintln!();
+        let block = jals_classpath::GoldenSet::declaration(
+            &target
+                .golden
+                .as_ref()
+                .map_or_else(|| target.name.clone(), |golden| golden.with.clone()),
+            &self.features.features.iter().cloned().collect(),
+            "<the URL you uploaded it to>",
+            &digest.to_hex(),
+            archive.len(),
+        );
+        for line in block.lines() {
+            eprintln!("    {line}");
+        }
+        Ok(())
     }
 
     /// Report what went wrong with the run as a whole, rather than with one test.

@@ -137,6 +137,35 @@ impl JarPackage {
     }
 }
 
+/// Packages arbitrary files into a stored zip.
+///
+/// The sibling of [`JarPackage`], and the difference is the manifest: a jar needs one and this
+/// deliberately writes none. What this packages is not a jar — a golden screenshot archive is
+/// pictures under their own names, and a `META-INF/MANIFEST.MF` in it would be a member every
+/// consumer has to know to ignore.
+///
+/// Stored rather than deflated, like everything this crate writes: the members are PNG files,
+/// which are already compressed, so deflating them costs time and saves nothing.
+pub struct ArchivePackage;
+
+impl ArchivePackage {
+    /// Serialize `entries` as a deterministic stored zip.
+    ///
+    /// # Errors
+    /// The writer's own refusals: an unsafe member name, two entries sharing a path, or an archive
+    /// beyond what the stored encoding's 32-bit fields can describe.
+    pub fn write(entries: &[(RelativePath, Vec<u8>)]) -> Result<Vec<u8>, String> {
+        let members = entries
+            .iter()
+            .map(|(path, bytes)| WriteMember {
+                name: path.to_string(),
+                bytes: bytes.clone(),
+            })
+            .collect::<Vec<_>>();
+        StoredZip::write(&members)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use alloc::vec;

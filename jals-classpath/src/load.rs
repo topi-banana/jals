@@ -495,6 +495,67 @@ pub struct SourceTreeLimits {
     pub max_total_bytes: usize,
 }
 
+/// Strict extraction of an archive's members **as files**, whatever they are.
+///
+/// The sibling of [`SourceTreeExtraction`], and the difference is the filter: that one selects
+/// `.java` (or decompiles `.class`), because what it produces is compiled or published as source.
+/// This one selects nothing — a native library, a PNG, a `pack.mcmeta` and a `.json` all come out
+/// as bytes under their own names, because what a *runtime* directory holds is whatever the thing
+/// being run expects to find there.
+pub struct FileTreeExtraction;
+
+impl FileTreeExtraction {
+    /// Extract every member below `prefix`, stripping that prefix from result paths.
+    ///
+    /// Any unsafe, duplicate or corrupt member fails the whole operation, exactly as it does for a
+    /// source tree: a runtime directory that is missing one file it should hold fails later and
+    /// somewhere else, which is the worse of the two ways to find out.
+    ///
+    /// # Errors
+    /// A rendered diagnostic naming the archive or the member that could not be produced.
+    pub async fn all<C: CacheBackend>(
+        exec: &Exec,
+        cache: &mut ArtifactCache<C>,
+        archive: &CacheKey,
+        prefix: &RelativePath,
+        limits: SourceTreeLimits,
+    ) -> Result<SourceTree, String> {
+        let reader = cache
+            .open_verified(archive)
+            .await
+            .map_err(|error| format!("archive is invalid: {error:?}"))?
+            .ok_or_else(|| "archive is not cached".to_owned())?;
+        let members = Archive::decode_all_bounded(exec, reader, limits).await?;
+        let prefix_len = prefix.segments().len();
+        let mut files = BTreeMap::new();
+        for (name, outcome) in members {
+            let member = Archive::safe_relative(&name)
+                .ok_or_else(|| format!("unsafe archive member `{name}`"))?;
+            if !member.starts_with(prefix) {
+                continue;
+            }
+            let relative = RelativePath::new(member.segments().skip(prefix_len).cloned());
+            if relative.is_root() {
+                return Err(format!("archive member `{name}` has no relative file name"));
+            }
+            let bytes = outcome?;
+            if files.insert(relative, (member, bytes)).is_some() {
+                return Err(format!("duplicate archive member `{name}`"));
+            }
+        }
+        let mut tree = SourceTree::default();
+        for (path, (member, bytes)) in files {
+            let key = Archive::member_key(CacheNamespace::ExtractedFile, archive, &member, &bytes);
+            cache
+                .publish(&key, &bytes)
+                .await
+                .map_err(|error| format!("archive member `{member}` publish failed: {error:?}"))?;
+            tree.files.push(LibrarySource { path, key });
+        }
+        Ok(tree)
+    }
+}
+
 /// Strict source-tree extraction for build tasks.
 pub struct SourceTreeExtraction;
 

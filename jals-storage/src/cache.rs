@@ -102,6 +102,19 @@ pub enum CacheNamespace {
     /// Folding them into that key would make editing one `[build] classpath` line re-fetch,
     /// re-remap and re-decompile a whole task plan.
     PublicationCoverage,
+    /// One member extracted from an archive **as a file** rather than as a source — a native
+    /// library, an image, a resource a runtime expects to find on disk.
+    ///
+    /// Separate from [`BuildTaskSource`](Self::BuildTaskSource) because nothing compiles it and
+    /// nothing indexes it: it exists to be materialized into a directory some process reads, and
+    /// an eviction policy that treated the two alike would be reasoning about the wrong artifact.
+    ExtractedFile,
+    /// The reference screenshots a `[[test-target]]` judges its own against, as fetched.
+    ///
+    /// Its own namespace for the reason [`Mappings`](Self::Mappings) has one: it is not a classpath
+    /// input, nothing loads a class from it, and it is replaced wholesale whenever the renderer
+    /// that produced it moves.
+    GoldenScreenshots,
     /// One mapping text a `remap` key names, fetched and verified before anything parses it.
     ///
     /// Its own namespace rather than [`DependencyJar`](Self::DependencyJar) because it is not a
@@ -141,6 +154,8 @@ impl CacheNamespace {
             Self::BuildTaskSource => "build-task-source",
             Self::BuildTaskState => "build-task-state",
             Self::PublicationCoverage => "publication-coverage",
+            Self::ExtractedFile => "extracted-file",
+            Self::GoldenScreenshots => "golden-screenshots",
             Self::Mappings => "mappings",
             Self::FrontendOutput => "frontend-output",
             Self::BackendOutput => "backend-output",
@@ -164,6 +179,8 @@ impl CacheNamespace {
             "build-task-source" => Self::BuildTaskSource,
             "build-task-state" => Self::BuildTaskState,
             "publication-coverage" => Self::PublicationCoverage,
+            "extracted-file" => Self::ExtractedFile,
+            "golden-screenshots" => Self::GoldenScreenshots,
             "mappings" => Self::Mappings,
             "frontend-output" => Self::FrontendOutput,
             "backend-output" => Self::BackendOutput,

@@ -14,8 +14,9 @@ mod resolve;
 mod skeleton;
 
 #[cfg(feature = "archive")]
-mod jar;
+mod golden;
 #[cfg(feature = "archive")]
+mod jar;
 mod load;
 #[cfg(feature = "archive")]
 mod mappings;
@@ -37,11 +38,13 @@ pub use resolve::{
 pub use skeleton::{SkeletonGroup, SkeletonMode, Skeletons};
 
 #[cfg(feature = "archive")]
-pub use jar::JarPackage;
+pub use golden::GoldenSet;
+#[cfg(feature = "archive")]
+pub use jar::{ArchivePackage, JarPackage};
 #[cfg(feature = "archive")]
 pub use load::{
-    CachedJar, ClasspathCoverage, ClasspathEntry, ClasspathLoad, JarExtraction, SourceTree,
-    SourceTreeExtraction, SourceTreeLimits,
+    CachedJar, ClasspathCoverage, ClasspathEntry, ClasspathLoad, FileTreeExtraction, JarExtraction,
+    SourceTree, SourceTreeExtraction, SourceTreeLimits,
 };
 #[cfg(feature = "native")]
 pub use native::{NativeProjectPlan, ReqwestFetcher};

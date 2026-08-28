@@ -713,6 +713,12 @@ impl TargetLauncher {
         Ok(Self { base, target })
     }
 
+    /// The working directory the target is started in, which its report's paths are relative to.
+    #[must_use]
+    pub fn run_dir(&self) -> &Path {
+        self.target.run_dir()
+    }
+
     /// The directory the process's own output and the difference pictures go in — the run
     /// directory's parent, so neither can be mistaken for something the program wrote.
     fn scratch(&self) -> PathBuf {
