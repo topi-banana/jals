@@ -567,6 +567,17 @@ impl CfgMap {
             if markers.test
                 && let Some(range) = Self::node_span(host)
             {
+                // The same guard the disabled path below carries, for the same reason: a
+                // non-test lowering blanks this whole span, and error recovery can mis-extend the
+                // node — a mis-extended blank would erase the author's syntax error along with
+                // whatever followed it, and the build would succeed on a broken file.
+                if Self::overlaps_error(parse, range) {
+                    self.errors.push(CfgError {
+                        range,
+                        kind: CfgErrorKind::DisabledHasErrors,
+                    });
+                    return Host::Enabled;
+                }
                 self.tests.push(TestHost {
                     range,
                     host: host.clone(),
@@ -1316,6 +1327,20 @@ mod tests {
         assert_eq!(map.disabled_ranges().count(), 1);
         // With the feature on, the same source has the test back.
         assert_eq!(compute(src, &["slow"]).tests().len(), 1);
+    }
+
+    /// A `#[test]` host is blanked whole by a non-test lowering, exactly as a `cfg`-disabled one
+    /// is, so it carries the same refusal: error recovery mis-extends a node, and a blank over a
+    /// mis-extended span erases the author's syntax error along with whatever followed it.
+    #[test]
+    fn a_test_host_overlapping_a_syntax_error_is_refused_and_not_collected() {
+        let src = "class C {\n    #[test]\n    static void t() {\n        int x = ;\n    }\n}\n";
+        let map = compute(src, &[]);
+        assert_eq!(kinds(&map), vec![CfgErrorKind::DisabledHasErrors]);
+        assert!(
+            map.tests().is_empty(),
+            "a host the frontend must not blank is not a test host either"
+        );
     }
 
     #[test]

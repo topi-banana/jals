@@ -1031,3 +1031,29 @@ fn lowering_imposes_canonical_order_on_its_input() {
         "the published keys must not depend on discovery order"
     );
 }
+
+#[test]
+fn a_disabled_host_inside_a_dropped_test_method_is_blanked_once() {
+    // The method's own blank already covers everything in it, so the `cfg`-disabled statement
+    // inside must not contribute a second, nested one: the splicer walks the blanks with a single
+    // forward cursor and a nested span makes it slice backwards.
+    let src = "class C {\n    #[test]\n    static void t() {\n        #[cfg(feature = \"x\")]\n        int a = 1;\n    }\n    static void kept() {}\n}\n";
+    let out = strip(src, &[]);
+    assert_eq!(out.len(), src.len());
+    assert_eq!(newlines(&out), newlines(src));
+    assert!(!out.contains("int a = 1"));
+    assert!(out.contains("static void kept() {}"));
+    assert_eq!(line_of(&out, "static void kept"), 7);
+}
+
+#[test]
+fn a_test_method_containing_a_syntax_error_fails_instead_of_being_erased() {
+    // Blanking a recovery-extended span would delete the author's error along with whatever the
+    // node was mis-extended over, and the build would then *succeed* on a broken file.
+    let src = "class C {\n    #[test]\n    static void t() {\n        int x = ;\n    }\n    static void kept() {}\n}\n";
+    let (messages, _) = strip_failing(src, &[]);
+    assert!(
+        messages.iter().any(|m| m.contains("syntax errors")),
+        "expected the mis-extended host to be refused: {messages:?}"
+    );
+}

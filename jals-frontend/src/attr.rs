@@ -98,11 +98,20 @@ impl AttrPlan {
             }
         }
         for host in cfg.disabled_hosts() {
-            out.remove_host(
-                host.range.start().into(),
-                host.range.end().into(),
-                Self::needs_semicolon(&host.host),
+            let (start, end) = (
+                usize::from(host.range.start()),
+                usize::from(host.range.end()),
             );
+            // Guarded for the same reason the attribute loop above is: a dropped `#[test]` method
+            // already contributes one blank covering its whole span, and a `cfg`-disabled host
+            // *inside* it would be a second, nested one. `blanks` must stay mutually disjoint —
+            // the splicer walks them with a single forward cursor and a nested span makes it slice
+            // backwards. `CfgMap` never descends into a disabled host, so this is the only
+            // direction an overlap can come from.
+            if out.disables((start, end)) {
+                continue;
+            }
+            out.remove_host(start, end, Self::needs_semicolon(&host.host));
         }
         for error in cfg.errors() {
             let line = Self::line_of(text, error.range.start().into());
