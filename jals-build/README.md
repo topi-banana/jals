@@ -889,7 +889,7 @@ fed into `Invocation::build` exactly as the discovered source list is fed in tod
 | ------------------------------------------ | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------- |
 | `jals new <path>`                          | `cargo new`                  | Scaffold into a **new** directory (vs. `init`, which is in-place). Mostly a thin alias over today's `InitOptions::scaffold`.         | reuse `InitOptions::scaffold`                                                                   |
 | `jals check`                               | `cargo check`                | Compile for diagnostics only, no runnable output (`javac -proc:only` / throwaway `-d`), or fold in `jals fmt --check` + `jals lint`. | a "check" invocation variant                                                                    |
-| `jals test [filter]`                       | `cargo test`                 | Compile test sources and run them via the JUnit Platform launcher; filter by class/method.                                           | `[test]` section, `test-source-dirs`, a JUnit dep on the classpath, a runner invocation builder |
+| ~~`jals test [filter]`~~ **done**          | `cargo test`                 | **Implemented**, and not through JUnit: a test is a `#[test]` method, and each one runs in its own JVM with `cargo nextest`-shaped output. See [§5](#5-testing). | — |
 | `jals doc`                                 | `cargo doc`                  | Run `javadoc` into `target/doc`; optionally open it.                                                                                 | a `javadoc` invocation builder, `[doc]` options                                                 |
 | `jals jar` / `jals package`                | `cargo package`              | Produce a runnable jar (`Main-Class` in the manifest), optionally a fat/uber jar bundling classpath deps.                            | a `jar`/archive plan, `[package]` metadata                                                      |
 | `jals add <coord>` / `jals remove <coord>` | `cargo add` / `cargo remove` | Edit `[dependencies]` in `jals.toml`.                                                                                                | manifest **writing** + Maven coordinate parsing                                                 |
@@ -935,7 +935,7 @@ Making a `features` release preset also imply a default `javac --release` is sti
 | Section                               | Cargo analogue        | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | ------------------------------------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `[dependencies]`                      | `[dependencies]`      | **partly done**: explicit JARs are wired for analysis/compile (plus optional navigation sources), and `{ git = "url", branch/tag/rev, dir }` / `{ path = "...", dir }` form a transitive JALS source-project graph with exact manifest probing, dependency scripts, LSP navigation, and `build`/`run` compilation. Maven coordinates, POM/version resolution, transitive Maven download, and a lockfile remain §3.                                                                            |
-| `[dev-dependencies]`                  | `[dev-dependencies]`  | test/bench-only deps (JUnit, etc.)                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `[dev-dependencies]`                  | `[dev-dependencies]`  | Dependencies only a test run puts on the classpath. Not needed for testing itself — `jals test` needs no framework (§5) — but a test that reaches for a helper library still has nowhere to declare it.                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `[toolchain]`                         | `rust-toolchain.toml` | **partly done**: `compiler`/`runtime` select `javac`/`java` independently — `"system"`, `"builtin"`, an explicit `{ path = "…" }`, or a `{ distribution = { name, version } }` discovered among the installed JDKs (SDKMAN / `~/.jdks` / `~/.jdk` / `/usr/lib/jvm` / macOS). Still to come: **automatic download** of a missing JDK (rust-toolchain style, e.g. via the foojay disco API) into a per-user cache, and letting a `[package] features` release preset default `[build] release`. |
 | `[repositories]`                      | (registries)          | Maven repository URLs; default Maven Central                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `[profile.dev]` / `[profile.release]` | `[profile.*]`         | debug vs. optimized/stripped builds (`-g` vs. `-g:none`, lint levels)                                                                                                                                                                                                                                                                                                                                                                                                                         |
@@ -987,10 +987,53 @@ separate, still-unwired step).
 
 ## 5. Testing
 
-`jals test` compiles `src/test/java` against the main classes + `[dev-dependencies]`, then runs
-the JUnit Platform launcher (or TestNG). Needs: a `[test]`/`test-source-dirs` config, a test
-classpath plan, a runner-`Invocation` builder, and result reporting in `jals-cli`. Pairs with
-`jals bench` (JMH) once dependencies (§3) exist.
+**Implemented.** `jals test` takes the Rust model rather than the JUnit one: a test is a method
+carrying the `#[test]` attribute, so no dependency, no annotation processor and no launcher jar is
+involved. The execution architecture follows `cargo nextest` — **one process per test**, run in
+parallel, with a live progress bar and completion lines as they land.
+
+```java
+public final class Calculator {
+    public static int add(int a, int b) { return a + b; }
+
+    #[test]
+    static void addsTwoNumbers() {
+        assert add(2, 3) == 5;
+    }
+}
+```
+
+- **Where tests live.** Anywhere. A `#[test]` method sits beside what it tests, and a project that
+  also keeps a separate tree names it in `[test] source-dirs` — which is *added to*
+  `[build] source-dirs`, never a replacement.
+- **What a test may be.** A `static void` method with no parameters and no type parameters, and
+  not `private`: the generated harness calls it by name from a sibling class in the same package.
+  Every other shape is a compile-time error, reported by the language server as you type.
+- **`#[should_fail]`** inverts the verdict; **`#[ignore]`** lists a test without running it until
+  `--run-ignored` asks.
+- **Assertions.** The JVM is launched with `-ea -esa`, which Java does not do by default — without
+  it an `assert`-based suite passes without checking anything.
+- **`jals build` compiles no test.** A `#[test]` method is removed from the lowered source exactly
+  as a false `#[cfg]` host is, and the test run compiles to `[test] classes-dir`
+  (`target/test-classes`) so the two outputs never mix.
+- **The linter reads the tests as source.** A `private` helper whose only caller is a `#[test]`
+  method is *used*, so `dead-code` stays quiet about it — even though the class an ordinary build
+  produces can no longer reach it. That is the deliberate reading: analysis answers questions
+  about the code as written, and the code as written calls that helper. The cost is one
+  unreachable `private` method in the built class, which is what a test helper is.
+
+The flags follow `cargo nextest run`: positional substring filters plus `--exact` and `--skip`,
+`--run-ignored`, `--partition count:M/N|hash:M/N`, `-j/--test-threads`, `--retries`,
+`--fail-fast`/`--max-fail`, `--timeout`/`--slow-timeout`, `--no-capture`, `--status-level` /
+`--final-status-level`, `--failure-output`/`--success-output`, `--list`, `--message-format`,
+`--no-run`, `--hide-progress-bar`, `--color` and `--no-tests`.
+[`examples/unit_tests`](../examples/unit_tests) is a worked example.
+
+**Still open:** a filter *expression* language (nextest's `-E`), JUnit XML output, reusing a
+compiled test build across runs (`--archive-file`), interoperating with an existing JUnit suite,
+and `jals bench` (JMH) once dependencies (§3) exist. Two known limits: `-j` can only narrow the
+worker pool the executor already sized to the machine, and interrupting a run leaves the test JVMs
+it had already started to finish on their own.
 
 ## 6. Operational / CLI flags (language-agnostic)
 
@@ -1018,7 +1061,7 @@ By Java-user impact:
 
 1. **High-value `[build]` keys** — `encoding`, `enable-preview`, `-Xlint`
    (cheap, immediately useful, no new infrastructure).
-2. **`jals test`** — JUnit integration; the first thing most projects need after `build`/`run`.
+2. ~~**`jals test`**~~ — **done**, through `#[test]` rather than JUnit (§5).
 3. **Maven dependency management (§3)** — coordinate/POM resolver + `jals.lock`. The highest
    impact and the largest remaining effort; unblocks `add`/`remove`/`fetch`/`update` and Maven
    entries in `tree`.

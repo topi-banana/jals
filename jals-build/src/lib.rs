@@ -42,6 +42,12 @@ pub mod backend;
 #[cfg(feature = "rhai")]
 pub mod build_script;
 #[cfg(feature = "native")]
+mod test_runner;
+#[cfg(feature = "native")]
+pub use test_runner::{
+    HarnessContract, RunOptions, TestEvent, TestLauncher, TestOutcome, TestVerdict,
+};
+#[cfg(feature = "native")]
 mod builtin;
 mod clean;
 mod init;
@@ -59,6 +65,11 @@ mod staging;
 mod target;
 #[cfg(feature = "rhai")]
 pub mod task;
+// Gated with the runner it plans for. The planning itself is pure, but a test plan is only ever
+// consumed by something that can start a JVM, so leaving it ungated puts an item with no caller
+// into the portable configuration — which the wasm clippy cells run at `-D warnings`.
+#[cfg(feature = "native")]
+mod test_plan;
 #[cfg(feature = "native")]
 mod toolchain;
 
@@ -84,8 +95,10 @@ pub use manifest_ext::{ManifestError, ManifestExt};
 #[cfg(feature = "native")]
 pub use request::RunRequest;
 #[cfg(feature = "native")]
-pub use staging::{FRONTEND_OUT_DIR, StagedTree};
+pub use staging::{FRONTEND_OUT_DIR, StagedTree, TEST_FRONTEND_OUT_DIR};
 pub use target::{ResolveTargetError, RunTarget};
+#[cfg(feature = "native")]
+pub use test_plan::{Partition, PartitionError, RunIgnored, Selection, TestCase, TestFilter};
 #[cfg(feature = "native")]
 pub(crate) use toolchain::Candidates;
 #[cfg(feature = "native")]

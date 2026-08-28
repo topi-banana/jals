@@ -51,6 +51,22 @@ impl FrontendSelection {
     /// of the rule, and keeping it here is what makes an attribute-free project's cache identity
     /// independent of the feature selection on every host at once.
     pub fn for_manifest(manifest: &Manifest, build_features: &BTreeSet<String>) -> Self {
+        Self::select(manifest, build_features, false)
+    }
+
+    /// The same selection, lowering for a **test run**: `#[test]` methods are kept and the harness
+    /// that calls them is generated alongside the project's own sources.
+    ///
+    /// A separate entry rather than a flag on [`for_manifest`](Self::for_manifest) so that the
+    /// ordinary path cannot pass `true` by accident — and a separate *selection* rather than a
+    /// separate frontend, because everything else about the lowering is identical and must stay
+    /// that way. The two differ in `config_digest`, so their cache entries never collide.
+    pub fn for_manifest_tests(manifest: &Manifest, build_features: &BTreeSet<String>) -> Self {
+        Self::select(manifest, build_features, true)
+    }
+
+    /// The one decision table, shared by both entries.
+    fn select(manifest: &Manifest, build_features: &BTreeSet<String>, tests: bool) -> Self {
         let feature_set = manifest.feature_set();
         let attributes = feature_set.contains(Feature::Attributes);
         let flags = DialectFlags {
@@ -61,6 +77,11 @@ impl FrontendSelection {
             } else {
                 BTreeSet::new()
             },
+            // A `#[test]` is an attribute, so a test lowering without the attributes dialect has
+            // nothing to keep. Folding it in only when the dialect is on is the same rule the
+            // build features follow, and for the same reason: it keeps an attribute-free
+            // project's cache identity independent of how it was invoked.
+            tests: tests && attributes,
         };
         // Exhaustive with no `_` arm, deliberately: adding a `[build.frontend]` variant must be a
         // compile error *here*, which is the whole reason the table moved into one place.

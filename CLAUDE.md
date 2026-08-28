@@ -313,6 +313,21 @@ filesystem reads into portable interfaces.
     of six buckets — against that same registry (`jals-lint/MAPPING-rustc-clippy.md` is the prose,
     `jals-lint/README.md` the roadmap). A new rule therefore lands in three places at once: the
     section that declares its key, the `RULES` table, and whichever ledger row now maps onto it.
+- `jals test`: a test is a `#[test]` method, and the whole feature is three seams already in place
+  rather than a fourth one beside them. `jals-syntax`'s `CfgMap` collects `TestHost`s — validating
+  the shape a generated harness can call (`static void`, no parameters, not `private`, and every
+  enclosing type nameable) so the failure is an edit-time diagnostic under the fixed `cfg` rule,
+  not a build-time one. `jals-frontend` keeps those methods only when it lowers for a test run and
+  synthesizes the Java that calls them: one shim per test *class* (per class, not per package —
+  `String.equals` dispatch against a 64 KiB method cap), plus a root harness in the default
+  package. `jals-build` owns the run: portable planning in `test_plan.rs` (filters, `--partition`)
+  and the host half in `test_runner.rs` (one JVM per test over `Exec::fan_out`, output redirected
+  to per-test scratch files rather than pipes, `-ea` prepended by the launcher). The contract
+  between the two halves — the sentinel line, `--list`, `--quiet` — is owned by `jals-frontend` and
+  travels to the runner as a `HarnessContract` value, so it is written once; the harness class is
+  the fourth item and travels beside it as `RunRequest.main_class`. A captured pass is the sentinel
+  and never the exit status, which is also `1` for a missing main class and `0` for a body that
+  called `System.exit(0)`; `--no-capture` gives up that reading along with the capture, and says so.
 - `jals-cli`: the host boundary from clap `PathBuf` values to `NativeStorage` and typed keys. It
   also owns native-formatter-config **detection** (`migrate.rs`): portable crates cannot look at a
   filesystem, so the host decides which config file is there and reads its bytes through a

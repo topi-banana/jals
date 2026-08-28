@@ -43,6 +43,9 @@ clap = { version = "4.6.1", features = ["derive"] }
 crc32fast = { version = "1", default-features = false }
 futures = { version = "0.3" }
 hashbrown = { version = "0.17" }
+# Host-only progress rendering for `jals test`, the one command whose work is long enough to want
+# a live display. Confined to `jals-cli`: the portable crates render nothing.
+indicatif = { version = "0.18" }
 # `default-features = false`: `jals-build`'s host half (`SubprocessToolchain`) is behind its
 # `native` feature. Consumers that spawn `javac`/`java` (jals-cli) opt in with
 # `features = ["native"]`; everyone else gets the pure core, so the wasm builds stay honest.

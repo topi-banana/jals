@@ -2,6 +2,7 @@
 
 mod migrate;
 mod report;
+mod testrun;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Write};
@@ -39,6 +40,8 @@ enum Commands {
     Build(BuildArgs),
     /// Compile and run a JALS/Java project with `java`.
     Run(RunArgs),
+    /// Compile a project's `#[test]` methods and run each in its own JVM.
+    Test(TestArgs),
     /// Remove a project's `classes-dir` and reserved build-script outputs.
     Clean(CleanArgs),
     /// Scaffold a new JALS/Java project (`jals.toml`, a starter `Main.java`, and `.gitignore`).
@@ -132,6 +135,30 @@ impl FeatureArgs {
     }
 }
 
+/// Which of the two lowerings a compile is part of.
+///
+/// The difference is three things and no more: which source roots are gathered, which frontend
+/// selection runs, and where the staged tree and the classes go. Everything else — the build
+/// script, the project graph, the backend selection — is shared, which is why this is a parameter
+/// on the existing path rather than a second one beside it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Lowering {
+    /// `jals build` / `jals run`: `#[test]` methods are removed.
+    Build,
+    /// `jals test`: `#[test]` methods are kept and the harness that calls them is generated.
+    Test,
+}
+
+impl Lowering {
+    /// Where this lowering's staged tree is written, relative to the project root.
+    const fn staging_root(self) -> &'static str {
+        match self {
+            Self::Build => jals_build::FRONTEND_OUT_DIR,
+            Self::Test => jals_build::TEST_FRONTEND_OUT_DIR,
+        }
+    }
+}
+
 #[derive(Args)]
 struct BuildArgs {
     /// Use this manifest instead of discovering `jals.toml` upward from the cwd.
@@ -197,6 +224,128 @@ struct RunArgs {
     features: FeatureArgs,
 }
 
+/// `jals test`, with `cargo nextest run` as the model for both the flags and the output.
+///
+/// The flags are a command-line surface, so the booleans are one per switch by construction:
+/// grouping them into an enum would be grouping *flags*, which is clap's job and not this
+/// struct's.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Args)]
+struct TestArgs {
+    /// Run only tests whose id contains one of these. With none, every test runs.
+    #[arg(value_name = "FILTER")]
+    filters: Vec<String>,
+    /// Match a filter against the whole test id instead of as a substring.
+    #[arg(long)]
+    exact: bool,
+    /// Skip tests whose id contains this. Applied after the positional filters, and always a
+    /// substring so that it can name a whole class.
+    #[arg(long, value_name = "PATTERN")]
+    skip: Vec<String>,
+    /// What to do with `#[ignore]` tests.
+    #[arg(long, value_name = "MODE", default_value = "default")]
+    run_ignored: RunIgnoredArg,
+    /// Run one shard of the suite: `count:M/N` splits by position, `hash:M/N` by test id.
+    #[arg(long, value_name = "SPEC")]
+    partition: Option<String>,
+    /// Tests to run at once. Defaults to the machine's parallelism, which is also the ceiling.
+    #[arg(short = 'j', long, value_name = "N")]
+    test_threads: Option<usize>,
+    /// Extra attempts a failing test is given before it counts as failed.
+    #[arg(long, value_name = "N", default_value_t = 0)]
+    retries: u32,
+    /// Stop starting tests after the first failure. Tests already running finish, so with
+    /// `-j N` up to N failures can be reported.
+    #[arg(long)]
+    fail_fast: bool,
+    /// Run every test even after one fails. The default.
+    #[arg(long, conflicts_with = "fail_fast")]
+    no_fail_fast: bool,
+    /// Stop starting tests once this many have failed. Tests already running finish.
+    ///
+    /// At least one: `0` would be a limit already reached before the first JVM starts, so every
+    /// test would be reported as skipped and the run would succeed having executed nothing.
+    #[arg(
+        long,
+        value_name = "N",
+        conflicts_with_all = ["fail_fast", "no_fail_fast"],
+        value_parser = clap::value_parser!(u64).range(1..),
+    )]
+    max_fail: Option<u64>,
+    /// Kill a test that runs longer than this many seconds.
+    #[arg(long, value_name = "SECS")]
+    timeout: Option<u64>,
+    /// Report a test that ran longer than this many seconds as slow. Never kills it.
+    #[arg(long, value_name = "SECS", default_value_t = 60)]
+    slow_timeout: u64,
+    /// Let the tests write straight to this terminal. Forces `-j 1` and hides the progress bar,
+    /// and makes the exit status the verdict — the harness's own report is no longer readable.
+    #[arg(long, alias = "nocapture")]
+    no_capture: bool,
+    /// Which outcomes are reported as they happen.
+    #[arg(long, value_name = "LEVEL", default_value = "pass")]
+    status_level: testrun::StatusLevel,
+    /// Which outcomes are repeated in the summary.
+    #[arg(long, value_name = "LEVEL", default_value = "fail")]
+    final_status_level: testrun::StatusLevel,
+    /// When a failing test's captured output is shown.
+    #[arg(long, value_name = "WHEN", default_value = "immediate")]
+    failure_output: testrun::OutputWhen,
+    /// When a passing test's captured output is shown.
+    #[arg(long, value_name = "WHEN", default_value = "never")]
+    success_output: testrun::OutputWhen,
+    /// Never draw the progress bar.
+    #[arg(long)]
+    hide_progress_bar: bool,
+    /// When to colour the output.
+    #[arg(long, value_name = "WHEN", default_value = "auto")]
+    color: testrun::ColorWhen,
+    /// What a run that selected no test does.
+    #[arg(long, value_name = "MODE", default_value = "fail")]
+    no_tests: testrun::NoTests,
+    /// List the selected tests on standard output and exit.
+    #[arg(long)]
+    list: bool,
+    /// How `--list` and the results are printed.
+    #[arg(long, value_name = "FMT", default_value = "human")]
+    message_format: testrun::MessageFormat,
+    /// Compile the tests and stop.
+    #[arg(long)]
+    no_run: bool,
+    /// Path to `jals.toml`.
+    #[arg(long, value_name = "PATH")]
+    manifest_path: Option<PathBuf>,
+    /// Never fetch a dependency over the network.
+    #[arg(long)]
+    offline: bool,
+    /// Print the compile command before running it.
+    #[arg(short, long)]
+    verbose: bool,
+    #[command(flatten)]
+    features: FeatureArgs,
+}
+
+/// The `--run-ignored` spelling, mapped onto `jals-build`'s own value.
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum RunIgnoredArg {
+    /// Run the tests that are not ignored.
+    Default,
+    /// Run only the ignored ones.
+    IgnoredOnly,
+    /// Run everything.
+    All,
+}
+
+impl From<RunIgnoredArg> for jals_build::RunIgnored {
+    fn from(value: RunIgnoredArg) -> Self {
+        match value {
+            RunIgnoredArg::Default => Self::Default,
+            RunIgnoredArg::IgnoredOnly => Self::IgnoredOnly,
+            RunIgnoredArg::All => Self::All,
+        }
+    }
+}
+
 #[derive(Args)]
 struct CleanArgs {
     /// Use this manifest instead of discovering `jals.toml` upward from the cwd.
@@ -230,6 +379,7 @@ fn main() -> ExitCode {
             Commands::Lint(args) => args.run(&exec).await,
             Commands::Build(args) => args.run(&exec).await,
             Commands::Run(args) => args.run(&exec).await,
+            Commands::Test(args) => args.run(&exec).await,
             Commands::Clean(args) => args.run(&exec).await,
             Commands::Init(args) => args.run(&exec).await,
         }
@@ -668,6 +818,7 @@ impl BuildArgs {
             } else {
                 jals_project::SourcePublication::Apply
             },
+            Lowering::Build,
         )
         .await?;
         // `[build] backend` picks *what* compiles the lowered tree, and the selection owns that
@@ -743,6 +894,7 @@ impl RunArgs {
             } else {
                 jals_project::SourcePublication::Apply
             },
+            Lowering::Build,
         )
         .await?;
         let run_request = jals_build::RunRequest {
@@ -786,6 +938,274 @@ impl RunArgs {
             .await
             .map_err(|e| anyhow!("{e}"))?;
         Ok(App::outcome_exit_code(run_outcome.code))
+    }
+}
+
+impl TestArgs {
+    /// Compile the project for a test run, ask the harness what it holds, and run each test in a
+    /// JVM of its own.
+    ///
+    /// The compile half is `jals build`'s, reached through the same
+    /// [`prepare_compile_inputs`](App::prepare_compile_inputs) with `Lowering::Test`: same build
+    /// script, same project graph, same backend selection. What differs is stated there and
+    /// nowhere else.
+    async fn run(&self, exec: &Exec) -> Result<ExitCode> {
+        let (mut manifest, root) = App::resolve_manifest(self.manifest_path.as_deref()).await?;
+        Self::refuse_unsupported(&manifest)?;
+        let features = self.features.resolve(&manifest)?;
+        // The classes a test run produces hold the test methods and the generated harness, so
+        // they go to their own directory. Everything downstream reads `[build] classes-dir` —
+        // the compile's `-d`, the run's `-cp`, the in-process backend's own writes — so swapping
+        // it here is what keeps `jals build`'s output untouched, with no second mechanism.
+        manifest.build.classes_dir = manifest.test.classes_dir.clone();
+
+        let reporter = self.reporter(0);
+        let fetcher = jals_classpath::ReqwestFetcher::for_project(
+            root.clone(),
+            jals_classpath::NetworkPolicy::when_offline(self.offline),
+        );
+        let (sources, tree, inputs) = App::prepare_compile_inputs(
+            &mut manifest,
+            &root,
+            exec,
+            &features,
+            &fetcher,
+            jals_project::SourcePublication::Apply,
+            Lowering::Test,
+        )
+        .await?;
+        let plan = CompilePlan::prepare(&manifest, &root, &sources, tree, &inputs, exec).await?;
+        let request = plan.request();
+        if self.verbose {
+            // stderr, unlike `jals build`'s: this command's stdout is a machine contract (`--list`
+            // and `--message-format json`), and a compile command line printed onto it is neither
+            // a test id nor a JSON object.
+            eprintln!("{}", plan.backend.describe(&request));
+        }
+        reporter.compiling(manifest.package.name.as_deref().unwrap_or("project"));
+        let outcome = plan
+            .backend
+            .compile(&request)
+            .await
+            .map_err(|e| anyhow!("{e}"))?;
+        App::finish_compile(&manifest, &root, &outcome)?;
+        if !outcome.success() {
+            return Ok(App::outcome_exit_code(outcome.code()));
+        }
+        if self.no_run {
+            return Ok(ExitCode::SUCCESS);
+        }
+        // The frontend generates no harness for a project that declares no test, so there is no
+        // main class to launch. Answered here rather than by launching anyway and reading an empty
+        // list: that reading is also what a JVM which failed to start produces, and the two have
+        // to stay distinguishable — `TestLauncher::list` reports a non-zero status as the failure
+        // it is precisely because this branch has already taken the innocent case.
+        let harness_class = root
+            .join(&manifest.build.classes_dir)
+            .join(format!("{}.class", jals_frontend::HARNESS_CLASS));
+        if !harness_class.is_file() {
+            return Ok(self.report_empty(&reporter, &[]));
+        }
+
+        let run_request = jals_build::RunRequest {
+            manifest: &manifest,
+            project_root: &root,
+            jvm_args: &inputs.jvm_args,
+            main_class: jals_frontend::HARNESS_CLASS,
+            program_args: &[],
+            extra_classpath: &inputs.extra_classpath,
+            run_env: &inputs.run_env,
+        };
+        let launcher = jals_build::TestLauncher::resolve(
+            &manifest,
+            &run_request,
+            jals_build::HarnessContract {
+                list_argument: jals_frontend::LIST_ARGUMENT.to_owned(),
+                ok_sentinel: jals_frontend::OK_SENTINEL.to_owned(),
+                quiet_argument: jals_frontend::QUIET_ARGUMENT.to_owned(),
+            },
+        )
+        .await
+        .map_err(|e| anyhow!("{e}"))?;
+
+        let cases = launcher.list().await.map_err(|e| anyhow!("{e}"))?;
+        let selection = self.filter()?.select(&cases);
+        if self.list {
+            testrun::TestReporter::list(selection.selected(), self.message_format);
+            return Ok(ExitCode::SUCCESS);
+        }
+        if selection.selected().is_empty() {
+            return Ok(self.report_empty(&reporter, &cases));
+        }
+
+        let reporter = std::sync::Arc::new(self.reporter(selection.selected().len() as u64));
+        reporter.starting(
+            selection.selected().len(),
+            testrun::TestReporter::class_count(selection.selected()),
+            selection.skipped().len(),
+        );
+        let observer = std::sync::Arc::clone(&reporter);
+        let started = std::time::Instant::now();
+        let outcomes = launcher
+            .run(
+                selection.selected(),
+                self.run_options(),
+                std::sync::Arc::new(move |event| match event {
+                    jals_build::TestEvent::Started(id) => observer.started(&id),
+                    jals_build::TestEvent::Finished(outcome) => observer.finished(&outcome),
+                }),
+                exec,
+            )
+            .await;
+        if self.message_format == testrun::MessageFormat::Json {
+            testrun::TestReporter::report_json(&outcomes);
+        }
+        let failed = reporter.summary(&outcomes, started.elapsed());
+        Ok(if failed {
+            ExitCode::from(1)
+        } else {
+            ExitCode::SUCCESS
+        })
+    }
+
+    /// Refuse the two configurations that cannot run a test at all, before anything is compiled.
+    ///
+    /// Each names what the project would have to change: a failure discovered at launch would read
+    /// as a missing class or a silent success, and neither points at the manifest line responsible.
+    fn refuse_unsupported(manifest: &Manifest) -> Result<()> {
+        if !manifest
+            .feature_set()
+            .contains(jals_config::Feature::Attributes)
+        {
+            bail!(
+                "`jals test` finds tests through the `#[test]` attribute, which the attributes \
+                 dialect provides, and this project does not enable it. Add \
+                 `features = [\"attributes\"]` to `[package]` in `jals.toml`."
+            );
+        }
+        if matches!(
+            manifest.build.backend,
+            jals_config::BackendKind::JalsWasm {}
+        ) {
+            bail!(
+                "`jals test` runs each test on a JVM, and `[build] backend` is `jals-wasm`, which \
+                 compiles the project to a WebAssembly module instead. Switch the backend to \
+                 `jals` or `javac` to produce class files."
+            );
+        }
+        if matches!(manifest.toolchain.runtime, jals_config::Runtime::Builtin) {
+            bail!(
+                "`[toolchain] runtime` is `builtin`, which runs nothing — every test would report \
+                 success without executing. Select `system`, a `path`, or a `distribution`."
+            );
+        }
+        Ok(())
+    }
+
+    /// The filter the flags describe.
+    fn filter(&self) -> Result<jals_build::TestFilter> {
+        let partition = match &self.partition {
+            Some(spec) => Some(
+                jals_build::Partition::parse(spec)
+                    .map_err(|e| anyhow!("invalid `--partition {spec}`: {e}"))?,
+            ),
+            None => None,
+        };
+        Ok(jals_build::TestFilter::new()
+            .with_patterns(self.filters.clone())
+            .with_skip(self.skip.clone())
+            .exact(self.exact)
+            .with_ignored(self.run_ignored.into())
+            .with_partition(partition))
+    }
+
+    /// The execution policy the flags describe.
+    fn run_options(&self) -> jals_build::RunOptions {
+        jals_build::RunOptions {
+            // `--no-capture` shares this terminal with the tests, so interleaved output from two
+            // at once would be unreadable. nextest forces serial execution for the same reason.
+            threads: if self.no_capture {
+                1
+            } else {
+                self.test_threads.unwrap_or_else(|| {
+                    std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
+                })
+            },
+            retries: self.retries,
+            timeout: self.timeout.map(std::time::Duration::from_secs),
+            slow_timeout: self.slow_timeout(),
+            max_fail: self
+                .max_fail
+                .map(|limit| usize::try_from(limit).unwrap_or(usize::MAX))
+                .or_else(|| self.fail_fast.then_some(1)),
+            capture: !self.no_capture,
+        }
+    }
+
+    /// A reporter configured from the flags, for `total` tests.
+    fn reporter(&self, total: u64) -> testrun::TestReporter {
+        testrun::TestReporter::new(testrun::ReporterConfig {
+            total,
+            color: self.color.enabled(),
+            show_bar: !self.hide_progress_bar && !self.no_capture,
+            status_level: self.status_level,
+            final_status_level: self.final_status_level,
+            failure_output: self.failure_output,
+            success_output: self.success_output,
+            slow_timeout: self.slow_timeout(),
+        })
+    }
+
+    /// The threshold past which a passing test is reported as slow. `0` turns the report off.
+    fn slow_timeout(&self) -> Option<std::time::Duration> {
+        (self.slow_timeout > 0).then(|| std::time::Duration::from_secs(self.slow_timeout))
+    }
+
+    /// What a run that selected nothing does.
+    ///
+    /// The default is to fail: a filter that matched nothing is usually a typo, and a green run is
+    /// the worst way to find that out. A project with no tests at all is told what it is missing.
+    ///
+    /// A `--partition` shard is the exception, and it is a shard *this run was given* rather than
+    /// a state it discovered: every shard of a CI matrix runs the same command line, so a shard
+    /// that legitimately holds no test cannot be told to accept that on its own — and failing it
+    /// would make `--partition` unusable the moment the shard count passes the test count.
+    fn report_empty(
+        &self,
+        reporter: &testrun::TestReporter,
+        cases: &[jals_build::TestCase],
+    ) -> ExitCode {
+        // Asked against the selection *before* the partition, not merely against "a shard was
+        // named": a shard passed alongside a misspelled filter must still fail, and every shard of
+        // a matrix carries the same filters.
+        if self.partition.is_some()
+            && self.filter().is_ok_and(|filter| {
+                !filter
+                    .with_partition(None)
+                    .select(cases)
+                    .selected()
+                    .is_empty()
+            })
+        {
+            reporter.no_tests("the filters matched, but this `--partition` shard holds no test");
+            return ExitCode::SUCCESS;
+        }
+        let reason = if cases.is_empty() {
+            "no `#[test]` method was found in this project"
+        } else {
+            "no test matched the filters"
+        };
+        match self.no_tests {
+            testrun::NoTests::Pass => ExitCode::SUCCESS,
+            testrun::NoTests::Warn => {
+                reporter.no_tests(reason);
+                ExitCode::SUCCESS
+            }
+            testrun::NoTests::Fail => {
+                reporter.no_tests(&format!("{reason} (`--no-tests pass` accepts this)"));
+                ExitCode::from(1)
+            }
+        }
     }
 }
 
@@ -1527,6 +1947,7 @@ impl App {
         features: &ResolvedBuildFeatures,
         fetcher: &jals_classpath::ReqwestFetcher,
         publications: jals_project::SourcePublication,
+        lowering: Lowering,
     ) -> Result<(
         jals_build::StagedTree,
         Vec<jals_build::BackendSource>,
@@ -1536,8 +1957,12 @@ impl App {
         let script =
             Self::run_build_script(manifest, root, exec, &environment, fetcher, publications)
                 .await?;
-        let sources =
-            Self::discover_sources(manifest, root, !script.host.generated_sources.is_empty())?;
+        let sources = Self::discover_sources(
+            manifest,
+            root,
+            !script.host.generated_sources.is_empty(),
+            lowering,
+        )?;
         // The root build script's output is root project source, so it goes through the root
         // frontend alongside the authored files. Dependency-contributed sources, which land in
         // `extra_sources` further down, deliberately do not: a dependency is lowered under its
@@ -1572,7 +1997,8 @@ impl App {
                 to_lower.push(path.clone());
             }
         }
-        let (staged, tree) = Self::lower_sources(manifest, root, &to_lower, features).await?;
+        let (staged, tree) =
+            Self::lower_sources(manifest, root, &to_lower, features, lowering).await?;
         // Whatever was lowered is now represented by its staged copy; leaving the original in
         // `extra_sources` would hand javac the pre-frontend file as well.
         inputs
@@ -1772,10 +2198,27 @@ impl App {
         manifest: &Manifest,
         root: &Path,
         has_generated_sources: bool,
+        lowering: Lowering,
     ) -> Result<Vec<PathBuf>> {
-        let source_roots = manifest.source_roots(root);
+        let source_roots = match lowering {
+            Lowering::Build => manifest.source_roots(root),
+            Lowering::Test => manifest.test_source_roots(root),
+        };
         for dir in &source_roots {
-            if !dir.is_dir() && !has_generated_sources {
+            // A declared `[test] source-dirs` that does not exist is not an error the way a
+            // missing `[build] source-dirs` is: a project may keep tests in the main tree and
+            // still name a test root it has not created yet.
+            //
+            // Only under the test lowering, though: naming the same directory in both sections is
+            // legal, and a `[build] source-dirs` entry that is missing must still be reported as
+            // missing when it is `jals build` that is looking for it.
+            let declared_for_tests = matches!(lowering, Lowering::Test)
+                && manifest
+                    .test
+                    .source_dirs
+                    .iter()
+                    .any(|declared| root.join(declared) == *dir);
+            if !dir.is_dir() && !has_generated_sources && !declared_for_tests {
                 return Err(anyhow!("source directory {} does not exist", dir.display()));
             }
         }
@@ -1809,12 +2252,19 @@ impl App {
         root: &Path,
         sources: &[PathBuf],
         features: &ResolvedBuildFeatures,
+        lowering: Lowering,
     ) -> Result<(jals_build::StagedTree, Vec<jals_build::BackendSource>)> {
         // `[build.frontend]` and the dialect features that override it are answered in
         // `jals-frontend`, not here — the host supplies the resolved build features (the same set
         // a build script queries) and asks once.
-        let frontend =
-            jals_frontend::FrontendSelection::for_manifest(manifest, features.features());
+        let frontend = match lowering {
+            Lowering::Build => {
+                jals_frontend::FrontendSelection::for_manifest(manifest, features.features())
+            }
+            Lowering::Test => {
+                jals_frontend::FrontendSelection::for_manifest_tests(manifest, features.features())
+            }
+        };
 
         let mut files = Vec::with_capacity(sources.len());
         for path in sources {
@@ -1864,7 +2314,10 @@ impl App {
         // The tree is staged for *both* backends: a process-based compiler needs the files on
         // disk, and having them there keeps `--verbose` and post-mortem debugging identical
         // whichever backend ran.
-        let staged = jals_build::StagedTree::write(&tree, root.join(jals_build::FRONTEND_OUT_DIR))
+        // Each lowering owns its own staging root: `StagedTree::write` prunes whatever the tree it
+        // is given does not name, so sharing one destination would make `jals build` and
+        // `jals test` delete each other's output on every alternating run.
+        let staged = jals_build::StagedTree::write(&tree, root.join(lowering.staging_root()))
             .await
             .map_err(|error| anyhow!("staging frontend output failed: {error}"))?;
         Ok((staged, tree))

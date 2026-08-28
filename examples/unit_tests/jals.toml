@@ -1,0 +1,21 @@
+[package]
+name = "unit_tests"
+version = "0.1.0"
+# `#[test]` is an attribute, so the attributes dialect is what makes tests possible at all.
+# Without it `jals test` refuses the project and says so.
+features = ["attributes"]
+
+[build]
+source-dirs = ["src/main/java"]
+classes-dir = "target/classes"
+release = 21
+
+# Optional. A `#[test]` method works anywhere its subject does, so this section is only for a
+# project that also keeps a separate test tree in the Java convention. It is *added to*
+# `[build] source-dirs`, never a replacement for it.
+[test]
+source-dirs = ["src/test/java"]
+classes-dir = "target/test-classes"
+
+[run]
+main-class = "com.example.Main"

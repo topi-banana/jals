@@ -26,7 +26,7 @@ use alloc::vec::Vec;
 
 use text_size::TextRange;
 
-use crate::ast::{AstNode, AttrArg, Attribute, Literal};
+use crate::ast::{AstNode, AttrArg, Attribute, Literal, MethodDecl, Modifiers, Type};
 use crate::language::{SyntaxElement, SyntaxNode};
 use crate::parser::Parse;
 use crate::syntax_kind::SyntaxKind;
@@ -40,6 +40,110 @@ pub struct DisabledHost {
     pub range: TextRange,
     /// The disabled host node.
     pub host: SyntaxNode,
+}
+
+/// The attribute names this pass understands, as they read in a diagnostic.
+const SUPPORTED_ATTRIBUTES: &str = "`cfg`, `test`, `ignore`, and `should_fail`";
+
+/// Why a `#[test]` method's own shape is rejected. Stated once so the editor and the compile
+/// frontend word it identically.
+const TEST_SIGNATURE_MESSAGE: &str = "a `test` method must be `static`, return `void`, declare no parameters and no type \
+     parameters, and must not be `private`";
+
+/// Why a `#[test]` method's *surroundings* are rejected.
+const TEST_ENCLOSING_MESSAGE: &str = "a `test` method must be reachable by name — every class enclosing it must be non-`private` \
+     and declared at class level, never inside a method body or an anonymous class";
+
+/// One jals test attribute. A marker rather than a predicate: it says what a method *is*, and
+/// never whether the method is compiled.
+///
+/// Keeping the set closed here is what makes [`CfgErrorKind::UnknownAttribute`] exhaustive: a
+/// name reaching `eval_attribute` is either one of these, `cfg`, or a typo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TestMarker {
+    Test,
+    Ignore,
+    ShouldFail,
+}
+
+impl TestMarker {
+    /// The marker `name` spells, or `None` when it spells no marker at all.
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "test" => Some(Self::Test),
+            "ignore" => Some(Self::Ignore),
+            "should_fail" => Some(Self::ShouldFail),
+            _ => None,
+        }
+    }
+
+    /// The name this marker is written with, for a diagnostic.
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Test => "test",
+            Self::Ignore => "ignore",
+            Self::ShouldFail => "should_fail",
+        }
+    }
+}
+
+/// The markers collected from one host's leading attributes.
+///
+/// A set rather than a list: writing one twice is an error, so at most one of each can survive,
+/// and the order they were written in changes nothing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct TestMarkers {
+    test: bool,
+    ignore: bool,
+    should_fail: bool,
+}
+
+impl TestMarkers {
+    /// Record `marker`, reporting `false` when it was already present.
+    const fn record(&mut self, marker: TestMarker) -> bool {
+        let slot = match marker {
+            TestMarker::Test => &mut self.test,
+            TestMarker::Ignore => &mut self.ignore,
+            TestMarker::ShouldFail => &mut self.should_fail,
+        };
+        let fresh = !*slot;
+        *slot = true;
+        fresh
+    }
+
+    /// Whether any marker was written.
+    const fn any(self) -> bool {
+        self.test || self.ignore || self.should_fail
+    }
+
+    /// The name of a marker written *without* `#[test]`, for the diagnostic that says so.
+    const fn stray(self) -> Option<&'static str> {
+        match (self.ignore, self.should_fail) {
+            (true, _) => Some(TestMarker::Ignore.name()),
+            (_, true) => Some(TestMarker::ShouldFail.name()),
+            _ => None,
+        }
+    }
+}
+
+/// One `#[test]` method: what the compile frontend generates a harness entry for, and what the
+/// linter counts as *used* even though no authored source calls it.
+///
+/// Collected unconditionally, whatever the feature selection — a test method is a fact about the
+/// source, not about the build. Whether it survives lowering is the compile frontend's decision
+/// (it blanks the whole host when it is not lowering for a test run), which is why this carries
+/// the same `range` a disabled host would: the span to blank, leading attributes included.
+#[derive(Debug, Clone)]
+pub struct TestHost {
+    /// The host's significant span: first through last non-trivia token, leading attributes
+    /// included.
+    pub range: TextRange,
+    /// The method declaration itself.
+    pub host: SyntaxNode,
+    /// `#[ignore]`: listed, but not run unless asked for.
+    pub ignore: bool,
+    /// `#[should_fail]`: the test passes only when its body throws.
+    pub should_fail: bool,
 }
 
 /// A structural attribute error, located by span.
@@ -58,8 +162,23 @@ pub struct CfgError {
 /// [`message`](CfgErrorKind::message).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CfgErrorKind {
-    /// An attribute other than `cfg` (the only supported name).
+    /// An attribute whose name is none of the supported ones.
     UnknownAttribute(String),
+    /// A test marker written with arguments or a value (`#[test(x)]`, `#[ignore = "y"]`). A
+    /// marker says what a method *is*; it carries nothing.
+    MalformedTestAttribute(String),
+    /// A `#[test]` on something other than a method declaration.
+    TestOnNonMethod,
+    /// A `#[test]` method a generated harness cannot call. The harness reaches it by name from a
+    /// sibling class in the same package, which is exactly what the shape has to allow.
+    TestSignature,
+    /// A `#[test]` method the harness cannot *name*, because a class on the way to it is
+    /// unreachable: `private`, or declared inside a method body or an anonymous class.
+    TestEnclosingType,
+    /// `#[ignore]` or `#[should_fail]` on a host that carries no `#[test]`.
+    TestMarkerWithoutTest(String),
+    /// The same jals attribute written twice on one host.
+    DuplicateAttribute(String),
     /// A `cfg` whose shape is not `#[cfg(<predicate>)]` with a supported predicate.
     MalformedCfg,
     /// A `feature = …` value that is not a plain, escape-free string literal.
@@ -84,7 +203,21 @@ impl CfgErrorKind {
     pub fn message(&self) -> String {
         match self {
             Self::UnknownAttribute(name) => {
-                format!("unknown attribute `{name}`; only `cfg` is supported")
+                format!(
+                    "unknown attribute `{name}`; the supported names are {SUPPORTED_ATTRIBUTES}"
+                )
+            }
+            Self::MalformedTestAttribute(name) => {
+                format!("the `{name}` attribute takes no arguments and no value")
+            }
+            Self::TestOnNonMethod => "`test` is only supported on a method declaration".to_owned(),
+            Self::TestSignature => TEST_SIGNATURE_MESSAGE.to_owned(),
+            Self::TestEnclosingType => TEST_ENCLOSING_MESSAGE.to_owned(),
+            Self::TestMarkerWithoutTest(name) => {
+                format!("`{name}` needs a `test` attribute on the same method")
+            }
+            Self::DuplicateAttribute(name) => {
+                format!("the `{name}` attribute is written more than once")
             }
             Self::MalformedCfg => "malformed `cfg` attribute; expected `#[cfg(<predicate>)]` \
                  with `feature = \"…\"`, `all(…)`, `any(…)`, or `not(…)`"
@@ -112,7 +245,30 @@ impl CfgErrorKind {
     pub fn render_with_line(&self, line: usize) -> String {
         match self {
             Self::UnknownAttribute(name) => {
-                format!("unknown attribute `{name}` on line {line}; only `cfg` is supported")
+                format!(
+                    "unknown attribute `{name}` on line {line}; the supported names are \
+                     {SUPPORTED_ATTRIBUTES}"
+                )
+            }
+            Self::MalformedTestAttribute(name) => {
+                format!("the `{name}` attribute on line {line} takes no arguments and no value")
+            }
+            Self::TestOnNonMethod => {
+                format!(
+                    "the `test` attribute on line {line} is only supported on a method declaration"
+                )
+            }
+            Self::TestSignature => {
+                format!("the method on line {line}: {TEST_SIGNATURE_MESSAGE}")
+            }
+            Self::TestEnclosingType => {
+                format!("the method on line {line}: {TEST_ENCLOSING_MESSAGE}")
+            }
+            Self::TestMarkerWithoutTest(name) => {
+                format!("`{name}` on line {line} needs a `test` attribute on the same method")
+            }
+            Self::DuplicateAttribute(name) => {
+                format!("the `{name}` attribute on line {line} is written more than once")
             }
             Self::MalformedCfg => format!(
                 "malformed `cfg` attribute on line {line}; expected `#[cfg(<predicate>)]` with \
@@ -150,6 +306,10 @@ pub struct CfgMap {
     attr_spans: Vec<TextRange>,
     /// Structural errors, in source order (stray-`#` errors last).
     errors: Vec<CfgError>,
+    /// Every enabled `#[test]` method, in walk order. Independent of the feature selection: a
+    /// `cfg`-disabled host is never walked into, so a test under a false `cfg` is absent for the
+    /// same reason its own declaration is.
+    tests: Vec<TestHost>,
 }
 
 /// Whether the attributes on one host left it enabled or disabled.
@@ -157,6 +317,17 @@ pub struct CfgMap {
 enum Host {
     Enabled,
     Disabled,
+}
+
+/// What one valid attribute contributes to its host.
+///
+/// The two arms are the whole difference between the two kinds of jals attribute: a predicate can
+/// remove the host from the build, a marker only describes it.
+enum AttrEval {
+    /// A `cfg` predicate's value.
+    Predicate(bool),
+    /// A test marker.
+    Marker(TestMarker),
 }
 
 impl CfgMap {
@@ -213,11 +384,19 @@ impl CfgMap {
         &self.errors
     }
 
+    /// Every enabled `#[test]` method, in walk order.
+    pub fn tests(&self) -> &[TestHost] {
+        &self.tests
+    }
+
     /// Whether the file has no attribute at all (nothing disabled, nothing to strip, no error) —
     /// consumers can skip their filtering entirely.
     #[cfg(test)]
     const fn is_empty(&self) -> bool {
-        self.disabled.is_empty() && self.attr_spans.is_empty() && self.errors.is_empty()
+        self.disabled.is_empty()
+            && self.attr_spans.is_empty()
+            && self.errors.is_empty()
+            && self.tests.is_empty()
     }
 
     /// Compute the `cfg` map of one parsed file against the resolved build `features`.
@@ -330,6 +509,9 @@ impl CfgMap {
     ) -> Host {
         let before = self.errors.len();
         let mut enabled = true;
+        let mut markers = TestMarkers::default();
+        // The span every host-level diagnostic is located by: the first attribute written on it.
+        let mut first_attr = None;
         for attr in attrs {
             let Some(range) = Self::node_span(attr.syntax()) else {
                 // An ATTRIBUTE node always holds at least its `#`; defensive only.
@@ -339,6 +521,7 @@ impl CfgMap {
                 });
                 continue;
             };
+            first_attr = first_attr.or(Some(range));
             if Self::overlaps_error(parse, range) {
                 self.errors.push(CfgError {
                     range,
@@ -347,9 +530,27 @@ impl CfgMap {
                 continue;
             }
             match Self::eval_attribute(attr, features) {
-                Ok(value) => enabled &= value,
+                Ok(AttrEval::Predicate(value)) => enabled &= value,
+                Ok(AttrEval::Marker(marker)) => {
+                    if !markers.record(marker) {
+                        self.errors.push(CfgError {
+                            range,
+                            kind: CfgErrorKind::DuplicateAttribute(marker.name().to_owned()),
+                        });
+                    }
+                }
                 Err(kind) => self.errors.push(CfgError { range, kind }),
             }
+        }
+        // Only validate the markers against the host once every attribute on it parsed cleanly:
+        // reporting a signature problem next to a typo'd attribute name states two things about
+        // one construct when the first one is the whole story.
+        if self.errors.len() == before
+            && markers.any()
+            && let Some(kind) = Self::validate_test_host(host, markers)
+        {
+            let range = first_attr.unwrap_or_else(|| host.text_range());
+            self.errors.push(CfgError { range, kind });
         }
         if self.errors.len() > before {
             // The host's spans are only planned from a fully valid attribute list.
@@ -360,6 +561,29 @@ impl CfgMap {
                 if let Some(range) = Self::node_span(attr.syntax()) {
                     self.attr_spans.push(range);
                 }
+            }
+            // Recorded only for an *enabled* host, so a `#[test]` under a false `cfg` is absent
+            // exactly as its own declaration is.
+            if markers.test
+                && let Some(range) = Self::node_span(host)
+            {
+                // The same guard the disabled path below carries, for the same reason: a
+                // non-test lowering blanks this whole span, and error recovery can mis-extend the
+                // node — a mis-extended blank would erase the author's syntax error along with
+                // whatever followed it, and the build would succeed on a broken file.
+                if Self::overlaps_error(parse, range) {
+                    self.errors.push(CfgError {
+                        range,
+                        kind: CfgErrorKind::DisabledHasErrors,
+                    });
+                    return Host::Enabled;
+                }
+                self.tests.push(TestHost {
+                    range,
+                    host: host.clone(),
+                    ignore: markers.ignore,
+                    should_fail: markers.should_fail,
+                });
             }
             return Host::Enabled;
         }
@@ -558,14 +782,27 @@ impl CfgMap {
             .any(|error| error.range().start() < range.end() && range.start() < error.range().end())
     }
 
-    /// Validate one attribute and evaluate its `cfg` predicate against the enabled feature set.
-    fn eval_attribute(attr: &Attribute, features: &BTreeSet<String>) -> Result<bool, CfgErrorKind> {
+    /// Validate one attribute: either a `cfg` predicate evaluated against the enabled feature
+    /// set, or a test marker, which carries no value and never disables its host.
+    fn eval_attribute(
+        attr: &Attribute,
+        features: &BTreeSet<String>,
+    ) -> Result<AttrEval, CfgErrorKind> {
         let Some(meta) = attr.meta() else {
             return Err(CfgErrorKind::MalformedCfg);
         };
         let Some(name) = meta.name_text() else {
             return Err(CfgErrorKind::MalformedCfg);
         };
+        if let Some(marker) = TestMarker::from_name(&name) {
+            // A marker is the whole attribute. `#[test(smoke)]` and `#[ignore = "flaky"]` are
+            // rejected rather than ignored: accepting an argument this pass drops would make the
+            // source say something the build does not do.
+            if meta.args().is_some() || meta.value().is_some() {
+                return Err(CfgErrorKind::MalformedTestAttribute(name));
+            }
+            return Ok(AttrEval::Marker(marker));
+        }
         if name != "cfg" {
             return Err(CfgErrorKind::UnknownAttribute(name));
         }
@@ -580,7 +817,97 @@ impl CfgMap {
         let (Some(predicate), None) = (predicates.next(), predicates.next()) else {
             return Err(CfgErrorKind::MalformedCfg);
         };
-        Self::eval_predicate(&predicate, features, 0)
+        Self::eval_predicate(&predicate, features, 0).map(AttrEval::Predicate)
+    }
+
+    /// Why this host cannot carry the markers written on it, or `None` when it can.
+    ///
+    /// Validated here rather than in the compile frontend so that a missing `static` is an
+    /// edit-time diagnostic: these errors flow through [`errors`](Self::errors), which the linter
+    /// reports under its fixed `cfg` rule.
+    fn validate_test_host(host: &SyntaxNode, markers: TestMarkers) -> Option<CfgErrorKind> {
+        if !markers.test {
+            // `#[ignore]` alone says a test is skipped; without `#[test]` there is no test.
+            return markers
+                .stray()
+                .map(|name| CfgErrorKind::TestMarkerWithoutTest(name.to_owned()));
+        }
+        // `cast` is the kind check: anything that is not a method declaration fails it.
+        let Some(method) = MethodDecl::cast(host.clone()) else {
+            return Some(CfgErrorKind::TestOnNonMethod);
+        };
+        let modifiers = method.modifiers();
+        let is_static = modifiers
+            .as_ref()
+            .is_some_and(|m| m.has(SyntaxKind::STATIC_KW));
+        let is_private = modifiers
+            .as_ref()
+            .is_some_and(|m| m.has(SyntaxKind::PRIVATE_KW));
+        let returns_void = method.return_type().is_some_and(|ty| Self::is_void(&ty));
+        let no_params = method
+            .params()
+            .is_none_or(|list| list.params().next().is_none());
+        if !is_static || is_private || !returns_void || !no_params || method.type_params().is_some()
+        {
+            return Some(CfgErrorKind::TestSignature);
+        }
+        if !Self::enclosing_types_are_nameable(host) {
+            return Some(CfgErrorKind::TestEnclosingType);
+        }
+        None
+    }
+
+    /// Whether `ty` is exactly `void`.
+    ///
+    /// Checked structurally rather than by text: `Type` covers primitives, reference types, and
+    /// array suffixes, and only a lone `void` token is the return type a harness can call and
+    /// discard.
+    fn is_void(ty: &Type) -> bool {
+        let mut significant = ty
+            .syntax()
+            .children_with_tokens()
+            .filter(|element| !element.kind().is_trivia());
+        matches!(
+            (significant.next(), significant.next()),
+            (Some(first), None) if first.kind() == SyntaxKind::VOID_KW
+        )
+    }
+
+    /// Whether every class between `method` and the file can be named from a sibling class in the
+    /// same package.
+    ///
+    /// The generated harness is such a sibling, so this is exactly the reachability it needs: a
+    /// `private` class on the way is closed to it, and a class declared inside a method body (a
+    /// local class) or an anonymous class body has no name to reach at all. Walking the ancestor
+    /// chain answers all three at once — anything that is not a type declaration or a type body
+    /// ends the chain.
+    fn enclosing_types_are_nameable(method: &SyntaxNode) -> bool {
+        use SyntaxKind as S;
+        let mut current = method.parent();
+        while let Some(node) = current {
+            match node.kind() {
+                S::SOURCE_FILE => return true,
+                S::CLASS_DECL
+                | S::INTERFACE_DECL
+                | S::ENUM_DECL
+                | S::RECORD_DECL
+                | S::ANNOTATION_TYPE_DECL => {
+                    let private = node
+                        .children()
+                        .find_map(Modifiers::cast)
+                        .is_some_and(|modifiers| modifiers.has(S::PRIVATE_KW));
+                    if private {
+                        return false;
+                    }
+                }
+                S::CLASS_BODY | S::ENUM_BODY => {}
+                // A block (local class), a `new` with a body (anonymous class), or anything else
+                // the recovery produced: not a chain of named types.
+                _ => return false,
+            }
+            current = node.parent();
+        }
+        true
     }
 
     /// Evaluate one `cfg` predicate: `feature = "name"`, `all(…)` (empty: true), `any(…)`
@@ -880,6 +1207,142 @@ mod tests {
         assert_eq!(map.disabled_hosts().len(), 1);
     }
 
+    /// A class holding one method, so a signature case reads as the one line that differs.
+    fn method(decl: &str) -> String {
+        alloc::format!("class C {{\n    #[test]\n    {decl} {{}}\n}}\n")
+    }
+
+    #[test]
+    fn test_attribute_marks_its_method_without_disabling_it() {
+        let map = compute(&method("static void adds()"), &[]);
+        assert_eq!(kinds(&map), []);
+        // The host survives: a marker describes a method, it never removes one.
+        assert!(map.disabled_ranges().next().is_none());
+        assert_eq!(map.tests().len(), 1);
+        let test = &map.tests()[0];
+        assert_eq!(
+            test.host.kind(),
+            crate::syntax_kind::SyntaxKind::METHOD_DECL
+        );
+        assert!(!test.ignore && !test.should_fail);
+        // The recorded span is the whole method, leading attributes included: it is what an
+        // ordinary lowering blanks, so it has to cover everything the method occupies.
+        let src = method("static void adds()");
+        let recorded = &src[usize::from(test.range.start())..usize::from(test.range.end())];
+        assert!(recorded.starts_with("#[test]"), "recorded: {recorded:?}");
+        assert!(recorded.ends_with("{}"), "recorded: {recorded:?}");
+        // The attribute text is still stripped — `javac` must never see a `#[`.
+        assert_eq!(map.attr_spans().len(), 1);
+    }
+
+    #[test]
+    fn ignore_and_should_fail_ride_along_with_test() {
+        let src = "class C {\n    #[test]\n    #[ignore]\n    #[should_fail]\n    static void t() {}\n}\n";
+        let map = compute(src, &[]);
+        assert_eq!(kinds(&map), []);
+        let test = &map.tests()[0];
+        assert!(test.ignore && test.should_fail);
+        // The whole leading run is stripped, not just the `#[test]`.
+        assert_eq!(map.attr_spans().len(), 3);
+    }
+
+    #[test]
+    fn a_test_method_must_be_callable_by_a_generated_harness() {
+        // Every rejected shape is a shape the harness could not call, or could not name.
+        for decl in [
+            "void t()",                // not static
+            "static int t()",          // does not return void
+            "static void t(int n)",    // takes an argument
+            "private static void t()", // closed to a sibling class
+            "static <T> void t()",     // generic: no way to pick the type argument
+        ] {
+            assert_eq!(
+                kinds(&compute(&method(decl), &[])),
+                [CfgErrorKind::TestSignature],
+                "expected `{decl}` to be rejected"
+            );
+        }
+        // And the shape that works stays accepted.
+        assert_eq!(kinds(&compute(&method("static void t()"), &[])), []);
+    }
+
+    #[test]
+    fn a_test_method_must_be_reachable_through_its_enclosing_types() {
+        let private_nest = "class Outer {\n    private static class Inner {\n        \
+             #[test]\n        static void t() {}\n    }\n}\n";
+        assert_eq!(
+            kinds(&compute(private_nest, &[])),
+            [CfgErrorKind::TestEnclosingType]
+        );
+        let local_class = "class C {\n    static void host() {\n        class Local {\n            \
+             #[test]\n            static void t() {}\n        }\n    }\n}\n";
+        assert_eq!(
+            kinds(&compute(local_class, &[])),
+            [CfgErrorKind::TestEnclosingType]
+        );
+        // A non-private nested class is fine: a sibling in the same package can name it.
+        let nested = "class Outer {\n    static class Inner {\n        #[test]\n        \
+             static void t() {}\n    }\n}\n";
+        assert_eq!(kinds(&compute(nested, &[])), []);
+        assert_eq!(compute(nested, &[]).tests().len(), 1);
+    }
+
+    #[test]
+    fn a_marker_is_the_whole_attribute_and_belongs_to_a_test() {
+        assert_eq!(
+            kinds(&compute(
+                &method("static void t()").replace("#[test]", "#[test(smoke)]"),
+                &[]
+            )),
+            [CfgErrorKind::MalformedTestAttribute("test".to_owned())]
+        );
+        assert_eq!(
+            kinds(&compute(
+                &method("static void t()").replace("#[test]", "#[ignore]"),
+                &[]
+            )),
+            [CfgErrorKind::TestMarkerWithoutTest("ignore".to_owned())]
+        );
+        assert_eq!(
+            kinds(&compute(
+                &method("static void t()").replace("#[test]", "#[test]\n    #[test]"),
+                &[]
+            )),
+            [CfgErrorKind::DuplicateAttribute("test".to_owned())]
+        );
+        // `test` is only a method attribute.
+        assert_eq!(
+            kinds(&compute("#[test]\nclass C {}\n", &[])),
+            [CfgErrorKind::TestOnNonMethod]
+        );
+    }
+
+    #[test]
+    fn a_test_under_a_false_cfg_is_absent_like_its_own_declaration() {
+        let src = "class C {\n    #[cfg(feature = \"slow\")]\n    #[test]\n    \
+             static void t() {}\n}\n";
+        let map = compute(src, &[]);
+        assert_eq!(kinds(&map), []);
+        assert!(map.tests().is_empty());
+        assert_eq!(map.disabled_ranges().count(), 1);
+        // With the feature on, the same source has the test back.
+        assert_eq!(compute(src, &["slow"]).tests().len(), 1);
+    }
+
+    /// A `#[test]` host is blanked whole by a non-test lowering, exactly as a `cfg`-disabled one
+    /// is, so it carries the same refusal: error recovery mis-extends a node, and a blank over a
+    /// mis-extended span erases the author's syntax error along with whatever followed it.
+    #[test]
+    fn a_test_host_overlapping_a_syntax_error_is_refused_and_not_collected() {
+        let src = "class C {\n    #[test]\n    static void t() {\n        int x = ;\n    }\n}\n";
+        let map = compute(src, &[]);
+        assert_eq!(kinds(&map), vec![CfgErrorKind::DisabledHasErrors]);
+        assert!(
+            map.tests().is_empty(),
+            "a host the frontend must not blank is not a test host either"
+        );
+    }
+
     #[test]
     fn messages_render_with_and_without_line() {
         assert_eq!(
@@ -892,7 +1355,8 @@ mod tests {
         );
         assert_eq!(
             CfgErrorKind::UnknownAttribute("derive".to_owned()).render_with_line(1),
-            "unknown attribute `derive` on line 1; only `cfg` is supported"
+            "unknown attribute `derive` on line 1; the supported names are `cfg`, `test`, \
+             `ignore`, and `should_fail`"
         );
         assert_eq!(
             CfgErrorKind::MalformedCfg.render_with_line(2),

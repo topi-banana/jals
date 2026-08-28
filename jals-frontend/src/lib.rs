@@ -37,6 +37,7 @@ mod attr;
 mod dialect;
 pub(crate) mod driver;
 pub mod frontend;
+mod harness;
 pub mod ir;
 pub mod key;
 pub mod level;
@@ -45,6 +46,7 @@ pub mod vanilla;
 
 pub use driver::{LowerError, Lowered};
 pub use frontend::{Frontend, FrontendCaps, FrontendError, FrontendFuture};
+pub use harness::{HARNESS_CLASS, LIST_ARGUMENT, OK_SENTINEL, QUIET_ARGUMENT, SHIM_PREFIX};
 pub use ir::{
     FrontendDiagnostic, FrontendOutput, Ir, IrFile, LoweredFile, LoweredTree, OriginSpan, Severity,
 };

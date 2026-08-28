@@ -316,6 +316,16 @@ impl NativeProjectPlan {
                 scopes.push(NativeScope::extension(path, "java"));
             }
         }
+        // `[test] source-dirs` too, and unconditionally — capture is not where a command's
+        // selection applies. Scoping the snapshot to what *this invocation* compiles would make
+        // the captured tree depend on which subcommand ran, and the same project would then read
+        // differently under `jals build` and `jals test`. What the two disagree about is which
+        // sources reach the frontend, which is decided where the sources are gathered.
+        for source in &manifest.test.source_dirs {
+            if let Some(path) = Self::project_relative(project_root, source) {
+                scopes.push(NativeScope::extension(path, "java"));
+            }
+        }
         // `[build] resource-dirs`, retaining *every* file: a resource is whatever the author put
         // there. Without this scope the directories are outside the captured tree, and the jar
         // `[build] remap` writes would silently come out with no resources in it at all.

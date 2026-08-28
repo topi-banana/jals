@@ -31,6 +31,15 @@ use crate::backend::{BackendError, BackendSource};
 /// as a rerun input — so generated sources structurally cannot certify their own build.
 pub const FRONTEND_OUT_DIR: &str = "target/jals/build/frontend";
 
+/// Where a **test** lowering is written, relative to the project root.
+///
+/// Separate from [`FRONTEND_OUT_DIR`] and not optional: [`StagedTree::write`] prunes whatever the
+/// tree it is given does not name, on the sound assumption that the destination is entirely its
+/// own. Two lowerings of the same project sharing one destination would each delete the other's
+/// output on every alternating run — and their bytes genuinely differ, since one keeps the
+/// `#[test]` methods and the harness and the other removes them.
+pub const TEST_FRONTEND_OUT_DIR: &str = "target/jals/build/test-frontend";
+
 /// A lowered tree materialized on disk.
 pub struct StagedTree {
     root: PathBuf,

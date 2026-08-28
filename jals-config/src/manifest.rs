@@ -123,6 +123,8 @@ pub struct Manifest {
     /// which at most one is ever active. The plural form is what lets one reference cover a project
     /// that targets many releases, each with its own mapping text.
     pub mappings: BTreeMap<String, MappingEntry>,
+    /// `[test]`: where a test run's extra sources live and where its classes go.
+    pub test: Test,
     /// Toolchain selection (`[toolchain]`): which `javac` compiles the project and which `java` runs
     /// it, chosen independently (see [`Toolchain`] and its [`Compiler`](crate::Compiler) /
     /// [`Runtime`](crate::Runtime) enums). Defaults to the system tools when omitted, so an existing
@@ -1653,6 +1655,39 @@ pub struct Build {
     pub remap: Option<BuildRemap>,
 }
 
+/// `[test]`: what a test run compiles on top of the project, and where it puts the result.
+///
+/// Deliberately small. A `#[test]` method lives wherever its subject lives — the Rust model, and
+/// the one this dialect is shaped for — so a project needs nothing here at all. `source-dirs` is
+/// for a project that also keeps a separate test tree in the Java convention, and it is *added to*
+/// `[build] source-dirs` rather than replacing it, because the tests in the main tree are still
+/// tests.
+///
+/// `classes-dir` is separate from `[build] classes-dir` for the property that makes
+/// `jals build` and `jals test` independent: the classes a test run produces hold the test
+/// methods and the generated harness, and an ordinary build's output must never hold either.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
+pub struct Test {
+    /// Extra source roots compiled only by `jals test`, relative to the manifest directory.
+    /// Empty by default: `src/test/java` is opted into, not assumed.
+    pub source_dirs: Vec<String>,
+    /// Output directory for a test run's `.class` files. Defaults to `"target/test-classes"`.
+    pub classes_dir: String,
+}
+
+impl Default for Test {
+    fn default() -> Self {
+        Self {
+            source_dirs: Vec::new(),
+            classes_dir: DEFAULT_TEST_CLASSES_DIR.to_owned(),
+        }
+    }
+}
+
+/// Where a test run's classes go when `[test] classes-dir` says nothing.
+const DEFAULT_TEST_CLASSES_DIR: &str = "target/test-classes";
+
 /// How `[build] resource-dirs` files become jar members (`[build.resources]`).
 ///
 /// A resource is whatever the author put there — a PNG, an `.nbt`, a font — so rendering every one
@@ -2323,6 +2358,20 @@ impl Manifest {
                 dir: self.build.classes_dir.clone(),
             });
         }
+        // The test output directory is removed recursively by `jals clean` for the same reason, so
+        // the root is rejected for the same one.
+        //
+        // The two `classes-dir` values are deliberately *not* checked against each other. They
+        // differ by default, which is what keeps a test run's classes — the test methods and the
+        // generated harness — out of an ordinary build's output. But a host legitimately points
+        // one at the other: `jals test` compiles by setting `[build] classes-dir` to the test one,
+        // exactly as `jals build --out-dir` overrides it, and a manifest that has been through
+        // that substitution would fail a check on the value rather than on what the author wrote.
+        if DirKey::parse(&self.test.classes_dir).is_ok_and(|dir| dir.path().is_root()) {
+            return Err(ValidationError::InvalidTestClassesDir {
+                dir: self.test.classes_dir.clone(),
+            });
+        }
         // `resource-dirs`, unlike `classes-dir`, is always a portable project path: its files are
         // read from the immutable snapshot, which addresses nothing outside the project. The root
         // is rejected for a reason of its own — it would package `target/` into the jar.
@@ -2835,6 +2884,11 @@ pub enum ValidationError {
         /// The invalid compiler output directory.
         dir: String,
     },
+    /// `[test] classes-dir` is not a non-root portable project directory path.
+    InvalidTestClassesDir {
+        /// The invalid test output directory.
+        dir: String,
+    },
     /// A `[build] resource-dirs` entry is not a non-root portable project directory path.
     InvalidResourceDir {
         /// The invalid resource directory.
@@ -3009,6 +3063,11 @@ impl fmt::Display for ValidationError {
             Self::InvalidClassesDir { dir } => write!(
                 f,
                 "invalid `[build] classes-dir` `{dir}`: expected a non-root portable project directory path"
+            ),
+            Self::InvalidTestClassesDir { dir } => write!(
+                f,
+                "invalid `[test] classes-dir` `{dir}`: expected a non-root portable project \
+                 directory path"
             ),
             Self::InvalidResourceDir { dir } => write!(
                 f,
@@ -3341,6 +3400,35 @@ mod tests {
             ValidationError::InvalidClassesDir { dir: String::new() }
         );
         assert!(source.to_string().contains("non-root"));
+    }
+
+    #[test]
+    fn the_test_section_defaults_and_is_validated_like_the_build_one() {
+        // Absent entirely: a project needs nothing here, and the defaults keep a test run's
+        // output clear of an ordinary build's.
+        let manifest: Manifest = toml::from_str("[package]\nname = \"x\"\n").unwrap();
+        assert!(manifest.test.source_dirs.is_empty());
+        assert_eq!(manifest.test.classes_dir, "target/test-classes");
+        assert!(manifest.validate().is_ok());
+
+        // The root is refused: `jals clean` removes this directory recursively.
+        let manifest: Manifest =
+            toml::from_str("[package]\nname = \"x\"\n[test]\nclasses-dir = \"\"\n").unwrap();
+        assert!(matches!(
+            manifest.validate(),
+            Err(ValidationError::InvalidTestClassesDir { .. })
+        ));
+
+        // Pointing one at the other is accepted: `jals test` compiles by doing exactly that, so a
+        // check on the value would reject a manifest no author wrote.
+        let manifest: Manifest = toml::from_str(
+            "[package]\nname = \"x\"\n[build]\nclasses-dir = \"out\"\n[test]\nclasses-dir = \"out\"\n",
+        )
+        .unwrap();
+        assert!(manifest.validate().is_ok());
+
+        // An unknown key inside the section is refused, as in `[build]`.
+        assert!(toml::from_str::<Manifest>("[package]\nname = \"x\"\n[test]\nnope = 1\n").is_err());
     }
 
     #[test]

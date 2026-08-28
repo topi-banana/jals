@@ -11,7 +11,7 @@ backed by a shared semantic layer (`jals-hir`) that does name resolution, cross-
 indexing, and type inference/checking — including resolving types from a project's compiled
 classpath and `[dependencies]` (explicit local/remote jars plus transitive `git`/`path` JALS source
 projects, with readable decompiled Java when a jar has no sources). Alongside them, a Cargo-style
-build front end (`jals build` / `run` / `clean` / `init`) wraps the JDK's `javac` / `java` from a
+build front end (`jals build` / `run` / `test` / `clean` / `init`) wraps the JDK's `javac` / `java` from a
 `jals.toml` manifest and can run sandboxed Rhai build scripts before compilation.
 
 > 日本語版の README は [README_jp.md](README_jp.md) にあります。
@@ -31,8 +31,11 @@ build front end (`jals build` / `run` / `clean` / `init`) wraps the JDK's `javac
 - **A linter with real semantics.** Beyond syntactic checks, `jals lint` catches unused bindings,
   members and imports, type mismatches, unreported checked exceptions, and dead conditionals, using
   name resolution and type inference over the CST — not just pattern matching.
+- **Tests without a framework.** A test is a method carrying `#[test]` — no JUnit, no annotation
+  processor, no launcher jar. `jals test` runs each one in its own JVM in parallel, with
+  `cargo nextest`-shaped output, and `jals build` compiles none of them into the project's classes.
 - **Cargo-style Java builds.** A `jals.toml` manifest — the Java analogue of `Cargo.toml` —
-  drives `jals build` / `run` / `clean` / `init`. Optional Rhai scripts run before `javac`, using
+  drives `jals build` / `run` / `test` / `clean` / `init`. Optional Rhai scripts run before `javac`, using
   bounded storage-only APIs to generate sources and augment flags, classpaths, and environments.
 - **Transitive source-project graphs.** `git`/`path` dependencies can themselves be JALS projects.
   Stable node identities deduplicate diamonds; every unique node is preprocessed dependency-first,
@@ -306,7 +309,9 @@ jals build --dry-run        # print the javac command without compiling
 jals run                    # compile, then run the resolved entry point
 jals run --bin server       # run a named [[bin]] entry point
 jals run -- arg1 arg2       # ...passing args to the program
-jals clean                  # remove the build output (target/classes)
+jals test                   # run every `#[test]` method, one JVM per test
+jals test --list            # list the tests without running them
+jals clean                  # remove the build output (target/classes, target/test-classes)
 ```
 
 A minimal `jals.toml` — every key is optional and defaults to the Maven-style

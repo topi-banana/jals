@@ -509,6 +509,13 @@ jobs:
           - name: rhai_build_script
             dir: examples/rhai_build_script
             run: true
+          # `test: true` is what makes this cell check the claim its README makes: that
+          # `jals test` finds the `#[test]` methods in both source trees and that all of them
+          # pass. `run: true` also holds — the example has a `main` worth running.
+          - name: unit_tests
+            dir: examples/unit_tests
+            run: true
+            test: true
           # The consumer is the entry point; `library/` is built through the dependency edge and has
           # no sources of its own to format or lint.
           - name: task_dependency
@@ -597,6 +604,13 @@ jobs:
         if: ${{ matrix.example.run }}
         working-directory: ${{ matrix.example.dir }}
         run: jals run ${{ matrix.example.features }}
+      # `jals test` compiles a second time (the test lowering keeps the `#[test]` methods the
+      # build removes) and then runs each test in its own JVM. A non-zero status here is a failing
+      # test, which is exactly what the cell is for.
+      - name: Test
+        if: ${{ matrix.example.test }}
+        working-directory: ${{ matrix.example.dir }}
+        run: jals test ${{ matrix.example.features }}
       # After the build, not before it: an example whose dependency fetches (`minecraft_mod`) can
       # only be analysed once that fetch has landed in the verified cache, because analysis is
       # always offline.

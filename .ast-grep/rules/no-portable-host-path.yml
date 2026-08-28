@@ -39,6 +39,10 @@ ignores:
   # the portable request meets host paths (the staged sources, the classpath, the project root).
   # `native`-gated; the seam it implements stays ungated and `wasm32`-buildable.
   - 'jals-build/src/javac_backend.rs'
+  # The test runner: it spawns one JVM per test and redirects each one's output into a scratch
+  # directory of its own, so host paths are what it manipulates. `native`-gated; the planning half
+  # it consumes (`test_plan.rs`) is portable and names no path at all.
+  - 'jals-build/src/test_runner.rs'
   - 'jals-cli/src/**/*.rs'
   - 'jals-lsp/src/**/*.rs'
   - 'jals-tests/src/**/*.rs'

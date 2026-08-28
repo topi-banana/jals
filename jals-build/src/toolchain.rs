@@ -364,6 +364,18 @@ pub enum ToolchainError {
         /// The underlying OS error.
         source: std::io::Error,
     },
+    /// The compiled test harness started but did not enumerate its tests.
+    ///
+    /// Distinct from an empty list: a JVM that could not load the harness, or that died before it
+    /// printed anything, produces the same empty standard output as a project with no test — and
+    /// reporting the first as the second sends the reader to look for missing `#[test]` methods
+    /// instead of at the launch failure.
+    HarnessList {
+        /// The harness's exit status, absent when a signal ended it.
+        status: Option<i32>,
+        /// What the harness wrote to standard error, if it could be read.
+        stderr: String,
+    },
     /// This backend does not support the requested step (e.g. a wasm compiler asked to *run*).
     Unsupported(&'static str),
     /// A project-storage step of an in-process backend failed (for example reading a source or
@@ -388,6 +400,22 @@ impl std::fmt::Display for ToolchainError {
             Self::ArgumentFile { path, source } => {
                 write!(f, "failed to write the argument file `{path}`: {source}")
             }
+            Self::HarnessList { status, stderr } => {
+                match status {
+                    Some(code) => write!(
+                        f,
+                        "the test harness exited with status {code} without listing any test"
+                    )?,
+                    None => f.write_str(
+                        "the test harness was ended by a signal without listing any test",
+                    )?,
+                }
+                if stderr.is_empty() {
+                    Ok(())
+                } else {
+                    write!(f, ":\n{stderr}")
+                }
+            }
             Self::Unsupported(what) => write!(f, "toolchain does not support {what}"),
             Self::Fs(source) => write!(f, "builtin toolchain I/O failed: {source}"),
         }
@@ -398,7 +426,7 @@ impl std::error::Error for ToolchainError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Spawn { source, .. } | Self::ArgumentFile { source, .. } => Some(source),
-            Self::Unsupported(_) => None,
+            Self::Unsupported(_) | Self::HarnessList { .. } => None,
             Self::Fs(source) => Some(source),
         }
     }
