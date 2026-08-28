@@ -42,6 +42,12 @@ pub mod backend;
 #[cfg(feature = "rhai")]
 pub mod build_script;
 #[cfg(feature = "native")]
+mod test_runner;
+#[cfg(feature = "native")]
+pub use test_runner::{
+    HarnessContract, RunOptions, TestEvent, TestLauncher, TestOutcome, TestVerdict,
+};
+#[cfg(feature = "native")]
 mod builtin;
 mod clean;
 mod init;
@@ -59,6 +65,7 @@ mod staging;
 mod target;
 #[cfg(feature = "rhai")]
 pub mod task;
+mod test_plan;
 #[cfg(feature = "native")]
 mod toolchain;
 
@@ -84,8 +91,9 @@ pub use manifest_ext::{ManifestError, ManifestExt};
 #[cfg(feature = "native")]
 pub use request::RunRequest;
 #[cfg(feature = "native")]
-pub use staging::{FRONTEND_OUT_DIR, StagedTree};
+pub use staging::{FRONTEND_OUT_DIR, StagedTree, TEST_FRONTEND_OUT_DIR};
 pub use target::{ResolveTargetError, RunTarget};
+pub use test_plan::{Partition, PartitionError, RunIgnored, Selection, TestCase, TestFilter};
 #[cfg(feature = "native")]
 pub(crate) use toolchain::Candidates;
 #[cfg(feature = "native")]

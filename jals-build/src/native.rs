@@ -104,7 +104,7 @@ impl SubprocessToolchain {
     ///
     /// Discovers installed JDKs only when a [`ToolSpec::Distribution`] selector is present (the
     /// common no-`[toolchain]` project pays no discovery cost).
-    async fn from_manifest(manifest: &Manifest) -> Self {
+    pub(crate) async fn from_manifest(manifest: &Manifest) -> Self {
         let tc = &manifest.toolchain;
         let needs_discovery = matches!(tc.compiler.spec(), Some(ToolSpec::Distribution { .. }))
             || matches!(tc.runtime.spec(), Some(ToolSpec::Distribution { .. }));
@@ -168,7 +168,11 @@ impl SubprocessToolchain {
     }
 
     /// The `java` [`Invocation`] with its program resolved, ready to spawn.
-    async fn plan_run(&self, req: &RunRequest<'_>) -> Invocation {
+    ///
+    /// `pub(crate)` for the test runner, which spawns its own processes and so needs the plan
+    /// rather than the spawn — the same `[toolchain] runtime` selection every other `java` spawn
+    /// goes through, which is the point of it not having a second entry.
+    pub(crate) async fn plan_run(&self, req: &RunRequest<'_>) -> Invocation {
         Invocation::run(req, self.path_sep)
             .with_program(self.resolve_program(Tool::Java, req.project_root).await)
     }

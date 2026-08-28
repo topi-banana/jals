@@ -33,6 +33,7 @@ use jals_syntax::{Parse, SyntaxElement, SyntaxKind};
 
 use crate::attr::AttrPlan;
 use crate::frontend::{Frontend, FrontendCaps, FrontendFuture};
+use crate::harness::TestCatalog;
 use crate::ir::{FrontendDiagnostic, FrontendOutput, Ir, Severity};
 use crate::level::IrLevel;
 
@@ -52,6 +53,14 @@ pub(crate) struct DialectFlags {
     /// The resolved build features `#[cfg(feature = "...")]` tests. Populated by the caller only
     /// when `attributes` is on; a name absent here is simply false (Cargo/Rust cfg semantics).
     pub(crate) build_features: BTreeSet<String>,
+    /// Whether this lowering is for a test run: keep every `#[test]` method and generate the
+    /// harness that calls them. Off, a `#[test]` method is blanked exactly as a `cfg`-disabled
+    /// host is, so an ordinary build's classes hold no test.
+    ///
+    /// Only meaningful with `attributes` on — a `#[test]` is an attribute — which is why
+    /// [`any`](DialectFlags::any) does not consult it: turning it on alone would select this
+    /// frontend over the identity one and change every cache key for nothing.
+    pub(crate) tests: bool,
 }
 
 impl DialectFlags {
@@ -86,8 +95,13 @@ impl Frontend for DialectFrontend {
             // Grouped-import expansion is per-file and introduces no new types — one import
             // statement becomes several, but the set of imported names is unchanged. A false
             // `cfg`, however, removes whole declarations (types included) from the output.
-            type_stable: !self.flags.attributes,
-            version: 1,
+            // A test lowering *adds* types (the generated harness and its shims) on top of the
+            // declarations a false `cfg` removes.
+            type_stable: !(self.flags.attributes || self.flags.tests),
+            // Bumped whenever this frontend's *output* changes for unchanged input — the
+            // generated test harness included, since a cached lowering is restored without the
+            // frontend running at all and would otherwise keep an older harness alive.
+            version: 2,
         }
     }
 
@@ -99,6 +113,7 @@ impl Frontend for DialectFrontend {
         let mut bytes = alloc::vec![
             u8::from(self.flags.grouped_imports),
             u8::from(self.flags.attributes),
+            u8::from(self.flags.tests),
         ];
         for feature in &self.flags.build_features {
             bytes.extend_from_slice(feature.as_bytes());
@@ -111,6 +126,7 @@ impl Frontend for DialectFrontend {
         Box::pin(async move {
             let mut files = Vec::with_capacity(ir.files().len());
             let mut diagnostics = Vec::new();
+            let mut catalog = TestCatalog::default();
             for file in ir.files() {
                 let verbatim = || (file.path.clone(), file.bytes.to_vec());
                 if !self.flags.any() {
@@ -128,7 +144,7 @@ impl Frontend for DialectFrontend {
                     files.push(verbatim());
                     continue;
                 };
-                match Self::desugar_file(text, &self.flags).await {
+                match Self::desugar_file(text, &self.flags, &mut catalog).await {
                     Desugared::Unchanged => files.push(verbatim()),
                     Desugared::Rewritten(rewritten) => {
                         files.push((file.path.clone(), rewritten.into_bytes()));
@@ -145,6 +161,10 @@ impl Frontend for DialectFrontend {
                     }
                 }
             }
+            // The harness is a function of the whole catalog, so it is emitted once, last. A
+            // lowering that produced an error publishes nothing anyway, so generating it here
+            // costs nothing on the failing path either.
+            files.extend(catalog.render());
             Ok(FrontendOutput {
                 files,
                 diagnostics,
@@ -184,16 +204,26 @@ enum Splice {
 impl DialectFrontend {
     /// Desugar one file: parse once, plan both features' rewrites, splice them in one pass.
     /// Any structural error fails the whole file instead of best-effort rewriting.
-    async fn desugar_file(text: &str, flags: &DialectFlags) -> Desugared {
+    async fn desugar_file(
+        text: &str,
+        flags: &DialectFlags,
+        catalog: &mut TestCatalog,
+    ) -> Desugared {
         let parse = Parse::parse(text).await;
         let Some(source_file) = SourceFile::cast(parse.syntax()) else {
             return Desugared::Unchanged;
         };
         let attr_plan = if flags.attributes {
-            AttrPlan::compute(&parse, text, &flags.build_features)
+            AttrPlan::compute(&parse, text, &flags.build_features, flags.tests)
         } else {
             AttrPlan::default()
         };
+        // Collect before the rewrite: the plan is about to blank spans, and the catalog names the
+        // methods that survive. `attr_plan.tests` is empty for an ordinary lowering, which removes
+        // them instead, so the lowering kind is already decided by the time this reads it.
+        if attr_plan.errors.is_empty() {
+            catalog.extend_from_file(&parse, &attr_plan.tests);
+        }
         let mut errors = attr_plan.errors.clone();
         // (start, end, rewrite) for each planned splice; construction keeps them disjoint (an
         // import's significant span starts at its `import` keyword, *after* any attribute, and

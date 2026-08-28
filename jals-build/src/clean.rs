@@ -41,6 +41,16 @@ impl CleanTargets {
             return Err(jals_storage::PathError::DirectoryIsRoot);
         }
         let mut keys = vec![classes_dir];
+        // The test run's output, on the same terms: it is jals-owned build output, it is removed
+        // recursively, and so the root is refused here as well rather than trusted from the
+        // manifest.
+        let test_classes_dir = DirKey::parse(&manifest.test.classes_dir)?;
+        if test_classes_dir.path().is_root() {
+            return Err(jals_storage::PathError::DirectoryIsRoot);
+        }
+        if !keys.contains(&test_classes_dir) {
+            keys.push(test_classes_dir);
+        }
         let build_root = DirKey::parse("target/jals/build")?;
         if !keys.contains(&build_root) {
             keys.push(build_root);
@@ -78,6 +88,7 @@ mod tests {
             paths,
             vec![
                 DirKey::parse("target/classes").unwrap(),
+                DirKey::parse("target/test-classes").unwrap(),
                 DirKey::parse("target/jals/build").unwrap(),
             ]
         );
@@ -92,6 +103,7 @@ mod tests {
             paths,
             vec![
                 DirKey::parse("out").unwrap(),
+                DirKey::parse("target/test-classes").unwrap(),
                 DirKey::parse("target/jals/build").unwrap(),
             ]
         );
@@ -115,13 +127,29 @@ mod tests {
         assert!(CleanTargets::keys(&m).is_err());
     }
 
+    /// The test output directory is removed recursively too, so the root is refused here for the
+    /// same reason `classes-dir`'s is — and independently of it, because `Manifest::validate` is
+    /// not what makes the destructive half safe.
+    #[test]
+    fn rejects_a_root_test_classes_dir() {
+        let mut m = Manifest::default();
+        m.test.classes_dir = String::new();
+        assert_eq!(
+            CleanTargets::keys(&m),
+            Err(jals_storage::PathError::DirectoryIsRoot)
+        );
+    }
+
     #[test]
     fn does_not_duplicate_the_build_script_root() {
         let mut m = Manifest::default();
         m.build.classes_dir = "target/jals/build".into();
         assert_eq!(
             CleanTargets::keys(&m).unwrap(),
-            vec![DirKey::parse("target/jals/build").unwrap()]
+            vec![
+                DirKey::parse("target/jals/build").unwrap(),
+                DirKey::parse("target/test-classes").unwrap(),
+            ]
         );
     }
 

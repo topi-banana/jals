@@ -16,7 +16,7 @@ use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use jals_syntax::cfg::CfgMap;
+use jals_syntax::cfg::{CfgMap, TestHost};
 use jals_syntax::{Parse, SyntaxKind, SyntaxNode};
 
 /// A byte span to blank in place (length-preserving).
@@ -36,6 +36,9 @@ pub(crate) struct AttrPlan {
     /// Host spans removed by a false `cfg`. Rewrites planned by other passes (a grouped-import
     /// expansion) inside one of these ranges must be dropped.
     pub disabled: Vec<(usize, usize)>,
+    /// The `#[test]` methods this lowering *keeps*, for the harness generator to call. Empty
+    /// unless the lowering is for a test run — an ordinary build removes them instead.
+    pub tests: Vec<TestHost>,
     /// Structural errors; any entry makes the file fail instead of rewriting.
     pub errors: Vec<String>,
 }
@@ -59,33 +62,64 @@ impl AttrPlan {
     /// Compute the attribute rewrite plan for one parsed file. `text` is the parsed source, used
     /// to name the offending line in error messages — the lowering they belong to is rejected, so
     /// no compiler downstream will restate them and each must locate its construct on its own.
-    pub(crate) fn compute(parse: &Parse, text: &str, features: &BTreeSet<String>) -> Self {
+    ///
+    /// `tests` says whether this lowering is for a test run. When it is not, every `#[test]`
+    /// method is blanked exactly as a `cfg`-disabled host is — that is what keeps a test out of
+    /// the classes an ordinary `jals build` produces, and it is the same rule Rust applies to
+    /// `#[cfg(test)]`.
+    pub(crate) fn compute(
+        parse: &Parse,
+        text: &str,
+        features: &BTreeSet<String>,
+        tests: bool,
+    ) -> Self {
         let cfg = CfgMap::compute(parse, features);
         let mut out = Self::default();
+        if tests {
+            out.tests = cfg.tests().to_vec();
+        } else {
+            // Removed *before* the attribute pass below, so `disables` already answers for them:
+            // `blanks` are mutually disjoint, and a dropped method's own span already covers the
+            // attributes written on it.
+            for test in cfg.tests() {
+                // A method declaration is never the sole body of a control structure, so removing
+                // one leaves nothing that needs a `;` to stand in for it.
+                out.remove_host(test.range.start().into(), test.range.end().into(), false);
+            }
+        }
         for span in cfg.attr_spans() {
-            out.blanks.push(Blank {
-                start: span.start().into(),
-                end: span.end().into(),
-                semicolon: false,
-            });
+            let (start, end) = (usize::from(span.start()), usize::from(span.end()));
+            if !out.disables((start, end)) {
+                out.blanks.push(Blank {
+                    start,
+                    end,
+                    semicolon: false,
+                });
+            }
         }
         for host in cfg.disabled_hosts() {
-            let (start, end) = (
-                usize::from(host.range.start()),
-                usize::from(host.range.end()),
+            out.remove_host(
+                host.range.start().into(),
+                host.range.end().into(),
+                Self::needs_semicolon(&host.host),
             );
-            out.blanks.push(Blank {
-                start,
-                end,
-                semicolon: Self::needs_semicolon(&host.host),
-            });
-            out.disabled.push((start, end));
         }
         for error in cfg.errors() {
             let line = Self::line_of(text, error.range.start().into());
             out.errors.push(error.kind.render_with_line(line));
         }
         out
+    }
+
+    /// Blank a whole host away and record it as removed, so a rewrite another pass planned inside
+    /// it is dropped.
+    fn remove_host(&mut self, start: usize, end: usize, semicolon: bool) {
+        self.blanks.push(Blank {
+            start,
+            end,
+            semicolon,
+        });
+        self.disabled.push((start, end));
     }
 
     /// Whether stripping this host must leave a `;` behind: as the sole body of a control

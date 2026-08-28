@@ -95,6 +95,14 @@ pub trait ManifestExt {
     /// `manifest_dir` (the manifest's own directory). These feed `javac -sourcepath` and are the
     /// roots scanned for `.java` files.
     fn source_roots(&self, manifest_dir: &Path) -> Vec<PathBuf>;
+
+    /// The absolute source roots a **test run** compiles: [`source_roots`](Self::source_roots)
+    /// plus every `[test] source-dirs` entry.
+    ///
+    /// Additive rather than a replacement, because a `#[test]` method lives wherever its subject
+    /// lives: the main tree is where most tests are, and a separate test tree is the Java
+    /// convention layered on top of that, never instead of it.
+    fn test_source_roots(&self, manifest_dir: &Path) -> Vec<PathBuf>;
 }
 
 impl ManifestExt for Manifest {
@@ -142,6 +150,17 @@ impl ManifestExt for Manifest {
             .map(|d| manifest_dir.join(d))
             .collect()
     }
+
+    fn test_source_roots(&self, manifest_dir: &Path) -> Vec<PathBuf> {
+        let mut roots = self.source_roots(manifest_dir);
+        for dir in &self.test.source_dirs {
+            let path = manifest_dir.join(dir);
+            if !roots.contains(&path) {
+                roots.push(path);
+            }
+        }
+        roots
+    }
 }
 
 #[cfg(test)]
@@ -154,6 +173,27 @@ mod tests {
         assert_eq!(
             jals_exec::block_on_inline(Manifest::discover_path(Path::new("/"))),
             None
+        );
+    }
+
+    #[test]
+    fn test_source_roots_add_to_the_build_ones_without_repeating_them() {
+        let mut manifest = Manifest::default();
+        manifest.test.source_dirs = vec!["src/test/java".to_owned(), "src/main/java".to_owned()];
+        let roots = manifest.test_source_roots(Path::new("/p"));
+        assert_eq!(
+            roots,
+            vec![
+                PathBuf::from("/p/src/main/java"),
+                PathBuf::from("/p/src/test/java"),
+            ],
+            "the main tree stays, and naming it twice adds it once"
+        );
+        // With no `[test]` section the two answers are the same.
+        let plain = Manifest::default();
+        assert_eq!(
+            plain.test_source_roots(Path::new("/p")),
+            plain.source_roots(Path::new("/p"))
         );
     }
 

@@ -469,6 +469,163 @@ mod attr_helpers {
 
 use attr_helpers::{attr_flags, strip, strip_failing};
 
+/// Test-lowering helpers: the same frontend with `tests` on, which keeps `#[test]` methods and
+/// generates the harness that calls them.
+mod test_helpers {
+    use super::*;
+
+    pub(super) fn test_flags() -> DialectFlags {
+        DialectFlags {
+            attributes: true,
+            tests: true,
+            ..DialectFlags::default()
+        }
+    }
+
+    /// Lower `src` for a test run and return every emitted file as `(path, text)`.
+    pub(super) fn lower_tests(src: &str) -> Vec<(alloc::string::String, alloc::string::String)> {
+        let files = vec![Fixture::file("src/main/java/Main.java", src.as_bytes())];
+        let frontend = DialectFrontend::new(test_flags());
+        let output = block_on_inline(frontend.run(Ir::Bytes { files: &files })).unwrap();
+        assert!(
+            !output.has_errors(),
+            "unexpected error: {:?}",
+            output.diagnostics
+        );
+        output
+            .files
+            .into_iter()
+            .map(|(path, bytes)| {
+                (
+                    alloc::format!("{path}"),
+                    alloc::string::String::from_utf8(bytes).unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    /// The generated file whose path ends with `suffix`.
+    pub(super) fn generated<'a>(
+        files: &'a [(alloc::string::String, alloc::string::String)],
+        suffix: &str,
+    ) -> &'a str {
+        &files
+            .iter()
+            .find(|(path, _)| path.ends_with(suffix))
+            .unwrap_or_else(|| {
+                panic!(
+                    "no generated file ending in `{suffix}`; emitted: {:?}",
+                    files.iter().map(|(p, _)| p).collect::<Vec<_>>()
+                )
+            })
+            .1
+    }
+}
+
+use test_helpers::{generated, lower_tests, test_flags};
+
+/// The source every test-lowering case starts from: one package-private `static void` test and
+/// one the harness has to wrap.
+const TEST_SOURCE: &str = "package com.example;\n\
+     public class MathTest {\n\
+     \x20   #[test]\n\
+     \x20   static void adds() {}\n\
+     \x20   #[test]\n\
+     \x20   #[should_fail]\n\
+     \x20   static void divides() {}\n\
+     \x20   #[test]\n\
+     \x20   #[ignore]\n\
+     \x20   static void slow() {}\n\
+     }\n";
+
+#[test]
+fn an_ordinary_lowering_removes_every_test_method() {
+    // Same source, `tests` off: the methods are blanked exactly as a false `cfg` blanks a host,
+    // so nothing reaches the classes an ordinary `jals build` produces.
+    let lowered = strip(TEST_SOURCE, &[]);
+    assert!(
+        !lowered.contains("adds"),
+        "the test method survived: {lowered}"
+    );
+    assert!(!lowered.contains("divides"));
+    assert!(!lowered.contains("slow"));
+    // Blanking is length-preserving, so the class around them is untouched and the line count
+    // still matches the author's file.
+    assert!(lowered.contains("public class MathTest"));
+    assert_eq!(lowered.len(), TEST_SOURCE.len());
+    assert_eq!(
+        lowered.lines().count(),
+        TEST_SOURCE.lines().count(),
+        "line numbers must survive"
+    );
+}
+
+#[test]
+fn a_test_lowering_keeps_the_methods_and_generates_a_harness() {
+    let files = lower_tests(TEST_SOURCE);
+    // The authored file plus one shim plus the root harness.
+    assert_eq!(
+        files.len(),
+        3,
+        "emitted: {:?}",
+        files.iter().map(|(p, _)| p).collect::<Vec<_>>()
+    );
+    let source = &files
+        .iter()
+        .find(|(p, _)| p.ends_with("Main.java"))
+        .unwrap()
+        .1;
+    assert!(
+        source.contains("static void adds()"),
+        "the test method must survive"
+    );
+    // The attributes themselves are still stripped: `javac` never sees a `#[`.
+    assert!(
+        !source.contains("#["),
+        "an attribute reached the output: {source}"
+    );
+
+    let shim = generated(&files, "JalsTest$MathTest.java");
+    assert!(
+        shim.contains("package com.example;"),
+        "the shim shares the package: {shim}"
+    );
+    // A plain static call, which is what reaches a package-private method.
+    assert!(shim.contains("MathTest.adds();"));
+    // `#[should_fail]` inverts the verdict inside the shim.
+    assert!(shim.contains("catch (Throwable thrown) { return; }"));
+    assert!(shim.contains("was expected to fail"));
+
+    let harness = generated(&files, "JalsTestHarness.java");
+    assert!(harness.contains("public static void main(String[] args)"));
+    // The root sits in the default package and names the shim in full.
+    assert!(harness.contains("com.example.JalsTest$MathTest.run(id);"));
+    // `--list` reports the flags the runner needs; `ignore` is the runner's decision, not the
+    // harness's.
+    assert!(harness.contains("com.example.MathTest#slow\\tignore"));
+    assert!(harness.contains("com.example.MathTest#adds\\t\""));
+    // A pass is stated, never inferred from the exit status.
+    assert!(harness.contains("jals-test:ok"));
+}
+
+#[test]
+fn a_test_lowering_has_its_own_cache_identity() {
+    // The two lowerings emit different bytes from the same input, so they must not share a cache
+    // entry. `config_digest` is hand-folded, which is exactly why this is asserted rather than
+    // assumed.
+    let ordinary = DialectFrontend::new(attr_flags(&[]));
+    let testing = DialectFrontend::new(test_flags());
+    assert_ne!(ordinary.config_digest(), testing.config_digest());
+    // And the two are still the same frontend, so a cached ordinary build stays valid.
+    assert_eq!(ordinary.caps().id, testing.caps().id);
+}
+
+#[test]
+fn a_project_with_no_test_generates_no_harness() {
+    let files = lower_tests("class C { static void plain() {} }\n");
+    assert_eq!(files.len(), 1, "a harness with no entry says nothing");
+}
+
 #[test]
 fn enabled_attribute_is_blanked_in_place() {
     // Length-preserving: the attribute's bytes become spaces, everything else is verbatim.
