@@ -9,7 +9,7 @@ edition.workspace = true
 # Portable target/scaffold planning stays filesystem/process-free, so `--no-default-features` builds a
 # `wasm32`-compatible core a future in-browser compiler can implement.
 default = ["native"]
-native = ["jals-storage/std", "jals-exec/tokio"]
+native = ["jals-storage/std", "jals-exec/tokio", "dep:jals-image"]
 rhai = ["dep:rhai", "dep:serde", "dep:serde_json"]
 
 [dependencies]
@@ -25,6 +25,9 @@ jals-syntax = { workspace = true }
 # handle and the blocking-pool escape the native half runs its syscalls through.
 jals-config.workspace = true
 jals-exec.workspace = true
+# The PNG codec and comparator behind `jals test`'s screenshot verdict. Optional and pulled in by
+# `native`, because the verdict reads files: the portable core has no screenshot to judge.
+jals-image = { workspace = true, optional = true }
 jals-storage.workspace = true
 rhai = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }

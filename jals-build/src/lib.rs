@@ -70,6 +70,13 @@ pub mod task;
 // into the portable configuration — which the wasm clippy cells run at `-D warnings`.
 #[cfg(feature = "native")]
 mod test_plan;
+// Gated with the runner that reads it, exactly as `test_plan` is: the parsing is pure, but a
+// report is only ever read by something that started a process, so leaving it ungated puts an item
+// with no caller into the portable configuration the wasm clippy cells run at `-D warnings`.
+#[cfg(feature = "native")]
+mod screenshot;
+#[cfg(feature = "native")]
+mod test_report;
 #[cfg(feature = "native")]
 mod toolchain;
 
@@ -95,10 +102,14 @@ pub use manifest_ext::{ManifestError, ManifestExt};
 #[cfg(feature = "native")]
 pub use request::RunRequest;
 #[cfg(feature = "native")]
+pub use screenshot::{ScreenshotDiff, ScreenshotVerifier, ShotOutcome};
+#[cfg(feature = "native")]
 pub use staging::{FRONTEND_OUT_DIR, StagedTree, TEST_FRONTEND_OUT_DIR};
 pub use target::{ResolveTargetError, RunTarget};
 #[cfg(feature = "native")]
 pub use test_plan::{Partition, PartitionError, RunIgnored, Selection, TestCase, TestFilter};
+#[cfg(feature = "native")]
+pub use test_report::{ReportEntry, ReportProblem, ReportedVerdict, Shot, TestReport};
 #[cfg(feature = "native")]
 pub(crate) use toolchain::Candidates;
 #[cfg(feature = "native")]

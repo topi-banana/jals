@@ -1128,6 +1128,7 @@ dependencies = [
  "jals-config",
  "jals-exec",
  "jals-hir",
+ "jals-image",
  "jals-javac",
  "jals-storage",
  "jals-syntax",
