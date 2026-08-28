@@ -2,13 +2,14 @@
 
 Corpus harnesses that exercise jals against large bodies of real Java.
 
-Three binaries, three questions:
+Four binaries, four questions:
 
 | binary | question | metric |
 | --- | --- | --- |
 | `jals-tests` | Does the **parser** hold its invariants? | never panics, lossless round-trip, syntax-error rate |
 | `jals-golden` | How close is the **formatter** to each native Java formatter? | exact-match count + mean line similarity |
 | `jals-compile` | Does the **compiler** emit class files a real JVM loads? | how far each file gets: parsed → lowered → re-read → verified |
+| `jals-wasm` | Does the **WasmGC backend** emit modules an engine runs, computing what javac's output computes? | how far each file gets: parsed → lowered → validated → instantiated → agreed |
 
 The corpora are git submodules (and, for the generated ones, local files) under
 `sources/`; none of the Java is committed to this repo.
@@ -318,10 +319,141 @@ so it is pinned like the formatter releases: `compile::JAVAC_PIN`, `JAVAC_VERSIO
 `.github/workflows/ci.yml`, and the generator's own check, with `the_javac_pin_matches_ci` and
 `the_generator_states_the_pin` failing when they drift.
 
+## WasmGC end-to-end — `jals-wasm`
+
+The other backend, over **the same corpus**. `[build] backend = "jals-wasm"` compiles a whole
+project to one WebAssembly module rather than a class file per type, and the question is the same
+one `jals-compile` asks with the authorities swapped: not "does a JVM link this" but "is this a
+module, does an engine run it, and does it compute what javac's own output computes".
+
+Nothing here generates anything. `jals-wasm` walks `sources/javac-langtools` — the very cases
+`gen-javac-corpus.sh` wrote — and reads the same `expected/` directories, because both backends
+compile the same language from the same front end and a second corpus would be a second
+denominator for one question.
+
+```sh
+git submodule update --init --depth 1 jals-tests/sources/openjdk
+jals-tests/scripts/gen-javac-corpus.sh 0          # the corpus jals-compile already needs
+cargo run -p jals-tests --bin jals-wasm -- langtools
+```
+
+| rung | what it proves |
+| --- | --- |
+| parsed | `jals-syntax` accepted the source with no syntax error |
+| lowered | `CompileWasm::project` produced a module rather than a `WasmError` |
+| **validated** | `wasm-tools validate` accepted it — the specification's own authority |
+| instantiated | `wasmtime` instantiated it, which is where the start function runs |
+| **agreed** | every jointly-callable method answered what javac's class file answers on a JVM |
+
+`validated` is this ladder's `verified`. The encoder writes its own type indices, block types and
+local counts, and `Module::finish` encodes whatever they say — so a body whose stack does not
+balance round-trips perfectly and is still a module no engine will load. Only a validator has an
+opinion, and it is the authority.
+
+`instantiated` is a rung and not a formality. A Java `static` initialiser is lowered into the
+module's **start function**, so instantiating is the cheapest way to *run* the lowering of every
+case that has one, with no entry point to choose and no arguments to invent. It is asked for by
+invoking an export that cannot exist: the engine compiles and instantiates the module *before* it
+looks the name up, so a `no func export named` reply is the proof that instantiation succeeded.
+
+`agreed` is the rung a validator structurally cannot reach — a module can be perfectly well-typed
+and compute the wrong number — and it is the wasm counterpart of `descriptor-equal`.
+
+### Two denominators, because this backend has a target subset
+
+`WasmError::NoRepresentation` is not a gap. A wasm host has no `java.base`, so a file naming
+`String` is **outside what this backend compiles**, by design, exactly as a file javac declines
+alone is outside `jals-compile`'s corpus. Those cases are reported as *out of subset* and excluded
+from the rate that measures the compiler; the corpus total is printed beside it so the scoped rate
+can never read as coverage of Java. On the current corpus that is 1272 of 2188 cases, 615 of them
+for `String` alone.
+
+The classification is **post hoc and order-dependent**: lowering reports the first thing it cannot
+do, so a file that both names `String` *and* declares an `@interface` lands in whichever the
+lowering reached first. That is a property of the traversal and not of the source. It is stated
+rather than solved — nothing re-lowers a case to find out what else it would have said.
+
+### What the agreement rung compares, and what it does not
+
+A wasm export carries a **bare method name and no owner** (`is_static && !is_constructor` is the
+whole export rule, with no visibility test), so a pairing is only defined where javac declares that
+name exactly once in the case, `static`, over a parameter list this harness can spell. That means
+primitives: inventing a receiver or a `String` would be inventing the test rather than running it.
+Everything else answers *unjudged* with its reason, and `unjudged` is an outcome of its own rather
+than a pass — folding "nothing compared" into "agreed" makes the top rung fail **open**, and open
+is the top rung.
+
+Each paired method is called six times, with the parameters' sample lists indexed at the same
+position rather than crossed, so a method of six parameters costs six calls and not six to the
+sixth. Three asymmetries between the two sides are closed by construction, because each would
+otherwise manufacture disagreements that say nothing about the compiler:
+
+- **State.** `wasmtime run --invoke` is a fresh process, so the module's globals restart on every
+  call. The driver therefore gives every call a class loader of its own.
+- **Width and sign.** wasm has `i32`/`i64`/`f32`/`f64`; Java has `boolean`, `byte`, `char` and
+  `short` besides. The comparison is on a canonical form derived from javac's *descriptor*, so a
+  `byte` the backend forgot to narrow is a difference rather than a formatting quirk. A float is
+  compared as its bit pattern with `NaN` canonicalised — neither side's printed decimal is the
+  value (`-0` against `-0.0`).
+- **Failure.** A trap and a thrown exception are **not** folded together. Collapsing them would
+  hide the finding this rung exists for: a missing bounds check reads garbage where the JVM throws.
+  A call that failed on both sides is counted apart from one that agreed, and a call that failed on
+  only one is a finding.
+
+The two comparison counts are reported separately, because they are different claims: a returned
+value that matches is *"computed the same answer"*, while a `void` method that completes on both
+sides is only *"neither side failed"*.
+
+**What the numbers mean today.** On the current corpus the rung judges 18 cases — 5 value
+comparisons and 19 completions — because a Java entry point takes `String[]` and a file naming
+`String` never reaches this rung at all. That is a fact about the corpus, not a claim about the
+compiler, which is why `jals-wasm` **lists the judged cases by name** rather than only counting
+them: a reader has to be able to tell a rate of 2% that means "2% of the compiler is checked" from
+one that means "2% of the corpus offers anything to check". It is the second. Widening it needs a
+corpus written in the backend's own subset, which is work this harness makes measurable and does
+not itself do.
+
+### Version pins
+
+Three tools decide this measurement. javac still chooses the corpus and its `ct.sym` is still the
+classpath (`compile::JAVAC_PIN`); on top of that `wasm::WASM_TOOLS_PIN` is the validator and
+`wasm::WASMTIME_PIN` the engine. The validator's message text **is** the failure-bucket key, so a
+bump silently re-partitions the report — which is why these are pinned like a formatter release and
+`the_pins_match_ci` fails when they drift from `.github/workflows/ci.yml`.
+
+### What fails the run, and what only lowers the rate
+
+An unimplemented lowering path lowers the percentage. Four outcomes are **defects**: a module the
+validator refuses, a compiled program that answers something else than javac's, a panic, and a
+syntax error on a file that is valid Java by construction. `--strict` exits non-zero on those.
+
+CI leaves `--strict` off, as it does for `jals-compile`: known defects are still open, so the
+report is a measurement rather than a gate. What is open today is **eight modules `wasm-tools`
+refuses**, and they are two families, not one:
+
+- **seven ill-typed function bodies** — `expected (ref null $type), found (ref $type)`, `expected
+  i32, found (ref $type)`, `values remaining on stack at end of block`, `expected … but nothing on
+  stack`. Four of them print the *same* type on both sides of the mismatch, which means two
+  distinct types in the recursive group print identically — most likely one class laid out twice
+  (the anonymous, inner and lambda shapes are where the cases cluster).
+- **one format limit reached without being reported** — `JsrRet.java`, `too many locals: locals
+  exceed maximum`. `WasmError::TooLarge` exists precisely so a limit is refused rather than
+  emitted, and this one got past it.
+
+Everything else is a gap rather than a defect, and the report buckets it. The largest are an
+`@interface` declaration (157 cases), a subclass of an inner class (71), and a call to a method
+outside this module (45).
+
+Two things the ladder does **not** yet report, because on this corpus they never happened: a start
+function that trapped, and a disagreement. Both have their own listing, so the day one appears it
+is named rather than averaged in.
+
 ## In CI
 
 The `corpus-reports` job downloads each pinned tool, generates the four OpenJDK formatter corpora
-plus the javac one, and runs all three harnesses, putting every corpus in one summary. Each is
+plus the javac one, and runs all four harnesses, putting every corpus in one summary. `jals-wasm`
+adds no corpus of its own — it reads the javac one — so what it adds to the job is two pinned
+binaries (`wasm-tools`, `wasmtime`) and one more report. Each is
 cached independently on the OpenJDK submodule commit, the tool version, the generator script and
 (for Eclipse) the committed profile, so a corpus is rebuilt only when something it depends on
 moves. `--allow-missing` is what keeps one failed or timed-out generation step from costing the
@@ -329,4 +461,6 @@ whole report.
 
 The formatter table lists six corpora with a least-similar `<details>` list each; the compiler
 table lists the ladder per corpus, the defects in full, and collapsed lists of what stopped the
-rest and of what javac declined.
+rest and of what javac declined. The WasmGC table lists both denominators beside the ladder, the
+defects in full, and collapsed lists of what stopped the rest, why the agreement rung compared
+nothing, and which types put a case outside the subset.

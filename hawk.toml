@@ -30,6 +30,11 @@ bin = "jals-compile"
 reason = "compiler harness scoring jals-javac output against a real JVM's bytecode verifier"
 
 [[production]]
+package = "jals-tests"
+bin = "jals-wasm"
+reason = "WasmGC harness scoring jals-javac's module output against wasm-tools, wasmtime and javac"
+
+[[production]]
 package = "xtask"
 bin = "xtask"
 reason = "workspace automation (codegen from java.ungram) via the cargo-xtask pattern"
