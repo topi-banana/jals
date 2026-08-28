@@ -721,7 +721,7 @@ jobs:
           # Into the runner temp rather than the workspace, which is what lets it share this group
           # with the checkout that recreates the workspace.
           - name: Download the jals binary built once for this matrix
-            uses: actions/download-artifact@v7
+            uses: actions/download-artifact@v8
             with:
               name: mod-jar-jals
               path: ${{ runner.temp }}/jals-bin
