@@ -459,8 +459,15 @@ cached independently on the OpenJDK submodule commit, the tool version, the gene
 moves. `--allow-missing` is what keeps one failed or timed-out generation step from costing the
 whole report.
 
-The formatter table lists six corpora with a least-similar `<details>` list each; the compiler
-table lists the ladder per corpus, the defects in full, and collapsed lists of what stopped the
-rest and of what javac declined. The WasmGC table lists both denominators beside the ladder, the
-defects in full, and collapsed lists of what stopped the rest, why the agreement rung compared
-nothing, and which types put a case outside the subset.
+Each report shows its **heading, one caption, and its ladder table**; everything else is a
+collapsed `<details>`, because four harnesses' worth of per-case rows is what buries the four
+tables they exist to explain. Collapsed is not hidden: a `<summary>` carries the count and what the
+rows are, so the defect listings still announce themselves — `DEFECTS_ALWAYS_LISTED` keeps a defect
+in the report whatever `--limit` says, and what the `<details>` removes is the twenty rows of
+corpus paths under the sentence that already named them.
+
+So the formatter report collapses a least-similar list per corpus; the compiler report collapses
+what each rung proves, the defects, the descriptor rung's cases, what stopped the rest and what
+javac declined; and the WasmGC report collapses the same plus why the agreement rung compared
+nothing, which cases it judged, and which types put a case outside the subset. The WasmGC ladder
+keeps both denominators in the visible table, since the scoped rate cannot be read without them.

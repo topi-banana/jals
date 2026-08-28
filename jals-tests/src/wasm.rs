@@ -617,17 +617,11 @@ impl WasmReport {
     /// The whole report as a GitHub-flavored Markdown summary — what CI posts.
     pub fn markdown_report(reports: &[Self], limit: usize) -> String {
         let mut out = String::from("## jals-javac WasmGC end-to-end\n\n");
+        // The two-denominator caveat is the one thing that changes how the table is read, so it
+        // stays visible; the rest of the prose is the same on every run and sits behind a summary.
         out.push_str(
-            "How much of the *same* corpus `jals-compile` scores turns into a WebAssembly module \
-             the specification's validator accepts, an engine instantiates, and — where both \
-             compilers offer the same callable surface — that answers what javac's own class files \
-             answer on a real JVM. Two denominators, because this backend has a target subset: a \
-             file naming a library type is **out of subset** by design (a wasm host has no \
-             `java.base`), so the rates are over what is left, and the corpus total is printed \
-             beside them so the scoped rate can never read as coverage of Java. `validated` is \
-             this ladder's `verified` — nothing upstream of the validator can tell a well-formed \
-             module from a plausible one — and `agreed` is the rung above it, since a module can \
-             be perfectly well-typed and compute the wrong number.\n\n",
+            "Rates are over the **in-subset** cases; *out of subset* is what this backend does \
+             not compile by design, not what it fails to.\n\n",
         );
         out.push_str(
             "| corpus | reference | in corpus | out of subset | in subset | parsed | lowered | \
@@ -637,6 +631,21 @@ impl WasmReport {
         for report in reports {
             report.push_ladder_row(&mut out);
         }
+        out.push_str(
+            "\n<details><summary>What this measures, and why there are two denominators\
+             </summary>\n\n\
+             How much of the *same* corpus `jals-compile` scores turns into a WebAssembly module \
+             the specification's validator accepts, an engine instantiates, and — where both \
+             compilers offer the same callable surface — that answers what javac's own class files \
+             answer on a real JVM. Two denominators, because this backend has a target subset: a \
+             file naming a library type is **out of subset** by design (a wasm host has no \
+             `java.base`), so the rates are over what is left, and the corpus total is printed \
+             beside them so the scoped rate can never read as coverage of Java. `validated` is \
+             this ladder's `verified` — nothing upstream of the validator can tell a well-formed \
+             module from a plausible one — and `agreed` is the rung above it, since a module can \
+             be perfectly well-typed and compute the wrong number.\n\n\
+             </details>\n",
+        );
         for report in reports {
             report.push_violations(&mut out, limit);
             report.push_agreements(&mut out, limit);
@@ -692,7 +701,14 @@ impl WasmReport {
         ));
     }
 
-    /// The defects, in full and out in the open rather than behind a `<details>`.
+    /// The defects, every one of them, behind a `<details>` whose summary already names them.
+    ///
+    /// Collapsed is not hidden, and the distinction is the count: [`DEFECTS_ALWAYS_LISTED`] says a
+    /// defect is never dropped from the report by a display setting, and it still is not — the
+    /// summary line carries the number and what kind of failure it is, so a reader who never
+    /// expands has already been told.
+    ///
+    /// [`DEFECTS_ALWAYS_LISTED`]: Self::DEFECTS_ALWAYS_LISTED
     fn push_violations(&self, out: &mut String, limit: usize) {
         let violations = self.violations();
         if violations.is_empty() {
@@ -700,10 +716,11 @@ impl WasmReport {
         }
         let (valued, completions) = self.comparisons();
         out.push_str(&format!(
-            "\n**{}: {} invariant violation(s)** — a module the validator refuses, a compiled \
-             program that answers something else than javac's, a panic, or a syntax error on valid \
-             Java. These are defects, not unimplemented syntax. The agreement rung made {valued} \
-             value comparison(s) and {completions} completion-only comparison(s) in this run.\n\n",
+            "\n<details><summary><strong>{}: {} invariant violation(s)</strong> — a module the \
+             validator refuses, a compiled program that answers something else than javac's, a \
+             panic, or a syntax error on valid Java. These are defects, not unimplemented syntax. \
+             The agreement rung made {valued} value comparison(s) and {completions} \
+             completion-only comparison(s) in this run.</summary>\n\n",
             self.name,
             violations.len()
         ));
@@ -719,6 +736,7 @@ impl WasmReport {
                 result.outcome.detail().unwrap_or("—"),
             ));
         }
+        out.push_str("\n</details>\n");
     }
 
     /// The cases the agreement rung judged, by name.
