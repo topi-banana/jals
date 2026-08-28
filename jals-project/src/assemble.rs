@@ -136,6 +136,8 @@ pub struct ProjectGraphAssembly {
     /// can only unpack archives, and asking what a logical path ends in is the path predicate this
     /// seam exists to keep out.
     pub(crate) task_classpath: Vec<CacheKey>,
+    /// Named directories a host materializes for a `[[test-target]]`'s `{dir:<name>}` placeholders.
+    pub(crate) task_runtime_dirs: Vec<crate::task::BuildTaskRuntimeDir>,
     /// Crate-internal: the projection folds these into the assembly a host receives, so a host that
     /// read them here would be reporting the graph's warnings without the root's.
     pub(crate) warnings: Vec<GraphWarning>,
@@ -153,6 +155,7 @@ struct Assembler<'a, C: CacheBackend> {
     published_classpath: BTreeSet<(NodeId, RelativePath)>,
     compile_classpath: Vec<CompileClasspathEntry>,
     task_classpath: Vec<CacheKey>,
+    task_runtime_dirs: Vec<crate::task::BuildTaskRuntimeDir>,
     warnings: Vec<GraphWarning>,
     errors: Vec<ProjectAssemblyError>,
 }
@@ -181,6 +184,7 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
             published_classpath: BTreeSet::new(),
             compile_classpath: Vec::new(),
             task_classpath: Vec::new(),
+            task_runtime_dirs: Vec::new(),
             warnings: graph.warnings.clone(),
             errors: Vec::new(),
         }
@@ -216,6 +220,7 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
             plan: self.plan,
             compile_classpath: self.compile_classpath,
             task_classpath: self.task_classpath,
+            task_runtime_dirs: self.task_runtime_dirs,
             warnings: self.warnings,
             errors: self.errors,
         }
@@ -319,6 +324,27 @@ impl<'a, C: CacheBackend> Assembler<'a, C> {
             // one traversal and cannot disagree. Iterating `graph.exports` instead would yield
             // NodeId-digest order: deterministic, compiling, and silently a different order.
             self.task_classpath.push(key.clone());
+        }
+        for dir in &exports.task_runtime_dirs {
+            // Two nodes publishing one name is refused rather than resolved: which directory a
+            // `{dir:<name>}` meant is not a question a first-wins rule should answer quietly.
+            if self
+                .task_runtime_dirs
+                .iter()
+                .any(|existing| existing.name == dir.name)
+            {
+                self.errors.push(ProjectAssemblyError::new(
+                    node.to_string(),
+                    None,
+                    format!(
+                        "two build tasks publish the runtime directory `{}`; a `{{dir:…}}` \
+                         placeholder would not say which",
+                        dir.name
+                    ),
+                ));
+                continue;
+            }
+            self.task_runtime_dirs.push(dir.clone());
         }
         // Navigation sources keep the package-relative path the task gave them, with no node token
         // in front: that is the address every other library source uses, and sharing it is what

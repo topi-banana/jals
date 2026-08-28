@@ -80,6 +80,10 @@ pub struct NativeProjectAssembly {
     /// same verified cache and re-reading those paths off disk to publish them again would be the
     /// same bytes acquired a second way.
     pub task_classpath: Vec<CacheKey>,
+    /// Named directories a `[[test-target]]`'s `{dir:<name>}` placeholders resolve to, still as
+    /// artifact trees: the host materializes each one, because only it knows where a materialized
+    /// tree lives.
+    pub task_runtime_dirs: Vec<crate::task::BuildTaskRuntimeDir>,
     warnings: Vec<GraphWarning>,
     pub(crate) errors: Vec<ProjectAssemblyError>,
     pub watch_paths: Vec<PathBuf>,
@@ -288,6 +292,7 @@ impl ProjectScript {
             source_roots: projected.source_roots,
             compile_classpath: projected.compile_classpath,
             task_classpath: projected.task_classpath,
+            task_runtime_dirs: projected.task_runtime_dirs,
             warnings: projected.warnings,
             errors: projected.errors,
             watch_paths: graph.native.watch_paths.clone(),

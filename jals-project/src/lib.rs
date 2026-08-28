@@ -58,6 +58,6 @@ pub use remap::{CompiledClasses, RemapAbsence, RemapPlan, RemapSelection};
 // is now the crate's own, so exporting the types would publish names with nothing readable behind
 // them. A host that needs to ask about the graph should get an accessor on the assembly, not these.
 pub use task::{
-    BuildTaskExecutor, BuildTaskHost, BuildTaskRunError, RootBuildScriptError,
+    BuildTaskExecutor, BuildTaskHost, BuildTaskRunError, BuildTaskRuntimeDir, RootBuildScriptError,
     RootBuildScriptOptions, SourcePublication,
 };

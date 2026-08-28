@@ -11,6 +11,7 @@
 //! three. What it is *for* — comparing pictures — is `jals-build`'s and `jals-image`'s, and neither
 //! of those is named in this file.
 
+use alloc::borrow::ToOwned;
 use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::string::String;

@@ -54,6 +54,13 @@ pub enum TaskValueKind {
     Text,
     Jar,
     SourceTree,
+    /// A tree of arbitrary files, addressed by relative path.
+    ///
+    /// Distinct from [`SourceTree`](Self::SourceTree) because their *sinks* are different, not
+    /// their shape: a source tree is published into the project's own source roots, and a file tree
+    /// is materialized into a directory some process reads. Letting one stand for the other would
+    /// let a native library be published as project source.
+    FileTree,
 }
 
 /// Digest algorithm used to authenticate fetched bytes.
@@ -207,6 +214,23 @@ pub enum TaskNodeKind {
         jar: TaskId,
         prefix: String,
     },
+    /// Every member of an archive below `prefix`, whatever its extension.
+    ///
+    /// The unfiltered sibling of `ExtractJava`. What a runtime directory holds is decided by the
+    /// thing being run — a `.so`, a `.png`, a `.json` — so filtering by extension here would be
+    /// this crate deciding what some other program needs.
+    ExtractFiles {
+        archive: TaskId,
+        prefix: String,
+    },
+    /// Two file trees as one, with `overlay` winning a shared path.
+    ///
+    /// Needed because a runtime directory is usually assembled from several archives — the natives
+    /// a launcher extracts come one jar per library — and a terminal takes one tree.
+    MergeTrees {
+        base: TaskId,
+        overlay: TaskId,
+    },
 }
 
 impl TaskNodeKind {
@@ -235,6 +259,7 @@ impl TaskNodeKind {
             | Self::MergeJars { .. }
             | Self::NestedJar { .. } => TaskValueKind::Jar,
             Self::ExtractJava { .. } | Self::DecompileJava { .. } => TaskValueKind::SourceTree,
+            Self::ExtractFiles { .. } | Self::MergeTrees { .. } => TaskValueKind::FileTree,
         }
     }
 
@@ -277,6 +302,11 @@ impl TaskNodeKind {
             Self::MergeJars { base, overlay } => {
                 vec![(*base, TaskValueKind::Jar), (*overlay, TaskValueKind::Jar)]
             }
+            Self::ExtractFiles { archive, .. } => vec![(*archive, TaskValueKind::Jar)],
+            Self::MergeTrees { base, overlay } => vec![
+                (*base, TaskValueKind::FileTree),
+                (*overlay, TaskValueKind::FileTree),
+            ],
         }
     }
 
@@ -291,7 +321,8 @@ impl TaskNodeKind {
             | Self::ProjectJar { path: value }
             | Self::ProjectText { path: value }
             | Self::Digest { value, .. } => value.len(),
-            Self::ByteCount { .. }
+            Self::MergeTrees { .. }
+            | Self::ByteCount { .. }
             | Self::Fetch { .. }
             | Self::JsonU64 { .. }
             | Self::MergeJars { .. } => 0,
@@ -306,7 +337,9 @@ impl TaskNodeKind {
             Self::JsonFindString {
                 path, field, value, ..
             } => path.iter().map(String::len).sum::<usize>() + field.len() + value.len(),
-            Self::ExtractJava { prefix, .. } | Self::DecompileJava { prefix, .. } => prefix.len(),
+            Self::ExtractJava { prefix, .. }
+            | Self::DecompileJava { prefix, .. }
+            | Self::ExtractFiles { prefix, .. } => prefix.len(),
             Self::NestedJar { member, .. } => member.len(),
         }
     }
@@ -384,6 +417,16 @@ pub enum TaskTerminal {
         mode: TaskPublishMode,
         intent: TaskPublishIntent,
     },
+    /// Materialize `tree` as a directory a `[[test-target]]` names with `{dir:<name>}`.
+    ///
+    /// A terminal rather than a value, for the reason every terminal is one: it is where something
+    /// *leaves* the plan. What it leaves as is a directory on disk, which is the one thing a plan
+    /// cannot describe — its address is the digest of its contents, and nothing knows that until
+    /// the task has run.
+    AddRuntimeDir {
+        name: String,
+        tree: TaskId,
+    },
 }
 
 impl TaskTerminal {
@@ -393,6 +436,7 @@ impl TaskTerminal {
                 (*jar, TaskValueKind::Jar)
             }
             Self::PublishTree { tree, .. } => (*tree, TaskValueKind::SourceTree),
+            Self::AddRuntimeDir { tree, .. } => (*tree, TaskValueKind::FileTree),
         }
     }
 
@@ -407,6 +451,7 @@ impl TaskTerminal {
             Self::PublishTree {
                 owner, destination, ..
             } => owner.len() + destination.len(),
+            Self::AddRuntimeDir { name, .. } => name.len(),
         }
     }
 }
@@ -511,6 +556,18 @@ impl TaskPlan {
             });
         }
         let mut publication_roots = 0;
+        if let TaskTerminal::AddRuntimeDir { name, .. } = terminal {
+            // The name is spelled inside `{dir:…}` and nowhere else, so it takes the vocabulary
+            // that placeholder can express: anything with a `}` in it could not be written, and
+            // anything empty could not be referred to.
+            if name.is_empty()
+                || !name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                return Err(TaskPlanError::InvalidRuntimeDirName);
+            }
+        }
         if let TaskTerminal::PublishTree {
             owner, destination, ..
         } = terminal
@@ -553,7 +610,8 @@ impl TaskPlan {
                 return Err(TaskPlanError::InvalidByteCount);
             }
             TaskNodeKind::ExtractJava { prefix, .. }
-            | TaskNodeKind::DecompileJava { prefix, .. } => {
+            | TaskNodeKind::DecompileJava { prefix, .. }
+            | TaskNodeKind::ExtractFiles { prefix, .. } => {
                 Self::validate_path(prefix, limits, true)?;
             }
             TaskNodeKind::NestedJar { member, .. } => {
@@ -571,7 +629,8 @@ impl TaskPlan {
             TaskNodeKind::ByteCount { .. }
             | TaskNodeKind::Fetch { .. }
             | TaskNodeKind::RemapJar { .. }
-            | TaskNodeKind::MergeJars { .. } => {}
+            | TaskNodeKind::MergeJars { .. }
+            | TaskNodeKind::MergeTrees { .. } => {}
         }
         Ok(())
     }
@@ -624,6 +683,8 @@ pub enum TaskPlanError {
     InvalidJsonPath,
     InvalidPath,
     InvalidOwner,
+    /// A `tasks.add_runtime_dir` name a `{dir:…}` placeholder could not spell.
+    InvalidRuntimeDirName,
 }
 
 impl fmt::Display for TaskPlanError {
@@ -656,6 +717,10 @@ impl fmt::Display for TaskPlanError {
             Self::InvalidJsonPath => f.write_str("build-task JSON path contains an empty segment"),
             Self::InvalidPath => f.write_str("build task contains an invalid portable path"),
             Self::InvalidOwner => f.write_str("build-task publication owner must not be empty"),
+            Self::InvalidRuntimeDirName => f.write_str(
+                "a runtime directory name may hold only letters, digits, `-` and `_`: it is spelled \
+                 inside a `{dir:…}` placeholder",
+            ),
         }
     }
 }
@@ -681,6 +746,7 @@ handle!(JsonTask);
 handle!(TextTask);
 handle!(JarTask);
 handle!(SourceTreeTask);
+handle!(FileTreeTask);
 
 /// A mapping grammar as a script value — the optional third argument of `tasks.remap_jar`.
 ///
@@ -1002,6 +1068,30 @@ impl TasksApi {
         .map(SourceTreeTask)
     }
 
+    fn extract_files(
+        api: &mut Self,
+        archive: JarTask,
+        prefix: ImmutableString,
+    ) -> RhaiResult<FileTreeTask> {
+        api.push(TaskNodeKind::ExtractFiles {
+            archive: archive.0.id,
+            prefix: prefix.into_owned(),
+        })
+        .map(FileTreeTask)
+    }
+
+    fn merge_trees(
+        api: &mut Self,
+        base: FileTreeTask,
+        overlay: FileTreeTask,
+    ) -> RhaiResult<FileTreeTask> {
+        api.push(TaskNodeKind::MergeTrees {
+            base: base.0.id,
+            overlay: overlay.0.id,
+        })
+        .map(FileTreeTask)
+    }
+
     fn nested_jar(api: &mut Self, jar: JarTask, member: ImmutableString) -> RhaiResult<JarTask> {
         api.push(TaskNodeKind::NestedJar {
             jar: jar.0.id,
@@ -1105,6 +1195,17 @@ impl TasksApi {
         api.terminal(TaskTerminal::AddNestedClasspath { jar: jar.0.id })
     }
 
+    fn add_runtime_dir(
+        api: &mut Self,
+        name: ImmutableString,
+        tree: FileTreeTask,
+    ) -> RhaiResult<()> {
+        api.terminal(TaskTerminal::AddRuntimeDir {
+            name: name.into_owned(),
+            tree: tree.0.id,
+        })
+    }
+
     /// The four-argument form every `build.rhai` written before the intent existed spells.
     ///
     /// Registered rather than left absent: Rhai resolves an overload by arity, so without this the
@@ -1168,6 +1269,7 @@ impl TasksApi {
             .register_type_with_name::<TextTask>("TextTask")
             .register_type_with_name::<JarTask>("JarTask")
             .register_type_with_name::<SourceTreeTask>("SourceTreeTask")
+            .register_type_with_name::<FileTreeTask>("FileTreeTask")
             .register_type_with_name::<MappingFormatValue>("MappingFormat")
             .register_fn("https_url", Self::https_url)
             .register_fn("project_jar", Self::project_jar)
@@ -1184,6 +1286,8 @@ impl TasksApi {
             .register_fn("json_sha256", Self::json_sha256)
             .register_fn("json_u64", Self::json_u64)
             .register_fn("extract_java", Self::extract_java)
+            .register_fn("extract_files", Self::extract_files)
+            .register_fn("merge_trees", Self::merge_trees)
             .register_fn("nested_jar", Self::nested_jar)
             .register_fn("proguard", Self::proguard)
             .register_fn("tiny_v2", Self::tiny_v2)
@@ -1193,6 +1297,7 @@ impl TasksApi {
             .register_fn("decompile_java", Self::decompile_java)
             .register_fn("add_classpath", Self::add_classpath)
             .register_fn("add_nested_classpath", Self::add_nested_classpath)
+            .register_fn("add_runtime_dir", Self::add_runtime_dir)
             .register_fn("publish_tree", Self::publish_tree_without_intent)
             .register_fn("publish_tree", Self::publish_tree);
     }
@@ -1213,6 +1318,118 @@ mod tests {
             max_path_depth: 16,
             max_fetch_bytes: 1_048_576,
         }
+    }
+
+    /// A plan that extracts a directory of files out of an archive and hands it to a runtime
+    /// directory — the shape a launcher's natives take.
+    fn runtime_dir_plan(name: &str) -> TaskPlan {
+        TaskPlan {
+            nodes: vec![
+                TaskNode {
+                    id: TaskId(0),
+                    kind: TaskNodeKind::ProjectJar {
+                        path: "vendor/runtime.zip".to_owned(),
+                    },
+                },
+                TaskNode {
+                    id: TaskId(1),
+                    kind: TaskNodeKind::ExtractFiles {
+                        archive: TaskId(0),
+                        prefix: "natives".to_owned(),
+                    },
+                },
+            ],
+            terminals: vec![TaskTerminal::AddRuntimeDir {
+                name: name.to_owned(),
+                tree: TaskId(1),
+            }],
+        }
+    }
+
+    #[test]
+    fn a_file_tree_reaches_a_runtime_directory() {
+        assert_eq!(runtime_dir_plan("natives").validate(limits()), Ok(()));
+    }
+
+    #[test]
+    fn a_runtime_directory_name_a_placeholder_cannot_spell_is_refused() {
+        // Every one of these would either be unwritable inside `{dir:…}` or unreferrable.
+        for bad in ["", "with space", "a/b", "close}brace", "dots.here"] {
+            assert_eq!(
+                runtime_dir_plan(bad).validate(limits()),
+                Err(TaskPlanError::InvalidRuntimeDirName),
+                "`{bad}` should not be a runtime directory name"
+            );
+        }
+    }
+
+    #[test]
+    fn a_source_tree_is_not_a_file_tree() {
+        // The two carry the same shape and have different sinks, so the plan keeps them apart:
+        // a `.java` extraction must not become a directory a process is pointed at, and a
+        // directory of natives must not be published into the project's sources.
+        let plan = TaskPlan {
+            nodes: vec![
+                TaskNode {
+                    id: TaskId(0),
+                    kind: TaskNodeKind::ProjectJar {
+                        path: "vendor/sources.jar".to_owned(),
+                    },
+                },
+                TaskNode {
+                    id: TaskId(1),
+                    kind: TaskNodeKind::ExtractJava {
+                        jar: TaskId(0),
+                        prefix: "net/example".to_owned(),
+                    },
+                },
+            ],
+            terminals: vec![TaskTerminal::AddRuntimeDir {
+                name: "natives".to_owned(),
+                tree: TaskId(1),
+            }],
+        };
+        assert!(
+            matches!(
+                plan.validate(limits()),
+                Err(TaskPlanError::TypeMismatch { .. })
+            ),
+            "a source tree must not satisfy a runtime directory"
+        );
+    }
+
+    #[test]
+    fn merging_two_file_trees_type_checks_and_merging_a_jar_does_not() {
+        let mut plan = runtime_dir_plan("natives");
+        plan.nodes.push(TaskNode {
+            id: TaskId(2),
+            kind: TaskNodeKind::ExtractFiles {
+                archive: TaskId(0),
+                prefix: "extra".to_owned(),
+            },
+        });
+        plan.nodes.push(TaskNode {
+            id: TaskId(3),
+            kind: TaskNodeKind::MergeTrees {
+                base: TaskId(1),
+                overlay: TaskId(2),
+            },
+        });
+        plan.terminals = vec![TaskTerminal::AddRuntimeDir {
+            name: "natives".to_owned(),
+            tree: TaskId(3),
+        }];
+        assert_eq!(plan.validate(limits()), Ok(()));
+
+        // The archive itself is a `Jar`, not a tree.
+        plan.nodes[3].kind = TaskNodeKind::MergeTrees {
+            base: TaskId(0),
+            overlay: TaskId(2),
+        };
+        assert!(matches!(
+            plan.validate(limits()),
+            Err(TaskPlanError::TypeMismatch { .. })
+        ));
     }
 
     #[test]

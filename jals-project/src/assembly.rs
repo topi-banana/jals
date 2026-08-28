@@ -62,6 +62,7 @@ impl ProjectAssembly {
         Ok(ProjectScript {
             output: output.script,
             task_classpath: output.task_classpath,
+            task_runtime_dirs: output.task_runtime_dirs,
         })
     }
 }
@@ -71,6 +72,12 @@ impl ProjectAssembly {
 pub struct ProjectScript {
     output: Option<BuildScriptOutput>,
     task_classpath: Vec<CacheKey>,
+    /// Named directories the *root* script's terminals materialized.
+    ///
+    /// Carried beside the task classpath and not folded into it, because they leave the plan by a
+    /// different door: a classpath entry is an archive a compiler reads, and a runtime directory is
+    /// a place a started program looks.
+    task_runtime_dirs: Vec<crate::task::BuildTaskRuntimeDir>,
 }
 
 impl ProjectScript {
@@ -82,6 +89,7 @@ impl ProjectScript {
         Self {
             output: None,
             task_classpath: Vec::new(),
+            task_runtime_dirs: Vec::new(),
         }
     }
 
@@ -97,6 +105,7 @@ impl ProjectScript {
         Self {
             output,
             task_classpath,
+            task_runtime_dirs: Vec::new(),
         }
     }
 
@@ -108,6 +117,12 @@ impl ProjectScript {
     /// Verified artifacts the root's task terminals put on the classpath.
     pub fn task_classpath(&self) -> &[CacheKey] {
         &self.task_classpath
+    }
+
+    /// Named directories the root's task terminals materialized, for a `[[test-target]]` to be
+    /// started against.
+    pub fn task_runtime_dirs(&self) -> &[crate::task::BuildTaskRuntimeDir] {
+        &self.task_runtime_dirs
     }
 
     /// Fold the script's `add_classpath` directives into the manifest the graph phase lowers, so a
@@ -228,6 +243,21 @@ impl ProjectScript {
         let mut task_classpath = self.task_classpath.clone();
         task_classpath.extend(graph_assembly.task_classpath.iter().cloned());
 
+        // The root's own runtime directories, then the dependencies'. The root leads for the reason
+        // its classpath entries do — it is the project being built — and a name a dependency also
+        // published is dropped rather than shadowing, so which directory a `{dir:…}` meant stays
+        // the same question the assembly already refuses to answer twice.
+        let mut task_runtime_dirs = self.task_runtime_dirs.clone();
+        for dir in &graph_assembly.task_runtime_dirs {
+            if task_runtime_dirs
+                .iter()
+                .any(|existing| existing.name == dir.name)
+            {
+                continue;
+            }
+            task_runtime_dirs.push(dir.clone());
+        }
+
         let graph_inputs =
             ProjectInputs::assemble(fetcher, storage, &graph_assembly.plan, options).await;
 
@@ -275,6 +305,7 @@ impl ProjectScript {
             source_roots,
             compile_classpath,
             task_classpath,
+            task_runtime_dirs,
             warnings: graph_assembly.warnings,
             errors: graph_assembly.errors,
         }
@@ -318,6 +349,9 @@ pub struct MemoryProjectAssembly {
     /// hierarchy index would try to unpack and fail on.
     #[cfg_attr(not(feature = "native"), allow(dead_code))]
     pub(crate) task_classpath: Vec<CacheKey>,
+    /// Named directories the build tasks materialize for a `[[test-target]]` to be started against.
+    #[cfg_attr(not(feature = "native"), allow(dead_code))]
+    pub(crate) task_runtime_dirs: Vec<crate::task::BuildTaskRuntimeDir>,
     pub(crate) warnings: Vec<GraphWarning>,
     pub(crate) errors: Vec<ProjectAssemblyError>,
 }

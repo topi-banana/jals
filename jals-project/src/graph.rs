@@ -768,6 +768,7 @@ impl ResolvedNode {
                 .run_task_plan(cache, &output.task_plan, &features, options, &source.view)
                 .await?;
             exports.task_classpath = execution.classpath;
+            exports.task_runtime_dirs = execution.runtime_dirs;
             self.publication_exports(manifest, &execution.publications, &mut exports)?;
             exports.unbacked_publications = self
                 .diagnose_unbacked_publications(
@@ -1210,6 +1211,12 @@ pub(crate) struct NodeExports {
     /// verified cache assembly reads from, so materializing a remapped game JAR back into memory to
     /// re-publish it under a second key would double the work and the storage for no gain.
     pub(crate) task_classpath: Vec<CacheKey>,
+    /// Directories this node's build tasks materialize for something a `[[test-target]]` starts.
+    ///
+    /// Carried from every node rather than the root alone: the project that *fetches* a runtime is
+    /// usually not the one that runs against it — an SDK dependency publishes the natives and the
+    /// assets, and the consumer's target names them.
+    pub(crate) task_runtime_dirs: Vec<crate::task::BuildTaskRuntimeDir>,
     /// Sources a build task published as `navigation`, addressed package-relative like every other
     /// library source. Never a compile input.
     ///

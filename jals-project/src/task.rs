@@ -63,6 +63,18 @@ pub struct BuildTaskPublication {
 pub struct BuildTaskExecution {
     pub(crate) classpath: Vec<CacheKey>,
     pub(crate) publications: Vec<BuildTaskPublication>,
+    pub(crate) runtime_dirs: Vec<BuildTaskRuntimeDir>,
+}
+
+/// One directory a plan materializes for something a `[[test-target]]` starts.
+///
+/// Named rather than addressed, because the address does not exist when the manifest is written:
+/// the tree's location is the digest of its contents. The name is what a `{dir:<name>}` placeholder
+/// spells, and the host resolves it to a path after the tasks have run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildTaskRuntimeDir {
+    pub name: String,
+    pub tree: SourceTree,
 }
 
 /// Failure during capability preflight or task-node evaluation.
@@ -106,6 +118,7 @@ impl core::error::Error for BuildTaskRunError {}
 pub(crate) struct RootBuildScriptOutput {
     pub(crate) script: Option<BuildScriptOutput>,
     pub(crate) task_classpath: Vec<CacheKey>,
+    pub(crate) task_runtime_dirs: Vec<BuildTaskRuntimeDir>,
 }
 
 /// Runtime policy for one task-plan execution.
@@ -210,6 +223,10 @@ enum TaskValue {
     Text(String),
     Jar(CacheKey),
     SourceTree(SourceTree),
+    /// A tree of arbitrary files. Carries the same shape a source tree does — paths to published
+    /// artifacts — and is a separate variant because their sinks are different: one is published
+    /// into the project, the other is materialized into a directory a process reads.
+    FileTree(SourceTree),
 }
 
 /// Namespace for executing a validated build-task plan.
@@ -248,7 +265,7 @@ struct OwnedFile {
 /// 2: a publication records the intent it was declared with, which decides where the consumer
 /// routes it. The plan fingerprint already folds that intent into the provenance, so a pre-intent
 /// record is unreachable by key as well — this is the belt to that's braces.
-const TASK_EXECUTION_VERSION: u32 = 2;
+const TASK_EXECUTION_VERSION: u32 = 3;
 
 /// A [`BuildTaskExecution`] recorded in the verified cache, addressed by what produced it.
 ///
@@ -261,6 +278,17 @@ struct TaskExecutionState {
     version: u32,
     classpath: Vec<String>,
     publications: Vec<PublishedTree>,
+    /// Recorded like the publications and for the same reason: a memoized run returns this whole
+    /// value without executing anything, so a channel left out here is a channel that silently
+    /// empties on the second run.
+    runtime_dirs: Vec<RecordedRuntimeDir>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RecordedRuntimeDir {
+    name: String,
+    files: Vec<PublishedFile>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -385,6 +413,7 @@ impl BuildTaskExecutor {
             return Ok(RootBuildScriptOutput {
                 script: None,
                 task_classpath: Vec::new(),
+                task_runtime_dirs: Vec::new(),
             });
         };
         let plan = prepared.output(view.revision()).task_plan;
@@ -418,11 +447,13 @@ impl BuildTaskExecutor {
             SourcePublication::Skip => Vec::new(),
         };
         let task_classpath = execution.classpath;
+        let task_runtime_dirs = execution.runtime_dirs;
         let script =
             publish_prepared_build_script(storage, &view, &prepared, session, changes).await?;
         Ok(RootBuildScriptOutput {
             script,
             task_classpath,
+            task_runtime_dirs,
         })
     }
 
@@ -476,7 +507,9 @@ impl BuildTaskExecutor {
                 TaskTerminal::PublishTree {
                     owner, destination, ..
                 } => Some((script.to_string(), owner.clone(), destination.clone())),
-                TaskTerminal::AddClasspath { .. } | TaskTerminal::AddNestedClasspath { .. } => None,
+                TaskTerminal::AddClasspath { .. }
+                | TaskTerminal::AddNestedClasspath { .. }
+                | TaskTerminal::AddRuntimeDir { .. } => None,
             })
             .collect();
         declared.sort();
@@ -591,6 +624,19 @@ impl BuildTaskExecutor {
                 intent: tree.intent,
             });
         }
+        for dir in &state.runtime_dirs {
+            let mut files = Vec::with_capacity(dir.files.len());
+            for file in &dir.files {
+                files.push(LibrarySource {
+                    path: RelativePath::parse(&file.path).ok()?,
+                    key: Self::present_artifact(cache, &file.artifact).await?,
+                });
+            }
+            execution.runtime_dirs.push(BuildTaskRuntimeDir {
+                name: dir.name.clone(),
+                tree: SourceTree { files },
+            });
+        }
         Some(execution)
     }
 
@@ -622,6 +668,22 @@ impl BuildTaskExecutor {
                     destination: publication.destination.to_string(),
                     intent: publication.intent,
                     files: publication
+                        .tree
+                        .files
+                        .iter()
+                        .map(|file| PublishedFile {
+                            path: file.path.to_string(),
+                            artifact: file.key.to_token(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+            runtime_dirs: execution
+                .runtime_dirs
+                .iter()
+                .map(|dir| RecordedRuntimeDir {
+                    name: dir.name.clone(),
+                    files: dir
                         .tree
                         .files
                         .iter()
@@ -742,6 +804,32 @@ impl BuildTaskExecutor {
                         intent: *intent,
                     });
                 }
+                TaskTerminal::AddRuntimeDir { name, tree } => {
+                    let tree = Self::file_tree(&values, *tree)
+                        .map_err(BuildTaskRunError::Terminal)?
+                        .clone();
+                    // An empty runtime directory is refused for the reason an empty publication is:
+                    // a `{dir:…}` that expands to a directory with nothing in it fails inside the
+                    // program that was handed it, which names the wrong cause.
+                    if tree.files.is_empty() {
+                        return Err(BuildTaskRunError::Terminal(format!(
+                            "runtime directory `{name}` would be empty"
+                        )));
+                    }
+                    if output
+                        .runtime_dirs
+                        .iter()
+                        .any(|existing| existing.name == *name)
+                    {
+                        return Err(BuildTaskRunError::Terminal(format!(
+                            "runtime directory `{name}` is declared twice"
+                        )));
+                    }
+                    output.runtime_dirs.push(BuildTaskRuntimeDir {
+                        name: name.clone(),
+                        tree,
+                    });
+                }
             }
         }
         Ok(output)
@@ -753,7 +841,9 @@ impl BuildTaskExecutor {
             .iter()
             .filter_map(|terminal| match terminal {
                 TaskTerminal::PublishTree { destination, .. } => Some(destination),
-                TaskTerminal::AddClasspath { .. } | TaskTerminal::AddNestedClasspath { .. } => None,
+                TaskTerminal::AddClasspath { .. }
+                | TaskTerminal::AddNestedClasspath { .. }
+                | TaskTerminal::AddRuntimeDir { .. } => None,
             })
             .map(|destination| {
                 DirKey::parse(destination).map_err(|error| {
@@ -1184,6 +1274,45 @@ impl BuildTaskExecutor {
                 .await
                 .map(TaskValue::SourceTree)
             }
+            TaskNodeKind::ExtractFiles { archive, prefix } => {
+                let archive = Self::jar(values, *archive)?.clone();
+                let prefix = RelativePath::parse(prefix)
+                    .map_err(|error| format!("invalid extraction prefix: {error:?}"))?;
+                jals_classpath::FileTreeExtraction::all(
+                    exec,
+                    cache,
+                    &archive,
+                    &prefix,
+                    SourceTreeLimits {
+                        max_files: 100_000,
+                        max_file_bytes: 16 * 1_048_576,
+                        max_total_bytes: 1_024 * 1_048_576,
+                    },
+                )
+                .await
+                .map(TaskValue::FileTree)
+            }
+            TaskNodeKind::MergeTrees { base, overlay } => {
+                let base = Self::file_tree(values, *base)?.clone();
+                let overlay = Self::file_tree(values, *overlay)?.clone();
+                let mut merged: BTreeMap<RelativePath, CacheKey> = base
+                    .files
+                    .into_iter()
+                    .map(|file| (file.path, file.key))
+                    .collect();
+                // Overlay wins, matching `merge_jars`: the second argument is the one a script
+                // reaches for to override, and a collision that silently kept the first would make
+                // the order of two `merge_trees` calls unobservable.
+                for file in overlay.files {
+                    merged.insert(file.path, file.key);
+                }
+                Ok(TaskValue::FileTree(SourceTree {
+                    files: merged
+                        .into_iter()
+                        .map(|(path, key)| jals_classpath::LibrarySource { path, key })
+                        .collect(),
+                }))
+            }
             TaskNodeKind::NestedJar { jar, member } => {
                 let jar = Self::jar(values, *jar)?.clone();
                 jals_classpath::NestedJar::extract(exec, cache, &jar, member)
@@ -1349,6 +1478,13 @@ impl BuildTaskExecutor {
         match Self::value(values, id)? {
             TaskValue::SourceTree(value) => Ok(value),
             _ => Err("task input is not a source tree".to_owned()),
+        }
+    }
+
+    fn file_tree(values: &[Option<TaskValue>], id: TaskId) -> Result<&SourceTree, String> {
+        match Self::value(values, id)? {
+            TaskValue::FileTree(value) => Ok(value),
+            _ => Err("task input is not a file tree".to_owned()),
         }
     }
 
@@ -1582,6 +1718,7 @@ mod tests {
                 .await
                 .unwrap();
             let execution = BuildTaskExecution {
+                runtime_dirs: Vec::new(),
                 classpath: Vec::new(),
                 publications: vec![BuildTaskPublication {
                     owner: "sources".to_owned(),

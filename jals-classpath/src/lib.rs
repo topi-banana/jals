@@ -17,6 +17,7 @@ mod skeleton;
 mod golden;
 #[cfg(feature = "archive")]
 mod jar;
+#[cfg(feature = "archive")]
 mod load;
 #[cfg(feature = "archive")]
 mod mappings;

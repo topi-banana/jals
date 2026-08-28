@@ -1179,14 +1179,11 @@ impl TestArgs {
         }
 
         let scratch = jals_build::ResolvedTarget::scratch(&root, &target.name);
-        // No runtime directories yet: the build tasks that publish them are the next thing to
-        // land, so a target naming `{dir:…}` is refused here with a message that says so rather
-        // than failing later inside the JVM.
         let resolved = jals_build::ResolvedTarget::resolve(
             &target,
             &root,
             scratch.join("run"),
-            &std::collections::BTreeMap::new(),
+            &inputs.runtime_dirs,
         )
         .map_err(|e| anyhow!("{e}"))?;
 
@@ -2016,6 +2013,13 @@ struct HostProjectInputs {
     /// mounts these into its own aggregate instead, because a materialized artifact lives under
     /// `target/jals/cache`, which the project snapshot deliberately excludes.
     source_dep_files: Vec<jals_classpath::SourceFile>,
+    /// Named directories the build tasks materialized, for a `[[test-target]]`'s `{dir:<name>}`
+    /// placeholders.
+    ///
+    /// Materialized here rather than carried as artifact keys, because a placeholder expands to a
+    /// path and only a host has one. Empty for every command but `jals test --target`, which is the
+    /// only thing that starts a program against them.
+    runtime_dirs: BTreeMap<String, PathBuf>,
     feature_set: FeatureSet,
     javac_args: Vec<String>,
     jvm_args: Vec<String>,
@@ -2259,6 +2263,34 @@ impl App {
         // bytes. Keying on the whole key would decode a game jar twice for no difference in the
         // index it builds.
         let mut seen = HashSet::new();
+        for dir in &assembly.task_runtime_dirs {
+            let members = dir
+                .tree
+                .files
+                .iter()
+                .map(|source| {
+                    let key = FileKey::parse(&source.path.to_string()).map_err(|_| {
+                        anyhow!(
+                            "runtime directory `{}` holds `{}`, which is not a file path",
+                            dir.name,
+                            source.path
+                        )
+                    })?;
+                    Ok((key, source.key.clone()))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let path = storage
+                .artifacts()
+                .materialize_tree(members.iter().map(|(path, key)| (path, key)))
+                .await
+                .map_err(|error| {
+                    anyhow!(
+                        "materializing runtime directory `{}` failed: {error:?}",
+                        dir.name
+                    )
+                })?;
+            result.runtime_dirs.insert(dir.name.clone(), path);
+        }
         result.remap_hierarchy = assembly
             .inputs
             .dependency_jars
