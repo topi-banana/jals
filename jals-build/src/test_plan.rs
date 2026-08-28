@@ -497,6 +497,21 @@ mod tests {
         assert_eq!(assign("com.example.MathTest#adds"), 4);
         assert_eq!(assign("com.example.MathTest#divides"), 4);
         assert_eq!(assign("com.example.TextTest#trims"), 2);
+        // The shard is two bits of the digest, so three of them pin almost nothing: a different
+        // hash function lands on the same three shards about once in sixty-four. The digests
+        // themselves are what a release must not move.
+        assert_eq!(
+            Partition::hash("com.example.MathTest#adds"),
+            0xee32_1c8a_aa53_44cb
+        );
+        assert_eq!(
+            Partition::hash("com.example.MathTest#divides"),
+            0x3bb1_0fae_e033_e02f
+        );
+        assert_eq!(
+            Partition::hash("com.example.TextTest#trims"),
+            0xf410_af18_3109_6a9d
+        );
     }
 
     #[test]
