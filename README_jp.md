@@ -306,7 +306,7 @@ jals run                    # コンパイルしてから [run] main-class を�
 jals run -- arg1 arg2       # ...プログラムへ引数を渡す
 jals test                   # `#[test]` メソッドを 1 テスト 1 JVM で実行
 jals test --list            # 実行せずにテスト一覧を表示
-jals clean                  # ビルド出力（target/classes）を削除
+jals clean                  # ビルド出力（target/classes・target/test-classes）を削除
 ```
 
 最小の `jals.toml`（すべてのキーは任意で、省略時は Maven 風の `src/main/java` → `target/classes`

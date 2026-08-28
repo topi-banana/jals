@@ -311,7 +311,7 @@ jals run --bin server       # run a named [[bin]] entry point
 jals run -- arg1 arg2       # ...passing args to the program
 jals test                   # run every `#[test]` method, one JVM per test
 jals test --list            # list the tests without running them
-jals clean                  # remove the build output (target/classes)
+jals clean                  # remove the build output (target/classes, target/test-classes)
 ```
 
 A minimal `jals.toml` — every key is optional and defaults to the Maven-style

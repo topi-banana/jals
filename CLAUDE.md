@@ -323,10 +323,11 @@ filesystem reads into portable interfaces.
   package. `jals-build` owns the run: portable planning in `test_plan.rs` (filters, `--partition`)
   and the host half in `test_runner.rs` (one JVM per test over `Exec::fan_out`, output redirected
   to per-test scratch files rather than pipes, `-ea` prepended by the launcher). The contract
-  between the two halves — the sentinel line, `--list`, `--quiet`, the harness class — is owned by
-  `jals-frontend` and travels to the runner as a `HarnessContract` value, so it is written once.
-  A pass is the sentinel and never the exit status, which is also `1` for a missing main class and
-  `0` for a body that called `System.exit(0)`.
+  between the two halves — the sentinel line, `--list`, `--quiet` — is owned by `jals-frontend` and
+  travels to the runner as a `HarnessContract` value, so it is written once; the harness class is
+  the fourth item and travels beside it as `RunRequest.main_class`. A captured pass is the sentinel
+  and never the exit status, which is also `1` for a missing main class and `0` for a body that
+  called `System.exit(0)`; `--no-capture` gives up that reading along with the capture, and says so.
 - `jals-cli`: the host boundary from clap `PathBuf` values to `NativeStorage` and typed keys. It
   also owns native-formatter-config **detection** (`migrate.rs`): portable crates cannot look at a
   filesystem, so the host decides which config file is there and reads its bytes through a
