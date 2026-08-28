@@ -2,7 +2,7 @@
 name = "jals-tests"
 version.workspace = true
 edition.workspace = true
-# The crate ships three binaries (jals-tests, jals-golden, jals-compile); keep `cargo run
+# The crate ships four binaries (jals-tests, jals-golden, jals-compile, jals-wasm); keep `cargo run
 # -p jals-tests` resolving to the parse-soundness CLI.
 default-run = "jals-tests"
 
@@ -21,6 +21,10 @@ path = "src/bin/golden.rs"
 [[bin]]
 name = "jals-compile"
 path = "src/bin/compile.rs"
+
+[[bin]]
+name = "jals-wasm"
+path = "src/bin/wasm.rs"
 
 # A binary cannot see `[dev-dependencies]`, so the compiler harness's crates are ordinary
 # dependencies even though nothing but a test corpus reads them.

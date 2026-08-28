@@ -1015,6 +1015,13 @@ jobs:
       # `jals_tests::compile::JAVAC_PIN` restates it and `the_javac_pin_matches_ci` fails
       # when the two drift; `gen-javac-corpus.sh` refuses a javac that is not this release.
       JAVAC_VERSION: "25"
+      # The two tools the WasmGC report is defined against. The validator's message text *is* the
+      # failure-bucket key, so a bump silently re-partitions the report — which is why these are
+      # pinned like a formatter release rather than taken as whatever is on the runner.
+      # `jals_tests::wasm::{WASM_TOOLS_PIN, WASMTIME_PIN}` restate them and `the_pins_match_ci`
+      # fails when the two drift.
+      CORPUS_WASM_TOOLS_VERSION: "1.258.0"
+      CORPUS_WASMTIME_VERSION: "48.0.1"
     steps:
       - parallel:
           - uses: actions/checkout@v7
@@ -1039,6 +1046,12 @@ jobs:
       - name: Build the corpus tools
         background: true
         run: cargo build --release -p jals-tests --bins
+      # The WasmGC report's two oracles, at the exact releases the report is defined against: one
+      # says whether an emitted module is a module, the other runs it. Without them `jals-wasm`
+      # still lowers every case and reports nothing about what came out.
+      - uses: taiki-e/install-action@v2.86.7
+        with:
+          tool: wasm-tools@${{ env.CORPUS_WASM_TOOLS_VERSION }},wasmtime@${{ env.CORPUS_WASMTIME_VERSION }}
       - name: Cache the google-java-format jar
         id: gjf-jar
         uses: actions/cache@v6
@@ -1213,6 +1226,9 @@ jobs:
               --worst 20 --allow-missing --markdown
             echo
             cargo run --release -p jals-tests --bin jals-compile -- \
+              --limit 20 --allow-missing --markdown
+            echo
+            cargo run --release -p jals-tests --bin jals-wasm -- \
               --limit 20 --allow-missing --markdown
           } | tee corpus.md >> "$GITHUB_STEP_SUMMARY"
       - name: Comment corpus reports on PR

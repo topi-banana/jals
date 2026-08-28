@@ -12,6 +12,7 @@
 
 pub mod compile;
 pub mod golden;
+pub mod wasm;
 
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};

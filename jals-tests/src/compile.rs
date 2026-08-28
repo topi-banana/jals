@@ -707,16 +707,12 @@ impl CompileReport {
     /// `<details>` so it stays tidy in a comment.
     pub fn markdown_report(reports: &[Self], limit: usize) -> String {
         let mut out = String::from("## jals-javac end-to-end\n\n");
+        // The one caption a reader needs before the table means anything. Everything else about
+        // what the rungs prove is a click away: it is the same prose on every run, and four
+        // harnesses' worth of it is what buries the four tables it exists to explain.
         out.push_str(
-            "How much of a corpus of real Java `jals-javac` turns into class files a real JVM \
-             links. Each corpus holds only files the pinned `javac` compiles **on their own**, so \
-             the denominator excludes what no single-file compiler could do; what the generator \
-             left out is listed under *out of scope*. The rungs are cumulative — `verified` is \
-             the one that means the class file is right, because nothing upstream of the JVM's \
-             bytecode verifier can tell a well-formed class file from a plausible one. \
-             `descriptor-equal` is the rung above it: the verifier judges one compilation at a \
-             time, so an erasure the declaration and its call sites get equally wrong still \
-             links — this rung asks javac's own class files whether the descriptors agree.\n\n",
+            "Rates are over the files the pinned `javac` compiles **on their own**; the rungs are \
+             cumulative.\n\n",
         );
         out.push_str(
             "| corpus | reference | in scope | parsed | lowered | re-read | verified | \
@@ -726,6 +722,20 @@ impl CompileReport {
         for report in reports {
             report.push_ladder_row(&mut out);
         }
+        out.push_str(
+            "\n<details><summary>What each rung proves, and what the denominator excludes\
+             </summary>\n\n\
+             How much of a corpus of real Java `jals-javac` turns into class files a real JVM \
+             links. Each corpus holds only files the pinned `javac` compiles **on their own**, so \
+             the denominator excludes what no single-file compiler could do; what the generator \
+             left out is listed under *out of scope*. The rungs are cumulative — `verified` is \
+             the one that means the class file is right, because nothing upstream of the JVM's \
+             bytecode verifier can tell a well-formed class file from a plausible one. \
+             `descriptor-equal` is the rung above it: the verifier judges one compilation at a \
+             time, so an erasure the declaration and its call sites get equally wrong still \
+             links — this rung asks javac's own class files whether the descriptors agree.\n\n\
+             </details>\n",
+        );
         for report in reports {
             report.push_violations(&mut out, limit);
             report.push_descriptor_findings(&mut out, limit);
@@ -772,15 +782,22 @@ impl CompileReport {
         ));
     }
 
-    /// The defects, in full and out in the open rather than behind a `<details>`.
+    /// The defects, every one of them, behind a `<details>` whose summary already names them.
+    ///
+    /// Collapsed is not hidden, and the distinction is the count: `DEFECTS_ALWAYS_LISTED` says a
+    /// defect is never dropped from the report by a display setting, and it still is not — the
+    /// summary line carries the number and what kind of failure it is, so a reader who never
+    /// expands has already been told. What the `<details>` removes is twenty rows of corpus paths
+    /// and `VerifyError` text from a summary that has three other reports under it.
     fn push_violations(&self, out: &mut String, limit: usize) {
         let violations = self.violations();
         if violations.is_empty() {
             return;
         }
         out.push_str(&format!(
-            "\n**{}: {} invariant violation(s)** — a class file the JVM rejects, output that does \
-             not read back, or a panic. These are defects, not unimplemented syntax.\n\n",
+            "\n<details><summary><strong>{}: {} invariant violation(s)</strong> — a class file \
+             the JVM rejects, output that does not read back, or a panic. These are defects, not \
+             unimplemented syntax.</summary>\n\n",
             self.name,
             violations.len()
         ));
@@ -796,6 +813,7 @@ impl CompileReport {
                 result.outcome.detail().unwrap_or("—"),
             ));
         }
+        out.push_str("\n</details>\n");
     }
 
     /// The descriptor rung's own cases, collapsed like a gap listing but written out one per row.
