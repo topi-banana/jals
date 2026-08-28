@@ -12,7 +12,7 @@ linter・language server（LSP）を提供しており、いずれも名前解�
 `git`/`path` JALS source project。jar に source が無ければ逆コンパイルして読める Java を生成）から型を
 解決することもできます。これらと並んで、`jals.toml` マニフェストから JDK の `javac` / `java` を
 ラップし、コンパイル前に sandbox 化された Rhai build script も実行できる Cargo 風のビルド
-フロントエンド（`jals build` / `run` / `clean` / `init`）も備えています。
+フロントエンド（`jals build` / `run` / `test` / `clean` / `init`）も備えています。
 
 > The English README is available at [README.md](README.md).
 
@@ -31,8 +31,12 @@ linter・language server（LSP）を提供しており、いずれも名前解�
 - **本物のセマンティクスを持つ linter。** 構文的なチェックにとどまらず、`jals lint` は名前解決と
   型推論を CST 上で行い、未使用のローカル変数・型不一致・報告されていない検査例外・到達しない
   条件分岐を検出します（単なるパターンマッチではありません）。
+- **フレームワーク不要のテスト。** テストとは `#[test]` を付けたメソッドのことで、JUnit も
+  annotation processor も launcher jar も要りません。`jals test` は各テストを専用の JVM で並列に
+  実行し、`cargo nextest` と同じ形で結果を報告します。`jals build` はそれらを 1 つもコンパイル
+  しません。
 - **Cargo 風の Java ビルド。** `Cargo.toml` の Java 版にあたる `jals.toml` マニフェストが
-  `jals build` / `run` / `clean` / `init` を駆動します。任意の Rhai script は `javac` より先に、
+  `jals build` / `run` / `test` / `clean` / `init` を駆動します。任意の Rhai script は `javac` より先に、
   制限付きの storage-only API だけを使って source を生成し、flag・classpath・environment を追加します。
 - **transitive な source-project graph。** `git`/`path` 依存自体を JALS project にできます。stable な
   node identity で diamond を重複排除し、一意な各 node を dependency-first で preprocess してから、
@@ -64,7 +68,7 @@ linter・language server（LSP）を提供しており、いずれも名前解�
 | [`jals-exec`](jals-exec)             | native・browser・inline host 共通の current-thread 実行コンテキスト。確定的な worker fan-out と runtime に依存しない協調 yield を提供します。                                                                                                                                                                                                                   |
 | [`jals-storage`](jals-storage)       | revision付きの確定的なproject storage。portable codeは検証済み`FileKey`/`DirKey`、不変`CodeTree` snapshot、transaction、overlay、SHA-256検証付きartifact cacheを使い、memory/native adapterが同じsealed contractを実装します。                                                                                                                                  |
 | [`jals-project`](jals-project)       | stable な node identity を持つ transitive path/Git/JAR project graph を探索し、選択 root 直下の正確な `jals.toml` だけを probe し、resolved から preprocessed への phase transition を必須にして、dependency input を node-scoped な検証済み artifact としてのみ `jals-classpath` へ公開します。portable in-memory host と native acquisition host を含みます。 |
-| [`jals-build`](jals-build)           | Cargo 風のビルドオーケストレータ。`jals.toml` を `javac`/`java` の計画・clean key・プロジェクト雛形へ変換し、任意の Rhai pre-build script を revision 付き project storage 上で実行します。`jals build`/`run`/`clean`/`init` と LSP/playground の build phase を支えます。                                                                                      |
+| [`jals-build`](jals-build)           | Cargo 風のビルドオーケストレータ。`jals.toml` を `javac`/`java` の計画・clean key・プロジェクト雛形へ変換し、任意の Rhai pre-build script を revision 付き project storage 上で実行します。`jals build`/`run`/`test`/`clean`/`init` と LSP/playground の build phase を支えます。                                                                                      |
 | [`jals-lsp`](jals-lsp)               | Language Server Protocol サーバ（`jals lsp` サブコマンド）。同じ CST とセマンティック層から診断・ドキュメントシンボル・整形・hover・定義へのジャンプ・参照検索などを提供。ホスト専用。                                                                                                                                                                          |
 | [`jals-cli`](jals-cli)               | `jals` コマンドラインバイナリ。                                                                                                                                                                                                                                                                                                                                 |
 | [`jals-playground`](jals-playground) | [Yew](https://yew.rs) 製・[Trunk](https://trunkrs.dev) でビルドするブラウザ向け playground。`wasm32` にコンパイルし、構文/format/解析/Rhai build-script の各層をブラウザ上だけで動かします。                                                                                                                                                                    |
@@ -300,6 +304,8 @@ jals build                  # javac でコンパイル
 jals build --dry-run        # コンパイルせず javac コマンドを表示
 jals run                    # コンパイルしてから [run] main-class を実行
 jals run -- arg1 arg2       # ...プログラムへ引数を渡す
+jals test                   # `#[test]` メソッドを 1 テスト 1 JVM で実行
+jals test --list            # 実行せずにテスト一覧を表示
 jals clean                  # ビルド出力（target/classes）を削除
 ```
 
