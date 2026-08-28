@@ -37,7 +37,12 @@ impl TestCase {
     /// generated and compiled from the same tree, so a flag reaching here that this build does not
     /// know is a jals version skew inside one project — impossible — and treating it as fatal
     /// would turn a future addition into a hard failure for no gain.
-    pub fn parse(line: &str) -> Option<Self> {
+    ///
+    /// Crate-internal: a host receives the `TestCase`s [`TestLauncher::list`] already parsed, so
+    /// publishing this would publish a second way to ask the harness the same question.
+    ///
+    /// [`TestLauncher::list`]: crate::TestLauncher::list
+    pub(crate) fn parse(line: &str) -> Option<Self> {
         let line = line.trim_end_matches(['\r', '\n']);
         let (id, flags) = line.split_once('\t').unwrap_or((line, ""));
         if id.is_empty() || !id.contains(ID_SEPARATOR) {
