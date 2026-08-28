@@ -23,7 +23,9 @@
 //! ```
 //!
 //! The first field is the test id, the second the verb. `ok` takes nothing further, `fail` and
-//! `skip` take one reason, and `shot` takes a name and a path.
+//! `skip` take one reason, `shot` takes a name and a path, and `time` takes a whole number of
+//! milliseconds. `time` is optional — a target that does not measure simply omits it, and the
+//! reported duration is then zero rather than invented.
 //!
 //! **Nothing here decides a verdict.** A `shot` line names a file; whether that file matches its
 //! reference image is the screenshot comparison's answer, not the program's. Keeping those apart is
@@ -33,6 +35,7 @@ use alloc::borrow::ToOwned;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
+use core::time::Duration;
 
 /// The separator between a test's declaring class and its method, in the id the report and the
 /// runner both spell. The same separator [`TestCase`](crate::TestCase) requires, because an
@@ -66,6 +69,12 @@ pub struct ReportEntry {
     pub verdict: ReportedVerdict,
     /// The screenshots this test produced, in the order the report named them.
     pub shots: Vec<Shot>,
+    /// How long the program says the test took, when it says.
+    ///
+    /// Optional because only the program can know: a target runs every test inside one process, so
+    /// there is no per-test wall clock on this side to fall back to. Absent is reported as zero,
+    /// never as a share of the run.
+    pub duration: Option<Duration>,
 }
 
 /// A line the report should not have contained.
@@ -167,6 +176,14 @@ impl TestReport {
                 let why = fields.next().unwrap_or_default().to_owned();
                 self.verdict(line, id, ReportedVerdict::Skipped(why));
             }
+            Some("time") => {
+                let Some(millis) = fields.next().and_then(|f| f.parse::<u64>().ok()) else {
+                    self.malformed(line, record);
+                    return;
+                };
+                let at = self.entry(id);
+                self.entries[at].duration = Some(Duration::from_millis(millis));
+            }
             Some("shot") => {
                 let (Some(name), Some(path)) = (fields.next(), fields.next()) else {
                     self.malformed(line, record);
@@ -215,6 +232,7 @@ impl TestReport {
             // entry is always a complete value; the parse tail turns any left over into a problem.
             verdict: ReportedVerdict::Skipped(MISSING_VERDICT.to_owned()),
             shots: Vec::new(),
+            duration: None,
         });
         self.entries.len() - 1
     }
@@ -400,6 +418,46 @@ mod tests {
             0
         );
         assert_eq!(report.problems().len(), 2);
+    }
+
+    #[test]
+    fn a_time_line_is_read_and_a_missing_one_is_not_invented() {
+        let report = TestReport::parse(concat!(
+            "com.example.A#one\tok\n",
+            "com.example.A#one\ttime\t1234\n",
+            "com.example.B#two\tok\n",
+        ));
+        assert!(report.problems().is_empty());
+        assert_eq!(
+            report
+                .entry_for("com.example.A#one")
+                .expect("named")
+                .duration,
+            Some(core::time::Duration::from_millis(1234))
+        );
+        assert_eq!(
+            report
+                .entry_for("com.example.B#two")
+                .expect("named")
+                .duration,
+            None
+        );
+    }
+
+    #[test]
+    fn a_time_that_is_not_a_number_is_malformed() {
+        let report = TestReport::parse(concat!(
+            "com.example.A#one\tok\n",
+            "com.example.A#one\ttime\tsoon\n",
+        ));
+        assert_eq!(report.problems().len(), 1);
+        assert_eq!(
+            report
+                .entry_for("com.example.A#one")
+                .expect("named")
+                .duration,
+            None
+        );
     }
 
     #[test]

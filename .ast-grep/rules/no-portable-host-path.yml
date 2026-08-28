@@ -43,6 +43,15 @@ ignores:
   # directory of its own, so host paths are what it manipulates. `native`-gated; the planning half
   # it consumes (`test_plan.rs`) is portable and names no path at all.
   - 'jals-build/src/test_runner.rs'
+  # A test target's resolved form: the run directory it is started in, the report it writes, and the
+  # seed tree copied into place are all host paths by the time they get here. `native`-gated, and
+  # the halves that are *not* host-shaped stay elsewhere — the schema is `jals-config`'s and the
+  # report parser (`test_report.rs`) is portable and names no path.
+  - 'jals-build/src/test_target.rs'
+  # The screenshot verdict: it reads two PNGs off disk and writes a difference picture beside them.
+  # `native`-gated, and the comparison itself is `jals-image`, which is `no_std` and takes byte
+  # slices — the paths stop here.
+  - 'jals-build/src/screenshot.rs'
   - 'jals-cli/src/**/*.rs'
   - 'jals-lsp/src/**/*.rs'
   - 'jals-tests/src/**/*.rs'

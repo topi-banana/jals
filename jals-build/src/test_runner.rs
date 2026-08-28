@@ -36,7 +36,10 @@ use jals_storage::RelativePath;
 
 use crate::invocation::Invocation;
 use crate::request::RunRequest;
+use crate::screenshot::{ScreenshotVerifier, ShotOutcome};
 use crate::test_plan::TestCase;
+use crate::test_report::{ReportProblem, ReportedVerdict, TestReport};
+use crate::test_target::ResolvedTarget;
 use crate::toolchain::ToolchainError;
 
 /// The parent of every test run's scratch, relative to the project root. A run owns the
@@ -45,7 +48,7 @@ use crate::toolchain::ToolchainError;
 /// Under `target/jals/build` rather than beside it, which is what makes `jals clean` remove it:
 /// `CleanTargets::keys` returns that root, and a sibling directory would have needed its own entry
 /// there — a second place to remember, and one nothing would have failed without.
-const TEST_RUN_DIR: &str = "target/jals/build/test-run";
+pub(crate) const TEST_RUN_DIR: &str = "target/jals/build/test-run";
 
 /// `-ea`: enable assertions in the project's own classes.
 ///
@@ -58,27 +61,49 @@ const ENABLE_ASSERTIONS: &str = "-ea";
 const ENABLE_SYSTEM_ASSERTIONS: &str = "-esa";
 
 /// How one test ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TestVerdict {
-    /// The harness printed the sentinel: the body returned normally (or threw, for a
-    /// `#[should_fail]` test).
+    /// The test passed: the harness printed the sentinel, or the target's report said `ok` and
+    /// every screenshot it named matched.
     Passed,
-    /// The process ended without printing the sentinel.
-    Failed {
-        /// The exit status, absent when a signal ended the process.
-        code: Option<i32>,
-    },
+    /// The test failed, in one of the ways a failure can be arrived at.
+    Failed(FailureKind),
     /// The process outlived `--timeout` and was killed.
     TimedOut,
-    /// Never started: an earlier failure ended the run.
+    /// Never started: an earlier failure ended the run, or the filters left it out.
     Skipped,
 }
 
 impl TestVerdict {
     /// Whether this verdict counts against the run.
-    pub const fn is_failure(self) -> bool {
-        matches!(self, Self::Failed { .. } | Self::TimedOut)
+    pub const fn is_failure(&self) -> bool {
+        matches!(self, Self::Failed(_) | Self::TimedOut)
     }
+}
+
+/// How a test came to fail.
+///
+/// A payload rather than an exit code, because the three runners now in play arrive at a failure by
+/// three different routes and a reader needs to be told which. A harness test fails by *not saying
+/// it passed*; a target's test fails because the program said so, in its own words; and a
+/// screenshot fails because jals compared it against a reference image the program never saw.
+/// Collapsing those into one status would make the most useful half of every message unavailable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FailureKind {
+    /// The process ended without saying this test passed — no sentinel from a harness, or no
+    /// record in a target's report.
+    Process {
+        /// The exit status, absent when a signal or a deadline ended the process.
+        code: Option<i32>,
+    },
+    /// The target's report said it failed, carrying the program's own explanation.
+    Reported(String),
+    /// One or more of this test's screenshots did not match its reference image.
+    ///
+    /// *Which* ones is [`TestOutcome::shots`] rather than a payload here: a test may produce
+    /// several, and a reader wants each of them rendered, not the first one promoted into the
+    /// verdict.
+    Screenshot,
 }
 
 /// What one test did.
@@ -95,6 +120,13 @@ pub struct TestOutcome {
     pub stdout: Option<PathBuf>,
     /// The captured standard error, absent when the run did not capture.
     pub stderr: Option<PathBuf>,
+    /// What this test's screenshots were judged to be, in the order the report named them.
+    ///
+    /// Always empty for a generated harness, which takes none. Carried even when they all matched,
+    /// because an outcome that says only "passed" cannot tell a reader that a comparison happened
+    /// at all — and "the golden set has no reference for this yet" is a state worth seeing on a
+    /// green run.
+    pub shots: Vec<ShotOutcome>,
 }
 
 impl TestOutcome {
@@ -467,6 +499,7 @@ impl SharedRun {
             attempts: 0,
             stdout: None,
             stderr: None,
+            shots: Vec::new(),
         }
     }
 
@@ -503,17 +536,19 @@ impl SharedRun {
                     attempts: 1,
                     stdout: raw.captured.then(|| raw.stdout.clone()),
                     stderr: raw.captured.then(|| raw.stderr.clone()),
+                    shots: Vec::new(),
                 }
             }
             // A JVM that could not be started is the test's failure to report: the alternative is
             // aborting the whole run over one process, which loses every other result.
             Err(_) => TestOutcome {
                 id: case.id().to_owned(),
-                verdict: TestVerdict::Failed { code: None },
+                verdict: TestVerdict::Failed(FailureKind::Process { code: None }),
                 duration: Duration::ZERO,
                 attempts: 1,
                 stdout: None,
                 stderr: None,
+                shots: Vec::new(),
             },
         }
     }
@@ -531,7 +566,7 @@ impl SharedRun {
             return if code == 0 {
                 TestVerdict::Passed
             } else {
-                TestVerdict::Failed { code: Some(code) }
+                TestVerdict::Failed(FailureKind::Process { code: Some(code) })
             };
         }
         let sentinel = format!("{}\t{}", self.sentinel, case.id());
@@ -552,7 +587,7 @@ impl SharedRun {
         if passed {
             TestVerdict::Passed
         } else {
-            TestVerdict::Failed { code: Some(code) }
+            TestVerdict::Failed(FailureKind::Process { code: Some(code) })
         }
     }
 }
@@ -608,5 +643,336 @@ impl Drop for Permit<'_> {
         *free += 1;
         drop(free);
         self.permits.released.notify_one();
+    }
+}
+
+/// A resolved command that runs an external test target.
+///
+/// The counterpart of [`TestLauncher`], and the differences are the whole point of the type:
+///
+/// - **One process for the whole selection.** A target boots something; booting it once per test
+///   is not a slow version of the right design, it is a different one. The selected ids are passed
+///   as arguments and the program runs them all.
+/// - **The verdict comes from a report, not from an exit status.** One status cannot say which of
+///   forty tests passed, and a target that runs to completion with three failures inside it exits
+///   however it likes.
+/// - **`--retries`, `-j` and `--max-fail` do not apply.** Each of them means "start another
+///   process", and there is only ever one. They are ignored rather than silently reinterpreted.
+pub struct TargetLauncher {
+    /// The command up to and including the main class, the target's own arguments appended.
+    base: Invocation,
+    target: ResolvedTarget,
+}
+
+/// What one target run produced.
+pub struct TargetRun {
+    /// One outcome per selected test, in the order they were selected.
+    pub outcomes: Vec<TestOutcome>,
+    /// What the report itself got wrong.
+    pub problems: Vec<ReportProblem>,
+    /// Names the golden set holds that this run produced no screenshot for.
+    pub unmatched_references: Vec<String>,
+    /// Where the process's own output landed.
+    pub stdout: PathBuf,
+    pub stderr: PathBuf,
+    /// The files the target's `artifacts` globs matched, for a host to collect.
+    pub artifacts: Vec<PathBuf>,
+    /// The process's exit status, absent when a deadline killed it.
+    pub status: Option<i32>,
+}
+
+impl TargetLauncher {
+    /// Resolve `[toolchain] runtime` and build the command that starts `target`'s main class.
+    ///
+    /// `request.main_class` and `request.program_args` are ignored: a target names its own entry
+    /// point and its own arguments, and the ids of the selected tests follow them per run.
+    ///
+    /// # Errors
+    /// [`ToolchainError`] when the run directory cannot be prepared.
+    pub async fn resolve(
+        manifest: &Manifest,
+        request: &RunRequest<'_>,
+        target: ResolvedTarget,
+    ) -> Result<Self, ToolchainError> {
+        let toolchain = crate::native::SubprocessToolchain::from_manifest(manifest).await;
+        // The build script's JVM arguments first, the target's after, so a target has the last
+        // word on anything both of them set.
+        let mut jvm_args = request.jvm_args.to_vec();
+        jvm_args.extend_from_slice(target.jvm_args());
+        let planned = RunRequest {
+            jvm_args: &jvm_args,
+            main_class: target.main_class(),
+            program_args: target.args(),
+            ..*request
+        };
+        let mut base = toolchain.plan_run(&planned).await;
+        // A target's working directory is its run directory, not the project root: it is expected
+        // to write there, and a program that wrote its world save into the checkout would leave
+        // the project modified by a test.
+        base.working_dir = target.run_dir().to_path_buf();
+        Ok(Self { base, target })
+    }
+
+    /// The directory the process's own output and the difference pictures go in — the run
+    /// directory's parent, so neither can be mistaken for something the program wrote.
+    fn scratch(&self) -> PathBuf {
+        self.target
+            .run_dir()
+            .parent()
+            .map_or_else(|| self.target.run_dir().to_path_buf(), Path::to_path_buf)
+    }
+
+    /// Ask the target which tests it holds.
+    ///
+    /// Runs the program with its `list-argument` in a clean run directory. A target is expected to
+    /// answer this **without doing its work** — that is what makes `jals test --list` cheap on a
+    /// target that would otherwise boot a game.
+    ///
+    /// # Errors
+    /// [`ToolchainError::Spawn`] when the process cannot be started,
+    /// [`ToolchainError::ArgumentFile`] when its output cannot be read, and
+    /// [`ToolchainError::HarnessList`] when it started but did not enumerate.
+    pub async fn list(&self) -> Result<Vec<TestCase>, ToolchainError> {
+        let invocation = TestLauncher::invocation_with(
+            &self.base,
+            core::slice::from_ref(&self.target.list_argument().to_owned()),
+        );
+        let run_dir = self.target.run_dir().to_path_buf();
+        let directory = self.scratch().join("list");
+        let outcome = on_blocking_pool(move || {
+            std::fs::create_dir_all(&run_dir)?;
+            TestLauncher::execute(&invocation, &directory, None, true)
+        })
+        .await
+        .map_err(|source| ToolchainError::Spawn {
+            program: "java".to_owned(),
+            source,
+        })?;
+        let text = std::fs::read_to_string(&outcome.stdout).map_err(|source| {
+            ToolchainError::ArgumentFile {
+                path: outcome.stdout.display().to_string(),
+                source,
+            }
+        })?;
+        if outcome.status != Some(0) {
+            return Err(ToolchainError::HarnessList {
+                status: outcome.status,
+                stderr: std::fs::read_to_string(&outcome.stderr)
+                    .unwrap_or_default()
+                    .trim_end()
+                    .to_owned(),
+            });
+        }
+        Ok(text.lines().filter_map(TestCase::parse).collect())
+    }
+
+    /// Run `cases` in one process and read what the target said about them.
+    ///
+    /// `verifier` judges the screenshots the report names; without one the shots are recorded and
+    /// not compared, which is what a target that takes none wants.
+    ///
+    /// # Errors
+    /// [`ToolchainError::Spawn`] when the process cannot be started at all. A process that started
+    /// and went wrong is not an error here — it is a set of failing tests, which is the more useful
+    /// answer.
+    pub async fn run(
+        &self,
+        cases: &[TestCase],
+        verifier: Option<&ScreenshotVerifier>,
+        timeout: Option<Duration>,
+    ) -> Result<TargetRun, ToolchainError> {
+        let ids: Vec<String> = cases.iter().map(|case| case.id().to_owned()).collect();
+        let invocation = TestLauncher::invocation_with(&self.base, &ids);
+        let scratch = self.scratch();
+        let run_dir = self.target.run_dir().to_path_buf();
+        let seed = self.target.seed().map(Path::to_path_buf);
+        // The target's own `timeout` unless the command line overrode it: the manifest knows how
+        // long its program takes to boot, and a caller that says otherwise means it.
+        let deadline = timeout.or_else(|| self.target.timeout());
+
+        let raw = on_blocking_pool(move || {
+            Self::prepare_run_dir(&run_dir, seed.as_deref())?;
+            TestLauncher::execute(&invocation, &scratch, deadline, true)
+        })
+        .await
+        .map_err(|source| ToolchainError::Spawn {
+            program: "java".to_owned(),
+            source,
+        })?;
+
+        let report = std::fs::read_to_string(self.target.report())
+            .map(|text| TestReport::parse(&text))
+            .unwrap_or_default();
+
+        let mut outcomes = Vec::with_capacity(cases.len());
+        let mut taken = Vec::new();
+        for case in cases {
+            let outcome = self.judge(case, &report, &raw, verifier, &mut taken).await;
+            outcomes.push(outcome);
+        }
+
+        let unmatched_references = match verifier {
+            Some(verifier) => verifier
+                .unmatched_references(&taken)
+                .await
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
+
+        Ok(TargetRun {
+            outcomes,
+            problems: report.problems().to_vec(),
+            unmatched_references,
+            stdout: raw.stdout.clone(),
+            stderr: raw.stderr.clone(),
+            artifacts: self.collect_artifacts().await,
+            status: raw.status,
+        })
+    }
+
+    /// Turn one selected case plus what the report said about it into an outcome.
+    async fn judge(
+        &self,
+        case: &TestCase,
+        report: &TestReport,
+        raw: &RawOutcome,
+        verifier: Option<&ScreenshotVerifier>,
+        taken: &mut Vec<String>,
+    ) -> TestOutcome {
+        let stdout = Some(raw.stdout.clone());
+        let stderr = Some(raw.stderr.clone());
+        // The whole run's output, attached to every test: one process wrote it, and splitting a
+        // shared log between tests would be a guess.
+        let Some(entry) = report.entry_for(case.id()) else {
+            return TestOutcome {
+                id: case.id().to_owned(),
+                // A deadline that killed the process is that, not "the report is missing a line":
+                // every test is unreported after a kill, and reporting forty failures for one
+                // timeout would bury the cause.
+                verdict: if raw.status.is_none() {
+                    TestVerdict::TimedOut
+                } else {
+                    TestVerdict::Failed(FailureKind::Process { code: raw.status })
+                },
+                duration: Duration::ZERO,
+                attempts: 1,
+                stdout,
+                stderr,
+                shots: Vec::new(),
+            };
+        };
+
+        let mut shots = Vec::with_capacity(entry.shots.len());
+        for shot in &entry.shots {
+            taken.push(shot.name.clone());
+            // Without a verifier the shot is recorded and not judged, which is what a target that
+            // compares nothing looks like — a combination the manifest already refuses, so this is
+            // the `--update-golden` path rather than a silent skip.
+            if let Some(verifier) = verifier {
+                shots.push(verifier.verify(shot, self.target.run_dir()).await);
+            }
+        }
+
+        let verdict = match &entry.verdict {
+            ReportedVerdict::Failed(why) => TestVerdict::Failed(FailureKind::Reported(why.clone())),
+            ReportedVerdict::Skipped(_) => TestVerdict::Skipped,
+            // A test the program passed still fails if a picture it produced disagrees: the
+            // program cannot know, because it has never seen the reference image.
+            ReportedVerdict::Passed if shots.iter().any(ShotOutcome::is_failure) => {
+                TestVerdict::Failed(FailureKind::Screenshot)
+            }
+            ReportedVerdict::Passed => TestVerdict::Passed,
+        };
+
+        TestOutcome {
+            id: case.id().to_owned(),
+            verdict,
+            duration: entry.duration.unwrap_or(Duration::ZERO),
+            attempts: 1,
+            stdout,
+            stderr,
+            shots,
+        }
+    }
+
+    /// Clear the run directory and lay the seed tree into it.
+    ///
+    /// Cleared every run: a target that read a file its *previous* run wrote would pass or fail on
+    /// state no one declared, which is the failure mode a seeded directory exists to prevent.
+    fn prepare_run_dir(run_dir: &Path, seed: Option<&Path>) -> std::io::Result<()> {
+        match std::fs::remove_dir_all(run_dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        std::fs::create_dir_all(run_dir)?;
+        if let Some(seed) = seed {
+            Self::copy_tree(seed, run_dir)?;
+        }
+        Ok(())
+    }
+
+    /// Copy `from` into `into`, recursively.
+    ///
+    /// Symlinks are followed as the files they name rather than recreated: the destination is a
+    /// scratch directory a program writes into, and a link pointing back into the project would let
+    /// a test modify the checkout.
+    fn copy_tree(from: &Path, into: &Path) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            let target = into.join(entry.file_name());
+            if entry.metadata()?.is_dir() {
+                std::fs::create_dir_all(&target)?;
+                Self::copy_tree(&entry.path(), &target)?;
+            } else {
+                std::fs::copy(entry.path(), &target)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The files under the run directory the target's `artifacts` globs matched.
+    async fn collect_artifacts(&self) -> Vec<PathBuf> {
+        if !self.target.collects_artifacts() {
+            return Vec::new();
+        }
+        let run_dir = self.target.run_dir().to_path_buf();
+        let target = self.target.clone();
+        on_blocking_pool(move || {
+            let mut found = Vec::new();
+            Self::walk(&run_dir, &run_dir, &target, &mut found);
+            // Sorted: a directory listing's order is the filesystem's, and what a run reports is a
+            // promise.
+            found.sort();
+            found
+        })
+        .await
+    }
+
+    /// Depth-first walk collecting whatever `target`'s globs match.
+    fn walk(root: &Path, at: &Path, target: &ResolvedTarget, found: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(at) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if entry.metadata().is_ok_and(|meta| meta.is_dir()) {
+                Self::walk(root, &path, target, found);
+                continue;
+            }
+            let Ok(relative) = path.strip_prefix(root) else {
+                continue;
+            };
+            let Some(text) = relative.to_str() else {
+                continue;
+            };
+            // A path that is not a portable project path cannot be matched against a glob written
+            // as one, and is not an artifact anyone declared.
+            if let Ok(key) = RelativePath::parse(&text.replace('\\', "/"))
+                && target.is_artifact(&key)
+            {
+                found.push(path);
+            }
+        }
     }
 }

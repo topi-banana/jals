@@ -3327,3 +3327,211 @@ fn test_filters_select_and_partition_covers_every_test() {
     expected.sort();
     assert_eq!(sharded, expected);
 }
+
+/// A project whose `[[test-target]]` is a stand-in for a program that boots something: it answers
+/// `--list` without doing any work, then runs whatever ids it is handed and writes a report.
+///
+/// Deliberately not a game. What the target facility has to get right is the *contract* — enumerate
+/// cheaply, run one process for the whole selection, read the verdicts back out of a file — and
+/// none of that needs the thing being booted to be real. The screenshot half is unit-tested in
+/// `jals-build`, which needs no JVM at all.
+#[cfg(unix)]
+fn target_project(root: &Path) {
+    std::fs::write(
+        root.join("jals.toml"),
+        "[package]\nname = \"targetdemo\"\n\n\
+         [build]\nsource-dirs = [\"src/main/java\"]\nclasses-dir = \"target/classes\"\n\n\
+         [[test-target]]\nname = \"demo\"\nsource-dirs = [\"src/e2e/java\"]\n\
+         main-class = \"e2e.Driver\"\nargs = [\"--out\", \"{run-dir}\"]\n\
+         artifacts = [\"logs/**\"]\n\n\
+         [test-target.run-dir]\nseed = \"fixtures/run\"\n",
+    )
+    .unwrap();
+
+    let main = root.join("src/main/java/com/example");
+    std::fs::create_dir_all(&main).unwrap();
+    std::fs::write(
+        main.join("Lib.java"),
+        "package com.example;\npublic final class Lib { public static int two() { return 2; } }\n",
+    )
+    .unwrap();
+
+    let seed = root.join("fixtures/run");
+    std::fs::create_dir_all(&seed).unwrap();
+    std::fs::write(seed.join("seeded.txt"), "from the fixture\n").unwrap();
+
+    let e2e = root.join("src/e2e/java/e2e");
+    std::fs::create_dir_all(&e2e).unwrap();
+    std::fs::write(
+        e2e.join("Driver.java"),
+        r##"package e2e;
+
+import java.io.FileWriter;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
+
+public final class Driver {
+    private static final String[] TESTS = {"e2e.T#alpha", "e2e.T#beta", "e2e.T#gamma"};
+
+    public static void main(String[] args) throws Exception {
+        List<String> ids = new ArrayList<>();
+        String out = ".";
+        for (int i = 0; i < args.length; i++) {
+            if (args[i].equals("--list")) {
+                for (String t : TESTS) { System.out.println(t + "\t"); }
+                return;
+            } else if (args[i].equals("--out")) {
+                out = args[++i];
+            } else {
+                ids.add(args[i]);
+            }
+        }
+        // Proves the seed landed before the process started.
+        System.out.println("seed:" + Files.readString(Path.of(out, "seeded.txt")).trim());
+        System.out.println("ids:" + ids.size());
+        Files.createDirectories(Path.of(out, "logs"));
+        Files.writeString(Path.of(out, "logs", "latest.log"), "left behind\n");
+        try (FileWriter report = new FileWriter(Path.of(out, "report.tsv").toFile())) {
+            for (String id : ids) {
+                if (id.endsWith("#gamma")) {
+                    report.write(id + "\tfail\tgamma was asked to fail\n");
+                } else {
+                    report.write(id + "\tok\n");
+                }
+                report.write(id + "\ttime\t7\n");
+            }
+        }
+    }
+}
+"##,
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_test_target_enumerates_without_running_anything() {
+    if !javac_available() {
+        eprintln!("skipping: no javac on PATH");
+        return;
+    }
+    let dir = tempdir().unwrap();
+    target_project(dir.path());
+
+    let out = jals()
+        .current_dir(dir.path())
+        .args(["test", "--target", "demo", "--list"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert_eq!(out.status.code(), Some(0), "stdout:\n{stdout}");
+    assert_eq!(
+        stdout.lines().collect::<Vec<_>>(),
+        ["e2e.T#alpha", "e2e.T#beta", "e2e.T#gamma"]
+    );
+    // Enumerating must not have done the work: the driver only writes a report when it runs.
+    let ran = std::fs::read_dir(dir.path().join("target/jals/build/test-run"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| entry.path().join("demo/run/report.tsv").exists());
+    assert!(!ran, "--list wrote a report, so it ran the tests");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_test_target_runs_once_and_its_report_decides_each_verdict() {
+    if !javac_available() {
+        eprintln!("skipping: no javac on PATH");
+        return;
+    }
+    let dir = tempdir().unwrap();
+    target_project(dir.path());
+
+    let out = jals()
+        .current_dir(dir.path())
+        .args(["test", "--target", "demo", "--color", "never"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    let all = format!("{stdout}{stderr}");
+
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a reported failure fails the run\n{all}"
+    );
+    assert!(all.contains("3 tests run: 2 passed, 1 failed"), "{all}");
+    // The program's own words for the failure, which an exit status could never carry.
+    assert!(all.contains("gamma was asked to fail"), "{all}");
+    // One process for the whole selection, and the seed was in place before it started.
+    assert!(all.contains("ids:3"), "{all}");
+    assert!(all.contains("seed:from the fixture"), "{all}");
+    // `time` lines became per-test durations rather than a shared wall clock.
+    assert!(all.contains("0.007s"), "{all}");
+    // The declared glob collected what the run left behind.
+    assert!(all.contains("latest.log"), "{all}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_test_target_passes_only_the_selected_ids_to_the_program() {
+    if !javac_available() {
+        eprintln!("skipping: no javac on PATH");
+        return;
+    }
+    let dir = tempdir().unwrap();
+    target_project(dir.path());
+
+    let out = jals()
+        .current_dir(dir.path())
+        // `--success-output` because the assertion below is about what the *program* was handed,
+        // and a passing test's captured output is not replayed by default.
+        .args([
+            "test",
+            "--target",
+            "demo",
+            "--color",
+            "never",
+            "--success-output",
+            "immediate",
+            "alpha",
+        ])
+        .output()
+        .unwrap();
+    let all = format!(
+        "{}{}",
+        String::from_utf8(out.stdout).unwrap(),
+        String::from_utf8(out.stderr).unwrap()
+    );
+    assert_eq!(out.status.code(), Some(0), "{all}");
+    // The filter narrowed what the *program* was asked to run, not merely what was reported.
+    assert!(all.contains("ids:1"), "{all}");
+    assert!(all.contains("1 test run: 1 passed"), "{all}");
+}
+
+#[test]
+fn an_unknown_target_names_the_ones_that_are_declared() {
+    let dir = tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("jals.toml"),
+        "[package]\nname = \"x\"\n\n\
+         [[test-target]]\nname = \"demo\"\nmain-class = \"e2e.Driver\"\n",
+    )
+    .unwrap();
+    let out = jals()
+        .current_dir(dir.path())
+        .args(["test", "--target", "nope"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert_ne!(out.status.code(), Some(0));
+    assert!(
+        stderr.contains("no `[[test-target]]` named `nope`"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("Declared: demo"), "{stderr}");
+}

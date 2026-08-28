@@ -45,7 +45,8 @@ pub mod build_script;
 mod test_runner;
 #[cfg(feature = "native")]
 pub use test_runner::{
-    HarnessContract, RunOptions, TestEvent, TestLauncher, TestOutcome, TestVerdict,
+    FailureKind, HarnessContract, RunOptions, TargetLauncher, TargetRun, TestEvent, TestLauncher,
+    TestOutcome, TestVerdict,
 };
 #[cfg(feature = "native")]
 mod builtin;
@@ -78,6 +79,8 @@ mod screenshot;
 #[cfg(feature = "native")]
 mod test_report;
 #[cfg(feature = "native")]
+mod test_target;
+#[cfg(feature = "native")]
 mod toolchain;
 
 #[cfg(feature = "native")]
@@ -104,12 +107,14 @@ pub use request::RunRequest;
 #[cfg(feature = "native")]
 pub use screenshot::{ScreenshotDiff, ScreenshotVerifier, ShotOutcome};
 #[cfg(feature = "native")]
-pub use staging::{FRONTEND_OUT_DIR, StagedTree, TEST_FRONTEND_OUT_DIR};
+pub use staging::{FRONTEND_OUT_DIR, StagedTree, TARGET_FRONTEND_OUT_DIR, TEST_FRONTEND_OUT_DIR};
 pub use target::{ResolveTargetError, RunTarget};
 #[cfg(feature = "native")]
 pub use test_plan::{Partition, PartitionError, RunIgnored, Selection, TestCase, TestFilter};
 #[cfg(feature = "native")]
 pub use test_report::{ReportEntry, ReportProblem, ReportedVerdict, Shot, TestReport};
+#[cfg(feature = "native")]
+pub use test_target::{ResolvedTarget, TargetError};
 #[cfg(feature = "native")]
 pub(crate) use toolchain::Candidates;
 #[cfg(feature = "native")]

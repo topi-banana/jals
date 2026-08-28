@@ -40,6 +40,14 @@ pub const FRONTEND_OUT_DIR: &str = "target/jals/build/frontend";
 /// `#[test]` methods and the harness and the other removes them.
 pub const TEST_FRONTEND_OUT_DIR: &str = "target/jals/build/test-frontend";
 
+/// Where a `[[test-target]]` lowering is written, relative to the project root, with the target's
+/// name appended.
+///
+/// A third root for the reason there is a second: `StagedTree::write` prunes what its destination
+/// holds and does not name, so two lowerings cannot share one. Per *target* as well, because two
+/// targets may compile different source sets and each would otherwise delete the other's tree.
+pub const TARGET_FRONTEND_OUT_DIR: &str = "target/jals/build/target-frontend";
+
 /// A lowered tree materialized on disk.
 pub struct StagedTree {
     root: PathBuf,

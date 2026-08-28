@@ -664,6 +664,116 @@ The run target for `jals run` is resolved in this order (`RunTarget::resolve`):
 Once any `[[bin]]` exists, `[run] main-class` is ignored for selection. Duplicate bin names and a
 `default-run` that names no bin are rejected at manifest load (`Manifest::validate`).
 
+### `[[test-target]]`
+
+A repeatable array-of-tables declaring a program `jals test --target <name>` starts **instead of**
+the generated `#[test]` harness.
+
+The harness runs one JVM per test and reads a sentinel line. That is right for a unit test and
+wrong for anything that has to *boot*: a program that takes tens of seconds to start cannot be
+started once per assertion. A target is the other shape — **one process for the whole selection**,
+which runs the tests itself and writes a report saying what happened.
+
+| Key             | Type             | Default                     | Maps to                                                                       |
+| --------------- | ---------------- | --------------------------- | ----------------------------------------------------------------------------- |
+| `name`          | string           | —                           | the `--target <name>` selector; letters, digits, `-` and `_` only              |
+| `source-dirs`   | array of strings | `[]`                        | source roots compiled **in addition to** `[build] source-dirs`                 |
+| `classes-dir`   | string           | `target/jals/test-target/<name>` | where this target's classes go                                            |
+| `main-class`    | string           | —                           | the class `java` starts                                                        |
+| `args`          | array of strings | `[]`                        | arguments after the main class; the selected test ids follow them              |
+| `jvm-args`      | array of strings | `[]`                        | arguments before the classpath, after the build script's own                   |
+| `list-argument` | string           | `"--list"`                  | the argument that makes the program enumerate instead of run                   |
+| `report`        | sub-table        | `{ file = "report.tsv" }`   | where the program says what happened, below the run directory                  |
+| `run-dir`       | sub-table        | `{}`                        | `seed` names a project directory copied in before the process starts           |
+| `artifacts`     | array of strings | `[]`                        | globs naming what to keep out of the run directory — logs, crash reports       |
+| `golden`        | sub-table        | —                           | `{ with = "<name>" }`, the `[[golden.<name>]]` its screenshots are judged against |
+| `screenshots`   | sub-table        | `{}`                        | how those screenshots are compared (see below)                                 |
+| `timeout`       | integer          | —                           | seconds before the process is killed                                           |
+
+`--retries`, `-j` and `--max-fail` **do not apply** to a target. Each of them means "start another
+process", and a target run has exactly one; they are ignored rather than silently reinterpreted.
+
+#### The contract
+
+Two invocations, and the second is the same shape the generated harness takes:
+
+```text
+<main-class> <args…> --list          → one `<id>` TAB `<flags>` line per test, and no work done
+<main-class> <args…> <id> <id> …     → runs those, writes the report
+```
+
+Enumerating has to be possible **without** running anything: `jals test --list --target <name>` on
+a target that boots a game must not boot the game, and the filters and `--partition` are applied to
+the list before a process starts. A shard is then one process running a subset.
+
+The report is one tab-separated record per line. `ok` takes nothing further, `fail` and `skip` take
+one reason, `shot` takes a screenshot's name and its path, and `time` takes whole milliseconds:
+
+```text
+com.example.e2e.Title#renders → ok
+com.example.e2e.Title#renders → shot → title_screen → screenshots/title_screen.png
+com.example.e2e.Title#renders → time → 412
+com.example.e2e.Cmd#suggests  → fail → expected 3 suggestions, saw 0
+```
+
+(`→` stands in for the tab.) An unrecognized verb is ignored, a malformed line is reported, and a
+run that crashed halfway still yields every test it did report — a truncated report is the most
+interesting one there is.
+
+#### Placeholders
+
+A target's `args` and `jvm-args` are written before the run directory has a name, and before the
+directories a build task's artifacts were materialized into exist at all — those are addressed by
+content. Two placeholders name them anyway:
+
+```toml
+args     = ["--gameDir", "{run-dir}", "--assetsDir", "{dir:assets}"]
+jvm-args = ["-Djava.library.path={dir:natives}"]
+```
+
+`{run-dir}` is the working directory the process is started in. `{dir:<name>}` is the directory a
+build task published under `<name>`. A `{dir:…}` naming something no task published is an error
+rather than an empty string — a program handed `--assetsDir ""` fails in a way that names the wrong
+cause. A brace opening neither is left alone, because `{` is an ordinary character in a JVM
+argument.
+
+#### Screenshots and `[[golden.<name>]]`
+
+`[test-target.screenshots]` says how the pictures a target takes are judged. The program takes them
+and jals decides whether they are right: a `shot` line names a file, and which bytes it should have
+been is a question about the golden set, which the program has never seen.
+
+| Key                | Type             | Default | Meaning                                                     |
+| ------------------ | ---------------- | ------- | ----------------------------------------------------------- |
+| `dir`              | string           | `""`    | where the program writes them, below the run directory      |
+| `threshold`        | float            | `0.0`   | matching sensitivity as a fraction of the maximum distance  |
+| `max-diff-pixels`  | integer          | —       | the most differing pixels that still passes                 |
+| `max-diff-ratio`   | float            | —       | the largest differing fraction that still passes            |
+| `masks`            | array of tables  | `[]`    | `{ left, top, right, bottom }` regions excluded entirely    |
+
+**Both defaults are exactness, and both are measured rather than preferred.** A pinned software
+renderer reproduces a frame byte for byte, so there is no run-to-run noise for a threshold to
+absorb; what a loose one absorbs is real failure — at `0.05` a comparison reports a *whole
+rasterizer swap* as a clean pass. And with neither budget set the budget is **zero**, not infinity:
+the other reading gives a comparison that can never fail.
+
+Reference images are a fetched artifact rather than committed files, because they are binary, large,
+and regenerated whenever the renderer moves. `[[golden.<name>]]` is shaped like `[[mappings.<name>]]`
+down to the exclusivity check — one name, one set per release, at most one active under any
+selection:
+
+```toml
+[[golden.client-e2e]]
+required-features = ["1.21.11"]
+url = "https://example.invalid/golden-1.21.11.zip"
+sha256 = "…"
+max-bytes = 4194304
+```
+
+A selection that activates no alternative is not an error: it is what a project looks like before
+its first golden archive exists, and every shot then reports "no reference" — reported out loud, so
+a green run that compared nothing cannot pass quietly.
+
 ### `[dependencies]`
 
 A table mapping a **dependency name** to its spec (Cargo's `[dependencies]`). Each entry picks exactly

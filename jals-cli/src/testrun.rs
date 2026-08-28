@@ -40,7 +40,7 @@ impl StatusLevel {
     /// Whether an outcome is reported at this level.
     fn shows(self, outcome: &TestOutcome, slow: Option<Duration>) -> bool {
         match outcome.verdict {
-            TestVerdict::Failed { .. } | TestVerdict::TimedOut => self >= Self::Fail,
+            TestVerdict::Failed(_) | TestVerdict::TimedOut => self >= Self::Fail,
             TestVerdict::Skipped => self >= Self::Skip,
             TestVerdict::Passed => {
                 if outcome.attempts > 1 {
@@ -255,13 +255,13 @@ impl TestReporter {
 
     /// One `PASS`/`FAIL` line: verb, duration, id.
     fn status_line(&self, outcome: &TestOutcome) -> String {
-        let (style, verb) = match outcome.verdict {
+        let (style, verb) = match &outcome.verdict {
             TestVerdict::Passed if outcome.attempts > 1 => (format!("{BOLD}{YELLOW}"), "TRY OK"),
             TestVerdict::Passed if outcome.is_slow(self.slow_timeout) => {
                 (format!("{BOLD}{YELLOW}"), "SLOW")
             }
             TestVerdict::Passed => (format!("{BOLD}{GREEN}"), "PASS"),
-            TestVerdict::Failed { .. } => (format!("{BOLD}{RED}"), "FAIL"),
+            TestVerdict::Failed(_) => (format!("{BOLD}{RED}"), "FAIL"),
             TestVerdict::TimedOut => (format!("{BOLD}{RED}"), "TIMEOUT"),
             TestVerdict::Skipped => (format!("{BOLD}{CYAN}"), "SKIP"),
         };
@@ -281,6 +281,25 @@ impl TestReporter {
     /// reading when more than one test fails, which is when it is read.
     fn replay(&self, outcome: &TestOutcome) {
         let mut block = String::new();
+        // The program's own words first. A target reports *why* a test failed, and that sentence is
+        // the whole difference between this and a harness run, where an exit status is all there
+        // is — burying it under a game's standard output would throw away the better answer.
+        if let TestVerdict::Failed(jals_build::FailureKind::Reported(why)) = &outcome.verdict
+            && !why.is_empty()
+        {
+            let _ = writeln!(
+                block,
+                "{}",
+                self.paint(&format!("{BOLD}{RED}"), &format!("    {why}"))
+            );
+        }
+        // Screenshots next: when a test failed because a picture disagreed, that is the thing the
+        // reader came for, and a game's standard output is thousands of lines long.
+        for shot in &outcome.shots {
+            if let Some(line) = self.shot_line(shot) {
+                let _ = writeln!(block, "{line}");
+            }
+        }
         for (label, path) in [("stdout", &outcome.stdout), ("stderr", &outcome.stderr)] {
             let Some(path) = path else { continue };
             let Ok(text) = std::fs::read_to_string(path) else {
@@ -304,6 +323,89 @@ impl TestReporter {
             block.pop();
             self.line(&block);
         }
+    }
+
+    /// One screenshot's verdict, indented under its test — `None` for a match, which needs no line.
+    ///
+    /// Every failing case names **where to look**. A screenshot difference is not something a
+    /// number settles: the reader has to open the picture, so the paths are the message and the
+    /// count is the headline.
+    fn shot_line(&self, shot: &jals_build::ShotOutcome) -> Option<String> {
+        use jals_build::ShotOutcome;
+        match shot {
+            ShotOutcome::Matched { .. } => None,
+            ShotOutcome::NoReference { name, actual } => Some(format!(
+                "{}\n        actual  {}",
+                self.paint(
+                    &format!("{BOLD}{YELLOW}"),
+                    &format!("    no reference image for `{name}`")
+                ),
+                actual.display()
+            )),
+            ShotOutcome::Missing { name, actual } => Some(format!(
+                "{}\n        expected at  {}",
+                self.paint(
+                    &format!("{BOLD}{RED}"),
+                    &format!("    the run wrote no screenshot named `{name}`")
+                ),
+                actual.display()
+            )),
+            ShotOutcome::Unreadable { name, path, reason } => Some(format!(
+                "{}\n        {}\n        {}",
+                self.paint(
+                    &format!("{BOLD}{RED}"),
+                    &format!("    `{name}` could not be read")
+                ),
+                path.display(),
+                reason
+            )),
+            ShotOutcome::Differed(diff) => {
+                let headline = match diff.size_mismatch {
+                    Some((ew, eh, aw, ah)) => {
+                        format!(
+                            "    `{}` is {aw}x{ah}, but the reference is {ew}x{eh}",
+                            diff.name
+                        )
+                    }
+                    None => format!(
+                        "    `{}`: {} of {} pixels differ ({:.4}%)",
+                        diff.name,
+                        diff.differing,
+                        diff.compared,
+                        diff.ratio * 100.0
+                    ),
+                };
+                let mut text = self.paint(&format!("{BOLD}{RED}"), &headline);
+                let _ = write!(text, "\n        reference  {}", diff.reference.display());
+                let _ = write!(text, "\n        actual     {}", diff.actual.display());
+                if let Some(path) = &diff.diff {
+                    let _ = write!(text, "\n        difference {}", path.display());
+                }
+                Some(text)
+            }
+        }
+    }
+
+    /// A one-line summary of a test's failing screenshots, for the JSON report's `reason`.
+    fn shot_summary(outcome: &TestOutcome) -> String {
+        use jals_build::ShotOutcome;
+        let parts: Vec<String> = outcome
+            .shots
+            .iter()
+            .filter(|shot| shot.is_failure())
+            .map(|shot| match shot {
+                ShotOutcome::Differed(diff) if diff.size_mismatch.is_some() => {
+                    format!("{}: wrong size", diff.name)
+                }
+                ShotOutcome::Differed(diff) => {
+                    format!("{}: {} pixels differ", diff.name, diff.differing)
+                }
+                ShotOutcome::Missing { name, .. } => format!("{name}: not written"),
+                ShotOutcome::Unreadable { name, .. } => format!("{name}: unreadable"),
+                ShotOutcome::Matched { .. } | ShotOutcome::NoReference { .. } => String::new(),
+            })
+            .collect();
+        parts.join("; ")
     }
 
     /// Drop the generated harness's own stack frames from a trace.
@@ -404,19 +506,31 @@ impl TestReporter {
     /// One line of JSON per outcome, on stdout.
     pub(crate) fn report_json(outcomes: &[TestOutcome]) {
         for outcome in outcomes {
-            let (verdict, code) = match outcome.verdict {
-                TestVerdict::Passed => ("passed", None),
-                TestVerdict::Failed { code } => ("failed", code),
-                TestVerdict::TimedOut => ("timed-out", None),
-                TestVerdict::Skipped => ("skipped", None),
+            // `reason` carries what a status code cannot: the program's own words for a reported
+            // failure, and the pixel count for a screenshot that disagreed. A consumer that only
+            // reads `verdict` is unaffected — the field is `null` where there is nothing to say.
+            let (verdict, code, reason) = match &outcome.verdict {
+                TestVerdict::Passed => ("passed", None, None),
+                TestVerdict::Failed(jals_build::FailureKind::Process { code }) => {
+                    ("failed", *code, None)
+                }
+                TestVerdict::Failed(jals_build::FailureKind::Reported(why)) => {
+                    ("failed", None, Some(why.clone()))
+                }
+                TestVerdict::Failed(jals_build::FailureKind::Screenshot) => {
+                    ("failed", None, Some(Self::shot_summary(outcome)))
+                }
+                TestVerdict::TimedOut => ("timed-out", None, None),
+                TestVerdict::Skipped => ("skipped", None, None),
             };
             println!(
                 "{{\"id\":{},\"verdict\":\"{verdict}\",\"exit-code\":{},\"duration-ms\":{},\
-                 \"attempts\":{}}}",
+                 \"attempts\":{},\"reason\":{}}}",
                 Self::json_string(&outcome.id),
                 code.map_or_else(|| "null".to_owned(), |code| code.to_string()),
                 outcome.duration.as_millis(),
-                outcome.attempts
+                outcome.attempts,
+                reason.map_or_else(|| "null".to_owned(), |text| Self::json_string(&text))
             );
         }
     }

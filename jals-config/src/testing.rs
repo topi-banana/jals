@@ -39,7 +39,7 @@ const FEATURE_SEPARATOR: char = '/';
 
 /// One `[[test-target]]`: a program `jals test --target <name>` starts instead of the generated
 /// harness.
-#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, rename_all = "kebab-case", deny_unknown_fields)]
 pub struct TestTarget {
     /// The name `--target` selects, unique across the array.
@@ -54,7 +54,17 @@ pub struct TestTarget {
     pub main_class: String,
     /// Arguments passed after the main class, with placeholders expanded (see
     /// [`Placeholder`]).
+    ///
+    /// The ids of the selected tests follow these, one argument each — the same shape the
+    /// generated harness takes, so a target and a harness are driven by one contract.
     pub args: Vec<String>,
+    /// The argument that makes the program enumerate its tests instead of running them.
+    ///
+    /// A target answers it by printing one `<id>` TAB `<flags>` line per test, exactly as the
+    /// generated harness answers `--list`. Enumerating has to be possible **without** running
+    /// anything: `jals test --list` on a target that boots a game must not boot the game, and the
+    /// filters and `--partition` are applied to the list before a process is started.
+    pub list_argument: String,
     /// JVM arguments passed before the classpath, with the same placeholders expanded.
     pub jvm_args: Vec<String>,
     /// Where the program writes what happened.
@@ -78,6 +88,30 @@ pub struct TestTarget {
 
 /// Where a `[[test-target]]`'s classes go when it names no `classes-dir`.
 const DEFAULT_TARGET_CLASSES_ROOT: &str = "target/jals/test-target";
+
+/// The enumerate argument a target takes when it names none. The generated harness's own spelling,
+/// so the two contracts read alike.
+const DEFAULT_LIST_ARGUMENT: &str = "--list";
+
+impl Default for TestTarget {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            source_dirs: Vec::new(),
+            classes_dir: String::new(),
+            main_class: String::new(),
+            args: Vec::new(),
+            list_argument: DEFAULT_LIST_ARGUMENT.to_owned(),
+            jvm_args: Vec::new(),
+            report: Report::default(),
+            run_dir: RunDir::default(),
+            artifacts: Vec::new(),
+            golden: None,
+            screenshots: Screenshots::default(),
+            timeout: None,
+        }
+    }
+}
 
 impl TestTarget {
     /// This target's class output directory, defaulted from its name.
@@ -119,6 +153,12 @@ impl TestTarget {
             return Err(TestTargetError::Empty {
                 name: self.name.clone(),
                 field: "main-class",
+            });
+        }
+        if self.list_argument.is_empty() {
+            return Err(TestTargetError::Empty {
+                name: self.name.clone(),
+                field: "list-argument",
             });
         }
         if self.report.file.is_empty() {

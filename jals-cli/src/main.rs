@@ -135,26 +135,49 @@ impl FeatureArgs {
     }
 }
 
-/// Which of the two lowerings a compile is part of.
+/// Which of the three lowerings a compile is part of.
 ///
 /// The difference is three things and no more: which source roots are gathered, which frontend
 /// selection runs, and where the staged tree and the classes go. Everything else — the build
 /// script, the project graph, the backend selection — is shared, which is why this is a parameter
 /// on the existing path rather than a second one beside it.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Lowering {
+#[derive(Clone, Copy)]
+enum Lowering<'a> {
     /// `jals build` / `jals run`: `#[test]` methods are removed.
     Build,
     /// `jals test`: `#[test]` methods are kept and the harness that calls them is generated.
     Test,
+    /// `jals test --target <name>`: the target's own source roots are added and **no harness is
+    /// generated**, because the target names its own main class. `#[test]` methods are removed
+    /// exactly as `jals build` removes them — a target's tests are its own, not jals's.
+    Target(&'a jals_config::testing::TestTarget),
 }
 
-impl Lowering {
+impl<'a> Lowering<'a> {
     /// Where this lowering's staged tree is written, relative to the project root.
-    const fn staging_root(self) -> &'static str {
+    fn staging_root(self) -> String {
         match self {
-            Self::Build => jals_build::FRONTEND_OUT_DIR,
-            Self::Test => jals_build::TEST_FRONTEND_OUT_DIR,
+            Self::Build => jals_build::FRONTEND_OUT_DIR.to_owned(),
+            Self::Test => jals_build::TEST_FRONTEND_OUT_DIR.to_owned(),
+            Self::Target(target) => {
+                format!("{}/{}", jals_build::TARGET_FRONTEND_OUT_DIR, target.name)
+            }
+        }
+    }
+
+    /// The source roots this lowering adds on top of `[build] source-dirs`, which a missing
+    /// directory is tolerated for.
+    ///
+    /// Tolerated for the same reason `[test] source-dirs` is: an opted-into root a project has not
+    /// created yet is not the failure a missing `[build] source-dirs` entry is.
+    fn extra_source_dirs<'m>(self, manifest: &'m Manifest) -> &'m [String]
+    where
+        'a: 'm,
+    {
+        match self {
+            Self::Build => &[],
+            Self::Test => &manifest.test.source_dirs,
+            Self::Target(target) => &target.source_dirs,
         }
     }
 }
@@ -245,6 +268,14 @@ struct TestArgs {
     /// What to do with `#[ignore]` tests.
     #[arg(long, value_name = "MODE", default_value = "default")]
     run_ignored: RunIgnoredArg,
+    /// Run a `[[test-target]]` instead of the generated harness.
+    ///
+    /// The target names its own main class and its own arguments; jals compiles the project with
+    /// the target's extra source roots, starts it **once** with the selected test ids, and reads
+    /// the report it writes. `--retries`, `-j` and `--max-fail` do not apply — each of them means
+    /// "start another process", and a target run has only one.
+    #[arg(long, value_name = "NAME")]
+    target: Option<String>,
     /// Run one shard of the suite: `count:M/N` splits by position, `hash:M/N` by test id.
     #[arg(long, value_name = "SPEC")]
     partition: Option<String>,
@@ -950,6 +981,9 @@ impl TestArgs {
     /// script, same project graph, same backend selection. What differs is stated there and
     /// nowhere else.
     async fn run(&self, exec: &Exec) -> Result<ExitCode> {
+        if let Some(name) = self.target.clone() {
+            return self.run_target(exec, &name).await;
+        }
         let (mut manifest, root) = App::resolve_manifest(self.manifest_path.as_deref()).await?;
         Self::refuse_unsupported(&manifest)?;
         let features = self.features.resolve(&manifest)?;
@@ -1068,6 +1102,189 @@ impl TestArgs {
         })
     }
 
+    /// Compile the project for a `[[test-target]]` and run that target once.
+    ///
+    /// The compile half is `jals build`'s, reached through the same `prepare_compile_inputs` with
+    /// `Lowering::Target`: same build script, same project graph, same backend selection, plus the
+    /// target's own source roots. What differs is the run — one process for the whole selection,
+    /// and a verdict read out of the report it writes rather than out of its exit status.
+    async fn run_target(&self, exec: &Exec, name: &str) -> Result<ExitCode> {
+        let (mut manifest, root) = App::resolve_manifest(self.manifest_path.as_deref()).await?;
+        let Some(target) = manifest
+            .test_target
+            .iter()
+            .find(|declared| declared.name == name)
+            .cloned()
+        else {
+            let declared: Vec<&str> = manifest
+                .test_target
+                .iter()
+                .map(|target| target.name.as_str())
+                .collect();
+            bail!(
+                "no `[[test-target]]` named `{name}` in this project.{}",
+                if declared.is_empty() {
+                    " It declares none.".to_owned()
+                } else {
+                    format!(" Declared: {}.", declared.join(", "))
+                }
+            );
+        };
+        Self::refuse_unsupported_runtime(&manifest)?;
+        let features = self.features.resolve(&manifest)?;
+        // The same swap the harness path makes, and for the same reason: everything downstream
+        // reads `[build] classes-dir`, so redirecting it here is what keeps `jals build`'s output
+        // untouched with no second mechanism.
+        manifest.build.classes_dir = target.classes_dir();
+
+        let reporter = self.reporter(0);
+        let fetcher = jals_classpath::ReqwestFetcher::for_project(
+            root.clone(),
+            jals_classpath::NetworkPolicy::when_offline(self.offline),
+        );
+        let (sources, tree, inputs) = App::prepare_compile_inputs(
+            &mut manifest,
+            &root,
+            exec,
+            &features,
+            &fetcher,
+            jals_project::SourcePublication::Apply,
+            Lowering::Target(&target),
+        )
+        .await?;
+        let plan = CompilePlan::prepare(&manifest, &root, &sources, tree, &inputs, exec).await?;
+        let request = plan.request();
+        if self.verbose {
+            eprintln!("{}", plan.backend.describe(&request));
+        }
+        reporter.compiling(manifest.package.name.as_deref().unwrap_or("project"));
+        let outcome = plan
+            .backend
+            .compile(&request)
+            .await
+            .map_err(|e| anyhow!("{e}"))?;
+        App::finish_compile(&manifest, &root, &outcome)?;
+        if !outcome.success() {
+            return Ok(App::outcome_exit_code(outcome.code()));
+        }
+        if self.no_run {
+            return Ok(ExitCode::SUCCESS);
+        }
+
+        let scratch = jals_build::ResolvedTarget::scratch(&root, &target.name);
+        // No runtime directories yet: the build tasks that publish them are the next thing to
+        // land, so a target naming `{dir:…}` is refused here with a message that says so rather
+        // than failing later inside the JVM.
+        let resolved = jals_build::ResolvedTarget::resolve(
+            &target,
+            &root,
+            scratch.join("run"),
+            &std::collections::BTreeMap::new(),
+        )
+        .map_err(|e| anyhow!("{e}"))?;
+
+        let run_request = jals_build::RunRequest {
+            manifest: &manifest,
+            project_root: &root,
+            jvm_args: &inputs.jvm_args,
+            main_class: &target.main_class,
+            program_args: &[],
+            extra_classpath: &inputs.extra_classpath,
+            run_env: &inputs.run_env,
+        };
+        let launcher = jals_build::TargetLauncher::resolve(&manifest, &run_request, resolved)
+            .await
+            .map_err(|e| anyhow!("{e}"))?;
+
+        let cases = launcher.list().await.map_err(|e| anyhow!("{e}"))?;
+        let selection = self.filter()?.select(&cases);
+        if self.list {
+            testrun::TestReporter::list(selection.selected(), self.message_format);
+            return Ok(ExitCode::SUCCESS);
+        }
+        if selection.selected().is_empty() {
+            return Ok(self.report_empty(&reporter, &cases));
+        }
+
+        // Without a golden archive there is nothing to compare against, and every shot reports
+        // "no reference" — which is exactly the state a project is in before its first
+        // `--update-golden`, and is deliberately not a failure.
+        let verifier = target.golden.as_ref().map(|_| {
+            jals_build::ScreenshotVerifier::new(&target.screenshots, None, scratch.join("diff"))
+        });
+
+        let reporter = self.reporter(selection.selected().len() as u64);
+        reporter.starting(
+            selection.selected().len(),
+            testrun::TestReporter::class_count(selection.selected()),
+            selection.skipped().len(),
+        );
+        let started = std::time::Instant::now();
+        let run = launcher
+            .run(
+                selection.selected(),
+                verifier.as_ref(),
+                self.timeout.map(std::time::Duration::from_secs),
+            )
+            .await
+            .map_err(|e| anyhow!("{e}"))?;
+        for outcome in &run.outcomes {
+            reporter.finished(outcome);
+        }
+        if self.message_format == testrun::MessageFormat::Json {
+            testrun::TestReporter::report_json(&run.outcomes);
+        }
+        let failed = reporter.summary(&run.outcomes, started.elapsed());
+        let complained = Self::report_target_problems(&run);
+        Ok(if failed || complained {
+            ExitCode::from(1)
+        } else {
+            ExitCode::SUCCESS
+        })
+    }
+
+    /// Report what went wrong with the run as a whole, rather than with one test.
+    ///
+    /// Returns whether any of it counts against the run. Each of these is a failure no individual
+    /// test can carry: a malformed report is the target's contract broken, and a reference image
+    /// nothing shot means a screenshot silently stopped being taken — which would otherwise show
+    /// up as one fewer test and a green run.
+    fn report_target_problems(run: &jals_build::TargetRun) -> bool {
+        for problem in &run.problems {
+            eprintln!("error: the target's report is malformed: {problem}");
+        }
+        for name in &run.unmatched_references {
+            eprintln!(
+                "error: the golden set holds `{name}`, but this run produced no screenshot for it"
+            );
+        }
+        // A green run that compared nothing is the failure mode this whole facility exists to
+        // avoid, so it is said out loud rather than left to be inferred from a silent pass.
+        let unreferenced: Vec<&str> = run
+            .outcomes
+            .iter()
+            .flat_map(|outcome| &outcome.shots)
+            .filter_map(|shot| match shot {
+                jals_build::ShotOutcome::NoReference { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        if !unreferenced.is_empty() {
+            eprintln!(
+                "      warning: {} screenshot(s) had no reference image and were not compared: {}",
+                unreferenced.len(),
+                unreferenced.join(", ")
+            );
+        }
+        if !run.artifacts.is_empty() {
+            eprintln!("     Artifacts [{}]", run.artifacts.len());
+            for path in &run.artifacts {
+                eprintln!("        {}", path.display());
+            }
+        }
+        !run.problems.is_empty() || !run.unmatched_references.is_empty()
+    }
+
     /// Refuse the two configurations that cannot run a test at all, before anything is compiled.
     ///
     /// Each names what the project would have to change: a failure discovered at launch would read
@@ -1083,12 +1300,21 @@ impl TestArgs {
                  `features = [\"attributes\"]` to `[package]` in `jals.toml`."
             );
         }
+        Self::refuse_unsupported_runtime(manifest)
+    }
+
+    /// The half of [`refuse_unsupported`](Self::refuse_unsupported) a `[[test-target]]` shares.
+    ///
+    /// The attributes check is **not** part of it: a target names its own main class and finds its
+    /// own tests, so `#[test]` — and the dialect that provides it — has nothing to do with whether
+    /// the target can run. Everything below is still true of it, because a target is a JVM.
+    fn refuse_unsupported_runtime(manifest: &Manifest) -> Result<()> {
         if matches!(
             manifest.build.backend,
             jals_config::BackendKind::JalsWasm {}
         ) {
             bail!(
-                "`jals test` runs each test on a JVM, and `[build] backend` is `jals-wasm`, which \
+                "`jals test` runs its tests on a JVM, and `[build] backend` is `jals-wasm`, which \
                  compiles the project to a WebAssembly module instead. Switch the backend to \
                  `jals` or `javac` to produce class files."
             );
@@ -1947,7 +2173,7 @@ impl App {
         features: &ResolvedBuildFeatures,
         fetcher: &jals_classpath::ReqwestFetcher,
         publications: jals_project::SourcePublication,
-        lowering: Lowering,
+        lowering: Lowering<'_>,
     ) -> Result<(
         jals_build::StagedTree,
         Vec<jals_build::BackendSource>,
@@ -2198,11 +2424,23 @@ impl App {
         manifest: &Manifest,
         root: &Path,
         has_generated_sources: bool,
-        lowering: Lowering,
+        lowering: Lowering<'_>,
     ) -> Result<Vec<PathBuf>> {
         let source_roots = match lowering {
             Lowering::Build => manifest.source_roots(root),
             Lowering::Test => manifest.test_source_roots(root),
+            // A target's roots are additive on `[build] source-dirs`, exactly as `[test]`'s are,
+            // and deduplicated the same way: naming one directory in both sections is legal.
+            Lowering::Target(target) => {
+                let mut roots = manifest.source_roots(root);
+                for dir in &target.source_dirs {
+                    let path = root.join(dir);
+                    if !roots.contains(&path) {
+                        roots.push(path);
+                    }
+                }
+                roots
+            }
         };
         for dir in &source_roots {
             // A declared `[test] source-dirs` that does not exist is not an error the way a
@@ -2212,12 +2450,10 @@ impl App {
             // Only under the test lowering, though: naming the same directory in both sections is
             // legal, and a `[build] source-dirs` entry that is missing must still be reported as
             // missing when it is `jals build` that is looking for it.
-            let declared_for_tests = matches!(lowering, Lowering::Test)
-                && manifest
-                    .test
-                    .source_dirs
-                    .iter()
-                    .any(|declared| root.join(declared) == *dir);
+            let declared_for_tests = lowering
+                .extra_source_dirs(manifest)
+                .iter()
+                .any(|declared| root.join(declared) == *dir);
             if !dir.is_dir() && !has_generated_sources && !declared_for_tests {
                 return Err(anyhow!("source directory {} does not exist", dir.display()));
             }
@@ -2252,13 +2488,14 @@ impl App {
         root: &Path,
         sources: &[PathBuf],
         features: &ResolvedBuildFeatures,
-        lowering: Lowering,
+        lowering: Lowering<'_>,
     ) -> Result<(jals_build::StagedTree, Vec<jals_build::BackendSource>)> {
         // `[build.frontend]` and the dialect features that override it are answered in
         // `jals-frontend`, not here — the host supplies the resolved build features (the same set
         // a build script queries) and asks once.
         let frontend = match lowering {
-            Lowering::Build => {
+            // A target has no generated harness, so it takes the same lowering `jals build` does.
+            Lowering::Build | Lowering::Target(_) => {
                 jals_frontend::FrontendSelection::for_manifest(manifest, features.features())
             }
             Lowering::Test => {
