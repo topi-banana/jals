@@ -262,8 +262,16 @@ struct TestArgs {
     #[arg(long, conflicts_with = "fail_fast")]
     no_fail_fast: bool,
     /// Stop starting tests once this many have failed. Tests already running finish.
-    #[arg(long, value_name = "N", conflicts_with_all = ["fail_fast", "no_fail_fast"])]
-    max_fail: Option<usize>,
+    ///
+    /// At least one: `0` would be a limit already reached before the first JVM starts, so every
+    /// test would be reported as skipped and the run would succeed having executed nothing.
+    #[arg(
+        long,
+        value_name = "N",
+        conflicts_with_all = ["fail_fast", "no_fail_fast"],
+        value_parser = clap::value_parser!(u64).range(1..),
+    )]
+    max_fail: Option<u64>,
     /// Kill a test that runs longer than this many seconds.
     #[arg(long, value_name = "SECS")]
     timeout: Option<u64>,
@@ -969,7 +977,10 @@ impl TestArgs {
         let plan = CompilePlan::prepare(&manifest, &root, &sources, tree, &inputs, exec).await?;
         let request = plan.request();
         if self.verbose {
-            println!("{}", plan.backend.describe(&request));
+            // stderr, unlike `jals build`'s: this command's stdout is a machine contract (`--list`
+            // and `--message-format json`), and a compile command line printed onto it is neither
+            // a test id nor a JSON object.
+            eprintln!("{}", plan.backend.describe(&request));
         }
         reporter.compiling(manifest.package.name.as_deref().unwrap_or("project"));
         let outcome = plan
@@ -983,6 +994,17 @@ impl TestArgs {
         }
         if self.no_run {
             return Ok(ExitCode::SUCCESS);
+        }
+        // The frontend generates no harness for a project that declares no test, so there is no
+        // main class to launch. Answered here rather than by launching anyway and reading an empty
+        // list: that reading is also what a JVM which failed to start produces, and the two have
+        // to stay distinguishable — `TestLauncher::list` reports a non-zero status as the failure
+        // it is precisely because this branch has already taken the innocent case.
+        let harness_class = root
+            .join(&manifest.build.classes_dir)
+            .join(format!("{}.class", jals_frontend::HARNESS_CLASS));
+        if !harness_class.is_file() {
+            return Ok(self.report_empty(&reporter, &[]));
         }
 
         let run_request = jals_build::RunRequest {
@@ -1112,7 +1134,10 @@ impl TestArgs {
             retries: self.retries,
             timeout: self.timeout.map(std::time::Duration::from_secs),
             slow_timeout: self.slow_timeout(),
-            max_fail: self.max_fail.or_else(|| self.fail_fast.then_some(1)),
+            max_fail: self
+                .max_fail
+                .map(|limit| usize::try_from(limit).unwrap_or(usize::MAX))
+                .or_else(|| self.fail_fast.then_some(1)),
             capture: !self.no_capture,
         }
     }
@@ -1140,11 +1165,31 @@ impl TestArgs {
     ///
     /// The default is to fail: a filter that matched nothing is usually a typo, and a green run is
     /// the worst way to find that out. A project with no tests at all is told what it is missing.
+    ///
+    /// A `--partition` shard is the exception, and it is a shard *this run was given* rather than
+    /// a state it discovered: every shard of a CI matrix runs the same command line, so a shard
+    /// that legitimately holds no test cannot be told to accept that on its own — and failing it
+    /// would make `--partition` unusable the moment the shard count passes the test count.
     fn report_empty(
         &self,
         reporter: &testrun::TestReporter,
         cases: &[jals_build::TestCase],
     ) -> ExitCode {
+        // Asked against the selection *before* the partition, not merely against "a shard was
+        // named": a shard passed alongside a misspelled filter must still fail, and every shard of
+        // a matrix carries the same filters.
+        if self.partition.is_some()
+            && self.filter().is_ok_and(|filter| {
+                !filter
+                    .with_partition(None)
+                    .select(cases)
+                    .selected()
+                    .is_empty()
+            })
+        {
+            reporter.no_tests("the filters matched, but this `--partition` shard holds no test");
+            return ExitCode::SUCCESS;
+        }
         let reason = if cases.is_empty() {
             "no `#[test]` method was found in this project"
         } else {
@@ -2163,11 +2208,16 @@ impl App {
             // A declared `[test] source-dirs` that does not exist is not an error the way a
             // missing `[build] source-dirs` is: a project may keep tests in the main tree and
             // still name a test root it has not created yet.
-            let declared_for_tests = manifest
-                .test
-                .source_dirs
-                .iter()
-                .any(|declared| root.join(declared) == *dir);
+            //
+            // Only under the test lowering, though: naming the same directory in both sections is
+            // legal, and a `[build] source-dirs` entry that is missing must still be reported as
+            // missing when it is `jals build` that is looking for it.
+            let declared_for_tests = matches!(lowering, Lowering::Test)
+                && manifest
+                    .test
+                    .source_dirs
+                    .iter()
+                    .any(|declared| root.join(declared) == *dir);
             if !dir.is_dir() && !has_generated_sources && !declared_for_tests {
                 return Err(anyhow!("source directory {} does not exist", dir.display()));
             }

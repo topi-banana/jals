@@ -274,7 +274,13 @@ impl TestReporter {
     }
 
     /// Replay a test's captured streams, indented under a header.
+    ///
+    /// Built into one block and written once. `replay` runs on the fan-out worker that ran the
+    /// test, so a line-at-a-time write would let a second failing test's output interleave with
+    /// this one's — and `--failure-output` defaults to `immediate`, so that is the default
+    /// reading when more than one test fails, which is when it is read.
     fn replay(&self, outcome: &TestOutcome) {
+        let mut block = String::new();
         for (label, path) in [("stdout", &outcome.stdout), ("stderr", &outcome.stderr)] {
             let Some(path) = path else { continue };
             let Ok(text) = std::fs::read_to_string(path) else {
@@ -284,10 +290,19 @@ impl TestReporter {
             if body.trim().is_empty() {
                 continue;
             }
-            self.line(&self.paint(DIM, &format!("--- {label}: {} ---", outcome.id)));
+            let _ = writeln!(
+                block,
+                "{}",
+                self.paint(DIM, &format!("--- {label}: {} ---", outcome.id))
+            );
             for line in body.lines() {
-                self.line(&format!("    {line}"));
+                let _ = writeln!(block, "    {line}");
             }
+        }
+        if !block.is_empty() {
+            // Trailing newline already written by the last `writeln!`.
+            block.pop();
+            self.line(&block);
         }
     }
 
@@ -301,7 +316,8 @@ impl TestReporter {
             .filter(|line| {
                 let trimmed = line.trim_start();
                 !(trimmed.starts_with("at ")
-                    && (trimmed.contains("JalsTestHarness") || trimmed.contains("JalsTest$")))
+                    && (trimmed.contains(jals_frontend::HARNESS_CLASS)
+                        || trimmed.contains(jals_frontend::SHIM_PREFIX)))
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -325,8 +341,12 @@ impl TestReporter {
             .count();
 
         for outcome in outcomes {
+            // Per outcome, not per run: the question is whether *this* line was already printed
+            // live, so comparing the two levels once would either repeat every line the live level
+            // already showed or — at the defaults, `pass` live and `fail` final — repeat nothing
+            // at all and make `--final-status-level` inert.
             if self.final_status_level.shows(outcome, self.slow_timeout)
-                && self.status_level < self.final_status_level
+                && !self.status_level.shows(outcome, self.slow_timeout)
             {
                 self.line(&self.status_line(outcome));
             }

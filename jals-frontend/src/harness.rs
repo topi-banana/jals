@@ -51,7 +51,11 @@ pub const HARNESS_CLASS: &str = "JalsTestHarness";
 
 /// The prefix of a per-class shim. `$` is an ordinary identifier character in Java (JLS §3.8) and
 /// is what keeps the name clear of anything a person would write.
-const SHIM_PREFIX: &str = "JalsTest$";
+///
+/// Public alongside [`HARNESS_CLASS`] because a host reading a failing test's stack trace has to
+/// recognize the generated frames to drop them, and re-spelling the prefix there would be a second
+/// place for it to live.
+pub const SHIM_PREFIX: &str = "JalsTest$";
 
 /// What the harness prints on the standard output when a test returned normally.
 ///
