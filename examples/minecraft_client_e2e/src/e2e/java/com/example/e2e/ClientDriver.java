@@ -122,14 +122,14 @@ public final class ClientDriver {
                 return;
             }
             if (arg.contains("#")) {
-                this.ids.add(arg);
+                ids.add(arg);
             } else {
                 gameArgs.add(arg);
             }
         }
-        if (this.ids.isEmpty()) {
+        if (ids.isEmpty()) {
             for (Case test : CASES) {
-                this.ids.add(test.id());
+                ids.add(test.id());
             }
         }
 

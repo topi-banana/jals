@@ -11,10 +11,22 @@ cargo run -p jals-cli -- test --target client-e2e --features 1.21.11
 ```
    Compiling client-e2e
     Starting 2 tests across 2 classes
-        PASS [  15.115s] com.example.e2e.HelloScreen#renders
-        PASS [  15.149s] com.example.e2e.OptionsScreen#renders
-     Summary [  40.252s] 2 tests run: 2 passed
+        PASS [  15.141s] com.example.e2e.HelloScreen#renders
+        PASS [  15.140s] com.example.e2e.OptionsScreen#renders
+------------
+     Summary [  40.196s] 2 tests run: 2 passed
+      warning: 2 screenshot(s) had no reference image and were not compared: hello_screen, options_screen
+     Artifacts [4]
+        …/run/logs/latest.log
+        …/run/report.tsv
+        …/run/screenshots/hello_screen.png
+        …/run/screenshots/options_screen.png
 ```
+
+The warning is the state a fresh clone is in and not a misconfiguration: no reference archive has
+been published for this example, the manifest says so rather than pointing at a URL that resolves to
+nothing, and the run photographs everything anyway. [Reference images](#reference-images) is how to
+bake a set and judge against it.
 
 The pictures are reproducible: two separate boots under a pinned software renderer write the same
 PNG byte for byte, which is why the comparison runs at a threshold of zero and with no masks. That
