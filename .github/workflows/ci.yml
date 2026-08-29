@@ -638,16 +638,20 @@ jobs:
     # other example does: an X server, a software OpenGL stack, and about 105 MiB of downloads on top
     # of a client-jar remap.
     #
-    # **What this gates is the pipeline, not the pictures.** The example's README says why: every menu
-    # in 1.20.5 and later is drawn over a panorama that rotates with the wall clock, so two shots of
-    # one screen differ by most of their pixels and there is nothing stable to compare against yet.
-    # So the cell runs the blessing path — fetch, materialize, boot, drive, shutter, report, package —
-    # and asserts that two screenshots came out. Everything except the comparison, and the comparison
-    # is unit-tested in `jals-image` and `jals-build` where it needs no game at all.
+    # **What this gates is that the pictures are reproducible**, which is the property the whole
+    # comparison rests on and the one no unit test can establish. It runs the suite twice: the first
+    # pass blesses an archive, the second judges a fresh boot against what the first one baked. A
+    # green second pass means two separate processes rendered the same frames to the byte — and,
+    # because a reference the run did not produce is reported too, that neither shot silently
+    # disappeared. The comparison itself is unit-tested in `jals-image` and `jals-build`, where it
+    # needs no game at all.
+    #
+    # Two passes rather than a published reference archive, because a published one would pin this
+    # cell to whatever renderer baked it; two passes pin it to the renderer it is running on.
     #
     # `continue-on-error` until it has a few runs behind it: the renderer here is not the renderer it
     # was developed against, and a cell that has never been green should not be the one that blocks a
-    # pull request.
+    # pull request. Remove it once the second pass has been green across several runs.
     name: example (minecraft_client_e2e)
     runs-on: ubuntu-latest
     continue-on-error: true
@@ -675,29 +679,44 @@ jobs:
         run: cargo build --release --package jals-cli
       - name: Put jals on PATH
         run: echo "$GITHUB_WORKSPACE/target/release" >> "$GITHUB_PATH"
-      - name: Build the driver against the remapped client
+      # Only `src/main/java` — the screen the suite judges. The driver under `src/e2e/java` is the
+      # target's own source root and is compiled by the test run, which is what keeps the reference
+      # images pictures of the project's output rather than of the test.
+      - name: Build the mod against the remapped client
         working-directory: examples/minecraft_client_e2e
         run: jals build --features 1.21.11
-      # `--update-golden` rather than a comparison: there is no published reference archive, and the
-      # example documents why. What this asserts is that the client booted and drew something.
-      - name: Boot the client and photograph two screens
+      # The same two checks every row of the `examples` matrix runs, over the same tracked-file set.
+      # This example is its own job for what it needs to *run*, and that is no reason for its Java
+      # to be held to a lower bar than the Java next door.
+      - name: Check the example's own sources
+        working-directory: examples/minecraft_client_e2e
+        run: |
+          mapfile -t sources < <(git ls-files -- '*.java')
+          printf 'checking %s\n' "${sources[@]}"
+          jals fmt --check "${sources[@]}"
+          jals lint --features 1.21.11 "${sources[@]}"
+      - name: Boot the client and bake a reference set
         working-directory: examples/minecraft_client_e2e
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
           GALLIUM_DRIVER: llvmpipe
         run: xvfb-run -a jals test --target client-e2e --features 1.21.11 --update-golden --color never
-      - name: Check that both screenshots came out
+      - name: Unpack it
         working-directory: examples/minecraft_client_e2e
         run: |
-          shots=$(find target/jals/build/test-run -name '*.png' | sort)
-          echo "$shots"
-          count=$(printf '%s\n' "$shots" | grep -c . || true)
-          if [ "$count" -ne 2 ]; then
-            echo "::error::expected two screenshots, found $count"
-            exit 1
-          fi
+          unzip -o target/jals/test/golden-update/client-e2e-1.21.11.zip -d target/jals/test/reference
+          ls -l target/jals/test/reference
+      # The assertion. A second boot, judged against the first one's pictures at a threshold of
+      # zero: it passes only if the two processes rendered identical frames.
+      - name: Boot it again and judge the frames against that set
+        working-directory: examples/minecraft_client_e2e
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          GALLIUM_DRIVER: llvmpipe
+        run: xvfb-run -a jals test --target client-e2e --features 1.21.11 --golden target/jals/test/reference --color never
       # A failing run whose only trace is an exit status says nothing about a game that crashed
-      # mid-boot. The target's `artifacts` globs already name what to keep; this is where they go.
+      # mid-boot, and a failing *comparison* says nothing without the three pictures. The target's
+      # `artifacts` globs already name the first; `diff/` is where jals writes the second.
       - name: Keep what the run left behind
         if: failure()
         uses: actions/upload-artifact@v4
@@ -708,6 +727,7 @@ jobs:
             examples/minecraft_client_e2e/target/jals/build/test-run/**/crash-reports/**
             examples/minecraft_client_e2e/target/jals/build/test-run/**/*.png
             examples/minecraft_client_e2e/target/jals/build/test-run/**/report.tsv
+            examples/minecraft_client_e2e/target/jals/test/reference/*.png
           if-no-files-found: ignore
 
   mod-jar-setup:
