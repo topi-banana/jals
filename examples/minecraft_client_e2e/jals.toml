@@ -8,6 +8,12 @@ version = "0.1.0"
 # `build.rhai`, and publishing a second golden archive.
 [features]
 "1.21.11" = ["minecraft/1.21.11", "minecraft/client"]
+# Turned on once a reference archive exists at the URL pinned under `[[golden.client-e2e]]`, and
+# off in this checkout because none does. With it off that entry is not active, which
+# `GoldenEntry::active` answers as "this selection has no reference images yet" — every shot is
+# reported as unreferenced and the suite still runs. The alternative spelling, an entry active by
+# default naming a URL that resolves to nothing, would make a fresh clone fail at DNS.
+published-golden = []
 
 # The game jar, remapped to official names by the SDK's build script and put on this project's
 # classpath. That remap is what lets `ClientDriver` be written in Java instead of in reflection:
@@ -30,6 +36,10 @@ release = 21
 
 [[test-target]]
 name = "client-e2e"
+# The driver is not part of the product. `jals build` compiles `src/main/java` — the screen this
+# suite judges — and only a target run additionally compiles the root below, so what the reference
+# images are of is the project's own output.
+source-dirs = ["src/e2e/java"]
 main-class = "com.example.e2e.ClientDriver"
 # The arguments a launcher passes, with the two directories the build script materialized filled in
 # by name. `{run-dir}` is this run's own working directory, cleared and re-seeded before the process
@@ -77,9 +87,14 @@ file = "report.tsv"
 # `Screenshot.grab` writes into a `screenshots/` directory below the one it is given, which is the
 # run directory here — so this is the game's own layout, not a convention this example invented.
 dir = "screenshots"
-# Zero, and measured rather than preferred: rendering this scene twice under a pinned llvmpipe gives
-# a byte-identical frame, so there is no run-to-run noise for a threshold to absorb. What a loose
-# one absorbs is real failure — at 0.05 a comparison reports a whole rasterizer swap as a pass.
+# Zero, and measured rather than preferred: two separate runs under a pinned llvmpipe write the same
+# PNG byte for byte, so there is no run-to-run noise for a threshold to absorb. What a loose one
+# absorbs is real failure — at 0.05 a comparison reports a whole rasterizer swap as a pass.
+#
+# No `masks` either, and that is the same decision rather than a missing one: the scenes photographed
+# were chosen to have nothing in them that varies. The title screen is not among them precisely
+# because its splash text cannot be bounded — random per launch, and fixed but longer on three days
+# of the year.
 threshold = 0.0
 
 # The reference images. Not committed: they are binary, they are ~250 KiB each, and they are
@@ -89,7 +104,7 @@ threshold = 0.0
 # Produce a new archive with `jals test --target client-e2e --update-golden --features 1.21.11`,
 # **inside the CI container**, upload it, and paste what the command prints here.
 [[golden.client-e2e]]
-required-features = ["1.21.11"]
+required-features = ["1.21.11", "published-golden"]
 url = "https://example.invalid/replace-me/client-e2e-1.21.11.zip"
 sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 max-bytes = 4194304

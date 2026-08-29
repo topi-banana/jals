@@ -1,6 +1,11 @@
-# Seeded into the run directory before the game starts. Only the keys that change what a frame
-# looks like are here; the game fills in the rest and rewrites this file, which is why it is a seed
-# and not the file itself.
+# Seeded into the run directory before the game starts, because a client with no options.txt writes
+# its own and renders the first run at a different GUI scale from every run after it. Only the keys
+# that change what a frame looks like are here; the game fills in the rest and rewrites the file.
+#
+# `#` is not a comment character to this parser — every line above is one the game skips with a
+# `Skipping bad option` warning — so the reasoning lives in the README rather than beside the keys,
+# and `panoramaScrollSpeed` is the one worth reading before changing.
+panoramaScrollSpeed:0.0
 guiScale:2
 gamma:1.0
 fullscreen:false

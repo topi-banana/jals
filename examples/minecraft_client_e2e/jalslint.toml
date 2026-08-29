@@ -1,0 +1,11 @@
+# The client's own API decides the shape of three parameters this project cannot drop:
+# `Screenshot.grab` takes a `Consumer<Component>` whose message is the on-screen confirmation, and
+# `Button.builder` takes an `OnPress` whose argument is the button that fired. A handler that has
+# nothing to do with either still has to declare it. That is the `@Override`-shaped false positive
+# the rule's own documentation says to suppress through this file — `minecraft_mod` suppresses it
+# for the same reason on Mixin's `CallbackInfo`.
+#
+# Java 21 has no unnamed variable (`_` is a preview there and final only in 22), so renaming is not
+# the alternative; `[build] release` would have to move first.
+[unused]
+unused-variables = "allow"
