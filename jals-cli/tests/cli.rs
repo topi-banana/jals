@@ -3535,3 +3535,164 @@ fn an_unknown_target_names_the_ones_that_are_declared() {
     );
     assert!(stderr.contains("Declared: demo"), "{stderr}");
 }
+
+/// A 4x4 opaque black PNG, and its opposite. Small enough to embed, real enough to decode: the
+/// point of the pair is that one matches a reference and the other cannot.
+const BLACK_PNG: &[u8] = &[
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 4, 0, 0, 0, 4, 8, 6, 0,
+    0, 0, 169, 241, 158, 126, 0, 0, 0, 17, 73, 68, 65, 84, 120, 218, 99, 96, 96, 96, 248, 143, 134,
+    73, 21, 0, 0, 6, 90, 15, 241, 81, 47, 59, 87, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+];
+const WHITE_PNG: &[u8] = &[
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 4, 0, 0, 0, 4, 8, 6, 0,
+    0, 0, 169, 241, 158, 126, 0, 0, 0, 15, 73, 68, 65, 84, 120, 218, 99, 248, 143, 6, 24, 72, 23,
+    0, 0, 120, 60, 63, 193, 225, 149, 149, 239, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+];
+
+/// A target that photographs something, without anything to photograph.
+///
+/// Its driver copies a seeded PNG into the screenshot directory and reports it as a shot, which is
+/// the whole contract a real one has with jals: write a file, name it in the report. The golden set
+/// it declares is gated on a feature nothing enables, so the run compares against whatever
+/// `--golden` hands it and never reaches the network.
+#[cfg(unix)]
+fn screenshot_target_project(root: &Path) {
+    std::fs::write(
+        root.join("jals.toml"),
+        "[package]\nname = \"shotdemo\"\n\n\
+         [features]\npublished = []\n\n\
+         [build]\nsource-dirs = [\"src/main/java\"]\nclasses-dir = \"target/classes\"\n\n\
+         [[test-target]]\nname = \"demo\"\nsource-dirs = [\"src/e2e/java\"]\n\
+         main-class = \"e2e.Shooter\"\nargs = [\"--out\", \"{run-dir}\"]\n\
+         golden = { with = \"shots\" }\n\n\
+         [test-target.run-dir]\nseed = \"fixtures/run\"\n\n\
+         [test-target.screenshots]\ndir = \"screenshots\"\n\n\
+         [[golden.shots]]\nrequired-features = [\"published\"]\n\
+         url = \"https://example.invalid/none.zip\"\n\
+         sha256 = \"0000000000000000000000000000000000000000000000000000000000000000\"\n\
+         max-bytes = 1024\n",
+    )
+    .unwrap();
+
+    let main = root.join("src/main/java/com/example");
+    std::fs::create_dir_all(&main).unwrap();
+    std::fs::write(
+        main.join("Lib.java"),
+        "package com.example;\npublic final class Lib {}\n",
+    )
+    .unwrap();
+
+    let seed = root.join("fixtures/run");
+    std::fs::create_dir_all(&seed).unwrap();
+    std::fs::write(seed.join("seed.png"), BLACK_PNG).unwrap();
+
+    let e2e = root.join("src/e2e/java/e2e");
+    std::fs::create_dir_all(&e2e).unwrap();
+    std::fs::write(
+        e2e.join("Shooter.java"),
+        r#"package e2e;
+
+import java.io.FileWriter;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+
+public final class Shooter {
+    public static void main(String[] args) throws Exception {
+        String out = ".";
+        for (int i = 0; i < args.length; i++) {
+            if (args[i].equals("--list")) {
+                System.out.println("e2e.T#shot\t");
+                return;
+            } else if (args[i].equals("--out")) {
+                out = args[++i];
+            }
+        }
+        Path shots = Path.of(out, "screenshots");
+        Files.createDirectories(shots);
+        Files.copy(Path.of(out, "seed.png"), shots.resolve("alpha.png"),
+                StandardCopyOption.REPLACE_EXISTING);
+        try (FileWriter report = new FileWriter(Path.of(out, "report.tsv").toFile())) {
+            report.write("e2e.T#shot\tok\n");
+            report.write("e2e.T#shot\tshot\talpha\tscreenshots/alpha.png\n");
+        }
+    }
+}
+"#,
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_local_golden_directory_judges_the_run_instead_of_the_pinned_archive() {
+    if !javac_available() {
+        eprintln!("skipping: no javac on PATH");
+        return;
+    }
+    let dir = tempdir().unwrap();
+    screenshot_target_project(dir.path());
+
+    let matching = dir.path().join("references/matching");
+    std::fs::create_dir_all(&matching).unwrap();
+    std::fs::write(matching.join("alpha.png"), BLACK_PNG).unwrap();
+    let differing = dir.path().join("references/differing");
+    std::fs::create_dir_all(&differing).unwrap();
+    std::fs::write(differing.join("alpha.png"), WHITE_PNG).unwrap();
+
+    let run = |golden: &Path| {
+        let out = jals()
+            .current_dir(dir.path())
+            .args(["test", "--target", "demo", "--color", "never", "--golden"])
+            .arg(golden)
+            .output()
+            .unwrap();
+        (
+            out.status.code(),
+            format!(
+                "{}{}",
+                String::from_utf8(out.stdout).unwrap(),
+                String::from_utf8(out.stderr).unwrap()
+            ),
+        )
+    };
+
+    // The reference the run reproduces. This is the shape of the reproducibility check a suite
+    // performs on itself: bless once, then judge a second run against what was blessed.
+    let (code, all) = run(&matching);
+    assert_eq!(code, Some(0), "an identical reference passes\n{all}");
+    assert!(all.contains("1 test run: 1 passed"), "{all}");
+
+    // The same run against a reference it cannot match. The comparison is what fails, so the
+    // report's own verdict for the test is still `ok` — which is exactly the case a screenshot
+    // suite exists for.
+    let (code, all) = run(&differing);
+    assert_eq!(code, Some(1), "a differing reference fails\n{all}");
+    assert!(all.contains("pixels differ"), "{all}");
+    assert!(all.contains("difference"), "{all}");
+
+    // A directory that is not there is an error and not an empty reference set, which would
+    // otherwise report the shot as unreferenced and pass.
+    let (code, all) = run(&dir.path().join("references/absent"));
+    assert_eq!(code, Some(1), "{all}");
+    assert!(all.contains("does not name a directory"), "{all}");
+}
+
+#[test]
+fn local_golden_images_are_refused_for_a_target_that_photographs_nothing() {
+    let dir = tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("jals.toml"),
+        "[package]\nname = \"x\"\n\n\
+         [[test-target]]\nname = \"demo\"\nmain-class = \"e2e.Driver\"\n",
+    )
+    .unwrap();
+    let out = jals()
+        .current_dir(dir.path())
+        .args(["test", "--target", "demo", "--golden", "anywhere"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert_ne!(out.status.code(), Some(0));
+    assert!(stderr.contains("takes no screenshots"), "{stderr}");
+}

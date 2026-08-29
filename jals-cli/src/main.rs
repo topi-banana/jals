@@ -283,6 +283,21 @@ struct TestArgs {
     /// the archive and prints the `[[golden.<name>]]` block to paste once it is uploaded.
     #[arg(long, requires = "target")]
     update_golden: bool,
+    /// Judge this run against reference images in a local directory, instead of the archive the
+    /// manifest pins.
+    ///
+    /// One `<name>.png` per screenshot name, which is the layout `--update-golden` packages — so
+    /// the pair is how a suite is checked for reproducibility without publishing anything: bless
+    /// once, unpack the archive, and judge a second run against it. A directory that does not
+    /// exist is an error rather than an empty reference set, because an override that silently
+    /// compared against nothing would report every shot as unreferenced and pass.
+    #[arg(
+        long,
+        value_name = "DIR",
+        requires = "target",
+        conflicts_with = "update_golden"
+    )]
+    golden: Option<PathBuf>,
     /// Run one shard of the suite: `count:M/N` splits by position, `hash:M/N` by test id.
     #[arg(long, value_name = "SPEC")]
     partition: Option<String>,
@@ -1138,6 +1153,14 @@ impl TestArgs {
             );
         };
         Self::refuse_unsupported_runtime(&manifest)?;
+        // A target that compares no screenshots has nothing for an override to displace, and a
+        // silently ignored `--golden` would report a suite as judged that was never judged.
+        if self.golden.is_some() && target.golden.is_none() {
+            bail!(
+                "`--golden` names reference images for `[[test-target]] {name}`, which takes no \
+                 screenshots. Give it a `[test-target.screenshots] dir` first."
+            );
+        }
         let features = self.features.resolve(&manifest)?;
         // The same swap the harness path makes, and for the same reason: everything downstream
         // reads `[build] classes-dir`, so redirecting it here is what keeps `jals build`'s output
@@ -1216,8 +1239,14 @@ impl TestArgs {
         // selection activates no alternative, or this run is blessing rather than judging. The
         // first two report every shot as "no reference"; the third is `--update-golden`, where
         // comparing what we are about to declare correct would be circular.
-        let reference_dir = match (&target.golden, self.update_golden) {
-            (Some(golden), false) => {
+        //
+        // `--golden` displaces the fetch entirely rather than being merged with it: an override
+        // that fell back to the pinned archive for the names it did not hold would judge one run
+        // against two sets, and which picture a verdict came from is not a question a fallback
+        // should answer silently.
+        let reference_dir = match (&self.golden, &target.golden, self.update_golden) {
+            (Some(dir), _, _) => Some(Self::local_golden_dir(&root, dir)?),
+            (None, Some(golden), false) => {
                 Self::golden_dir(&manifest, &root, exec, &fetcher, &features, &golden.with).await?
             }
             _ => None,
@@ -1273,6 +1302,33 @@ impl TestArgs {
         } else {
             ExitCode::SUCCESS
         })
+    }
+
+    /// Resolve `--golden`'s directory against the project root, and insist that it is one.
+    ///
+    /// The whole value of the override is that a run can be judged against pictures nobody
+    /// published, so the checks it gets are the ones a fetched archive gets for free: the bytes
+    /// are there, and they are a directory of them.
+    fn local_golden_dir(root: &Path, given: &Path) -> Result<PathBuf> {
+        let dir = if given.is_absolute() {
+            given.to_path_buf()
+        } else {
+            root.join(given)
+        };
+        let metadata = std::fs::metadata(&dir).with_context(|| {
+            format!(
+                "`--golden {}` does not name a directory jals can read",
+                dir.display()
+            )
+        })?;
+        if !metadata.is_dir() {
+            bail!(
+                "`--golden {}` names a file. It takes the directory of `<name>.png` reference \
+                 images that `--update-golden` packages, not the archive itself.",
+                dir.display()
+            );
+        }
+        Ok(dir)
     }
 
     /// Fetch and unpack the golden set `reference` names, materialized as one directory.
