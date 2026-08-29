@@ -131,7 +131,7 @@ impl TestTarget {
     ///
     /// # Errors
     /// The first [`TestTargetError`] found.
-    pub fn validate(&self) -> Result<(), TestTargetError> {
+    pub(crate) fn validate(&self) -> Result<(), TestTargetError> {
         if self.name.is_empty() {
             return Err(TestTargetError::Empty {
                 name: String::new(),
@@ -383,7 +383,7 @@ impl GoldenEntry {
     ///
     /// # Errors
     /// The first [`GoldenError`] found.
-    pub fn validate(&self, name: &str) -> Result<(), GoldenError> {
+    pub(crate) fn validate(&self, name: &str) -> Result<(), GoldenError> {
         let alternatives = self.alternatives();
         if alternatives.is_empty() {
             return Err(GoldenError::NoAlternatives {
@@ -439,7 +439,7 @@ pub struct GoldenSource {
     pub max_bytes: u64,
     /// The build features that must **all** be enabled for this entry to be active.
     #[serde(default)]
-    pub required_features: Vec<String>,
+    required_features: Vec<String>,
 }
 
 impl GoldenSource {
@@ -501,11 +501,11 @@ impl GoldenSource {
 /// More than one alternative of one `[[golden.<name>]]` entry is active under a feature selection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AmbiguousGolden {
-    pub name: String,
+    name: String,
     /// The 1-based position of the first alternative found active.
-    pub first: usize,
+    first: usize,
     /// The 1-based position of the second.
-    pub second: usize,
+    second: usize,
 }
 
 impl fmt::Display for AmbiguousGolden {

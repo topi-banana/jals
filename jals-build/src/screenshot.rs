@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use jals_config::testing::Screenshots;
 use jals_exec::tokio_rt::on_blocking_pool;
 use jals_image::{Comparison, Image, Png, Rect};
+use jals_storage::RelativePath;
 
 use crate::test_report::Shot;
 
@@ -50,6 +51,19 @@ pub enum ShotOutcome {
         path: PathBuf,
         reason: String,
     },
+    /// The report named a file the target does not claim to write screenshots into.
+    ///
+    /// The report is written by the program under test, so its paths are a claim and not a fact: a
+    /// `..` in one would have jals read — and `--update-golden` package and publish — a file the
+    /// run never produced. `[test-target.screenshots] dir` is the declaration this is checked
+    /// against, which is why a target that photographs anything must make it.
+    Misplaced {
+        name: String,
+        /// What the report said, verbatim.
+        claimed: String,
+        /// The declared directory it had to be under.
+        expected: String,
+    },
 }
 
 impl ShotOutcome {
@@ -63,20 +77,11 @@ impl ShotOutcome {
     pub const fn is_failure(&self) -> bool {
         matches!(
             self,
-            Self::Differed(_) | Self::Missing { .. } | Self::Unreadable { .. }
+            Self::Differed(_)
+                | Self::Missing { .. }
+                | Self::Unreadable { .. }
+                | Self::Misplaced { .. }
         )
-    }
-
-    /// The screenshot's name, whatever the outcome.
-    #[must_use]
-    pub fn name(&self) -> &str {
-        match self {
-            Self::Matched { name, .. }
-            | Self::NoReference { name, .. }
-            | Self::Missing { name, .. }
-            | Self::Unreadable { name, .. } => name,
-            Self::Differed(diff) => &diff.name,
-        }
     }
 }
 
@@ -87,7 +92,7 @@ pub struct ScreenshotDiff {
     /// Pixels that differ beyond the threshold and are not anti-aliasing.
     pub differing: u32,
     /// Pixels that differ but sit on an anti-aliased edge — seen, judged, not counted.
-    pub antialiased: u32,
+    antialiased: u32,
     /// Pixels actually compared: every pixel less those a mask excluded.
     pub compared: u32,
     /// [`differing`](Self::differing) over [`compared`](Self::compared).
@@ -110,6 +115,11 @@ pub struct ScreenshotVerifier {
     reference_dir: Option<PathBuf>,
     /// Where difference pictures are written.
     diff_dir: PathBuf,
+    /// The directory below the run directory the target says it writes screenshots into.
+    ///
+    /// The containment check every reported path is held to. `None` only for a target that takes
+    /// no screenshots, which never reaches a verifier.
+    screenshot_dir: Option<RelativePath>,
 }
 
 impl ScreenshotVerifier {
@@ -117,6 +127,7 @@ impl ScreenshotVerifier {
     #[must_use]
     pub fn new(config: &Screenshots, reference_dir: Option<PathBuf>, diff_dir: PathBuf) -> Self {
         Self {
+            screenshot_dir: RelativePath::parse(&config.dir).ok(),
             comparison: Comparison {
                 threshold: config.threshold,
                 max_diff_pixels: config.max_diff_pixels,
@@ -133,11 +144,35 @@ impl ScreenshotVerifier {
         }
     }
 
+    /// The path a reported shot may be read from, or `None` when the report overreached.
+    ///
+    /// Two conditions, and neither is a formality. `RelativePath::parse` rejects an absolute path,
+    /// a drive letter, a UNC prefix and every `.`/`..` segment, so what comes back cannot leave the
+    /// run directory by construction. The prefix test then holds it to the directory the target
+    /// declared — because a run that writes its logs where its screenshots go is a target that has
+    /// stopped meaning what its manifest says, and `--update-golden` would publish the difference.
+    fn admit(&self, claimed: &str) -> Option<RelativePath> {
+        let path = RelativePath::parse(claimed).ok()?;
+        let dir = self.screenshot_dir.as_ref()?;
+        path.starts_with(dir).then_some(path)
+    }
+
     /// Compare one shot, reading both images and writing a difference picture if they disagree.
     ///
     /// `run_dir` is the target's working directory, which the report's paths are relative to.
-    pub async fn verify(&self, shot: &Shot, run_dir: &Path) -> ShotOutcome {
-        let actual_path = run_dir.join(&shot.path);
+    pub(crate) async fn verify(&self, shot: &Shot, run_dir: &Path) -> ShotOutcome {
+        let Some(relative) = self.admit(&shot.path) else {
+            return ShotOutcome::Misplaced {
+                name: shot.name.clone(),
+                claimed: shot.path.clone(),
+                expected: self
+                    .screenshot_dir
+                    .as_ref()
+                    .map(RelativePath::to_string)
+                    .unwrap_or_default(),
+            };
+        };
+        let actual_path = run_dir.join(relative.to_string());
         let reference_path = self
             .reference_dir
             .as_ref()
@@ -231,7 +266,10 @@ impl ScreenshotVerifier {
     ///
     /// # Errors
     /// The directory listing's failure, when a reference directory is set but cannot be read.
-    pub async fn unmatched_references(&self, taken: &[String]) -> std::io::Result<Vec<String>> {
+    pub(crate) async fn unmatched_references(
+        &self,
+        taken: &[String],
+    ) -> std::io::Result<Vec<String>> {
         let Some(dir) = self.reference_dir.clone() else {
             return Ok(Vec::new());
         };
@@ -319,6 +357,16 @@ mod tests {
         }
     }
 
+    /// The section a target that photographs anything declares, which is what the containment
+    /// check is built from — `Screenshots::default()` alone declares no directory, and a verifier
+    /// is never built for a target in that state.
+    fn declared() -> Screenshots {
+        Screenshots {
+            dir: "screenshots".to_owned(),
+            ..Screenshots::default()
+        }
+    }
+
     /// A verifier over a fresh scratch tree, plus the run directory its shots live under.
     fn fixture(config: &Screenshots) -> (tempfile::TempDir, ScreenshotVerifier) {
         let dir = tempfile::tempdir().expect("scratch");
@@ -332,7 +380,7 @@ mod tests {
 
     #[test]
     fn an_identical_shot_matches() {
-        let (dir, verifier) = fixture(&Screenshots::default());
+        let (dir, verifier) = fixture(&declared());
         let image = Image::filled(8, 8, WHITE);
         write(&dir.path().join("golden/title.png"), &image);
         write(&dir.path().join("run/screenshots/title.png"), &image);
@@ -348,7 +396,7 @@ mod tests {
 
     #[test]
     fn a_changed_shot_differs_and_leaves_a_picture_to_look_at() {
-        let (dir, verifier) = fixture(&Screenshots::default());
+        let (dir, verifier) = fixture(&declared());
         let reference = Image::filled(8, 8, WHITE);
         let mut actual = reference.clone();
         actual.set(3, 3, Rgba::OPAQUE_BLACK);
@@ -364,9 +412,11 @@ mod tests {
         assert_eq!(diff.compared, 64);
         let written = diff.diff.expect("a difference picture is written");
         assert!(written.exists());
-        // And it is a PNG this crate can read back, not merely bytes on disk.
+        // And it is a PNG this crate can read back, not merely bytes on disk — at the size of the
+        // pictures it is the difference between, which is the half a width alone would not catch.
         let bytes = std::fs::read(&written).expect("read");
-        assert_eq!(Png::decode(&bytes).expect("valid").width(), 8);
+        let picture = Png::decode(&bytes).expect("valid");
+        assert_eq!((picture.width(), picture.height()), (8, 8));
     }
 
     #[test]
@@ -378,7 +428,7 @@ mod tests {
                 right: 8,
                 bottom: 2,
             }],
-            ..Screenshots::default()
+            ..declared()
         };
         let (dir, verifier) = fixture(&config);
         let reference = Image::filled(8, 8, WHITE);
@@ -399,7 +449,7 @@ mod tests {
 
     #[test]
     fn a_shot_with_no_reference_is_a_state_and_not_a_failure() {
-        let (dir, verifier) = fixture(&Screenshots::default());
+        let (dir, verifier) = fixture(&declared());
         write(
             &dir.path().join("run/screenshots/title.png"),
             &Image::filled(4, 4, WHITE),
@@ -415,7 +465,7 @@ mod tests {
 
     #[test]
     fn a_shot_the_run_never_wrote_is_a_failure() {
-        let (dir, verifier) = fixture(&Screenshots::default());
+        let (dir, verifier) = fixture(&declared());
         write(
             &dir.path().join("golden/title.png"),
             &Image::filled(4, 4, WHITE),
@@ -431,7 +481,7 @@ mod tests {
 
     #[test]
     fn a_truncated_png_is_unreadable_rather_than_different() {
-        let (dir, verifier) = fixture(&Screenshots::default());
+        let (dir, verifier) = fixture(&declared());
         write(
             &dir.path().join("golden/title.png"),
             &Image::filled(4, 4, WHITE),
@@ -451,7 +501,7 @@ mod tests {
 
     #[test]
     fn differently_sized_images_report_the_dimensions_rather_than_a_pixel_count() {
-        let (dir, verifier) = fixture(&Screenshots::default());
+        let (dir, verifier) = fixture(&declared());
         write(
             &dir.path().join("golden/title.png"),
             &Image::filled(8, 8, WHITE),
@@ -469,9 +519,55 @@ mod tests {
         assert_eq!(diff.differing, 0);
     }
 
+    /// The report is written by the program under test, so a path in it is a claim. These are the
+    /// claims that are refused before any file is opened.
+    #[test]
+    fn a_reported_path_that_leaves_the_screenshot_directory_is_refused() {
+        let (dir, verifier) = fixture(&declared());
+        let run = dir.path().join("run");
+        // Something a `--update-golden` would otherwise package and publish.
+        write(&dir.path().join("secret.png"), &Image::filled(4, 4, WHITE));
+        write(
+            &run.join("screenshots/title.png"),
+            &Image::filled(4, 4, WHITE),
+        );
+        write(
+            &dir.path().join("golden/title.png"),
+            &Image::filled(4, 4, WHITE),
+        );
+
+        for claimed in [
+            "../secret.png",
+            "screenshots/../../secret.png",
+            "/etc/passwd",
+            // Inside the run directory, but not where the target says its screenshots go.
+            "logs/latest.png",
+        ] {
+            let outcome = jals_exec::block_on_inline(verifier.verify(
+                &Shot {
+                    name: "title".to_owned(),
+                    path: claimed.to_owned(),
+                },
+                &run,
+            ));
+            assert!(
+                matches!(outcome, ShotOutcome::Misplaced { .. }),
+                "`{claimed}` should not be admitted, got {outcome:?}"
+            );
+            assert!(outcome.is_failure(), "`{claimed}` must fail its test");
+        }
+
+        // And the path the target actually declares still is.
+        let outcome = jals_exec::block_on_inline(verifier.verify(&shot("title"), &run));
+        assert!(
+            matches!(outcome, ShotOutcome::Matched { .. }),
+            "{outcome:?}"
+        );
+    }
+
     #[test]
     fn a_reference_nothing_shot_is_reported_so_a_dropped_test_cannot_pass_quietly() {
-        let (dir, verifier) = fixture(&Screenshots::default());
+        let (dir, verifier) = fixture(&declared());
         write(
             &dir.path().join("golden/title.png"),
             &Image::filled(4, 4, WHITE),

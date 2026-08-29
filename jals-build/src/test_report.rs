@@ -44,7 +44,7 @@ const ID_SEPARATOR: char = '#';
 
 /// What a program said about one test.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ReportedVerdict {
+pub(crate) enum ReportedVerdict {
     /// The test ran and passed.
     Passed,
     /// The test ran and failed, with the program's own explanation.
@@ -55,26 +55,26 @@ pub enum ReportedVerdict {
 
 /// One screenshot a test produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Shot {
+pub(crate) struct Shot {
     /// The name it is compared under — the golden archive's member name, without an extension.
-    pub name: String,
+    pub(crate) name: String,
     /// Where the program wrote it, relative to the run directory.
-    pub path: String,
+    pub(crate) path: String,
 }
 
 /// Everything the report said about one test.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReportEntry {
-    pub id: String,
-    pub verdict: ReportedVerdict,
+pub(crate) struct ReportEntry {
+    id: String,
+    pub(crate) verdict: ReportedVerdict,
     /// The screenshots this test produced, in the order the report named them.
-    pub shots: Vec<Shot>,
+    pub(crate) shots: Vec<Shot>,
     /// How long the program says the test took, when it says.
     ///
     /// Optional because only the program can know: a target runs every test inside one process, so
     /// there is no per-test wall clock on this side to fall back to. Absent is reported as zero,
     /// never as a share of the run.
-    pub duration: Option<Duration>,
+    pub(crate) duration: Option<Duration>,
 }
 
 /// A line the report should not have contained.
@@ -118,7 +118,7 @@ impl core::error::Error for ReportProblem {}
 
 /// A parsed report.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct TestReport {
+pub(crate) struct TestReport {
     entries: Vec<ReportEntry>,
     problems: Vec<ReportProblem>,
 }
@@ -130,7 +130,7 @@ impl TestReport {
     /// program ran them in — not the order the runner selected them, because a target that
     /// reorders its own work is allowed to.
     #[must_use]
-    pub fn parse(text: &str) -> Self {
+    pub(crate) fn parse(text: &str) -> Self {
         let mut report = Self::default();
         for (index, raw) in text.lines().enumerate() {
             let line = index + 1;
@@ -245,20 +245,24 @@ impl TestReport {
     }
 
     /// Every test the report named, in first-mention order.
+    ///
+    /// The parse's own view of its result: production reads one entry at a time through
+    /// [`entry_for`](Self::entry_for), and only a test over the parser asks for the whole list.
+    #[cfg(test)]
     #[must_use]
-    pub fn entries(&self) -> &[ReportEntry] {
+    fn entries(&self) -> &[ReportEntry] {
         &self.entries
     }
 
     /// What the report got wrong.
     #[must_use]
-    pub fn problems(&self) -> &[ReportProblem] {
+    pub(crate) fn problems(&self) -> &[ReportProblem] {
         &self.problems
     }
 
     /// The entry for `id`, if the report named it.
     #[must_use]
-    pub fn entry_for(&self, id: &str) -> Option<&ReportEntry> {
+    pub(crate) fn entry_for(&self, id: &str) -> Option<&ReportEntry> {
         self.entries.iter().find(|entry| entry.id == id)
     }
 }

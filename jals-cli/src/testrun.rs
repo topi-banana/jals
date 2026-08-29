@@ -359,6 +359,17 @@ impl TestReporter {
                 path.display(),
                 reason
             )),
+            ShotOutcome::Misplaced {
+                name,
+                claimed,
+                expected,
+            } => Some(format!(
+                "{}\n        reported   {claimed}\n        declared   {expected}/",
+                self.paint(
+                    &format!("{BOLD}{RED}"),
+                    &format!("    `{name}` was reported outside the target's screenshot directory")
+                ),
+            )),
             ShotOutcome::Differed(diff) => {
                 let headline = match diff.size_mismatch {
                     Some((ew, eh, aw, ah)) => {
@@ -402,6 +413,9 @@ impl TestReporter {
                 }
                 ShotOutcome::Missing { name, .. } => format!("{name}: not written"),
                 ShotOutcome::Unreadable { name, .. } => format!("{name}: unreadable"),
+                ShotOutcome::Misplaced { name, .. } => {
+                    format!("{name}: outside the screenshot directory")
+                }
                 ShotOutcome::Matched { .. } | ShotOutcome::NoReference { .. } => String::new(),
             })
             .collect();

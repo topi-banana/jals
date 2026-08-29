@@ -119,12 +119,6 @@ impl ProjectScript {
         &self.task_classpath
     }
 
-    /// Named directories the root's task terminals materialized, for a `[[test-target]]` to be
-    /// started against.
-    pub fn task_runtime_dirs(&self) -> &[crate::task::BuildTaskRuntimeDir] {
-        &self.task_runtime_dirs
-    }
-
     /// Fold the script's `add_classpath` directives into the manifest the graph phase lowers, so a
     /// script-contributed entry is classified by exactly the rule that classifies one written in
     /// `[build] classpath` — and lands in the same order, after the authored entries.

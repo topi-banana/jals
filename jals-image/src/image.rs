@@ -10,10 +10,10 @@ use alloc::vec::Vec;
 /// One pixel, non-premultiplied.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Rgba {
-    pub r: u8,
-    pub g: u8,
-    pub b: u8,
-    pub a: u8,
+    pub(crate) r: u8,
+    pub(crate) g: u8,
+    pub(crate) b: u8,
+    pub(crate) a: u8,
 }
 
 impl Rgba {
@@ -33,10 +33,10 @@ impl Rgba {
 /// error: a mask that selects no pixel is a mask that changes no verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Rect {
-    pub left: u32,
-    pub top: u32,
-    pub right: u32,
-    pub bottom: u32,
+    left: u32,
+    top: u32,
+    right: u32,
+    bottom: u32,
 }
 
 impl Rect {
@@ -52,7 +52,7 @@ impl Rect {
 
     /// Whether `(x, y)` falls inside.
     #[must_use]
-    pub const fn contains(self, x: u32, y: u32) -> bool {
+    pub(crate) const fn contains(self, x: u32, y: u32) -> bool {
         x >= self.left && x < self.right && y >= self.top && y < self.bottom
     }
 }
@@ -70,9 +70,9 @@ pub struct Image {
 }
 
 impl Image {
-    /// Bytes per pixel in [`pixels`](Self::pixels). Public because a caller reading the raw buffer
-    /// needs the stride, and re-spelling `4` there would be a second place for it to live.
-    pub const CHANNELS: usize = 4;
+    /// Bytes per pixel in [`pixels`](Self::pixels). Named rather than spelled `4` at each of the
+    /// half-dozen sites that index the buffer.
+    pub(crate) const CHANNELS: usize = 4;
 
     /// An image of `fill`.
     #[must_use]
@@ -91,7 +91,7 @@ impl Image {
 
     /// An image of transparent black.
     #[must_use]
-    pub fn transparent(width: u32, height: u32) -> Self {
+    pub(crate) fn transparent(width: u32, height: u32) -> Self {
         Self {
             width,
             height,
@@ -103,7 +103,11 @@ impl Image {
     ///
     /// # Errors
     /// [`BufferLength`] when `pixels` is not exactly `width * height * 4` bytes long.
-    pub fn from_rgba(width: u32, height: u32, pixels: Vec<u8>) -> Result<Self, BufferLength> {
+    pub(crate) fn from_rgba(
+        width: u32,
+        height: u32,
+        pixels: Vec<u8>,
+    ) -> Result<Self, BufferLength> {
         let expected = Self::buffer_len(width, height);
         if pixels.len() == expected {
             Ok(Self {
@@ -142,19 +146,19 @@ impl Image {
 
     /// How many pixels the image holds.
     #[must_use]
-    pub const fn pixel_count(&self) -> u32 {
+    pub(crate) const fn pixel_count(&self) -> u32 {
         self.width * self.height
     }
 
     /// Whether `other` has the same dimensions.
     #[must_use]
-    pub const fn same_size_as(&self, other: &Self) -> bool {
+    pub(crate) const fn same_size_as(&self, other: &Self) -> bool {
         self.width == other.width && self.height == other.height
     }
 
     /// The raw row-major RGBA buffer.
     #[must_use]
-    pub fn pixels(&self) -> &[u8] {
+    pub(crate) fn pixels(&self) -> &[u8] {
         &self.pixels
     }
 
@@ -165,7 +169,7 @@ impl Image {
 
     /// The pixel at `(x, y)`, or `None` when the coordinate is outside the image.
     #[must_use]
-    pub fn get(&self, x: u32, y: u32) -> Option<Rgba> {
+    pub(crate) fn get(&self, x: u32, y: u32) -> Option<Rgba> {
         if x >= self.width || y >= self.height {
             return None;
         }

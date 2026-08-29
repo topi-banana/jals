@@ -157,7 +157,6 @@ impl Comparison {
         Ok(Outcome {
             differing,
             antialiased,
-            masked,
             compared,
             ratio,
             within_budget,
@@ -325,8 +324,6 @@ pub struct Outcome {
     pub differing: u32,
     /// Pixels that differ but sit on an anti-aliased edge. Reported, not counted against the run.
     pub antialiased: u32,
-    /// Pixels a mask excluded from the comparison.
-    pub masked: u32,
     /// Pixels actually compared — every pixel less the masked ones. The denominator of
     /// [`ratio`](Self::ratio), so a mask tightens the ratio rather than diluting it.
     pub compared: u32,
@@ -422,7 +419,8 @@ mod tests {
         };
         let outcome = masked.run(&expected, &actual).expect("same size");
         assert_eq!(outcome.differing, 0);
-        assert_eq!(outcome.masked, 4);
+        // 12 rather than 16: `compared` is the mask's effect stated where a consumer reads it, so
+        // there is no second field carrying the count that was taken out.
         assert_eq!(outcome.compared, 12);
         assert_eq!(outcome.diff.get(0, 0), Some(MASKED));
     }

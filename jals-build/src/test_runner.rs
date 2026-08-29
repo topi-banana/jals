@@ -672,13 +672,12 @@ pub struct TargetRun {
     pub problems: Vec<ReportProblem>,
     /// Names the golden set holds that this run produced no screenshot for.
     pub unmatched_references: Vec<String>,
-    /// Where the process's own output landed.
-    pub stdout: PathBuf,
-    pub stderr: PathBuf,
     /// The files the target's `artifacts` globs matched, for a host to collect.
+    ///
+    /// The process's own output and its exit status are deliberately not here: `judge` has the raw
+    /// run in hand and folds both into every [`TestOutcome`], so a copy on the aggregate would be a
+    /// second place a reader could take them from.
     pub artifacts: Vec<PathBuf>,
-    /// The process's exit status, absent when a deadline killed it.
-    pub status: Option<i32>,
 }
 
 impl TargetLauncher {
@@ -711,12 +710,6 @@ impl TargetLauncher {
         // the project modified by a test.
         base.working_dir = target.run_dir().to_path_buf();
         Ok(Self { base, target })
-    }
-
-    /// The working directory the target is started in, which its report's paths are relative to.
-    #[must_use]
-    pub fn run_dir(&self) -> &Path {
-        self.target.run_dir()
     }
 
     /// The directory the process's own output and the difference pictures go in — the run
@@ -829,10 +822,7 @@ impl TargetLauncher {
             outcomes,
             problems: report.problems().to_vec(),
             unmatched_references,
-            stdout: raw.stdout.clone(),
-            stderr: raw.stderr.clone(),
             artifacts: self.collect_artifacts().await,
-            status: raw.status,
         })
     }
 

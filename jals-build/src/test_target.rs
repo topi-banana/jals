@@ -26,7 +26,6 @@ use jals_storage::RelativePath;
 /// A `[[test-target]]` with its placeholders expanded and its paths resolved against the host.
 #[derive(Debug, Clone)]
 pub struct ResolvedTarget {
-    name: String,
     main_class: String,
     args: Vec<String>,
     jvm_args: Vec<String>,
@@ -41,7 +40,6 @@ pub struct ResolvedTarget {
     /// artifact glob needs, and a second implementation would be a second set of edge cases.
     artifacts: Vec<ResourcePattern>,
     timeout: Option<Duration>,
-    screenshot_dir: Option<RelativePath>,
 }
 
 impl ResolvedTarget {
@@ -93,15 +91,14 @@ impl ResolvedTarget {
             .map(|seed| Self::project_path(&target.name, "run-dir.seed", seed))
             .transpose()?
             .map(|path| path.to_host_path(project_root));
-        let screenshot_dir = if target.screenshots.dir.is_empty() {
-            None
-        } else {
-            Some(Self::project_path(
-                &target.name,
-                "screenshots.dir",
-                &target.screenshots.dir,
-            )?)
-        };
+        // Validated here and kept nowhere: `ScreenshotVerifier` parses the same string when it
+        // builds the containment check every reported shot path is held to, and one field holding
+        // a second copy of it would be a second place for the two to disagree. What resolving it
+        // here buys is *when* a malformed one is reported — once, before the process starts,
+        // rather than as one misplaced shot per photograph.
+        if !target.screenshots.dir.is_empty() {
+            Self::project_path(&target.name, "screenshots.dir", &target.screenshots.dir)?;
+        }
         let artifacts = target
             .artifacts
             .iter()
@@ -114,7 +111,6 @@ impl ResolvedTarget {
             .collect::<Result<_, _>>()?;
 
         Ok(Self {
-            name: target.name.clone(),
             main_class: target.main_class.clone(),
             args,
             jvm_args,
@@ -124,7 +120,6 @@ impl ResolvedTarget {
             seed,
             artifacts,
             timeout: target.timeout.map(Duration::from_secs),
-            screenshot_dir,
         })
     }
 
@@ -142,67 +137,56 @@ impl ResolvedTarget {
     }
 
     #[must_use]
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    #[must_use]
-    pub fn main_class(&self) -> &str {
+    pub(crate) fn main_class(&self) -> &str {
         &self.main_class
     }
 
     #[must_use]
-    pub fn args(&self) -> &[String] {
+    pub(crate) fn args(&self) -> &[String] {
         &self.args
     }
 
     #[must_use]
-    pub fn jvm_args(&self) -> &[String] {
+    pub(crate) fn jvm_args(&self) -> &[String] {
         &self.jvm_args
     }
 
     #[must_use]
-    pub fn list_argument(&self) -> &str {
+    pub(crate) fn list_argument(&self) -> &str {
         &self.list_argument
     }
 
     #[must_use]
-    pub fn run_dir(&self) -> &Path {
+    pub(crate) fn run_dir(&self) -> &Path {
         &self.run_dir
     }
 
     #[must_use]
-    pub fn report(&self) -> &Path {
+    pub(crate) fn report(&self) -> &Path {
         &self.report
     }
 
     /// The directory copied into the run directory before the process starts.
     #[must_use]
-    pub fn seed(&self) -> Option<&Path> {
+    pub(crate) fn seed(&self) -> Option<&Path> {
         self.seed.as_deref()
     }
 
     #[must_use]
-    pub const fn timeout(&self) -> Option<Duration> {
+    pub(crate) const fn timeout(&self) -> Option<Duration> {
         self.timeout
-    }
-
-    /// Where this target's screenshots land, relative to the run directory.
-    #[must_use]
-    pub const fn screenshot_dir(&self) -> Option<&RelativePath> {
-        self.screenshot_dir.as_ref()
     }
 
     /// Whether `path`, relative to the run directory, is something the target declared worth
     /// keeping.
     #[must_use]
-    pub fn is_artifact(&self, path: &RelativePath) -> bool {
+    pub(crate) fn is_artifact(&self, path: &RelativePath) -> bool {
         self.artifacts.iter().any(|pattern| pattern.matches(path))
     }
 
     /// Whether the target declared any artifacts at all.
     #[must_use]
-    pub const fn collects_artifacts(&self) -> bool {
+    pub(crate) const fn collects_artifacts(&self) -> bool {
         !self.artifacts.is_empty()
     }
 }

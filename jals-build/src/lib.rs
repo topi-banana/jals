@@ -112,7 +112,7 @@ pub use target::{ResolveTargetError, RunTarget};
 #[cfg(feature = "native")]
 pub use test_plan::{Partition, PartitionError, RunIgnored, Selection, TestCase, TestFilter};
 #[cfg(feature = "native")]
-pub use test_report::{ReportEntry, ReportProblem, ReportedVerdict, Shot, TestReport};
+pub use test_report::ReportProblem;
 #[cfg(feature = "native")]
 pub use test_target::{ResolvedTarget, TargetError};
 #[cfg(feature = "native")]
