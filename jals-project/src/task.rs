@@ -227,6 +227,8 @@ enum TaskValue {
     /// artifacts — and is a separate variant because their sinks are different: one is published
     /// into the project, the other is materialized into a directory a process reads.
     FileTree(SourceTree),
+    /// Fetched bytes, still in the cache under the key that authenticated them.
+    Blob(CacheKey),
 }
 
 /// Namespace for executing a validated build-task plan.
@@ -1172,6 +1174,7 @@ impl BuildTaskExecutor {
                 let key = ExternalArtifactResolver::resolve(fetcher, cache, &spec).await?;
                 match kind {
                     TaskFetchKind::Jar => Ok(TaskValue::Jar(key)),
+                    TaskFetchKind::Bytes => Ok(TaskValue::Blob(key)),
                     TaskFetchKind::Json => {
                         let bytes = cache
                             .lookup_bounded(&key, max_bytes)
@@ -1291,6 +1294,17 @@ impl BuildTaskExecutor {
                 )
                 .await
                 .map(TaskValue::FileTree)
+            }
+            TaskNodeKind::PlaceFile { blob, path } => {
+                let key = Self::blob(values, *blob)?.clone();
+                let path = RelativePath::parse(path)
+                    .map_err(|error| format!("invalid placement path: {error:?}"))?;
+                // No republish: the bytes are already in the cache under the key that
+                // authenticated them, and a placement decides only where a materialized tree puts
+                // them. Copying would be the same bytes acquired a second way.
+                Ok(TaskValue::FileTree(SourceTree {
+                    files: alloc::vec![jals_classpath::LibrarySource { path, key }],
+                }))
             }
             TaskNodeKind::MergeTrees { base, overlay } => {
                 let base = Self::file_tree(values, *base)?.clone();
@@ -1478,6 +1492,13 @@ impl BuildTaskExecutor {
         match Self::value(values, id)? {
             TaskValue::SourceTree(value) => Ok(value),
             _ => Err("task input is not a source tree".to_owned()),
+        }
+    }
+
+    fn blob(values: &[Option<TaskValue>], id: TaskId) -> Result<&CacheKey, String> {
+        match Self::value(values, id)? {
+            TaskValue::Blob(value) => Ok(value),
+            _ => Err("task input is not fetched bytes".to_owned()),
         }
     }
 

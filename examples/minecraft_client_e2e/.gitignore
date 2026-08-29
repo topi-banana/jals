@@ -1,0 +1,2 @@
+# The build script's downloads, the compiled classes, and every run directory.
+/target/

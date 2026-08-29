@@ -54,6 +54,12 @@ pub enum TaskValueKind {
     Text,
     Jar,
     SourceTree,
+    /// Fetched bytes with no interpretation — an image, a font, a data file.
+    ///
+    /// Separate from [`Jar`](Self::Jar) because a jar is a thing this crate opens: it can be put on
+    /// a classpath, remapped, merged, unpacked. None of that is true of a PNG, and a value kind
+    /// that admitted both would let `add_classpath` take one.
+    Blob,
     /// A tree of arbitrary files, addressed by relative path.
     ///
     /// Distinct from [`SourceTree`](Self::SourceTree) because their *sinks* are different, not
@@ -84,6 +90,8 @@ impl TaskDigestAlgorithm {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TaskFetchKind {
+    /// Bytes fetched and not interpreted.
+    Bytes,
     Json,
     Jar,
     Text,
@@ -223,6 +231,15 @@ pub enum TaskNodeKind {
         archive: TaskId,
         prefix: String,
     },
+    /// One fetched blob as a one-file tree, at the path a runtime expects to find it under.
+    ///
+    /// The composition partner of `MergeTrees`: a store addressed by digest — a Minecraft asset
+    /// index, a Maven-style layout — is many individually fetched files whose *placement* the
+    /// consumer decides, and this is the smallest node that expresses "this blob goes here".
+    PlaceFile {
+        blob: TaskId,
+        path: String,
+    },
     /// Two file trees as one, with `overlay` winning a shared path.
     ///
     /// Needed because a runtime directory is usually assembled from several archives — the natives
@@ -259,7 +276,13 @@ impl TaskNodeKind {
             | Self::MergeJars { .. }
             | Self::NestedJar { .. } => TaskValueKind::Jar,
             Self::ExtractJava { .. } | Self::DecompileJava { .. } => TaskValueKind::SourceTree,
-            Self::ExtractFiles { .. } | Self::MergeTrees { .. } => TaskValueKind::FileTree,
+            Self::ExtractFiles { .. } | Self::MergeTrees { .. } | Self::PlaceFile { .. } => {
+                TaskValueKind::FileTree
+            }
+            Self::Fetch {
+                kind: TaskFetchKind::Bytes,
+                ..
+            } => TaskValueKind::Blob,
         }
     }
 
@@ -303,6 +326,7 @@ impl TaskNodeKind {
                 vec![(*base, TaskValueKind::Jar), (*overlay, TaskValueKind::Jar)]
             }
             Self::ExtractFiles { archive, .. } => vec![(*archive, TaskValueKind::Jar)],
+            Self::PlaceFile { blob, .. } => vec![(*blob, TaskValueKind::Blob)],
             Self::MergeTrees { base, overlay } => vec![
                 (*base, TaskValueKind::FileTree),
                 (*overlay, TaskValueKind::FileTree),
@@ -340,6 +364,7 @@ impl TaskNodeKind {
             Self::ExtractJava { prefix, .. }
             | Self::DecompileJava { prefix, .. }
             | Self::ExtractFiles { prefix, .. } => prefix.len(),
+            Self::PlaceFile { path, .. } => path.len(),
             Self::NestedJar { member, .. } => member.len(),
         }
     }
@@ -614,7 +639,8 @@ impl TaskPlan {
             | TaskNodeKind::ExtractFiles { prefix, .. } => {
                 Self::validate_path(prefix, limits, true)?;
             }
-            TaskNodeKind::NestedJar { member, .. } => {
+            TaskNodeKind::NestedJar { member, .. }
+            | TaskNodeKind::PlaceFile { path: member, .. } => {
                 Self::validate_path(member, limits, false)?;
             }
             TaskNodeKind::JsonAt { path, .. }
@@ -747,6 +773,7 @@ handle!(TextTask);
 handle!(JarTask);
 handle!(SourceTreeTask);
 handle!(FileTreeTask);
+handle!(BlobTask);
 
 /// A mapping grammar as a script value — the optional third argument of `tasks.remap_jar`.
 ///
@@ -1080,6 +1107,29 @@ impl TasksApi {
         .map(FileTreeTask)
     }
 
+    fn fetch_bytes(
+        api: &mut Self,
+        url: UrlTask,
+        digest: DigestTask,
+        max_bytes: ByteCountTask,
+    ) -> RhaiResult<BlobTask> {
+        api.push(TaskNodeKind::Fetch {
+            kind: TaskFetchKind::Bytes,
+            url: url.0.id,
+            digest: digest.0.id,
+            max_bytes: max_bytes.0.id,
+        })
+        .map(BlobTask)
+    }
+
+    fn place(api: &mut Self, path: ImmutableString, blob: BlobTask) -> RhaiResult<FileTreeTask> {
+        api.push(TaskNodeKind::PlaceFile {
+            blob: blob.0.id,
+            path: path.into_owned(),
+        })
+        .map(FileTreeTask)
+    }
+
     fn merge_trees(
         api: &mut Self,
         base: FileTreeTask,
@@ -1270,6 +1320,7 @@ impl TasksApi {
             .register_type_with_name::<JarTask>("JarTask")
             .register_type_with_name::<SourceTreeTask>("SourceTreeTask")
             .register_type_with_name::<FileTreeTask>("FileTreeTask")
+            .register_type_with_name::<BlobTask>("BlobTask")
             .register_type_with_name::<MappingFormatValue>("MappingFormat")
             .register_fn("https_url", Self::https_url)
             .register_fn("project_jar", Self::project_jar)
@@ -1286,6 +1337,8 @@ impl TasksApi {
             .register_fn("json_sha256", Self::json_sha256)
             .register_fn("json_u64", Self::json_u64)
             .register_fn("extract_java", Self::extract_java)
+            .register_fn("fetch_bytes", Self::fetch_bytes)
+            .register_fn("place", Self::place)
             .register_fn("extract_files", Self::extract_files)
             .register_fn("merge_trees", Self::merge_trees)
             .register_fn("nested_jar", Self::nested_jar)

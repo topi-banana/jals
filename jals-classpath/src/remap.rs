@@ -5,7 +5,8 @@
 //! `NameAndType` / Class entries are added, refs are rewritten in place) so every external index
 //! stays stable while rates of hierarchy-aware member renaming and descriptor/signature
 //! rewriting proceed. Non-class members pass through verbatim; `META-INF/MANIFEST.MF`'s
-//! `Main-Class` is rewritten when present.
+//! `Main-Class` is rewritten when present, and its **signature is dropped**, because a remapped
+//! jar's signature is invalid by construction — see [`helpers::strip_signatures`].
 //!
 //! [`JarMerge::merge`] unions two jars by member path: the overlay wins on conflicts, the base
 //! keeps everything else, both in deterministic input order.
@@ -294,10 +295,18 @@ impl JarRemap {
                 let prefix = helpers::multi_release_prefix(&name);
                 (format!("{prefix}{member_name}"), remapped_bytes)
             } else {
+                // A signature block describes bytes that no longer exist: every class was renamed
+                // and rewritten, so every per-entry digest is stale and the entries they name are
+                // gone. A JVM asked to load such a jar refuses it with a digest error rather than
+                // ignoring the mismatch, so the block is dropped rather than carried.
+                if helpers::is_signature_member(&name) {
+                    continue;
+                }
                 let mut bytes = outcome
                     .map_err(|error| format!("failed to read archive member `{name}`: {error}"))?;
                 if name == "META-INF/MANIFEST.MF" {
                     bytes = helpers::rewrite_manifest_main_class(&bytes, &mappings);
+                    bytes = helpers::strip_signatures(&bytes);
                 }
                 (name, bytes)
             };
@@ -420,7 +429,13 @@ impl RemapRequest<'_> {
     /// rather than its bytes so identity — not position in some file — is what the key rests on.
     fn provenance(&self, jar: &CacheKey) -> ContentDigest {
         let mut fold = ProvenanceFold::new(b"remap-jar\0");
-        fold.parent(jar)
+        // What this transform *produces* is part of what the key identifies, and it has changed
+        // once: a remapped jar used to carry the signature block of the jar it was remapped from,
+        // which a JVM refuses to load. Without a version here, a checkout that already remapped a
+        // jar keeps being served the unloadable one — the plan digest folds the inputs, and the
+        // inputs did not change.
+        fold.version(REMAP_OUTPUT_VERSION)
+            .parent(jar)
             .digest(ContentDigest::of(self.mappings.as_bytes()));
         // Through the format itself, so the match over its variants is exhaustive: a format that
         // selects a renaming from more than its tag — tiny v2's namespace pair — has to reach the
@@ -433,6 +448,14 @@ impl RemapRequest<'_> {
         fold.finish()
     }
 }
+
+/// What a remap emits, bumped when that changes in a way an existing artifact cannot be reused
+/// across.
+///
+/// 1 → 2: the source jar's signature block is dropped. A remapped jar's signature describes bytes
+/// that no longer exist, and a JVM asked to load one refuses it with a digest error rather than
+/// ignoring the mismatch.
+const REMAP_OUTPUT_VERSION: u32 = 2;
 
 /// Jar merge namespace.
 pub struct JarMerge;
@@ -515,6 +538,52 @@ mod helpers {
     /// Whether `bytes` opens with a local-file-header / central-directory zip signature.
     pub(super) fn looks_like_zip(bytes: &[u8]) -> bool {
         bytes.len() >= 4 && bytes.starts_with(b"PK")
+    }
+
+    /// Whether `name` is part of a jar signature block, which a remap invalidates.
+    ///
+    /// The two file kinds JAR signing adds under `META-INF/`: the signature file listing per-entry
+    /// digests, and the signature block holding the certificate. Matched case-insensitively and
+    /// only one level down, which is where the specification puts them.
+    pub(super) fn is_signature_member(name: &str) -> bool {
+        let Some(rest) = name.strip_prefix("META-INF/") else {
+            return false;
+        };
+        if rest.contains('/') {
+            return false;
+        }
+        ["sf", "dsa", "rsa", "ec"]
+            .iter()
+            .any(|extension| has_extension(rest, extension))
+    }
+
+    /// Drop the per-entry digest sections from a manifest body, keeping the main section.
+    ///
+    /// A signed jar's manifest is mostly `Name:` sections carrying a digest of each entry. After a
+    /// remap every one of them names a member that no longer exists under that name, with a digest
+    /// of bytes that no longer exist either. Left in place they are inert — a JVM ignores them once
+    /// the `.SF` is gone — but they are also 3.7 MB of lies in a Minecraft client jar, so they go
+    /// with the signature that gave them meaning.
+    ///
+    /// The main section is everything before the first blank line, and is kept: it carries
+    /// `Main-Class`, `Multi-Release` and anything else the archive genuinely declares.
+    pub(super) fn strip_signatures(bytes: &[u8]) -> Vec<u8> {
+        let Ok(text) = core::str::from_utf8(bytes) else {
+            return bytes.to_vec();
+        };
+        let mut out = String::with_capacity(256);
+        for line in text.split_inclusive('\n') {
+            if line.trim_end_matches(['\r', '\n']).is_empty() {
+                break;
+            }
+            out.push_str(line);
+        }
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        // A manifest ends with a blank line; without it a reader may drop the last attribute.
+        out.push_str("\r\n");
+        out.into_bytes()
     }
 
     /// Rewrite `Main-Class:` in a manifest body when the target maps under `mappings`.
@@ -1496,7 +1565,72 @@ impl core::ops::DerefMut for PoolInterner<'_> {
 
 #[cfg(test)]
 mod tests {
+    use super::helpers;
     use super::helpers::multi_release_prefix;
+
+    /// A remapped jar's signature is invalid by construction: every class was renamed and
+    /// rewritten, so every entry the signature names is gone and every digest is of bytes that no
+    /// longer exist. A JVM refuses such a jar rather than ignoring the mismatch, which is why the
+    /// block is dropped rather than carried.
+    #[test]
+    fn a_signature_block_is_recognised_only_where_signing_puts_it() {
+        for signed in [
+            "META-INF/MOJANGCS.SF",
+            "META-INF/MOJANGCS.RSA",
+            "META-INF/mojangcs.rsa",
+            "META-INF/SOMETHING.DSA",
+            "META-INF/X.EC",
+        ] {
+            assert!(helpers::is_signature_member(signed), "{signed}");
+        }
+        for kept in [
+            "META-INF/MANIFEST.MF",
+            "META-INF/LICENSE",
+            "META-INF/services/java.sql.Driver",
+            // One level down only: signing does not put a block in a subdirectory, and a member
+            // that merely ends in `.rsa` deeper in the tree is somebody's data.
+            "META-INF/nested/X.RSA",
+            "assets/x.rsa",
+        ] {
+            assert!(!helpers::is_signature_member(kept), "{kept}");
+        }
+    }
+
+    #[test]
+    fn stripping_signatures_keeps_the_main_section_and_drops_the_digests() {
+        let manifest = concat!(
+            "Manifest-Version: 1.0\r\n",
+            "Main-Class: net.minecraft.client.Main\r\n",
+            "Multi-Release: true\r\n",
+            "\r\n",
+            "Name: assets/minecraft/models/block/x.json\r\n",
+            "SHA-384-Digest: 2Uw4L41ERLytkd8h36J2lyAw3BawYE4dWCdWULFK4kZy\r\n",
+            "\r\n",
+            "Name: mr$d.class\r\n",
+            "SHA-384-Digest: acTvVR2bh+Dkxj8XbIGcTUhejsJJjwo0d1akboAuiwiy\r\n",
+            "\r\n",
+        );
+        let stripped = helpers::strip_signatures(manifest.as_bytes());
+        let text = core::str::from_utf8(&stripped).expect("utf-8");
+        assert!(text.contains("Manifest-Version: 1.0"), "{text}");
+        assert!(
+            text.contains("Main-Class: net.minecraft.client.Main"),
+            "{text}"
+        );
+        assert!(text.contains("Multi-Release: true"), "{text}");
+        assert!(!text.contains("SHA-384-Digest"), "{text}");
+        assert!(!text.contains("Name:"), "{text}");
+        // Still a well-formed manifest: main section, then the blank line that ends it.
+        assert!(text.ends_with("\r\n\r\n"), "{text:?}");
+    }
+
+    #[test]
+    fn a_manifest_with_no_signature_survives_unchanged_in_substance() {
+        let manifest = "Manifest-Version: 1.0\r\nMain-Class: a.B\r\n\r\n";
+        let stripped = helpers::strip_signatures(manifest.as_bytes());
+        let text = core::str::from_utf8(&stripped).expect("utf-8");
+        assert!(text.contains("Main-Class: a.B"), "{text}");
+    }
 
     /// A multi-release jar stores the same class twice — once at its plain path and once under
     /// `META-INF/versions/<n>/` — and both copies share a `this_class`. Naming the remapped output

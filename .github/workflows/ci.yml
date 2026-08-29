@@ -632,6 +632,84 @@ jobs:
           jals fmt --check "${sources[@]}"
           jals lint ${{ matrix.example.features }} "${sources[@]}"
 
+  client-e2e:
+    # `examples/minecraft_client_e2e` boots the real game client headless and photographs what it
+    # draws. Its own job rather than a row in the `examples` matrix, because it needs three things no
+    # other example does: an X server, a software OpenGL stack, and about 105 MiB of downloads on top
+    # of a client-jar remap.
+    #
+    # **What this gates is the pipeline, not the pictures.** The example's README says why: every menu
+    # in 1.20.5 and later is drawn over a panorama that rotates with the wall clock, so two shots of
+    # one screen differ by most of their pixels and there is nothing stable to compare against yet.
+    # So the cell runs the blessing path — fetch, materialize, boot, drive, shutter, report, package —
+    # and asserts that two screenshots came out. Everything except the comparison, and the comparison
+    # is unit-tested in `jals-image` and `jals-build` where it needs no game at all.
+    #
+    # `continue-on-error` until it has a few runs behind it: the renderer here is not the renderer it
+    # was developed against, and a cell that has never been green should not be the one that blocks a
+    # pull request.
+    name: example (minecraft_client_e2e)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - parallel:
+          - uses: actions/checkout@v7
+          - name: Set up JDK (the client needs 21 or later; the toolchain compiles the driver)
+            uses: actions/setup-java@v6
+            with:
+              distribution: temurin
+              java-version: "25"
+          - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: client-e2e
+      # `xvfb` supplies the display GLFW opens a window on; `libgl1-mesa-dri` supplies llvmpipe, the
+      # software rasterizer `LIBGL_ALWAYS_SOFTWARE=1` selects. Neither is on the runner by default.
+      - name: Install a headless OpenGL stack
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb libgl1-mesa-dri libglx-mesa0
+      # Release, not debug: this cell decompresses and remaps a whole client jar, which an
+      # unoptimized build turns from a step into the job.
+      - name: Build the jals binary
+        run: cargo build --release --package jals-cli
+      - name: Put jals on PATH
+        run: echo "$GITHUB_WORKSPACE/target/release" >> "$GITHUB_PATH"
+      - name: Build the driver against the remapped client
+        working-directory: examples/minecraft_client_e2e
+        run: jals build --features 1.21.11
+      # `--update-golden` rather than a comparison: there is no published reference archive, and the
+      # example documents why. What this asserts is that the client booted and drew something.
+      - name: Boot the client and photograph two screens
+        working-directory: examples/minecraft_client_e2e
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          GALLIUM_DRIVER: llvmpipe
+        run: xvfb-run -a jals test --target client-e2e --features 1.21.11 --update-golden --color never
+      - name: Check that both screenshots came out
+        working-directory: examples/minecraft_client_e2e
+        run: |
+          shots=$(find target/jals/build/test-run -name '*.png' | sort)
+          echo "$shots"
+          count=$(printf '%s\n' "$shots" | grep -c . || true)
+          if [ "$count" -ne 2 ]; then
+            echo "::error::expected two screenshots, found $count"
+            exit 1
+          fi
+      # A failing run whose only trace is an exit status says nothing about a game that crashed
+      # mid-boot. The target's `artifacts` globs already name what to keep; this is where they go.
+      - name: Keep what the run left behind
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: client-e2e-run
+          path: |
+            examples/minecraft_client_e2e/target/jals/build/test-run/**/logs/**
+            examples/minecraft_client_e2e/target/jals/build/test-run/**/crash-reports/**
+            examples/minecraft_client_e2e/target/jals/build/test-run/**/*.png
+            examples/minecraft_client_e2e/target/jals/build/test-run/**/report.tsv
+          if-no-files-found: ignore
+
   mod-jar-setup:
     # The two things all 43 cells below need and neither should produce forty-three times: the list
     # of releases, and the `jals` that builds them.

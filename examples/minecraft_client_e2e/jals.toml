@@ -1,0 +1,95 @@
+[package]
+name = "client-e2e"
+version = "0.1.0"
+
+# One release, deliberately. `minecraft_mod` builds against 43 because a *jar* is cheap to produce
+# for each; a screenshot suite is not — every release needs its own reference images, baked in the
+# container that renders them. Adding a second release here means adding its feature, regenerating
+# `build.rhai`, and publishing a second golden archive.
+[features]
+"1.21.11" = ["minecraft/1.21.11", "minecraft/client"]
+
+# The game jar, remapped to official names by the SDK's build script and put on this project's
+# classpath. That remap is what lets `ClientDriver` be written in Java instead of in reflection:
+# without it `Minecraft.getInstance()` is `gfj.V()`, and a driver spelled that way would have to be
+# regenerated for every release.
+#
+# The remapped jar is also what *runs*. That is not the arrangement `minecraft_mod` uses — a mixin
+# has to be reobfuscated because it is loaded into a vanilla launcher — and the difference is that
+# here there is no vanilla launcher: the target *is* the launcher, so it can run the jar whose names
+# it compiled against, exactly as a modded development environment does.
+[dependencies]
+minecraft = { path = "../minecraft", default-features = false }
+
+[build]
+# The libraries, the natives and the asset slice — everything the vanilla launcher would assemble.
+script = { type = "rhai", file = "build.rhai" }
+source-dirs = ["src/main/java"]
+classes-dir = "target/classes"
+release = 21
+
+[[test-target]]
+name = "client-e2e"
+main-class = "com.example.e2e.ClientDriver"
+# The arguments a launcher passes, with the two directories the build script materialized filled in
+# by name. `{run-dir}` is this run's own working directory, cleared and re-seeded before the process
+# starts, so the game never writes into the checkout.
+args = [
+  "--username",
+  "jalstest",
+  "--uuid",
+  "00000000000000000000000000000001",
+  "--accessToken",
+  "0",
+  "--version",
+  "jals-e2e",
+  "--gameDir",
+  "{run-dir}",
+  "--assetsDir",
+  "{dir:assets}",
+  "--assetIndex",
+  "29",
+  "--width",
+  "854",
+  "--height",
+  "480",
+]
+jvm-args = [
+  "-Xmx1G",
+  "-Djava.library.path={dir:natives}",
+  "-Dorg.lwjgl.system.SharedLibraryExtractPath={dir:natives}",
+]
+artifacts = ["logs/**", "crash-reports/**", "screenshots/**", "report.tsv"]
+golden = { with = "client-e2e" }
+# Generous: the game boots in about seven seconds and each shot waits for its screen to stop
+# animating, but a cold CI cell decompressing a game jar is not this machine.
+timeout = 600
+
+[test-target.run-dir]
+# `options.txt` has to be in place *before* the game starts, or it writes its own defaults and the
+# first run renders at a different GUI scale from every run after it.
+seed = "fixtures/run"
+
+[test-target.report]
+file = "report.tsv"
+
+[test-target.screenshots]
+# `Screenshot.grab` writes into a `screenshots/` directory below the one it is given, which is the
+# run directory here — so this is the game's own layout, not a convention this example invented.
+dir = "screenshots"
+# Zero, and measured rather than preferred: rendering this scene twice under a pinned llvmpipe gives
+# a byte-identical frame, so there is no run-to-run noise for a threshold to absorb. What a loose
+# one absorbs is real failure — at 0.05 a comparison reports a whole rasterizer swap as a pass.
+threshold = 0.0
+
+# The reference images. Not committed: they are binary, they are ~250 KiB each, and they are
+# regenerated whenever Mesa moves — three arguments against a repository and none against the
+# machinery `jals.toml` already has for pinning bytes by digest.
+#
+# Produce a new archive with `jals test --target client-e2e --update-golden --features 1.21.11`,
+# **inside the CI container**, upload it, and paste what the command prints here.
+[[golden.client-e2e]]
+required-features = ["1.21.11"]
+url = "https://example.invalid/replace-me/client-e2e-1.21.11.zip"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+max-bytes = 4194304

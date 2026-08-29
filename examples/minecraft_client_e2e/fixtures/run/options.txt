@@ -1,0 +1,15 @@
+# Seeded into the run directory before the game starts. Only the keys that change what a frame
+# looks like are here; the game fills in the rest and rewrites this file, which is why it is a seed
+# and not the file itself.
+guiScale:2
+gamma:1.0
+fullscreen:false
+enableVsync:false
+maxFps:60
+particles:2
+graphicsMode:1
+renderDistance:8
+narrator:0
+soundCategory_master:0.0
+tutorialStep:none
+skipMultiplayerWarning:true
