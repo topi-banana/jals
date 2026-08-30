@@ -3335,7 +3335,11 @@ fn test_filters_select_and_partition_covers_every_test() {
 /// cheaply, run one process for the whole selection, read the verdicts back out of a file — and
 /// none of that needs the thing being booted to be real. The screenshot half is unit-tested in
 /// `jals-build`, which needs no JVM at all.
-#[cfg(unix)]
+///
+/// Ungated, unlike the build-script tests above: nothing here is a shell or a packaged jar. It is
+/// `javac` and a JVM reached the way `test_reports_each_verdict_and_fails_the_run` already reaches
+/// them on every platform, and every assertion below is on a message or a count rather than on a
+/// path, so there is no separator to get wrong.
 fn target_project(root: &Path) {
     std::fs::write(
         root.join("jals.toml"),
@@ -3410,7 +3414,6 @@ public final class Driver {
     .unwrap();
 }
 
-#[cfg(unix)]
 #[test]
 fn a_test_target_enumerates_without_running_anything() {
     if !javac_available() {
@@ -3440,7 +3443,6 @@ fn a_test_target_enumerates_without_running_anything() {
     assert!(!ran, "--list wrote a report, so it ran the tests");
 }
 
-#[cfg(unix)]
 #[test]
 fn a_test_target_runs_once_and_its_report_decides_each_verdict() {
     if !javac_available() {
@@ -3476,7 +3478,6 @@ fn a_test_target_runs_once_and_its_report_decides_each_verdict() {
     assert!(all.contains("latest.log"), "{all}");
 }
 
-#[cfg(unix)]
 #[test]
 fn a_test_target_passes_only_the_selected_ids_to_the_program() {
     if !javac_available() {
@@ -3555,7 +3556,6 @@ const WHITE_PNG: &[u8] = &[
 /// the whole contract a real one has with jals: write a file, name it in the report. The golden set
 /// it declares is gated on a feature nothing enables, so the run compares against whatever
 /// `--golden` hands it and never reaches the network.
-#[cfg(unix)]
 fn screenshot_target_project(root: &Path) {
     std::fs::write(
         root.join("jals.toml"),
@@ -3623,7 +3623,6 @@ public final class Shooter {
     .unwrap();
 }
 
-#[cfg(unix)]
 #[test]
 fn a_local_golden_directory_judges_the_run_instead_of_the_pinned_archive() {
     if !javac_available() {
