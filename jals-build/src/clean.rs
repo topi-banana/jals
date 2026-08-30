@@ -57,13 +57,8 @@ impl CleanTargets {
         if test_classes_dir.path().is_root() {
             return Err(jals_storage::PathError::DirectoryIsRoot);
         }
-        if !keys.contains(&test_classes_dir) {
-            keys.push(test_classes_dir);
-        }
-        let build_root = DirKey::parse("target/jals/build")?;
-        if !keys.contains(&build_root) {
-            keys.push(build_root);
-        }
+        Self::add(&mut keys, test_classes_dir);
+        Self::add(&mut keys, DirKey::parse(jals_config::MANAGED_BUILD_ROOT)?);
         // The two roots a target run writes under, then whatever a target redirected its classes
         // to. The roots come first so that the usual case — a target keeping the default — adds
         // nothing: its directory is already inside one of them.
@@ -92,10 +87,7 @@ impl CleanTargets {
             // arbitrary `jar` path would delete whatever else the author keeps beside it. A
             // redirected jar is theirs to place and theirs to remove; what jals owns is the root it
             // chose itself, which holds nothing else by construction.
-            let remap_root = DirKey::parse(jals_config::MANAGED_REMAP_ROOT)?;
-            if !keys.contains(&remap_root) {
-                keys.push(remap_root);
-            }
+            Self::add(&mut keys, DirKey::parse(jals_config::MANAGED_REMAP_ROOT)?);
         }
         Ok(keys)
     }
@@ -104,8 +96,10 @@ impl CleanTargets {
     ///
     /// The caller removes each key recursively, so a directory *inside* one already listed is not a
     /// second target — it is the same removal named twice. Containment rather than equality because
-    /// a target's `classes-dir` usually sits under the managed root that follows it, and a clean set
-    /// that listed both would describe one deletion as two.
+    /// a target's `classes-dir` usually sits under the managed root that precedes it, and a clean
+    /// set that listed both would describe one deletion as two. Every key after the first goes
+    /// through here, so one manifest never gets two dedupe policies: a `classes-dir` of `target`
+    /// subsumes the rest exactly as the managed roots subsume a target that kept its default.
     fn add(keys: &mut Vec<DirKey>, key: DirKey) {
         if !keys.iter().any(|held| key.path().starts_with(held.path())) {
             keys.push(key);
@@ -211,6 +205,19 @@ mod tests {
                 .unwrap()
                 .iter()
                 .all(|target| !script.path().starts_with(target.path()))
+        );
+    }
+
+    /// One dedupe policy for the whole set, not one for the keys that were here first and another
+    /// for the ones added later. A `classes-dir` that contains every managed root leaves a set of
+    /// exactly one key, because the caller removes it recursively and the rest are inside it.
+    #[test]
+    fn a_classes_dir_that_contains_the_managed_roots_subsumes_them() {
+        let mut m = Manifest::default();
+        m.build.classes_dir = "target".into();
+        assert_eq!(
+            CleanTargets::keys(&m).unwrap(),
+            vec![DirKey::parse("target").unwrap()]
         );
     }
 

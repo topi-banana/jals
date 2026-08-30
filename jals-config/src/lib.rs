@@ -38,7 +38,6 @@ pub mod toolchain;
 pub use diagnostic::DiagnosticSeverity;
 pub use lint::{Category, LintLevel};
 pub use loader::{ConfigError, DiscoverableConfig};
-pub use manifest::MANAGED_REMAP_ROOT;
 pub use manifest::{
     AmbiguousMapping, BackendKind, Bin, Build, BuildFeatureError, BuildRemap, BuildResources,
     BuildScript, Dependency, DependencyError, Feature, FeatureRefError, FeatureSet, FileMappings,
@@ -47,4 +46,5 @@ pub use manifest::{
     PathDependency, RemapSite, ResolvedBuildFeatures, ResourcePattern, ResourcePatternError, Run,
     UrlMappings, ValidationError,
 };
+pub use manifest::{MANAGED_BUILD_ROOT, MANAGED_REMAP_ROOT};
 pub use toolchain::{Compiler, Distribution, Runtime, ToolSpec, Toolchain};

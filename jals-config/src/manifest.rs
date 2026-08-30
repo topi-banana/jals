@@ -23,7 +23,11 @@ use serde::Deserialize;
 
 use crate::toolchain::Toolchain;
 
-const MANAGED_BUILD_ROOT: &str = "target/jals/build";
+/// The dedicated root a build script's artifacts and a target run's scratch live under.
+///
+/// Public for the same reason its two siblings below are: `jals clean` removes it, and a literal
+/// spelled once here and once in `jals-build` is a literal that will drift.
+pub const MANAGED_BUILD_ROOT: &str = "target/jals/build";
 
 /// Where a `[build] remap` writes its jar when the entry names no path.
 ///
