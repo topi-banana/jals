@@ -569,7 +569,7 @@ Every project under `examples/` is a CI cell of its own (`example (<name>)`), ru
 README tells a reader to run: `jals build`, then `jals fmt --check` and `jals lint` over the
 example's **tracked** `.java` files. Tracked is what separates authored source from published
 output — a build script's publication into a source root is untracked by construction — so the gate
-never scores a decompiled skeleton as something someone wrote. Two consequences for an example:
+never scores a decompiled skeleton as something someone wrote. Three consequences for an example:
 
 - A `tasks.project_jar` example needs its JAR, and a JAR is a binary, so none is committed:
   `examples/scripts/gen-vendor-jars.sh` writes the two the `task_dependency` and
@@ -579,3 +579,12 @@ never scores a decompiled skeleton as something someone wrote. Two consequences 
   §Compile-safety). That cell asserts the pipeline instead — fetch → nested extract → remap →
   decompile → publish — by requiring all three publication roots to come out non-empty, which is a
   statement only a run that reached the last step can make.
+- `minecraft_client_e2e` runs the same three gates and then *boots* what it built, which is why it
+  is a job of its own rather than a matrix row: an X server and a software rasterizer are things no
+  other example needs. Its boot steps carry `continue-on-error` until the two-pass screenshot
+  comparison has been green across several runs, because the renderer CI supplies is not the one the
+  reference images were developed against. **That flag belongs on those steps and never on the
+  job.** A job-level one is not a weaker version of the same statement — it also stops `jals build`,
+  `jals fmt --check` and `jals lint` from failing anything, and the bar those three set is the one
+  every example is held to. A provisional *assertion* is not a licence to stop checking everything
+  around it.
