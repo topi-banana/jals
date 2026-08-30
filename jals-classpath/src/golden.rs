@@ -15,11 +15,14 @@ use alloc::borrow::ToOwned;
 use alloc::collections::BTreeSet;
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use jals_config::Manifest;
 use jals_config::testing::GoldenSource;
 use jals_exec::Exec;
-use jals_storage::{ArtifactCache, CacheBackend, CacheNamespace, RelativePath};
+use jals_storage::{ArtifactCache, CacheBackend, CacheNamespace, ContentDigest, RelativePath};
+
+use crate::jar::ArchivePackage;
 
 use crate::io::Fetcher;
 use crate::load::{FileTreeExtraction, SourceTree, SourceTreeLimits};
@@ -27,6 +30,19 @@ use crate::resolve::{
     ExpectedDigest, ExternalArtifactResolver, ExternalArtifactSpec, ExternalLocator,
 };
 use crate::{Warning, WarningOrigin};
+
+/// A packaged golden set: the bytes to publish, and the digest a `[[golden.<name>]]` pins them by.
+///
+/// The two travel together because they are one answer. A blessing run writes the bytes, an author
+/// uploads them, and the block they paste names the digest — so a caller that recomputed the digest
+/// from bytes it had written elsewhere would be free to have written different ones.
+pub struct GoldenArchive {
+    /// The archive itself, ready to be written out and uploaded.
+    pub bytes: Vec<u8>,
+    /// Its SHA-256, which is what [`GoldenSet::declaration`] renders and what
+    /// [`GoldenSet::resolve`] verifies a fetch against.
+    pub digest: ContentDigest,
+}
 
 /// The reference images one `[[golden.<name>]]` key resolves to.
 pub struct GoldenSet;
@@ -146,6 +162,31 @@ impl GoldenSet {
         })
     }
 
+    /// Package `entries` as the archive [`GoldenSet::resolve`] reads back.
+    ///
+    /// Written here rather than by the CLI for the reason [`GoldenSet::declaration`] is: what a
+    /// blessing run produces and what a judging run unpacks are one contract, and the two halves
+    /// changing independently is the failure this places them next to each other to avoid.
+    ///
+    /// The sort is part of that contract and not tidiness. A stored zip lays its members out in the
+    /// order it is handed them, and the order a run reports its screenshots in is the order its
+    /// tests happened to finish — so without this, two runs that photographed the same screens
+    /// would publish archives with different digests, and the digest is the whole of what a
+    /// `[[golden.<name>]]` pins. Sorting *here* rather than at each call site is what makes "the
+    /// same pictures package to the same bytes" a property of the archive rather than of the
+    /// caller.
+    ///
+    /// # Errors
+    /// The writer's refusals: two entries sharing a path, or an archive beyond what the stored
+    /// encoding's 32-bit fields can describe.
+    pub fn package(entries: &[(RelativePath, Vec<u8>)]) -> Result<GoldenArchive, String> {
+        let mut sorted = entries.to_vec();
+        sorted.sort_by(|left, right| left.0.cmp(&right.0));
+        let bytes = ArchivePackage::write(&sorted)?;
+        let digest = ContentDigest::of(&bytes);
+        Ok(GoldenArchive { bytes, digest })
+    }
+
     /// Render the `[[golden.<name>]]` block an author pastes after publishing an archive.
     ///
     /// Rendered here rather than by the CLI because the shape it has to match is this module's
@@ -162,7 +203,7 @@ impl GoldenSet {
         let features = required_features
             .iter()
             .map(|feature| format!("\"{feature}\""))
-            .collect::<alloc::vec::Vec<_>>()
+            .collect::<Vec<_>>()
             .join(", ");
         format!(
             "[[golden.{reference}]]\n\
@@ -184,6 +225,61 @@ mod tests {
     use alloc::borrow::ToOwned;
     use alloc::collections::BTreeSet;
     use alloc::string::String;
+    use alloc::vec;
+    use alloc::vec::Vec;
+    use jals_storage::RelativePath;
+
+    fn shot(name: &str, fill: u8) -> (RelativePath, Vec<u8>) {
+        (
+            RelativePath::parse(name).expect("a relative path"),
+            vec![fill; 32],
+        )
+    }
+
+    /// The property the whole comparison rests on: the same pictures package to the same bytes.
+    ///
+    /// Stated over *order* rather than over sortedness, because order is the only thing that
+    /// varies between two runs of one suite — a report lists its shots in the order its tests
+    /// finished, and nothing makes two runs finish in the same order. A digest that moved with it
+    /// would make `[[golden.<name>]]`'s `sha256` unpinnable.
+    #[test]
+    fn two_bakes_of_one_set_agree_byte_for_byte() {
+        let one = [
+            shot("title.png", 1),
+            shot("hud.png", 2),
+            shot("nested/inventory.png", 3),
+        ];
+        let other = [
+            shot("nested/inventory.png", 3),
+            shot("title.png", 1),
+            shot("hud.png", 2),
+        ];
+        let first = GoldenSet::package(&one).expect("packages");
+        let second = GoldenSet::package(&other).expect("packages");
+        assert_eq!(
+            first.bytes, second.bytes,
+            "the same pictures in a different order packaged to different bytes"
+        );
+        assert_eq!(first.digest, second.digest);
+    }
+
+    /// The digest travels with the bytes because it is a digest *of* them, and not of a rewrite.
+    #[test]
+    fn the_digest_is_of_the_bytes_the_archive_holds() {
+        let archive = GoldenSet::package(&[shot("only.png", 7)]).expect("packages");
+        assert_eq!(
+            archive.digest,
+            jals_storage::ContentDigest::of(&archive.bytes)
+        );
+    }
+
+    /// Two `shot` lines naming one screenshot are the target's contract broken, and an archive that
+    /// silently kept one of them would publish a reference nobody could tell was half a set.
+    #[test]
+    fn one_name_photographed_twice_is_refused_rather_than_packaged() {
+        let entries = [shot("hud.png", 1), shot("hud.png", 2)];
+        assert!(GoldenSet::package(&entries).is_err());
+    }
 
     #[test]
     fn a_declaration_is_pasteable_toml_with_a_rounded_cap() {

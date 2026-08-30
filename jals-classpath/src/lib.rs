@@ -39,9 +39,9 @@ pub use resolve::{
 pub use skeleton::{SkeletonGroup, SkeletonMode, Skeletons};
 
 #[cfg(feature = "archive")]
-pub use golden::GoldenSet;
+pub use golden::{GoldenArchive, GoldenSet};
 #[cfg(feature = "archive")]
-pub use jar::{ArchivePackage, JarPackage};
+pub use jar::JarPackage;
 #[cfg(feature = "archive")]
 pub use load::{
     CachedJar, ClasspathCoverage, ClasspathEntry, ClasspathLoad, FileTreeExtraction, JarExtraction,

@@ -146,15 +146,20 @@ impl JarPackage {
 ///
 /// Stored rather than deflated, like everything this crate writes: the members are PNG files,
 /// which are already compressed, so deflating them costs time and saves nothing.
-pub struct ArchivePackage;
+///
+/// Crate-internal, and [`GoldenSet::package`](crate::GoldenSet::package) is the only caller: a
+/// stored zip lays its members out in the order it is handed them, so *which* order that is belongs
+/// with the contract that pins the result by digest rather than with the encoder that serializes
+/// it.
+pub(crate) struct ArchivePackage;
 
 impl ArchivePackage {
-    /// Serialize `entries` as a deterministic stored zip.
+    /// Serialize `entries` as a stored zip, in the order given.
     ///
     /// # Errors
     /// The writer's own refusals: an unsafe member name, two entries sharing a path, or an archive
     /// beyond what the stored encoding's 32-bit fields can describe.
-    pub fn write(entries: &[(RelativePath, Vec<u8>)]) -> Result<Vec<u8>, String> {
+    pub(crate) fn write(entries: &[(RelativePath, Vec<u8>)]) -> Result<Vec<u8>, String> {
         let members = entries
             .iter()
             .map(|(path, bytes)| WriteMember {

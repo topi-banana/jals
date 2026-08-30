@@ -1416,11 +1416,12 @@ impl TestArgs {
                 target.main_class
             );
         }
-        entries.sort_by(|left, right| left.0.cmp(&right.0));
+        // Sorted by `GoldenSet::package` rather than here: the order members are written in is
+        // what the published digest is a digest *of*, so it belongs with the packaging. What is
+        // sorted here is only the line this prints.
         names.sort();
-        let archive = jals_classpath::ArchivePackage::write(&entries)
+        let archive = jals_classpath::GoldenSet::package(&entries)
             .map_err(|error| anyhow!("packaging the golden archive failed: {error}"))?;
-        let digest = jals_storage::ContentDigest::of(&archive);
 
         let selection = if self.features.features.is_empty() {
             String::new()
@@ -1433,14 +1434,19 @@ impl TestArgs {
             .join(format!("{}{selection}.zip", target.name));
         std::fs::create_dir_all(out.parent().expect("the archive path has a parent"))
             .with_context(|| format!("creating {}", out.display()))?;
-        std::fs::write(&out, &archive).with_context(|| format!("writing {}", out.display()))?;
+        std::fs::write(&out, &archive.bytes)
+            .with_context(|| format!("writing {}", out.display()))?;
 
         eprintln!(
             "    Packaged {} screenshot(s): {}",
             entries.len(),
             names.join(", ")
         );
-        eprintln!("        → {} ({} bytes)", out.display(), archive.len());
+        eprintln!(
+            "        → {} ({} bytes)",
+            out.display(),
+            archive.bytes.len()
+        );
         eprintln!();
         eprintln!("    Upload it, then declare it in jals.toml:");
         eprintln!();
@@ -1451,8 +1457,8 @@ impl TestArgs {
                 .map_or_else(|| target.name.clone(), |golden| golden.with.clone()),
             &self.features.features.iter().cloned().collect(),
             "<the URL you uploaded it to>",
-            &digest.to_hex(),
-            archive.len(),
+            &archive.digest.to_hex(),
+            archive.bytes.len(),
         );
         for line in block.lines() {
             eprintln!("    {line}");

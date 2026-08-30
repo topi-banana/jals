@@ -101,9 +101,17 @@ filesystem reads into portable interfaces.
 - `jals-classpath`: resolution over project bytes and cache artifacts.
   - The in-house zip reader is isolated in `zip.rs` behind `archive` (portable, `no_std`, over the
     async io seam; also a stored-only writer for jar remap/merge; the `zip` crate is a dev-only
-    fixture oracle). `jar.rs` is the only public surface over that writer: `JarPackage::write`
-    packages compiled classes, generating the `META-INF/MANIFEST.MF` a jar needs (first member,
-    CRLF, 72-byte wrapped) and keeping `StoredZip`/`WriteMember` sealed.
+    fixture oracle). `StoredZip`/`WriteMember` stay sealed, and that writer has exactly **two**
+    public surfaces, one per thing this crate writes. `jar.rs`'s `JarPackage::write` packages
+    compiled classes, generating the `META-INF/MANIFEST.MF` a jar needs (first member, CRLF,
+    72-byte wrapped). `golden.rs`'s `GoldenSet::package` packages reference screenshots, writing no
+    manifest and **sorting the members** — a stored zip lays them out in the order it is handed
+    them, and the order a run reports its shots in is the order its tests happened to finish, so
+    without the sort two bakes of one suite would publish different digests and `[[golden.<name>]]`
+    would have nothing stable to pin. It returns the digest beside the bytes because those are one
+    answer, and it sits next to `resolve` and `declaration` for the reason those sit together:
+    writing the archive, reading it back and rendering the block that names it are one contract.
+    `jar.rs`'s `ArchivePackage` is the crate-internal encoder beneath it and is not exported.
   - Mappings parsing, hierarchy-aware jar remapping, and compile-oriented jar decompilation into
     source trees live under `archive` too. Two grammars are read into one `Mappings` index —
     Mojang/ProGuard and Fabric's tiny v2 — and a format that names more than two namespaces carries

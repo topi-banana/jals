@@ -6,7 +6,7 @@
 //! and a test that only checked the writer would pass while the reader could not open what it
 //! produced.
 
-use jals_classpath::{ArchivePackage, FileTreeExtraction, SourceTreeLimits};
+use jals_classpath::{FileTreeExtraction, GoldenSet, SourceTreeLimits};
 use jals_exec::{Exec, block_on_inline};
 use jals_storage::{
     ArtifactCache, CacheKey, CacheNamespace, ContentDigest, MemoryCache, RelativePath,
@@ -43,7 +43,7 @@ fn an_archive_this_crate_wrote_unpacks_to_what_went_into_it() {
             (path("hud.png"), vec![0xFF, 0x00, 0xFF, 0x00]),
             (path("nested/inventory.png"), vec![7; 300]),
         ];
-        let archive = ArchivePackage::write(&entries).expect("packages");
+        let archive = GoldenSet::package(&entries).expect("packages").bytes;
 
         let exec = Exec::inline();
         let mut cache = ArtifactCache::new(MemoryCache::default());
@@ -52,7 +52,8 @@ fn an_archive_this_crate_wrote_unpacks_to_what_went_into_it() {
             .await
             .expect("unpacks");
 
-        // Sorted by path, whatever order they were written in — a golden set is compared by name.
+        // Sorted by path on the way out as well as on the way in: a golden set is compared by
+        // name, so neither half of the round trip may reorder what the other established.
         let names: Vec<String> = tree
             .files
             .iter()
@@ -82,7 +83,7 @@ fn an_archive_with_no_manifest_is_what_a_golden_set_is() {
         // The distinction from `JarPackage`: no `META-INF/MANIFEST.MF` is invented, so a consumer
         // comparing by member name has nothing to know to ignore.
         let entries = vec![(path("only.png"), vec![1, 2, 3])];
-        let archive = ArchivePackage::write(&entries).expect("packages");
+        let archive = GoldenSet::package(&entries).expect("packages").bytes;
         let exec = Exec::inline();
         let mut cache = ArtifactCache::new(MemoryCache::default());
         let key = publish(&mut cache, &archive).await;
@@ -102,7 +103,7 @@ fn a_prefix_selects_a_subtree_and_strips_it() {
             (path("1.21.11/hud.png"), vec![2]),
             (path("1.20.1/title.png"), vec![3]),
         ];
-        let archive = ArchivePackage::write(&entries).expect("packages");
+        let archive = GoldenSet::package(&entries).expect("packages").bytes;
         let exec = Exec::inline();
         let mut cache = ArtifactCache::new(MemoryCache::default());
         let key = publish(&mut cache, &archive).await;
@@ -122,7 +123,7 @@ fn a_prefix_selects_a_subtree_and_strips_it() {
 fn an_archive_larger_than_its_limit_is_refused_rather_than_unpacked() {
     block_on_inline(async {
         let entries = vec![(path("big.png"), vec![0; 4096])];
-        let archive = ArchivePackage::write(&entries).expect("packages");
+        let archive = GoldenSet::package(&entries).expect("packages").bytes;
         let exec = Exec::inline();
         let mut cache = ArtifactCache::new(MemoryCache::default());
         let key = publish(&mut cache, &archive).await;

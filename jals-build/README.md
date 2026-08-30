@@ -780,6 +780,20 @@ A selection that activates no alternative is not an error: it is what a project 
 its first golden archive exists, and every shot then reports "no reference" — reported out loud, so
 a green run that compared nothing cannot pass quietly.
 
+`--update-golden` is how the archive gets made. The run's shots are packaged under their own names,
+the command prints the digest and the `[[golden.<name>]]` block to paste, and an author uploads the
+file and pastes the block. Two properties of that step are worth naming, because a reference set is
+worth exactly what its reproducibility is:
+
+- **The members are sorted, so two bakes of one suite produce the same bytes.** A stored zip lays
+  its members out in the order it is handed them, and the order a report lists its shots in is the
+  order the tests happened to finish — so without the sort, two runs that photographed the same
+  screens would publish archives that differ in bytes while agreeing in pictures, and the `sha256`
+  the block pins would be unpinnable.
+- **Blessing reports on the archive, not on the tests.** A run whose assertions failed may still
+  have produced the pictures an author means to declare correct, so a failing assertion does not
+  block an unrelated screenshot update — the exit status still reflects the tests.
+
 ### `[dependencies]`
 
 A table mapping a **dependency name** to its spec (Cargo's `[dependencies]`). Each entry picks exactly
