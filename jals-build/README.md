@@ -53,7 +53,7 @@ Four subcommands are wired through `jals-cli`:
 | ------------------ | ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
 | `jals build`       | `execute_build_script` + `jals-project` + `Invocation::build`                | Run the root pre-build script, preprocess the transitive dependency graph, discover `.java` sources, build the `javac` command, and run it.                     | `--manifest-path <PATH>`, `--dry-run`, `-v`/`--verbose`, `--out-dir <DIR>`, `--bin <NAME>`                  |
 | `jals run`         | `execute_build_script` + `jals-project` + `RunTarget::resolve` + invocations | Run the root and dependency pre-build phases, compile the complete source graph, then run the resolved entry point with `java`. Compilation must succeed first. | `--manifest-path <PATH>`, `--dry-run`, `-v`/`--verbose`, `--main-class <FQCN>`, `--bin <NAME>`, `-- <args>` |
-| `jals clean`       | `CleanTargets::keys`                                                         | Remove `classes-dir` and `target/jals/build`, including stale outputs after a script is removed. A never-built project succeeds quietly.                        | `--manifest-path <PATH>`, `--dry-run`                                                                       |
+| `jals clean`       | `CleanTargets::keys`                                                         | Remove `classes-dir`, `target/jals/build` and the `[[test-target]]` roots, including stale outputs after a script or a target is removed. A never-built project succeeds quietly. | `--manifest-path <PATH>`, `--dry-run`                                                                       |
 | `jals init [PATH]` | `InitOptions::scaffold`                                                      | Scaffold a new project: `jals.toml`, a starter `Main.java`, and a `.gitignore`. Refuses to overwrite an existing `jals.toml`.                                   | `--name <NAME>`                                                                                             |
 
 Common behavior, all implemented in `jals-cli` on top of this crate:
@@ -560,10 +560,16 @@ deleted. Missing cached output, a digest mismatch, changed inputs, or invalid ca
 normal script evaluation. Failure to persist cache state becomes a warning after generated output
 has committed, not a failed build.
 
-`jals clean` first removes exclusive task-owned source roots, then both `classes-dir` and
-`target/jals/build`, including stale
-`target/jals/build/rhai/out` files after a script is removed. It intentionally leaves the shared
-verified cache at `target/jals/cache`; the next build can safely restore matching output from it.
+`jals clean` first removes exclusive task-owned source roots, then `classes-dir`, `[test]
+classes-dir`, `target/jals/build` (including stale `target/jals/build/rhai/out` files after a script
+is removed), and the two roots a `[[test-target]]` run writes under —
+`target/jals/test-target` for its classes and `target/jals/test` for the archive `--update-golden`
+bakes. Those two are unconditional rather than gated on a target being declared, because the case
+worth reaping is the one where the declaration is *gone*: a renamed or deleted target leaves output
+nothing names any more, exactly as a removed build script does. A target that redirected its
+`classes-dir` has that directory removed as well, since it is a `javac -d` destination like every
+other one in the set. It intentionally leaves the shared verified cache at `target/jals/cache`; the
+next build can safely restore matching output from it.
 
 #### Sandbox and WebAssembly
 
@@ -678,7 +684,7 @@ which runs the tests itself and writes a report saying what happened.
 | --------------- | ---------------- | --------------------------- | ----------------------------------------------------------------------------- |
 | `name`          | string           | —                           | the `--target <name>` selector; letters, digits, `-` and `_` only              |
 | `source-dirs`   | array of strings | `[]`                        | source roots compiled **in addition to** `[build] source-dirs`                 |
-| `classes-dir`   | string           | `target/jals/test-target/<name>` | where this target's classes go                                            |
+| `classes-dir`   | string           | `target/jals/test-target/<name>` | where this target's classes go (removed by `jals clean`)                  |
 | `main-class`    | string           | —                           | the class `java` starts                                                        |
 | `args`          | array of strings | `[]`                        | arguments after the main class; the selected test ids follow them              |
 | `jvm-args`      | array of strings | `[]`                        | arguments before the classpath, after the build script's own                   |
@@ -894,7 +900,7 @@ jals run                    # compile, then run the resolved entry point
 jals run --bin server       # run the [[bin]] named "server"
 jals run -- arg1 arg2       # ...passing args to the program
 jals run --main-class com.example.Other
-jals clean                  # remove target/classes and target/jals/build
+jals clean                  # remove target/classes and the managed target/jals roots
 ```
 
 ## Library API

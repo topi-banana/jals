@@ -42,14 +42,15 @@ build front end (`jals build` / `run` / `test` / `clean` / `init`) wraps the JDK
   then projected into verified source/classpath artifacts without mutating dependency trees.
 - **`wasm32`-ready core.** The syntax, formatting, linting, and semantic-analysis layers
   (`jals-editor`, `jals-syntax`, `jals-fmt`, `jals-lint`, `jals-hir`, `jals-classfile`,
-  `jals-decompile`, `jals-javac`, `jals-storage`, `jals-config`) are `no_std` and build for
+  `jals-decompile`, `jals-javac`, `jals-frontend`, `jals-image`, `jals-storage`, `jals-config`) are
+  `no_std` and build for
   `wasm32-unknown-unknown`; `jals-classpath`'s resolution core, `jals-project`'s in-memory graph, and
   `jals-build`'s Rhai runner do too (host I/O sits behind `native` features). The browser playground
   therefore runs the same analysis, project-graph, and build-script stack client-side.
 
 ## Workspace layout
 
-`jals` is a Cargo workspace of sixteen product crates, including a browser playground:
+`jals` is a Cargo workspace of nineteen product crates, including a browser playground:
 
 | Crate                                | Description                                                                                                                                                                                                                                                                                                                                                                                                         |
 | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -66,6 +67,8 @@ build front end (`jals build` / `run` / `test` / `clean` / `init`) wraps the JDK
 | [`jals-exec`](jals-exec)             | The unified current-thread execution context for native, browser, and inline hosts, including deterministic worker fan-out and runtime-free cooperative yielding.                                                                                                                                                                                                                                                   |
 | [`jals-storage`](jals-storage)       | Deterministic, revisioned project storage. Portable code uses validated `FileKey`/`DirKey` values, immutable `CodeTree` snapshots, transactions, overlays, a SHA-256 verified artifact cache (whole-buffer `lookup` or streaming `open_verified` readers), and the portable `io` byte-stream traits the class-file codec parses through; memory and `std`-gated native adapters implement the same sealed contract. |
 | [`jals-project`](jals-project)       | Discovers the transitive path/Git/JAR project graph with stable node identity, probes only each selected root's exact `jals.toml`, enforces the resolved-to-preprocessed phase transition, and publishes dependency inputs only as node-scoped verified artifacts for `jals-classpath`. Includes portable in-memory and native acquisition hosts.                                                                   |
+| [`jals-frontend`](jals-frontend)     | The compile frontend seam: project sources lowered to the Java a backend compiles, with `[build.frontend]` and the dialect features selecting the lowering through a single decision table.                                                                                                                                                                                                                          |
+| [`jals-image`](jals-image)           | An in-house PNG codec and a pixelmatch-style screenshot comparator, used by `jals test --target` to judge a run's pictures against a reference set. Both matching defaults are exactness, measured rather than preferred.                                                                                                                                                                                             |
 | [`jals-build`](jals-build)           | A Cargo-style build orchestrator: it turns `jals.toml` into `javac`/`java` plans, clean keys, and scaffolding, and optionally runs sandboxed Rhai pre-build scripts over revisioned project storage. Backs `jals build`/`run`/`clean`/`init` and the LSP/playground build phase.                                                                                                                                    |
 | [`jals-lsp`](jals-lsp)               | A Language Server Protocol server (the `jals lsp` subcommand) providing diagnostics, document symbols, formatting, hover, go-to-definition, find-references, and more from the same CST and semantic layer. Host-only.                                                                                                                                                                                              |
 | [`jals-cli`](jals-cli)               | The `jals` command-line binary.                                                                                                                                                                                                                                                                                                                                                                                     |
@@ -90,6 +93,8 @@ jals/
 ├── jals-exec/        # current-thread execution + worker fan-out (no_std, wasm-compatible)
 ├── jals-storage/     # revisioned project storage               (no_std, wasm-compatible)
 ├── jals-project/     # transitive source-project graph          (no_std + wasm-compatible core)
+├── jals-frontend/    # project sources -> a backend's Java      (no_std, wasm-compatible)
+├── jals-image/       # PNG codec + screenshot comparison        (no_std, wasm-compatible)
 ├── jals-build/       # Cargo-style javac/java build planner     (no_std + wasm-compatible core)
 ├── jals-lsp/         # LSP server (async-lsp, `jals lsp`)       (std, host-only)
 ├── jals-cli/         # `jals` binary                            (std)
@@ -311,7 +316,10 @@ jals run --bin server       # run a named [[bin]] entry point
 jals run -- arg1 arg2       # ...passing args to the program
 jals test                   # run every `#[test]` method, one JVM per test
 jals test --list            # list the tests without running them
-jals clean                  # remove the build output (target/classes, target/test-classes)
+jals test --target e2e      # run a [[test-target]] program instead: one process for the selection
+jals test --target e2e --update-golden        # bake its screenshots into a reference archive
+jals test --target e2e --golden ./reference   # judge this run against an unpacked one
+jals clean                  # remove the build output (keeps the verified cache)
 ```
 
 A minimal `jals.toml` — every key is optional and defaults to the Maven-style
@@ -652,7 +660,7 @@ cargo check -p jals-project --all-features                    # native path/Git 
 # wasm: the pure `no_std` crate set (built as one package set so their `std` features stay off) …
 cargo build --release --target wasm32-unknown-unknown \
   -p jals-editor -p jals-syntax -p jals-classfile -p jals-hir -p jals-decompile \
-  -p jals-javac -p jals-fmt -p jals-lint -p jals-storage -p jals-config
+  -p jals-javac -p jals-fmt -p jals-lint -p jals-storage -p jals-config -p jals-image
 # … plus jals-classpath's wasm-compatible core (host I/O is behind its default `native` feature)
 cargo build --release --target wasm32-unknown-unknown -p jals-classpath --no-default-features
 # The portable in-memory project graph includes dependency-script preparation and artifact projection
@@ -688,8 +696,8 @@ for any change to the syntax or formatting layers:
   reorders comments, and is idempotent. The fail-safe reads that table, and a run it cannot vouch
   for returns the input unchanged.
 - `jals-editor`, `jals-syntax`, `jals-fmt`, `jals-lint`, `jals-hir`, `jals-classfile`,
-  `jals-decompile`, `jals-javac`, `jals-storage`, and `jals-config` build for
-  `wasm32-unknown-unknown` as `no_std` crates;
+  `jals-decompile`, `jals-javac`, `jals-frontend`, `jals-image`, `jals-storage`, and `jals-config`
+  build for `wasm32-unknown-unknown` as `no_std` crates;
   `jals-classpath`'s resolution core builds for `wasm32` too (`--no-default-features`), as does
   `jals-build` with its portable `rhai` feature and `jals-project`'s in-memory graph.
 

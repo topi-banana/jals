@@ -313,8 +313,9 @@ filesystem reads into portable interfaces.
     of six buckets — against that same registry (`jals-lint/MAPPING-rustc-clippy.md` is the prose,
     `jals-lint/README.md` the roadmap). A new rule therefore lands in three places at once: the
     section that declares its key, the `RULES` table, and whichever ledger row now maps onto it.
-- `jals test`: a test is a `#[test]` method, and the whole feature is three seams already in place
-  rather than a fourth one beside them. `jals-syntax`'s `CfgMap` collects `TestHost`s — validating
+- `jals test` has **two modes**, and which one runs is `--target`. Without it a test is a `#[test]`
+  method, and the whole feature is three seams already in place rather than a fourth one beside
+  them. `jals-syntax`'s `CfgMap` collects `TestHost`s — validating
   the shape a generated harness can call (`static void`, no parameters, not `private`, and every
   enclosing type nameable) so the failure is an edit-time diagnostic under the fixed `cfg` rule,
   not a build-time one. `jals-frontend` keeps those methods only when it lowers for a test run and
@@ -328,6 +329,23 @@ filesystem reads into portable interfaces.
   the fourth item and travels beside it as `RunRequest.main_class`. A captured pass is the sentinel
   and never the exit status, which is also `1` for a missing main class and `0` for a body that
   called `System.exit(0)`; `--no-capture` gives up that reading along with the capture, and says so.
+
+  With `--target <name>` a test is instead whatever a `[[test-target]]`'s program says it is. The
+  harness shape is wrong for anything that has to *boot* — a program taking tens of seconds to start
+  cannot be started once per assertion — so a target is **one process for the whole selection**,
+  which runs the tests itself and writes a line-oriented report saying what happened. The seams are
+  the same ones: `test_plan.rs`'s filters and `--partition` apply unchanged because they are string
+  operations over ids, and enumeration still answers `--list` — which a target must do **without
+  booting**, so a shard is one process over a subset rather than a second launch policy. What is new
+  is `test_target.rs` (resolution, and the `{run-dir}` / `{dir:<name>}` placeholders a manifest needs
+  because a materialized artifact's path is a content digest), `test_report.rs` (the parser; a
+  truncated report is the most interesting one there is, so it yields every test it did report), and
+  `screenshot.rs`, which is where jals decides whether a picture is right — the program takes the
+  shot, and which bytes it should have been is a question about `[[golden.<name>]]` the program has
+  never seen. A reported path is a *claim*: it is held to `[test-target.screenshots] dir`, because
+  the program under test writes the report and `--update-golden` publishes what it names.
+  `--retries`, `-j` and `--max-fail` each mean "start another process" and a target run has exactly
+  one, so they are ignored rather than reinterpreted.
 - `jals-cli`: the host boundary from clap `PathBuf` values to `NativeStorage` and typed keys. It
   also owns native-formatter-config **detection** (`migrate.rs`): portable crates cannot look at a
   filesystem, so the host decides which config file is there and reads its bytes through a
@@ -365,6 +383,16 @@ filesystem reads into portable interfaces.
   under the workspace lock in `workspace.rs` and the graph phase off a detached snapshot in
   `app.rs`; the `ProjectScript` crossing between them is what keeps that split from also splitting
   the procedure.
+- `jals-image`: the PNG codec and the screenshot comparator, and a crate of its own for the reason
+  the in-house zip reader and the Jinja subset are: it keeps `miniz_oxide` out of `jals-build`'s
+  portable core, which `--no-default-features` has to stay a genuine one. One raster representation
+  and no conversions — 8-bit RGBA, row-major — so nothing downstream branches on colour type or bit
+  depth. **Both comparison defaults are exactness, and both are measured rather than preferred**: a
+  pinned software renderer reproduces a frame byte for byte, so there is no run-to-run noise for a
+  threshold to absorb, while at pixelmatch's default `0.1` a *whole rasterizer swap* reports a clean
+  pass. With neither `max-diff-pixels` nor `max-diff-ratio` set the budget is **zero**, not
+  infinity; the other reading gives a comparator that can never fail. It needs no JDK, no game and
+  no host, so it tests in the wasm cell like any other portable crate.
 - `jals-classfile`, `jals-syntax`, `jals-fmt`, `jals-decompile`: portable domain crates; do not add
   host filesystem APIs. `jals-fmt` has **one layout engine** — a port of google-java-format's greedy
   `computeBreaks` over a GJF-shaped `Doc`/`Level`/`Break` IR — and every style target is reached by
@@ -423,8 +451,9 @@ Portable crates use `core + alloc`.
   portable too, and CI builds it for `wasm32`. `native` is the host half (JDK discovery, `javac`
   spawning, `native.rs`).
 - `jals-frontend`, `jals-javac`, `jals-hir`, `jals-lint`, `jals-config`, `jals-syntax`,
-  `jals-classfile`, `jals-decompile`, and `jals-editor` have no features at all, so a plain
-  `cargo check` *is* the portability check — do not add one without a reason that survives review.
+  `jals-classfile`, `jals-decompile`, `jals-image`, and `jals-editor` have no features at all, so a
+  plain `cargo check` *is* the portability check — do not add one without a reason that survives
+  review.
 - `jals-fmt`'s `std` feature adds only `quick-xml` for the two XML-backed config importers.
   `jals-cli` enables it; the wasm playground resolves separately and never sees it.
 - rayon is workspace-banned except in `jals-tests`' host-only harness; product fan-out goes
