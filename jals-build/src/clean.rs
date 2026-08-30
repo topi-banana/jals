@@ -19,9 +19,18 @@ impl CleanTargets {
     /// root-relative keys the caller resolves against the project root.
     ///
     /// This is the compiler output directory (`classes-dir`), the dedicated `target/jals/build`
-    /// script-artifact root, and — when `[build] remap` declares one — the directory holding the
-    /// jar that step writes. Returning a `Vec` leaves room for future artifacts (a packaged jar, a
-    /// dependency cache) without changing the signature.
+    /// script-artifact root, the two roots a `[[test-target]]` run writes under, and — when
+    /// `[build] remap` declares one — the directory holding the jar that step writes. Returning a
+    /// `Vec` leaves room for future artifacts (a packaged jar, a dependency cache) without changing
+    /// the signature.
+    ///
+    /// A target contributes its own `classes-dir` **and** the managed root that dir defaults into,
+    /// which are two different claims. The first is a `javac -d` destination and is removed wherever
+    /// the author put it, exactly as `classes-dir` and `[test] classes-dir` are. The second is what
+    /// reaps a target that was *renamed or deleted*: its classes stay under the old name, and no
+    /// manifest names them any more — the same stale-output argument that makes `target/jals/build`
+    /// unconditional, which is why these roots are unconditional too rather than gated on a
+    /// declaration being present.
     ///
     /// A declared remap contributes `target/jals/remap` — the root its jar defaults into — because
     /// nothing else claims it: the jar sits outside both roots above by construction
@@ -55,6 +64,24 @@ impl CleanTargets {
         if !keys.contains(&build_root) {
             keys.push(build_root);
         }
+        // The two roots a target run writes under, then whatever a target redirected its classes
+        // to. The roots come first so that the usual case — a target keeping the default — adds
+        // nothing: its directory is already inside one of them.
+        Self::add(
+            &mut keys,
+            DirKey::parse(jals_config::testing::MANAGED_TARGET_CLASSES_ROOT)?,
+        );
+        Self::add(
+            &mut keys,
+            DirKey::parse(jals_config::testing::MANAGED_TEST_ROOT)?,
+        );
+        for target in &manifest.test_target {
+            let target_classes = DirKey::parse(&target.classes_dir())?;
+            if target_classes.path().is_root() {
+                return Err(jals_storage::PathError::DirectoryIsRoot);
+            }
+            Self::add(&mut keys, target_classes);
+        }
         if manifest.build.remap.is_some() {
             // Declared, not *active*: a `[build] remap` whose mapping set no selection activates
             // still packages its jar into this root, so the question here is whether the step
@@ -71,6 +98,18 @@ impl CleanTargets {
             }
         }
         Ok(keys)
+    }
+
+    /// Record `key` unless a key already held would remove it anyway.
+    ///
+    /// The caller removes each key recursively, so a directory *inside* one already listed is not a
+    /// second target — it is the same removal named twice. Containment rather than equality because
+    /// a target's `classes-dir` usually sits under the managed root that follows it, and a clean set
+    /// that listed both would describe one deletion as two.
+    fn add(keys: &mut Vec<DirKey>, key: DirKey) {
+        if !keys.iter().any(|held| key.path().starts_with(held.path())) {
+            keys.push(key);
+        }
     }
 }
 
@@ -90,6 +129,8 @@ mod tests {
                 DirKey::parse("target/classes").unwrap(),
                 DirKey::parse("target/test-classes").unwrap(),
                 DirKey::parse("target/jals/build").unwrap(),
+                DirKey::parse("target/jals/test-target").unwrap(),
+                DirKey::parse("target/jals/test").unwrap(),
             ]
         );
     }
@@ -105,6 +146,8 @@ mod tests {
                 DirKey::parse("out").unwrap(),
                 DirKey::parse("target/test-classes").unwrap(),
                 DirKey::parse("target/jals/build").unwrap(),
+                DirKey::parse("target/jals/test-target").unwrap(),
+                DirKey::parse("target/jals/test").unwrap(),
             ]
         );
     }
@@ -149,6 +192,8 @@ mod tests {
             vec![
                 DirKey::parse("target/jals/build").unwrap(),
                 DirKey::parse("target/test-classes").unwrap(),
+                DirKey::parse("target/jals/test-target").unwrap(),
+                DirKey::parse("target/jals/test").unwrap(),
             ]
         );
     }
@@ -166,6 +211,82 @@ mod tests {
                 .unwrap()
                 .iter()
                 .all(|target| !script.path().starts_with(target.path()))
+        );
+    }
+
+    /// A target keeping the default `classes-dir` adds nothing of its own: the directory is inside
+    /// the managed root, which is already listed, and the caller removes a key recursively — so
+    /// naming both would describe one deletion as two.
+    #[test]
+    fn a_target_on_the_default_root_adds_no_key_of_its_own() {
+        let manifest: Manifest = "[[test-target]]\nname = \"client-e2e\"\nmain-class = \"E\"\n"
+            .parse()
+            .unwrap();
+        assert_eq!(
+            manifest.test_target[0].classes_dir(),
+            "target/jals/test-target/client-e2e"
+        );
+        assert_eq!(
+            CleanTargets::keys(&manifest).unwrap(),
+            CleanTargets::keys(&Manifest::default()).unwrap()
+        );
+    }
+
+    /// The managed roots are unconditional, and that is what reaps a target after it is renamed or
+    /// deleted: nothing in the manifest names its old output any more. Same argument as the build
+    /// root's stale-output sweep.
+    #[test]
+    fn the_managed_target_roots_are_removed_without_a_target_declared() {
+        let keys = CleanTargets::keys(&Manifest::default()).unwrap();
+        assert!(
+            keys.contains(
+                &DirKey::parse(jals_config::testing::MANAGED_TARGET_CLASSES_ROOT).unwrap()
+            )
+        );
+        assert!(keys.contains(&DirKey::parse(jals_config::testing::MANAGED_TEST_ROOT).unwrap()));
+    }
+
+    /// A redirected target `classes-dir` is a `javac -d` destination like every other one here, so
+    /// it is removed where the author put it — unlike a redirected remap *jar*, whose directory is
+    /// left alone because it holds a file rather than being an output tree.
+    #[test]
+    fn a_redirected_target_classes_dir_is_removed_where_it_was_put() {
+        let manifest: Manifest =
+            "[[test-target]]\nname = \"e2e\"\nmain-class = \"E\"\nclasses-dir = \"out/e2e\"\n"
+                .parse()
+                .unwrap();
+        assert!(
+            CleanTargets::keys(&manifest)
+                .unwrap()
+                .contains(&DirKey::parse("out/e2e").unwrap())
+        );
+    }
+
+    /// Every key is removed recursively, so a target naming the project root would delete the whole
+    /// checkout. Refused here rather than trusted from `Manifest::validate`, for the same reason
+    /// `classes-dir`'s is.
+    #[test]
+    fn rejects_a_root_target_classes_dir() {
+        let mut m = Manifest::default();
+        m.test_target.push(jals_config::testing::TestTarget {
+            name: "e2e".to_owned(),
+            classes_dir: ".".to_owned(),
+            ..Default::default()
+        });
+        assert!(CleanTargets::keys(&m).is_err());
+    }
+
+    /// The archive `--update-golden` writes lands under a root the clean set holds, so a stale
+    /// golden never survives a clean and never becomes the reference a later run is judged against.
+    #[test]
+    fn the_golden_update_archive_is_inside_a_cleaned_root() {
+        let archive =
+            FileKey::parse("target/jals/test/golden-update/client-e2e-1.21.11.zip").unwrap();
+        assert!(
+            CleanTargets::keys(&Manifest::default())
+                .unwrap()
+                .iter()
+                .any(|target| archive.path().starts_with(target.path()))
         );
     }
 

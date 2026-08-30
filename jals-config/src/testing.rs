@@ -87,7 +87,21 @@ pub struct TestTarget {
 }
 
 /// Where a `[[test-target]]`'s classes go when it names no `classes-dir`.
-const DEFAULT_TARGET_CLASSES_ROOT: &str = "target/jals/test-target";
+///
+/// Public because `jals clean` removes this root rather than only the directories the manifest
+/// currently declares: a target that was renamed or deleted leaves its classes behind under the
+/// old name, and nothing else would ever name them again. Same reasoning as the build root's
+/// stale-output sweep, and the reason it is a constant rather than a literal in two crates.
+pub const MANAGED_TARGET_CLASSES_ROOT: &str = "target/jals/test-target";
+
+/// Where a target run's own outputs go — the archive `--update-golden` writes, and whatever a
+/// reader unpacks beside it.
+///
+/// Deliberately not under [`MANAGED_TARGET_CLASSES_ROOT`]: that root is a `javac -d` destination
+/// and is emptied by a rebuild, while a baked golden archive is the *product* of a run and outlives
+/// one. `jals clean` removes both, and this constant is what keeps the CLI's spelling and the clean
+/// set from drifting apart.
+pub const MANAGED_TEST_ROOT: &str = "target/jals/test";
 
 /// The enumerate argument a target takes when it names none. The generated harness's own spelling,
 /// so the two contracts read alike.
@@ -121,7 +135,7 @@ impl TestTarget {
     #[must_use]
     pub fn classes_dir(&self) -> String {
         if self.classes_dir.is_empty() {
-            alloc::format!("{DEFAULT_TARGET_CLASSES_ROOT}/{}", self.name)
+            alloc::format!("{MANAGED_TARGET_CLASSES_ROOT}/{}", self.name)
         } else {
             self.classes_dir.clone()
         }

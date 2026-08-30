@@ -1428,7 +1428,8 @@ impl TestArgs {
             format!("-{}", self.features.features.join("-"))
         };
         let out = root
-            .join("target/jals/test/golden-update")
+            .join(jals_config::testing::MANAGED_TEST_ROOT)
+            .join("golden-update")
             .join(format!("{}{selection}.zip", target.name));
         std::fs::create_dir_all(out.parent().expect("the archive path has a parent"))
             .with_context(|| format!("creating {}", out.display()))?;
