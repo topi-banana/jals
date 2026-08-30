@@ -649,14 +649,18 @@ jobs:
     # Two passes rather than a published reference archive, because a published one would pin this
     # cell to whatever renderer baked it; two passes pin it to the renderer it is running on.
     #
-    # `continue-on-error` is on the three boot steps and on nothing else in this job. The renderer
-    # here is not the renderer the suite was developed against, and a comparison that has never been
-    # green should not be what blocks a pull request — but that argument is about the *pictures*,
-    # and it was never an argument for letting `jals build`, `jals fmt --check` and `jals lint` go
-    # unwatched. Those are the same gates every row of the `examples` matrix runs, and they fail
-    # this job exactly as they fail that one. Remove the three step-level flags once the second pass
-    # has been green across several runs; the job-level flag they replaced is not the shape to put
-    # back, because it would take the other three gates down with them again.
+    # Nothing in this job is `continue-on-error`. The boot steps carried it while the comparison had
+    # never been measured on *this* renderer — the reference images were developed against a
+    # different Mesa, and a cell that has never been green should not be what blocks a pull request.
+    # Five consecutive runs then baked byte-identical archives: one `sha256` across all five, on
+    # separate runner VMs. That is the measurement the flag was waiting for, and keeping it
+    # afterwards would prefer the doubt over the evidence against it — which is the opposite of what
+    # this cell exists to say, since its own comparison budget is zero for the same measured reason.
+    #
+    # While it lasted the flag was on those steps and never on the job, and that part is worth
+    # keeping in mind if one is ever needed again: a job-level flag would also stop `jals build`,
+    # `jals fmt --check` and `jals lint` from failing anything, and a provisional *assertion* is not
+    # a licence to stop checking everything around it.
     name: example (minecraft_client_e2e)
     runs-on: ubuntu-latest
     steps:
@@ -700,16 +704,12 @@ jobs:
           jals fmt --check "${sources[@]}"
           jals lint --features 1.21.11 "${sources[@]}"
       - name: Boot the client and bake a reference set
-        continue-on-error: true
         working-directory: examples/minecraft_client_e2e
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
           GALLIUM_DRIVER: llvmpipe
         run: xvfb-run -a jals test --target client-e2e --features 1.21.11 --update-golden --color never
-      # Also provisional, and not for its own sake: a bake that soft-failed leaves no archive, so
-      # without this the unpack would be the step that turned a provisional failure into a hard one.
       - name: Unpack it
-        continue-on-error: true
         working-directory: examples/minecraft_client_e2e
         run: |
           unzip -o target/jals/test/golden-update/client-e2e-1.21.11.zip -d target/jals/test/reference
@@ -717,7 +717,6 @@ jobs:
       # The assertion. A second boot, judged against the first one's pictures at a threshold of
       # zero: it passes only if the two processes rendered identical frames.
       - name: Boot it again and judge the frames against that set
-        continue-on-error: true
         working-directory: examples/minecraft_client_e2e
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
@@ -726,13 +725,8 @@ jobs:
       # A failing run whose only trace is an exit status says nothing about a game that crashed
       # mid-boot, and a failing *comparison* says nothing without the three pictures. The target's
       # `artifacts` globs already name the first; `diff/` is where jals writes the second.
-      #
-      # `always()` rather than `failure()`: the three steps above soft-fail, so a comparison that
-      # went wrong leaves this job green and `failure()` would never fire — taking the artifacts
-      # away in exactly the case they are the only trace of what happened. Uploading them on a green
-      # run too is the price, and a small one: it is also how the reference set gets looked at.
       - name: Keep what the run left behind
-        if: always()
+        if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: client-e2e-run

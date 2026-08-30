@@ -581,10 +581,12 @@ never scores a decompiled skeleton as something someone wrote. Three consequence
   statement only a run that reached the last step can make.
 - `minecraft_client_e2e` runs the same three gates and then *boots* what it built, which is why it
   is a job of its own rather than a matrix row: an X server and a software rasterizer are things no
-  other example needs. Its boot steps carry `continue-on-error` until the two-pass screenshot
-  comparison has been green across several runs, because the renderer CI supplies is not the one the
-  reference images were developed against. **That flag belongs on those steps and never on the
-  job.** A job-level one is not a weaker version of the same statement — it also stops `jals build`,
-  `jals fmt --check` and `jals lint` from failing anything, and the bar those three set is the one
-  every example is held to. A provisional *assertion* is not a licence to stop checking everything
+  other example needs. Its screenshot comparison is a hard gate like the rest of that job — one boot
+  bakes a reference set, a second is judged against it, so a green pass is the statement that two
+  processes rendered identical frames on the renderer CI actually supplies. It was
+  `continue-on-error` while that had never been measured there and stopped being so once it had:
+  five consecutive runs baked byte-identical archives, one `sha256` between them, on separate runner
+  VMs. **A flag like that goes on the steps and never on the job.** A job-level one is not a weaker
+  version of the same statement — it also stops `jals build`, `jals fmt --check` and `jals lint`
+  from failing anything, and a provisional *assertion* is not a licence to stop checking everything
   around it.
