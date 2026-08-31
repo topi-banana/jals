@@ -46,6 +46,16 @@ server = ["minecraft/server"]
 client = ["minecraft/client"]
 mixin = ["minecraft/mixin"]
 mixinextras = ["minecraft/mixinextras"]
+
+# The client end-to-end tests under `src/test/java`. It implies `client`, so one name on a command
+# line is the whole selection: `jals test --features 1.21.11,client-test`.
+#
+# A feature of its own rather than reusing `client`, because the two ask for different things.
+# `--features client` says "compile against the client jar"; this one additionally says "download
+# the ~60 jars a client needs at runtime and boot one". Everything under `src/test/java` is
+# `#[cfg]`-gated on it, so a selection that does not name it compiles and lints as if the tests were
+# not there — which is what keeps the other CI cells unchanged.
+client-test = ["client"]
 "since-1.14.4" = []
 "since-1.17" = ["since-1.14.4"]
 "since-1.18" = ["since-1.17"]
@@ -99,6 +109,14 @@ mixinextras = ["minecraft/mixinextras"]
 # `mixinextras-common-0.5.4.jar` on this project's compile classpath, and publishes the matching
 # sources as navigation trees an editor can open. Compiling against the jars and reading the trees
 # is the whole arrangement; a published tree is never a compile input.
+# `jals test` compiles this tree *in addition to* `[build] source-dirs` and writes the result
+# somewhere else, so `jals build` still produces a jar with nothing but the mixin in it. The harness
+# that boots a Minecraft client lives here for exactly that reason: it is a test tool, and a mod jar
+# is no place for one.
+[test]
+source-dirs = ["src/test/java"]
+classes-dir = "target/test-classes"
+
 [dependencies]
 minecraft = { path = "../minecraft" }
 

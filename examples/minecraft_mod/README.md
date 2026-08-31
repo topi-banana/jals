@@ -409,6 +409,89 @@ SDK puts on the classpath — and 0.8.7's `CompatibilityLevel` ending at `JAVA_2
 the `--release` cap above answers to, so a build against a Mixin that names a higher level would
 raise it.
 
+## Booting the game from a test
+
+`src/test/java` holds a small Java API that starts a **real Minecraft client in the test JVM** and
+drives it — no Mixin, no java agent, no launcher. It is compiled and run only by `jals test`, so the
+mod jar `jals build` produces is untouched by it.
+
+```sh
+cd examples/minecraft_mod
+cargo run -p jals-cli -- test --features 1.21.11,client-test -j 1
+```
+
+```
+   Compiling hellomod
+    Starting 3 tests across 1 class
+        PASS [  30.170s] com.example.hellomod.ClientTest#bootsToTheTitleScreen
+        PASS [  30.123s] com.example.hellomod.ClientTest#opensAScreenAndFindsAWidgetByItsLabel
+        PASS [  35.053s] com.example.hellomod.ClientTest#placesABlockThroughTheIntegratedServer
+------------
+     Summary [  95.350s] 3 tests run: 3 passed
+```
+
+A test reads like a browser driver, except that both handles are typed game objects:
+
+```java
+try (GameClient game = GameClient.launch()) {
+    game.openFlatWorld("jals-test");
+    BlockPos pos = new BlockPos(0, 0, 0);
+    game.runOnServer(server ->
+        server.overworld().setBlockAndUpdate(pos, Blocks.DIAMOND_BLOCK.defaultBlockState()));
+    assert game.evalOnServer(server -> server.overworld().getBlockState(pos).is(Blocks.DIAMOND_BLOCK));
+}
+```
+
+### The hinge
+
+`Minecraft` implements `java.util.concurrent.Executor`. `execute(Runnable)` is an override of a JDK
+interface method, so no mapping set may rename it, and a thread that is not the render thread can
+schedule work onto it. `GameClient.evalOnClient` is that call with a result and an exception path
+attached. `MinecraftServer` is an `Executor` for the same reason, which is what `evalOnServer` rides.
+
+**Why a client and not a dedicated server.** Vanilla publishes no static accessor for a running
+`MinecraftServer` — but `Minecraft.getInstance().getSingleplayerServer()` is public. So booting a
+client is what hands a test a typed, in-process server as well; a dedicated server would have to be
+reached by reflection or through RCON.
+
+### What the harness has to do about `jals test`
+
+- **A test is one JVM, and one JVM is one client.** Three tests are three boots. That is the shape
+  `jals test` gives, and the reason this file holds three tests rather than thirty. Pass `-j 1`:
+  `-j` defaults to the machine's parallelism, and two clients want two GL contexts.
+- **The game runs on a daemon thread and is never asked to stop.** `jals test` reads a test as
+  passed when the generated harness prints its sentinel line, *after* the test method returns. A
+  client shutting the JVM down would take the sentinel with it, so the test abandons the game.
+- **Something still has to end the process.** A booted client leaves non-daemon workers running, so
+  `close()` arms a watchdog that calls `Runtime.halt` once the sentinel has had its moment. The
+  verdict is already on disk by then, and `jals test` reads the sentinel rather than the exit
+  status.
+- **A screen appearing is not the game being ready.** The resource reload finishes by calling
+  `setScreen(new TitleScreen(...))` itself, so a driver that starts as soon as `screen != null` has
+  its own screen replaced a moment later. The harness waits for the overlay to be gone *and* the
+  title screen to be showing. Nothing in the API sleeps for a fixed interval.
+
+### What it costs to run
+
+`client-test` implies `client`, so the SDK resolves the merged client+server jar, and the build
+script fetches the ~60 libraries a client loads at runtime — LWJGL and its native classifier jars,
+icu4j, oshi, the netty/guava/log4j stack. Those are pinned by URL and SHA-1 for **one release**,
+because a launcher's library set is per release and per platform, and a Rhai script cannot walk the
+metadata's `libraries` array: `tasks.fetch_json` returns a task handle and the fetch happens after
+the script has returned. `examples/scripts/gen-client-runtime.py <release>` rewrites the pinned block.
+
+Two things a launcher supplies that this does not, both measured rather than assumed:
+
+- **No native library directory.** The `-natives-linux` jars go on the classpath like any other, and
+  LWJGL's own `SharedLibraryLoader` extracts what it needs out of them. There is no
+  `-Djava.library.path`.
+- **No asset store.** The harness writes an asset index with no objects in it. Almost everything in a
+  launcher's store is sounds and translations; the textures, models and shaders a boot needs are
+  inside the client jar.
+
+**Linux only.** GLFW wants the main thread on macOS (`-XstartOnFirstThread`) and the main thread
+belongs to the test. CI runs the cell under `xvfb` with Mesa's llvmpipe.
+
 ## Legal note
 
 Minecraft jars and mappings are Mojang's copyrighted material. This example records only download
