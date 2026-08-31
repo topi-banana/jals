@@ -1807,11 +1807,11 @@ impl AssembledWorkspace {
                 Ok(assembly) => assembly,
                 Err(failure) => {
                     let message = failure.error.to_string();
-                    // The root-only fallback below rediscovers without `[dependencies]`, so every
-                    // warning about a dependency is reported here or nowhere. The script phase is
-                    // deliberately `Skipped`: the fallback's own `finish_assembly` reports it, and
-                    // `workspace_ready` concatenates both sets — reporting it here too would
-                    // publish every script warning twice on exactly this path.
+                    // The root-only fallback below rediscovers without either dependency table,
+                    // so every warning about a dependency is reported here or nowhere. The script
+                    // phase is deliberately `Skipped`: the fallback's own `finish_assembly`
+                    // reports it, and `workspace_ready` concatenates both sets — reporting it here
+                    // too would publish every script warning twice on exactly this path.
                     let project_diagnostics = ProjectDiagnostics::assemble(
                         ScriptOutcome::Skipped,
                         GraphOutcome::Failed(&failure),
@@ -1821,7 +1821,13 @@ impl AssembledWorkspace {
                     .map(|diagnostic| Self::lsp_diagnostic(diagnostic, None))
                     .collect();
                     let mut root_only = effective_manifest.clone();
+                    // Both tables, as `jals_project`'s own `root_only` clears both: the fallback
+                    // rediscovers under `DependencyScope::Test`, so a `[dev-dependencies]` entry
+                    // left in place is walked again and fails the walk again — and a fallback that
+                    // fails the way the first attempt did leaves the workspace with no analysis at
+                    // all, which is the one outcome it exists to prevent.
                     root_only.dependencies.clear();
+                    root_only.dev_dependencies.clear();
                     let fallback_assembly = match Self::assemble_graph(
                         &script,
                         &root_only,
@@ -2088,7 +2094,12 @@ impl AssembledWorkspace {
                 .iter()
                 .filter_map(|path| local_path(root, path)),
         );
-        for dependency in manifest.dependencies.values() {
+        // Both tables: the graph is assembled under `DependencyScope::Test`, so a
+        // `[dev-dependencies]` entry is a real analysis input and a change to it has to reassemble
+        // the workspace exactly as a `[dependencies]` one does. `declared_dependencies` rather
+        // than `active_dependencies` because a watch set must see an entry a selection did not
+        // activate — that is what the entry becoming active later would change.
+        for (_, dependency) in manifest.declared_dependencies(DependencyScope::Test) {
             match dependency {
                 Dependency::Jar(jar) => {
                     reassemble_inputs.extend(

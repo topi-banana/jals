@@ -1122,7 +1122,7 @@ impl fmt::Display for BuildFeatureError {
             Self::UnknownSelectedDependency { name, dependency } => write!(
                 f,
                 "`--features {name}` names `{dependency}`, which is not a declared `git`/`path` \
-                 `[dependencies]` entry"
+                 `[dependencies]` or `[dev-dependencies]` entry"
             ),
             Self::InvalidSelected { name, reason } => {
                 write!(f, "`--features {name}` is malformed: {reason}")
@@ -2843,9 +2843,13 @@ impl Manifest {
                     return Err(BuildFeatureError::ActivationSelected { name: name.clone() });
                 }
                 Ok(FeatureRef::Dependency { dependency, .. }) => {
+                    // Scope-free, exactly as `validate_feature_ref`'s own routing arm: one
+                    // `[features]` table is read under both scopes, so a spelling the manifest
+                    // accepts has to be a spelling a command line accepts. Reading only
+                    // `[dependencies]` here made `--features <dev-entry>/<feature>` an error for
+                    // the very route `client-test = ["mc-client-test/1.21.11"]` writes.
                     if !self
-                        .dependencies
-                        .get(dependency)
+                        .dependency_entry(dependency)
                         .is_some_and(Dependency::accepts_features)
                     {
                         return Err(BuildFeatureError::UnknownSelectedDependency {
@@ -4899,10 +4903,11 @@ mod tests {
     }
 
     #[test]
-    fn a_feature_reaches_a_dev_dependency_by_both_routes() {
-        // `<dep>/<feature>` and `dep:<dep>` resolve against the union of the two tables. They have
-        // to: a `[features]` table is written once and read under both scopes, so a manifest that
-        // was valid for `jals test` and invalid for `jals build` would be one table's fault.
+    fn a_feature_reaches_a_dev_dependency_by_every_route() {
+        // `<dep>/<feature>`, `dep:<dep>` and a `--features` selection all resolve against the
+        // union of the two tables. They have to: a `[features]` table is written once and read
+        // under both scopes, so a manifest that was valid for `jals test` and invalid for
+        // `jals build` would be one table's fault.
         let manifest: Manifest = r#"
             [features]
             client-test = ["harness/1.21.11", "dep:extra"]
@@ -4929,6 +4934,33 @@ mod tests {
             "the release is routed to the harness rather than kept as a local feature"
         );
         assert!(!selected.features().contains("harness/1.21.11"));
+
+        // The third route, and the one a user actually types: the same spelling on a command line.
+        // A manifest that is valid cannot have a routing its own CLI rejects.
+        let from_cli = manifest
+            .resolve_build_features(&["harness/1.21.11".to_owned()], false, false)
+            .expect("`--features <dev-entry>/<feature>` routes exactly as the table does");
+        assert_eq!(
+            from_cli
+                .dependencies()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>(),
+            ["harness"]
+        );
+        // The `Local` arm reads the same union through `implicit_dependency_feature`, so an
+        // optional dev entry no `dep:` names declares a selectable feature of its own name.
+        let implicit: Manifest = r#"
+            [dev-dependencies]
+            extra = { path = "../extra", optional = true }
+            "#
+        .parse()
+        .unwrap();
+        assert!(
+            implicit
+                .resolve_build_features(&["extra".to_owned()], false, false)
+                .expect("an optional dev entry's implicit feature is selectable")
+                .activates("extra")
+        );
 
         // And an undeclared name is still a mistake, whichever table a reader expected it in.
         let error = "[features]\nx = [\"absent/y\"]\n"

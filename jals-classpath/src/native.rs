@@ -215,7 +215,7 @@ impl NativeProjectPlan {
     /// declares into the portable plan.
     ///
     /// `scope` is the host's, never inferred: the two callers ask different questions. The
-    /// projection path hands over a manifest whose dependency tables `ProjectAssembly::root_only`
+    /// projection path hands over a manifest whose dependency tables `ProjectScript::root_only`
     /// already emptied — every declared entry is a graph node there — so only `jals lint`'s
     /// graph-less fallback reaches this with entries still in place.
     pub fn from_manifest(

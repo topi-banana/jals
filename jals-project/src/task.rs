@@ -248,7 +248,15 @@ struct OwnedFile {
 /// 2: a publication records the intent it was declared with, which decides where the consumer
 /// routes it. The plan fingerprint already folds that intent into the provenance, so a pre-intent
 /// record is unreachable by key as well — this is the belt to that's braces.
-const TASK_EXECUTION_VERSION: u32 = 2;
+///
+/// 3: a remapped or merged jar no longer carries the signature block and per-entry manifest digests
+/// its source jar had, because a JVM refuses such an archive. Bumped here and not only in
+/// `jals-classpath`'s own `REMAP_OUTPUT_VERSION` / `MERGE_OUTPUT_VERSION`: this record names the
+/// artifacts a *previous* transform produced, and reusing it is what stops the new transform from
+/// running at all — so a warm cache would keep serving the jar that cannot be loaded. An output
+/// version is only reached through a task that re-executes, which makes this the outer half of the
+/// same rule.
+const TASK_EXECUTION_VERSION: u32 = 3;
 
 /// A [`BuildTaskExecution`] recorded in the verified cache, addressed by what produced it.
 ///

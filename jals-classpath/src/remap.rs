@@ -319,7 +319,7 @@ impl JarRemap {
             } else {
                 let mut bytes = outcome
                     .map_err(|error| format!("failed to read archive member `{name}`: {error}"))?;
-                if name == "META-INF/MANIFEST.MF" {
+                if helpers::is_manifest_member(&name) {
                     bytes = helpers::rewrite_manifest_main_class(&bytes, &mappings);
                     bytes = helpers::strip_manifest_digests(&bytes);
                 }
@@ -497,7 +497,7 @@ impl JarMerge {
             }
             let mut bytes = outcome
                 .map_err(|error| format!("failed to read overlay member `{name}`: {error}"))?;
-            if name == "META-INF/MANIFEST.MF" {
+            if helpers::is_manifest_member(&name) {
                 bytes = helpers::strip_manifest_digests(&bytes);
             }
             if overlay_map.insert(name.clone(), bytes).is_none() {
@@ -517,7 +517,7 @@ impl JarMerge {
             } else {
                 let bytes = outcome
                     .map_err(|error| format!("failed to read base member `{name}`: {error}"))?;
-                if name == "META-INF/MANIFEST.MF" {
+                if helpers::is_manifest_member(&name) {
                     helpers::strip_manifest_digests(&bytes)
                 } else {
                     bytes
@@ -580,14 +580,32 @@ mod helpers {
             .any(|extension| has_extension(base, extension))
     }
 
+    /// Whether `name` is the jar manifest: `META-INF/MANIFEST.MF`, at that one depth.
+    ///
+    /// Case-insensitively, for the same reason [`is_signature_member`] is — a jar tool is free not
+    /// to write the specification's spelling, and a JVM finds the manifest either way. Matching
+    /// this one exactly while matching the signature block loosely is the asymmetry that would
+    /// drop a jar's `.SF` and keep the manifest digests saying the same thing about it.
+    pub(super) fn is_manifest_member(name: &str) -> bool {
+        name.strip_prefix("META-INF/")
+            .is_some_and(|base| base.eq_ignore_ascii_case("MANIFEST.MF"))
+    }
+
     /// Whether a manifest attribute line declares a digest of something.
     ///
     /// Matched on the substring rather than on a fixed list, because the algorithm is part of the
     /// name (`SHA-256-Digest`, `SHA1-Digest`) and a signer may add `-Digest-Manifest` spellings of
     /// its own.
     fn is_digest_attribute(line: &str) -> bool {
-        line.split_once(':')
-            .is_some_and(|(name, _)| name.trim().to_ascii_lowercase().contains("-digest"))
+        const DIGEST: &[u8] = b"-digest";
+        line.split_once(':').is_some_and(|(name, _)| {
+            // Matched without allocating: a signed client jar's manifest holds one section per
+            // member, so this runs once per line over megabytes of text.
+            name.trim()
+                .as_bytes()
+                .windows(DIGEST.len())
+                .any(|window| window.eq_ignore_ascii_case(DIGEST))
+        })
     }
 
     /// One manifest section with its digest attributes removed, or `None` when nothing but its
@@ -632,8 +650,12 @@ mod helpers {
     /// about bytes that no longer exist — and hands them to whoever signs the jar next.
     ///
     /// Only the digests go. An individual section that says something else about its member keeps
-    /// saying it, and the main section — `Manifest-Version`, `Main-Class`, `Multi-Release` — is
-    /// never a digest and is never touched.
+    /// saying it, and the main section survives whole in practice, because what a signer writes
+    /// there — `Manifest-Version`, `Created-By`, and beside them `Main-Class` and `Multi-Release` —
+    /// names no digest; the per-file digests are the individual sections, and the digest *of* those
+    /// sections lives in `META-INF/*.SF`, which goes as a member. The rule below is applied to
+    /// every section alike rather than to all but the first, so a main-section attribute that did
+    /// name a digest would go too.
     pub(super) fn strip_manifest_digests(bytes: &[u8]) -> Vec<u8> {
         let Ok(text) = core::str::from_utf8(bytes) else {
             return bytes.to_vec();
@@ -1648,7 +1670,9 @@ mod tests {
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    use super::helpers::{is_signature_member, multi_release_prefix, strip_manifest_digests};
+    use super::helpers::{
+        is_manifest_member, is_signature_member, multi_release_prefix, strip_manifest_digests,
+    };
 
     /// A multi-release jar stores the same class twice — once at its plain path and once under
     /// `META-INF/versions/<n>/` — and both copies share a `this_class`. Naming the remapped output
@@ -1685,6 +1709,19 @@ mod tests {
         assert!(!is_signature_member("META-INF/services/provider.sf"));
         assert!(!is_signature_member("net/minecraft/Client.sf"));
         assert!(!is_signature_member("META-INF/"));
+    }
+
+    /// The manifest is found the way the signature block is, or a jar spelling it in lower case
+    /// would lose the block and keep the digests — half a claim, which the module doc says is worse
+    /// than none.
+    #[test]
+    fn the_manifest_is_recognised_the_way_a_signature_block_is() {
+        assert!(is_manifest_member("META-INF/MANIFEST.MF"));
+        assert!(is_manifest_member("META-INF/manifest.mf"));
+
+        assert!(!is_manifest_member("META-INF/versions/9/MANIFEST.MF"));
+        assert!(!is_manifest_member("MANIFEST.MF"));
+        assert!(!is_manifest_member("META-INF/SIGNER.SF"));
     }
 
     /// A remapped jar that keeps its per-entry digests is refused by a JVM exactly as one that
