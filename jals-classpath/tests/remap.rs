@@ -410,3 +410,108 @@ Renamed -> Box:
         );
     });
 }
+
+/// A remapped jar has to *run*, not only compile, and a signed one does not: every class was
+/// rewritten, so the digests the signer wrote describe bytes that are gone and a JVM refuses the
+/// archive outright. Both halves of the claim go — the block under `META-INF/` and the per-entry
+/// sections of the manifest — while everything the manifest says about the jar itself survives.
+#[test]
+fn remap_drops_a_signed_jars_signature_and_its_stale_digests() {
+    block_on_inline(async {
+        let manifest = "Manifest-Version: 1.0\r\n\
+             Multi-Release: true\r\n\
+             \r\n\
+             Name: Box.class\r\n\
+             SHA-256-Digest: Zm9vYmFyYmF6cXV1eA==\r\n\
+             \r\n";
+        let jar_bytes = write_jar(&[
+            ("META-INF/MANIFEST.MF", manifest.as_bytes()),
+            ("META-INF/SIGNER.SF", b"Signature-Version: 1.0\r\n"),
+            ("META-INF/SIGNER.RSA", &[0x30, 0x82, 0x01, 0x02]),
+            // Deeper down the extension means nothing, so this one is an ordinary resource.
+            ("META-INF/services/provider.sf", b"net.example.Provider\n"),
+            ("Box.class", box_class()),
+        ]);
+        let mappings = "\
+Renamed -> Box:
+    java.lang.Object value -> value
+    java.lang.Object get() -> get
+    void set(java.lang.Object) -> set
+";
+        let exec = Exec::inline();
+        let mut cache = ArtifactCache::new(MemoryCache::default());
+        let jar = publish(&mut cache, b"signed", &jar_bytes).await;
+        let remapped = JarRemap::remap(&exec, &mut cache, &jar, &deobfuscate(mappings))
+            .await
+            .expect("remap succeeds");
+        let bytes = cache.lookup(&remapped).await.unwrap().unwrap();
+
+        let names: Vec<String> = zip::ZipArchive::new(Cursor::new(bytes.clone()))
+            .expect("remapped jar is a zip")
+            .file_names()
+            .map(str::to_owned)
+            .collect();
+        assert!(!names.iter().any(|name| name == "META-INF/SIGNER.SF"));
+        assert!(!names.iter().any(|name| name == "META-INF/SIGNER.RSA"));
+        assert!(
+            names
+                .iter()
+                .any(|name| name == "META-INF/services/provider.sf")
+        );
+        assert!(names.iter().any(|name| name == "Renamed.class"));
+
+        let rewritten = String::from_utf8(member_bytes(&bytes, "META-INF/MANIFEST.MF"))
+            .expect("the manifest is text");
+        assert_eq!(
+            rewritten,
+            "Manifest-Version: 1.0\r\nMulti-Release: true\r\n\r\n"
+        );
+    });
+}
+
+/// A merge is the other way a signed jar stops being the archive its signature describes: the union
+/// carries members the signer never saw, and a JVM refuses an archive that mixes signed and
+/// unsigned classes in one package. A release that ships deobfuscated reaches `merge_jars` without
+/// passing through a remap at all, so the two have to agree about this.
+#[test]
+fn merge_drops_both_sides_signatures_and_stale_digests() {
+    block_on_inline(async {
+        let signed_manifest = "Manifest-Version: 1.0\r\n\
+             \r\n\
+             Name: Box.class\r\n\
+             SHA-256-Digest: Zm9vYmFyYmF6\r\n\
+             \r\n";
+        let base_bytes = write_jar(&[
+            ("META-INF/MANIFEST.MF", signed_manifest.as_bytes()),
+            ("META-INF/SIGNER.SF", b"Signature-Version: 1.0\r\n"),
+            ("META-INF/SIGNER.RSA", &[0x30, 0x82]),
+            ("Box.class", box_class()),
+        ]);
+        let overlay_bytes = write_jar(&[
+            ("META-INF/OVERLAY.DSA", &[0x30, 0x82]),
+            ("client/Only.class", b"unrelated".as_slice()),
+        ]);
+
+        let mut cache = ArtifactCache::new(MemoryCache::default());
+        let base = publish(&mut cache, b"base", &base_bytes).await;
+        let overlay = publish(&mut cache, b"overlay", &overlay_bytes).await;
+        let merged = JarMerge::merge(&Exec::inline(), &mut cache, &base, &overlay)
+            .await
+            .expect("merge succeeds");
+        let bytes = cache.lookup(&merged).await.unwrap().unwrap();
+
+        let names: Vec<String> = zip::ZipArchive::new(Cursor::new(bytes.clone()))
+            .expect("merged jar is a zip")
+            .file_names()
+            .map(str::to_owned)
+            .collect();
+        assert!(!names.iter().any(|name| name == "META-INF/SIGNER.SF"));
+        assert!(!names.iter().any(|name| name == "META-INF/SIGNER.RSA"));
+        assert!(!names.iter().any(|name| name == "META-INF/OVERLAY.DSA"));
+        assert!(names.iter().any(|name| name == "client/Only.class"));
+
+        let manifest = String::from_utf8(member_bytes(&bytes, "META-INF/MANIFEST.MF"))
+            .expect("the manifest is text");
+        assert_eq!(manifest, "Manifest-Version: 1.0\r\n\r\n");
+    });
+}

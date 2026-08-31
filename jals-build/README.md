@@ -366,6 +366,14 @@ asynchronously after Rhai evaluation and capability preflight succeed:
 | `add_nested_classpath(jar)`                                                      | Expand every nested `.jar` member onto the root classpath (library bundlers). |
 | `publish_tree(owner, tree, destination, "replace-root", intent)`                 | Atomically replace an exclusive physical source subtree.                      |
 
+`remap_jar` and `merge_jars` both drop a signed jar's signature block
+(`META-INF/*.{SF,DSA,RSA,EC}`) and the per-entry digests in its manifest. Renaming every class leaves
+both describing bytes that no longer exist, and a union carries members the signer never saw; a JVM
+refuses either archive with `SecurityException: signer information does not match` — so a jar that
+kept them would compile against but never run. A Minecraft client jar carries about 3.7 MB of them.
+The two agree because a release that ships deobfuscated reaches `merge_jars` without passing through
+a remap at all.
+
 For example:
 
 ```rhai
