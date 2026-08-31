@@ -344,9 +344,10 @@ filesystem reads into portable interfaces.
   fourth seam and the only new one: a test-support library is a project, resolved under
   `DependencyScope::Test` and therefore absent from everything that produces output. It is what
   `examples/minecraft_client_test` is — and what a dependency still cannot contribute is
-  `build.add_jvm_arg`, which reaches a test JVM from the root script only. A captured pass is the sentinel
-  and never the exit status, which is also `1` for a missing main class and `0` for a body that
-  called `System.exit(0)`; `--no-capture` gives up that reading along with the capture, and says so.
+  `build.add_jvm_arg` or `build.add_javac_arg`, both of which reach a compile or a test JVM from the
+  root script only. A captured pass is the sentinel and never the exit status, which is also `1`
+  for a missing main class and `0` for a body that called `System.exit(0)`; `--no-capture` gives up
+  that reading along with the capture, and says so.
 - `jals-cli`: the host boundary from clap `PathBuf` values to `NativeStorage` and typed keys. It
   also owns native-formatter-config **detection** (`migrate.rs`): portable crates cannot look at a
   filesystem, so the host decides which config file is there and reads its bytes through a
@@ -573,4 +574,5 @@ the moment it has a tracked `.java`. Four consequences for an example:
 - `examples/scripts/gen-client-runtime.py` is a **generator, not a build step**: it rewrites the
   pinned library block in `examples/minecraft_client_test/build.rhai` between two exact markers,
   and its output is committed. CI never runs it. The release it pins is the `[features]` key in
-  that project's `jals.toml`, which five other places name and none of them owns.
+  that project's `jals.toml`, which six other places name and none of them owns — the consumer's
+  own `build.rhai` guard is one of them, and two CI cells rather than one.

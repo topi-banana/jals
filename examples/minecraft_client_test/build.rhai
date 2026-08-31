@@ -13,12 +13,17 @@
 //
 // A consumer reaches these through its own `[dev-dependencies]` edge: a dependency's
 // `tasks.add_classpath` lands on the consumer's classpath, which under `jals test` is also the
-// classpath the test JVM runs on. What does *not* cross that edge is `build.add_jvm_arg`, so a
-// consumer supplies `-Xmx2G` itself — see `README.md`.
+// classpath the test JVM runs on. What does *not* cross that edge is an argument —
+// `build.add_jvm_arg` and `build.add_javac_arg` alike reach a JVM or a compile from the root
+// project's script only — so a consumer supplies `-Xmx2G` itself, and compiles this project's
+// sources at its own `--release`. See `README.md`.
 
-// The class-file level. Java 21 rather than the 25 the game's own JVM runs on 1.21.x, to match what
-// a mod compiled against the same release is capped at: `GameClient` is handed to test code that
-// was compiled at 21, and a 25 class file on that classpath would not load.
+// The class-file level for *this project's own* `jals build` — the cell that checks the harness
+// still compiles against the release it claims. It governs nothing on a consumer's side: a
+// dependency's `build.add_javac_arg` does not cross the edge any more than its `build.add_jvm_arg`
+// does, so `GameClient.java` is compiled by whoever consumes it, at that project's own `--release`.
+// Java 21 rather than the 25 the game's own JVM runs on 1.21.x, because a mod compiled against the
+// same release is capped there and a 25 class file on its classpath would not load.
 build.add_javac_arg("--release");
 build.add_javac_arg("21");
 
@@ -145,10 +150,6 @@ if build.feature("1.21.11") {
     tasks.add_classpath(tasks.fetch_jar(
         tasks.https_url("https://libraries.minecraft.net/io/netty/netty-transport-classes-kqueue/4.2.7.Final/netty-transport-classes-kqueue-4.2.7.Final.jar"),
         tasks.sha1("bdec7c23c75caabd848426d073c09568e8d5f94e"), tasks.bytes(117794)));
-    // io.netty:netty-transport-native-epoll:4.2.7.Final:linux-aarch_64
-    tasks.add_classpath(tasks.fetch_jar(
-        tasks.https_url("https://libraries.minecraft.net/io/netty/netty-transport-native-epoll/4.2.7.Final/netty-transport-native-epoll-4.2.7.Final-linux-aarch_64.jar"),
-        tasks.sha1("98d02251c98c8f07a23ac5ea27657d9e0ef57614"), tasks.bytes(43408)));
     // io.netty:netty-transport-native-epoll:4.2.7.Final:linux-x86_64
     tasks.add_classpath(tasks.fetch_jar(
         tasks.https_url("https://libraries.minecraft.net/io/netty/netty-transport-native-epoll/4.2.7.Final/netty-transport-native-epoll-4.2.7.Final-linux-x86_64.jar"),

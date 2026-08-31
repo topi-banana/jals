@@ -103,9 +103,19 @@ public final class GameClient implements AutoCloseable {
     public static GameClient launch() {
         Path directory =
             Path.of(RUN_ROOT, Long.toString(ProcessHandle.current().pid())).toAbsolutePath();
-        GameClient game = start(directory);
-        game.awaitTitleScreen();
-        return game;
+        try {
+            GameClient game = start(directory);
+            game.awaitTitleScreen();
+            return game;
+        } catch (RuntimeException | Error thrown) {
+            // A boot that failed leaves the same JVM behind as one that succeeded — the game
+            // thread is running and whatever it got as far as constructing has non-daemon workers
+            // behind it. Nothing calls `close()` on an instance that was never returned, so the
+            // watchdog is armed here instead; without it the failure is reported and the process
+            // then hangs until `--timeout` kills it, or forever when none was given.
+            armHalt();
+            throw thrown;
+        }
     }
 
     /** The run directory this client owns. Kept after the run, so a failure leaves its log behind. */
@@ -127,11 +137,26 @@ public final class GameClient implements AutoCloseable {
 
     /** Run {@code action} on the render thread. */
     public void runOnClient(GameEffect<Minecraft> action) {
-        evalOnClient(
+        runOnClient(action, STEP_DEADLINE);
+    }
+
+    /**
+     * The same, for a body the render thread runs for longer than a step.
+     *
+     * <p>The deadline is how long the <em>caller</em> waits, and a body that generates a world is
+     * not a body that reads a field: giving both the same budget makes the slower one time out
+     * while it is still running, which reads as a harness failure and is not one.
+     */
+    private void runOnClient(GameEffect<Minecraft> action, Duration deadline) {
+        evalOn(
+            this.client,
+            this.client,
             client -> {
                 action.accept(client);
                 return null;
-            });
+            },
+            "the render thread",
+            deadline);
     }
 
     /** Run {@code action} on the integrated server's thread and return what it produced. */
@@ -173,24 +198,49 @@ public final class GameClient implements AutoCloseable {
      * number every faster one pays.
      */
     public void waitUntil(String what, Predicate<Minecraft> condition, Duration deadline) {
+        pollOnClient(what, client -> condition.test(client) ? Boolean.TRUE : null, deadline);
+    }
+
+    /**
+     * Wait until the showing screen is a {@code type}, and return it.
+     *
+     * <p>Tested and captured in one hop: the render thread is free to replace the screen between a
+     * wait passing and a second call reading it, and that read would then hand back {@code null} —
+     * or throw about a screen nobody asked for.
+     */
+    public <S extends Screen> S waitForScreen(Class<S> type, Duration deadline) {
+        return pollOnClient(
+            type.getSimpleName() + " to be showing",
+            client -> type.isInstance(client.screen) ? type.cast(client.screen) : null,
+            deadline);
+    }
+
+    /**
+     * Ask {@code question} on the render thread until it answers with something, and return that.
+     *
+     * <p>Each hop is given what is <em>left</em> of {@code deadline} rather than a step's worth. A
+     * render thread that has stopped draining its queue is exactly what a long wait is waiting for,
+     * so bounding one hop at {@link #STEP_DEADLINE} would make every deadline longer than that
+     * unreachable: a 5-minute world load would fail after one minute, saying the render thread was
+     * slow rather than that the world was.
+     */
+    private <T> T pollOnClient(String what, GameAction<Minecraft, T> question, Duration deadline) {
         long limit = System.nanoTime() + deadline.toNanos();
         while (System.nanoTime() < limit) {
             requireAlive(what);
-            if (evalOnClient(condition::test)) {
-                return;
+            T answer =
+                evalOn(
+                    this.client,
+                    this.client,
+                    question,
+                    "the render thread",
+                    Duration.ofNanos(limit - System.nanoTime()));
+            if (answer != null) {
+                return answer;
             }
             pause();
         }
         throw timedOut(what, deadline);
-    }
-
-    /** Wait until the showing screen is a {@code type}, and return it. */
-    public <S extends Screen> S waitForScreen(Class<S> type, Duration deadline) {
-        waitUntil(
-            type.getSimpleName() + " to be showing",
-            client -> type.isInstance(client.screen),
-            deadline);
-        return evalOnClient(client -> type.cast(client.screen));
     }
 
     // --- screens -------------------------------------------------------------------------------
@@ -266,7 +316,8 @@ public final class GameClient implements AutoCloseable {
                         WorldOptions.testWorldWithRandomSeed(),
                         WorldPresets::createFlatWorldDimensions,
                         client.screen);
-            });
+            },
+            WORLD_DEADLINE);
         waitUntil(
             "the world to load",
             client -> client.level != null && client.player != null,
@@ -307,6 +358,18 @@ public final class GameClient implements AutoCloseable {
      */
     @Override
     public void close() {
+        armHalt();
+    }
+
+    /**
+     * Start the daemon that ends this JVM once the verdict has had its moment.
+     *
+     * <p>A daemon, so it costs a JVM that <em>can</em> wind down on its own nothing: that one exits
+     * and takes the watchdog with it before the sleep is up. Armed by {@link #close()} on the way
+     * out of a test, and by {@link #launch()} when a boot failed before there was anything to
+     * close.
+     */
+    private static void armHalt() {
         Thread watchdog =
             new Thread(
                 () -> {
@@ -360,7 +423,16 @@ public final class GameClient implements AutoCloseable {
             }
             Minecraft instance = Minecraft.getInstance();
             if (instance != null) {
-                return new GameClient(instance, game, directory);
+                GameClient client = new GameClient(instance, game, directory);
+                // Installed once there is a field to write. The window before that is covered by
+                // the liveness check above, which has nothing to report a cause for anyway; from
+                // here on this is what makes `failure` say anything at all, and without it every
+                // wait that fails reports the clock rather than the reason.
+                // `_thread` is the same opt-out `_interrupted` below takes: the handler is
+                // handed the thread it already has, and `unused-variables` reports a lambda
+                // parameter like any other binding.
+                game.setUncaughtExceptionHandler((_thread, thrown) -> client.failure = thrown);
+                return client;
             }
             pause();
         }
@@ -459,7 +531,7 @@ public final class GameClient implements AutoCloseable {
                 + "\"/>\n"
                 + "    </Console>\n"
                 + "    <File name=\"File\" fileName=\""
-                + logs.resolve("latest.log")
+                + attribute(logs.resolve("latest.log").toString())
                 + "\">\n"
                 + "      <PatternLayout pattern=\""
                 + pattern
@@ -474,6 +546,19 @@ public final class GameClient implements AutoCloseable {
                 + "  </Loggers>\n"
                 + "</Configuration>\n");
         System.setProperty("log4j2.configurationFile", configuration.toString());
+    }
+
+    /**
+     * One host path, as an XML attribute value.
+     *
+     * <p>A run directory is under whatever the checkout is under, and a workspace path may hold an
+     * {@code &} or a quote. Interpolated raw, one of those makes the configuration unparsable,
+     * log4j falls back to a console-only default, and the run's log — the only account a failed
+     * boot leaves — is never written where the CI upload looks for it.
+     */
+    private static String attribute(String value) {
+        return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            .replace("\"", "&quot;");
     }
 
     // --- plumbing ------------------------------------------------------------------------------

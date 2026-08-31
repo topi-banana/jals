@@ -32,8 +32,10 @@ never sees this project.
 | the ~60 runtime jars                       | yes, onto the consumer's classpath | `tasks.add_classpath` in `build.rhai`                                      |
 | the game jar and its navigation sources    | yes                                | the `minecraft` SDK, reached from both sides of a diamond                  |
 | **`-Xmx2G`**                               | **no**                             | `build.add_jvm_arg` reaches a test JVM only from the *root* project's script |
+| **`--release 21`**                         | **no**                             | `build.add_javac_arg` is the same rule, so `GameClient.java` is compiled at whatever `--release` the consumer set |
 
-So a consumer writes that last one itself:
+So a consumer writes the JVM argument itself; the compiler one it already has, because a mod
+compiled against a release is capped at that release's class-file level either way:
 
 ```rhai
 if build.feature("client-test") {
@@ -46,9 +48,10 @@ Leaving it out does not fail cleanly — the boot dies inside the resource reloa
 
 ## One release, and where the pin lives
 
-The canonical pin is the `[features]` key in `jals.toml`: **`1.21.11`**. Five other places name it
+The canonical pin is the `[features]` key in `jals.toml`: **`1.21.11`**. Six other places name it
 and none of them is the source of truth — `build.rhai`'s guard, the `#[cfg]` on every declaration in
-`GameClient.java`, the consumer's `client-test` entry, this repository's CI cell, and the default in
+`GameClient.java`, the consumer's `client-test` entry, the consumer's own `build.rhai` guard, this
+repository's two CI cells (`minecraft_client_test` and `minecraft_mod (client)`), and the default in
 `examples/scripts/gen-client-runtime.py`.
 
 One release rather than the SDK's 43, because the harness is written against a client API that
