@@ -28,7 +28,9 @@ use jals_build::{
     ManifestExt,
     build_script::{BuildScriptEnvironment, BuildScriptLimits, BuildScriptSession},
 };
-use jals_config::{BuildScript, Dependency, FeatureSet, Manifest, ResolvedBuildFeatures};
+use jals_config::{
+    BuildScript, Dependency, DependencyScope, FeatureSet, Manifest, ResolvedBuildFeatures,
+};
 use jals_editor::{
     EditorHost, FoldingHost, Folds, Ident, LineIndex, Outline, SelectionChains, SelectionHost,
 };
@@ -1907,6 +1909,9 @@ impl AssembledWorkspace {
                     root_features: scripts.features,
                     limits: scripts.limits,
                 },
+                // Every open file gets an answer, and a `[test] source-dirs` tree is open like
+                // any other — so the scope is the one that carries the types those files name.
+                DependencyScope::Test,
                 jals_classpath::ProjectInputOptions::Editor,
             )
             .await

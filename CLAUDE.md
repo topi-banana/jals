@@ -76,6 +76,15 @@ filesystem reads into portable interfaces.
   adapters (see *Storage* above). Only `native.rs` may use `std::path`/`std::fs`.
 - `jals-config`: pure schemas and revision-aware config discovery over `ProjectView`, plus the
   shared severity vocabulary — the configured `LintLevel` and the presented `DiagnosticSeverity`.
+
+  `[dependencies]` and `[dev-dependencies]` hold the same `Dependency` and differ only in *when* an
+  entry is resolved, so which of them a resolution reads is a `DependencyScope` a host **states**
+  (`Build` / `Test`) and never infers. `Test` is additive — the test run still needs the ordinary
+  dependencies, exactly as `[test] source-dirs` adds to `[build] source-dirs`. `active_dependencies`
+  and `declared_dependencies` are the only two spellings of "which entries", the second for callers
+  that must see an entry a selection did not activate (discovery, the LSP watch set). A name in both
+  tables is rejected rather than overridden as Cargo does: one name denotes one entry wherever it is
+  read — `dep:<name>`, `<name>/<feature>`, one discovery edge.
   A crate that produces diagnostics states how they present without depending on an editor, which
   is why the vocabulary lives here: `jals-editor` and `jals-project` both assemble diagnostics and
   neither depends on the other. `jals-editor` re-exports the name, so a host still spells it
@@ -131,6 +140,12 @@ filesystem reads into portable interfaces.
   dependency-first preprocessing, and artifact-only projection into `jals-classpath`. The portable
   memory graph operates on one captured `CodeTree`; only the `native` adapter may acquire host path
   trees or temporary Git checkouts.
+  - The `DependencyScope` a host states applies to the **root manifest alone**: `walk.rs`'s
+    recursion is hard-coded to `Build`, because `[dev-dependencies]` are not transitive. That is the
+    one place the rule is written and it is invisible in the signature, so it carries a test.
+  - Two edges reaching one `path` dependency are one node — identity is the canonicalized directory
+    — and the features every in-edge routed to it are unioned there. A test-support library and its
+    consumer can therefore both depend on the same SDK without becoming two selections.
   - Dependency snapshots are immutable and must never receive generated output: a dependency's
     build tasks run under `BuildTaskHost::Snapshot`, so their JARs and declared source trees are
     projected into the *consumer's* artifact cache instead of being published to the project they

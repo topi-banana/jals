@@ -8,7 +8,7 @@ use alloc::borrow::ToOwned;
 use alloc::string::{String, ToString};
 
 use jals_classfile::ClassFile;
-use jals_config::{Dependency, FeatureSet, Manifest, ResolvedBuildFeatures};
+use jals_config::{Dependency, DependencyScope, FeatureSet, Manifest, ResolvedBuildFeatures};
 use jals_storage::{
     CacheBackend, CacheKey, DirKey, EntryRef, FileKey, Name, ProjectStorage, ProjectView,
     RelativePath, SourceBackend,
@@ -74,18 +74,19 @@ pub struct ProjectInputPlan {
 }
 
 impl ProjectInputPlan {
-    /// Lower a manifest's `[dependencies]` jar entries into this plan — each binary jar plus its
-    /// optional `sources` jar — classifying every locator through `classify` (hosts decide what
-    /// resolves as a project file versus external content). A non-portable dependency name is
-    /// diagnosed into `warnings` and skipped. Shared by the native lowering and the browser host.
+    /// Lower the jar entries `scope` declares into this plan — each binary jar plus its optional
+    /// `sources` jar — classifying every locator through `classify` (hosts decide what resolves as
+    /// a project file versus external content). A non-portable dependency name is diagnosed into
+    /// `warnings` and skipped.
     pub(crate) fn add_jar_dependencies(
         &mut self,
         manifest: &Manifest,
+        scope: DependencyScope,
         features: &ResolvedBuildFeatures,
         mut classify: impl FnMut(&str) -> DependencyLocation,
         warnings: &mut Vec<Warning>,
     ) {
-        for (raw_name, dependency) in manifest.active_dependencies(features) {
+        for (raw_name, dependency) in manifest.active_dependencies(scope, features) {
             let Dependency::Jar(jar) = dependency else {
                 continue;
             };

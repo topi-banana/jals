@@ -21,7 +21,7 @@ use jals_classpath::{
     ClasspathEntry, Fetcher, MemoryProjectPlan, ProjectInputOptions, ProjectInputPlan,
     ProjectInputs,
 };
-use jals_config::Manifest;
+use jals_config::{DependencyScope, Manifest};
 use jals_exec::Exec;
 use jals_storage::{
     CacheBackend, CacheKey, DirKey, Name, ProjectStorage, RelativePath, SourceBackend,
@@ -137,6 +137,7 @@ impl ProjectScript {
         manifest: &Manifest,
         storage: &mut ProjectStorage<S, C>,
         preprocess: GraphPreprocess<'_, F>,
+        scope: DependencyScope,
         options: ProjectInputOptions,
     ) -> Result<MemoryProjectAssembly, GraphResolveError>
     where
@@ -147,7 +148,7 @@ impl ProjectScript {
         // `preprocess` is consumed by the phase it names, but the graph plan needs the same fetch
         // capability again when it resolves. The field is a shared reference, so copy it out first.
         let fetcher = preprocess.fetcher;
-        let graph = MemoryProjectGraph::discover(manifest, &storage.view())
+        let graph = MemoryProjectGraph::discover(manifest, scope, &storage.view())
             .await
             .map_err(GraphResolveError::unreported)?;
         let discovered = graph.warnings.clone();
@@ -490,6 +491,7 @@ mod tests {
                     &root_manifest(),
                     &mut storage,
                     inert!(),
+                    DependencyScope::Build,
                     ProjectInputOptions::Editor,
                 )
                 .await
@@ -533,7 +535,13 @@ mod tests {
             ] {
                 let mut storage = project();
                 let assembly = ProjectScript::skipped()
-                    .resolve_memory(&manifest, &mut storage, inert!(), options)
+                    .resolve_memory(
+                        &manifest,
+                        &mut storage,
+                        inert!(),
+                        DependencyScope::Build,
+                        options,
+                    )
                     .await
                     .expect("an in-tree path dependency resolves offline");
                 assert!(
@@ -586,6 +594,7 @@ mod tests {
                     &manifest,
                     &mut storage,
                     inert!(),
+                    DependencyScope::Build,
                     ProjectInputOptions::Editor,
                 )
                 .await
@@ -615,6 +624,7 @@ mod tests {
                     &invalid,
                     &mut storage,
                     inert!(),
+                    DependencyScope::Build,
                     ProjectInputOptions::Editor,
                 )
                 .await
@@ -703,6 +713,7 @@ mod tests {
                     &manifest,
                     &mut storage,
                     inert!(),
+                    DependencyScope::Build,
                     ProjectInputOptions::Editor,
                 )
                 .await
@@ -766,6 +777,7 @@ mod tests {
                     &root_manifest(),
                     &mut storage,
                     inert!(),
+                    DependencyScope::Build,
                     ProjectInputOptions::Compile,
                 )
                 .await
@@ -822,7 +834,13 @@ mod tests {
                     .await
                     .expect("an in-memory publication is infallible");
                 let assembly = ProjectScript::from_parts(None, vec![task_key.clone()])
-                    .resolve_memory(&manifest, &mut storage, inert!(), options)
+                    .resolve_memory(
+                        &manifest,
+                        &mut storage,
+                        inert!(),
+                        DependencyScope::Build,
+                        options,
+                    )
                     .await
                     .expect("an in-tree path dependency resolves offline");
 
@@ -936,6 +954,7 @@ mod tests {
                     &root_manifest(),
                     &mut storage,
                     inert!(),
+                    DependencyScope::Build,
                     ProjectInputOptions::Compile,
                 )
                 .await
@@ -1017,6 +1036,7 @@ mod tests {
                     &root_manifest(),
                     &mut storage,
                     inert!(),
+                    DependencyScope::Build,
                     ProjectInputOptions::Compile,
                 )
                 .await

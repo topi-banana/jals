@@ -30,7 +30,9 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use jals_config::{Dependency, GitDependency, JarDependency, Manifest, PathDependency};
+use jals_config::{
+    Dependency, DependencyScope, GitDependency, JarDependency, Manifest, PathDependency,
+};
 use jals_exec::LocalBoxFuture;
 use jals_storage::{DirKey, EntryRef, FileKey, Name, ProjectView, RelativePath};
 
@@ -211,10 +213,16 @@ impl<H: GraphHost> GraphWalk<'_, H> {
     ///
     /// `warnings` seeds the output with whatever the caller already had to say about the root
     /// itself, so those come before anything the walk finds.
+    ///
+    /// `scope` applies to the **root manifest alone**. Every dependency is walked under
+    /// [`DependencyScope::Build`], because `[dev-dependencies]` are not transitive: a library's
+    /// test-support entries are what compiling *its* tests needs, and nothing a consumer builds or
+    /// tests reaches them. This is the only place that rule is written.
     pub(crate) async fn run(
         host: &mut H,
         root: &H::Project,
         root_manifest: &Manifest,
+        scope: DependencyScope,
         warnings: Vec<GraphWarning>,
     ) -> Result<WalkOutput, GraphError> {
         let mut walk = GraphWalk {
@@ -227,7 +235,8 @@ impl<H: GraphHost> GraphWalk<'_, H> {
             order: Vec::new(),
             warnings,
         };
-        walk.visit_dependencies(None, root, root_manifest).await?;
+        walk.visit_dependencies(None, root, root_manifest, scope)
+            .await?;
         Ok(WalkOutput {
             nodes: walk.nodes,
             edges: walk.edges,
@@ -251,9 +260,10 @@ impl<H: GraphHost> GraphWalk<'_, H> {
         parent: Option<NodeId>,
         declaring: &'a H::Project,
         manifest: &'a Manifest,
+        scope: DependencyScope,
     ) -> LocalBoxFuture<'a, Result<(), GraphError>> {
         Box::pin(async move {
-            for (name, dependency) in &manifest.dependencies {
+            for (name, dependency) in manifest.declared_dependencies(scope) {
                 // A jar is a leaf, and the walk is over once its bytes are in hand. A path and a
                 // repository are the same walk from the moment either has been acquired, so only
                 // the acquiring tells them apart.
@@ -433,7 +443,10 @@ impl<H: GraphHost> GraphWalk<'_, H> {
         });
         self.host.admitted(acquired);
         if let Some(manifest) = &manifest {
-            self.visit_dependencies(Some(id.clone()), &project, manifest)
+            // `Build`, never the scope the root was walked under: `[dev-dependencies]` are not
+            // transitive. A dependency's test-support entries belong to compiling *its* tests,
+            // which no consumer ever does.
+            self.visit_dependencies(Some(id.clone()), &project, manifest, DependencyScope::Build)
                 .await?;
         }
         self.stack.pop();

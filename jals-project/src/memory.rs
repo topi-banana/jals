@@ -11,7 +11,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::future::{Future, ready};
 
-use jals_config::{GitDependency, Manifest, PathDependency};
+use jals_config::{DependencyScope, GitDependency, Manifest, PathDependency};
 use jals_storage::{
     CodeTree, DirKey, Entry, EntryRef, FileKey, MemoryStorage, Name, ProjectView, RelativePath,
 };
@@ -46,6 +46,7 @@ impl MemoryProjectGraph {
     /// rooted at that selected subtree, so every key remains project-relative.
     pub(crate) async fn discover(
         root_manifest: &Manifest,
+        scope: DependencyScope,
         root_view: &ProjectView,
     ) -> Result<ResolvedProjectGraph, GraphError> {
         root_manifest
@@ -56,8 +57,14 @@ impl MemoryProjectGraph {
         let mut host = MemoryHost {
             root_view: root_view.clone(),
         };
-        let output =
-            GraphWalk::run(&mut host, &RelativePath::ROOT, root_manifest, Vec::new()).await?;
+        let output = GraphWalk::run(
+            &mut host,
+            &RelativePath::ROOT,
+            root_manifest,
+            scope,
+            Vec::new(),
+        )
+        .await?;
         Ok(ResolvedProjectGraph {
             nodes: output.nodes,
             edges: output.edges,
@@ -396,7 +403,7 @@ mod tests {
             ]);
             let root = manifest("[dependencies]\nparent = { path = \"deps/parent\" }\n");
             let mut storage = MemoryStorage::memory(CodeTree::default());
-            let graph = MemoryProjectGraph::discover(&root, &root_view)
+            let graph = MemoryProjectGraph::discover(&root, DependencyScope::Build, &root_view)
                 .await
                 .unwrap();
             assert_eq!(
@@ -444,12 +451,14 @@ mod tests {
                 ("base/jals.toml", b"[build\n"),
                 ("base/selected/src/S.java", b"class S {}"),
             ]);
-            let graph = MemoryProjectGraph::discover(&root, &absent).await.unwrap();
+            let graph = MemoryProjectGraph::discover(&root, DependencyScope::Build, &absent)
+                .await
+                .unwrap();
             assert_eq!(graph.metadata().nodes()[0].kind, NodeKind::PlainSource);
 
             let malformed = view(&[("base/selected/jals.toml", b"[build\n")]);
             assert!(matches!(
-                MemoryProjectGraph::discover(&root, &malformed).await,
+                MemoryProjectGraph::discover(&root, DependencyScope::Build, &malformed).await,
                 Err(GraphError::MalformedManifest { .. })
             ));
         });
@@ -472,9 +481,10 @@ mod tests {
                 ),
                 ("shared/src/Shared.java", b"class Shared {}"),
             ]);
-            let graph = MemoryProjectGraph::discover(&diamond, &diamond_view)
-                .await
-                .unwrap();
+            let graph =
+                MemoryProjectGraph::discover(&diamond, DependencyScope::Build, &diamond_view)
+                    .await
+                    .unwrap();
             assert_eq!(graph.metadata().nodes().len(), 3);
             assert_eq!(graph.metadata().edges().len(), 4);
 
@@ -486,9 +496,10 @@ mod tests {
                     b"[dependencies]\na-again = { path = \"../a\" }\n",
                 ),
             ]);
-            let GraphError::Cycle { chain } = MemoryProjectGraph::discover(&root, &root_view)
-                .await
-                .unwrap_err()
+            let GraphError::Cycle { chain } =
+                MemoryProjectGraph::discover(&root, DependencyScope::Build, &root_view)
+                    .await
+                    .unwrap_err()
             else {
                 panic!("expected a cycle");
             };
@@ -501,7 +512,7 @@ mod tests {
             );
 
             let escaped = manifest("[dependencies]\nx = { path = \"../x\" }\n");
-            let graph = MemoryProjectGraph::discover(&escaped, &root_view)
+            let graph = MemoryProjectGraph::discover(&escaped, DependencyScope::Build, &root_view)
                 .await
                 .unwrap();
             assert!(graph.metadata().nodes().is_empty());
@@ -520,7 +531,7 @@ mod tests {
                 ("lib/sources.jar", b"sources"),
             ]);
             let mut storage = MemoryStorage::memory(CodeTree::default());
-            let graph = MemoryProjectGraph::discover(&root, &root_view)
+            let graph = MemoryProjectGraph::discover(&root, DependencyScope::Build, &root_view)
                 .await
                 .unwrap()
                 .preprocess(storage.artifacts_mut(), inert!())
@@ -583,7 +594,7 @@ mod tests {
             environment.insert("HOST_VALUE", "kept");
             let mut storage = MemoryStorage::memory(CodeTree::default());
 
-            MemoryProjectGraph::discover(&root, &root_view)
+            MemoryProjectGraph::discover(&root, DependencyScope::Build, &root_view)
                 .await
                 .unwrap()
                 .preprocess(
@@ -622,7 +633,7 @@ mod tests {
                 max_cache_state_size: 1,
                 ..BuildScriptLimits::default()
             };
-            let graph = MemoryProjectGraph::discover(&root, &root_view)
+            let graph = MemoryProjectGraph::discover(&root, DependencyScope::Build, &root_view)
                 .await
                 .unwrap()
                 .preprocess(
@@ -659,7 +670,7 @@ mod tests {
             let root = manifest(
                 "[dependencies]\na = { git = \"https://example.invalid/a.git\" }\nb = { git = \"https://example.invalid/b.git\" }\n",
             );
-            let graph = MemoryProjectGraph::discover(&root, &view(&[]))
+            let graph = MemoryProjectGraph::discover(&root, DependencyScope::Build, &view(&[]))
                 .await
                 .unwrap();
             assert!(graph.metadata().nodes().is_empty());
@@ -696,6 +707,7 @@ mod tests {
             let root = manifest("[dependencies]\ndep = { path = \"dep\" }\n");
             let graph = MemoryProjectGraph::discover(
                 &root,
+                DependencyScope::Build,
                 &view(&[
                     (
                         "dep/jals.toml",
@@ -731,6 +743,7 @@ mod tests {
             let root = manifest("[dependencies]\ndep = { path = \"dep\" }\n");
             let graph = MemoryProjectGraph::discover(
                 &root,
+                DependencyScope::Build,
                 &view(&[(
                     "dep/jals.toml",
                     b"[build]\nsource-dirs = [\"src/main/java\"]\n",
@@ -791,7 +804,7 @@ mod tests {
     /// which fires at the start of `preprocess` before any script runs.
     async fn preprocess_error(root: &Manifest, root_view: &ProjectView) -> GraphError {
         let mut storage = MemoryStorage::memory(CodeTree::default());
-        MemoryProjectGraph::discover(root, root_view)
+        MemoryProjectGraph::discover(root, DependencyScope::Build, root_view)
             .await
             .unwrap()
             .preprocess(storage.artifacts_mut(), inert!())
@@ -812,7 +825,7 @@ mod tests {
             .resolve_build_features(&selected, false, false)
             .unwrap();
         let mut storage = MemoryStorage::memory(CodeTree::default());
-        MemoryProjectGraph::discover(root, root_view)
+        MemoryProjectGraph::discover(root, DependencyScope::Build, root_view)
             .await
             .unwrap()
             .preprocess(
@@ -1072,7 +1085,7 @@ mod tests {
                 ("dep/jals.toml", PROBE_MANIFEST),
                 ("dep/build.rhai", FEATURE_PROBE),
             ]);
-            let error = MemoryProjectGraph::discover(&root, &root_view)
+            let error = MemoryProjectGraph::discover(&root, DependencyScope::Build, &root_view)
                 .await
                 .unwrap_err();
             let GraphError::MalformedManifest {
@@ -1106,7 +1119,7 @@ mod tests {
                 ("dep/build.rhai", FEATURE_PROBE),
                 ("libs/x.jar", b"not really a jar"),
             ]);
-            let graph = MemoryProjectGraph::discover(&root, &root_view)
+            let graph = MemoryProjectGraph::discover(&root, DependencyScope::Build, &root_view)
                 .await
                 .unwrap();
             let metadata = graph.metadata();

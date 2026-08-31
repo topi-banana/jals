@@ -40,10 +40,10 @@ pub use loader::{ConfigError, DiscoverableConfig};
 pub use manifest::MANAGED_REMAP_ROOT;
 pub use manifest::{
     AmbiguousMapping, BackendKind, Bin, Build, BuildFeatureError, BuildRemap, BuildResources,
-    BuildScript, Dependency, DependencyError, Feature, FeatureRefError, FeatureSet, FileMappings,
-    FrontendKind, GitDependency, GitRef, JarDependency, Manifest, ManifestParseError,
-    MappingDigest, MappingEntry, MappingError, MappingFormatKind, MappingSource, Package,
-    PathDependency, RemapSite, ResolvedBuildFeatures, ResourcePattern, ResourcePatternError, Run,
-    UrlMappings, ValidationError,
+    BuildScript, Dependency, DependencyError, DependencyScope, Feature, FeatureRefError,
+    FeatureSet, FileMappings, FrontendKind, GitDependency, GitRef, JarDependency, Manifest,
+    ManifestParseError, MappingDigest, MappingEntry, MappingError, MappingFormatKind,
+    MappingSource, Package, PathDependency, RemapSite, ResolvedBuildFeatures, ResourcePattern,
+    ResourcePatternError, Run, UrlMappings, ValidationError,
 };
 pub use toolchain::{Compiler, Distribution, Runtime, ToolSpec, Toolchain};

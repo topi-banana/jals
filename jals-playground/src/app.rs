@@ -30,7 +30,7 @@ use futures::lock::Mutex;
 use jals_build::build_script::{BuildScriptEnvironment, BuildScriptLimits, BuildScriptOutput};
 use jals_classpath::{LibrarySource, ProjectInputOptions, SourceFile};
 use jals_config::fmt::Config;
-use jals_config::{FeatureSet, Manifest, ManifestParseError};
+use jals_config::{DependencyScope, FeatureSet, Manifest, ManifestParseError};
 use jals_hir::{LoweredClasspath, ProjectIndex};
 use jals_project::{
     GraphOutcome, ProjectAnchor, ProjectDiagnostic, ProjectDiagnostics, ProjectScript, ScriptFile,
@@ -1045,6 +1045,9 @@ impl App {
                     root_features: &features,
                     limits: &BuildScriptLimits::default(),
                 },
+                // The playground builds and never runs a test, so `[dev-dependencies]` are not
+                // part of what it resolves.
+                DependencyScope::Build,
                 ProjectInputOptions::Editor,
             )
             .await
