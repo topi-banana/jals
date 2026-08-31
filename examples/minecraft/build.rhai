@@ -118,6 +118,9 @@ let meta = tasks.fetch_json(
 );
 
 let game = ();
+// The server bundler, when the selected release ships one. Held out here because its nested jars
+// go on the classpath *after* the remapped game jar, never before — see below.
+let bundler = ();
 if server {
     let download = tasks.fetch_jar(
         tasks.json_url(meta, ["downloads", "server", "url"]),
@@ -135,7 +138,7 @@ if server {
             download,
             "META-INF/versions/" + version + "/server-" + version + ".jar"
         );
-        tasks.add_nested_classpath(download);
+        bundler = download;
     }
     if obfuscated {
         // Up to 1.21.11 the shipped names are obfuscated, so the official mappings turn them back
@@ -172,9 +175,20 @@ if client {
     }
 }
 
-// Deobfuscated game bytecode on the classpath (1.18+ libraries come from the server bundler above,
+// Deobfuscated game bytecode on the classpath (1.18+ libraries come from the server bundler below,
 // older ones ride along inside this same jar).
 tasks.add_classpath(game);
+if bundler != () {
+    // The bundler's nested jars, flattened: brigadier, guava, netty and the rest of what a 1.18+
+    // server links against. They go on *after* the remapped jar and not before, because
+    // `add_nested_classpath` expands every nested member and one of them is
+    // `META-INF/versions/<v>/server-<v>.jar` — the game itself, still obfuscated. It declares
+    // `net.minecraft.server.MinecraftServer` and `net.minecraft.server.Main` under exactly the
+    // names the remapping gives them (Mojang leaves those two alone), so whichever jar comes first
+    // is the one `javac` resolves them from. Ahead of the remapped jar it wins, and every method on
+    // `MinecraftServer` reads as missing while the classes around it resolve perfectly.
+    tasks.add_nested_classpath(bundler);
+}
 let sources = tasks.decompile_java(game, "net/minecraft");
 tasks.publish_tree(
     "minecraft-" + version,
