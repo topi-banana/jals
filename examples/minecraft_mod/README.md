@@ -411,9 +411,22 @@ raise it.
 
 ## Booting the game from a test
 
-`src/test/java` holds a small Java API that starts a **real Minecraft client in the test JVM** and
-drives it — no Mixin, no java agent, no launcher. It is compiled and run only by `jals test`, so the
-mod jar `jals build` produces is untouched by it.
+`src/test/java` holds three `#[test]` methods that start a **real Minecraft client in the test JVM**
+and assert against it — no Mixin, no java agent, no launcher. What starts it is not here: the
+harness is a project of its own, `../minecraft_client_test`, and this project reaches it in one
+line.
+
+```toml
+[dev-dependencies]
+mc-client-test = { path = "../minecraft_client_test" }
+```
+
+That is the whole of the arrangement, and it is the point of the split. `[dev-dependencies]` is
+resolved by `jals test` and by the analysis hosts and by nothing that produces output, so the jar
+`jals build` writes holds the mixin and nothing else — which a `[dependencies]` entry could not
+promise, because a `path` dependency's `.java` is compiled into whoever consumes it. Nothing in
+`GameClient` names a type in `com.example.hellomod`, so a second mod adds the same one line and gets
+the same harness.
 
 ```sh
 cd examples/minecraft_mod
@@ -442,52 +455,25 @@ try (GameClient game = GameClient.launch()) {
 }
 ```
 
-### The hinge
+### What this project still owns
 
-`Minecraft` implements `java.util.concurrent.Executor`. `execute(Runnable)` is an override of a JDK
-interface method, so no mapping set may rename it, and a thread that is not the render thread can
-schedule work onto it. `GameClient.evalOnClient` is that call with a result and an exception path
-attached. `MinecraftServer` is an `Executor` for the same reason, which is what `evalOnServer` rides.
+Three things, and each is here because it cannot live on the other side of the edge:
 
-**Why a client and not a dedicated server.** Vanilla publishes no static accessor for a running
-`MinecraftServer` — but `Minecraft.getInstance().getSingleplayerServer()` is public. So booting a
-client is what hands a test a typed, in-process server as well; a dedicated server would have to be
-reached by reflection or through RCON.
+- **`client-test`.** `["client", "mc-client-test/1.21.11"]` — it implies `client` so this project
+  compiles against the client jar, and routes the release into the harness. Everything under
+  `src/test/java` is `#[cfg]`-gated on it, so a selection that does not name it compiles and lints
+  as if the tests were not there, which is what keeps the other two `minecraft_mod` CI cells
+  unchanged.
+- **`-Xmx2G`.** `build.add_jvm_arg` reaches a test JVM only from the *root* project's script, so a
+  dependency cannot contribute it. `build.rhai` writes the line; without it the boot dies inside the
+  resource reload with an `OutOfMemoryError`.
+- **The release guard.** `--features 1.20.1,client-test` routes two versions into the SDK, which
+  rejects them. The root's build script runs before the graph is preprocessed, so the guard's
+  sentence is what a reader sees rather than the SDK's.
 
-### What the harness has to do about `jals test`
-
-- **A test is one JVM, and one JVM is one client.** Three tests are three boots. That is the shape
-  `jals test` gives, and the reason this file holds three tests rather than thirty. Pass `-j 1`:
-  `-j` defaults to the machine's parallelism, and two clients want two GL contexts.
-- **The game runs on a daemon thread and is never asked to stop.** `jals test` reads a test as
-  passed when the generated harness prints its sentinel line, *after* the test method returns. A
-  client shutting the JVM down would take the sentinel with it, so the test abandons the game.
-- **Something still has to end the process.** A booted client leaves non-daemon workers running, so
-  `close()` arms a watchdog that calls `Runtime.halt` once the sentinel has had its moment. The
-  verdict is already on disk by then, and `jals test` reads the sentinel rather than the exit
-  status.
-- **A screen appearing is not the game being ready.** The resource reload finishes by calling
-  `setScreen(new TitleScreen(...))` itself, so a driver that starts as soon as `screen != null` has
-  its own screen replaced a moment later. The harness waits for the overlay to be gone *and* the
-  title screen to be showing. Nothing in the API sleeps for a fixed interval.
-
-### What it costs to run
-
-`client-test` implies `client`, so the SDK resolves the merged client+server jar, and the build
-script fetches the ~60 libraries a client loads at runtime — LWJGL and its native classifier jars,
-icu4j, oshi, the netty/guava/log4j stack. Those are pinned by URL and SHA-1 for **one release**,
-because a launcher's library set is per release and per platform, and a Rhai script cannot walk the
-metadata's `libraries` array: `tasks.fetch_json` returns a task handle and the fetch happens after
-the script has returned. `examples/scripts/gen-client-runtime.py <release>` rewrites the pinned block.
-
-Two things a launcher supplies that this does not, both measured rather than assumed:
-
-- **No native library directory.** The `-natives-linux` jars go on the classpath like any other, and
-  LWJGL's own `SharedLibraryLoader` extracts what it needs out of them. There is no
-  `-Djava.library.path`.
-- **No asset store.** The harness writes an asset index with no objects in it. Almost everything in a
-  launcher's store is sounds and translations; the textures, models and shaders a boot needs are
-  inside the client jar.
+Everything else — the harness class, the ~60 pinned runtime libraries, the `Executor` hinge, the
+daemon-thread and watchdog dance `jals test` forces, and why there is no native directory and no
+asset store — is documented in [`../minecraft_client_test/README.md`](../minecraft_client_test/README.md).
 
 **Linux only.** GLFW wants the main thread on macOS (`-XstartOnFirstThread`) and the main thread
 belongs to the test. CI runs the cell under `xvfb` with Mesa's llvmpipe.

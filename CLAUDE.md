@@ -340,7 +340,11 @@ filesystem reads into portable interfaces.
   to per-test scratch files rather than pipes, `-ea` prepended by the launcher). The contract
   between the two halves — the sentinel line, `--list`, `--quiet` — is owned by `jals-frontend` and
   travels to the runner as a `HarnessContract` value, so it is written once; the harness class is
-  the fourth item and travels beside it as `RunRequest.main_class`. A captured pass is the sentinel
+  the fourth item and travels beside it as `RunRequest.main_class`. `[dev-dependencies]` is the
+  fourth seam and the only new one: a test-support library is a project, resolved under
+  `DependencyScope::Test` and therefore absent from everything that produces output. It is what
+  `examples/minecraft_client_test` is — and what a dependency still cannot contribute is
+  `build.add_jvm_arg`, which reaches a test JVM from the root script only. A captured pass is the sentinel
   and never the exit status, which is also `1` for a missing main class and `0` for a body that
   called `System.exit(0)`; `--no-capture` gives up that reading along with the capture, and says so.
 - `jals-cli`: the host boundary from clap `PathBuf` values to `NativeStorage` and typed keys. It
@@ -547,7 +551,9 @@ Every project under `examples/` is a CI cell of its own (`example (<name>)`), ru
 README tells a reader to run: `jals build`, then `jals fmt --check` and `jals lint` over the
 example's **tracked** `.java` files. Tracked is what separates authored source from published
 output — a build script's publication into a source root is untracked by construction — so the gate
-never scores a decompiled skeleton as something someone wrote. Two consequences for an example:
+never scores a decompiled skeleton as something someone wrote. The fmt/lint step runs under the
+cell's own `dir`, so a project reached only through a dependency edge still needs a cell of its own
+the moment it has a tracked `.java`. Four consequences for an example:
 
 - A `tasks.project_jar` example needs its JAR, and a JAR is a binary, so none is committed:
   `examples/scripts/gen-vendor-jars.sh` writes the two the `task_dependency` and
@@ -557,3 +563,14 @@ never scores a decompiled skeleton as something someone wrote. Two consequences 
   §Compile-safety). That cell asserts the pipeline instead — fetch → nested extract → remap →
   decompile → publish — by requiring all three publication roots to come out non-empty, which is a
   statement only a run that reached the last step can make.
+- `minecraft_mod (client)` is the one cell that *runs* Minecraft rather than compiling against it.
+  It sets `headless_gl` (an apt install of `xvfb libgl1-mesa-dri libglx-mesa0`, and the test step
+  under `xvfb-run` with Mesa's llvmpipe) and `test_flags: -j 1 --timeout 600`, because each test
+  boots its own client and two at once want two GL contexts. A failed run uploads the client's
+  `logs/` and `crash-reports/`. It is also the cell whose fmt/lint step depends on the *test* step
+  having run: analysis is always offline, and the client's runtime jars are fetched by a
+  `[dev-dependencies]` entry, which `jals build` does not resolve.
+- `examples/scripts/gen-client-runtime.py` is a **generator, not a build step**: it rewrites the
+  pinned library block in `examples/minecraft_client_test/build.rhai` between two exact markers,
+  and its output is committed. CI never runs it. The release it pins is the `[features]` key in
+  that project's `jals.toml`, which five other places name and none of them owns.

@@ -1,38 +1,44 @@
-package com.example.hellomod.client;
+package com.example.mctest;
 
-// Every declaration in this file is `#[cfg(feature = "client-test")]`, imports included. Without
-// the feature the SDK dependency resolves to the *server* jar, so `net.minecraft.client.*` names
-// nothing — and a `cfg`-disabled declaration is blanked before anything tries to resolve it, which
-// is what lets `jals lint --features 1.20.1` read this file and find nothing to complain about.
+// Every declaration in this file is `#[cfg(feature = "1.21.11")]`, imports included — the release
+// this harness is written against, and the only feature it declares.
+//
+// Two things need the gate. Without the release the SDK dependency resolves no client jar at all,
+// so `net.minecraft.client.*` names nothing; and a consumer that declares this project in
+// `[dev-dependencies]` still discovers it under every *other* selection, because a dependency is a
+// node whether or not the selection routes a feature to it. A `cfg`-disabled declaration is blanked
+// before anything tries to resolve it, so under those selections this file lowers to its `package`
+// line and nothing else — a compilation unit that declares no type and emits no class.
+//
 // Java allows no annotation on an import, but the jals dialect's `#[cfg]` is not an annotation:
 // `jals-syntax` treats an import as an attribute host like any other declaration.
-#[cfg(feature = "client-test")] import java.io.IOException;
-#[cfg(feature = "client-test")] import java.nio.file.Files;
-#[cfg(feature = "client-test")] import java.nio.file.Path;
-#[cfg(feature = "client-test")] import java.time.Duration;
-#[cfg(feature = "client-test")] import java.util.Comparator;
-#[cfg(feature = "client-test")] import java.util.List;
-#[cfg(feature = "client-test")] import java.util.concurrent.CompletableFuture;
-#[cfg(feature = "client-test")] import java.util.concurrent.ExecutionException;
-#[cfg(feature = "client-test")] import java.util.concurrent.Executor;
-#[cfg(feature = "client-test")] import java.util.concurrent.TimeUnit;
-#[cfg(feature = "client-test")] import java.util.concurrent.TimeoutException;
-#[cfg(feature = "client-test")] import java.util.function.Predicate;
-#[cfg(feature = "client-test")] import java.util.function.Supplier;
-#[cfg(feature = "client-test")] import java.util.stream.Stream;
-#[cfg(feature = "client-test")] import net.minecraft.client.Minecraft;
-#[cfg(feature = "client-test")] import net.minecraft.client.gui.components.AbstractWidget;
-#[cfg(feature = "client-test")] import net.minecraft.client.gui.components.events.GuiEventListener;
-#[cfg(feature = "client-test")] import net.minecraft.client.gui.screens.Screen;
-#[cfg(feature = "client-test")] import net.minecraft.client.gui.screens.TitleScreen;
-#[cfg(feature = "client-test")] import net.minecraft.server.MinecraftServer;
-#[cfg(feature = "client-test")] import net.minecraft.world.Difficulty;
-#[cfg(feature = "client-test")] import net.minecraft.world.level.GameType;
-#[cfg(feature = "client-test")] import net.minecraft.world.level.LevelSettings;
-#[cfg(feature = "client-test")] import net.minecraft.world.level.WorldDataConfiguration;
-#[cfg(feature = "client-test")] import net.minecraft.world.level.gamerules.GameRules;
-#[cfg(feature = "client-test")] import net.minecraft.world.level.levelgen.WorldOptions;
-#[cfg(feature = "client-test")] import net.minecraft.world.level.levelgen.presets.WorldPresets;
+#[cfg(feature = "1.21.11")] import java.io.IOException;
+#[cfg(feature = "1.21.11")] import java.nio.file.Files;
+#[cfg(feature = "1.21.11")] import java.nio.file.Path;
+#[cfg(feature = "1.21.11")] import java.time.Duration;
+#[cfg(feature = "1.21.11")] import java.util.Comparator;
+#[cfg(feature = "1.21.11")] import java.util.List;
+#[cfg(feature = "1.21.11")] import java.util.concurrent.CompletableFuture;
+#[cfg(feature = "1.21.11")] import java.util.concurrent.ExecutionException;
+#[cfg(feature = "1.21.11")] import java.util.concurrent.Executor;
+#[cfg(feature = "1.21.11")] import java.util.concurrent.TimeUnit;
+#[cfg(feature = "1.21.11")] import java.util.concurrent.TimeoutException;
+#[cfg(feature = "1.21.11")] import java.util.function.Predicate;
+#[cfg(feature = "1.21.11")] import java.util.function.Supplier;
+#[cfg(feature = "1.21.11")] import java.util.stream.Stream;
+#[cfg(feature = "1.21.11")] import net.minecraft.client.Minecraft;
+#[cfg(feature = "1.21.11")] import net.minecraft.client.gui.components.AbstractWidget;
+#[cfg(feature = "1.21.11")] import net.minecraft.client.gui.components.events.GuiEventListener;
+#[cfg(feature = "1.21.11")] import net.minecraft.client.gui.screens.Screen;
+#[cfg(feature = "1.21.11")] import net.minecraft.client.gui.screens.TitleScreen;
+#[cfg(feature = "1.21.11")] import net.minecraft.server.MinecraftServer;
+#[cfg(feature = "1.21.11")] import net.minecraft.world.Difficulty;
+#[cfg(feature = "1.21.11")] import net.minecraft.world.level.GameType;
+#[cfg(feature = "1.21.11")] import net.minecraft.world.level.LevelSettings;
+#[cfg(feature = "1.21.11")] import net.minecraft.world.level.WorldDataConfiguration;
+#[cfg(feature = "1.21.11")] import net.minecraft.world.level.gamerules.GameRules;
+#[cfg(feature = "1.21.11")] import net.minecraft.world.level.levelgen.WorldOptions;
+#[cfg(feature = "1.21.11")] import net.minecraft.world.level.levelgen.presets.WorldPresets;
 
 /**
  * A Minecraft client, booted in this JVM and driven from a {@code #[test]} method.
@@ -54,7 +60,7 @@ package com.example.hellomod.client;
  * <p>Linux only. GLFW wants the main thread on macOS ({@code -XstartOnFirstThread}), and the main
  * thread belongs to the test.
  */
-#[cfg(feature = "client-test")]
+#[cfg(feature = "1.21.11")]
 public final class GameClient implements AutoCloseable {
     /** Where the client's `saves/`, `logs/` and `options.txt` go. */
     private static final String RUN_ROOT = "target/jals/build/mc-client";

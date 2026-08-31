@@ -496,8 +496,8 @@ jobs:
     #   publication is the *last* thing the script does, so three non-empty roots is exactly the
     #   statement "fetch → nested extract → remap → decompile → publish ran".
     #
-    # Nothing here is cached between runs on purpose. The two Minecraft cells re-fetch and re-remap
-    # a ~50 MiB game jar every time, which is the cost of the gate meaning what it says: build-task
+    # Nothing here is cached between runs on purpose. The Minecraft cells re-fetch and re-remap a
+    # ~50 MiB game jar every time, which is the cost of the gate meaning what it says: build-task
     # results are memoized under a plan digest that no jals version participates in, so a restored
     # `target/jals` would let a change to this workspace reuse artifacts the change was supposed to
     # regenerate — a green cell that ran nothing.
@@ -533,6 +533,15 @@ jobs:
             dir: examples/minecraft
             features: --features 1.20.1
             publications: net/minecraft org/spongepowered com/llamalad7
+          # The client harness the mod's `[dev-dependencies]` names. It is reached through that edge
+          # too, but it has a tracked `.java` of its own, and the fmt/lint step only ever sees the
+          # files under the cell's own `dir` — so without a cell of its own the one file nobody
+          # would be checking is the 500-line one. `jals build` here is the other half: it is what
+          # says the harness still compiles against the release it claims, independently of whether
+          # any consumer selected it.
+          - name: minecraft_client_test
+            dir: examples/minecraft_client_test
+            features: --features 1.21.11
           # One cell per side of the `#[cfg(feature = "since-1.21.6")]` branch in the mod's own
           # source: 1.20.1 compiles the `getName()` spelling and 1.21.11 the `name()` one, and a
           # matrix that built only one of them would let the other rot until someone selected it by
@@ -654,9 +663,12 @@ jobs:
             examples/minecraft_mod/target/jals/build/mc-client/**/crash-reports/**
             examples/minecraft_mod/target/jals/build/test-run/**
           if-no-files-found: ignore
-      # After the build, not before it: an example whose dependency fetches (`minecraft_mod`) can
-      # only be analysed once that fetch has landed in the verified cache, because analysis is
-      # always offline.
+      # After the build *and* the test, not before them: an example whose dependency fetches
+      # (`minecraft_mod`) can only be analysed once that fetch has landed in the verified cache,
+      # because analysis is always offline. For the client cell that means after the test step
+      # specifically — the ~60 client runtime jars come from a `[dev-dependencies]` entry, which
+      # `jals build` does not resolve and `jals test` does. Reordering these two steps would leave
+      # that cell's lint on a root-only fallback, which reports nothing and fails nothing.
       #
       # Tracked files only. Everything a build script publishes into a source root is untracked by
       # construction (the examples' `.gitignore`s reserve those roots), so `git ls-files` is what
@@ -688,7 +700,7 @@ jobs:
     # standard library, so this reads the same file `jals` does rather than a grep of it.
     #
     # The binary is built once and handed down as an artifact. The `examples` job above builds its
-    # own per cell, which is right at seven; at forty-three it would be forty-three cargo builds to
+    # own per cell, which is right at ten; at forty-three it would be forty-three cargo builds to
     # produce one binary that is bit-identical in every one of them.
     name: mod jar setup
     runs-on: ubuntu-latest

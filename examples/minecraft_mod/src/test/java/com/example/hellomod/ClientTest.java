@@ -3,7 +3,7 @@ package com.example.hellomod;
 // `#[cfg(feature = "client-test")]` on every declaration, imports included. Under any other
 // selection this file is blanked whole, so `jals build --features 1.20.1` and the lint that follows
 // it never see a `net.minecraft.client.*` name the server jar cannot resolve.
-#[cfg(feature = "client-test")] import com.example.hellomod.client.GameClient;
+#[cfg(feature = "client-test")] import com.example.mctest.GameClient;
 #[cfg(feature = "client-test")] import net.minecraft.client.gui.screens.TitleScreen;
 #[cfg(feature = "client-test")] import net.minecraft.core.BlockPos;
 #[cfg(feature = "client-test")] import net.minecraft.world.level.block.Blocks;
