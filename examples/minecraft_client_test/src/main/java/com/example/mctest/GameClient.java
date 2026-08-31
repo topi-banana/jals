@@ -312,7 +312,7 @@ public final class GameClient implements AutoCloseable {
                 () -> {
                     try {
                         Thread.sleep(HALT_AFTER.toMillis());
-                    } catch (InterruptedException interrupted) {
+                    } catch (InterruptedException _interrupted) {
                         Thread.currentThread().interrupt();
                     }
                     Runtime.getRuntime().halt(0);
