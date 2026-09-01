@@ -457,12 +457,17 @@ A test reads like a browser driver, except that both handles are typed game obje
 ```java
 try (GameClient game = GameClient.launch()) {
     game.openWorld("jals-test");
+    ServerLevel overworld = game.overworld();
     BlockPos pos = new BlockPos(0, 0, 0);
     game.runOnServer(server ->
-        server.overworld().setBlockAndUpdate(pos, Blocks.DIAMOND_BLOCK.defaultBlockState()));
-    assert game.evalOnServer(server -> server.overworld().getBlockState(pos).is(Blocks.DIAMOND_BLOCK));
+        overworld.setBlockAndUpdate(pos, Blocks.DIAMOND_BLOCK.defaultBlockState()));
+    assert game.evalOnServer(server -> overworld.getBlockState(pos).is(Blocks.DIAMOND_BLOCK));
 }
 ```
+
+`game.overworld()` rather than `server.overworld()` because 1.16 replaced
+`getLevel(DimensionType.OVERWORLD)` with it, and the harness is what knows that — the same reason
+nothing in this snippet names a release.
 
 ### What this project still owns
 

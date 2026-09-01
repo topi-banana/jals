@@ -585,7 +585,7 @@ fn a_test_lowering_keeps_the_methods_and_generates_a_harness() {
         "an attribute reached the output: {source}"
     );
 
-    let shim = generated(&files, "JalsTest$MathTest.java");
+    let shim = generated(&files, "JalsTest$com$example$MathTest.java");
     assert!(
         shim.contains("package com.example;"),
         "the shim shares the package: {shim}"
@@ -599,7 +599,12 @@ fn a_test_lowering_keeps_the_methods_and_generates_a_harness() {
     let harness = generated(&files, "JalsTestHarness.java");
     assert!(harness.contains("public static void main(String[] args)"));
     // The root sits in the default package and names the shim in full.
-    assert!(harness.contains("com.example.JalsTest$MathTest.run(id);"));
+    // Imported and called by its simple name, never `com.example.JalsTest$…` in full: this
+    // class is in the default package, where a classpath class named `com` would shadow the
+    // package root and make a qualified reference unresolvable.
+    assert!(harness.contains("import com.example.JalsTest$com$example$MathTest;"));
+    assert!(harness.contains("JalsTest$com$example$MathTest.run(id);"));
+    assert!(!harness.contains("com.example.JalsTest$com$example$MathTest.run(id);"));
     // `--list` reports the flags the runner needs; `ignore` is the runner's decision, not the
     // harness's.
     assert!(harness.contains("com.example.MathTest#slow\\tignore"));

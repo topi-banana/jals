@@ -66,8 +66,8 @@ absent, never a third thing in between.
 ### The threshold chain
 
 `#[cfg]` in `GameClient.java` never names a release. It names a threshold; a release names exactly
-one threshold and inherits the rest, so a 44th release is one row in `jals.toml` and no change to any
-source file. A threshold exists only where the game's API actually moved, which is why there are
+one threshold and inherits the rest, so a 44th release is one row in `jals.toml` and no change to
+any source file. A threshold exists only where the game's API actually moved, which is why there are
 fourteen and not forty-three:
 
 | threshold       | what moves at it                                                                                             |
@@ -133,8 +133,8 @@ partly regenerated is a boot that dies in `SharedLibraryLoader` with its cause t
 
 ## Which JDK
 
-Two JDKs, chosen independently — `$JAVAC` and `$JAVA` are how a caller says so. The compiler only has
-to be able to *read* the game's class files; the runtime has to be one the release can boot on:
+Two JDKs, chosen independently — `$JAVAC` and `$JAVA` are how a caller says so. The compiler only
+has to be able to *read* the game's class files; the runtime has to be one the release can boot on:
 
 | releases         | compiles with | boots on |
 | ---------------- | ------------- | -------- |
@@ -164,10 +164,10 @@ same reason, so those selections fetch nothing.
 
 The selection that *does* name the release is the other half of that, and worth knowing:
 `jals lint` is unconditionally offline, so under `--features <release>,client-test` it wants that
-release's ~60 jars already in the consumer's verified cache. `jals build` no longer puts them there — that is the
-point of the table — so a `jals test` has to have run. Without it the graph does not resolve and
-lint degrades to a root-only analysis with a warning, the same way it does for any dependency whose
-artifacts are not yet built.
+release's ~60 jars already in the consumer's verified cache. `jals build` no longer puts them there
+— that is the point of the table — so a `jals test` has to have run. Without it the graph does not
+resolve and lint degrades to a root-only analysis with a warning, the same way it does for any
+dependency whose artifacts are not yet built.
 
 That is why the project declares `[package] features = ["attributes"]`, and why `[features]
 default` is empty — a default release would be forwarded into the SDK as a *second* version beside
@@ -241,8 +241,8 @@ jals test --features 1.21.11,client-test -j 1
 
 Any of the 43 releases goes in place of `1.21.11`.
 
-Here, `jals build --features <release>,enabled` is the whole of what this project does on its own: it
-proves the harness compiles against the release it claims. CI runs that for all 43, which is also
+Here, `jals build --features <release>,enabled` is the whole of what this project does on its own:
+it proves the harness compiles against the release it claims. CI runs that for all 43, which is also
 what verifies all 2287 pinned digests — a build script's fetches execute.
 
 ## Legal note

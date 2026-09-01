@@ -960,10 +960,17 @@ public final class GameClient implements AutoCloseable {
         return client.screen;
     }
 
-    /** The screen the client is showing, or {@code null}. */
+    /**
+     * The screen the client is showing, or {@code null}.
+     *
+     * <p>The {@code gui} is null-checked because it is built during the boot, not before it: the
+     * first thing this harness does is poll for the title screen, and it starts polling as soon as
+     * the singleton exists. Reading through a null there is an {@code NullPointerException} on
+     * every 26.2 boot rather than a wait — measured, not guessed.
+     */
     #[cfg(all(feature = "enabled", feature = "since-26.2"))]
     private static Screen showing(Minecraft client) {
-        return client.gui.screen();
+        return client.gui == null ? null : client.gui.screen();
     }
 
     /** Put {@code screen} up. Only safe on the render thread. */
@@ -989,10 +996,16 @@ public final class GameClient implements AutoCloseable {
         return client.getOverlay();
     }
 
-    /** The overlay the client is showing, or {@code null}. */
+    /**
+     * The overlay the client is showing, or {@code null}.
+     *
+     * <p>Null-checked for the reason {@link #showing} is, and the answer is right either way: no
+     * {@code gui} yet means no overlay yet, and the boot is settled only once the overlay is gone
+     * <em>and</em> the title screen is up — a test the missing {@code gui} correctly fails.
+     */
     #[cfg(all(feature = "enabled", feature = "since-26.2"))]
     private static Overlay overlay(Minecraft client) {
-        return client.gui.overlay();
+        return client.gui == null ? null : client.gui.overlay();
     }
 
     /**
