@@ -1828,6 +1828,16 @@ impl AssembledWorkspace {
                     // all, which is the one outcome it exists to prevent.
                     root_only.dependencies.clear();
                     root_only.dev_dependencies.clear();
+                    // And `[features]` with them, because `discover` opens with
+                    // `Manifest::validate` and a routing entry — `<dep>/<feature>`, `dep:<dep>`,
+                    // an optional entry's implicit feature — names a table that is now empty.
+                    // Without this the fallback returns `InvalidRootManifest` for exactly the
+                    // manifests it exists for (`examples/minecraft_mod` routes `minecraft/client`),
+                    // leaving the workspace with no analysis at all. Dropping them costs nothing
+                    // here: the real selection travels in `scripts.features`, the root-only plan
+                    // lowers under `ResolvedBuildFeatures::default()`, and `finish_assembly` reads
+                    // `effective_manifest` rather than this copy.
+                    root_only.features.clear();
                     let fallback_assembly = match Self::assemble_graph(
                         &script,
                         &root_only,
@@ -3479,6 +3489,49 @@ mod tests {
                     "the failed traversal reports the graph, never the script"
                 );
             }
+        });
+    }
+
+    /// The root-only fallback has to survive a manifest whose `[features]` route into the tables it
+    /// just emptied. `discover` opens with `Manifest::validate`, so a routing entry left behind
+    /// names an entry that no longer exists and the fallback fails exactly where it is needed —
+    /// which is every real project, `examples/minecraft_mod` included.
+    #[test]
+    fn the_root_only_fallback_survives_a_manifest_that_routes_features_to_a_dependency() {
+        block_on_inline(async {
+            let dir = tempfile::tempdir().unwrap();
+            write(
+                dir.path(),
+                "jals.toml",
+                "[build]\nsource-dirs = [\"src\"]\n\
+                 [features]\nclient = [\"a/client\"]\n\
+                 [dependencies]\na = { path = \"a\" }\n",
+            );
+            write(
+                dir.path(),
+                "a/jals.toml",
+                "[features]\nclient = []\n[dependencies]\nb = { path = \"../b\" }\n",
+            );
+            write(
+                dir.path(),
+                "b/jals.toml",
+                "[dependencies]\na-again = { path = \"../a\" }\n",
+            );
+            write(dir.path(), "src/Main.java", "class Main {}");
+            let manifest = Manifest::from_file(&dir.path().join("jals.toml"))
+                .await
+                .unwrap();
+
+            let Err(failure) =
+                AssembledWorkspace::assemble(&manifest, dir.path(), Exec::inline()).await
+            else {
+                panic!("cycle unexpectedly assembled");
+            };
+            assert!(
+                failure.fallback.is_some(),
+                "a routed `[features]` entry must not take the fallback down with it: {}",
+                failure.message
+            );
         });
     }
 

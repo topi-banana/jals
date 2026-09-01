@@ -1470,7 +1470,18 @@ impl LintProject {
                 return Ok(Self {
                     root: root.to_path_buf(),
                     storage,
-                    layout: jals_editor::ProjectLayout::new(source_roots),
+                    // The classpath is what the failed assembly was carrying and the fallback
+                    // genuinely cannot have; the dialect is not. `[package] features` is a pure
+                    // function of the manifest and the selection is already resolved, so dropping
+                    // them here would turn a *narrower* analysis into a wrong one: with the
+                    // `attributes` feature off, `cfg` filtering stops and every `#[cfg(...)]` in
+                    // the project is reported by the `attribute` rule, which is an `error` by
+                    // default. The LSP's own fallback keeps both for the same reason.
+                    layout: jals_editor::ProjectLayout {
+                        feature_set: manifest.feature_set(),
+                        build_features: features.into_features(),
+                        ..jals_editor::ProjectLayout::new(source_roots)
+                    },
                 });
             }
         };
