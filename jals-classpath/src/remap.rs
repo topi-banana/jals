@@ -55,7 +55,9 @@ const JAR_LIMITS: SourceTreeLimits = SourceTreeLimits {
 const REMAP_OUTPUT_VERSION: u32 = 1;
 
 /// The same, for what a merge writes.
-const MERGE_OUTPUT_VERSION: u32 = 1;
+///
+/// 2: a merged manifest carries `Multi-Release` when either input's did.
+const MERGE_OUTPUT_VERSION: u32 = 2;
 
 /// Obfuscated class-hierarchy index used to walk supers/interfaces for inherited member lookups.
 #[derive(Debug, Default)]
@@ -489,6 +491,15 @@ impl JarMerge {
         let base_members = Archive::decode_all_bounded(exec, base_reader, JAR_LIMITS).await?;
         let overlay_members = Archive::decode_all_bounded(exec, overlay_reader, JAR_LIMITS).await?;
 
+        // Whether either input is a multi-release archive. Only one manifest survives a merge —
+        // the overlay's, like every other conflict — but `Multi-Release` is not a claim about the
+        // manifest's own side. It says the archive's `META-INF/versions/<n>/` entries are live, and
+        // a union carries both sides' entries, so dropping it with the losing manifest leaves those
+        // entries in the jar and invisible to the JVM. That is not academic: 1.17's flat server jar
+        // bundles log4j-api, whose `StackLocator` has a Java 8 body at the root and a Java 9 body
+        // under `versions/9/`; without the attribute the client loads the Java 8 one and dies in
+        // the first `LogManager.getLogger()` asking for a method Java 9 removed.
+        let mut multi_release = false;
         let mut overlay_map: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         let mut overlay_order: Vec<String> = Vec::new();
         for (name, outcome) in overlay_members {
@@ -499,6 +510,7 @@ impl JarMerge {
                 .map_err(|error| format!("failed to read overlay member `{name}`: {error}"))?;
             if helpers::is_manifest_member(&name) {
                 bytes = helpers::strip_manifest_digests(&bytes);
+                multi_release |= helpers::declares_multi_release(&bytes);
             }
             if overlay_map.insert(name.clone(), bytes).is_none() {
                 overlay_order.push(name);
@@ -513,6 +525,12 @@ impl JarMerge {
                 continue;
             }
             let bytes = if let Some(overlay_bytes) = overlay_map.remove(&name) {
+                if helpers::is_manifest_member(&name)
+                    && let Ok(shadowed) = outcome
+                    && helpers::declares_multi_release(&shadowed)
+                {
+                    multi_release = true;
+                }
                 overlay_bytes
             } else {
                 let bytes = outcome
@@ -528,6 +546,15 @@ impl JarMerge {
         for name in overlay_order {
             if let Some(bytes) = overlay_map.remove(&name) {
                 out_members.push(WriteMember { name, bytes });
+            }
+        }
+        // Applied after the union is assembled rather than while it is: which manifest survives is
+        // decided by the walk above, and this has to reach whichever one did.
+        if multi_release {
+            for member in &mut out_members {
+                if helpers::is_manifest_member(&member.name) {
+                    member.bytes = helpers::with_multi_release(&member.bytes);
+                }
             }
         }
 
@@ -700,6 +727,79 @@ mod helpers {
                 out.push_str(terminator);
             }
             // The specification terminates every section with an empty line, the last one included.
+            out.push_str(terminator);
+        }
+        out.into_bytes()
+    }
+
+    /// Whether a manifest's main section declares `Multi-Release: true`.
+    ///
+    /// Only the main section is read, because that is the only place the attribute means anything:
+    /// the JVM consults `META-INF/versions/<n>/` for an archive whose *main* attributes say so, and
+    /// an individual section saying it says something about one member instead.
+    pub(super) fn declares_multi_release(bytes: &[u8]) -> bool {
+        let Ok(text) = core::str::from_utf8(bytes) else {
+            return false;
+        };
+        for raw in text.split('\n') {
+            let line = raw.strip_suffix('\r').unwrap_or(raw);
+            if line.is_empty() {
+                // The main section ended; whatever follows is about a member.
+                return false;
+            }
+            if let Some((name, value)) = line.split_once(':')
+                && name.eq_ignore_ascii_case("Multi-Release")
+                && value.trim().eq_ignore_ascii_case("true")
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The same manifest with `Multi-Release: true` in its main section.
+    ///
+    /// Appended to the end of the main section rather than written in place, because the attribute
+    /// may be absent, present as `false`, or present as `true` already — and an append after the
+    /// removal below reads the same in all three cases. Order within a section carries no meaning
+    /// beyond `Manifest-Version` coming first, which this never displaces.
+    pub(super) fn with_multi_release(bytes: &[u8]) -> Vec<u8> {
+        let Ok(text) = core::str::from_utf8(bytes) else {
+            return bytes.to_vec();
+        };
+        let terminator = if text.contains("\r\n") { "\r\n" } else { "\n" };
+        let mut lines: Vec<&str> = text
+            .split('\n')
+            .map(|raw| raw.strip_suffix('\r').unwrap_or(raw))
+            .collect();
+        // Every line below is written back with a terminator, so the empty string a trailing
+        // terminator leaves behind would become a section break the input did not have.
+        if lines.last() == Some(&"") {
+            lines.pop();
+        }
+        let mut out = String::with_capacity(text.len() + 24);
+        let mut in_main = true;
+        for line in lines {
+            if in_main && line.is_empty() {
+                out.push_str("Multi-Release: true");
+                out.push_str(terminator);
+                in_main = false;
+            }
+            if in_main
+                && line
+                    .split_once(':')
+                    .is_some_and(|(name, _)| name.eq_ignore_ascii_case("Multi-Release"))
+            {
+                continue;
+            }
+            out.push_str(line);
+            out.push_str(terminator);
+        }
+        if in_main {
+            // A manifest whose main section was never terminated. Close it, rather than leaving the
+            // attribute in a section the JVM would read as being about a member.
+            out.push_str("Multi-Release: true");
+            out.push_str(terminator);
             out.push_str(terminator);
         }
         out.into_bytes()
@@ -1688,7 +1788,8 @@ mod tests {
     use alloc::vec::Vec;
 
     use super::helpers::{
-        is_manifest_member, is_signature_member, multi_release_prefix, strip_manifest_digests,
+        declares_multi_release, is_manifest_member, is_signature_member, multi_release_prefix,
+        strip_manifest_digests, with_multi_release,
     };
 
     /// A multi-release jar stores the same class twice — once at its plain path and once under
@@ -1734,6 +1835,52 @@ mod tests {
         assert!(!is_signature_member("META-INF/services/provider.sf"));
         assert!(!is_signature_member("net/minecraft/Client.sf"));
         assert!(!is_signature_member("META-INF/"));
+    }
+
+    /// `Multi-Release` is read from the main section only, and only as `true`.
+    #[test]
+    fn multi_release_is_a_main_attribute() {
+        assert!(declares_multi_release(
+            b"Manifest-Version: 1.0\r\nMulti-Release: true\r\n\r\n"
+        ));
+        assert!(declares_multi_release(
+            b"Manifest-Version: 1.0\r\nmulti-release: TRUE\r\n\r\n"
+        ));
+        assert!(!declares_multi_release(
+            b"Manifest-Version: 1.0\r\nMulti-Release: false\r\n\r\n"
+        ));
+        assert!(!declares_multi_release(b"Manifest-Version: 1.0\r\n\r\n"));
+        // An individual section says it about one member, which is not what the JVM reads.
+        assert!(!declares_multi_release(
+            b"Manifest-Version: 1.0\r\n\r\nName: a/B.class\r\nMulti-Release: true\r\n\r\n"
+        ));
+    }
+
+    /// Setting it is idempotent, replaces a `false`, and never lands in an individual section.
+    #[test]
+    fn multi_release_is_written_into_the_main_section() {
+        let plain =
+            b"Manifest-Version: 1.0\r\nCreated-By: x\r\n\r\nName: a/B.class\r\nFoo: 1\r\n\r\n";
+        let out = with_multi_release(plain);
+        let text = core::str::from_utf8(&out).expect("utf-8");
+        let expected = concat!(
+            "Manifest-Version: 1.0\r\nCreated-By: x\r\nMulti-Release: true\r\n\r\n",
+            "Name: a/B.class\r\nFoo: 1\r\n\r\n"
+        );
+        assert_eq!(text, expected);
+        assert!(declares_multi_release(&out));
+        // Applying it again changes nothing, and a `false` becomes a `true` rather than both.
+        assert_eq!(with_multi_release(&out), out);
+        let denied = b"Manifest-Version: 1.0\r\nMulti-Release: false\r\n\r\n";
+        let fixed = with_multi_release(denied);
+        assert!(declares_multi_release(&fixed));
+        assert_eq!(
+            core::str::from_utf8(&fixed)
+                .expect("utf-8")
+                .matches("Multi-Release")
+                .count(),
+            1
+        );
     }
 
     /// The manifest is found the way the signature block is, or a jar spelling it in lower case
