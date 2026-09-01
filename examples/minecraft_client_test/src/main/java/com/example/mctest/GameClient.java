@@ -1,6 +1,6 @@
 package com.example.mctest;
 
-// Every declaration in this file is `#[cfg(feature = "1.21.11")]`, imports included — the release
+// Every declaration in this file is `#[cfg(feature = "enabled")]`, imports included — the release
 // this harness is written against, and the only feature it declares.
 //
 // Two things need the gate. Without the release the SDK dependency resolves no client jar at all,
@@ -12,34 +12,39 @@ package com.example.mctest;
 //
 // Java allows no annotation on an import, but the jals dialect's `#[cfg]` is not an annotation:
 // `jals-syntax` treats an import as an attribute host like any other declaration.
-#[cfg(feature = "1.21.11")] import java.io.IOException;
-#[cfg(feature = "1.21.11")] import java.io.UncheckedIOException;
-#[cfg(feature = "1.21.11")] import java.nio.file.Files;
-#[cfg(feature = "1.21.11")] import java.nio.file.Path;
-#[cfg(feature = "1.21.11")] import java.time.Duration;
-#[cfg(feature = "1.21.11")] import java.util.Comparator;
-#[cfg(feature = "1.21.11")] import java.util.List;
-#[cfg(feature = "1.21.11")] import java.util.concurrent.CompletableFuture;
-#[cfg(feature = "1.21.11")] import java.util.concurrent.ExecutionException;
-#[cfg(feature = "1.21.11")] import java.util.concurrent.Executor;
-#[cfg(feature = "1.21.11")] import java.util.concurrent.TimeUnit;
-#[cfg(feature = "1.21.11")] import java.util.concurrent.TimeoutException;
-#[cfg(feature = "1.21.11")] import java.util.function.Predicate;
-#[cfg(feature = "1.21.11")] import java.util.function.Supplier;
-#[cfg(feature = "1.21.11")] import java.util.stream.Stream;
-#[cfg(feature = "1.21.11")] import net.minecraft.client.Minecraft;
-#[cfg(feature = "1.21.11")] import net.minecraft.client.gui.components.AbstractWidget;
-#[cfg(feature = "1.21.11")] import net.minecraft.client.gui.components.events.GuiEventListener;
-#[cfg(feature = "1.21.11")] import net.minecraft.client.gui.screens.Screen;
-#[cfg(feature = "1.21.11")] import net.minecraft.client.gui.screens.TitleScreen;
-#[cfg(feature = "1.21.11")] import net.minecraft.server.MinecraftServer;
-#[cfg(feature = "1.21.11")] import net.minecraft.world.Difficulty;
-#[cfg(feature = "1.21.11")] import net.minecraft.world.level.GameType;
-#[cfg(feature = "1.21.11")] import net.minecraft.world.level.LevelSettings;
-#[cfg(feature = "1.21.11")] import net.minecraft.world.level.WorldDataConfiguration;
-#[cfg(feature = "1.21.11")] import net.minecraft.world.level.gamerules.GameRules;
-#[cfg(feature = "1.21.11")] import net.minecraft.world.level.levelgen.WorldOptions;
-#[cfg(feature = "1.21.11")] import net.minecraft.world.level.levelgen.presets.WorldPresets;
+#[cfg(feature = "enabled")] import java.io.IOException;
+#[cfg(feature = "enabled")] import java.io.UncheckedIOException;
+#[cfg(feature = "enabled")] import java.lang.management.ManagementFactory;
+#[cfg(feature = "enabled")] import java.nio.charset.StandardCharsets;
+#[cfg(feature = "enabled")] import java.nio.file.Files;
+#[cfg(feature = "enabled")] import java.nio.file.Path;
+#[cfg(feature = "enabled")] import java.nio.file.Paths;
+#[cfg(feature = "enabled")] import java.time.Duration;
+#[cfg(feature = "enabled")] import java.util.Comparator;
+#[cfg(feature = "enabled")] import java.util.List;
+#[cfg(feature = "enabled")] import java.util.concurrent.CompletableFuture;
+#[cfg(feature = "enabled")] import java.util.concurrent.ExecutionException;
+#[cfg(feature = "enabled")] import java.util.concurrent.Executor;
+#[cfg(feature = "enabled")] import java.util.concurrent.TimeUnit;
+#[cfg(feature = "enabled")] import java.util.concurrent.TimeoutException;
+#[cfg(feature = "enabled")] import java.util.function.Predicate;
+#[cfg(feature = "enabled")] import java.util.function.Supplier;
+#[cfg(feature = "enabled")] import java.util.stream.Collectors;
+#[cfg(feature = "enabled")] import java.util.stream.Stream;
+#[cfg(feature = "enabled")] import net.minecraft.client.Minecraft;
+#[cfg(feature = "enabled")] import net.minecraft.client.gui.components.AbstractWidget;
+#[cfg(feature = "enabled")] import net.minecraft.client.gui.components.events.GuiEventListener;
+#[cfg(feature = "enabled")] import net.minecraft.client.gui.screens.Overlay;
+#[cfg(feature = "enabled")] import net.minecraft.client.gui.screens.Screen;
+#[cfg(feature = "enabled")] import net.minecraft.client.gui.screens.TitleScreen;
+#[cfg(feature = "enabled")] import net.minecraft.server.MinecraftServer;
+#[cfg(feature = "enabled")] import net.minecraft.world.Difficulty;
+#[cfg(feature = "enabled")] import net.minecraft.world.level.GameType;
+#[cfg(feature = "enabled")] import net.minecraft.world.level.LevelSettings;
+#[cfg(feature = "enabled")] import net.minecraft.world.level.WorldDataConfiguration;
+#[cfg(feature = "enabled")] import net.minecraft.world.level.gamerules.GameRules;
+#[cfg(feature = "enabled")] import net.minecraft.world.level.levelgen.WorldOptions;
+#[cfg(feature = "enabled")] import net.minecraft.world.level.levelgen.presets.WorldPresets;
 
 /**
  * A Minecraft client, booted in this JVM and driven from a {@code #[test]} method.
@@ -66,7 +71,7 @@ package com.example.mctest;
  * <p>Linux only. GLFW wants the main thread on macOS ({@code -XstartOnFirstThread}), and the main
  * thread belongs to the test.
  */
-#[cfg(feature = "1.21.11")]
+#[cfg(feature = "enabled")]
 public final class GameClient implements AutoCloseable {
     /** Where the client's `saves/`, `logs/` and `options.txt` go. */
     private static final String RUN_ROOT = "target/jals/build/mc-client";
@@ -115,8 +120,7 @@ public final class GameClient implements AutoCloseable {
 
     /** Boot a client and return once the title screen is up. */
     public static GameClient launch() {
-        Path directory =
-            Path.of(RUN_ROOT, Long.toString(ProcessHandle.current().pid())).toAbsolutePath();
+        Path directory = Paths.get(RUN_ROOT, jvmIdentity()).toAbsolutePath();
         try {
             GameClient game = start(directory);
             game.awaitTitleScreen();
@@ -225,7 +229,10 @@ public final class GameClient implements AutoCloseable {
     public <S extends Screen> S waitForScreen(Class<S> type, Duration deadline) {
         return pollOnClient(
             type.getSimpleName() + " to be showing",
-            client -> type.isInstance(client.screen) ? type.cast(client.screen) : null,
+            client -> {
+                Screen showing = showing(client);
+                return type.isInstance(showing) ? type.cast(showing) : null;
+            },
             deadline);
     }
 
@@ -269,7 +276,22 @@ public final class GameClient implements AutoCloseable {
 
     /** The screen currently showing, or {@code null}. */
     public Screen screen() {
-        return evalOnClient(client -> client.screen);
+        return evalOnClient(GameClient::showing);
+    }
+
+    /**
+     * The overlay currently showing, or {@code null}.
+     *
+     * <p>Published because a consumer's test wants to say "the resource reload has finished" without
+     * naming the release-specific way of asking.
+     */
+    public Overlay overlay() {
+        return evalOnClient(GameClient::overlay);
+    }
+
+    /** The width of the game window, in pixels. */
+    public int windowWidth() {
+        return evalOnClient(client -> client.getWindow().getWidth());
     }
 
     /**
@@ -279,7 +301,7 @@ public final class GameClient implements AutoCloseable {
      * constructor is free to touch the resources only that thread owns.
      */
     public <S extends Screen> S openScreen(Class<S> type, Supplier<S> screen) {
-        runOnClient(client -> client.setScreen(screen.get()));
+        runOnClient(client -> show(client, screen.get()));
         return waitForScreen(type, STEP_DEADLINE);
     }
 
@@ -292,15 +314,17 @@ public final class GameClient implements AutoCloseable {
     public AbstractWidget widget(String label) {
         return evalOnClient(
             client -> {
-                Screen showing = client.screen;
+                Screen showing = showing(client);
                 if (showing == null) {
                     return null;
                 }
                 List<? extends GuiEventListener> children = showing.children();
                 for (GuiEventListener child : children) {
-                    if (child instanceof AbstractWidget widget
-                        && widget.getMessage().getString().equals(label)) {
-                        return widget;
+                    if (child instanceof AbstractWidget) {
+                        AbstractWidget widget = (AbstractWidget) child;
+                        if (label(widget).equals(label)) {
+                            return widget;
+                        }
                     }
                 }
                 return null;
@@ -353,25 +377,30 @@ public final class GameClient implements AutoCloseable {
             WORLD_DEADLINE);
     }
 
-    /** Run a command as the server console and return once the server has executed it. */
+    /**
+     * Run a command as the server console and return once the server has executed it.
+     *
+     * <p>Dispatched on the server rather than sent from the client, and that is what makes this one
+     * method rather than four. The client-side spelling moved twice inside 1.19 alone — {@code
+     * LocalPlayer.chat("/…")}, then {@code command(…)}, then {@code commandUnsigned(…)}, then
+     * {@code ClientPacketListener.sendCommand(…)} from 1.19.3 — while {@code
+     * MinecraftServer.getCommands()}, {@code Commands.getDispatcher()} and {@code
+     * createCommandSourceStack()} are the same three calls on every release in the catalog.
+     *
+     * <p>It also removes a wait. A command sent from the client travels as a packet the server
+     * drains on a later tick, so the old spelling had to watch the tick counter cross two
+     * boundaries before an assertion could read the world. Brigadier's {@code execute} runs the
+     * command on the thread that calls it, and this calls it on the server thread — so by the time
+     * the hop returns, the command has run.
+     *
+     * <p>The source is the console, so it carries permission level 4 and the world does not have to
+     * have been created with cheats on.
+     */
     public void runCommand(String command) {
-        runOnClient(client -> client.player.connection.sendCommand(command));
-        // Two tick boundaries, not one. A command travels as a packet the server drains once per
-        // tick, and `before` is read on the server thread *after* the packet was queued — so the
-        // packet is in the queue no later than during tick `before`, and the drain that runs it
-        // happens by the end of tick `before + 1`. Waiting only for `> before` would be satisfied
-        // by the boundary into `before + 1`, which the command has not necessarily crossed, and
-        // the assertion after it would read the world as it was. (Sampling before the send instead
-        // is not the fix: `before` would then be an arbitrarily stale count and the wait could be
-        // over before it began.)
-        int before = evalOnServer(MinecraftServer::getTickCount);
-        waitUntil(
-            "the server to tick past the command",
-            client -> {
-                MinecraftServer server = client.getSingleplayerServer();
-                return server != null && server.getTickCount() > before + 1;
-            },
-            STEP_DEADLINE);
+        runOnServer(
+            server ->
+                server.getCommands().getDispatcher()
+                    .execute(command, server.createCommandSourceStack()));
     }
 
     // --- shutdown ------------------------------------------------------------------------------
@@ -488,12 +517,38 @@ public final class GameClient implements AutoCloseable {
         long limit = System.nanoTime() + BOOT_DEADLINE.toNanos();
         while (System.nanoTime() < limit) {
             requireAlive("the title screen");
-            if (this.client.getOverlay() == null && this.client.screen instanceof TitleScreen) {
+            if (overlay(this.client) == null && showing(this.client) instanceof TitleScreen) {
                 return;
             }
             pause();
         }
         throw timedOut("the title screen", BOOT_DEADLINE);
+    }
+
+    /**
+     * The pid of this JVM, as the name of the directory this run owns.
+     *
+     * <p>Not {@code ProcessHandle.current().pid()}: this file is compiled at {@code --release 8}
+     * for the oldest releases in the catalog, and {@code ProcessHandle} is Java 9. {@code
+     * RuntimeMXBean.getName()} is the JDK's own answer to "which JVM is this" and every
+     * implementation that matters here spells it {@code <pid>@<host>}. The host half is dropped
+     * because a run directory is *named*, not addressed, and everything outside
+     * {@code [0-9A-Za-z]} goes with it — the value ends up as a path segment, and no JVM promises
+     * what it puts in that string.
+     */
+    private static String jvmIdentity() {
+        String name = ManagementFactory.getRuntimeMXBean().getName();
+        StringBuilder identity = new StringBuilder();
+        for (int index = 0; index < name.length(); index++) {
+            char character = name.charAt(index);
+            if (character == '@') {
+                break;
+            }
+            if (Character.isLetterOrDigit(character)) {
+                identity.append(character);
+            }
+        }
+        return identity.length() == 0 ? "jvm" : identity.toString();
     }
 
     /** Write the run directory the client boots into. */
@@ -504,21 +559,21 @@ public final class GameClient implements AutoCloseable {
             // reading its `options.txt` after this harness has changed what it writes there.
             if (Files.exists(directory)) {
                 try (Stream<Path> entries = Files.walk(directory)) {
-                    for (Path entry : entries.sorted(Comparator.reverseOrder()).toList()) {
+                    for (Path entry :
+                        entries.sorted(Comparator.reverseOrder()).collect(Collectors.toList())) {
                         Files.deleteIfExists(entry);
                     }
                 }
             }
             Files.createDirectories(directory.resolve("assets/indexes"));
             Files.createDirectories(directory.resolve("assets/objects"));
-            Files.writeString(
-                directory.resolve("assets/indexes/" + ASSET_INDEX + ".json"), "{\"objects\":{}}");
+            write(directory.resolve("assets/indexes/" + ASSET_INDEX + ".json"), "{\"objects\":{}}");
             redirectLogging(directory);
             // Written rather than left to the defaults so the client makes the same choices on a
             // CI runner as on a workstation: no vsync to pace the boot, no narrator to start a
             // speech synthesizer, no sound to open an audio device, and no tutorial or multiplayer
             // notice to put a screen in front of the one under test.
-            Files.writeString(
+            write(
                 directory.resolve("options.txt"),
                 "guiScale:2\n"
                     + "enableVsync:false\n"
@@ -556,7 +611,7 @@ public final class GameClient implements AutoCloseable {
         Files.createDirectories(logs);
         Path configuration = directory.resolve("log4j2.xml");
         String pattern = "[%d{HH:mm:ss}] [%t/%level]: %msg{nolookups}%n";
-        Files.writeString(
+        write(
             configuration,
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
                 + "<Configuration status=\"WARN\">\n"
@@ -585,6 +640,18 @@ public final class GameClient implements AutoCloseable {
     }
 
     /**
+     * Write {@code text} to {@code file} as UTF-8.
+     *
+     * <p>{@code Files.writeString} is Java 11 and this file is compiled at {@code --release 8} for
+     * the oldest releases, so the charset is named rather than defaulted — the platform default is
+     * what a launcher's locale decides, and the log4j configuration below has to be read back by
+     * log4j.
+     */
+    private static void write(Path file, String text) throws IOException {
+        Files.write(file, text.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /**
      * One host path, as an XML attribute value.
      *
      * <p>A run directory is under whatever the checkout is under, and a workspace path may hold an
@@ -595,6 +662,83 @@ public final class GameClient implements AutoCloseable {
     private static String attribute(String value) {
         return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             .replace("\"", "&quot;");
+    }
+
+    // --- what moved between releases -------------------------------------------------------------
+    //
+    // Everything above is written once for 43 releases because the four things that actually moved
+    // are named here and nowhere else. A branch inlined at its use is a branch to find again the
+    // next time the API turns over; a branch behind a name is a line in the table in `jals.toml`.
+    //
+    // Note what is *not* here. `Minecraft.getInstance`, `getSingleplayerServer`, `getWindow`, the
+    // `level` and `player` fields, `MinecraftServer.isReady` / `getPlayerList`, `Screen.children`
+    // and `net.minecraft.client.main.Main.main` are the same on all 43, and the two places the
+    // source could have named a type that moved — the client level's class, the value
+    // `SharedConstants` hands back — it chains through instead.
+
+    /**
+     * The screen the client is showing, or {@code null}.
+     *
+     * <p>26.2 moved the showing screen and the overlay off {@code Minecraft} onto its {@code gui}
+     * field. Both are still public and neither changed shape, so this is a two-line difference
+     * rather than a different way of driving the game.
+     */
+    #[cfg(all(feature = "enabled", not(feature = "since-26.2")))]
+    private static Screen showing(Minecraft client) {
+        return client.screen;
+    }
+
+    /** The screen the client is showing, or {@code null}. */
+    #[cfg(all(feature = "enabled", feature = "since-26.2"))]
+    private static Screen showing(Minecraft client) {
+        return client.gui.screen();
+    }
+
+    /** Put {@code screen} up. Only safe on the render thread. */
+    #[cfg(all(feature = "enabled", not(feature = "since-26.2")))]
+    private static void show(Minecraft client, Screen screen) {
+        client.setScreen(screen);
+    }
+
+    /**
+     * Put {@code screen} up. Only safe on the render thread.
+     *
+     * <p>{@code Minecraft.setScreenAndShow} exists on 26.2 too, but it renders a frame on the way
+     * out. This is the plain setter the older releases have, so a caller gets the same thing.
+     */
+    #[cfg(all(feature = "enabled", feature = "since-26.2"))]
+    private static void show(Minecraft client, Screen screen) {
+        client.gui.setScreen(screen);
+    }
+
+    /** The overlay the client is showing, or {@code null}. */
+    #[cfg(all(feature = "enabled", not(feature = "since-26.2")))]
+    private static Overlay overlay(Minecraft client) {
+        return client.getOverlay();
+    }
+
+    /** The overlay the client is showing, or {@code null}. */
+    #[cfg(all(feature = "enabled", feature = "since-26.2"))]
+    private static Overlay overlay(Minecraft client) {
+        return client.gui.overlay();
+    }
+
+    /**
+     * What a widget says.
+     *
+     * <p>1.16 turned a button's message from a {@code String} into a {@code Component}. The label is
+     * how {@link #widget} finds a button at all — it is the one property that survives both
+     * obfuscation and a layout change — so the difference has to be crossed rather than avoided.
+     */
+    #[cfg(all(feature = "enabled", feature = "since-1.16"))]
+    private static String label(AbstractWidget widget) {
+        return widget.getMessage().getString();
+    }
+
+    /** What a widget says. */
+    #[cfg(all(feature = "enabled", not(feature = "since-1.16")))]
+    private static String label(AbstractWidget widget) {
+        return widget.getMessage();
     }
 
     // --- plumbing ------------------------------------------------------------------------------
