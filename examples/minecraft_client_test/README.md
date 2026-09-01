@@ -135,6 +135,35 @@ metadata digest out of `examples/minecraft/build.rhai`'s own `CATALOG` rather th
 It refuses to write anything at all if it cannot read one library of one release: a table that is
 partly regenerated is a boot that dies in `SharedLibraryLoader` with its cause two files away.
 
+## The two releases that do not boot yet
+
+1.17 and 1.17.1 compile like the other 41 and fail at the first line of the boot, in
+`LogManager.getLogger()`:
+
+```
+java.lang.UnsupportedOperationException: No class provided, and an appropriate one cannot be found.
+    at org.apache.logging.log4j.LogManager.callerClass(LogManager.java:573)
+    at net.minecraft.util.thread.BlockableEventLoop.<clinit>(BlockableEventLoop.java:23)
+```
+
+The cause is not in this project, and it is worth stating exactly because it looks like a harness
+bug and is not one. Those two releases are the only ones that both ship a **flat** server jar (1.18
+introduced the bundler) and bundle a **multi-release** library in it: log4j-api 2.14.1, whose
+`StackLocator` has a Java 8 implementation at the jar root and a Java 9 one under
+`META-INF/versions/9/`. 1.16.5 and earlier bundle log4j 2.8.1, which predates that split.
+
+The merged game jar this workspace builds carries both copies — and a manifest that says
+`Multi-Release: false`. So the JVM loads the Java 8 `StackLocator`, which asks
+`sun.reflect.Reflection.getCallerClass` (gone since Java 9), gets nothing back, and throws. The
+game jar is first on the classpath, so it shadows the correctly-marked `log4j-api-2.14.1.jar` this
+project pins right beside it. Changing the JDK does
+not help: it fails identically on 16, which is the release's own `javaVersion.majorVersion`.
+
+That is a defect in the jar merge — `Multi-Release` is a main attribute that has to survive a merge
+whenever any input carries versioned entries — and it belongs to `jals-classpath`, not here. It is
+the same shape as the shadowing bug in the generated test harness that this change already fixed: a
+jar built by this workspace quietly outranking a correct one.
+
 ## Which JDK
 
 Two JDKs, chosen independently — `$JAVAC` and `$JAVA` are how a caller says so. The compiler only
