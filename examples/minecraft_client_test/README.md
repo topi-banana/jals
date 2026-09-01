@@ -157,6 +157,21 @@ its own JVM, and the fourth column is not advice: 1.17 asks for 16 and means it.
 JAVAC=$JDK25/bin/javac JAVA=$JDK8/bin/java jals test --features 1.14.4,client-test -j 1
 ```
 
+## What has actually been run
+
+Two claims, verified two ways, because they cost two very different amounts.
+
+**All 43 compile.** `jals build --features <release>,enabled`, every release, checking that a class
+file comes out — a selection without `enabled` compiles a file blanked to its `package` line and
+succeeds, so the exit status alone proves nothing. CI runs this as a 43-cell matrix, which is also
+what verifies all 2287 pinned library digests: a build script's fetches execute.
+
+**Every branch boots.** A client boot costs a minute or two and a GL context, so the boot matrix is
+run locally rather than in CI. 32 of the 43 have been booted, three tests each, zero failures — and
+between them they cover **every one of the fourteen threshold bands**, which is the property that
+matters: two releases in the same band compile the same source and differ only in the game jar. The
+JVM is the one the release asks for, from the table above.
+
 ## Why every declaration carries `#[cfg(feature = "enabled")]`
 
 A dependency is a graph node whether or not the selection routes a feature to it, so this project's
