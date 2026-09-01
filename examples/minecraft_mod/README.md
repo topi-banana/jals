@@ -409,6 +409,75 @@ SDK puts on the classpath — and 0.8.7's `CompatibilityLevel` ending at `JAVA_2
 the `--release` cap above answers to, so a build against a Mixin that names a higher level would
 raise it.
 
+## Booting the game from a test
+
+`src/test/java` holds three `#[test]` methods that start a **real Minecraft client in the test JVM**
+and assert against it — no Mixin, no java agent, no launcher. What starts it is not here: the
+harness is a project of its own, `../minecraft_client_test`, and this project reaches it in one
+line.
+
+```toml
+[dev-dependencies]
+mc-client-test = { path = "../minecraft_client_test" }
+```
+
+That is the whole of the arrangement, and it is the point of the split. `[dev-dependencies]` is
+resolved by `jals test` and by the analysis hosts and by nothing that produces output, so the jar
+`jals build` writes holds the mixin and nothing else — which a `[dependencies]` entry could not
+promise, because a `path` dependency's `.java` is compiled into whoever consumes it. Nothing in
+`GameClient` names a type in `com.example.hellomod`, so a second mod adds the same one line and gets
+the same harness.
+
+```sh
+cd examples/minecraft_mod
+cargo run -p jals-cli -- test --features 1.21.11,client-test -j 1
+```
+
+```
+   Compiling hellomod
+    Starting 3 tests across 1 class
+        PASS [  30.170s] com.example.hellomod.ClientTest#bootsToTheTitleScreen
+        PASS [  30.123s] com.example.hellomod.ClientTest#opensAScreenAndFindsAWidgetByItsLabel
+        PASS [  35.053s] com.example.hellomod.ClientTest#placesABlockThroughTheIntegratedServer
+------------
+     Summary [  95.350s] 3 tests run: 3 passed
+```
+
+A test reads like a browser driver, except that both handles are typed game objects:
+
+```java
+try (GameClient game = GameClient.launch()) {
+    game.openFlatWorld("jals-test");
+    BlockPos pos = new BlockPos(0, 0, 0);
+    game.runOnServer(server ->
+        server.overworld().setBlockAndUpdate(pos, Blocks.DIAMOND_BLOCK.defaultBlockState()));
+    assert game.evalOnServer(server -> server.overworld().getBlockState(pos).is(Blocks.DIAMOND_BLOCK));
+}
+```
+
+### What this project still owns
+
+Three things, and each is here because it cannot live on the other side of the edge:
+
+- **`client-test`.** `["client", "mc-client-test/1.21.11"]` — it implies `client` so this project
+  compiles against the client jar, and routes the release into the harness. Everything under
+  `src/test/java` is `#[cfg]`-gated on it, so a selection that does not name it compiles and lints
+  as if the tests were not there, which is what keeps the other two `minecraft_mod` CI cells
+  unchanged.
+- **`-Xmx2G`.** `build.add_jvm_arg` reaches a test JVM only from the *root* project's script, so a
+  dependency cannot contribute it. `build.rhai` writes the line; without it the boot dies inside the
+  resource reload with an `OutOfMemoryError`.
+- **The release guard.** `--features 1.20.1,client-test` routes two versions into the SDK, which
+  rejects them. The root's build script runs before the graph is preprocessed, so the guard's
+  sentence is what a reader sees rather than the SDK's.
+
+Everything else — the harness class, the ~60 pinned runtime libraries, the `Executor` hinge, the
+daemon-thread and watchdog dance `jals test` forces, and why there is no native directory and no
+asset store — is documented in [`../minecraft_client_test/README.md`](../minecraft_client_test/README.md).
+
+**Linux only.** GLFW wants the main thread on macOS (`-XstartOnFirstThread`) and the main thread
+belongs to the test. CI runs the cell under `xvfb` with Mesa's llvmpipe.
+
 ## Legal note
 
 Minecraft jars and mappings are Mojang's copyrighted material. This example records only download

@@ -28,7 +28,9 @@ use jals_build::{
     ManifestExt,
     build_script::{BuildScriptEnvironment, BuildScriptLimits, BuildScriptSession},
 };
-use jals_config::{BuildScript, Dependency, FeatureSet, Manifest, ResolvedBuildFeatures};
+use jals_config::{
+    BuildScript, Dependency, DependencyScope, FeatureSet, Manifest, ResolvedBuildFeatures,
+};
 use jals_editor::{
     EditorHost, FoldingHost, Folds, Ident, LineIndex, Outline, SelectionChains, SelectionHost,
 };
@@ -1805,11 +1807,11 @@ impl AssembledWorkspace {
                 Ok(assembly) => assembly,
                 Err(failure) => {
                     let message = failure.error.to_string();
-                    // The root-only fallback below rediscovers without `[dependencies]`, so every
-                    // warning about a dependency is reported here or nowhere. The script phase is
-                    // deliberately `Skipped`: the fallback's own `finish_assembly` reports it, and
-                    // `workspace_ready` concatenates both sets — reporting it here too would
-                    // publish every script warning twice on exactly this path.
+                    // The root-only fallback below rediscovers without either dependency table,
+                    // so every warning about a dependency is reported here or nowhere. The script
+                    // phase is deliberately `Skipped`: the fallback's own `finish_assembly`
+                    // reports it, and `workspace_ready` concatenates both sets — reporting it here
+                    // too would publish every script warning twice on exactly this path.
                     let project_diagnostics = ProjectDiagnostics::assemble(
                         ScriptOutcome::Skipped,
                         GraphOutcome::Failed(&failure),
@@ -1819,7 +1821,23 @@ impl AssembledWorkspace {
                     .map(|diagnostic| Self::lsp_diagnostic(diagnostic, None))
                     .collect();
                     let mut root_only = effective_manifest.clone();
+                    // Both tables, as `jals_project`'s own `root_only` clears both: the fallback
+                    // rediscovers under `DependencyScope::Test`, so a `[dev-dependencies]` entry
+                    // left in place is walked again and fails the walk again — and a fallback that
+                    // fails the way the first attempt did leaves the workspace with no analysis at
+                    // all, which is the one outcome it exists to prevent.
                     root_only.dependencies.clear();
+                    root_only.dev_dependencies.clear();
+                    // And `[features]` with them, because `discover` opens with
+                    // `Manifest::validate` and a routing entry — `<dep>/<feature>`, `dep:<dep>`,
+                    // an optional entry's implicit feature — names a table that is now empty.
+                    // Without this the fallback returns `InvalidRootManifest` for exactly the
+                    // manifests it exists for (`examples/minecraft_mod` routes `minecraft/client`),
+                    // leaving the workspace with no analysis at all. Dropping them costs nothing
+                    // here: the real selection travels in `scripts.features`, the root-only plan
+                    // lowers under `ResolvedBuildFeatures::default()`, and `finish_assembly` reads
+                    // `effective_manifest` rather than this copy.
+                    root_only.features.clear();
                     let fallback_assembly = match Self::assemble_graph(
                         &script,
                         &root_only,
@@ -1907,6 +1925,9 @@ impl AssembledWorkspace {
                     root_features: scripts.features,
                     limits: scripts.limits,
                 },
+                // Every open file gets an answer, and a `[test] source-dirs` tree is open like
+                // any other — so the scope is the one that carries the types those files name.
+                DependencyScope::Test,
                 jals_classpath::ProjectInputOptions::Editor,
             )
             .await
@@ -2083,7 +2104,12 @@ impl AssembledWorkspace {
                 .iter()
                 .filter_map(|path| local_path(root, path)),
         );
-        for dependency in manifest.dependencies.values() {
+        // Both tables: the graph is assembled under `DependencyScope::Test`, so a
+        // `[dev-dependencies]` entry is a real analysis input and a change to it has to reassemble
+        // the workspace exactly as a `[dependencies]` one does. `declared_dependencies` rather
+        // than `active_dependencies` because a watch set must see an entry a selection did not
+        // activate — that is what the entry becoming active later would change.
+        for (_, dependency) in manifest.declared_dependencies(DependencyScope::Test) {
             match dependency {
                 Dependency::Jar(jar) => {
                     reassemble_inputs.extend(
@@ -3463,6 +3489,49 @@ mod tests {
                     "the failed traversal reports the graph, never the script"
                 );
             }
+        });
+    }
+
+    /// The root-only fallback has to survive a manifest whose `[features]` route into the tables it
+    /// just emptied. `discover` opens with `Manifest::validate`, so a routing entry left behind
+    /// names an entry that no longer exists and the fallback fails exactly where it is needed —
+    /// which is every real project, `examples/minecraft_mod` included.
+    #[test]
+    fn the_root_only_fallback_survives_a_manifest_that_routes_features_to_a_dependency() {
+        block_on_inline(async {
+            let dir = tempfile::tempdir().unwrap();
+            write(
+                dir.path(),
+                "jals.toml",
+                "[build]\nsource-dirs = [\"src\"]\n\
+                 [features]\nclient = [\"a/client\"]\n\
+                 [dependencies]\na = { path = \"a\" }\n",
+            );
+            write(
+                dir.path(),
+                "a/jals.toml",
+                "[features]\nclient = []\n[dependencies]\nb = { path = \"../b\" }\n",
+            );
+            write(
+                dir.path(),
+                "b/jals.toml",
+                "[dependencies]\na-again = { path = \"../a\" }\n",
+            );
+            write(dir.path(), "src/Main.java", "class Main {}");
+            let manifest = Manifest::from_file(&dir.path().join("jals.toml"))
+                .await
+                .unwrap();
+
+            let Err(failure) =
+                AssembledWorkspace::assemble(&manifest, dir.path(), Exec::inline()).await
+            else {
+                panic!("cycle unexpectedly assembled");
+            };
+            assert!(
+                failure.fallback.is_some(),
+                "a routed `[features]` entry must not take the fallback down with it: {}",
+                failure.message
+            );
         });
     }
 

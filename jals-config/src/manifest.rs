@@ -104,6 +104,28 @@ pub struct Manifest {
     /// source into the editor index; this crate only models and validates the specs, staying pure
     /// (`jals-build`'s `ManifestExt` classifies them into host-facing path sources).
     pub dependencies: BTreeMap<String, Dependency>,
+    /// Dependencies only a **test run** resolves (`[dev-dependencies]`), keyed the same way.
+    ///
+    /// Cargo's `[dev-dependencies]`, and the same shape as [`dependencies`](Self::dependencies) —
+    /// the value type is the identical [`Dependency`], because what changes is *when* an entry is
+    /// present and never what it is. A [`DependencyScope`] is how a host says which of the two
+    /// tables it is asking about, and `Test` is the union rather than a replacement, for the same
+    /// reason [`Test::source_dirs`] adds to `[build] source-dirs`: a test run still needs the
+    /// project's ordinary dependencies.
+    ///
+    /// The point of the separate table is what a *source* dependency does. A `git`/`path` entry's
+    /// `.java` is compiled into whoever consumes it, so a test-support library declared in
+    /// `[dependencies]` would land in `jals build`'s output too. Declared here it reaches the test
+    /// lowering and nothing else.
+    ///
+    /// **Not transitive**: a dependency's own `[dev-dependencies]` are never walked, exactly as in
+    /// Cargo. `jals-project`'s discovery states that by recursing with
+    /// [`DependencyScope::Build`] unconditionally.
+    ///
+    /// A name declared in **both** tables is a [`ValidationError::DuplicateDependency`]. Cargo
+    /// permits it (the dev entry overrides); jals does not, because one name would then denote two
+    /// specs and discovery would draw two edges for one entry.
+    pub dev_dependencies: BTreeMap<String, Dependency>,
     /// Named mapping sets (`[mappings]`), keyed by the name a `remap` key references.
     ///
     /// A sibling of `[dependencies]` rather than a form of one: a mapping set never reaches a
@@ -132,6 +154,25 @@ pub struct Manifest {
     /// to a backend, and its `native` feature resolves the [`ToolSpec`](crate::ToolSpec) view of a
     /// program-selecting variant to a program path (JDK discovery / `PATH`).
     pub toolchain: Toolchain,
+}
+
+/// Which of the two dependency tables a resolution reads.
+///
+/// A host **states** this the way it states a [`FrontendKind`] selection or a `publish_tree`
+/// intent — it is never inferred from the command, the options, or the manifest. `jals build`
+/// asks for [`Build`](Self::Build), `jals test` for [`Test`](Self::Test), and an analysis host
+/// (`jals lint`, the language server) for `Test` because it has to understand a test tree.
+///
+/// Orthogonal to `jals-classpath`'s `ProjectInputOptions`, which says *what an assembly takes out*
+/// of a plan. This says *which entries the plan was built from*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum DependencyScope {
+    /// `[dependencies]` alone. What a build, a run, and the packaging step behind them resolve.
+    Build,
+    /// `[dependencies]` **and** `[dev-dependencies]`. Additive rather than a replacement: a test
+    /// run needs the project's ordinary dependencies too, exactly as `[test] source-dirs` adds to
+    /// `[build] source-dirs` instead of replacing it.
+    Test,
 }
 
 /// A single `[dependencies]` entry, in exactly one of three forms.
@@ -1081,7 +1122,7 @@ impl fmt::Display for BuildFeatureError {
             Self::UnknownSelectedDependency { name, dependency } => write!(
                 f,
                 "`--features {name}` names `{dependency}`, which is not a declared `git`/`path` \
-                 `[dependencies]` entry"
+                 `[dependencies]` or `[dev-dependencies]` entry"
             ),
             Self::InvalidSelected { name, reason } => {
                 write!(f, "`--features {name}` is malformed: {reason}")
@@ -2493,7 +2534,17 @@ impl Manifest {
         // empty value, an unsupported URL scheme, conflicting git refs. These are hard errors, like
         // Cargo; runtime I/O failures (a download that fails, a missing local jar / repo) are soft
         // warnings handled later by the host's resolver.
-        for (name, dep) in &self.dependencies {
+        //
+        // `[dev-dependencies]` goes through the identical checks: the table differs in *when* an
+        // entry is resolved, never in what an entry may be. A name declared in both is rejected
+        // first, because every check below — and discovery, and `dep:` activation — reads a name as
+        // denoting one entry.
+        for name in self.dependencies.keys() {
+            if self.dev_dependencies.contains_key(name) {
+                return Err(ValidationError::DuplicateDependency { name: name.clone() });
+            }
+        }
+        for (name, dep) in self.declared_dependencies(DependencyScope::Test) {
             dep.validate(name).map_err(ValidationError::Dependency)?;
             if let Some(mapping) = dep.remap() {
                 self.require_mapping(RemapSite::Dependency(name.clone()), mapping)?;
@@ -2546,19 +2597,49 @@ impl Manifest {
         })
     }
 
-    /// The `[dependencies]` entries present under `features`, in name order: every required entry,
-    /// plus each `optional` one the resolution activated.
+    /// Every entry `scope` declares, in a deterministic order: `[dependencies]` in name order,
+    /// then — under [`DependencyScope::Test`] — `[dev-dependencies]` in name order.
+    ///
+    /// The unfiltered half of the pair below, for the callers that must see an entry whether or not
+    /// a selection activated it: graph discovery (a node's own selection is only settled *after*
+    /// the edges exist), the language server's watch set, and anything reporting what a manifest
+    /// declares. Iterating `manifest.dependencies` directly is what this replaces.
+    pub fn declared_dependencies(
+        &self,
+        scope: DependencyScope,
+    ) -> impl Iterator<Item = (&String, &Dependency)> {
+        let dev = match scope {
+            DependencyScope::Build => None,
+            DependencyScope::Test => Some(&self.dev_dependencies),
+        };
+        self.dependencies.iter().chain(dev.into_iter().flatten())
+    }
+
+    /// The entries `scope` declares that are present under `features`, in the same order: every
+    /// required entry, plus each `optional` one the resolution activated.
     ///
     /// The single spelling of "is this entry present?", so the two discovery adapters, the classpath
     /// lowering, and anything that reports what a selection dropped cannot answer it differently.
-    /// Iterating `manifest.dependencies` directly is what this replaces.
     pub fn active_dependencies<'a>(
         &'a self,
+        scope: DependencyScope,
         features: &'a ResolvedBuildFeatures,
     ) -> impl Iterator<Item = (&'a String, &'a Dependency)> {
-        self.dependencies
-            .iter()
+        self.declared_dependencies(scope)
             .filter(move |(name, dep)| !dep.is_optional() || features.activates(name))
+    }
+
+    /// The `[dependencies]` or `[dev-dependencies]` entry named `name`, whichever table declares
+    /// it.
+    ///
+    /// Scope-free on purpose: this answers what the *manifest* says, which is the question every
+    /// manifest-internal check asks. A `[features]` list is written once and read under both
+    /// scopes, so gating `dep:x` on which table `x` sits in would make one manifest valid for
+    /// `jals test` and invalid for `jals build`.
+    fn dependency_entry(&self, name: &str) -> Option<&Dependency> {
+        self.dependencies
+            .get(name)
+            .or_else(|| self.dev_dependencies.get(name))
     }
 
     /// Whether some `[features]` list writes `dep:<dependency>`, which suppresses that entry's
@@ -2576,8 +2657,7 @@ impl Manifest {
     /// Whether `name` is the implicit feature of an optional dependency: the entry is optional and
     /// no `dep:` mentions it.
     fn implicit_dependency_feature(&self, name: &str) -> bool {
-        self.dependencies
-            .get(name)
+        self.dependency_entry(name)
             .is_some_and(Dependency::is_optional)
             && !self.activated_explicitly(name)
     }
@@ -2608,7 +2688,7 @@ impl Manifest {
             // Activating something that is always present has no meaning, and reading it as a
             // no-op would hide the real mistake: either the `optional` was forgotten, or the entry
             // is not the one meant.
-            FeatureRef::Activation(dependency) => match self.dependencies.get(dependency) {
+            FeatureRef::Activation(dependency) => match self.dependency_entry(dependency) {
                 Some(dep) if dep.is_optional() => Ok(()),
                 Some(_) => Err(ValidationError::ActivatesRequiredDependency {
                     feature: feature.to_owned(),
@@ -2624,7 +2704,7 @@ impl Manifest {
             // Routing to something with no build script is always a mistake, and the graph relies
             // on it: a `jar` name reaching the router would be ambiguous, since a jar with a
             // companion `sources` archive contributes two edges under one name.
-            FeatureRef::Dependency { dependency, .. } => match self.dependencies.get(dependency) {
+            FeatureRef::Dependency { dependency, .. } => match self.dependency_entry(dependency) {
                 Some(dep) if dep.accepts_features() => Ok(()),
                 Some(_) => Err(ValidationError::BinaryFeatureDependency {
                     feature: feature.to_owned(),
@@ -2763,9 +2843,13 @@ impl Manifest {
                     return Err(BuildFeatureError::ActivationSelected { name: name.clone() });
                 }
                 Ok(FeatureRef::Dependency { dependency, .. }) => {
+                    // Scope-free, exactly as `validate_feature_ref`'s own routing arm: one
+                    // `[features]` table is read under both scopes, so a spelling the manifest
+                    // accepts has to be a spelling a command line accepts. Reading only
+                    // `[dependencies]` here made `--features <dev-entry>/<feature>` an error for
+                    // the very route `client-test = ["mc-client-test/1.21.11"]` writes.
                     if !self
-                        .dependencies
-                        .get(dependency)
+                        .dependency_entry(dependency)
                         .is_some_and(Dependency::accepts_features)
                     {
                         return Err(BuildFeatureError::UnknownSelectedDependency {
@@ -2943,10 +3027,19 @@ pub enum ValidationError {
         /// Which field was empty (`"name"` or `"main-class"`).
         field: &'static str,
     },
-    /// A `[dependencies]` entry could not be classified — an empty `jar`, an unsupported URL scheme,
-    /// or conflicting git refs. Wraps the classification [`DependencyError`] so the two layers share a
-    /// single message and the variant set never drifts apart.
+    /// A `[dependencies]` or `[dev-dependencies]` entry could not be classified — an empty `jar`, an
+    /// unsupported URL scheme, or conflicting git refs. Wraps the classification [`DependencyError`]
+    /// so the two layers share a single message and the variant set never drifts apart.
     Dependency(DependencyError),
+    /// One name is declared in both `[dependencies]` and `[dev-dependencies]`.
+    ///
+    /// A deliberate divergence from Cargo, which lets the dev entry override. Here a name denotes
+    /// one entry everywhere it is read — `dep:<name>`, `<name>/<feature>`, one discovery edge — so
+    /// two specs under one name have no defensible reading.
+    DuplicateDependency {
+        /// The name both tables declare.
+        name: String,
+    },
     /// A `[features]` entry's `default`/`enables` list references a feature that is not itself a
     /// declared key.
     UndeclaredBuildFeature {
@@ -3107,6 +3200,11 @@ impl fmt::Display for ValidationError {
                 write!(f, "a `[[bin]]` has an empty `{field}`")
             }
             Self::Dependency(err) => write!(f, "{err}"),
+            Self::DuplicateDependency { name } => write!(
+                f,
+                "`{name}` is declared in both `[dependencies]` and `[dev-dependencies]`: a name \
+                 denotes one entry, so declare it once"
+            ),
             Self::UndeclaredBuildFeature { feature, enables } => write!(
                 f,
                 "`[features] {feature}` enables `{enables}`, which is not a declared feature"
@@ -3128,7 +3226,7 @@ impl fmt::Display for ValidationError {
             } => write!(
                 f,
                 "`[features] {feature}` enables `{entry}`, but `{dependency}` is not a declared \
-                 `[dependencies]` entry"
+                 `[dependencies]` or `[dev-dependencies]` entry"
             ),
             Self::BinaryFeatureDependency {
                 feature,
@@ -4685,7 +4783,7 @@ mod tests {
         let none = manifest.resolve_build_features(&[], false, false).unwrap();
         assert_eq!(
             manifest
-                .active_dependencies(&none)
+                .active_dependencies(DependencyScope::Build, &none)
                 .map(|(name, _)| name.as_str())
                 .collect::<Vec<_>>(),
             ["core"]
@@ -4699,11 +4797,182 @@ mod tests {
         assert!(selected.activates("render"));
         assert_eq!(
             manifest
-                .active_dependencies(&selected)
+                .active_dependencies(DependencyScope::Build, &selected)
                 .map(|(name, _)| name.as_str())
                 .collect::<Vec<_>>(),
             ["core", "render"]
         );
+    }
+
+    #[test]
+    fn dev_dependencies_are_declared_and_active_only_under_the_test_scope() {
+        // The whole of what the table buys: one manifest, two answers, and the host says which.
+        let manifest: Manifest = r#"
+            [dependencies]
+            core = { path = "../core" }
+
+            [dev-dependencies]
+            harness = { path = "../harness" }
+            "#
+        .parse()
+        .unwrap();
+
+        let none = manifest.resolve_build_features(&[], false, false).unwrap();
+        for scope in [DependencyScope::Build, DependencyScope::Test] {
+            let declared: Vec<&str> = manifest
+                .declared_dependencies(scope)
+                .map(|(name, _)| name.as_str())
+                .collect();
+            let active: Vec<&str> = manifest
+                .active_dependencies(scope, &none)
+                .map(|(name, _)| name.as_str())
+                .collect();
+            // `[dependencies]` first, then `[dev-dependencies]`, each in name order — a `BTreeMap`
+            // chained onto a `BTreeMap`, so a resolved classpath comes out the same every run.
+            let expected: &[&str] = match scope {
+                DependencyScope::Build => &["core"],
+                DependencyScope::Test => &["core", "harness"],
+            };
+            assert_eq!(declared, expected, "declared under {scope:?}");
+            assert_eq!(active, expected, "active under {scope:?}");
+        }
+    }
+
+    #[test]
+    fn a_dev_dependency_takes_every_form_and_every_check() {
+        // The table differs in *when* an entry is resolved, never in what an entry may be — so the
+        // three forms parse here and the value-level checks reach them.
+        let manifest: Manifest = r#"
+            [dev-dependencies]
+            binary = { jar = "https://example.test/x.jar" }
+            repo = { git = "https://example.test/x.git", tag = "v1" }
+            local = { path = "../local" }
+            "#
+        .parse()
+        .unwrap();
+        assert_eq!(manifest.dev_dependencies.len(), 3);
+        assert!(matches!(
+            manifest.dev_dependencies["binary"],
+            Dependency::Jar(_)
+        ));
+        assert!(matches!(
+            manifest.dev_dependencies["repo"],
+            Dependency::Git(_)
+        ));
+        assert!(matches!(
+            manifest.dev_dependencies["local"],
+            Dependency::Path(_)
+        ));
+
+        // The same classification failure a `[dependencies]` entry would be rejected for.
+        let error = r#"
+            [dev-dependencies]
+            repo = { git = "https://example.test/x.git", tag = "v1", rev = "abc" }
+            "#
+        .parse::<Manifest>()
+        .unwrap_err();
+        let ManifestParseError::Invalid { source, .. } = error else {
+            panic!("a dev entry's conflicting git refs must be a validation error");
+        };
+        assert!(matches!(
+            source,
+            ValidationError::Dependency(DependencyError::ConflictingGitRef { .. })
+        ));
+    }
+
+    #[test]
+    fn one_name_may_not_be_declared_in_both_tables() {
+        // A deliberate divergence from Cargo, which lets the dev entry override: here a name
+        // denotes one entry wherever it is read, so two specs under it have no reading.
+        let error = r#"
+            [dependencies]
+            shared = { path = "../a" }
+
+            [dev-dependencies]
+            shared = { path = "../b" }
+            "#
+        .parse::<Manifest>()
+        .unwrap_err();
+        let ManifestParseError::Invalid { source, .. } = error else {
+            panic!("one name in two tables must be a validation error");
+        };
+        assert!(matches!(
+            source,
+            ValidationError::DuplicateDependency { name } if name == "shared"
+        ));
+    }
+
+    #[test]
+    fn a_feature_reaches_a_dev_dependency_by_every_route() {
+        // `<dep>/<feature>`, `dep:<dep>` and a `--features` selection all resolve against the
+        // union of the two tables. They have to: a `[features]` table is written once and read
+        // under both scopes, so a manifest that was valid for `jals test` and invalid for
+        // `jals build` would be one table's fault.
+        let manifest: Manifest = r#"
+            [features]
+            client-test = ["harness/1.21.11", "dep:extra"]
+
+            [dev-dependencies]
+            harness = { path = "../harness" }
+            extra = { path = "../extra", optional = true }
+            "#
+        .parse()
+        .unwrap();
+        manifest.validate().expect("both routes reach a dev entry");
+
+        let selected = manifest
+            .resolve_build_features(&["client-test".to_owned()], false, false)
+            .unwrap();
+        assert!(selected.activates("extra"));
+        let routed: Vec<(&str, Vec<&str>)> = selected
+            .dependencies()
+            .map(|(name, features)| (name, features.iter().map(String::as_str).collect()))
+            .collect();
+        assert_eq!(
+            routed,
+            [("harness", alloc::vec!["1.21.11"])],
+            "the release is routed to the harness rather than kept as a local feature"
+        );
+        assert!(!selected.features().contains("harness/1.21.11"));
+
+        // The third route, and the one a user actually types: the same spelling on a command line.
+        // A manifest that is valid cannot have a routing its own CLI rejects.
+        let from_cli = manifest
+            .resolve_build_features(&["harness/1.21.11".to_owned()], false, false)
+            .expect("`--features <dev-entry>/<feature>` routes exactly as the table does");
+        assert_eq!(
+            from_cli
+                .dependencies()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>(),
+            ["harness"]
+        );
+        // The `Local` arm reads the same union through `implicit_dependency_feature`, so an
+        // optional dev entry no `dep:` names declares a selectable feature of its own name.
+        let implicit: Manifest = r#"
+            [dev-dependencies]
+            extra = { path = "../extra", optional = true }
+            "#
+        .parse()
+        .unwrap();
+        assert!(
+            implicit
+                .resolve_build_features(&["extra".to_owned()], false, false)
+                .expect("an optional dev entry's implicit feature is selectable")
+                .activates("extra")
+        );
+
+        // And an undeclared name is still a mistake, whichever table a reader expected it in.
+        let error = "[features]\nx = [\"absent/y\"]\n"
+            .parse::<Manifest>()
+            .unwrap_err();
+        let ManifestParseError::Invalid { source, .. } = error else {
+            panic!("an undeclared routing target must be a validation error");
+        };
+        assert!(matches!(
+            source,
+            ValidationError::UndeclaredFeatureDependency { dependency, .. } if dependency == "absent"
+        ));
     }
 
     #[test]

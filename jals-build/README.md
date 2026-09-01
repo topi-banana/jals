@@ -366,6 +366,14 @@ asynchronously after Rhai evaluation and capability preflight succeed:
 | `add_nested_classpath(jar)`                                                      | Expand every nested `.jar` member onto the root classpath (library bundlers). |
 | `publish_tree(owner, tree, destination, "replace-root", intent)`                 | Atomically replace an exclusive physical source subtree.                      |
 
+`remap_jar` and `merge_jars` both drop a signed jar's signature block
+(`META-INF/*.{SF,DSA,RSA,EC}`) and the per-entry digests in its manifest. Renaming every class leaves
+both describing bytes that no longer exist, and a union carries members the signer never saw; a JVM
+refuses either archive with `SecurityException: signer information does not match` — so a jar that
+kept them would compile against but never run. A Minecraft client jar carries about 3.7 MB of them.
+The two agree because a release that ships deobfuscated reaches `merge_jars` without passing through
+a remap at all.
+
 For example:
 
 ```rhai
@@ -934,8 +942,8 @@ Making a `features` release preset also imply a default `javac --release` is sti
 
 | Section                               | Cargo analogue        | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | ------------------------------------- | --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `[dev-dependencies]`                  | `[dev-dependencies]`  | **done** — see [§5](#5-testing). Same entry shapes as `[dependencies]`, resolved by `jals test` and by the analysis hosts and by nothing that produces output, and **not transitive**.                                                                                                                                                                                                                                                                                                    |
 | `[dependencies]`                      | `[dependencies]`      | **partly done**: explicit JARs are wired for analysis/compile (plus optional navigation sources), and `{ git = "url", branch/tag/rev, dir }` / `{ path = "...", dir }` form a transitive JALS source-project graph with exact manifest probing, dependency scripts, LSP navigation, and `build`/`run` compilation. Maven coordinates, POM/version resolution, transitive Maven download, and a lockfile remain §3.                                                                            |
-| `[dev-dependencies]`                  | `[dev-dependencies]`  | Dependencies only a test run puts on the classpath. Not needed for testing itself — `jals test` needs no framework (§5) — but a test that reaches for a helper library still has nowhere to declare it.                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `[toolchain]`                         | `rust-toolchain.toml` | **partly done**: `compiler`/`runtime` select `javac`/`java` independently — `"system"`, `"builtin"`, an explicit `{ path = "…" }`, or a `{ distribution = { name, version } }` discovered among the installed JDKs (SDKMAN / `~/.jdks` / `~/.jdk` / `/usr/lib/jvm` / macOS). Still to come: **automatic download** of a missing JDK (rust-toolchain style, e.g. via the foojay disco API) into a per-user cache, and letting a `[package] features` release preset default `[build] release`. |
 | `[repositories]`                      | (registries)          | Maven repository URLs; default Maven Central                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `[profile.dev]` / `[profile.release]` | `[profile.*]`         | debug vs. optimized/stripped builds (`-g` vs. `-g:none`, lint levels)                                                                                                                                                                                                                                                                                                                                                                                                                         |
@@ -1021,6 +1029,38 @@ public final class Calculator {
   produces can no longer reach it. That is the deliberate reading: analysis answers questions
   about the code as written, and the code as written calls that helper. The cost is one
   unreachable `private` method in the built class, which is what a test helper is.
+
+### Test-only dependencies
+
+`[dev-dependencies]` takes the same three entry shapes as `[dependencies]` — `jar`, `git`, `path`
+— and differs only in **when** an entry is resolved:
+
+```toml
+[dev-dependencies]
+mc-client-test = { path = "../minecraft_client_test" }
+```
+
+- **Who resolves it.** `jals test` and the analysis hosts (`jals lint`, the language server); not
+  `jals build`, not `jals run`, and not the packaging step behind them. Which of the two tables a
+  resolution reads is a `jals_config::DependencyScope` a host **states** — `Build` or `Test` —
+  never something inferred from the command or from `ProjectInputOptions`, which is the orthogonal
+  question of what an assembly takes *out* of a plan.
+- **Why the table has to exist.** A `git`/`path` entry is a *source* dependency: its
+  `[build] source-dirs` tree is lowered under its own frontend and handed to the consumer's
+  `javac`. A test-support library declared in `[dependencies]` would therefore be compiled into
+  the consumer's output and packaged. Declared here it reaches the test lowering and nothing else.
+- **`Test` is additive.** It is `[dependencies]` *plus* `[dev-dependencies]`, for the same reason
+  `[test] source-dirs` adds to `[build] source-dirs` rather than replacing it.
+- **Not transitive.** A dependency's own `[dev-dependencies]` are never walked: discovery drops the
+  root's scope at the first edge and recurses under `Build` forever after. A consumer of a consumer
+  never sees them.
+- **One name, one entry.** A name declared in both tables is rejected — a deliberate divergence
+  from Cargo, which lets the dev entry override. Here a name denotes one entry wherever it is read
+  (`dep:<name>`, `<name>/<feature>`, one discovery edge), and two specs under it have no reading.
+- **What still does not cross the edge.** `build.add_jvm_arg` reaches the test JVM only from the
+  *root* project's script, so a dev-dependency contributes classpath and sources but no JVM flags.
+  [`examples/minecraft_client_test`](../examples/minecraft_client_test) is a worked example, and
+  documents what a consumer therefore writes itself.
 
 The flags follow `cargo nextest run`: positional substring filters plus `--exact` and `--skip`,
 `--run-ignored`, `--partition count:M/N|hash:M/N`, `-j/--test-threads`, `--retries`,

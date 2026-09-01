@@ -15,7 +15,9 @@ use jals_build::build_script::{BuildScriptEnvironment, BuildScriptLimits, BuildS
 use jals_build::{ManifestExt, Runtime};
 use jals_config::fmt::Config;
 use jals_config::lint::Config as LintConfig;
-use jals_config::{DiscoverableConfig, FeatureSet, Manifest, ResolvedBuildFeatures};
+use jals_config::{
+    DependencyScope, DiscoverableConfig, FeatureSet, Manifest, ResolvedBuildFeatures,
+};
 use jals_exec::Exec;
 use jals_storage::{DirKey, FileKey, Name, NativeScope, NativeStorage, RelativePath};
 
@@ -155,6 +157,19 @@ impl Lowering {
         match self {
             Self::Build => jals_build::FRONTEND_OUT_DIR,
             Self::Test => jals_build::TEST_FRONTEND_OUT_DIR,
+        }
+    }
+
+    /// Which dependency tables this lowering resolves.
+    ///
+    /// The fourth thing the two differ in, and the one that makes `[dev-dependencies]` mean
+    /// anything: a test-support library's `.java` is compiled into whoever consumes it, so a build
+    /// that resolved it would package it. Answered here so the correspondence is written once,
+    /// exactly like [`staging_root`](Self::staging_root).
+    const fn dependency_scope(self) -> DependencyScope {
+        match self {
+            Self::Build => DependencyScope::Build,
+            Self::Test => DependencyScope::Test,
         }
     }
 }
@@ -1406,12 +1421,22 @@ impl LintProject {
             }
         };
         // The project's analysis inputs, best-effort: the classpath `.class` from `[build]
-        // classpath` plus resolved `[dependencies]` jars, the `[package] features`, and the
-        // `.java` of `git`/`path` dependencies — every typing authority a name can resolve to.
+        // classpath` plus resolved dependency jars, the `[package] features`, and the `.java` of
+        // `git`/`path` dependencies — every typing authority a name can resolve to.
+        //
+        // Under `DependencyScope::Test`, the widest one, because linting is asked about whatever
+        // file the user named and a `[test] source-dirs` tree is one of them: a test's types come
+        // from `[dev-dependencies]` as much as the main tree's come from `[dependencies]`, and a
+        // narrower scope would report every one of them as unknown in exactly the files they exist
+        // for. The cost is this command's usual one — lint is unconditionally offline, so it reads
+        // the artifacts some earlier command produced, and a `[dev-dependencies]` entry that
+        // fetches is now among them. A graph that cannot resolve degrades to the root-only
+        // fallback below with a warning, exactly as an unbuilt `[dependencies]` entry does.
         let inputs = match App::project_inputs(
             &mut storage,
             &manifest,
             root,
+            DependencyScope::Test,
             jals_classpath::ProjectInputOptions::Analysis,
             // Lint analyses what is already on disk; opening a project to report diagnostics must
             // not execute an unreviewed `build.rhai`.
@@ -1436,6 +1461,7 @@ impl LintProject {
                 // `[build] source-dirs` means.
                 let source_roots = jals_classpath::NativeProjectPlan::from_manifest(
                     &manifest,
+                    DependencyScope::Test,
                     &features,
                     root,
                     &storage.view(),
@@ -1444,7 +1470,18 @@ impl LintProject {
                 return Ok(Self {
                     root: root.to_path_buf(),
                     storage,
-                    layout: jals_editor::ProjectLayout::new(source_roots),
+                    // The classpath is what the failed assembly was carrying and the fallback
+                    // genuinely cannot have; the dialect is not. `[package] features` is a pure
+                    // function of the manifest and the selection is already resolved, so dropping
+                    // them here would turn a *narrower* analysis into a wrong one: with the
+                    // `attributes` feature off, `cfg` filtering stops and every `#[cfg(...)]` in
+                    // the project is reported by the `attribute` rule, which is an `error` by
+                    // default. The LSP's own fallback keeps both for the same reason.
+                    layout: jals_editor::ProjectLayout {
+                        feature_set: manifest.feature_set(),
+                        build_features: features.into_features(),
+                        ..jals_editor::ProjectLayout::new(source_roots)
+                    },
                 });
             }
         };
@@ -1796,10 +1833,16 @@ impl App {
     /// and it carries the execution context, so there is no separate `exec` to hand over and no
     /// way to hand over one that is not the aggregate's. `jals_editor::Workspace::load` takes its
     /// own the same way.
+    /// Eight parameters, and none of them collapses into another: three are the project (aggregate,
+    /// manifest, root), two are the selection a host states (`scope` and `options`, deliberately
+    /// orthogonal — *which entries* against *what is taken out of them*), and three are the phase
+    /// hand-over the script produced.
+    #[allow(clippy::too_many_arguments)]
     async fn project_inputs(
         storage: &mut NativeStorage,
         manifest: &Manifest,
         root: &Path,
+        scope: DependencyScope,
         options: jals_classpath::ProjectInputOptions,
         script: RootScript,
         scripts: &RootScriptInputs<'_>,
@@ -1823,6 +1866,7 @@ impl App {
                     root_features: scripts.features,
                     limits: &BuildScriptLimits::default(),
                 },
+                scope,
                 options,
             )
             .await
@@ -1975,6 +2019,7 @@ impl App {
             &mut storage,
             manifest,
             root,
+            lowering.dependency_scope(),
             jals_classpath::ProjectInputOptions::Compile,
             script,
             &RootScriptInputs {

@@ -76,6 +76,15 @@ filesystem reads into portable interfaces.
   adapters (see *Storage* above). Only `native.rs` may use `std::path`/`std::fs`.
 - `jals-config`: pure schemas and revision-aware config discovery over `ProjectView`, plus the
   shared severity vocabulary — the configured `LintLevel` and the presented `DiagnosticSeverity`.
+
+  `[dependencies]` and `[dev-dependencies]` hold the same `Dependency` and differ only in *when* an
+  entry is resolved, so which of them a resolution reads is a `DependencyScope` a host **states**
+  (`Build` / `Test`) and never infers. `Test` is additive — the test run still needs the ordinary
+  dependencies, exactly as `[test] source-dirs` adds to `[build] source-dirs`. `active_dependencies`
+  and `declared_dependencies` are the only two spellings of "which entries", the second for callers
+  that must see an entry a selection did not activate (discovery, the LSP watch set). A name in both
+  tables is rejected rather than overridden as Cargo does: one name denotes one entry wherever it is
+  read — `dep:<name>`, `<name>/<feature>`, one discovery edge.
   A crate that produces diagnostics states how they present without depending on an editor, which
   is why the vocabulary lives here: `jals-editor` and `jals-project` both assemble diagnostics and
   neither depends on the other. `jals-editor` re-exports the name, so a host still spells it
@@ -131,6 +140,12 @@ filesystem reads into portable interfaces.
   dependency-first preprocessing, and artifact-only projection into `jals-classpath`. The portable
   memory graph operates on one captured `CodeTree`; only the `native` adapter may acquire host path
   trees or temporary Git checkouts.
+  - The `DependencyScope` a host states applies to the **root manifest alone**: `walk.rs`'s
+    recursion is hard-coded to `Build`, because `[dev-dependencies]` are not transitive. That is the
+    one place the rule is written and it is invisible in the signature, so it carries a test.
+  - Two edges reaching one `path` dependency are one node — identity is the canonicalized directory
+    — and the features every in-edge routed to it are unioned there. A test-support library and its
+    consumer can therefore both depend on the same SDK without becoming two selections.
   - Dependency snapshots are immutable and must never receive generated output: a dependency's
     build tasks run under `BuildTaskHost::Snapshot`, so their JARs and declared source trees are
     projected into the *consumer's* artifact cache instead of being published to the project they
@@ -325,9 +340,14 @@ filesystem reads into portable interfaces.
   to per-test scratch files rather than pipes, `-ea` prepended by the launcher). The contract
   between the two halves — the sentinel line, `--list`, `--quiet` — is owned by `jals-frontend` and
   travels to the runner as a `HarnessContract` value, so it is written once; the harness class is
-  the fourth item and travels beside it as `RunRequest.main_class`. A captured pass is the sentinel
-  and never the exit status, which is also `1` for a missing main class and `0` for a body that
-  called `System.exit(0)`; `--no-capture` gives up that reading along with the capture, and says so.
+  the fourth item and travels beside it as `RunRequest.main_class`. `[dev-dependencies]` is the
+  fourth seam and the only new one: a test-support library is a project, resolved under
+  `DependencyScope::Test` and therefore absent from everything that produces output. It is what
+  `examples/minecraft_client_test` is — and what a dependency still cannot contribute is
+  `build.add_jvm_arg` or `build.add_javac_arg`, both of which reach a compile or a test JVM from the
+  root script only. A captured pass is the sentinel and never the exit status, which is also `1`
+  for a missing main class and `0` for a body that called `System.exit(0)`; `--no-capture` gives up
+  that reading along with the capture, and says so.
 - `jals-cli`: the host boundary from clap `PathBuf` values to `NativeStorage` and typed keys. It
   also owns native-formatter-config **detection** (`migrate.rs`): portable crates cannot look at a
   filesystem, so the host decides which config file is there and reads its bytes through a
@@ -532,7 +552,9 @@ Every project under `examples/` is a CI cell of its own (`example (<name>)`), ru
 README tells a reader to run: `jals build`, then `jals fmt --check` and `jals lint` over the
 example's **tracked** `.java` files. Tracked is what separates authored source from published
 output — a build script's publication into a source root is untracked by construction — so the gate
-never scores a decompiled skeleton as something someone wrote. Two consequences for an example:
+never scores a decompiled skeleton as something someone wrote. The fmt/lint step runs under the
+cell's own `dir`, so a project reached only through a dependency edge still needs a cell of its own
+the moment it has a tracked `.java`. Four consequences for an example:
 
 - A `tasks.project_jar` example needs its JAR, and a JAR is a binary, so none is committed:
   `examples/scripts/gen-vendor-jars.sh` writes the two the `task_dependency` and
@@ -542,3 +564,15 @@ never scores a decompiled skeleton as something someone wrote. Two consequences 
   §Compile-safety). That cell asserts the pipeline instead — fetch → nested extract → remap →
   decompile → publish — by requiring all three publication roots to come out non-empty, which is a
   statement only a run that reached the last step can make.
+- `minecraft_mod (client)` is the one cell that *runs* Minecraft rather than compiling against it.
+  It sets `headless_gl` (an apt install of `xvfb libgl1-mesa-dri libglx-mesa0`, and the test step
+  under `xvfb-run` with Mesa's llvmpipe) and `test_flags: -j 1 --timeout 600`, because each test
+  boots its own client and two at once want two GL contexts. A failed run uploads the client's
+  `logs/` and `crash-reports/`. It is also the cell whose fmt/lint step depends on the *test* step
+  having run: analysis is always offline, and the client's runtime jars are fetched by a
+  `[dev-dependencies]` entry, which `jals build` does not resolve.
+- `examples/scripts/gen-client-runtime.py` is a **generator, not a build step**: it rewrites the
+  pinned library block in `examples/minecraft_client_test/build.rhai` between two exact markers,
+  and its output is committed. CI never runs it. The release it pins is the `[features]` key in
+  that project's `jals.toml`, which six other places name and none of them owns — the consumer's
+  own `build.rhai` guard is one of them, and two CI cells rather than one.

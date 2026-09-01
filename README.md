@@ -376,7 +376,10 @@ The source-archive task shape is shown in
 `[mappings]` alternatives plus `[build] remap`, packaging a jar for all 43 releases and
 reobfuscating it for the 39 that ship obfuscated. One source tree covers all 43: the dialect's
 `#[cfg]` carries the one API Mojang renamed inside that range, over a chain of threshold features
-that a build script and a resource template read too.
+that a build script and a resource template read too. That mod's `jals test` boots a real Minecraft
+client and asserts against it, through a harness it names in one `[dev-dependencies]` line —
+[`examples/minecraft_client_test`](examples/minecraft_client_test), a test-only dependency that no
+build resolves and no jar carries.
 
 The root Rhai phase itself is capability-limited, but its compiler/JVM arguments, classpath entries,
 and subprocess environment directives intentionally affect the later explicit `jals build`/`run`

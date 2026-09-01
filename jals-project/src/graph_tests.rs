@@ -14,7 +14,7 @@ use std::process::Command;
 use jals_build::build_script::{BuildScriptEnvironment, BuildScriptLimits};
 use jals_build::task::TaskPublishIntent;
 use jals_classpath::{DependencyLocation, ProjectInputOptions};
-use jals_config::{Manifest, ResolvedBuildFeatures};
+use jals_config::{DependencyScope, Manifest, ResolvedBuildFeatures};
 use jals_exec::Exec;
 use jals_storage::{CodeTree, DirKey, Entry, FileKey, MemoryStorage, NativeStorage, RelativePath};
 
@@ -122,6 +122,7 @@ fn a_dependency_build_entry_names_the_project_that_declared_it() {
 
         let graph = NativeProjectGraph::discover(
             &root,
+            DependencyScope::Build,
             project.path(),
             &exec,
             jals_classpath::NetworkPolicy::Online,
@@ -167,6 +168,7 @@ fn transitive_path_graph_is_classified_in_parent_discovery_order() {
 
         let graph = NativeProjectGraph::discover(
             &root,
+            DependencyScope::Build,
             project.path(),
             &exec,
             jals_classpath::NetworkPolicy::Online,
@@ -207,14 +209,16 @@ fn native_and_memory_providers_coexist_under_native_features() {
             )])
             .unwrap(),
         );
-        let memory_graph = MemoryProjectGraph::discover(&root, &memory.view())
-            .await
-            .unwrap();
+        let memory_graph =
+            MemoryProjectGraph::discover(&root, DependencyScope::Build, &memory.view())
+                .await
+                .unwrap();
         assert_eq!(memory_graph.metadata().nodes().len(), 1);
 
         write(project.path(), "dep/src/Native.java", "class Native {}\n");
         let native_graph = NativeProjectGraph::discover(
             &root,
+            DependencyScope::Build,
             project.path(),
             &exec,
             jals_classpath::NetworkPolicy::Online,
@@ -237,7 +241,13 @@ fn native_companion_source_archives_are_role_distinct() {
              remote = { jar = \"https://example.invalid/binary.jar\", sources = \"https://example.invalid/sources.jar\" }\n",
         );
         let mut cache = MemoryStorage::memory(CodeTree::default());
-        let graph = NativeProjectGraph::discover(&root, project.path(), &exec, jals_classpath::NetworkPolicy::Online)
+        let graph = NativeProjectGraph::discover(
+            &root,
+            DependencyScope::Build,
+            project.path(),
+            &exec,
+            jals_classpath::NetworkPolicy::Online,
+        )
             .await
             .unwrap()
             .preprocess(cache.artifacts_mut(), inert!())
@@ -262,6 +272,7 @@ fn manifest_probe_is_exact_and_malformed_manifest_is_hard() {
             manifest("[dependencies]\nselected = { path = \"base\", dir = \"selected\" }\n");
         let graph = NativeProjectGraph::discover(
             &selected,
+            DependencyScope::Build,
             project.path(),
             &exec,
             jals_classpath::NetworkPolicy::Online,
@@ -277,6 +288,7 @@ fn manifest_probe_is_exact_and_malformed_manifest_is_hard() {
         );
         let error = NativeProjectGraph::discover(
             &selected,
+            DependencyScope::Build,
             project.path(),
             &exec,
             jals_classpath::NetworkPolicy::Online,
@@ -292,6 +304,7 @@ fn manifest_probe_is_exact_and_malformed_manifest_is_hard() {
         );
         let graph = NativeProjectGraph::discover(
             &selected,
+            DependencyScope::Build,
             project.path(),
             &exec,
             jals_classpath::NetworkPolicy::Online,
@@ -319,6 +332,7 @@ fn diamond_deduplicates_nodes_and_cycle_reports_edge_chain() {
             manifest("[dependencies]\nleft = { path = \"left\" }\nright = { path = \"right\" }\n");
         let graph = NativeProjectGraph::discover(
             &root,
+            DependencyScope::Build,
             project.path(),
             &exec,
             jals_classpath::NetworkPolicy::Online,
@@ -335,6 +349,7 @@ fn diamond_deduplicates_nodes_and_cycle_reports_edge_chain() {
         );
         let error = NativeProjectGraph::discover(
             &root,
+            DependencyScope::Build,
             project.path(),
             &exec,
             jals_classpath::NetworkPolicy::Online,
@@ -372,6 +387,7 @@ fn relative_child_jar_and_classpath_become_verified_artifacts() {
         let mut root_storage = storage(project.path(), &exec).await;
         let graph = NativeProjectGraph::discover(
             &root,
+            DependencyScope::Build,
             project.path(),
             &exec,
             jals_classpath::NetworkPolicy::Online,
@@ -424,6 +440,7 @@ fn declared_classpath_directory_remains_one_compile_tree() {
         let mut root_storage = storage(project.path(), &exec).await;
         let graph = NativeProjectGraph::discover(
             &root,
+            DependencyScope::Build,
             project.path(),
             &exec,
             jals_classpath::NetworkPolicy::Online,
@@ -451,6 +468,195 @@ fn declared_classpath_directory_remains_one_compile_tree() {
     .unwrap();
 }
 
+/// `[dev-dependencies]` is what the scope selects, and the selection is the host's: the same
+/// manifest yields one graph for a build and another for a test run.
+#[test]
+fn a_dev_dependency_is_a_node_only_under_the_test_scope() {
+    jals_exec::tokio_rt::run(|exec| async move {
+        let project = tempfile::tempdir().unwrap();
+        write(
+            project.path(),
+            "core/jals.toml",
+            "[package]\nname = \"core\"\n",
+        );
+        write(
+            project.path(),
+            "core/src/main/java/Core.java",
+            "class Core {}\n",
+        );
+        write(
+            project.path(),
+            "harness/jals.toml",
+            "[package]\nname = \"harness\"\n",
+        );
+        write(
+            project.path(),
+            "harness/src/main/java/Harness.java",
+            "class Harness {}\n",
+        );
+        let root = manifest(
+            "[dependencies]\ncore = { path = \"core\" }\n\
+             [dev-dependencies]\nharness = { path = \"harness\" }\n",
+        );
+        for (scope, expected) in [
+            (DependencyScope::Build, &["core"][..]),
+            (DependencyScope::Test, &["core", "harness"][..]),
+        ] {
+            let mut storage = storage(project.path(), &exec).await;
+            let graph = NativeProjectGraph::discover(
+                &root,
+                scope,
+                project.path(),
+                &exec,
+                jals_classpath::NetworkPolicy::Online,
+            )
+            .await
+            .unwrap();
+            let mut names: Vec<String> = graph
+                .edges
+                .iter()
+                .map(|edge| edge.dependency.clone())
+                .collect();
+            names.sort();
+            assert_eq!(names, expected, "edges under {scope:?}");
+            // And what the assembly hands a compiler follows: a dev entry's authored source is a
+            // compile input for a test run and absent from a build.
+            let assembly = graph
+                .preprocess(storage.artifacts_mut(), inert!())
+                .await
+                .unwrap()
+                .assemble(storage.artifacts_mut())
+                .await;
+            assert_eq!(
+                assembly.plan.source_dependency_artifacts.len(),
+                expected.len(),
+                "lowered dependency sources under {scope:?}"
+            );
+        }
+    })
+    .unwrap();
+}
+
+/// `[dev-dependencies]` are not transitive. A library's test-support entries exist to compile
+/// *its* tests, which nothing a consumer builds or tests ever does — so the walk drops the root's
+/// scope at the first edge and recurses under `Build` forever after.
+#[test]
+fn dev_dependencies_of_a_dependency_are_never_walked() {
+    jals_exec::tokio_rt::run(|exec| async move {
+        let project = tempfile::tempdir().unwrap();
+        write(
+            project.path(),
+            "buried/jals.toml",
+            "[package]\nname = \"buried\"\n",
+        );
+        write(
+            project.path(),
+            "buried/src/main/java/Buried.java",
+            "class Buried {}\n",
+        );
+        // `lib` needs `buried` only to test itself.
+        write(
+            project.path(),
+            "lib/jals.toml",
+            "[dev-dependencies]\nburied = { path = \"../buried\" }\n",
+        );
+        write(
+            project.path(),
+            "lib/src/main/java/Lib.java",
+            "class Lib {}\n",
+        );
+        let root = manifest("[dependencies]\nlib = { path = \"lib\" }\n");
+        let graph = NativeProjectGraph::discover(
+            &root,
+            // The widest scope the root can ask for; it still stops at the first edge.
+            DependencyScope::Test,
+            project.path(),
+            &exec,
+            jals_classpath::NetworkPolicy::Online,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            graph
+                .edges
+                .iter()
+                .map(|edge| edge.dependency.as_str())
+                .collect::<Vec<_>>(),
+            ["lib"],
+            "a dependency's own `[dev-dependencies]` must not be discovered"
+        );
+    })
+    .unwrap();
+}
+
+/// Two edges reaching one path dependency from different depths are one node, and the features
+/// every edge routed to it are unioned there. This is what lets a test-support library depend on
+/// the same SDK its consumer does without the two selections becoming two remaps.
+#[test]
+fn a_source_diamond_is_one_node_whose_features_are_unioned() {
+    jals_exec::tokio_rt::run(|exec| async move {
+        let project = tempfile::tempdir().unwrap();
+        write(
+            project.path(),
+            "sdk/jals.toml",
+            "[package]\nname = \"sdk\"\n[features]\ndefault = []\nclient = []\nrelease = []\n",
+        );
+        write(
+            project.path(),
+            "sdk/src/main/java/Sdk.java",
+            "class Sdk {}\n",
+        );
+        // The harness reaches the SDK by a *different* spelling of the same directory, and asks it
+        // for one feature; the root asks for the other.
+        write(
+            project.path(),
+            "harness/jals.toml",
+            "[dependencies]\nsdk = { path = \"../sdk\", features = [\"client\"] }\n",
+        );
+        write(
+            project.path(),
+            "harness/src/main/java/Harness.java",
+            "class Harness {}\n",
+        );
+        let root = manifest(
+            "[dependencies]\nsdk = { path = \"sdk\", features = [\"release\"] }\n\
+             [dev-dependencies]\nharness = { path = \"harness\" }\n",
+        );
+        let mut storage = storage(project.path(), &exec).await;
+        let graph = NativeProjectGraph::discover(
+            &root,
+            DependencyScope::Test,
+            project.path(),
+            &exec,
+            jals_classpath::NetworkPolicy::Online,
+        )
+        .await
+        .unwrap()
+        .preprocess(storage.artifacts_mut(), inert!())
+        .await
+        .unwrap();
+        // Three edges — root→sdk, root→harness, harness→sdk — over *two* nodes: the root project
+        // is no node of its own, and `sdk` and `../sdk` resolved to one identity.
+        assert_eq!(graph.edges.len(), 3);
+        assert_eq!(graph.nodes.len(), 2);
+        let sdk = graph
+            .nodes
+            .iter()
+            .find(|node| node.location.contains("sdk"))
+            .expect("the sdk node");
+        let mut selected: Vec<&str> = graph
+            .features
+            .get(&sdk.id)
+            .expect("the sdk resolved a selection")
+            .iter()
+            .map(String::as_str)
+            .collect();
+        selected.sort_unstable();
+        assert_eq!(selected, ["client", "release"]);
+    })
+    .unwrap();
+}
+
 #[test]
 fn binary_diamond_emits_one_first_edge_spec_and_ors_recursive() {
     jals_exec::tokio_rt::run(|exec| async move {
@@ -471,6 +677,7 @@ fn binary_diamond_emits_one_first_edge_spec_and_ors_recursive() {
         let mut root_storage = storage(project.path(), &exec).await;
         let graph = NativeProjectGraph::discover(
             &root,
+            DependencyScope::Build,
             project.path(),
             &exec,
             jals_classpath::NetworkPolicy::Online,
@@ -520,6 +727,7 @@ off = { jar = "lib/off.jar", optional = true }
         let mut cache = MemoryStorage::memory(CodeTree::default());
         let graph = NativeProjectGraph::discover(
             &root,
+            DependencyScope::Build,
             project.path(),
             &exec,
             jals_classpath::NetworkPolicy::Online,
@@ -578,6 +786,7 @@ fn mixed_local_and_remote_binary_specs_keep_first_edge_order() {
         let mut cache = MemoryStorage::memory(CodeTree::default());
         let graph = NativeProjectGraph::discover(
             &root,
+            DependencyScope::Build,
             project.path(),
             &exec,
             jals_classpath::NetworkPolicy::Online,
@@ -642,6 +851,7 @@ fn native_compile_classpath_keeps_mixed_local_and_remote_order() {
         let mut root_storage = storage(project.path(), &exec).await;
         let graph = NativeProjectGraph::discover(
             &root,
+            DependencyScope::Build,
             project.path(),
             &exec,
             jals_classpath::NetworkPolicy::Online,
@@ -732,7 +942,13 @@ fn every_node_kind_preprocesses_and_scripts_export_only_sources_and_classpath() 
              plain = { path = \"plain\" }\nscripted = { path = \"scripted\" }\n",
         );
         let mut root_storage = storage(project.path(), &exec).await;
-        let graph = NativeProjectGraph::discover(&root, project.path(), &exec, jals_classpath::NetworkPolicy::Online)
+        let graph = NativeProjectGraph::discover(
+            &root,
+            DependencyScope::Build,
+            project.path(),
+            &exec,
+            jals_classpath::NetworkPolicy::Online,
+        )
             .await
             .unwrap();
         assert_eq!(
@@ -797,7 +1013,13 @@ fn node_tokens_isolate_identical_script_paths_and_outputs() {
             "[dependencies]\none = { path = \"one\" }\ntwo = { path = \"two\" }\n",
         );
         let mut root_storage = storage(project.path(), &exec).await;
-        let graph = NativeProjectGraph::discover(&root, project.path(), &exec, jals_classpath::NetworkPolicy::Online)
+        let graph = NativeProjectGraph::discover(
+            &root,
+            DependencyScope::Build,
+            project.path(),
+            &exec,
+            jals_classpath::NetworkPolicy::Online,
+        )
             .await
             .unwrap()
             .preprocess(root_storage.artifacts_mut(), inert!())
@@ -871,6 +1093,7 @@ fn git_identity_uses_head_not_checkout_path_and_local_children_stay_confined() {
 
         let first = NativeProjectGraph::discover(
             &root,
+            DependencyScope::Build,
             project.path(),
             &exec,
             jals_classpath::NetworkPolicy::Online,
@@ -879,6 +1102,7 @@ fn git_identity_uses_head_not_checkout_path_and_local_children_stay_confined() {
         .unwrap();
         let second = NativeProjectGraph::discover(
             &root,
+            DependencyScope::Build,
             project.path(),
             &exec,
             jals_classpath::NetworkPolicy::Online,
@@ -943,6 +1167,7 @@ fn git_identity_uses_head_not_checkout_path_and_local_children_stay_confined() {
         );
         let graph = NativeProjectGraph::discover(
             &root,
+            DependencyScope::Build,
             project.path(),
             &exec,
             jals_classpath::NetworkPolicy::Online,
@@ -970,6 +1195,7 @@ fn native_projection_returns_watch_paths_and_applies_mode_downstream() {
         let mut root_storage = storage(project.path(), &exec).await;
         let graph = NativeProjectGraph::discover(
             &root,
+            DependencyScope::Build,
             project.path(),
             &exec,
             jals_classpath::NetworkPolicy::Online,
@@ -1060,6 +1286,7 @@ fn resolve_native_runs_the_whole_graph_phase_in_one_call() {
                 project.path(),
                 &mut root_storage,
                 inert!(),
+                DependencyScope::Build,
                 ProjectInputOptions::Editor,
             )
             .await
@@ -1118,6 +1345,7 @@ fn dependency_snapshots_exclude_git_and_jals_cache_inputs() {
         let mut cache = MemoryStorage::memory(CodeTree::default());
         let graph = NativeProjectGraph::discover(
             &root,
+            DependencyScope::Build,
             project.path(),
             &exec,
             jals_classpath::NetworkPolicy::Online,
@@ -1163,6 +1391,7 @@ fn snapshot_diagnostics_warn_but_unreadable_manifest_is_hard() {
         let warning_root = manifest("[dependencies]\nwarn = { path = \"warn\" }\n");
         let graph = NativeProjectGraph::discover(
             &warning_root,
+            DependencyScope::Build,
             project.path(),
             &exec,
             jals_classpath::NetworkPolicy::Online,
@@ -1211,6 +1440,7 @@ fn snapshot_diagnostics_warn_but_unreadable_manifest_is_hard() {
         assert!(matches!(
             NativeProjectGraph::discover(
                 &hard_root,
+                DependencyScope::Build,
                 project.path(),
                 &exec,
                 jals_classpath::NetworkPolicy::Online
@@ -1242,7 +1472,7 @@ fn memory_and_native_resolve_sibling_inputs_relative_to_the_selected_project() {
             .unwrap(),
         );
         let mut memory_cache = MemoryStorage::memory(CodeTree::default());
-        let memory = MemoryProjectGraph::discover(&root, &memory_storage.view())
+        let memory = MemoryProjectGraph::discover(&root, DependencyScope::Build, &memory_storage.view())
             .await
             .unwrap()
             .preprocess(memory_cache.artifacts_mut(), inert!())
@@ -1256,7 +1486,13 @@ fn memory_and_native_resolve_sibling_inputs_relative_to_the_selected_project() {
             write(project.path(), path, bytes);
         }
         let mut native_cache = storage(project.path(), &exec).await;
-        let native = NativeProjectGraph::discover(&root, project.path(), &exec, jals_classpath::NetworkPolicy::Online)
+        let native = NativeProjectGraph::discover(
+            &root,
+            DependencyScope::Build,
+            project.path(),
+            &exec,
+            jals_classpath::NetworkPolicy::Online,
+        )
             .await
             .unwrap()
             .preprocess(native_cache.artifacts_mut(), inert!())
@@ -1337,7 +1573,7 @@ async fn local_assembly(
     storage: &MemoryStorage,
     cache: &mut MemoryStorage,
 ) -> crate::assemble::ProjectGraphAssembly {
-    MemoryProjectGraph::discover(root, &storage.view())
+    MemoryProjectGraph::discover(root, DependencyScope::Build, &storage.view())
         .await
         .unwrap()
         .preprocess(cache.artifacts_mut(), inert!())
@@ -1366,7 +1602,7 @@ async fn publication_diagnoses_in(
     storage: &MemoryStorage,
     cache: &mut MemoryStorage,
 ) -> Vec<crate::graph::PublicationDiagnosis> {
-    let graph = MemoryProjectGraph::discover(root, &storage.view())
+    let graph = MemoryProjectGraph::discover(root, DependencyScope::Build, &storage.view())
         .await
         .unwrap()
         .preprocess(cache.artifacts_mut(), inert!())
@@ -1491,23 +1727,24 @@ fn a_dependency_build_task_puts_its_jar_on_the_consumer_classpath() {
         let mut cache = MemoryStorage::memory(CodeTree::default());
         let fetcher = CountingFetcher::new(&[("https://example.invalid/game.jar", &game)]);
 
-        let assembly = MemoryProjectGraph::discover(&root, &view_storage.view())
-            .await
-            .unwrap()
-            .preprocess(
-                cache.artifacts_mut(),
-                GraphPreprocess {
-                    exec: &Exec::inline(),
-                    fetcher: &fetcher,
-                    environment: &BuildScriptEnvironment::new(),
-                    root_features: &ResolvedBuildFeatures::default(),
-                    limits: &BuildScriptLimits::default(),
-                },
-            )
-            .await
-            .unwrap()
-            .assemble(cache.artifacts_mut())
-            .await;
+        let assembly =
+            MemoryProjectGraph::discover(&root, DependencyScope::Build, &view_storage.view())
+                .await
+                .unwrap()
+                .preprocess(
+                    cache.artifacts_mut(),
+                    GraphPreprocess {
+                        exec: &Exec::inline(),
+                        fetcher: &fetcher,
+                        environment: &BuildScriptEnvironment::new(),
+                        root_features: &ResolvedBuildFeatures::default(),
+                        limits: &BuildScriptLimits::default(),
+                    },
+                )
+                .await
+                .unwrap()
+                .assemble(cache.artifacts_mut())
+                .await;
 
         assert!(assembly.errors.is_empty(), "{:?}", assembly.errors);
         assert_eq!(fetcher.calls(), 1);
@@ -1550,7 +1787,7 @@ fn a_dependency_publication_becomes_navigation_source_and_never_touches_the_snap
         let mut cache = MemoryStorage::memory(CodeTree::default());
         let fetcher = CountingFetcher::new(&[("https://example.invalid/sources.jar", &sources)]);
 
-        let assembly = MemoryProjectGraph::discover(&root, &before)
+        let assembly = MemoryProjectGraph::discover(&root, DependencyScope::Build, &before)
             .await
             .unwrap()
             .preprocess(
@@ -1621,21 +1858,22 @@ fn a_dependency_publication_outside_a_source_root_is_rejected() {
         let mut cache = MemoryStorage::memory(CodeTree::default());
         let fetcher = CountingFetcher::new(&[("https://example.invalid/sources.jar", &sources)]);
 
-        let error = MemoryProjectGraph::discover(&root, &view_storage.view())
-            .await
-            .unwrap()
-            .preprocess(
-                cache.artifacts_mut(),
-                GraphPreprocess {
-                    exec: &Exec::inline(),
-                    fetcher: &fetcher,
-                    environment: &BuildScriptEnvironment::new(),
-                    root_features: &ResolvedBuildFeatures::default(),
-                    limits: &BuildScriptLimits::default(),
-                },
-            )
-            .await
-            .unwrap_err();
+        let error =
+            MemoryProjectGraph::discover(&root, DependencyScope::Build, &view_storage.view())
+                .await
+                .unwrap()
+                .preprocess(
+                    cache.artifacts_mut(),
+                    GraphPreprocess {
+                        exec: &Exec::inline(),
+                        fetcher: &fetcher,
+                        environment: &BuildScriptEnvironment::new(),
+                        root_features: &ResolvedBuildFeatures::default(),
+                        limits: &BuildScriptLimits::default(),
+                    },
+                )
+                .await
+                .unwrap_err();
 
         let GraphError::BuildScript {
             location, message, ..
@@ -1662,21 +1900,22 @@ fn a_dependency_build_script_error_reaches_the_consumer_with_its_message() {
         );
         let mut cache = MemoryStorage::memory(CodeTree::default());
 
-        let error = MemoryProjectGraph::discover(&root, &view_storage.view())
-            .await
-            .unwrap()
-            .preprocess(
-                cache.artifacts_mut(),
-                GraphPreprocess {
-                    exec: &Exec::inline(),
-                    fetcher: &UnreachableFetcher,
-                    environment: &BuildScriptEnvironment::new(),
-                    root_features: &ResolvedBuildFeatures::default(),
-                    limits: &BuildScriptLimits::default(),
-                },
-            )
-            .await
-            .unwrap_err();
+        let error =
+            MemoryProjectGraph::discover(&root, DependencyScope::Build, &view_storage.view())
+                .await
+                .unwrap()
+                .preprocess(
+                    cache.artifacts_mut(),
+                    GraphPreprocess {
+                        exec: &Exec::inline(),
+                        fetcher: &UnreachableFetcher,
+                        environment: &BuildScriptEnvironment::new(),
+                        root_features: &ResolvedBuildFeatures::default(),
+                        limits: &BuildScriptLimits::default(),
+                    },
+                )
+                .await
+                .unwrap_err();
 
         let GraphError::BuildScript {
             location, message, ..
@@ -1711,7 +1950,7 @@ fn a_dependency_task_execution_is_memoized_across_preprocessing() {
         let (root, with_jar) = task_dependency(script, &[("dep/vendor/lib.jar", &library)]);
         let mut cache = MemoryStorage::memory(CodeTree::default());
 
-        let first = MemoryProjectGraph::discover(&root, &with_jar.view())
+        let first = MemoryProjectGraph::discover(&root, DependencyScope::Build, &with_jar.view())
             .await
             .unwrap()
             .preprocess(cache.artifacts_mut(), inert!())
@@ -1723,14 +1962,15 @@ fn a_dependency_task_execution_is_memoized_across_preprocessing() {
         assert_eq!(first.compile_classpath.len(), 1);
 
         let (root, without_jar) = task_dependency(script, &[]);
-        let second = MemoryProjectGraph::discover(&root, &without_jar.view())
-            .await
-            .unwrap()
-            .preprocess(cache.artifacts_mut(), inert!())
-            .await
-            .unwrap()
-            .assemble(cache.artifacts_mut())
-            .await;
+        let second =
+            MemoryProjectGraph::discover(&root, DependencyScope::Build, &without_jar.view())
+                .await
+                .unwrap()
+                .preprocess(cache.artifacts_mut(), inert!())
+                .await
+                .unwrap()
+                .assemble(cache.artifacts_mut())
+                .await;
         assert!(second.errors.is_empty(), "{:?}", second.errors);
         assert_eq!(second.compile_classpath, first.compile_classpath);
     });
@@ -1766,14 +2006,15 @@ fn a_memoized_dependency_execution_is_keyed_on_its_build_features() {
             "dep = { path = \"dep\", features = [\"wide\"] }",
         ] {
             let root = manifest(&format!("[dependencies]\n{entry}\n"));
-            let assembly = MemoryProjectGraph::discover(&root, &view_storage.view())
-                .await
-                .unwrap()
-                .preprocess(cache.artifacts_mut(), inert!())
-                .await
-                .unwrap()
-                .assemble(cache.artifacts_mut())
-                .await;
+            let assembly =
+                MemoryProjectGraph::discover(&root, DependencyScope::Build, &view_storage.view())
+                    .await
+                    .unwrap()
+                    .preprocess(cache.artifacts_mut(), inert!())
+                    .await
+                    .unwrap()
+                    .assemble(cache.artifacts_mut())
+                    .await;
             assert!(assembly.errors.is_empty(), "{:?}", assembly.errors);
             let [CompileClasspathEntry::File(file)] = assembly.compile_classpath.as_slice() else {
                 panic!("expected exactly the task JAR");
@@ -1808,23 +2049,24 @@ fn a_dependency_publication_reaches_the_editor_but_not_the_compiler() {
         let mut cache = MemoryStorage::memory(CodeTree::default());
         let fetcher = CountingFetcher::new(&[("https://example.invalid/sources.jar", &sources)]);
 
-        let assembly = MemoryProjectGraph::discover(&root, &view_storage.view())
-            .await
-            .unwrap()
-            .preprocess(
-                cache.artifacts_mut(),
-                GraphPreprocess {
-                    exec: &Exec::inline(),
-                    fetcher: &fetcher,
-                    environment: &BuildScriptEnvironment::new(),
-                    root_features: &ResolvedBuildFeatures::default(),
-                    limits: &BuildScriptLimits::default(),
-                },
-            )
-            .await
-            .unwrap()
-            .assemble(cache.artifacts_mut())
-            .await;
+        let assembly =
+            MemoryProjectGraph::discover(&root, DependencyScope::Build, &view_storage.view())
+                .await
+                .unwrap()
+                .preprocess(
+                    cache.artifacts_mut(),
+                    GraphPreprocess {
+                        exec: &Exec::inline(),
+                        fetcher: &fetcher,
+                        environment: &BuildScriptEnvironment::new(),
+                        root_features: &ResolvedBuildFeatures::default(),
+                        limits: &BuildScriptLimits::default(),
+                    },
+                )
+                .await
+                .unwrap()
+                .assemble(cache.artifacts_mut())
+                .await;
         assert!(assembly.errors.is_empty(), "{:?}", assembly.errors);
 
         let editor = jals_classpath::ProjectInputs::assemble(
@@ -2051,12 +2293,13 @@ fn a_compile_intent_publication_outside_a_source_root_is_rejected() {
         );
         let mut cache = MemoryStorage::memory(CodeTree::default());
 
-        let error = MemoryProjectGraph::discover(&root, &view_storage.view())
-            .await
-            .unwrap()
-            .preprocess(cache.artifacts_mut(), inert!())
-            .await
-            .unwrap_err();
+        let error =
+            MemoryProjectGraph::discover(&root, DependencyScope::Build, &view_storage.view())
+                .await
+                .unwrap()
+                .preprocess(cache.artifacts_mut(), inert!())
+                .await
+                .unwrap_err();
 
         let GraphError::BuildScript {
             location, message, ..
@@ -2411,7 +2654,7 @@ fn a_publication_at_a_source_root_is_rejected_before_the_check() {
         );
         let mut cache = MemoryStorage::memory(CodeTree::default());
 
-        let error = MemoryProjectGraph::discover(&root, &storage.view())
+        let error = MemoryProjectGraph::discover(&root, DependencyScope::Build, &storage.view())
             .await
             .unwrap()
             .preprocess(cache.artifacts_mut(), inert!())
@@ -2538,14 +2781,15 @@ fn two_entries_reaching_one_jar_must_agree_about_remap() {
         // classpath under two names, which is exactly what the dedup prevents.
         let (root, view_storage) = shared_jar_project("remap = \"a\"", "remap = \"b\"");
         let mut cache = MemoryStorage::memory(CodeTree::default());
-        let assembly = MemoryProjectGraph::discover(&root, &view_storage.view())
-            .await
-            .unwrap()
-            .preprocess(cache.artifacts_mut(), inert!())
-            .await
-            .unwrap()
-            .assemble(cache.artifacts_mut())
-            .await;
+        let assembly =
+            MemoryProjectGraph::discover(&root, DependencyScope::Build, &view_storage.view())
+                .await
+                .unwrap()
+                .preprocess(cache.artifacts_mut(), inert!())
+                .await
+                .unwrap()
+                .assemble(cache.artifacts_mut())
+                .await;
 
         assert_eq!(
             assembly.plan.dependencies.len(),
@@ -2569,14 +2813,15 @@ fn agreeing_entries_carry_one_remap_and_report_nothing() {
     jals_exec::block_on_inline(async {
         let (root, view_storage) = shared_jar_project("remap = \"a\"", "remap = \"a\"");
         let mut cache = MemoryStorage::memory(CodeTree::default());
-        let assembly = MemoryProjectGraph::discover(&root, &view_storage.view())
-            .await
-            .unwrap()
-            .preprocess(cache.artifacts_mut(), inert!())
-            .await
-            .unwrap()
-            .assemble(cache.artifacts_mut())
-            .await;
+        let assembly =
+            MemoryProjectGraph::discover(&root, DependencyScope::Build, &view_storage.view())
+                .await
+                .unwrap()
+                .preprocess(cache.artifacts_mut(), inert!())
+                .await
+                .unwrap()
+                .assemble(cache.artifacts_mut())
+                .await;
 
         let [dependency] = &assembly.plan.dependencies[..] else {
             panic!("one node: {:?}", assembly.plan.dependencies);
@@ -2619,14 +2864,15 @@ fn an_inactive_required_feature_leaves_the_jar_unremapped() {
             .expect("tree is valid"),
         );
         let mut cache = MemoryStorage::memory(CodeTree::default());
-        let assembly = MemoryProjectGraph::discover(&root, &view_storage.view())
-            .await
-            .unwrap()
-            .preprocess(cache.artifacts_mut(), inert!())
-            .await
-            .unwrap()
-            .assemble(cache.artifacts_mut())
-            .await;
+        let assembly =
+            MemoryProjectGraph::discover(&root, DependencyScope::Build, &view_storage.view())
+                .await
+                .unwrap()
+                .preprocess(cache.artifacts_mut(), inert!())
+                .await
+                .unwrap()
+                .assemble(cache.artifacts_mut())
+                .await;
 
         let [dependency] = &assembly.plan.dependencies[..] else {
             panic!("one node: {:?}", assembly.plan.dependencies);
@@ -2682,21 +2928,22 @@ fn alternatives_select_the_one_the_root_selection_activates() {
         for selection in [&["1.20.1"][..], &["1.19.4"][..]] {
             let (root, view_storage, features) = alternatives_project(selection);
             let mut cache = MemoryStorage::memory(CodeTree::default());
-            let assembly = MemoryProjectGraph::discover(&root, &view_storage.view())
-                .await
-                .unwrap()
-                .preprocess(
-                    cache.artifacts_mut(),
-                    inert!(
-                        &BuildScriptEnvironment::new(),
-                        &features,
-                        &BuildScriptLimits::default()
-                    ),
-                )
-                .await
-                .unwrap()
-                .assemble(cache.artifacts_mut())
-                .await;
+            let assembly =
+                MemoryProjectGraph::discover(&root, DependencyScope::Build, &view_storage.view())
+                    .await
+                    .unwrap()
+                    .preprocess(
+                        cache.artifacts_mut(),
+                        inert!(
+                            &BuildScriptEnvironment::new(),
+                            &features,
+                            &BuildScriptLimits::default()
+                        ),
+                    )
+                    .await
+                    .unwrap()
+                    .assemble(cache.artifacts_mut())
+                    .await;
 
             let [dependency] = &assembly.plan.dependencies[..] else {
                 panic!("one node: {:?}", assembly.plan.dependencies);
@@ -2715,21 +2962,22 @@ fn an_ambiguous_edge_remap_warns_and_leaves_the_jar_unremapped() {
         // sets of names is the disagreement the dedup above refuses for the same reason.
         let (root, view_storage, features) = alternatives_project(&["1.20.1", "1.19.4"]);
         let mut cache = MemoryStorage::memory(CodeTree::default());
-        let assembly = MemoryProjectGraph::discover(&root, &view_storage.view())
-            .await
-            .unwrap()
-            .preprocess(
-                cache.artifacts_mut(),
-                inert!(
-                    &BuildScriptEnvironment::new(),
-                    &features,
-                    &BuildScriptLimits::default()
-                ),
-            )
-            .await
-            .unwrap()
-            .assemble(cache.artifacts_mut())
-            .await;
+        let assembly =
+            MemoryProjectGraph::discover(&root, DependencyScope::Build, &view_storage.view())
+                .await
+                .unwrap()
+                .preprocess(
+                    cache.artifacts_mut(),
+                    inert!(
+                        &BuildScriptEnvironment::new(),
+                        &features,
+                        &BuildScriptLimits::default()
+                    ),
+                )
+                .await
+                .unwrap()
+                .assemble(cache.artifacts_mut())
+                .await;
 
         let [dependency] = &assembly.plan.dependencies[..] else {
             panic!("one node: {:?}", assembly.plan.dependencies);
@@ -2798,6 +3046,7 @@ fn an_offline_graph_does_not_fetch_a_remote_jar_dependency() {
                     root_features: &ResolvedBuildFeatures::default(),
                     limits: &BuildScriptLimits::default(),
                 },
+                DependencyScope::Build,
                 ProjectInputOptions::Compile,
             )
             .await

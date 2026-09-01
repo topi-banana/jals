@@ -486,14 +486,18 @@ jobs:
     #   `name` is what separates them, and `minecraft_mod` uses that below.
     # - `run`: whether `[run] main-class` is something the example can actually run. It is a promise
     #   the manifest makes, and running it is the only thing that checks it.
+    # - `headless_gl` / `test_flags`: set only by the cell that boots a Minecraft client. The first
+    #   installs an X server and a software rasterizer and runs the test step under them; the
+    #   second is how that cell asks for one client at a time and a deadline, because `-j` defaults
+    #   to the runner's parallelism and `--timeout` defaults to none.
     # - `publications`: set only for the SDK example, whose `jals build` is documented to end in
     #   `javac` errors (`examples/minecraft/README.md` §Compile-safety — the published skeleton tree
     #   is reference sources, not a compiling project). There the pipeline is what is gated: the
     #   publication is the *last* thing the script does, so three non-empty roots is exactly the
     #   statement "fetch → nested extract → remap → decompile → publish ran".
     #
-    # Nothing here is cached between runs on purpose. The two Minecraft cells re-fetch and re-remap
-    # a ~50 MiB game jar every time, which is the cost of the gate meaning what it says: build-task
+    # Nothing here is cached between runs on purpose. The Minecraft cells re-fetch and re-remap a
+    # ~50 MiB game jar every time, which is the cost of the gate meaning what it says: build-task
     # results are memoized under a plan digest that no jals version participates in, so a restored
     # `target/jals` would let a change to this workspace reuse artifacts the change was supposed to
     # regenerate — a green cell that ran nothing.
@@ -529,6 +533,15 @@ jobs:
             dir: examples/minecraft
             features: --features 1.20.1
             publications: net/minecraft org/spongepowered com/llamalad7
+          # The client harness the mod's `[dev-dependencies]` names. It is reached through that edge
+          # too, but it has a tracked `.java` of its own, and the fmt/lint step only ever sees the
+          # files under the cell's own `dir` — so without a cell of its own the one file nobody
+          # would be checking is the 500-line one. `jals build` here is the other half: it is what
+          # says the harness still compiles against the release it claims, independently of whether
+          # any consumer selected it.
+          - name: minecraft_client_test
+            dir: examples/minecraft_client_test
+            features: --features 1.21.11
           # One cell per side of the `#[cfg(feature = "since-1.21.6")]` branch in the mod's own
           # source: 1.20.1 compiles the `getName()` spelling and 1.21.11 the `name()` one, and a
           # matrix that built only one of them would let the other rot until someone selected it by
@@ -542,6 +555,18 @@ jobs:
           - name: minecraft_mod (1.21.11)
             dir: examples/minecraft_mod
             features: --features 1.21.11
+          # The third `minecraft_mod` cell is the one that *runs* Minecraft rather than compiling
+          # against it: `client-test` puts a client's ~60 runtime libraries on the classpath and
+          # `src/test/java` boots one headless, from inside a `#[test]` method, and asserts against
+          # the client and its integrated server. One release, because the library set is pinned per
+          # release; `-j 1`, because each test boots its own client and two at once want two GL
+          # contexts.
+          - name: minecraft_mod (client)
+            dir: examples/minecraft_mod
+            features: --features 1.21.11,client-test
+            test: true
+            headless_gl: true
+            test_flags: -j 1 --timeout 600
     steps:
       - parallel:
           - uses: actions/checkout@v7
@@ -571,6 +596,14 @@ jobs:
         id: vendor-jars
         background: true
         run: examples/scripts/gen-vendor-jars.sh
+      # `xvfb` supplies the display GLFW opens a window on, and `libgl1-mesa-dri` supplies llvmpipe,
+      # the software rasterizer `LIBGL_ALWAYS_SOFTWARE` selects below. Neither is on the runner
+      # image, and only the cell that boots a client has any use for them.
+      - name: Install a headless OpenGL stack
+        if: ${{ matrix.example.headless_gl }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb libgl1-mesa-dri libglx-mesa0
       # Release, not debug: the Minecraft cells decompress, remap and decompile a whole game jar,
       # and an unoptimized build turns that from a step into the job.
       - name: Build the jals binary
@@ -607,13 +640,35 @@ jobs:
       # `jals test` compiles a second time (the test lowering keeps the `#[test]` methods the
       # build removes) and then runs each test in its own JVM. A non-zero status here is a failing
       # test, which is exactly what the cell is for.
+      #
+      # The two `LIBGL_*` variables are set for every cell and read by none but the client one:
+      # they only mean anything to a Mesa that a GL context is being asked of.
       - name: Test
         if: ${{ matrix.example.test }}
         working-directory: ${{ matrix.example.dir }}
-        run: jals test ${{ matrix.example.features }}
-      # After the build, not before it: an example whose dependency fetches (`minecraft_mod`) can
-      # only be analysed once that fetch has landed in the verified cache, because analysis is
-      # always offline.
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+          GALLIUM_DRIVER: llvmpipe
+        run: ${{ matrix.example.headless_gl && 'xvfb-run -a' || '' }} jals test ${{ matrix.example.features }} ${{ matrix.example.test_flags }}
+      # A client that failed to boot says nothing through an exit status. Its log and any crash
+      # report are the only account of what happened, and both are under the run directory the
+      # harness makes for the JVM that owns them.
+      - name: Keep what a failed client run left behind
+        if: ${{ failure() && matrix.example.headless_gl }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: minecraft-mod-client-run
+          path: |
+            examples/minecraft_mod/target/jals/build/mc-client/**/logs/**
+            examples/minecraft_mod/target/jals/build/mc-client/**/crash-reports/**
+            examples/minecraft_mod/target/jals/build/test-run/**
+          if-no-files-found: ignore
+      # After the build *and* the test, not before them: an example whose dependency fetches
+      # (`minecraft_mod`) can only be analysed once that fetch has landed in the verified cache,
+      # because analysis is always offline. For the client cell that means after the test step
+      # specifically — the ~60 client runtime jars come from a `[dev-dependencies]` entry, which
+      # `jals build` does not resolve and `jals test` does. Reordering these two steps would leave
+      # that cell's lint on a root-only fallback, which reports nothing and fails nothing.
       #
       # Tracked files only. Everything a build script publishes into a source root is untracked by
       # construction (the examples' `.gitignore`s reserve those roots), so `git ls-files` is what
@@ -645,7 +700,7 @@ jobs:
     # standard library, so this reads the same file `jals` does rather than a grep of it.
     #
     # The binary is built once and handed down as an artifact. The `examples` job above builds its
-    # own per cell, which is right at seven; at forty-three it would be forty-three cargo builds to
+    # own per cell, which is right at ten; at forty-three it would be forty-three cargo builds to
     # produce one binary that is bit-identical in every one of them.
     name: mod jar setup
     runs-on: ubuntu-latest

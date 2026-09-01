@@ -46,6 +46,23 @@ server = ["minecraft/server"]
 client = ["minecraft/client"]
 mixin = ["minecraft/mixin"]
 mixinextras = ["minecraft/mixinextras"]
+
+# The client end-to-end tests under `src/test/java`. One name on a command line is the whole
+# selection: `jals test --features 1.21.11,client-test`.
+#
+# A feature of its own rather than reusing `client`, because the two ask for different things.
+# `--features client` says "compile against the client jar"; this one additionally says "download
+# the ~60 jars a client needs at runtime and boot one". Everything under `src/test/java` is
+# `#[cfg]`-gated on it, so a selection that does not name it compiles and lints as if the tests were
+# not there — which is what keeps the other CI cells unchanged.
+#
+# `mc-client-test/1.21.11` is the release reaching the harness, and it is the **only** place this
+# project restates the pin — the canonical one is the `[features]` key in
+# `../minecraft_client_test/jals.toml`. It is written on `client-test` rather than on each of the 43
+# version features because the harness supports exactly one release: a selection naming a different
+# one routes two versions into the SDK, which rejects them, and `build.rhai`'s guard says so first
+# in a sentence a reader can act on.
+client-test = ["client", "mc-client-test/1.21.11"]
 "since-1.14.4" = []
 "since-1.17" = ["since-1.14.4"]
 "since-1.18" = ["since-1.17"]
@@ -95,12 +112,32 @@ mixinextras = ["minecraft/mixinextras"]
 "1.15" = ["since-1.14.4", "minecraft/1.15"]
 "1.14.4" = ["since-1.14.4", "minecraft/1.14.4"]
 
+# `jals test` compiles this tree *in addition to* `[build] source-dirs` and writes the result
+# somewhere else, so `jals build` still produces a jar with nothing but the mixin in it. What lives
+# here is the tests themselves; the harness they drive is a project of its own, declared under
+# `[dev-dependencies]` below.
+[test]
+source-dirs = ["src/test/java"]
+classes-dir = "target/test-classes"
+
 # The SDK. Its build script puts the resolved game jar, `mixin-0.8.7.jar` and
 # `mixinextras-common-0.5.4.jar` on this project's compile classpath, and publishes the matching
 # sources as navigation trees an editor can open. Compiling against the jars and reading the trees
 # is the whole arrangement; a published tree is never a compile input.
 [dependencies]
 minecraft = { path = "../minecraft" }
+
+# The client harness, and the reason it is *here* rather than in `[dependencies]`: a source
+# dependency's `.java` is compiled into whoever consumes it, so a harness declared above would be
+# compiled by `jals build` and packaged into the mod jar. `[dev-dependencies]` is resolved by
+# `jals test` and by the analysis hosts, and by nothing that produces output.
+#
+# Nothing about it is mod-specific — `GameClient` names no type in `com.example.hellomod` — which is
+# the other half of the point: a second mod adds the same one line and gets the same harness, and
+# because a `path` dependency's node identity is its canonicalized directory, its `minecraft` edge
+# and this project's are one node with one release selection between them.
+[dev-dependencies]
+mc-client-test = { path = "../minecraft_client_test" }
 
 [build]
 # Everything `javac` needs that varies with the release, derived from the threshold chain rather

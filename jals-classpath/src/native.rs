@@ -14,7 +14,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use jals_config::{
-    Dependency, GitDependency, GitRef, Manifest, PathDependency, ResolvedBuildFeatures,
+    Dependency, DependencyScope, GitDependency, GitRef, Manifest, PathDependency,
+    ResolvedBuildFeatures,
 };
 use jals_exec::tokio_rt::on_blocking_pool;
 use jals_storage::{
@@ -187,13 +188,15 @@ impl NativeProjectPlan {
     /// The parameter sits where the portable sibling `MemoryProjectPlan::assemble` puts it.
     pub async fn assemble_native<F: Fetcher>(
         manifest: &Manifest,
+        scope: DependencyScope,
         features: &ResolvedBuildFeatures,
         project_root: &Path,
         storage: &mut NativeStorage,
         fetcher: &F,
         options: ProjectInputOptions,
     ) -> (ProjectInputs, Vec<DirKey>) {
-        let mut native = Self::from_manifest(manifest, features, project_root, &storage.view());
+        let mut native =
+            Self::from_manifest(manifest, scope, features, project_root, &storage.view());
         native.materialize_external_sources(storage, options).await;
         native
             .materialize_external_classpath(storage, options)
@@ -208,8 +211,16 @@ impl NativeProjectPlan {
         (inputs, native.source_roots)
     }
 
+    /// Lower the source roots, the `[build] classpath`, and the dependency entries `scope`
+    /// declares into the portable plan.
+    ///
+    /// `scope` is the host's, never inferred: the two callers ask different questions. The
+    /// projection path hands over a manifest whose dependency tables `ProjectScript::root_only`
+    /// already emptied — every declared entry is a graph node there — so only `jals lint`'s
+    /// graph-less fallback reaches this with entries still in place.
     pub fn from_manifest(
         manifest: &Manifest,
+        scope: DependencyScope,
         features: &ResolvedBuildFeatures,
         project_root: &Path,
         view: &ProjectView,
@@ -270,11 +281,12 @@ impl NativeProjectPlan {
 
         result.plan.add_jar_dependencies(
             manifest,
+            scope,
             features,
             |locator| Self::classify(project_root, locator),
             &mut result.warnings,
         );
-        for (raw_name, dependency) in &manifest.dependencies {
+        for (raw_name, dependency) in manifest.declared_dependencies(scope) {
             if matches!(dependency, Dependency::Jar(_)) {
                 continue;
             }
@@ -358,7 +370,11 @@ impl NativeProjectPlan {
                 }
             }
         }
-        for dependency in manifest.dependencies.values() {
+        // `[dev-dependencies]` alongside `[dependencies]`, and unconditionally, for the same
+        // reason `[test] source-dirs` is captured above: capture is not where a command's
+        // selection applies. A snapshot scoped to the entries one subcommand resolves would make
+        // the captured tree depend on which subcommand ran.
+        for (_, dependency) in manifest.declared_dependencies(DependencyScope::Test) {
             match dependency {
                 Dependency::Jar(jar) => {
                     for locator in core::iter::once(&jar.jar).chain(jar.sources.iter()) {

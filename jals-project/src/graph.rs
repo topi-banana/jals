@@ -540,6 +540,13 @@ pub(crate) struct PublicationDiagnosis {
     /// [`jals_classpath::Warning`]'s `Display` — several of its messages name no location at all,
     /// so the message alone would drop the half a user can act on.
     pub(crate) unread: Vec<jals_classpath::Warning>,
+    /// Whether the node declares `[dependencies]` this pass could not see the classes of.
+    ///
+    /// `[dependencies]` alone, deliberately: this is a *dependency node* diagnosing its own
+    /// publications, and a dependency is walked under
+    /// [`DependencyScope::Build`](jals_config::DependencyScope::Build), so its
+    /// `[dev-dependencies]` never reach a classpath a consumer's build could have covered these
+    /// roots from.
     pub(crate) dependencies_unseen: bool,
 }
 

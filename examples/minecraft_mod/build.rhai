@@ -55,3 +55,24 @@ if release <= 8 {
 // processor it merely *found* on the class path is a property of the JDK (since 23 it does not),
 // so saying it here is what keeps the build from depending on which JDK a reader has installed.
 build.add_javac_arg("-proc:none");
+
+// --- the client end-to-end tests -------------------------------------------------------------
+//
+// `client-test` selects the whole test arrangement: it implies `client` (so this project compiles
+// against the client jar) and routes `1.21.11` into the `mc-client-test` dev-dependency, whose own
+// build script puts a client's ~60 runtime libraries on the classpath. None of that is here, and
+// none of it is mod-specific — see `examples/minecraft_client_test/`.
+//
+// What stays is the one thing a dependency cannot contribute: `build.add_jvm_arg` reaches the test
+// JVM only from the *root* project's script, so every consumer of the harness writes this line.
+if build.feature("client-test") {
+    if !build.feature("1.21.11") {
+        build.error("`client-test` is wired to one release. Run it as `--features 1.21.11,client-test`; \
+                     `examples/scripts/gen-client-runtime.py <release>` rewrites the pinned library set \
+                     in `examples/minecraft_client_test/build.rhai` for another.");
+    }
+    // The client is given its own heap rather than whatever a quarter of the runner's RAM comes to,
+    // so the test behaves the same on a laptop and on a CI machine. Without it the boot dies inside
+    // a resource reload with an `OutOfMemoryError`, which reads as a harness bug and is not one.
+    build.add_jvm_arg("-Xmx2G");
+}

@@ -16,7 +16,7 @@ use alloc::vec::Vec;
 use jals_classpath::{
     Fetcher, NativeProjectPlan, NetworkPolicy, ProjectInputOptions, ProjectInputs,
 };
-use jals_config::{GitDependency, Manifest, PathDependency};
+use jals_config::{DependencyScope, GitDependency, Manifest, PathDependency};
 use jals_exec::Exec;
 use jals_storage::{
     CacheKey, Diagnostic, DirKey, FileKey, MemoryCache, Name, NativeSource, NativeStorage,
@@ -147,6 +147,7 @@ impl NativeProjectGraph {
     /// upward; every dependency probes exactly its selected root's `jals.toml`.
     pub(crate) async fn discover(
         root_manifest: &Manifest,
+        scope: DependencyScope,
         root_directory: &Path,
         exec: &Exec,
         network: NetworkPolicy,
@@ -178,7 +179,7 @@ impl NativeProjectGraph {
             network,
             watch_paths: BTreeSet::new(),
         };
-        let output = GraphWalk::run(&mut host, &declaring, root_manifest, warnings).await?;
+        let output = GraphWalk::run(&mut host, &declaring, root_manifest, scope, warnings).await?;
         Ok(ResolvedProjectGraph {
             nodes: output.nodes,
             edges: output.edges,
@@ -205,6 +206,7 @@ impl ProjectScript {
         root: &Path,
         storage: &mut NativeStorage,
         preprocess: GraphPreprocess<'_, F>,
+        scope: DependencyScope,
         options: ProjectInputOptions,
     ) -> Result<NativeProjectAssembly, GraphResolveError> {
         // `preprocess` is consumed by the phase it names, but the graph plan needs the same fetch
@@ -213,7 +215,7 @@ impl ProjectScript {
         // under `--offline`.
         let fetcher = preprocess.fetcher;
         let graph =
-            NativeProjectGraph::discover(manifest, root, preprocess.exec, fetcher.network())
+            NativeProjectGraph::discover(manifest, scope, root, preprocess.exec, fetcher.network())
                 .await
                 .map_err(GraphResolveError::unreported)?;
         let discovered = graph.warnings.clone();
@@ -226,7 +228,7 @@ impl ProjectScript {
             .await)
     }
 
-    /// The root manifest with its `[dependencies]` removed.
+    /// The root manifest with **both** dependency tables removed.
     ///
     /// Unlike the portable sibling, [`NativeProjectPlan::assemble_native`] *does* lower a
     /// `[dependencies]` jar entry — it has to, because a host path or URL is exactly what it exists
@@ -234,9 +236,15 @@ impl ProjectScript {
     /// would resolve each jar a second time and double-count it on the classpath. That makes this
     /// stripping the native path's own precondition, not a rule about root plans in general, which
     /// is why it lives here and `resolve_memory` hands its manifest over whole.
+    ///
+    /// `[dev-dependencies]` is cleared unconditionally rather than under the caller's scope: an
+    /// entry the walk did not visit contributes no node, so clearing one the plan would not have
+    /// lowered either costs nothing, and a scope threaded to here would be a second place the
+    /// selection is stated.
     fn root_only(manifest: &Manifest) -> Manifest {
         let mut root_only = manifest.clone();
         root_only.dependencies.clear();
+        root_only.dev_dependencies.clear();
         root_only
     }
 
@@ -259,8 +267,10 @@ impl ProjectScript {
         let graph_assembly = graph.assemble(storage.artifacts_mut()).await;
         let (inputs, source_roots) = NativeProjectPlan::assemble_native(
             &Self::root_only(root_manifest),
-            // `root_only` cleared `[dependencies]`, so nothing this call lowers reads a feature.
-            // The graph resolved the real selection per node before this point.
+            // `root_only` emptied both dependency tables, so the scope selects between two empty
+            // maps and the features nothing lowers here reads. The graph resolved the real
+            // selection per node before this point.
+            DependencyScope::Build,
             &jals_config::ResolvedBuildFeatures::default(),
             root_directory,
             storage,
@@ -1016,24 +1026,29 @@ mod tests {
                     .unwrap();
 
             let mut storage = MemoryStorage::memory(CodeTree::default());
-            let graph =
-                NativeProjectGraph::discover(&root, project.path(), &exec, NetworkPolicy::Offline)
-                    .await
-                    .unwrap()
-                    .preprocess(
-                        storage.artifacts_mut(),
-                        crate::graph::GraphPreprocess {
-                            exec: &exec,
-                            fetcher: &UnreachableFetcher,
-                            // A root selection the dependency must not inherit.
-                            environment: &BuildScriptEnvironment::new()
-                                .with_features(BTreeSet::from(["root-only".to_owned()])),
-                            root_features: &ResolvedBuildFeatures::default(),
-                            limits: &BuildScriptLimits::default(),
-                        },
-                    )
-                    .await
-                    .unwrap();
+            let graph = NativeProjectGraph::discover(
+                &root,
+                DependencyScope::Build,
+                project.path(),
+                &exec,
+                NetworkPolicy::Offline,
+            )
+            .await
+            .unwrap()
+            .preprocess(
+                storage.artifacts_mut(),
+                crate::graph::GraphPreprocess {
+                    exec: &exec,
+                    fetcher: &UnreachableFetcher,
+                    // A root selection the dependency must not inherit.
+                    environment: &BuildScriptEnvironment::new()
+                        .with_features(BTreeSet::from(["root-only".to_owned()])),
+                    root_features: &ResolvedBuildFeatures::default(),
+                    limits: &BuildScriptLimits::default(),
+                },
+            )
+            .await
+            .unwrap();
 
             let generated: Vec<String> = graph
                 .exports

@@ -10,7 +10,7 @@ use std::str::FromStr;
 use jals_classpath::{
     ClasspathEntry, Fetcher, NativeProjectPlan, ProjectInputOptions, ProjectInputs, SourceFile,
 };
-use jals_config::Manifest;
+use jals_config::{DependencyScope, Manifest};
 use jals_storage::{CacheNamespace, DirKey, NativeStorage};
 
 /// The build features a test project resolves with nothing selected — its own `[features] default`
@@ -70,6 +70,7 @@ classpath = ["./libs/dep.jar"]
         .unwrap();
         NativeProjectPlan::from_manifest(
             &manifest,
+            DependencyScope::Build,
             &features(&manifest),
             project.path(),
             &storage.view(),
@@ -111,6 +112,7 @@ fn in_project_path_dependency_auto_detects_conventional_source_root() {
         .unwrap();
         NativeProjectPlan::from_manifest(
             &manifest,
+            DependencyScope::Build,
             &features(&manifest),
             project.path(),
             &storage.view(),
@@ -143,6 +145,7 @@ fn sibling_path_dependency_is_scanned_and_published() {
             .unwrap();
         let mut plan = NativeProjectPlan::from_manifest(
             &manifest,
+            DependencyScope::Build,
             &features(&manifest),
             &project,
             &storage.view(),
@@ -193,6 +196,7 @@ fn missing_path_dependency_is_a_warning_not_a_panic() {
         .unwrap();
         let mut plan = NativeProjectPlan::from_manifest(
             &manifest,
+            DependencyScope::Build,
             &features(&manifest),
             project.path(),
             &storage.view(),
@@ -227,6 +231,7 @@ trailing = { path = "../sibling", dir = "src/" }
             .unwrap();
         let mut plan = NativeProjectPlan::from_manifest(
             &manifest,
+            DependencyScope::Build,
             &features(&manifest),
             &project,
             &storage.view(),
@@ -282,6 +287,7 @@ classpath = ["../sibling-classes", "{absolute_class}"]
                 .unwrap();
             NativeProjectPlan::assemble_native(
                 &manifest,
+                DependencyScope::Build,
                 &features(&manifest),
                 &project,
                 &mut storage,

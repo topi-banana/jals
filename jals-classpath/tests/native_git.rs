@@ -7,7 +7,7 @@ use std::process::Command;
 use std::str::FromStr;
 
 use jals_classpath::{Fetcher, NativeProjectPlan, ProjectInputOptions, ProjectInputs, SourceFile};
-use jals_config::Manifest;
+use jals_config::{DependencyScope, Manifest};
 use jals_storage::{CacheNamespace, NativeStorage};
 
 /// The build features a test project resolves with nothing selected — its own `[features] default`
@@ -129,6 +129,7 @@ fixture = { git = "https://example.invalid/fixture.git" }
         .unwrap();
         let mut plan = NativeProjectPlan::from_manifest(
             &manifest,
+            DependencyScope::Build,
             &features(&manifest),
             project.path(),
             &storage.view(),
@@ -181,6 +182,7 @@ fixture = {{ git = "{locator}" }}
         .unwrap();
         let mut plan = NativeProjectPlan::from_manifest(
             &manifest,
+            DependencyScope::Build,
             &features(&manifest),
             project.path(),
             &storage.view(),
@@ -220,6 +222,7 @@ fixture = {{ git = "{locator}" }}
         .unwrap();
         let mut plan = NativeProjectPlan::from_manifest(
             &manifest,
+            DependencyScope::Build,
             &features(&manifest),
             project.path(),
             &storage.view(),
@@ -298,6 +301,7 @@ fixture = {{ git = "{locator}", rev = "{rev}" }}
 
         let mut first = NativeProjectPlan::from_manifest(
             &manifest,
+            DependencyScope::Build,
             &features(&manifest),
             project.path(),
             &storage.view(),
@@ -313,6 +317,7 @@ fixture = {{ git = "{locator}", rev = "{rev}" }}
 
         let mut second = NativeProjectPlan::from_manifest(
             &manifest,
+            DependencyScope::Build,
             &features(&manifest),
             project.path(),
             &storage.view(),

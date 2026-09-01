@@ -1,0 +1,34 @@
+[package]
+name = "mc-client-test"
+version = "0.1.0"
+# `#[cfg]` is what makes this project resolvable under a selection that does not want it. A
+# consumer declares it in `[dev-dependencies]`, and a dependency is a graph node whether or not the
+# selection routes a feature to it — so under `--features 1.20.1` the release below is off, every
+# declaration in `GameClient.java` is blanked, and the file lowers to its `package` line. Without
+# the dialect feature that gate would be a syntax error instead.
+features = ["attributes"]
+
+# One release, and it is the **canonical pin**: `build.rhai`'s library set, the SDK jar this
+# compiles against, `README.md`, the CI cell and `examples/scripts/gen-client-runtime.py` all name
+# this key. Supporting a second release means a second key here, a second generated block, and a
+# second `#[cfg]` branch anywhere `GameClient` touches an API that moved — `openFlatWorld` is the
+# one call site that does.
+#
+# `default` is empty and must stay that way. A consumer reaches this project through a
+# `[dev-dependencies]` edge whose `default-features` is on, so a default release would be forwarded
+# into the SDK as a *second* version alongside the one the consumer chose, and the SDK rejects that
+# before any download. Leaving it empty is what lets one consumer select `1.21.11` and another
+# select nothing at all.
+[features]
+default = []
+"1.21.11" = ["minecraft/client", "minecraft/1.21.11"]
+
+# The same SDK a consumer depends on, and — because a `path` dependency's node identity is its
+# canonicalized directory — the *same node*. The features every edge routes to it are unioned
+# there, so `minecraft/1.21.11` written here and written by the consumer are one selection and one
+# remap, not two.
+[dependencies]
+minecraft = { path = "../minecraft" }
+
+[build]
+script = { type = "rhai", file = "build.rhai" }
