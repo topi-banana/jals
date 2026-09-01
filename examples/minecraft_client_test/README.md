@@ -114,7 +114,9 @@ Four constraints come from `jals test` rather than from Minecraft:
   client that took the JVM down on its way out would take the sentinel with it.
 - `close()` therefore abandons the game and arms a watchdog that halts the JVM once the sentinel has
   had its moment. The client leaves non-daemon workers behind, so without it the process never
-  exits.
+  exits. It halts with status `0`, which is only safe while the sentinel is what is being read — so
+  **do not run these tests with `--no-capture`**, where there is nothing captured to read and the
+  runner falls back to the exit status this forces.
 - A screen appearing is not readiness. The boot is settled when the overlay is gone *and* the title
   screen is up.
 

@@ -13,6 +13,7 @@ package com.example.mctest;
 // Java allows no annotation on an import, but the jals dialect's `#[cfg]` is not an annotation:
 // `jals-syntax` treats an import as an attribute host like any other declaration.
 #[cfg(feature = "1.21.11")] import java.io.IOException;
+#[cfg(feature = "1.21.11")] import java.io.UncheckedIOException;
 #[cfg(feature = "1.21.11")] import java.nio.file.Files;
 #[cfg(feature = "1.21.11")] import java.nio.file.Path;
 #[cfg(feature = "1.21.11")] import java.time.Duration;
@@ -57,6 +58,11 @@ package com.example.mctest;
  * #close()} arms a watchdog that halts the JVM once the sentinel has had its moment — the client
  * leaves non-daemon worker threads behind, so without it the process would simply never exit.
  *
+ * <p>That watchdog halts with status <b>0</b>, which is only safe while {@code jals test} is
+ * reading the sentinel. Under {@code --no-capture} there is no captured output to read and the
+ * runner falls back to the exit status, so a client test that <em>failed</em> would be reported as
+ * passed. Do not run this harness with {@code --no-capture}.
+ *
  * <p>Linux only. GLFW wants the main thread on macOS ({@code -XstartOnFirstThread}), and the main
  * thread belongs to the test.
  */
@@ -79,6 +85,14 @@ public final class GameClient implements AutoCloseable {
     private static final Duration STEP_DEADLINE = Duration.ofSeconds(60);
     private static final Duration WORLD_DEADLINE = Duration.ofSeconds(300);
     private static final long POLL_MILLIS = 50L;
+
+    /**
+     * How long one {@code get} inside {@link #evalOn} waits before the liveness check runs again.
+     *
+     * <p>Not a deadline of its own: the loop keeps waiting until the caller's own deadline is up.
+     * It only bounds how long a wait can go on after the game thread has died.
+     */
+    private static final long LIVENESS_POLL_NANOS = POLL_MILLIS * 1_000_000L;
 
     /**
      * How long the JVM is given to print the harness sentinel and shut down on its own before the
@@ -226,7 +240,15 @@ public final class GameClient implements AutoCloseable {
      */
     private <T> T pollOnClient(String what, GameAction<Minecraft, T> question, Duration deadline) {
         long limit = System.nanoTime() + deadline.toNanos();
-        while (System.nanoTime() < limit) {
+        while (true) {
+            // What is left, read once and checked before it is spent: between the loop's test and
+            // the call below it can go to zero, and a hop given a non-positive budget reports
+            // `evalOn`'s timeout rather than the one here — the one that names what was waited for
+            // and appends the game thread's stack.
+            long remaining = limit - System.nanoTime();
+            if (remaining <= 0) {
+                break;
+            }
             requireAlive(what);
             T answer =
                 evalOn(
@@ -234,7 +256,7 @@ public final class GameClient implements AutoCloseable {
                     this.client,
                     question,
                     "the render thread",
-                    Duration.ofNanos(limit - System.nanoTime()));
+                    Duration.ofNanos(remaining));
             if (answer != null) {
                 return answer;
             }
@@ -334,12 +356,20 @@ public final class GameClient implements AutoCloseable {
     /** Run a command as the server console and return once the server has executed it. */
     public void runCommand(String command) {
         runOnClient(client -> client.player.connection.sendCommand(command));
+        // Two tick boundaries, not one. A command travels as a packet the server drains once per
+        // tick, and `before` is read on the server thread *after* the packet was queued — so the
+        // packet is in the queue no later than during tick `before`, and the drain that runs it
+        // happens by the end of tick `before + 1`. Waiting only for `> before` would be satisfied
+        // by the boundary into `before + 1`, which the command has not necessarily crossed, and
+        // the assertion after it would read the world as it was. (Sampling before the send instead
+        // is not the fix: `before` would then be an arbitrarily stale count and the wait could be
+        // over before it began.)
         int before = evalOnServer(MinecraftServer::getTickCount);
         waitUntil(
             "the server to tick past the command",
             client -> {
                 MinecraftServer server = client.getSingleplayerServer();
-                return server != null && server.getTickCount() > before;
+                return server != null && server.getTickCount() > before + 1;
             },
             STEP_DEADLINE);
     }
@@ -354,7 +384,9 @@ public final class GameClient implements AutoCloseable {
      * game and lets the JVM wind down instead. It will not wind all the way down on its own: a
      * booted client leaves non-daemon IO workers running, so something has to call {@code halt}.
      * By then the verdict is already on disk, and {@code jals test} reads the sentinel rather than
-     * the exit status, so halting costs the run nothing.
+     * the exit status, so halting costs the run nothing — <em>except</em> under
+     * {@code --no-capture}, where there is nothing captured to read and the runner falls back to
+     * the exit status this forces to 0. See the class doc: that mode is not supported here.
      */
     @Override
     public void close() {
@@ -497,7 +529,11 @@ public final class GameClient implements AutoCloseable {
                     + "skipMultiplayerWarning:true\n"
                     + "panoramaScrollSpeed:0.0\n"
                     + "pauseOnLostFocus:false\n");
-        } catch (IOException failure) {
+        } catch (IOException | UncheckedIOException failure) {
+            // Both, because `Files.walk` reports a traversal failure — an unreadable directory a
+            // previous run left behind, a mount point — by wrapping it in the *unchecked* one,
+            // which a `catch (IOException)` does not see. Uncaught it would leave `launch()`
+            // rethrowing an exception that names neither this directory nor this harness.
             throw new GameFailure("could not write the run directory " + directory, failure);
         }
     }
@@ -563,7 +599,21 @@ public final class GameClient implements AutoCloseable {
 
     // --- plumbing ------------------------------------------------------------------------------
 
-    private static <H, T> T evalOn(
+    /**
+     * Put {@code action} on a game thread and wait out {@code deadline} for its answer.
+     *
+     * <p>The wait is a poll rather than one long {@code get}, and an instance method rather than a
+     * static one, so that {@link #requireAlive} is consulted <em>while</em> it waits. A thread that
+     * died with the action still queued would otherwise hold the caller for the whole deadline and
+     * then report the clock — a boot that crashed reading as a boot that is slow, which is the one
+     * thing {@code requireAlive} exists to prevent. The action is submitted once and never
+     * resubmitted, so a body with an effect runs at most once however long the wait takes.
+     *
+     * <p>Nanoseconds, not milliseconds: what is left of a deadline rounds to zero for the last
+     * millisecond of it, and {@code get(0, …)} times out at once — reporting a duration of
+     * {@code PT0S} instead of the wait that actually elapsed.
+     */
+    private <H, T> T evalOn(
         Executor executor, H host, GameAction<H, T> action, String where, Duration deadline) {
         CompletableFuture<T> result = new CompletableFuture<>();
         executor.execute(
@@ -574,12 +624,26 @@ public final class GameClient implements AutoCloseable {
                     result.completeExceptionally(thrown);
                 }
             });
+        String waiting = "an action on " + where;
+        long limit = System.nanoTime() + deadline.toNanos();
         try {
-            return result.get(deadline.toMillis(), TimeUnit.MILLISECONDS);
+            while (true) {
+                requireAlive(waiting);
+                long remaining = limit - System.nanoTime();
+                if (remaining <= 0) {
+                    throw new GameFailure(
+                        where + " did not run the action within " + deadline, null);
+                }
+                try {
+                    return result.get(
+                        Math.min(remaining, LIVENESS_POLL_NANOS), TimeUnit.NANOSECONDS);
+                } catch (TimeoutException _patience) {
+                    // Not an answer yet. The loop's own clock decides when to give up; this only
+                    // says the thread has not got to it in the last poll.
+                }
+            }
         } catch (ExecutionException thrown) {
             throw new GameFailure("the action threw on " + where, thrown.getCause());
-        } catch (TimeoutException thrown) {
-            throw new GameFailure(where + " did not run the action within " + deadline, thrown);
         } catch (InterruptedException thrown) {
             Thread.currentThread().interrupt();
             throw new GameFailure("interrupted waiting on " + where, thrown);

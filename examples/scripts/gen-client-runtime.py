@@ -74,6 +74,9 @@ class Runtime:
         if entry is None:
             raise SystemExit(f"{release!r} is not a release the version manifest lists")
         self.meta = self.get_json(entry["url"])
+        # Walked once. `render` and the summary both want the result, and the scan reports what it
+        # could not read — reporting it twice would read as two distinct gaps in the metadata.
+        self.libraries, self.gaps = self.scan()
 
     @staticmethod
     def get_json(url: str) -> dict:
@@ -120,27 +123,35 @@ class Runtime:
             verdict = rule["action"] == "allow"
         return verdict
 
-    def entries(self) -> list[tuple[str, str, str, int]]:
-        """`(name, url, sha1, size)` for every admitted library, in metadata order."""
+    def scan(self) -> tuple[list[tuple[str, str, str, int]], list[str]]:
+        """`(name, url, sha1, size)` for every admitted library in metadata order, and the gaps.
+
+        A gap is a library this generator admitted but could not write out. It is returned rather
+        than printed so the caller can refuse to rewrite a committed file over one: a block silently
+        missing its LWJGL natives is a boot that dies in `SharedLibraryLoader` with its cause two
+        files away.
+        """
         admitted = []
+        gaps = []
         for library in self.meta["libraries"]:
             if not self.admits_linux(library.get("rules")):
                 continue
             if not self.admits_x86_64(library["name"]):
                 continue
-            artifact = library.get("downloads", {}).get("artifact")
-            if artifact is None:
-                # Said out loud rather than skipped quietly. Before 1.19 a native lived under
-                # `downloads.classifiers[<classifier>]` with a sibling `natives` map instead of
-                # under `downloads.artifact`, and dropping those silently would write a block with
-                # no LWJGL natives in it at all — a boot that dies in `SharedLibraryLoader` with
-                # its cause two files away. Reading that shape is work this generator has not
-                # needed; saying it has not is the difference between a gap and a bug.
-                print(
-                    f"skipped {library['name']}: no `downloads.artifact`"
-                    " (pre-1.19 `classifiers` shape is not read)",
-                    file=sys.stderr,
+            downloads = library.get("downloads", {})
+            # Before 1.19 a native lived under `downloads.classifiers[<classifier>]`, named by a
+            # sibling `natives` map, *beside* an ordinary `downloads.artifact` for the plain jar.
+            # So the absent-artifact test below never fires for the entries this is about: the
+            # artifact is there and only the natives are missed. Reading that shape is work this
+            # generator has not needed; naming it is the difference between a gap and a bug.
+            if library.get("natives") or downloads.get("classifiers"):
+                gaps.append(
+                    f"{library['name']}: the pre-1.19 `downloads.classifiers` shape is not read,"
+                    " so this entry's native jars would be dropped"
                 )
+            artifact = downloads.get("artifact")
+            if artifact is None:
+                gaps.append(f"{library['name']}: no `downloads.artifact`")
                 continue
             admitted.append(
                 (
@@ -150,7 +161,7 @@ class Runtime:
                     artifact["size"],
                 )
             )
-        return admitted
+        return admitted, gaps
 
     def render(self) -> str:
         """The Rhai body between the markers."""
@@ -159,7 +170,7 @@ class Runtime:
             "    // like every other one: LWJGL extracts what it needs out of them itself, so no",
             "    // `java.library.path` and no unpacked directory are involved.",
         ]
-        for name, url, sha1, size in self.entries():
+        for name, url, sha1, size in self.libraries:
             lines.append(f"    // {name}")
             lines.append("    tasks.add_classpath(tasks.fetch_jar(")
             lines.append(f'        tasks.https_url("{url}"),')
@@ -185,8 +196,15 @@ class Main:
     def run(argv: list[str]) -> int:
         release = argv[1] if len(argv) > 1 else "1.21.11"
         runtime = Runtime(release)
+        if runtime.gaps:
+            # Before the write, not after it. The output is committed, so writing a block this
+            # generator knows to be incomplete would put the gap in the repository and leave the
+            # only account of it in a terminal nobody kept.
+            for gap in runtime.gaps:
+                print(f"cannot write {release}: {gap}", file=sys.stderr)
+            raise SystemExit(f"{SCRIPT} left untouched")
+        count = len(runtime.libraries)
         runtime.write(SCRIPT)
-        count = len(runtime.entries())
         print(f"wrote {count} libraries for {release} into {SCRIPT}")
         print(f'asset index is "{runtime.meta["assetIndex"]["id"]}" — the harness writes an empty one')
         return 0
