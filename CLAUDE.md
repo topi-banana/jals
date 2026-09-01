@@ -113,6 +113,12 @@ filesystem reads into portable interfaces.
     fixture oracle). `jar.rs` is the only public surface over that writer: `JarPackage::write`
     packages compiled classes, generating the `META-INF/MANIFEST.MF` a jar needs (first member,
     CRLF, 72-byte wrapped) and keeping `StoredZip`/`WriteMember` sealed.
+  - **A manifest attribute that describes the archive survives a merge; one that describes the
+    manifest's own side does not.** Only one `META-INF/MANIFEST.MF` can win a path conflict, and the
+    overlay's does — but `Multi-Release` says the union's `META-INF/versions/<n>/` entries are live,
+    and a union carries both sides' entries, so it is re-declared whenever *either* input declared
+    it. Signature digests are the opposite case and go from both sides. Getting this wrong is not
+    visible in a build: it is a class loaded from the wrong multi-release variant at run time.
   - Mappings parsing, hierarchy-aware jar remapping, and compile-oriented jar decompilation into
     source trees live under `archive` too. Two grammars are read into one `Mappings` index —
     Mojang/ProGuard and Fabric's tiny v2 — and a format that names more than two namespaces carries
