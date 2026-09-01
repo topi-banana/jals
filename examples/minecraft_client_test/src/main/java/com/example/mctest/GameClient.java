@@ -41,10 +41,10 @@ package com.example.mctest;
     all(
         feature = "enabled", feature = "since-1.16",
         not(
-            feature = "since-1.19")))] import net.minecraft.client.gui.screens.worldselection.WorldPreset;
+            feature = "since-1.18")))] import net.minecraft.client.gui.screens.worldselection.WorldPreset;
 #[cfg(
     all(
-        feature = "enabled", feature = "since-1.19",
+        feature = "enabled", feature = "since-1.18",
         not(feature = "since-1.19.3")))] import net.minecraft.core.Registry;
 #[cfg(
     all(
@@ -78,15 +78,33 @@ package com.example.mctest;
 #[cfg(
     all(
         feature = "enabled",
-        not(feature = "since-1.16")))] import net.minecraft.world.level.dimension.DimensionType;
+        any(
+            not(feature = "since-1.16"),
+            all(
+                feature = "since-1.18",
+                not(
+                    feature = "since-1.19")))))] import net.minecraft.world.level.dimension.DimensionType;
 #[cfg(
     all(
         feature = "enabled", feature = "since-1.21.11",
         not(feature = "since-26.1")))] import net.minecraft.world.level.gamerules.GameRules;
 #[cfg(
     all(
+        feature = "enabled", feature = "since-1.18",
+        not(feature = "since-1.19")))] import net.minecraft.world.level.levelgen.FlatLevelSource;
+#[cfg(
+    all(
+        feature = "enabled", feature = "since-1.18",
+        not(feature = "since-1.19")))] import net.minecraft.world.level.levelgen.WorldGenSettings;
+#[cfg(
+    all(
         feature = "enabled",
         feature = "since-1.19.3"))] import net.minecraft.world.level.levelgen.WorldOptions;
+#[cfg(
+    all(
+        feature = "enabled", feature = "since-1.18",
+        not(
+            feature = "since-1.19")))] import net.minecraft.world.level.levelgen.flat.FlatLevelGeneratorSettings;
 #[cfg(
     all(
         feature = "enabled", feature = "since-1.19.3",
@@ -152,6 +170,23 @@ public final class GameClient implements AutoCloseable {
     private static final long FLAT_SEED = 0L;
 
     private static final Duration BOOT_DEADLINE = Duration.ofSeconds(300);
+
+    /**
+     * How long the boot has to keep looking finished before it is believed.
+     *
+     * <p>"No overlay and the title screen showing" is a state the boot passes *through* on some
+     * releases as well as ending in. On 1.16.5 the client is observable before it installs the
+     * reload overlay at all: the singleton is assigned inside the constructor, so a driver that
+     * starts polling as soon as `Minecraft.getInstance()` answers can see a bare, quiet client,
+     * return, and have the overlay appear underneath it a moment later. Requiring the state to hold
+     * across an interval rather than at an instant is what tells the two apart, and it costs a
+     * settled boot only this much.
+     *
+     * <p>It is not a sleep. Nothing waits for it when the condition is false, and a boot that takes
+     * five minutes still takes five minutes; this only bounds how quickly a boot may be *called*
+     * finished.
+     */
+    private static final Duration BOOT_SETTLE = Duration.ofSeconds(2);
     private static final Duration STEP_DEADLINE = Duration.ofSeconds(60);
     private static final Duration WORLD_DEADLINE = Duration.ofSeconds(300);
     private static final long POLL_MILLIS = 50L;
@@ -414,15 +449,18 @@ public final class GameClient implements AutoCloseable {
      * <p>Creative, peaceful, no structures, one fixed seed: a world that generates quickly and then
      * holds still, which is what a test wants to assert against.
      *
-     * <p><b>Superflat where the release lets a caller ask for it, and the default generator
-     * otherwise.</b> 1.14.4–1.15.2 name it with a {@code LevelType} constant and 1.19 onwards with a
-     * world-preset registry key, but on 1.16–1.18.2 the flat preset is a <em>private</em> field of
-     * the client's own {@code WorldPreset} and the only public way to the same generator is to
-     * assemble it — a different {@code FlatLevelGeneratorSettings}, {@code FlatLevelSource} and
-     * {@code DimensionType.defaultDimensions} on each of 1.16–1.17.1, 1.18–1.18.1 and 1.18.2. Those
-     * nine releases get {@code WorldPreset.NORMAL} instead. Nothing a test asserts depends on the
-     * terrain — a block set at a fixed position is set whatever is around it — so what this costs is
-     * seconds of generation, and naming the method for what it always does costs nothing.
+     * <p><b>Superflat on 40 of the 43 releases, and the default generator on 1.16–1.17.1.</b>
+     * 1.14.4–1.15.2 name flat with a {@code LevelType} constant and 1.19 onwards with a world-preset
+     * registry key, but 1.16–1.18.2 keep the flat preset in a <em>private</em> field of the client's
+     * own {@code WorldPreset}: the only public route is to assemble the generator, and its pieces
+     * are spelled differently on each of 1.16–1.17.1, 1.18–1.18.1 and 1.18.2. The 1.18 spellings are
+     * assembled below because there a normal world does not merely cost time — it loads the noise
+     * generator, which reads a generic signature the remapped jar carries in a form the JVM refuses.
+     * 1.16–1.17.1 have no such problem and take {@code WorldPreset.NORMAL}.
+     *
+     * <p>Nothing a test asserts depends on the terrain — a block set at a fixed position is set
+     * whatever is around it — so what those three releases cost is seconds of generation, and naming
+     * the method for what it always does costs nothing.
      *
      * <p>This is where the game's API actually moved, and the eight {@code createWorld} bodies below
      * are the whole of it. The public method is one method on all 43 releases because they are.
@@ -541,9 +579,16 @@ public final class GameClient implements AutoCloseable {
     /**
      * Ask the client to create and join the world. Only safe on the render thread.
      *
-     * <p>Before 1.19 there is no {@code WorldOpenFlows}: the client creates the world itself. The
-     * flat preset is the *client's* {@code WorldPreset.FLAT} here, a different type from the
-     * {@code WorldPresets} registry keys that replaced it.
+     * <p>Before 1.19 there is no {@code WorldOpenFlows}: the client creates the world itself. And
+     * the flat preset cannot be <em>asked</em> for — 1.16 through 1.18.2 keep it in a private field
+     * of the client's own {@code WorldPreset}, whose {@code NORMAL} is public and whose
+     * {@code FLAT} is not — so the generator is assembled here out of the four public pieces
+     * vanilla assembles it from.
+     *
+     * <p>On 1.18 that is not a nicety. The noise generator a normal world uses reads a generic
+     * signature reflectively, and the remapped jar this compiles against carries one the JVM
+     * refuses: a {@code GenericSignatureFormatError} out of {@code NoiseChunk}, five minutes into
+     * a world load. A flat world never reaches that code.
      */
     #[cfg(all(feature = "enabled", feature = "since-1.18.2", not(feature = "since-1.19")))]
     private static void createWorld(Minecraft client, String levelName) {
@@ -552,16 +597,54 @@ public final class GameClient implements AutoCloseable {
             levelName,
             settings(levelName),
             registries,
-            WorldPreset.NORMAL.create(registries, FLAT_SEED, false, false));
+            new WorldGenSettings(
+                FLAT_SEED,
+                false,
+                false,
+                WorldGenSettings.withOverworld(
+                    registries.registryOrThrow(Registry.DIMENSION_TYPE_REGISTRY),
+                    DimensionType.defaultDimensions(registries, FLAT_SEED),
+                    new FlatLevelSource(
+                        registries.registryOrThrow(Registry.STRUCTURE_SET_REGISTRY),
+                        FlatLevelGeneratorSettings.getDefault(
+                            registries.registryOrThrow(Registry.BIOME_REGISTRY),
+                            registries.registryOrThrow(Registry.STRUCTURE_SET_REGISTRY))))));
     }
 
     /**
      * Ask the client to create and join the world. Only safe on the render thread.
      *
-     * <p>The same call as 1.18.2, through the older registry handle. Java 8 has no {@code var}, so
-     * the local has to name one of the two types and this is the only reason the two bodies differ.
+     * <p>The same assembly one release earlier: there is no structure-set registry yet, so neither
+     * the flat settings nor the generator takes one, and the builtin registries come back as a
+     * {@code RegistryHolder}. Java 8 has no {@code var}, so the local names it.
      */
-    #[cfg(all(feature = "enabled", feature = "since-1.16", not(feature = "since-1.18.2")))]
+    #[cfg(all(feature = "enabled", feature = "since-1.18", not(feature = "since-1.18.2")))]
+    private static void createWorld(Minecraft client, String levelName) {
+        RegistryAccess.RegistryHolder registries = RegistryAccess.builtin();
+        client.createLevel(
+            levelName,
+            settings(levelName),
+            registries,
+            new WorldGenSettings(
+                FLAT_SEED,
+                false,
+                false,
+                WorldGenSettings.withOverworld(
+                    registries.registryOrThrow(Registry.DIMENSION_TYPE_REGISTRY),
+                    DimensionType.defaultDimensions(registries, FLAT_SEED),
+                    new FlatLevelSource(
+                        FlatLevelGeneratorSettings.getDefault(
+                            registries.registryOrThrow(Registry.BIOME_REGISTRY))))));
+    }
+
+    /**
+     * Ask the client to create and join the world. Only safe on the render thread.
+     *
+     * <p>1.16 through 1.17.1 spell that assembly a third way, and take the client's public
+     * {@code WorldPreset.NORMAL} instead. These are the releases whose world is not superflat —
+     * nothing a test asserts depends on the terrain, and unlike 1.18 nothing here trips over it.
+     */
+    #[cfg(all(feature = "enabled", feature = "since-1.16", not(feature = "since-1.18")))]
     private static void createWorld(Minecraft client, String levelName) {
         RegistryAccess.RegistryHolder registries = RegistryAccess.builtin();
         client.createLevel(
@@ -784,13 +867,25 @@ public final class GameClient implements AutoCloseable {
      *
      * <p>Polled off the render thread rather than through {@link #evalOnClient}, because during a
      * reload there is no promise that the render thread is draining its queue.
+     *
+     * <p>And held rather than sampled: see {@link #BOOT_SETTLE} for the release this distinguishes.
      */
     private void awaitTitleScreen() {
         long limit = System.nanoTime() + BOOT_DEADLINE.toNanos();
+        boolean settling = false;
+        long settledSince = 0L;
         while (System.nanoTime() < limit) {
             requireAlive("the title screen");
             if (overlay(this.client) == null && showing(this.client) instanceof TitleScreen) {
-                return;
+                if (!settling) {
+                    settling = true;
+                    settledSince = System.nanoTime();
+                } else if (System.nanoTime() - settledSince >= BOOT_SETTLE.toNanos()) {
+                    return;
+                }
+            } else {
+                // Whatever it was, it was not the end of the boot. The clock starts again.
+                settling = false;
             }
             pause();
         }

@@ -461,7 +461,7 @@ try (GameClient game = GameClient.launch()) {
     BlockPos pos = new BlockPos(0, 0, 0);
     game.runOnServer(server ->
         overworld.setBlockAndUpdate(pos, Blocks.DIAMOND_BLOCK.defaultBlockState()));
-    assert game.evalOnServer(server -> overworld.getBlockState(pos).is(Blocks.DIAMOND_BLOCK));
+    assert game.evalOnServer(server -> overworld.getBlockState(pos).getBlock() == Blocks.DIAMOND_BLOCK);
 }
 ```
 

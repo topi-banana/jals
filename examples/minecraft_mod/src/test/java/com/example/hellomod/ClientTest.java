@@ -72,15 +72,17 @@ public final class ClientTest {
             game.runOnServer(
                 server ->
                     overworld.setBlockAndUpdate(direct, Blocks.DIAMOND_BLOCK.defaultBlockState()));
+            // `getBlock() ==` rather than `is(Block)`: before 1.16 a block state's only `is` takes
+            // a *tag*, so the shorter spelling is a release the reader would have to know about.
             assert game.evalOnServer(
-                    server -> overworld.getBlockState(direct).is(Blocks.DIAMOND_BLOCK))
+                    server -> overworld.getBlockState(direct).getBlock() == Blocks.DIAMOND_BLOCK)
                 : "the block the harness placed is the block the world holds";
 
             // And the same thing asked for the way a player would, then verified the typed way.
             BlockPos commanded = new BlockPos(0, 2, 0);
             game.runCommand("setblock 0 2 0 minecraft:gold_block");
             assert game.evalOnServer(
-                    server -> overworld.getBlockState(commanded).is(Blocks.GOLD_BLOCK))
+                    server -> overworld.getBlockState(commanded).getBlock() == Blocks.GOLD_BLOCK)
                 : "a command the harness sent reached the world";
 
             assert game.evalOnServer(server -> server.getPlayerList().getPlayerCount()) == 1

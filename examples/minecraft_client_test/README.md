@@ -105,12 +105,16 @@ carries names and descriptors and no access flags: 1.15's window accessor and 1.
 flat preset were both found by compiling.
 
 One thing the harness does *not* hide, because hiding it would be a lie: `openWorld` opens a
-**superflat** world on 1.14.4–1.15.2 and on 1.19 and later, and the **default** generator on
-1.16–1.18.2. Those nine releases keep the flat preset in a private field of the client's own
-`WorldPreset`, and the only public route to the same generator is to assemble it out of a
-`FlatLevelGeneratorSettings`, a `FlatLevelSource` and `DimensionType.defaultDimensions` that
-themselves differ across 1.16–1.17.1, 1.18–1.18.1 and 1.18.2. Nothing a test asserts depends on the
-terrain, so what that costs is a few seconds of generation.
+**superflat** world on 40 of the 43 releases and the **default** generator on 1.16–1.17.1. Those
+three keep the flat preset in a private field of the client's own `WorldPreset`, and the only public
+route to it is to assemble the generator out of a `FlatLevelGeneratorSettings`, a `FlatLevelSource`
+and `DimensionType.defaultDimensions` whose spellings differ again on each of 1.16–1.17.1,
+1.18–1.18.1 and 1.18.2. The 1.18 spellings *are* assembled, because there a normal world is not just
+slower: it loads the noise generator, which reads a generic signature that the remapped jar carries
+in a form the JVM refuses — a `GenericSignatureFormatError` out of `NoiseChunk`, five minutes into a
+world load. That is a defect in the remap rather than in the harness, and worth its own change;
+1.16–1.17.1 do not hit it. Nothing a test asserts depends on the terrain, so what those three
+releases cost is a few seconds of generation.
 
 `GameClient.java` is also **Java 8 source** throughout: no `ProcessHandle`, no `Files.writeString`,
 no `Stream.toList`, no pattern `instanceof`. It is loaded by the JVM the release runs on, and the
@@ -204,8 +208,12 @@ Four constraints come from `jals test` rather than from Minecraft:
   exits. It halts with status `0`, which is only safe while the sentinel is what is being read — so
   **do not run these tests with `--no-capture`**, where there is nothing captured to read and the
   runner falls back to the exit status this forces.
-- A screen appearing is not readiness. The boot is settled when the overlay is gone *and* the title
-  screen is up.
+- A screen appearing is not readiness, and neither is one sample of it. The boot is settled when the
+  overlay is gone *and* the title screen is up *and* both have stayed that way for a moment: on
+  1.16.5 the singleton is assigned inside the constructor, so a driver that starts as soon as
+  `Minecraft.getInstance()` answers can see a bare, quiet client before the reload overlay is
+  installed at all. Nothing waits when the condition is false, so a slow boot is still as slow as it
+  is; the interval only bounds how quickly a boot may be *called* finished.
 
 ## What it does not supply
 
