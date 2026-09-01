@@ -93,9 +93,9 @@ disagree about where the interesting lines are is why the SDK publishes no chain
 
 ### What that costs the source
 
-One file. The whole of the drift is eight short private methods and 25 bodies between them:
+One file. The whole of the drift is eight short private methods and 24 bodies between them:
 `showing`, `show`, `overlay`, `label`, `windowWidth` and `overworld` have two each, `settings` has
-five and `createWorld` has eight. Everything a consumer calls is one method on all 43, and
+four and `createWorld` has eight. Everything a consumer calls is one method on all 43, and
 everything that could be avoided was — `runCommand` dispatches through the server's own Brigadier
 dispatcher, because the three calls that takes are identical on every release, while the
 client-side spelling moved four times.

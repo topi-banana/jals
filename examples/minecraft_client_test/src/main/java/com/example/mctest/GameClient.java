@@ -579,16 +579,23 @@ public final class GameClient implements AutoCloseable {
      */
     #[cfg(all(feature = "enabled", not(feature = "since-1.16")))]
     private static void createWorld(Minecraft client, String levelName) {
-        client.selectLevel(levelName, levelName, settings(levelName));
+        // Built here rather than through `settings`, because this shape carries no level name —
+        // `selectLevel` takes it twice instead, once as the save directory and once as the world's
+        // own name — and a shared helper would have to take one it could not use.
+        client.selectLevel(
+            levelName,
+            levelName,
+            new LevelSettings(FLAT_SEED, GameType.CREATIVE, false, false, LevelType.FLAT));
     }
 
     /**
      * The world's settings.
      *
-     * <p>Five shapes across the catalog. The two that are not just a parameter moving: 1.16
-     * replaced the seed and the world type with a level name and a difficulty — the seed moved into
-     * the generator settings — and 26.1 folded the difficulty, the hardcore flag and the difficulty
-     * lock into one {@code DifficultySettings} and dropped the game rules entirely.
+     * <p>Four shapes, and only from 1.16: before that a {@code LevelSettings} carries a seed and a
+     * world type rather than a name and a difficulty, and the one release range that wants it builds
+     * it in place. The change that is not just a parameter moving is 26.1's, which folded the
+     * difficulty, the hardcore flag and the difficulty lock into one {@code DifficultySettings} and
+     * dropped the game rules entirely.
      */
     #[cfg(all(feature = "enabled", feature = "since-26.1"))]
     private static LevelSettings settings(String levelName) {
@@ -640,12 +647,6 @@ public final class GameClient implements AutoCloseable {
             true,
             new GameRules(),
             DataPackConfig.DEFAULT);
-    }
-
-    /** The world's settings. */
-    #[cfg(all(feature = "enabled", not(feature = "since-1.16")))]
-    private static LevelSettings settings(String levelName) {
-        return new LevelSettings(FLAT_SEED, GameType.CREATIVE, false, false, LevelType.FLAT);
     }
 
     /**

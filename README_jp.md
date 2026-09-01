@@ -366,9 +366,11 @@ remap 済み Minecraft の例は [`examples/minecraft`](examples/minecraft)
 リリースでは再難読化します。source tree は 43 リリースで 1 つです。その範囲内で Mojang が
 rename した唯一の API を dialect の `#[cfg]` が引き受け、その述語である threshold feature の
 chain は build script と resource template も読みます。この mod の `jals test` は実際の Minecraft
-client を起動して assert します。それを行う harness は `[dev-dependencies]` に 1 行書くだけの別
-project — [`examples/minecraft_client_test`](examples/minecraft_client_test) — で、build は解決せず
-jar にも入りません。
+client を起動して assert します。しかも同じ 43 リリースのいずれでもです。それを行う harness は
+`[dev-dependencies]` に 1 行書くだけの別 project —
+[`examples/minecraft_client_test`](examples/minecraft_client_test) — で、build は解決せず jar にも
+入りません。この harness が各リリースの runtime jar 約 60 本を pin し、client API 用の threshold
+chain を自前で持つため、mod 側の test はリリース名を一切書きません。
 
 root Rhai phase 自体は capability 制限されていますが、その compiler/JVM 引数、classpath、subprocess
 environment directive は、後続の明示的な `jals build` / `run` による JDK process へ意図的に反映され
