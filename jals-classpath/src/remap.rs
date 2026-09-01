@@ -564,16 +564,32 @@ mod helpers {
         bytes.len() >= 4 && bytes.starts_with(b"PK")
     }
 
-    /// Whether `name` is a jar signature block: `META-INF/<base>.{SF,DSA,RSA,EC}`.
+    /// Whether `name` is a jar signature block: `META-INF/<base>.{SF,DSA,RSA,EC}`, or the
+    /// `META-INF/SIG-*` spelling.
     ///
     /// Directly under `META-INF/` and nowhere else — the JAR specification only reads the block at
     /// that one depth, so a `META-INF/services/x.sf` is an ordinary member and stays.
+    ///
+    /// The `SIG-` prefix is the second form the JDK's own predicate
+    /// (`sun.security.util.SignatureFileVerifier::isSigningRelated`) recognises, with or without an
+    /// extension. Matching what the JVM matches is the whole point: a block this misses is a block
+    /// that keeps the archive "signed" while the manifest half of the claim has already been
+    /// stripped below — the half-a-claim state the module doc calls worse than keeping neither.
     pub(super) fn is_signature_member(name: &str) -> bool {
         let Some(base) = name.strip_prefix("META-INF/") else {
             return false;
         };
         if base.contains('/') {
             return false;
+        }
+        // Over the bytes, not a `&str` slice: a member name is whatever the archive says, and
+        // `&base[..4]` panics when byte 4 falls inside a multi-byte character.
+        if base
+            .as_bytes()
+            .first_chunk::<4>()
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"SIG-"))
+        {
+            return true;
         }
         ["sf", "dsa", "rsa", "ec"]
             .iter()
@@ -595,9 +611,12 @@ mod helpers {
     ///
     /// Matched on the substring rather than on a fixed list, because the algorithm is part of the
     /// name (`SHA-256-Digest`, `SHA1-Digest`) and a signer may add `-Digest-Manifest` spellings of
-    /// its own.
+    /// its own. On `digest` rather than on `-digest`, because the specification's legacy
+    /// `Digest-Algorithms` puts the word first: matching only the hyphenated form would leave a
+    /// section saying which algorithms were used and carrying none of them — and, since that line
+    /// is not a `Name:`, would keep the whole section alive around it.
     fn is_digest_attribute(line: &str) -> bool {
-        const DIGEST: &[u8] = b"-digest";
+        const DIGEST: &[u8] = b"digest";
         line.split_once(':').is_some_and(|(name, _)| {
             // Matched without allocating: a signed client jar's manifest holds one section per
             // member, so this runs once per line over megabytes of text.
@@ -635,11 +654,9 @@ mod helpers {
                     .split_once(':')
                     .is_some_and(|(name, _)| name.trim().eq_ignore_ascii_case("Name"))
         });
-        if kept.is_empty() || names_only {
-            None
-        } else {
-            Some(kept)
-        }
+        // `names_only` alone: `all` over an empty `kept` is already `true`, so a section that lost
+        // every line is the same answer by the same test.
+        if names_only { None } else { Some(kept) }
     }
 
     /// Drop the per-entry digests a signer wrote into a manifest.
@@ -1703,7 +1720,15 @@ mod tests {
         // The specification writes them upper-case; a jar tool is free not to.
         assert!(is_signature_member("META-INF/signer.sf"));
 
+        // The JDK's own predicate reads this spelling as signing-related too, extension or not.
+        assert!(is_signature_member("META-INF/SIG-BC"));
+        assert!(is_signature_member("META-INF/sig-bc.rsa"));
+
         assert!(!is_signature_member("META-INF/MANIFEST.MF"));
+        assert!(!is_signature_member("META-INF/SIGNATURES.TXT"));
+        // A member name is whatever the archive says; a prefix test over bytes must not panic on
+        // one whose fourth byte falls inside a character.
+        assert!(!is_signature_member("META-INF/sé"));
         // Read at one depth only, so a member that happens to share the extension deeper down is
         // an ordinary resource and survives the remap.
         assert!(!is_signature_member("META-INF/services/provider.sf"));
@@ -1742,6 +1767,22 @@ mod tests {
             stripped,
             "Manifest-Version: 1.0\r\nMain-Class: net.minecraft.client.main.Main\r\n\r\n"
         );
+    }
+
+    /// A digest attribute whose name opens with the word — the specification's legacy
+    /// `Digest-Algorithms` — is a digest like any other. Left behind it would both survive as
+    /// residue and, not being a `Name:`, keep its whole section alive around it.
+    #[test]
+    fn a_legacy_digest_algorithms_line_goes_with_the_digests_it_names() {
+        let manifest = "Manifest-Version: 1.0\r\n\
+             \r\n\
+             Name: a/B.class\r\n\
+             Digest-Algorithms: SHA MD5\r\n\
+             SHA-Digest: Zm9v\r\n\
+             MD5-Digest: YmFy\r\n\
+             \r\n";
+        let stripped = String::from_utf8(strip_manifest_digests(manifest.as_bytes())).unwrap();
+        assert_eq!(stripped, "Manifest-Version: 1.0\r\n\r\n");
     }
 
     /// The digests are what is stale; whatever else a section says about its member is not.
