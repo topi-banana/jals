@@ -541,7 +541,7 @@ jobs:
           # any consumer selected it.
           - name: minecraft_client_test
             dir: examples/minecraft_client_test
-            features: --features 1.21.11
+            features: --features 1.21.11,enabled
           # One cell per side of the `#[cfg(feature = "since-1.21.6")]` branch in the mod's own
           # source: 1.20.1 compiles the `getName()` spelling and 1.21.11 the `name()` one, and a
           # matrix that built only one of them would let the other rot until someone selected it by
@@ -829,6 +829,98 @@ jobs:
           name: hellomod-jars
           pattern: hellomod-jar-*
           delete-merged: true
+
+  client-harness-setup:
+    # The same two things `mod-jar-setup` produces, for the other end of the same claim. That job
+    # checks all 43 releases *compile a mod*; this one checks all 43 compile the **harness** those
+    # mods are tested with — and, because a build script's tasks execute, it is also what verifies
+    # every one of the 2287 library digests `examples/minecraft_client_test/build.rhai` pins.
+    #
+    # A separate list from `mod-jar-setup`'s, read out of the harness's own manifest, because the
+    # two projects declare their releases independently. They agree today; a cell that fails because
+    # they stopped agreeing is the point.
+    name: client harness setup
+    runs-on: ubuntu-latest
+    outputs:
+      versions: ${{ steps.versions.outputs.versions }}
+    steps:
+      - parallel:
+          - uses: actions/checkout@v7
+          - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: client-harness
+      - name: Read the release list out of the harness's manifest
+        id: versions
+        run: |
+          set -euo pipefail
+          versions=$(python3 -c '
+          import json, tomllib
+
+          manifest = tomllib.load(open("examples/minecraft_client_test/jals.toml", "rb"))
+          print(json.dumps([k for k in manifest["features"] if k[0].isdigit()]))
+          ')
+          echo "${versions}"
+          echo "versions=${versions}" >>"$GITHUB_OUTPUT"
+      - name: Build the jals binary
+        run: cargo build --release --package jals-cli
+      - name: Upload the jals binary for the matrix
+        uses: actions/upload-artifact@v7
+        with:
+          name: client-harness-jals
+          path: target/release/jals
+          if-no-files-found: error
+          retention-days: 1
+
+  client-harness:
+    # One cell per Minecraft release, compiling `GameClient.java` against that release's client jar.
+    #
+    # `enabled` is not optional here and the step after the build is why. Without that feature the
+    # harness's `#[cfg]` blanks every declaration in the file, `javac` is handed a compilation unit
+    # that is one `package` line, and the build succeeds having compiled nothing — a green cell that
+    # proves only that a selection can be resolved. So the cell asserts the class file exists, the
+    # same way the `minecraft` cell asserts its publication roots are not empty.
+    name: client harness (${{ matrix.minecraft }})
+    needs: client-harness-setup
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        minecraft: ${{ fromJSON(needs.client-harness-setup.outputs.versions) }}
+    steps:
+      - parallel:
+          - uses: actions/checkout@v7
+          # One JDK for all 43, for the reason `mod-jar` gives: `javac` compiles at any `--release`
+          # it still supports and reads a newer classpath class without complaint. The harness's
+          # own `build.rhai` derives `--release` from the release's era, 8 through 21.
+          - name: Set up JDK (the harness compiles against the game's class files)
+            uses: actions/setup-java@v6
+            with:
+              distribution: temurin
+              java-version: "25"
+          - name: Download the jals binary built once for this matrix
+            uses: actions/download-artifact@v8
+            with:
+              name: client-harness-jals
+              path: ${{ runner.temp }}/jals-bin
+      - name: Put jals on PATH
+        run: |
+          set -euo pipefail
+          chmod +x "${RUNNER_TEMP}/jals-bin/jals"
+          echo "${RUNNER_TEMP}/jals-bin" >>"$GITHUB_PATH"
+      - name: Compile the harness against this release
+        working-directory: examples/minecraft_client_test
+        run: jals build --features ${{ matrix.minecraft }},enabled
+      - name: Check it compiled a type and not a blanked file
+        working-directory: examples/minecraft_client_test
+        run: |
+          set -euo pipefail
+          class=target/classes/com/example/mctest/GameClient.class
+          if [ ! -f "${class}" ]; then
+            echo "::error::${class} is missing: the build resolved but compiled no type"
+            exit 1
+          fi
+          echo "compiled ${class} ($(stat -c%s "${class}") bytes)"
 
   setup-action:
     # The repository-root `action.yml` claims a consumer installs `jals` in one step. A claim is

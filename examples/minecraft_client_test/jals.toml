@@ -38,12 +38,16 @@ enabled = ["minecraft/client"]
 #
 # - `since-1.14.4` — the bottom of the chain. `build.rhai` errors when `enabled` is on and this is
 #   off, which is what makes "no release was named" distinguishable from "the oldest release was".
+# - `since-1.15` — the game window is behind `Minecraft.getWindow()`; on 1.14.4 it is the public
+#   `window` field and there is no accessor.
 # - `since-1.16` — `AbstractWidget.getMessage()` returns a `Component` rather than a `String`;
 #   `LevelSettings` takes a level name and a `Difficulty` rather than a seed and a `LevelType`; and
 #   `Minecraft.createLevel` replaces `Minecraft.selectLevel`.
 # - `since-1.17` — `--release 16`, the game's own `javaVersion.majorVersion`.
-# - `since-1.18` — `--release 17`; and `createLevel` takes a `RegistryAccess` where 1.16–1.17.1 take
-#   a `RegistryAccess.RegistryHolder`, which `WorldGenSettings.makeDefault` follows.
+# - `since-1.18` — `--release 17`.
+# - `since-1.18.2` — the builtin registries come from `RegistryAccess.builtinCopy()` as a
+#   `RegistryAccess.Writable`, where 1.16–1.18.1 take them from `RegistryAccess.builtin()` as a
+#   `RegistryAccess.RegistryHolder`. Java 8 has no `var`, so the local has to name one of the two.
 # - `since-1.19` — world creation moves off `Minecraft` onto `Minecraft.createWorldOpenFlows()`.
 # - `since-1.19.3` — `createFreshLevel` takes a `WorldOptions` and a dimensions `Function` rather
 #   than a `RegistryAccess` and a `WorldGenSettings`, and `LevelSettings` takes a
@@ -59,10 +63,12 @@ enabled = ["minecraft/client"]
 #   `WorldPresets.createFlatWorldDimensions` becomes `createTestWorldDimensions`.
 
 "since-1.14.4" = []
-"since-1.16" = ["since-1.14.4"]
+"since-1.15" = ["since-1.14.4"]
+"since-1.16" = ["since-1.15"]
 "since-1.17" = ["since-1.16"]
 "since-1.18" = ["since-1.17"]
-"since-1.19" = ["since-1.18"]
+"since-1.18.2" = ["since-1.18"]
+"since-1.19" = ["since-1.18.2"]
 "since-1.19.3" = ["since-1.19"]
 "since-1.20.3" = ["since-1.19.3"]
 "since-1.20.5" = ["since-1.20.3"]
@@ -107,7 +113,7 @@ enabled = ["minecraft/client"]
 "1.19.2" = ["since-1.19", "minecraft/1.19.2"]
 "1.19.1" = ["since-1.19", "minecraft/1.19.1"]
 "1.19" = ["since-1.19", "minecraft/1.19"]
-"1.18.2" = ["since-1.18", "minecraft/1.18.2"]
+"1.18.2" = ["since-1.18.2", "minecraft/1.18.2"]
 "1.18.1" = ["since-1.18", "minecraft/1.18.1"]
 "1.18" = ["since-1.18", "minecraft/1.18"]
 "1.17.1" = ["since-1.17", "minecraft/1.17.1"]
@@ -118,9 +124,9 @@ enabled = ["minecraft/client"]
 "1.16.2" = ["since-1.16", "minecraft/1.16.2"]
 "1.16.1" = ["since-1.16", "minecraft/1.16.1"]
 "1.16" = ["since-1.16", "minecraft/1.16"]
-"1.15.2" = ["since-1.14.4", "minecraft/1.15.2"]
-"1.15.1" = ["since-1.14.4", "minecraft/1.15.1"]
-"1.15" = ["since-1.14.4", "minecraft/1.15"]
+"1.15.2" = ["since-1.15", "minecraft/1.15.2"]
+"1.15.1" = ["since-1.15", "minecraft/1.15.1"]
+"1.15" = ["since-1.15", "minecraft/1.15"]
 "1.14.4" = ["since-1.14.4", "minecraft/1.14.4"]
 
 [dependencies]

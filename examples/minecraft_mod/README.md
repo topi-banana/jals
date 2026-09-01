@@ -377,13 +377,18 @@ all*, and the two are separate constraints. `--release 17` cannot relax the bind
 against the SDK's classpath `javac` must be able to **read** the game's class files, and a JDK 21
 `javac` rejects a Java 25 class outright. So your JDK must be at least:
 
-| releases         | JDK | `--release` |
-| ---------------- | --- | ----------- |
-| 1.14.4 – 1.16.5  | 9   | 8           |
-| 1.17 – 1.17.1    | 16  | 16          |
-| 1.18 – 1.20.4    | 17  | 17          |
-| 1.20.5 – 1.21.11 | 21  | 21          |
-| 26.x             | 25  | 21          |
+| releases         | JDK | `--release` | boots on |
+| ---------------- | --- | ----------- | -------- |
+| 1.14.4 – 1.16.5  | 9   | 8           | 8        |
+| 1.17 – 1.17.1    | 16  | 16          | 16       |
+| 1.18 – 1.20.4    | 17  | 17          | 17       |
+| 1.20.5 – 1.21.11 | 21  | 21          | 21       |
+| 26.x             | 25  | 21          | 25       |
+
+The fourth column is `jals test`'s, not `jals build`'s, and it is a different constraint: compiling
+only needs a `javac` that can read the game's class files, but *booting* the client needs the JVM
+that release actually runs on. `$JAVAC` and `$JAVA` are resolved independently, so one command says
+both — `JAVAC=$JDK25/bin/javac JAVA=$JDK8/bin/java jals test --features 1.14.4,client-test -j 1`.
 
 The oldest row is the one place the two columns disagree about which number is binding: those game
 jars are Java 8 class files, but `--release` did not exist before JDK 9, so 9 is the floor for
@@ -412,9 +417,9 @@ raise it.
 ## Booting the game from a test
 
 `src/test/java` holds three `#[test]` methods that start a **real Minecraft client in the test JVM**
-and assert against it — no Mixin, no java agent, no launcher. What starts it is not here: the
-harness is a project of its own, `../minecraft_client_test`, and this project reaches it in one
-line.
+and assert against it — no Mixin, no java agent, no launcher, and on any of the 43 releases. What
+starts it is not here: the harness is a project of its own, `../minecraft_client_test`, and this
+project reaches it in one line.
 
 ```toml
 [dev-dependencies]
@@ -433,6 +438,10 @@ cd examples/minecraft_mod
 cargo run -p jals-cli -- test --features 1.21.11,client-test -j 1
 ```
 
+Any of the 43 releases goes in place of `1.21.11` — the harness carries the `#[cfg]` branches for
+all of them, so nothing under `src/test/java` names a release. What does vary is the JVM the client
+boots on; see [JDK requirement](#jdk-requirement).
+
 ```
    Compiling hellomod
     Starting 3 tests across 1 class
@@ -447,7 +456,7 @@ A test reads like a browser driver, except that both handles are typed game obje
 
 ```java
 try (GameClient game = GameClient.launch()) {
-    game.openFlatWorld("jals-test");
+    game.openWorld("jals-test");
     BlockPos pos = new BlockPos(0, 0, 0);
     game.runOnServer(server ->
         server.overworld().setBlockAndUpdate(pos, Blocks.DIAMOND_BLOCK.defaultBlockState()));
@@ -459,21 +468,25 @@ try (GameClient game = GameClient.launch()) {
 
 Three things, and each is here because it cannot live on the other side of the edge:
 
-- **`client-test`.** `["client", "mc-client-test/1.21.11"]` — it implies `client` so this project
-  compiles against the client jar, and routes the release into the harness. Everything under
-  `src/test/java` is `#[cfg]`-gated on it, so a selection that does not name it compiles and lints
-  as if the tests were not there, which is what keeps the other two `minecraft_mod` CI cells
-  unchanged.
+- **`client-test`.** `["client", "mc-client-test/enabled"]` — it implies `client` so this project
+  compiles against the client jar, and it says the harness is wanted. It names no release: each of
+  the 43 version features carries its own `mc-client-test/<release>` beside its
+  `minecraft/<release>`, so the release reaches the harness by the route it already took to the SDK.
+  Everything under `src/test/java` is `#[cfg]`-gated on `client-test`, so a selection that does not
+  name it compiles and lints as if the tests were not there, which is what keeps the other two
+  `minecraft_mod` CI cells unchanged.
+- **The second route on every version feature.** It is the one real cost of the split, and it is
+  paid here rather than in the harness because a feature reaches a dependency only through the
+  manifest that declares the edge. It costs a selection that never asks for the harness nothing: the
+  harness registers no task and compiles no type without `enabled`, and the release it is handed is
+  the one this project already routed to the same SDK node.
 - **`-Xmx2G`.** `build.add_jvm_arg` reaches a test JVM only from the *root* project's script, so a
   dependency cannot contribute it. `build.rhai` writes the line; without it the boot dies inside the
   resource reload with an `OutOfMemoryError`.
-- **The release guard.** `--features 1.20.1,client-test` routes two versions into the SDK, which
-  rejects them. The root's build script runs before the graph is preprocessed, so the guard's
-  sentence is what a reader sees rather than the SDK's.
 
-Everything else — the harness class, the ~60 pinned runtime libraries, the `Executor` hinge, the
-daemon-thread and watchdog dance `jals test` forces, and why there is no native directory and no
-asset store — is documented in [`../minecraft_client_test/README.md`](../minecraft_client_test/README.md).
+Everything else — the harness class and its fourteen thresholds, the 2287 pinned runtime libraries,
+the `Executor` hinge, the daemon-thread and watchdog dance `jals test` forces, and why there is no
+native directory and no asset store — is documented in [`../minecraft_client_test/README.md`](../minecraft_client_test/README.md).
 
 **Linux only.** GLFW wants the main thread on macOS (`-XstartOnFirstThread`) and the main thread
 belongs to the test. CI runs the cell under `xvfb` with Mesa's llvmpipe.

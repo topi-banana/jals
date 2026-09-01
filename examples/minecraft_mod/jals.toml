@@ -41,6 +41,14 @@ features = ["attributes"]
 # The version features are mutually exclusive, and this project does not re-enforce that: the
 # forwarded selection reaches the SDK's own build script, whose `build.error` rejects a second
 # version before any download. Restating the rule here would be a second copy of a 43-row table.
+#
+# Each row routes its release to two places: the SDK, which fetches and remaps that release's game
+# jar, and the `mc-client-test` dev-dependency, which pins that release's client runtime libraries
+# and selects the `#[cfg]` branches its harness is written in. The second route costs a selection
+# that never asked for the harness nothing — `mc-client-test` registers no task and compiles no type
+# without `mc-client-test/enabled`, which only `client-test` routes — and it reaches the *same* SDK
+# node this row already reached, so `jals test --features 1.20.1` resolves the classpath
+# `jals build --features 1.20.1` resolves, not a wider one.
 [features]
 server = ["minecraft/server"]
 client = ["minecraft/client"]
@@ -56,61 +64,61 @@ mixinextras = ["minecraft/mixinextras"]
 # `#[cfg]`-gated on it, so a selection that does not name it compiles and lints as if the tests were
 # not there — which is what keeps the other CI cells unchanged.
 #
-# `mc-client-test/1.21.11` is the release reaching the harness, and it is the **only** place this
-# project restates the pin — the canonical one is the `[features]` key in
-# `../minecraft_client_test/jals.toml`. It is written on `client-test` rather than on each of the 43
-# version features because the harness supports exactly one release: a selection naming a different
-# one routes two versions into the SDK, which rejects them, and `build.rhai`'s guard says so first
-# in a sentence a reader can act on.
-client-test = ["client", "mc-client-test/1.21.11"]
+# It names no release, and cannot: the harness supports all 43 and the release reaching it is routed
+# by whichever version feature the command line named — see the table below, where every row carries
+# a `mc-client-test/<version>` beside its `minecraft/<version>`. `mc-client-test/enabled` is the
+# other half, and the half that is a *choice*: it says the harness is wanted at all, which is what
+# adds the client jar and the ~60 runtime downloads on top of a selection that would otherwise
+# resolve exactly as `jals build` resolves it.
+client-test = ["client", "mc-client-test/enabled"]
 "since-1.14.4" = []
 "since-1.17" = ["since-1.14.4"]
 "since-1.18" = ["since-1.17"]
 "since-1.20.5" = ["since-1.18"]
 "since-1.21.6" = ["since-1.20.5"]
-"26.2" = ["since-1.21.6", "minecraft/26.2"]
-"26.1.2" = ["since-1.21.6", "minecraft/26.1.2"]
-"26.1.1" = ["since-1.21.6", "minecraft/26.1.1"]
-"26.1" = ["since-1.21.6", "minecraft/26.1"]
-"1.21.11" = ["since-1.21.6", "minecraft/1.21.11"]
-"1.21.10" = ["since-1.21.6", "minecraft/1.21.10"]
-"1.21.9" = ["since-1.21.6", "minecraft/1.21.9"]
-"1.21.8" = ["since-1.21.6", "minecraft/1.21.8"]
-"1.21.7" = ["since-1.21.6", "minecraft/1.21.7"]
-"1.21.6" = ["since-1.21.6", "minecraft/1.21.6"]
-"1.21.5" = ["since-1.20.5", "minecraft/1.21.5"]
-"1.21.4" = ["since-1.20.5", "minecraft/1.21.4"]
-"1.21.3" = ["since-1.20.5", "minecraft/1.21.3"]
-"1.21.2" = ["since-1.20.5", "minecraft/1.21.2"]
-"1.21.1" = ["since-1.20.5", "minecraft/1.21.1"]
-"1.21" = ["since-1.20.5", "minecraft/1.21"]
-"1.20.6" = ["since-1.20.5", "minecraft/1.20.6"]
-"1.20.5" = ["since-1.20.5", "minecraft/1.20.5"]
-"1.20.4" = ["since-1.18", "minecraft/1.20.4"]
-"1.20.3" = ["since-1.18", "minecraft/1.20.3"]
-"1.20.2" = ["since-1.18", "minecraft/1.20.2"]
-"1.20.1" = ["since-1.18", "minecraft/1.20.1"]
-"1.20" = ["since-1.18", "minecraft/1.20"]
-"1.19.4" = ["since-1.18", "minecraft/1.19.4"]
-"1.19.3" = ["since-1.18", "minecraft/1.19.3"]
-"1.19.2" = ["since-1.18", "minecraft/1.19.2"]
-"1.19.1" = ["since-1.18", "minecraft/1.19.1"]
-"1.19" = ["since-1.18", "minecraft/1.19"]
-"1.18.2" = ["since-1.18", "minecraft/1.18.2"]
-"1.18.1" = ["since-1.18", "minecraft/1.18.1"]
-"1.18" = ["since-1.18", "minecraft/1.18"]
-"1.17.1" = ["since-1.17", "minecraft/1.17.1"]
-"1.17" = ["since-1.17", "minecraft/1.17"]
-"1.16.5" = ["since-1.14.4", "minecraft/1.16.5"]
-"1.16.4" = ["since-1.14.4", "minecraft/1.16.4"]
-"1.16.3" = ["since-1.14.4", "minecraft/1.16.3"]
-"1.16.2" = ["since-1.14.4", "minecraft/1.16.2"]
-"1.16.1" = ["since-1.14.4", "minecraft/1.16.1"]
-"1.16" = ["since-1.14.4", "minecraft/1.16"]
-"1.15.2" = ["since-1.14.4", "minecraft/1.15.2"]
-"1.15.1" = ["since-1.14.4", "minecraft/1.15.1"]
-"1.15" = ["since-1.14.4", "minecraft/1.15"]
-"1.14.4" = ["since-1.14.4", "minecraft/1.14.4"]
+"26.2" = ["since-1.21.6", "minecraft/26.2", "mc-client-test/26.2"]
+"26.1.2" = ["since-1.21.6", "minecraft/26.1.2", "mc-client-test/26.1.2"]
+"26.1.1" = ["since-1.21.6", "minecraft/26.1.1", "mc-client-test/26.1.1"]
+"26.1" = ["since-1.21.6", "minecraft/26.1", "mc-client-test/26.1"]
+"1.21.11" = ["since-1.21.6", "minecraft/1.21.11", "mc-client-test/1.21.11"]
+"1.21.10" = ["since-1.21.6", "minecraft/1.21.10", "mc-client-test/1.21.10"]
+"1.21.9" = ["since-1.21.6", "minecraft/1.21.9", "mc-client-test/1.21.9"]
+"1.21.8" = ["since-1.21.6", "minecraft/1.21.8", "mc-client-test/1.21.8"]
+"1.21.7" = ["since-1.21.6", "minecraft/1.21.7", "mc-client-test/1.21.7"]
+"1.21.6" = ["since-1.21.6", "minecraft/1.21.6", "mc-client-test/1.21.6"]
+"1.21.5" = ["since-1.20.5", "minecraft/1.21.5", "mc-client-test/1.21.5"]
+"1.21.4" = ["since-1.20.5", "minecraft/1.21.4", "mc-client-test/1.21.4"]
+"1.21.3" = ["since-1.20.5", "minecraft/1.21.3", "mc-client-test/1.21.3"]
+"1.21.2" = ["since-1.20.5", "minecraft/1.21.2", "mc-client-test/1.21.2"]
+"1.21.1" = ["since-1.20.5", "minecraft/1.21.1", "mc-client-test/1.21.1"]
+"1.21" = ["since-1.20.5", "minecraft/1.21", "mc-client-test/1.21"]
+"1.20.6" = ["since-1.20.5", "minecraft/1.20.6", "mc-client-test/1.20.6"]
+"1.20.5" = ["since-1.20.5", "minecraft/1.20.5", "mc-client-test/1.20.5"]
+"1.20.4" = ["since-1.18", "minecraft/1.20.4", "mc-client-test/1.20.4"]
+"1.20.3" = ["since-1.18", "minecraft/1.20.3", "mc-client-test/1.20.3"]
+"1.20.2" = ["since-1.18", "minecraft/1.20.2", "mc-client-test/1.20.2"]
+"1.20.1" = ["since-1.18", "minecraft/1.20.1", "mc-client-test/1.20.1"]
+"1.20" = ["since-1.18", "minecraft/1.20", "mc-client-test/1.20"]
+"1.19.4" = ["since-1.18", "minecraft/1.19.4", "mc-client-test/1.19.4"]
+"1.19.3" = ["since-1.18", "minecraft/1.19.3", "mc-client-test/1.19.3"]
+"1.19.2" = ["since-1.18", "minecraft/1.19.2", "mc-client-test/1.19.2"]
+"1.19.1" = ["since-1.18", "minecraft/1.19.1", "mc-client-test/1.19.1"]
+"1.19" = ["since-1.18", "minecraft/1.19", "mc-client-test/1.19"]
+"1.18.2" = ["since-1.18", "minecraft/1.18.2", "mc-client-test/1.18.2"]
+"1.18.1" = ["since-1.18", "minecraft/1.18.1", "mc-client-test/1.18.1"]
+"1.18" = ["since-1.18", "minecraft/1.18", "mc-client-test/1.18"]
+"1.17.1" = ["since-1.17", "minecraft/1.17.1", "mc-client-test/1.17.1"]
+"1.17" = ["since-1.17", "minecraft/1.17", "mc-client-test/1.17"]
+"1.16.5" = ["since-1.14.4", "minecraft/1.16.5", "mc-client-test/1.16.5"]
+"1.16.4" = ["since-1.14.4", "minecraft/1.16.4", "mc-client-test/1.16.4"]
+"1.16.3" = ["since-1.14.4", "minecraft/1.16.3", "mc-client-test/1.16.3"]
+"1.16.2" = ["since-1.14.4", "minecraft/1.16.2", "mc-client-test/1.16.2"]
+"1.16.1" = ["since-1.14.4", "minecraft/1.16.1", "mc-client-test/1.16.1"]
+"1.16" = ["since-1.14.4", "minecraft/1.16", "mc-client-test/1.16"]
+"1.15.2" = ["since-1.14.4", "minecraft/1.15.2", "mc-client-test/1.15.2"]
+"1.15.1" = ["since-1.14.4", "minecraft/1.15.1", "mc-client-test/1.15.1"]
+"1.15" = ["since-1.14.4", "minecraft/1.15", "mc-client-test/1.15"]
+"1.14.4" = ["since-1.14.4", "minecraft/1.14.4", "mc-client-test/1.14.4"]
 
 # `jals test` compiles this tree *in addition to* `[build] source-dirs` and writes the result
 # somewhere else, so `jals build` still produces a jar with nothing but the mixin in it. What lives

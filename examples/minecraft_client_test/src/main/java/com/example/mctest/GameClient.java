@@ -37,14 +37,65 @@ package com.example.mctest;
 #[cfg(feature = "enabled")] import net.minecraft.client.gui.screens.Overlay;
 #[cfg(feature = "enabled")] import net.minecraft.client.gui.screens.Screen;
 #[cfg(feature = "enabled")] import net.minecraft.client.gui.screens.TitleScreen;
+#[cfg(
+    all(
+        feature = "enabled", feature = "since-1.16",
+        not(
+            feature = "since-1.19")))] import net.minecraft.client.gui.screens.worldselection.WorldPreset;
+#[cfg(
+    all(
+        feature = "enabled", feature = "since-1.19",
+        not(feature = "since-1.19.3")))] import net.minecraft.core.Registry;
+#[cfg(
+    all(
+        feature = "enabled", feature = "since-1.16",
+        not(feature = "since-1.19.3")))] import net.minecraft.core.RegistryAccess;
+#[cfg(
+    all(
+        feature = "enabled", feature = "since-1.19.3",
+        not(feature = "since-1.21.2")))] import net.minecraft.core.registries.Registries;
 #[cfg(feature = "enabled")] import net.minecraft.server.MinecraftServer;
-#[cfg(feature = "enabled")] import net.minecraft.world.Difficulty;
+#[cfg(feature = "enabled")] import net.minecraft.server.level.ServerLevel;
+#[cfg(all(feature = "enabled", feature = "since-1.16"))] import net.minecraft.world.Difficulty;
+#[cfg(
+    all(
+        feature = "enabled", feature = "since-1.16",
+        not(feature = "since-1.19.3")))] import net.minecraft.world.level.DataPackConfig;
+#[cfg(
+    all(
+        feature = "enabled", feature = "since-1.16",
+        not(feature = "since-1.21.11")))] import net.minecraft.world.level.GameRules;
 #[cfg(feature = "enabled")] import net.minecraft.world.level.GameType;
 #[cfg(feature = "enabled")] import net.minecraft.world.level.LevelSettings;
-#[cfg(feature = "enabled")] import net.minecraft.world.level.WorldDataConfiguration;
-#[cfg(feature = "enabled")] import net.minecraft.world.level.gamerules.GameRules;
-#[cfg(feature = "enabled")] import net.minecraft.world.level.levelgen.WorldOptions;
-#[cfg(feature = "enabled")] import net.minecraft.world.level.levelgen.presets.WorldPresets;
+#[cfg(
+    all(
+        feature = "enabled",
+        not(feature = "since-1.16")))] import net.minecraft.world.level.LevelType;
+#[cfg(
+    all(
+        feature = "enabled",
+        feature = "since-1.19.3"))] import net.minecraft.world.level.WorldDataConfiguration;
+#[cfg(
+    all(
+        feature = "enabled",
+        not(feature = "since-1.16")))] import net.minecraft.world.level.dimension.DimensionType;
+#[cfg(
+    all(
+        feature = "enabled", feature = "since-1.21.11",
+        not(feature = "since-26.1")))] import net.minecraft.world.level.gamerules.GameRules;
+#[cfg(
+    all(
+        feature = "enabled",
+        feature = "since-1.19.3"))] import net.minecraft.world.level.levelgen.WorldOptions;
+#[cfg(
+    all(
+        feature = "enabled", feature = "since-1.19.3",
+        not(
+            feature = "since-1.21.2")))] import net.minecraft.world.level.levelgen.presets.WorldPreset;
+#[cfg(
+    all(
+        feature = "enabled",
+        feature = "since-1.19"))] import net.minecraft.world.level.levelgen.presets.WorldPresets;
 
 /**
  * A Minecraft client, booted in this JVM and driven from a {@code #[test]} method.
@@ -85,6 +136,20 @@ public final class GameClient implements AutoCloseable {
      * by the release, which is one fewer constant to update.
      */
     private static final String ASSET_INDEX = "jals-empty";
+
+    /**
+     * The seed the releases that take one are given.
+     *
+     * <p>Fixed rather than random, so a failure on an old release is reproducible. A superflat world
+     * looks the same whatever it is — the seed decides where the structures go, and this world has
+     * none.
+     *
+     * <p>Every era takes it, which is why it is one constant and not four spellings.
+     * {@code WorldOptions} has convenience factories, but *which* ones is release-specific
+     * ({@code testWorldWithRandomSeed} arrived at 1.21.2, {@code defaultWithRandomSeed} at 1.19.3),
+     * while its {@code (seed, structures, bonusChest)} constructor is the same on all of them.
+     */
+    private static final long FLAT_SEED = 0L;
 
     private static final Duration BOOT_DEADLINE = Duration.ofSeconds(300);
     private static final Duration STEP_DEADLINE = Duration.ofSeconds(60);
@@ -198,6 +263,16 @@ public final class GameClient implements AutoCloseable {
      * <p>Vanilla publishes no static accessor for a {@code MinecraftServer} — this is the one that
      * exists, and it is the reason a test that wants to inspect a world boots a <em>client</em>.
      */
+    /**
+     * The overworld of the running integrated server.
+     *
+     * <p>Published so a consumer's test does not have to know that 1.16 replaced
+     * {@code getLevel(DimensionType.OVERWORLD)} with an {@code overworld()} of its own.
+     */
+    public ServerLevel overworld() {
+        return evalOnServer(GameClient::overworld);
+    }
+
     public MinecraftServer server() {
         MinecraftServer server = evalOnClient(Minecraft::getSingleplayerServer);
         if (server == null) {
@@ -291,7 +366,7 @@ public final class GameClient implements AutoCloseable {
 
     /** The width of the game window, in pixels. */
     public int windowWidth() {
-        return evalOnClient(client -> client.getWindow().getWidth());
+        return evalOnClient(GameClient::windowWidth);
     }
 
     /**
@@ -334,36 +409,26 @@ public final class GameClient implements AutoCloseable {
     // --- worlds --------------------------------------------------------------------------------
 
     /**
-     * Create a superflat world, join it, and return once the player and the integrated server are
-     * both up.
+     * Create a world, join it, and return once the player and the integrated server are both up.
      *
-     * <p>Creative, peaceful, cheats on, no structures: a world that generates fast and then holds
-     * still, which is what a test wants to assert against. This is the one method whose call is
-     * specific to a Minecraft release — hence the single pinned release the `client-test` feature
-     * is wired to.
+     * <p>Creative, peaceful, no structures, one fixed seed: a world that generates quickly and then
+     * holds still, which is what a test wants to assert against.
+     *
+     * <p><b>Superflat where the release lets a caller ask for it, and the default generator
+     * otherwise.</b> 1.14.4–1.15.2 name it with a {@code LevelType} constant and 1.19 onwards with a
+     * world-preset registry key, but on 1.16–1.18.2 the flat preset is a <em>private</em> field of
+     * the client's own {@code WorldPreset} and the only public way to the same generator is to
+     * assemble it — a different {@code FlatLevelGeneratorSettings}, {@code FlatLevelSource} and
+     * {@code DimensionType.defaultDimensions} on each of 1.16–1.17.1, 1.18–1.18.1 and 1.18.2. Those
+     * nine releases get {@code WorldPreset.NORMAL} instead. Nothing a test asserts depends on the
+     * terrain — a block set at a fixed position is set whatever is around it — so what this costs is
+     * seconds of generation, and naming the method for what it always does costs nothing.
+     *
+     * <p>This is where the game's API actually moved, and the eight {@code createWorld} bodies below
+     * are the whole of it. The public method is one method on all 43 releases because they are.
      */
-    public void openFlatWorld(String levelName) {
-        runOnClient(
-            client -> {
-                WorldDataConfiguration configuration = WorldDataConfiguration.DEFAULT;
-                LevelSettings settings =
-                    new LevelSettings(
-                        levelName,
-                        GameType.CREATIVE,
-                        false,
-                        Difficulty.PEACEFUL,
-                        true,
-                        new GameRules(configuration.enabledFeatures()),
-                        configuration);
-                client.createWorldOpenFlows()
-                    .createFreshLevel(
-                        levelName,
-                        settings,
-                        WorldOptions.testWorldWithRandomSeed(),
-                        WorldPresets::createFlatWorldDimensions,
-                        client.screen);
-            },
-            WORLD_DEADLINE);
+    public void openWorld(String levelName) {
+        runOnClient(client -> createWorld(client, levelName), WORLD_DEADLINE);
         waitUntil(
             "the world to load",
             client -> client.level != null && client.player != null,
@@ -375,6 +440,212 @@ public final class GameClient implements AutoCloseable {
                 return server != null && server.isReady();
             },
             WORLD_DEADLINE);
+    }
+
+    /**
+     * Ask the client to create and join the world. Only safe on the render thread.
+     *
+     * <p>Eight bodies, newest first, and the boundaries are measured rather than remembered: each
+     * one is the range over which a call actually compiles. The `jals.toml` threshold table says
+     * what each boundary is; this says what it costs.
+     */
+    #[cfg(all(feature = "enabled", feature = "since-26.2"))]
+    private static void createWorld(Minecraft client, String levelName) {
+        // 26.2 renamed the flat preset's helper. `FLAT_ALL_DIMENSIONS` rather than `FLAT` is the
+        // only difference in the body it replaced.
+        client.createWorldOpenFlows()
+            .createFreshLevel(
+                levelName,
+                settings(levelName),
+                new WorldOptions(FLAT_SEED, false, false),
+                WorldPresets::createTestWorldDimensions,
+                showing(client));
+    }
+
+    /** Ask the client to create and join the world. Only safe on the render thread. */
+    #[cfg(all(feature = "enabled", feature = "since-1.21.2", not(feature = "since-26.2")))]
+    private static void createWorld(Minecraft client, String levelName) {
+        client.createWorldOpenFlows()
+            .createFreshLevel(
+                levelName,
+                settings(levelName),
+                new WorldOptions(FLAT_SEED, false, false),
+                WorldPresets::createFlatWorldDimensions,
+                showing(client));
+    }
+
+    /**
+     * Ask the client to create and join the world. Only safe on the render thread.
+     *
+     * <p>Before 1.21.2 there is no {@code createFlatWorldDimensions}, so the flat preset is looked
+     * up in the world-preset registry by hand — which is what that helper does.
+     */
+    #[cfg(all(feature = "enabled", feature = "since-1.20.3", not(feature = "since-1.21.2")))]
+    private static void createWorld(Minecraft client, String levelName) {
+        client.createWorldOpenFlows()
+            .createFreshLevel(
+                levelName,
+                settings(levelName),
+                new WorldOptions(FLAT_SEED, false, false),
+                registries ->
+                    // Cast because the chain erases: `registryOrThrow` hands back a raw `Registry`
+                    // here, so `value()` is typed `Object` and the call below is not found.
+                    ((WorldPreset)
+                            registries.registryOrThrow(Registries.WORLD_PRESET)
+                                .getHolderOrThrow(WorldPresets.FLAT).value())
+                        .createWorldDimensions(),
+                showing(client));
+    }
+
+    /**
+     * Ask the client to create and join the world. Only safe on the render thread.
+     *
+     * <p>1.20.3 gave {@code createFreshLevel} a trailing screen to return to; before it, there are
+     * four arguments and no screen.
+     */
+    #[cfg(all(feature = "enabled", feature = "since-1.19.3", not(feature = "since-1.20.3")))]
+    private static void createWorld(Minecraft client, String levelName) {
+        client.createWorldOpenFlows()
+            .createFreshLevel(
+                levelName,
+                settings(levelName),
+                new WorldOptions(FLAT_SEED, false, false),
+                registries ->
+                    // Cast because the chain erases: `registryOrThrow` hands back a raw `Registry`
+                    // here, so `value()` is typed `Object` and the call below is not found.
+                    ((WorldPreset)
+                            registries.registryOrThrow(Registries.WORLD_PRESET)
+                                .getHolderOrThrow(WorldPresets.FLAT).value())
+                        .createWorldDimensions());
+    }
+
+    /**
+     * Ask the client to create and join the world. Only safe on the render thread.
+     *
+     * <p>1.19 through 1.19.2 pass the registries and a fully built {@code WorldGenSettings} rather
+     * than a seed and a function that builds the dimensions from them.
+     */
+    #[cfg(all(feature = "enabled", feature = "since-1.19", not(feature = "since-1.19.3")))]
+    private static void createWorld(Minecraft client, String levelName) {
+        RegistryAccess.Writable registries = RegistryAccess.builtinCopy();
+        client.createWorldOpenFlows()
+            .createFreshLevel(
+                levelName,
+                settings(levelName),
+                registries,
+                registries.registryOrThrow(Registry.WORLD_PRESET_REGISTRY)
+                    .getHolderOrThrow(WorldPresets.FLAT).value()
+                    .createWorldGenSettings(FLAT_SEED, false, false));
+    }
+
+    /**
+     * Ask the client to create and join the world. Only safe on the render thread.
+     *
+     * <p>Before 1.19 there is no {@code WorldOpenFlows}: the client creates the world itself. The
+     * flat preset is the *client's* {@code WorldPreset.FLAT} here, a different type from the
+     * {@code WorldPresets} registry keys that replaced it.
+     */
+    #[cfg(all(feature = "enabled", feature = "since-1.18.2", not(feature = "since-1.19")))]
+    private static void createWorld(Minecraft client, String levelName) {
+        RegistryAccess.Writable registries = RegistryAccess.builtinCopy();
+        client.createLevel(
+            levelName,
+            settings(levelName),
+            registries,
+            WorldPreset.NORMAL.create(registries, FLAT_SEED, false, false));
+    }
+
+    /**
+     * Ask the client to create and join the world. Only safe on the render thread.
+     *
+     * <p>The same call as 1.18.2, through the older registry handle. Java 8 has no {@code var}, so
+     * the local has to name one of the two types and this is the only reason the two bodies differ.
+     */
+    #[cfg(all(feature = "enabled", feature = "since-1.16", not(feature = "since-1.18.2")))]
+    private static void createWorld(Minecraft client, String levelName) {
+        RegistryAccess.RegistryHolder registries = RegistryAccess.builtin();
+        client.createLevel(
+            levelName,
+            settings(levelName),
+            registries,
+            WorldPreset.NORMAL.create(registries, FLAT_SEED, false, false));
+    }
+
+    /**
+     * Ask the client to create and join the world. Only safe on the render thread.
+     *
+     * <p>The oldest shape, and the simplest: a world type is one enum constant, there are no
+     * registries to build, and the save directory and the level name are passed separately.
+     */
+    #[cfg(all(feature = "enabled", not(feature = "since-1.16")))]
+    private static void createWorld(Minecraft client, String levelName) {
+        client.selectLevel(levelName, levelName, settings(levelName));
+    }
+
+    /**
+     * The world's settings.
+     *
+     * <p>Five shapes across the catalog. The two that are not just a parameter moving: 1.16
+     * replaced the seed and the world type with a level name and a difficulty — the seed moved into
+     * the generator settings — and 26.1 folded the difficulty, the hardcore flag and the difficulty
+     * lock into one {@code DifficultySettings} and dropped the game rules entirely.
+     */
+    #[cfg(all(feature = "enabled", feature = "since-26.1"))]
+    private static LevelSettings settings(String levelName) {
+        return new LevelSettings(
+            levelName,
+            GameType.CREATIVE,
+            new LevelSettings.DifficultySettings(Difficulty.PEACEFUL, false, false),
+            true,
+            WorldDataConfiguration.DEFAULT);
+    }
+
+    /** The world's settings. */
+    #[cfg(all(feature = "enabled", feature = "since-1.21.2", not(feature = "since-26.1")))]
+    private static LevelSettings settings(String levelName) {
+        // 1.21.2 made the game rules depend on which feature flags the data configuration turns on,
+        // so the two are built together rather than the rules being built from nothing.
+        WorldDataConfiguration configuration = WorldDataConfiguration.DEFAULT;
+        return new LevelSettings(
+            levelName,
+            GameType.CREATIVE,
+            false,
+            Difficulty.PEACEFUL,
+            true,
+            new GameRules(configuration.enabledFeatures()),
+            configuration);
+    }
+
+    /** The world's settings. */
+    #[cfg(all(feature = "enabled", feature = "since-1.19.3", not(feature = "since-1.21.2")))]
+    private static LevelSettings settings(String levelName) {
+        return new LevelSettings(
+            levelName,
+            GameType.CREATIVE,
+            false,
+            Difficulty.PEACEFUL,
+            true,
+            new GameRules(),
+            WorldDataConfiguration.DEFAULT);
+    }
+
+    /** The world's settings. */
+    #[cfg(all(feature = "enabled", feature = "since-1.16", not(feature = "since-1.19.3")))]
+    private static LevelSettings settings(String levelName) {
+        return new LevelSettings(
+            levelName,
+            GameType.CREATIVE,
+            false,
+            Difficulty.PEACEFUL,
+            true,
+            new GameRules(),
+            DataPackConfig.DEFAULT);
+    }
+
+    /** The world's settings. */
+    #[cfg(all(feature = "enabled", not(feature = "since-1.16")))]
+    private static LevelSettings settings(String levelName) {
+        return new LevelSettings(FLAT_SEED, GameType.CREATIVE, false, false, LevelType.FLAT);
     }
 
     /**
@@ -739,6 +1010,40 @@ public final class GameClient implements AutoCloseable {
     #[cfg(all(feature = "enabled", not(feature = "since-1.16")))]
     private static String label(AbstractWidget widget) {
         return widget.getMessage();
+    }
+
+    /** The overworld, from the server. */
+    #[cfg(all(feature = "enabled", feature = "since-1.16"))]
+    private static ServerLevel overworld(MinecraftServer server) {
+        return server.overworld();
+    }
+
+    /**
+     * The overworld, from the server.
+     *
+     * <p>Before 1.16 a level is asked for by dimension rather than named, and the dimension itself
+     * is a {@code DimensionType} constant rather than a registry key.
+     */
+    #[cfg(all(feature = "enabled", not(feature = "since-1.16")))]
+    private static ServerLevel overworld(MinecraftServer server) {
+        return server.getLevel(DimensionType.OVERWORLD);
+    }
+
+    /**
+     * The width of the game window, in pixels.
+     *
+     * <p>1.15 put the window behind an accessor. On 1.14.4 the field is public and there is no
+     * accessor to call.
+     */
+    #[cfg(all(feature = "enabled", feature = "since-1.15"))]
+    private static int windowWidth(Minecraft client) {
+        return client.getWindow().getWidth();
+    }
+
+    /** The width of the game window, in pixels. */
+    #[cfg(all(feature = "enabled", not(feature = "since-1.15")))]
+    private static int windowWidth(Minecraft client) {
+        return client.window.getWidth();
     }
 
     // --- plumbing ------------------------------------------------------------------------------

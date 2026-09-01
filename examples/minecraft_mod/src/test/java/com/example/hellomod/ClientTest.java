@@ -6,6 +6,7 @@ package com.example.hellomod;
 #[cfg(feature = "client-test")] import com.example.mctest.GameClient;
 #[cfg(feature = "client-test")] import net.minecraft.client.gui.screens.TitleScreen;
 #[cfg(feature = "client-test")] import net.minecraft.core.BlockPos;
+#[cfg(feature = "client-test")] import net.minecraft.server.level.ServerLevel;
 #[cfg(feature = "client-test")] import net.minecraft.world.level.block.Blocks;
 
 /**
@@ -15,7 +16,8 @@ package com.example.hellomod;
  * gives and the reason there are three tests here rather than thirty: a boot on a software
  * rasterizer costs the better part of a minute. Run them one at a time — {@code jals test
  * --features 1.21.11,client-test -j 1} — since two clients at once want two GL contexts and twice
- * the memory.
+ * the memory. Any of the SDK's 43 releases works in place of {@code 1.21.11}; the harness is what
+ * absorbs the difference, so nothing in this file names one.
  */
 #[cfg(feature = "client-test")]
 public final class ClientTest {
@@ -27,10 +29,8 @@ public final class ClientTest {
     static void bootsToTheTitleScreen() {
         try (GameClient game = GameClient.launch()) {
             assert game.screen() instanceof TitleScreen : "the boot settles on the title screen";
-            assert game.evalOnClient(client -> client.getOverlay()) == null
-                : "the resource reload has finished";
-            assert game.evalOnClient(client -> client.getWindow().getWidth()) == 854
-                : "the window is the size the harness asked for";
+            assert game.overlay() == null : "the resource reload has finished";
+            assert game.windowWidth() == 854 : "the window is the size the harness asked for";
         }
     }
 
@@ -58,23 +58,29 @@ public final class ClientTest {
     #[test]
     static void placesABlockThroughTheIntegratedServer() {
         try (GameClient game = GameClient.launch()) {
-            game.openFlatWorld("jals-test");
+            game.openWorld("jals-test");
+
+            // The overworld is read once, off the harness, because 1.16 replaced
+            // `getLevel(DimensionType.OVERWORLD)` with `overworld()` and the harness is what knows
+            // that. Reading it here rather than inside each body also keeps the bodies to one hop:
+            // `overworld()` is itself a hop onto the server thread, and a hop inside a hop would
+            // wait on the thread it is running on.
+            ServerLevel overworld = game.overworld();
 
             // Written through the server's own API, on the server's own thread.
             BlockPos direct = new BlockPos(0, 0, 0);
             game.runOnServer(
                 server ->
-                    server.overworld()
-                        .setBlockAndUpdate(direct, Blocks.DIAMOND_BLOCK.defaultBlockState()));
+                    overworld.setBlockAndUpdate(direct, Blocks.DIAMOND_BLOCK.defaultBlockState()));
             assert game.evalOnServer(
-                    server -> server.overworld().getBlockState(direct).is(Blocks.DIAMOND_BLOCK))
+                    server -> overworld.getBlockState(direct).is(Blocks.DIAMOND_BLOCK))
                 : "the block the harness placed is the block the world holds";
 
             // And the same thing asked for the way a player would, then verified the typed way.
             BlockPos commanded = new BlockPos(0, 2, 0);
             game.runCommand("setblock 0 2 0 minecraft:gold_block");
             assert game.evalOnServer(
-                    server -> server.overworld().getBlockState(commanded).is(Blocks.GOLD_BLOCK))
+                    server -> overworld.getBlockState(commanded).is(Blocks.GOLD_BLOCK))
                 : "a command the harness sent reached the world";
 
             assert game.evalOnServer(server -> server.getPlayerList().getPlayerCount()) == 1

@@ -554,7 +554,7 @@ example's **tracked** `.java` files. Tracked is what separates authored source f
 output — a build script's publication into a source root is untracked by construction — so the gate
 never scores a decompiled skeleton as something someone wrote. The fmt/lint step runs under the
 cell's own `dir`, so a project reached only through a dependency edge still needs a cell of its own
-the moment it has a tracked `.java`. Four consequences for an example:
+the moment it has a tracked `.java`. Seven consequences for an example:
 
 - A `tasks.project_jar` example needs its JAR, and a JAR is a binary, so none is committed:
   `examples/scripts/gen-vendor-jars.sh` writes the two the `task_dependency` and
@@ -572,7 +572,28 @@ the moment it has a tracked `.java`. Four consequences for an example:
   having run: analysis is always offline, and the client's runtime jars are fetched by a
   `[dev-dependencies]` entry, which `jals build` does not resolve.
 - `examples/scripts/gen-client-runtime.py` is a **generator, not a build step**: it rewrites the
-  pinned library block in `examples/minecraft_client_test/build.rhai` between two exact markers,
-  and its output is committed. CI never runs it. The release it pins is the `[features]` key in
-  that project's `jals.toml`, which six other places name and none of them owns — the consumer's
-  own `build.rhai` guard is one of them, and two CI cells rather than one.
+  `const RUNTIME` table in `examples/minecraft_client_test/build.rhai` between two exact markers,
+  and its output is committed. CI never runs it. It takes no arguments and writes **every** release
+  — the list and each release's metadata digest come from `examples/minecraft/build.rhai`'s own
+  `CATALOG`, so no release list is restated and no mutable version manifest is consulted — and it
+  refuses to write at all when it cannot read one library of one release, because a table that is
+  partly regenerated is a boot that dies in `SharedLibraryLoader` with its cause two files away.
+- The client harness supports the same 43 releases the SDK does, and **two features select it**:
+  `enabled` (is the harness wanted; routes `minecraft/client`) and a release feature (which release;
+  routes `minecraft/<version>` and names one threshold). Keeping the release out of `enabled` is
+  what makes a consumer's `jals test --features <version>` resolve the same SDK selection its
+  `jals build --features <version>` resolves — so a consumer routes `mc-client-test/enabled` from
+  its `client-test` and `mc-client-test/<version>` from each of its own version features. The
+  `#[cfg]` in `GameClient.java` names a *threshold*, never a release, and the fourteen thresholds
+  are that project's own: `examples/minecraft_mod` reads the same catalog through five of its own,
+  because it branches on different things. Two of the fourteen boundaries are invisible in a mapping
+  file, which carries no access flags — they were found by compiling, which is what the 43-cell
+  matrix is for.
+- The harness is **Java 8 source** and its `--release` follows the game's own
+  `javaVersion.majorVersion` (8/16/17/21), because it is loaded by the JVM the release runs on. That
+  is also the one place `jals build` and `jals test` want different JDKs, and `$JAVAC`/`$JAVA`
+  resolve independently so one command can say both.
+- `client harness (<release>)` is a 43-cell matrix modelled on `mod jar`, and its assertion is not
+  the exit status: a selection without `enabled` compiles a file blanked to its `package` line and
+  succeeds, so the cell checks `GameClient.class` exists. Running the build script is also what
+  verifies all 2287 pinned library digests.
