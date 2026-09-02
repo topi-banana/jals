@@ -293,12 +293,6 @@ public final class GameClient implements AutoCloseable {
     }
 
     /**
-     * The running integrated server.
-     *
-     * <p>Vanilla publishes no static accessor for a {@code MinecraftServer} — this is the one that
-     * exists, and it is the reason a test that wants to inspect a world boots a <em>client</em>.
-     */
-    /**
      * The overworld of the running integrated server.
      *
      * <p>Published so a consumer's test does not have to know that 1.16 replaced
@@ -308,6 +302,12 @@ public final class GameClient implements AutoCloseable {
         return evalOnServer(GameClient::overworld);
     }
 
+    /**
+     * The running integrated server.
+     *
+     * <p>Vanilla publishes no static accessor for a {@code MinecraftServer} — this is the one that
+     * exists, and it is the reason a test that wants to inspect a world boots a <em>client</em>.
+     */
     public MinecraftServer server() {
         MinecraftServer server = evalOnClient(Minecraft::getSingleplayerServer);
         if (server == null) {
@@ -449,7 +449,7 @@ public final class GameClient implements AutoCloseable {
      * <p>Creative, peaceful, no structures, one fixed seed: a world that generates quickly and then
      * holds still, which is what a test wants to assert against.
      *
-     * <p><b>Superflat on 40 of the 43 releases, and the default generator on 1.16–1.17.1.</b>
+     * <p><b>Superflat on 35 of the 43 releases, and the default generator on 1.16–1.17.1.</b>
      * 1.14.4–1.15.2 name flat with a {@code LevelType} constant and 1.19 onwards with a world-preset
      * registry key, but 1.16–1.18.2 keep the flat preset in a <em>private</em> field of the client's
      * own {@code WorldPreset}: the only public route is to assemble the generator, and its pieces
@@ -459,10 +459,10 @@ public final class GameClient implements AutoCloseable {
      * 1.16–1.17.1 have no such problem and take {@code WorldPreset.NORMAL}.
      *
      * <p>Nothing a test asserts depends on the terrain — a block set at a fixed position is set
-     * whatever is around it — so what those three releases cost is seconds of generation, and naming
+     * whatever is around it — so what those eight releases cost is seconds of generation, and naming
      * the method for what it always does costs nothing.
      *
-     * <p>This is where the game's API actually moved, and the eight {@code createWorld} bodies below
+     * <p>This is where the game's API actually moved, and the nine {@code createWorld} bodies below
      * are the whole of it. The public method is one method on all 43 releases because they are.
      */
     public void openWorld(String levelName) {

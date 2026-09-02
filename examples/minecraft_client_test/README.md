@@ -93,9 +93,9 @@ disagree about where the interesting lines are is why the SDK publishes no chain
 
 ### What that costs the source
 
-One file. The whole of the drift is eight short private methods and 24 bodies between them:
+One file. The whole of the drift is eight short private methods and 25 bodies between them:
 `showing`, `show`, `overlay`, `label`, `windowWidth` and `overworld` have two each, `settings` has
-four and `createWorld` has eight. Everything a consumer calls is one method on all 43, and
+four and `createWorld` has nine. Everything a consumer calls is one method on all 43, and
 everything that could be avoided was — `runCommand` dispatches through the server's own Brigadier
 dispatcher, because the three calls that takes are identical on every release, while the
 client-side spelling moved four times.
@@ -105,8 +105,8 @@ carries names and descriptors and no access flags: 1.15's window accessor and 1.
 flat preset were both found by compiling.
 
 One thing the harness does *not* hide, because hiding it would be a lie: `openWorld` opens a
-**superflat** world on 40 of the 43 releases and the **default** generator on 1.16–1.17.1. Those
-three keep the flat preset in a private field of the client's own `WorldPreset`, and the only public
+**superflat** world on 35 of the 43 releases and the **default** generator on 1.16–1.17.1. Those
+eight keep the flat preset in a private field of the client's own `WorldPreset`, and the only public
 route to it is to assemble the generator out of a `FlatLevelGeneratorSettings`, a `FlatLevelSource`
 and `DimensionType.defaultDimensions` whose spellings differ again on each of 1.16–1.17.1,
 1.18–1.18.1 and 1.18.2. The 1.18 spellings *are* assembled, because there a normal world is not just
