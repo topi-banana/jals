@@ -591,8 +591,10 @@ the moment it has a tracked `.java`. Seven consequences for an example:
   does. `client` is therefore on the dependency edge (`features = ["client"]`) rather than in a
   feature, and a consumer routes only `mc-client-test/<version>` from each of its own version
   features. The cost is stated rather than hidden: `jals test --features <version>` pulls the client
-  jar and the ~60 runtime libraries even without the consumer's own `client-test`, so the test-side
-  classpath is wider than the build-side one. `build.rhai` rejects a selection naming no release,
+  jar and the ~60 runtime libraries even without the consumer's own `client-test`, so a consumer
+  whose defaults route `minecraft/server` compiles its tests against the SDK's **merged** jar where
+  its build used the server one — a second fetch and a second whole-game remap, which is why all
+  three `minecraft_mod` cells now run `jals test` before their offline lint. `build.rhai` rejects a selection naming no release,
   because the SDK falls back to its newest while every threshold stays off. The `#[cfg]` in
   `GameClient.java` names a *threshold*, never a release, and the fourteen thresholds are that
   project's own: `examples/minecraft_mod` reads the same catalog through five of its own, because it

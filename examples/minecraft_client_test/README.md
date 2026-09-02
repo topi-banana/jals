@@ -61,10 +61,13 @@ and nothing that produces output does. A consumer that names this project in its
 its tests boot a client; asking again on every command line would be the same statement written
 twice, and two copies of a statement are a pair that eventually disagrees.
 
-The price is worth stating rather than burying: `jals test --features 1.20.1` resolves the client
+The price is worth stating rather than burying. `jals test --features 1.20.1` resolves the client
 jar and the ~60 runtime libraries whether or not the consumer's own `client-test` is named, so the
-test-side classpath is wider than `jals build --features 1.20.1`'s. `jals build` is unaffected —
-it never resolves a `[dev-dependencies]` entry at all.
+test-side classpath is wider than `jals build --features 1.20.1`'s — and *wider* understates it: a
+consumer whose own defaults route `minecraft/server` now hands the SDK a node carrying both sides,
+and the SDK answers that with the **merged** jar. The two commands compile against different game
+jars, at the cost of a second fetch and a second whole-game remap. `jals build` itself is
+unaffected: it never resolves a `[dev-dependencies]` entry at all.
 
 ### The threshold chain
 

@@ -558,6 +558,12 @@ jobs:
           # is what says the empty selection is the expected one here — `client-test` is off, so
           # `src/test/java` is blanked — while the compile it does perform is worth having on its
           # own: it is the harness building *inside a consumer*, at the consumer's own `--release`.
+          #
+          # It is not a cheap step, and the reason is worth naming: the harness's edge routes
+          # `minecraft/client` while this project's own defaults route `minecraft/server`, and the
+          # SDK answers a node carrying both with the *merged* jar. So the test step is a second
+          # game-jar fetch and a second whole-game remap on top of what the build step already did
+          # — the same cost this file cites as the reason the other 41 releases are not cells.
           - name: minecraft_mod (1.20.1)
             dir: examples/minecraft_mod
             features: --features 1.20.1
