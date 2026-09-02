@@ -515,3 +515,101 @@ fn merge_drops_both_sides_signatures_and_stale_digests() {
         assert_eq!(manifest, "Manifest-Version: 1.0\r\n\r\n");
     });
 }
+
+/// One manifest comes out of a merge, and it comes out first.
+///
+/// Both halves are what `jar.rs` states about the jars this crate writes, and the merge is the
+/// second writer over the same zip writer. The manifest a base does not have is taken from the
+/// overlay-only tail, which appends — and `JarInputStream::getManifest` reads none but the first,
+/// so a streaming reader of such a jar sees no `Multi-Release` and none of the attributes with it.
+#[test]
+fn a_merged_jar_carries_one_manifest_and_carries_it_first() {
+    block_on_inline(async {
+        let base_bytes = write_jar(&[("a.txt", b"base-a"), ("Box.class", box_class())]);
+        let overlay_bytes = write_jar(&[
+            ("client/Only.class", b"unrelated".as_slice()),
+            (
+                "META-INF/MANIFEST.MF",
+                b"Manifest-Version: 1.0\r\nMulti-Release: true\r\n\r\n".as_slice(),
+            ),
+        ]);
+
+        let mut cache = ArtifactCache::new(MemoryCache::default());
+        let base = publish(&mut cache, b"base", &base_bytes).await;
+        let overlay = publish(&mut cache, b"overlay", &overlay_bytes).await;
+        let merged = JarMerge::merge(&Exec::inline(), &mut cache, &base, &overlay)
+            .await
+            .expect("merge succeeds");
+        let bytes = cache.lookup(&merged).await.unwrap().unwrap();
+
+        let names: Vec<String> = zip::ZipArchive::new(Cursor::new(bytes.clone()))
+            .expect("merged jar is a zip")
+            .file_names()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(
+            names.first().map(String::as_str),
+            Some("META-INF/MANIFEST.MF"),
+            "the manifest an overlay contributes is still the first member: {names:?}"
+        );
+        // And the post-pass still reaches it: `Multi-Release` is applied to the member the walk
+        // left holding the manifest, which the hoist above has just moved.
+        let manifest = String::from_utf8(member_bytes(&bytes, "META-INF/MANIFEST.MF"))
+            .expect("the manifest is text");
+        assert!(
+            manifest.contains("Multi-Release: true"),
+            "the surviving manifest keeps the attribute: {manifest:?}"
+        );
+    });
+}
+
+/// A conflict the case-insensitive manifest predicate sees is one the union has to resolve.
+///
+/// `is_manifest_member` matches either spelling on purpose, so keying the conflict on the exact
+/// path would let a base `META-INF/MANIFEST.MF` and an overlay `META-INF/manifest.mf` both through
+/// — two manifests in one archive, with the *base*'s winning whatever a reader resolves to, which
+/// is the documented "overlay wins on conflicts" rule backwards.
+#[test]
+fn a_manifest_spelled_differently_on_the_two_sides_is_still_one_conflict() {
+    block_on_inline(async {
+        let base_bytes = write_jar(&[
+            (
+                "META-INF/MANIFEST.MF",
+                b"Manifest-Version: 1.0\r\nMain-Class: base.Main\r\n\r\n".as_slice(),
+            ),
+            ("Box.class", box_class()),
+        ]);
+        let overlay_bytes = write_jar(&[(
+            "META-INF/manifest.mf",
+            b"Manifest-Version: 1.0\r\nMain-Class: overlay.Main\r\n\r\n".as_slice(),
+        )]);
+
+        let mut cache = ArtifactCache::new(MemoryCache::default());
+        let base = publish(&mut cache, b"base", &base_bytes).await;
+        let overlay = publish(&mut cache, b"overlay", &overlay_bytes).await;
+        let merged = JarMerge::merge(&Exec::inline(), &mut cache, &base, &overlay)
+            .await
+            .expect("merge succeeds");
+        let bytes = cache.lookup(&merged).await.unwrap().unwrap();
+
+        let names: Vec<String> = zip::ZipArchive::new(Cursor::new(bytes.clone()))
+            .expect("merged jar is a zip")
+            .file_names()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.eq_ignore_ascii_case("META-INF/MANIFEST.MF"))
+                .count(),
+            1,
+            "one manifest, however the two sides spelled it: {names:?}"
+        );
+        let manifest = String::from_utf8(member_bytes(&bytes, "META-INF/MANIFEST.MF"))
+            .expect("the manifest is text");
+        assert_eq!(
+            manifest, "Manifest-Version: 1.0\r\nMain-Class: overlay.Main\r\n\r\n",
+            "the overlay's manifest is the one that survives"
+        );
+    });
+}

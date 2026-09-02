@@ -52,12 +52,24 @@ const JAR_LIMITS: SourceTreeLimits = SourceTreeLimits {
 /// hierarchy — say what went in and nothing about what this crate does with it, so a change to the
 /// transform itself would be served the previous transform's jar out of the cache. Bump this
 /// whenever the bytes written for an otherwise unchanged input change.
-const REMAP_OUTPUT_VERSION: u32 = 1;
+///
+/// 2: everything the `META-INF/` pass has done to a remapped jar. The signature block goes and the
+/// manifest's per-entry digests go with it — which is the change this constant should have moved
+/// for when that landed, and did not: `jals-project`'s `TASK_EXECUTION_VERSION` gates the task
+/// above this and not the lookup below, so a warm cache kept handing back the signed jar a JVM
+/// refuses. And, with it: a `META-INF/SIG-*` member whose extension is not the JDK's one to three
+/// alphanumerics is a resource and is kept, a rewritten `Main-Class` carries its own line's
+/// terminator rather than an LF, and a manifest with no digest in it comes back byte-identical
+/// rather than re-terminated and re-closed.
+const REMAP_OUTPUT_VERSION: u32 = 2;
 
 /// The same, for what a merge writes.
 ///
 /// 2: a merged manifest carries `Multi-Release` when either input's did.
-const MERGE_OUTPUT_VERSION: u32 = 2;
+///
+/// 3: the two sides' manifests are one conflict however either spells the name, the survivor is
+/// written first, and the digest strip leaves a manifest that has no digests in it alone.
+const MERGE_OUTPUT_VERSION: u32 = 3;
 
 /// Obfuscated class-hierarchy index used to walk supers/interfaces for inherited member lookups.
 #[derive(Debug, Default)]
@@ -472,6 +484,14 @@ impl JarMerge {
     /// union carries members the signer never saw, and a JVM reading a signed archive that mixes
     /// signed and unsigned classes in one package refuses it. The half of the claim that lives in
     /// the manifest goes with it.
+    ///
+    /// The two sides' manifests are **one** conflict however either spells the name — the path
+    /// collision a case-insensitive predicate recognises is not one an exact-keyed map would — and
+    /// whichever survives is written **first**, the rule `jar.rs` states for the jars it writes and
+    /// that this second writer over the same zip writer has to keep too. Neither claim reaches
+    /// further than that: a single input carrying two manifests of its own is two members here as
+    /// it was there, since deduplicating *within* a side would be this function inventing a
+    /// conflict its inputs did not have.
     pub async fn merge<C: CacheBackend>(
         exec: &Exec,
         cache: &mut ArtifactCache<C>,
@@ -502,6 +522,12 @@ impl JarMerge {
         let mut multi_release = false;
         let mut overlay_map: BTreeMap<String, Vec<u8>> = BTreeMap::new();
         let mut overlay_order: Vec<String> = Vec::new();
+        // Which member the overlay's manifest is, by name. Remembered rather than looked up again
+        // by the base's spelling: `is_manifest_member` matches case-insensitively on purpose, so a
+        // base `META-INF/MANIFEST.MF` and an overlay `META-INF/manifest.mf` would never collide in
+        // a map keyed by the exact name, and the union would carry two manifests — with the base's
+        // winning, which is the documented conflict rule backwards.
+        let mut overlay_manifest: Option<String> = None;
         for (name, outcome) in overlay_members {
             if helpers::is_signature_member(&name) {
                 continue;
@@ -511,6 +537,7 @@ impl JarMerge {
             if helpers::is_manifest_member(&name) {
                 bytes = helpers::strip_manifest_digests(&bytes);
                 multi_release |= helpers::declares_multi_release(&bytes);
+                overlay_manifest.get_or_insert_with(|| name.clone());
             }
             if overlay_map.insert(name.clone(), bytes).is_none() {
                 overlay_order.push(name);
@@ -524,18 +551,33 @@ impl JarMerge {
             if helpers::is_signature_member(&name) {
                 continue;
             }
-            let bytes = if let Some(overlay_bytes) = overlay_map.remove(&name) {
-                if helpers::is_manifest_member(&name)
-                    && let Ok(shadowed) = outcome
-                    && helpers::declares_multi_release(&shadowed)
-                {
-                    multi_release = true;
+            let is_manifest = helpers::is_manifest_member(&name);
+            // The manifest is matched to the overlay's manifest however either side spells it;
+            // every other member is matched by exact path, as a zip's own identity is.
+            let shadowing = if is_manifest {
+                overlay_manifest
+                    .as_ref()
+                    .and_then(|manifest| overlay_map.remove(manifest))
+            } else {
+                overlay_map.remove(&name)
+            };
+            let bytes = if let Some(overlay_bytes) = shadowing {
+                if is_manifest {
+                    // Read even though the overlay's copy is the one that survives: the base
+                    // manifest is the only place the base side can say `Multi-Release`, and a
+                    // member that could not be read is not a member that said no. Fatal for the
+                    // same reason it is fatal in the arm below — an I/O failure is not missing
+                    // data, and answering it as "no" here is the wrong-variant-at-run-time bug
+                    // this whole block exists to prevent.
+                    let shadowed = outcome
+                        .map_err(|error| format!("failed to read base member `{name}`: {error}"))?;
+                    multi_release |= helpers::declares_multi_release(&shadowed);
                 }
                 overlay_bytes
             } else {
                 let bytes = outcome
                     .map_err(|error| format!("failed to read base member `{name}`: {error}"))?;
-                if helpers::is_manifest_member(&name) {
+                if is_manifest {
                     helpers::strip_manifest_digests(&bytes)
                 } else {
                     bytes
@@ -548,14 +590,27 @@ impl JarMerge {
                 out_members.push(WriteMember { name, bytes });
             }
         }
+        // The manifest first, whatever order the walk left it in — the rule `jar.rs` states for
+        // the jars it writes, and the second writer over `StoredZip` has to keep it too. A base
+        // with no manifest takes the overlay's out of the tail loop above, which would put it
+        // last, and `JarInputStream::getManifest` reads none but the first: a streaming reader
+        // would then see no `Multi-Release`, which is the one attribute this merge adds.
+        if let Some(position) = out_members
+            .iter()
+            .position(|member| helpers::is_manifest_member(&member.name))
+            && position != 0
+        {
+            out_members[..=position].rotate_right(1);
+        }
         // Applied after the union is assembled rather than while it is: which manifest survives is
-        // decided by the walk above, and this has to reach whichever one did.
-        if multi_release {
-            for member in &mut out_members {
-                if helpers::is_manifest_member(&member.name) {
-                    member.bytes = helpers::with_multi_release(&member.bytes);
-                }
-            }
+        // decided by the walk above, and this has to reach whichever one did — which the hoist has
+        // just put first, so there is no second scan and no second manifest to disagree with.
+        if multi_release
+            && let Some(manifest) = out_members
+                .first_mut()
+                .filter(|member| helpers::is_manifest_member(&member.name))
+        {
+            manifest.bytes = helpers::with_multi_release(&manifest.bytes);
         }
 
         let jar_bytes = StoredZip::write(&out_members)?;
@@ -599,9 +654,14 @@ mod helpers {
     ///
     /// The `SIG-` prefix is the second form the JDK's own predicate
     /// (`sun.security.util.SignatureFileVerifier::isSigningRelated`) recognises, with or without an
-    /// extension. Matching what the JVM matches is the whole point: a block this misses is a block
-    /// that keeps the archive "signed" while the manifest half of the claim has already been
-    /// stripped below — the half-a-claim state the module doc calls worse than keeping neither.
+    /// extension. Matching what the JVM matches is the whole point, and it cuts both ways: a block
+    /// this misses keeps the archive "signed" while the manifest half of the claim has already been
+    /// stripped below — the half-a-claim state the module doc calls worse than keeping neither —
+    /// and a member this matches that the JVM would not is an ordinary resource deleted from a jar
+    /// that still needs it. So the `SIG-` extension rule is the JDK's: absent, or one to three
+    /// ASCII alphanumerics. `META-INF/SIG-config.json` is a resource, and `META-INF/SIG-Foo.class`
+    /// is a class — which this predicate is asked about *before* the remapped bytes are collected,
+    /// so matching it would have thrown away a class this pass had already rewritten.
     pub(super) fn is_signature_member(name: &str) -> bool {
         let Some(base) = name.strip_prefix("META-INF/") else {
             return false;
@@ -616,7 +676,10 @@ mod helpers {
             .first_chunk::<4>()
             .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"SIG-"))
         {
-            return true;
+            return base.rsplit_once('.').is_none_or(|(_, extension)| {
+                (1..=3).contains(&extension.len())
+                    && extension.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            });
         }
         ["sf", "dsa", "rsa", "ec"]
             .iter()
@@ -704,6 +767,19 @@ mod helpers {
         let Ok(text) = core::str::from_utf8(bytes) else {
             return bytes.to_vec();
         };
+        // Nothing to strip is the common case — every unsigned jar, and the jars this crate writes
+        // itself — and the rebuild below is not the identity on one: it re-terminates every line
+        // with the detected terminator and closes every section, so a manifest with no digest in it
+        // would come back changed in ways nothing asked for. Answered first, over the same lines
+        // and the same predicate the pass below uses, so the two cannot disagree about what a
+        // digest is.
+        let has_digest = text.split('\n').any(|raw| {
+            let line = raw.strip_suffix('\r').unwrap_or(raw);
+            !line.starts_with(' ') && is_digest_attribute(line)
+        });
+        if !has_digest {
+            return bytes.to_vec();
+        }
         // A manifest is written with CRLF. Detected rather than assumed, so a hand-written one that
         // is not stays the way its author left it.
         let terminator = if text.contains("\r\n") { "\r\n" } else { "\n" };
@@ -821,7 +897,12 @@ mod helpers {
                 let internal = dotted.replace('.', "/");
                 if let Some(official) = mappings.remap_class(&internal) {
                     let rewritten = official.replace('/', ".");
-                    let _ = writeln!(out, "Main-Class: {rewritten}");
+                    // The line's own terminator, not `writeln!`'s: a manifest is CRLF and writing
+                    // one LF line into the middle of one leaves a file whose terminators disagree.
+                    // `trimmed` is a prefix of `line`, so the remainder is exactly what was there —
+                    // including nothing, for a final line the archive left unterminated.
+                    let terminator = &line[trimmed.len()..];
+                    let _ = write!(out, "Main-Class: {rewritten}{terminator}");
                     continue;
                 }
             }
@@ -1824,6 +1905,14 @@ mod tests {
         // The JDK's own predicate reads this spelling as signing-related too, extension or not.
         assert!(is_signature_member("META-INF/SIG-BC"));
         assert!(is_signature_member("META-INF/sig-bc.rsa"));
+
+        // …but only with the extension the JDK accepts: absent, or one to three alphanumerics.
+        // Matching more than the JVM does deletes a member the archive still needs — and for a
+        // `.class` it deletes one this pass had already remapped, since the predicate is asked
+        // before the remapped bytes are collected.
+        assert!(!is_signature_member("META-INF/SIG-config.json"));
+        assert!(!is_signature_member("META-INF/SIG-Foo.class"));
+        assert!(!is_signature_member("META-INF/SIG-x.a_b"));
 
         assert!(!is_signature_member("META-INF/MANIFEST.MF"));
         assert!(!is_signature_member("META-INF/SIGNATURES.TXT"));
