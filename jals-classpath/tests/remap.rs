@@ -563,6 +563,72 @@ fn a_merged_jar_carries_one_manifest_and_carries_it_first() {
     });
 }
 
+/// The losing manifest's `Multi-Release` survives the merge, which is the whole reason the merge
+/// reads it at all.
+///
+/// Only one `META-INF/MANIFEST.MF` can win a path conflict and the overlay's does — but the
+/// attribute is not a claim about the manifest's own side. It says the archive's
+/// `META-INF/versions/<n>/` entries are live, and a union carries both sides', so it is re-declared
+/// whenever *either* input declared it. The other merge tests all put the attribute on the
+/// surviving side, where copying the overlay's bytes verbatim satisfies them; this is the case the
+/// post-pass exists for, and the one that shipped broken. Getting it wrong is invisible in a build:
+/// 1.17's flat server jar bundles a log4j-api whose `StackLocator` has a Java 9 body under
+/// `versions/9/`, and without the attribute the client loads the Java 8 one and dies in the first
+/// `LogManager.getLogger()`.
+#[test]
+fn a_multi_release_base_re_declares_the_attribute_on_the_surviving_manifest() {
+    block_on_inline(async {
+        let base_bytes = write_jar(&[
+            (
+                "META-INF/MANIFEST.MF",
+                b"Manifest-Version: 1.0\r\nMulti-Release: true\r\n\r\n".as_slice(),
+            ),
+            (
+                "META-INF/versions/9/only/Nine.class",
+                b"versioned".as_slice(),
+            ),
+            ("Box.class", box_class()),
+        ]);
+        // The overlay wins the manifest and says nothing about versioned entries.
+        let overlay_bytes = write_jar(&[(
+            "META-INF/MANIFEST.MF",
+            b"Manifest-Version: 1.0\r\nCreated-By: overlay\r\n\r\n".as_slice(),
+        )]);
+
+        let mut cache = ArtifactCache::new(MemoryCache::default());
+        let base = publish(&mut cache, b"base", &base_bytes).await;
+        let overlay = publish(&mut cache, b"overlay", &overlay_bytes).await;
+        let merged = JarMerge::merge(&Exec::inline(), &mut cache, &base, &overlay)
+            .await
+            .expect("merge succeeds");
+        let bytes = cache.lookup(&merged).await.unwrap().unwrap();
+
+        let manifest = String::from_utf8(member_bytes(&bytes, "META-INF/MANIFEST.MF"))
+            .expect("the manifest is text");
+        assert!(
+            manifest.contains("Multi-Release: true"),
+            "the base's declaration reaches the surviving manifest: {manifest:?}"
+        );
+        // The overlay is still the manifest that won; only the one archive-describing attribute
+        // crossed.
+        assert!(
+            manifest.contains("Created-By: overlay"),
+            "the overlay's manifest is the one that survived: {manifest:?}"
+        );
+        let names: Vec<String> = zip::ZipArchive::new(Cursor::new(bytes))
+            .expect("merged jar is a zip")
+            .file_names()
+            .map(str::to_owned)
+            .collect();
+        assert!(
+            names
+                .iter()
+                .any(|name| name == "META-INF/versions/9/only/Nine.class"),
+            "the versioned entries the attribute speaks for are in the union: {names:?}"
+        );
+    });
+}
+
 /// A conflict the case-insensitive manifest predicate sees is one the union has to resolve.
 ///
 /// `is_manifest_member` matches either spelling on purpose, so keying the conflict on the exact
