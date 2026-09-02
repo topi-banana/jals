@@ -784,14 +784,30 @@ public final class GameClient implements AutoCloseable {
      * and takes the watchdog with it before the sleep is up. Armed by {@link #close()} on the way
      * out of a test, and by {@link #launch()} when a boot failed before there was anything to
      * close.
+     *
+     * <p>The wait runs to a deadline rather than to the first interrupt. An interrupt that ended it
+     * early would halt the JVM before the generated harness had printed its sentinel, and {@code
+     * jals test} reads the verdict from that line rather than from the exit status — so a passing
+     * test would come back a failure with nothing in the capture to explain it. The flag is
+     * restored once at the end rather than inside the loop, where restoring it would make the next
+     * {@code sleep} throw straight away and spin the remaining seconds off.
      */
     private static void armHalt() {
         Thread watchdog =
             new Thread(
                 () -> {
-                    try {
-                        Thread.sleep(HALT_AFTER.toMillis());
-                    } catch (InterruptedException _interrupted) {
+                    long deadline = System.nanoTime() + HALT_AFTER.toNanos();
+                    boolean wasInterrupted = false;
+                    long remaining = deadline - System.nanoTime();
+                    while (remaining > 0L) {
+                        try {
+                            Thread.sleep(Math.max(1L, remaining / 1_000_000L));
+                        } catch (InterruptedException _interrupted) {
+                            wasInterrupted = true;
+                        }
+                        remaining = deadline - System.nanoTime();
+                    }
+                    if (wasInterrupted) {
                         Thread.currentThread().interrupt();
                     }
                     Runtime.getRuntime().halt(0);
