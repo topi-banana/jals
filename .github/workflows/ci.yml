@@ -580,12 +580,19 @@ jobs:
           # the client and its integrated server. One release, because the library set is pinned per
           # release; `-j 1`, because each test boots its own client and two at once want two GL
           # contexts.
+          #
+          # `--timeout` is the outer bound and has to sit *above* the harness's own, not below it:
+          # `jals test`'s deadline kills the JVM outright, while `GameClient`'s deadlines are what
+          # print where the boot was waiting and append the game thread's stack. Its worst case is
+          # two `BOOT_DEADLINE`s through `launch()` plus three `WORLD_DEADLINE`s through
+          # `openWorld()` — 1500s — so a shorter kill is the one that throws away the only account
+          # of a hung boot. It only bites on a hang: the three tests take about two minutes.
           - name: minecraft_mod (client)
             dir: examples/minecraft_mod
             features: --features 1.21.11,client-test
             test: true
             headless_gl: true
-            test_flags: -j 1 --timeout 600
+            test_flags: -j 1 --timeout 1800
     steps:
       - parallel:
           - uses: actions/checkout@v7
@@ -618,8 +625,15 @@ jobs:
       # `xvfb` supplies the display GLFW opens a window on, and `libgl1-mesa-dri` supplies llvmpipe,
       # the software rasterizer `LIBGL_ALWAYS_SOFTWARE` selects below. Neither is on the runner
       # image, and only the cell that boots a client has any use for them.
+      #
+      # Beside the binary build rather than ahead of it, for the reason the vendor JARs are: apt
+      # shares nothing with cargo but the CPU and the network, and the Test step below is the first
+      # thing that reads either package. It is joined there rather than left unwaited, so a failed
+      # install is still a failed cell.
       - name: Install a headless OpenGL stack
+        id: headless-gl
         if: ${{ matrix.example.headless_gl }}
+        background: true
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends xvfb libgl1-mesa-dri libglx-mesa0
@@ -661,7 +675,9 @@ jobs:
       # test, which is exactly what the cell is for — and, for the two `minecraft_mod` cells that
       # select none, it is also the only command that resolves `[dev-dependencies]` and so the only
       # one that leaves the offline lint below anything to read.
-      #
+      - name: Wait for the headless OpenGL stack
+        if: ${{ matrix.example.headless_gl }}
+        wait: headless-gl
       # The two `LIBGL_*` variables are set for every cell and read by none but the client one:
       # they only mean anything to a Mesa that a GL context is being asked of.
       - name: Test
@@ -678,11 +694,14 @@ jobs:
         if: ${{ failure() && matrix.example.headless_gl }}
         uses: actions/upload-artifact@v7
         with:
-          name: minecraft-mod-client-run
+          # The cell's own directory and its own name, as every other step in this job takes them:
+          # a second `headless_gl` cell would otherwise upload the first one's paths under a name
+          # the two collide on, and lose the logs in the one place they are the whole account.
+          name: client-run-${{ matrix.example.name }}
           path: |
-            examples/minecraft_mod/target/jals/build/mc-client/**/logs/**
-            examples/minecraft_mod/target/jals/build/mc-client/**/crash-reports/**
-            examples/minecraft_mod/target/jals/build/test-run/**
+            ${{ matrix.example.dir }}/target/jals/build/mc-client/**/logs/**
+            ${{ matrix.example.dir }}/target/jals/build/mc-client/**/crash-reports/**
+            ${{ matrix.example.dir }}/target/jals/build/test-run/**
           if-no-files-found: ignore
       # After the build *and* the test, not before them: an example whose dependency fetches
       # (`minecraft_mod`) can only be analysed once that fetch has landed in the verified cache,
