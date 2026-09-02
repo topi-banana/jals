@@ -401,7 +401,7 @@ impl MemoryProjectPlan {
         (inputs, lowered.source_roots)
     }
 
-    /// Lower `manifest`'s `[build] source_dirs` and `[build] classpath` against one immutable view.
+    /// Lower `manifest`'s source roots and `[build] classpath` against one immutable view.
     ///
     /// `[dependencies]` are deliberately *not* lowered, and this is the only place that decides so:
     /// a caller assembling a dependency graph projects each declared dependency as a graph node, so
@@ -420,6 +420,23 @@ impl MemoryProjectPlan {
         };
 
         for source in &manifest.build.source_dirs {
+            match Self::project_relative(source) {
+                Ok(path) => result.source_roots.push(DirKey::new(path)),
+                Err(message) => result.warn_path(source, message),
+            }
+        }
+        // `[test] source-dirs` too, and unconditionally, exactly as the native sibling lowers them
+        // and `NativeProjectPlan::snapshot_scopes` captures them. These roots are the *shape of the
+        // project* an index walks, and scoping them to what one invocation compiles would make the
+        // same project read differently under `jals build` and `jals test`. Nothing on a compile
+        // path reads this list — a compiler is handed the sources a host gathers per lowering — so
+        // what it decides is only which files an analysis host indexes.
+        //
+        // The two lowerings agreeing is the point: they are the only two, they are handed the same
+        // manifest, and a host picks between them by whether it has host paths, never by what it
+        // wants the project to look like. One of them answering "which roots does this project
+        // have?" differently is a project that changes shape when it moves in-memory.
+        for source in &manifest.test.source_dirs {
             match Self::project_relative(source) {
                 Ok(path) => result.source_roots.push(DirKey::new(path)),
                 Err(message) => result.warn_path(source, message),
@@ -583,6 +600,10 @@ mod tests {
         );
     }
 
+    /// Both source tables, because an index walks the project's *shape* and a `[test]` root is
+    /// part of it whatever this invocation compiles — and because the native sibling lowers them
+    /// too. Two lowerings of one manifest that disagree about which roots exist is a project that
+    /// changes shape when it moves in-memory.
     #[test]
     fn source_dirs_lower_to_sorted_deduplicated_roots() {
         let storage = MemoryStorage::memory(CodeTree::default());
@@ -593,6 +614,7 @@ mod tests {
             "generated".to_owned(),
             "../outside".to_owned(),
         ];
+        manifest.test.source_dirs = vec!["src/test/java".to_owned(), "generated".to_owned()];
 
         let lowered = MemoryProjectPlan::from_manifest(&manifest, &storage.view());
 
@@ -601,8 +623,9 @@ mod tests {
             vec![
                 DirKey::parse("generated").expect("portable key"),
                 DirKey::parse("src/main/java").expect("portable key"),
+                DirKey::parse("src/test/java").expect("portable key"),
             ],
-            "`.` normalizes to the same root and duplicates collapse"
+            "`.` normalizes to the same root and duplicates collapse, across both tables"
         );
         assert_eq!(lowered.warnings.len(), 1);
         assert!(

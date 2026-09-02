@@ -140,11 +140,15 @@ filesystem reads into portable interfaces.
     the pair it is read through *inside* its `MappingFormat` variant, so the selection reaches the
     remap's provenance fold with it: `official→named` and `official→intermediary` over one tiny
     file are two jars.
-  - A manifest's `[build]` section is lowered into `ProjectInputPlan` by exactly two siblings —
-    portable `MemoryProjectPlan` and host-path `NativeProjectPlan` — and there must never be a
-    third: a host that lowers `[build] classpath` itself is a second rule that will drift.
-    `MemoryProjectPlan` has no external fallback because an in-memory project has one address
-    space; an entry reaching outside it is a warning, not a host path.
+  - A manifest is lowered into `ProjectInputPlan` by exactly two siblings — portable
+    `MemoryProjectPlan` and host-path `NativeProjectPlan` — and there must never be a third: a host
+    that lowers `[build] classpath` itself is a second rule that will drift. They differ only where
+    a host path forces it: `MemoryProjectPlan` has no external fallback, because an in-memory
+    project has one address space and an entry reaching outside it is a warning rather than a host
+    path. **Everything else they must answer the same way**, `[test] source-dirs` included — a
+    source root is the *shape of the project* an index walks and is captured unconditionally, so a
+    sibling that lowered it and one that did not would be one project changing shape when it moves
+    in-memory. What a command compiles is decided where its sources are gathered, never here.
   - A `Warning` carries its subject in `origin`, not in `message` — several messages name no
     location at all — so a host reports one by rendering the whole `Warning` through its `Display`,
     never `warning.message` alone.
