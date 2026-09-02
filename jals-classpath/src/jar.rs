@@ -2,9 +2,15 @@
 //!
 //! A jar is a zip whose first member is `META-INF/MANIFEST.MF`. The zip half is already here and
 //! already hardened — [`StoredZip`] computes crc32s, zeroes the DOS timestamps so identical inputs
-//! produce identical bytes, and refuses unsafe or duplicate member names — so this module owns only
-//! the manifest: its required first attribute, its CRLF lines, its 72-byte line cap, and the blank
-//! line that terminates the main section.
+//! produce identical bytes, and refuses unsafe or duplicate member names — and the manifest half is
+//! [`crate::manifest`]'s, so what this module owns is the *assembly*: which member leads, and that
+//! an entry cannot supply a manifest the packager writes itself.
+//!
+//! It is also the crate's only route to the zip writer. [`JarPackage::write`] packages a compile's
+//! output; [`JarPackage::write_members`] serializes members somebody else assembled — a remap's
+//! rewritten archive, a merge's union — and both put the manifest first, because
+//! `JarInputStream::getManifest` reads the first member and no other. A second caller reaching
+//! `StoredZip` directly is a second place that has to remember that.
 //!
 //! Portable like the rest of `archive`: an in-browser compile packages its own output with no host
 //! archiver involved.
@@ -16,28 +22,13 @@ use alloc::vec::Vec;
 
 use jals_storage::RelativePath;
 
+use crate::manifest::{Manifest, MetaInf};
 use crate::zip::{StoredZip, WriteMember};
-
-/// The manifest's physical line cap, in bytes, counted here *including* the `\r\n` terminator.
-///
-/// The jar specification caps a line at 72 bytes and is read both ways on whether the terminator
-/// counts against it. Counting it is the strict reading, so a manifest this writer produces is
-/// legal under either.
-pub(crate) const MAX_LINE: usize = 72;
-
-/// Manifest lines end with CRLF, not the host's line ending — the format is not text-mode.
-const EOL: &str = "\r\n";
 
 /// Namespace for packaging compiled classes into a jar.
 pub struct JarPackage;
 
 impl JarPackage {
-    /// The manifest member every jar carries, and the first member this writer emits.
-    ///
-    /// Private: a caller never supplies this path — it is generated — and the one place a caller
-    /// could collide with it names it in the error message instead.
-    const MANIFEST_PATH: &'static str = "META-INF/MANIFEST.MF";
-
     /// Package compiled class files into a deterministic, stored-only jar.
     ///
     /// `entries` are `(project-relative path, bytes)` — the shape a compile backend hands its
@@ -46,30 +37,31 @@ impl JarPackage {
     /// classes, and `main_class`, when given, becomes its `Main-Class`. Without one the result is a
     /// library jar, which is the honest output for a project that declares no entry point.
     ///
-    /// No `Created-By`: naming the writing tool's version would change the bytes on every release,
-    /// and the archive is otherwise reproducible from its inputs alone.
-    ///
     /// # Errors
-    /// Returns a message when an entry claims `META-INF/MANIFEST.MF`, and passes through the
-    /// writer's own refusals — an unsafe member name, two entries sharing a path, or an archive
-    /// beyond what the stored encoding's 32-bit fields can describe.
+    /// Returns a message when an entry claims the manifest's name, and passes through the writer's
+    /// own refusals — an unsafe member name, two entries sharing a path, or an archive beyond what
+    /// the stored encoding's 32-bit fields can describe.
     pub fn write(
         entries: &[(RelativePath, Vec<u8>)],
         main_class: Option<&str>,
     ) -> Result<Vec<u8>, String> {
         let mut members = Vec::with_capacity(entries.len() + 1);
         members.push(WriteMember {
-            name: Self::MANIFEST_PATH.to_owned(),
-            bytes: Self::main_section(main_class).into_bytes(),
+            name: MetaInf::MANIFEST_PATH.to_owned(),
+            bytes: Manifest::packaged(main_class),
         });
         for (path, bytes) in entries {
             let name = path.to_string();
             // Caught here rather than left to the writer's duplicate check so the message names the
-            // actual cause: the manifest is generated, not something a caller supplies.
-            if name == Self::MANIFEST_PATH {
+            // actual cause: the manifest is generated, not something a caller supplies. Recognised
+            // the way a JVM recognises it, so an entry spelling it `meta-inf/manifest.mf` is the
+            // same conflict — the writer would take it as a distinct path, and `JarFile` would then
+            // have two manifests to choose between.
+            if MetaInf::is_manifest(&name) {
                 return Err(format!(
-                    "`{}` is written by the packager and cannot also be a packaged entry",
-                    Self::MANIFEST_PATH
+                    "`{name}` is the jar manifest, which the packager writes itself \
+                     (`{}`) and an entry cannot also supply",
+                    MetaInf::MANIFEST_PATH
                 ));
             }
             members.push(WriteMember {
@@ -77,63 +69,34 @@ impl JarPackage {
                 bytes: bytes.clone(),
             });
         }
+        Self::write_members(members)
+    }
+
+    /// Serialize members somebody else assembled as a jar, with the manifest first.
+    ///
+    /// The hoist is why this exists rather than a second `StoredZip::write` call site. A remap
+    /// preserves its input's member order and a merge walks the overlay and then the base, so
+    /// neither ends up with the manifest first by construction — and a base with no manifest of its
+    /// own takes the overlay's out of the union's tail. `JarInputStream::getManifest` reads none but
+    /// the first member, so a streaming reader would then see no manifest at all, and with it none
+    /// of what a merge writes into one.
+    ///
+    /// Only the *first* manifest moves. A single input carrying two of its own keeps both, exactly
+    /// as it did: deduplicating them would be this writer inventing a conflict its caller did not
+    /// have.
+    ///
+    /// # Errors
+    /// Passes through the writer's refusals: an unsafe member name, two members sharing a path, or
+    /// an archive beyond what the stored encoding's 32-bit fields can describe.
+    pub(crate) fn write_members(mut members: Vec<WriteMember>) -> Result<Vec<u8>, String> {
+        if let Some(position) = members
+            .iter()
+            .position(|member| MetaInf::is_manifest(&member.name))
+            && position != 0
+        {
+            members[..=position].rotate_right(1);
+        }
         StoredZip::write(&members)
-    }
-
-    /// Render the jar manifest's main section.
-    ///
-    /// `Manifest-Version` comes first because the specification requires the version to be the
-    /// main section's first attribute; a blank line terminates the section.
-    fn main_section(main_class: Option<&str>) -> String {
-        let mut out = String::new();
-        Self::write_attribute(&mut out, "Manifest-Version", "1.0");
-        if let Some(main_class) = main_class {
-            Self::write_attribute(&mut out, "Main-Class", main_class);
-        }
-        out.push_str(EOL);
-        out
-    }
-
-    /// Append `name: value` to `out` as one or more physical manifest lines.
-    ///
-    /// A value too long for one line continues on following lines that each begin with exactly one
-    /// space. Every physical line, terminator included, stays within [`MAX_LINE`] bytes, and the
-    /// split never lands inside a UTF-8 sequence — `str::floor_char_boundary` is unstable and this
-    /// crate is `no_std`, so the boundary is walked back by hand. Only a deeply nested `Main-Class`
-    /// ever reaches the wrapping path, but an unwrapped over-long line is an invalid manifest, not
-    /// a cosmetic issue.
-    fn write_attribute(out: &mut String, name: &str, value: &str) {
-        let mut line = String::with_capacity(name.len() + 2 + value.len());
-        line.push_str(name);
-        line.push_str(": ");
-        line.push_str(value);
-
-        let mut rest = line.as_str();
-        // The first physical line spends its whole budget on content; a continuation gives one
-        // byte back to the leading space that marks it as one.
-        let mut budget = MAX_LINE - EOL.len();
-        loop {
-            if rest.len() <= budget {
-                out.push_str(rest);
-                out.push_str(EOL);
-                return;
-            }
-            let mut take = budget;
-            while take > 0 && !rest.is_char_boundary(take) {
-                take -= 1;
-            }
-            if take == 0 {
-                // Unreachable while the budget exceeds four bytes, but emitting one whole
-                // character keeps the loop total rather than spinning on a zero-length split.
-                take = rest.chars().next().map_or(rest.len(), char::len_utf8);
-            }
-            let (head, tail) = rest.split_at(take);
-            out.push_str(head);
-            out.push_str(EOL);
-            out.push(' ');
-            rest = tail;
-            budget = MAX_LINE - EOL.len() - 1;
-        }
     }
 }
 
@@ -149,6 +112,13 @@ mod tests {
 
     fn path(text: &str) -> RelativePath {
         RelativePath::parse(text).expect("test path is valid")
+    }
+
+    fn member(name: &str, bytes: &[u8]) -> WriteMember {
+        WriteMember {
+            name: name.to_owned(),
+            bytes: bytes.to_vec(),
+        }
     }
 
     fn read_member(archive: &[u8], member: &MemberRecord) -> Vec<u8> {
@@ -167,11 +137,20 @@ mod tests {
         })
     }
 
+    fn member_names(archive: &[u8]) -> Vec<String> {
+        block_on_inline(CentralDirectory::parse(&mut Cursor::new(archive)))
+            .expect("the jar parses")
+            .members
+            .iter()
+            .map(|member| member.name.clone())
+            .collect()
+    }
+
     fn manifest_text(archive: &[u8]) -> String {
         let mut oracle =
             zip::ZipArchive::new(std::io::Cursor::new(archive)).expect("oracle opens the jar");
         let mut reader = oracle
-            .by_name(JarPackage::MANIFEST_PATH)
+            .by_name(MetaInf::MANIFEST_PATH)
             .expect("the jar carries a manifest");
         let mut text = String::new();
         std::io::Read::read_to_string(&mut reader, &mut text).expect("the manifest is text");
@@ -198,7 +177,7 @@ mod tests {
         let directory = block_on_inline(CentralDirectory::parse(&mut Cursor::new(&archive)))
             .expect("the jar parses");
         assert_eq!(directory.members.len(), entries.len() + 1);
-        assert_eq!(directory.members[0].name, JarPackage::MANIFEST_PATH);
+        assert_eq!(directory.members[0].name, MetaInf::MANIFEST_PATH);
         // Input order is preserved after the manifest, so the members line up with `entries`.
         for (member, (entry_path, bytes)) in directory.members[1..].iter().zip(&entries) {
             assert_eq!(member.name, entry_path.to_string());
@@ -209,57 +188,6 @@ mod tests {
             manifest_text(&archive),
             "Manifest-Version: 1.0\r\nMain-Class: com.example.Main\r\n\r\n"
         );
-    }
-
-    /// A `Main-Class` longer than one manifest line has to continue on wrapped lines, or the
-    /// manifest is invalid and `java -jar` refuses the archive.
-    #[test]
-    fn a_long_main_class_wraps_within_the_line_budget() {
-        let mut fqcn = String::from("com.example");
-        while fqcn.len() < 200 {
-            fqcn.push_str(".deeply");
-        }
-        fqcn.push_str(".Main");
-        let archive = JarPackage::write(&[], Some(&fqcn)).expect("packaging succeeds");
-        let text = manifest_text(&archive);
-
-        // Drop the blank line that terminates the main section; what remains is the attributes.
-        let body = text.strip_suffix(EOL).expect("the section is terminated");
-        let lines: Vec<&str> = body.split_terminator(EOL).collect();
-        for line in &lines {
-            assert!(
-                line.len() + EOL.len() <= MAX_LINE,
-                "physical line exceeds the budget: {line:?}"
-            );
-        }
-        // Everything after `Manifest-Version` belongs to the wrapped attribute: the first of those
-        // lines starts it, each later one continues it with exactly one leading space.
-        let attribute = &lines[1..];
-        let mut joined = String::from(attribute[0]);
-        for line in &attribute[1..] {
-            assert!(
-                line.starts_with(' ') && !line[1..].starts_with(' '),
-                "continuation must start with exactly one space: {line:?}"
-            );
-            joined.push_str(&line[1..]);
-        }
-        assert_eq!(joined, format!("Main-Class: {fqcn}"));
-    }
-
-    /// The wrap walks back to a character boundary, so a multibyte value cannot be split into
-    /// invalid UTF-8 — the manifest is read as text on the other side.
-    #[test]
-    fn a_wrapped_value_never_splits_a_utf8_sequence() {
-        // Three-byte characters land astride every candidate split point.
-        let value: String = core::iter::repeat_n('あ', 60).collect();
-        let mut out = String::new();
-        JarPackage::write_attribute(&mut out, "Main-Class", &value);
-
-        let mut joined = String::new();
-        for (index, line) in out.split_terminator(EOL).enumerate() {
-            joined.push_str(if index == 0 { line } else { &line[1..] });
-        }
-        assert_eq!(joined, format!("Main-Class: {value}"));
     }
 
     /// A project with no entry point still packages — as a library jar, without `Main-Class`.
@@ -282,16 +210,15 @@ mod tests {
         assert_eq!(first, second);
     }
 
-    /// The packager writes the manifest, so an entry claiming that path is a conflict — and the
-    /// message has to name it rather than surface as a generic duplicate.
+    /// The packager writes the manifest, so an entry claiming that name is a conflict — however the
+    /// entry spells it, because a JVM finds a manifest either way and the writer would keep both.
     #[test]
     fn an_entry_named_like_the_manifest_is_rejected() {
-        let entries = vec![(path(JarPackage::MANIFEST_PATH), b"forged".to_vec())];
-        let error = JarPackage::write(&entries, None).expect_err("the conflict is reported");
-        assert!(
-            error.contains(JarPackage::MANIFEST_PATH),
-            "message must name the manifest: {error}"
-        );
+        for name in [MetaInf::MANIFEST_PATH, "meta-inf/manifest.mf"] {
+            let entries = vec![(path(name), b"forged".to_vec())];
+            let error = JarPackage::write(&entries, None).expect_err("the conflict is reported");
+            assert!(error.contains(name), "message must name the entry: {error}");
+        }
     }
 
     /// Two sources declaring the same type produce the same artifact path; the writer's duplicate
@@ -303,5 +230,46 @@ mod tests {
             (path("com/example/Main.class"), b"two".to_vec()),
         ];
         assert!(JarPackage::write(&entries, None).is_err());
+    }
+
+    /// A remap and a merge hand over members in *their* order, and the manifest need not be first
+    /// in it. `JarInputStream::getManifest` reads none but the first member, so a jar assembled
+    /// that way would answer a streaming reader with no manifest at all.
+    #[test]
+    fn assembled_members_are_written_with_the_manifest_first() {
+        let archive = JarPackage::write_members(vec![
+            member("a/B.class", b"one"),
+            member("meta-inf/manifest.mf", b"Manifest-Version: 1.0\r\n\r\n"),
+            member("a/C.class", b"two"),
+        ])
+        .expect("assembly succeeds");
+        assert_eq!(
+            member_names(&archive),
+            ["meta-inf/manifest.mf", "a/B.class", "a/C.class"]
+        );
+
+        // Only the hoist: every other member keeps the order it was handed over in, and a jar whose
+        // manifest is already first is written exactly as it came.
+        let unchanged = vec![
+            member(MetaInf::MANIFEST_PATH, b"Manifest-Version: 1.0\r\n\r\n"),
+            member("a/B.class", b"one"),
+        ];
+        assert_eq!(
+            JarPackage::write_members(unchanged.clone()).expect("assembly succeeds"),
+            JarPackage::write_members(unchanged).expect("assembly succeeds")
+        );
+
+        // A single input carrying two manifests keeps both, in order: deduplicating them would be
+        // this writer inventing a conflict its caller did not have.
+        let archive = JarPackage::write_members(vec![
+            member("a/B.class", b"one"),
+            member("META-INF/MANIFEST.MF", b"first"),
+            member("meta-inf/manifest.mf", b"second"),
+        ])
+        .expect("assembly succeeds");
+        assert_eq!(
+            member_names(&archive),
+            ["META-INF/MANIFEST.MF", "a/B.class", "meta-inf/manifest.mf"]
+        );
     }
 }

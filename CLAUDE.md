@@ -110,9 +110,24 @@ filesystem reads into portable interfaces.
 - `jals-classpath`: resolution over project bytes and cache artifacts.
   - The in-house zip reader is isolated in `zip.rs` behind `archive` (portable, `no_std`, over the
     async io seam; also a stored-only writer for jar remap/merge; the `zip` crate is a dev-only
-    fixture oracle). `jar.rs` is the only public surface over that writer: `JarPackage::write`
-    packages compiled classes, generating the `META-INF/MANIFEST.MF` a jar needs (first member,
-    CRLF, 72-byte wrapped) and keeping `StoredZip`/`WriteMember` sealed.
+    fixture oracle). `jar.rs` is the **only** route to that writer — `JarPackage::write` packages
+    compiled classes and `JarPackage::write_members` serializes a union somebody else assembled —
+    and both put the manifest first, because `JarInputStream::getManifest` reads the first member
+    and no other. `StoredZip`/`WriteMember` stay sealed, and a second caller reaching them is a
+    second place that has to remember the ordering.
+  - **What a manifest *is* lives in `manifest.rs`, and only there.** Two places write one — `jar.rs`
+    packaging a fresh manifest, `remap.rs` editing one somebody else wrote — and they used to agree
+    by writing the 72-byte fold rule and the `META-INF/` name matching down twice, which is two
+    copies of a specification with one of them a release behind. `MetaInf` owns the member names a
+    JVM matches case-insensitively (manifest, signature block, `META-INF/versions/<n>/`) and
+    `Manifest` owns the bytes: attributes folded across continuation lines, main-section semantics,
+    the digest strip. Three rules travel with it. A manifest is **edited, not re-rendered** — every
+    transform returns the bytes it was given when it changes nothing, and writes an untouched
+    attribute back verbatim, because normalizing a manifest nobody asked about is a diff in an
+    artifact whose determinism is a stated invariant. A **main** attribute is not an individual one:
+    `Multi-Release` and `Main-Class` are read and written in the main section and nowhere else. And
+    a **member name is matched the way the JVM matches it** in both components, since matching one
+    of the two loosely and the other exactly is what leaves half a claim standing.
   - **A manifest attribute that describes the archive survives a merge; one that describes the
     manifest's own side does not.** Only one `META-INF/MANIFEST.MF` can win a path conflict, and the
     overlay's does — but `Multi-Release` says the union's `META-INF/versions/<n>/` entries are live,

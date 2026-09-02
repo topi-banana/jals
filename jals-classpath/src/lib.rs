@@ -18,6 +18,8 @@ mod jar;
 #[cfg(feature = "archive")]
 mod load;
 #[cfg(feature = "archive")]
+mod manifest;
+#[cfg(feature = "archive")]
 mod mappings;
 #[cfg(feature = "native")]
 mod native;
