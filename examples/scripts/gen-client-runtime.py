@@ -44,6 +44,7 @@ release. The result is committed — this is not a build step, and CI never runs
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import pathlib
@@ -131,18 +132,27 @@ class Runtime:
 
     def __init__(self, release: str, meta_sha1: str) -> None:
         self.release = release
-        self.meta = self.get_json(METADATA.format(sha1=meta_sha1, version=release))
+        self.meta = self.get_json(METADATA.format(sha1=meta_sha1, version=release), meta_sha1)
         # Walked once. `render` and the summary both want the result, and the scan reports what it
         # could not read — reporting it twice would read as two distinct gaps in the metadata.
         self.libraries, self.gaps = self.scan()
 
     @staticmethod
-    def get_json(url: str) -> dict:
+    def get_json(url: str, sha1: str) -> dict:
         # With a deadline. Forty-three sequential fetches and no timeout is a run that can stall
         # on one connection forever, and this script writes nothing until every release has been
         # read — so a stall produces no output and no account of where it stopped.
         with urllib.request.urlopen(url, timeout=HTTP_TIMEOUT) as response:
-            return json.load(response)
+            body = response.read()
+        # Checked, not merely addressed. The catalog carries the digest so the fetch names one
+        # immutable document, and every one of the 2287 rows written below is derived from these
+        # bytes — so a proxy, a CDN edge or a poisoned resolver that answers with something else
+        # would be pinned into a committed file that nothing downstream can tell from the real one.
+        # The SDK side verifies the same document through `tasks.sha1`; this is that check.
+        digest = hashlib.sha1(body).hexdigest()
+        if digest != sha1:
+            raise SystemExit(f"{url} answered with sha1 {digest}, not the catalog's {sha1}")
+        return json.loads(body)
 
     @staticmethod
     def admits_x86_64(name: str) -> bool:
@@ -194,7 +204,15 @@ class Runtime:
         entries claiming the same path with *different* bytes is a different thing entirely and is
         reported rather than silently resolved.
         """
-        url = download["url"]
+        # `.get`, not `[...]`: a metadata object missing one of the three keys is the same kind of
+        # thing as one carrying a digest of the wrong shape, and the caller refuses to rewrite the
+        # committed table over either. Indexing instead raised a bare `KeyError` naming neither the
+        # release nor the library, after forty-odd fetches — the cause-two-files-away failure this
+        # whole gap mechanism exists to prevent.
+        url = download.get("url")
+        if not isinstance(url, str):
+            gaps.append(f"{name}: its metadata states no download URL")
+            return
         if not url.startswith(LIBRARIES):
             gaps.append(f"{name}: {url} is not published under {LIBRARIES}")
             return
@@ -207,19 +225,21 @@ class Runtime:
         if '"' in path or "\\" in path:
             gaps.append(f"{name}: {path} is not spellable as a Rhai string literal")
             return
-        if not SHA1.fullmatch(str(download["sha1"])):
+        sha1 = download.get("sha1")
+        if not SHA1.fullmatch(str(sha1)):
             gaps.append(f"{name}: {path} has no SHA-1 digest in its metadata")
             return
-        if not isinstance(download["size"], int) or isinstance(download["size"], bool):
+        size = download.get("size")
+        if not isinstance(size, int) or isinstance(size, bool):
             gaps.append(f"{name}: {path} has no integer size in its metadata")
             return
         seen = self.seen.get(path)
         if seen is not None:
-            if seen != download["sha1"]:
+            if seen != sha1:
                 gaps.append(f"{name}: {path} is listed twice with different digests")
             return
-        self.seen[path] = download["sha1"]
-        admitted.append((name, path, download["sha1"], download["size"]))
+        self.seen[path] = sha1
+        admitted.append((name, path, sha1, size))
 
     def scan(self) -> tuple[list[tuple[str, str, str, int]], list[str]]:
         """`(name, path, sha1, size)` for every admitted library in metadata order, and the gaps.
@@ -296,7 +316,12 @@ class Table:
         return "\n".join(lines)
 
     def write(self, script: pathlib.Path) -> None:
-        text = script.read_text(encoding="utf-8")
+        # `newline=""` on both halves. Left at its default, the read translates every terminator to
+        # `\n` and the write translates it back to `os.linesep` — so a regeneration on a checkout
+        # whose line endings are not the host's rewrites all 2467 lines and buries the ~60 rows that
+        # actually moved in a whole-file diff. This output is committed and reviewed.
+        with open(script, encoding="utf-8", newline="") as source:
+            text = source.read()
         # Located rather than assumed: an edited or reordered marker would otherwise splice the
         # table into the wrong place, or raise a `ValueError` that names neither file nor marker.
         begin = text.find(BEGIN)
@@ -306,13 +331,18 @@ class Table:
         end = text.find(END, begin)
         if end < 0:
             raise SystemExit(f"{script} does not contain {END!r} after the opening marker")
-        replaced = text[:begin] + "\n" + self.render() + "\n" + text[end:]
+        # The file's own terminator, so a splice into a CRLF checkout does not leave the table the
+        # one LF region in it. `render` joins with `\n` and no row can contain one, so the
+        # substitution is exact.
+        eol = "\r\n" if "\r\n" in text else "\n"
+        body = self.render().replace("\n", eol)
+        replaced = text[:begin] + eol + body + eol + text[end:]
         # Written through a sibling temporary file and renamed: the destination is committed, and a
         # process killed halfway through a plain overwrite leaves a truncated build script that
         # neither this generator nor `jals` can make sense of.
         handle, temporary = tempfile.mkstemp(dir=str(script.parent), suffix=".rhai")
         try:
-            with os.fdopen(handle, "w", encoding="utf-8") as sink:
+            with os.fdopen(handle, "w", encoding="utf-8", newline="") as sink:
                 sink.write(replaced)
             # `mkstemp` creates at 0600. The destination is a committed, world-readable source
             # file, and a rename would otherwise quietly narrow it.

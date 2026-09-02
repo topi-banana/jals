@@ -18,3 +18,6 @@
 # commit).
 /jals-tests/vendor
 google-java-format-*.jar
+# Byte cache from the one Python generator in the tree (`examples/scripts/`). Running it is a
+# documented step, and it should not leave anything for the next `git add -A` to pick up.
+__pycache__/
