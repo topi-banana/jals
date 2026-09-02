@@ -46,7 +46,8 @@ const JAR_LIMITS: SourceTreeLimits = SourceTreeLimits {
 /// The provenance's other inputs — the source jar, the mapping bytes, the direction, the class
 /// hierarchy — say what went in and nothing about what this crate does with it, so a change to the
 /// transform itself would be served the previous transform's jar out of the cache. Bump this
-/// whenever the bytes written for an otherwise unchanged input change.
+/// whenever the bytes written for an otherwise unchanged input change; [`JarTransforms`] carries it
+/// to the consumers that memoize around this one.
 ///
 /// 2: everything the `META-INF/` pass has done to a remapped jar. The signature block goes and the
 /// manifest's per-entry digests go with it — which is the change this constant should have moved
@@ -81,6 +82,38 @@ const REMAP_OUTPUT_VERSION: u32 = 4;
 /// nothing — a union whose surviving manifest already said `Multi-Release: true` now keeps that
 /// manifest's own bytes rather than a re-rendering of them.
 const MERGE_OUTPUT_VERSION: u32 = 5;
+
+/// The output versions of every jar transform this crate performs.
+///
+/// Published because the versions above are not the whole rule. A consumer that memoizes *around*
+/// one of these transforms — `jals-project` records what a build task produced and replays it
+/// without re-running the task at all — names the transform's inputs in its own key and nothing
+/// about the transform, so a bump here would leave that consumer serving the previous transform's
+/// bytes out of a warm cache. That has happened twice: a remapped jar kept its signature block, and
+/// a merged jar kept saying `Multi-Release: false`, both after the fix had shipped.
+///
+/// It is a fold rather than a number a consumer copies, so the rule holds without anyone
+/// remembering it: a consumer folds this into its key once, and a transform added or bumped here
+/// moves every such key with no edit on the consumer's side.
+pub struct JarTransforms;
+
+impl JarTransforms {
+    /// Every transform's name and output version, in a fixed order.
+    ///
+    /// The name is folded beside the number so that two transforms swapping versions is not the
+    /// same fold, and so that adding one shifts nothing that came before it.
+    const VERSIONS: &'static [(&'static str, u32)] = &[
+        ("remap", REMAP_OUTPUT_VERSION),
+        ("merge", MERGE_OUTPUT_VERSION),
+    ];
+
+    /// Fold every transform's output version into `fold`.
+    pub fn fold(fold: &mut ProvenanceFold) {
+        for (name, version) in Self::VERSIONS {
+            fold.bytes(name.as_bytes()).version(*version);
+        }
+    }
+}
 
 /// Obfuscated class-hierarchy index used to walk supers/interfaces for inherited member lookups.
 #[derive(Debug, Default)]

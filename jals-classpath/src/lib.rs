@@ -52,7 +52,7 @@ pub use project::{
     MemoryProjectPlan, ProjectInputOptions, ProjectInputPlan, ProjectInputs, SourceFile,
 };
 #[cfg(feature = "archive")]
-pub use remap::{JarMerge, JarRemap, NestedJar, RemapRequest};
+pub use remap::{JarMerge, JarRemap, JarTransforms, NestedJar, RemapRequest};
 
 use alloc::string::String;
 use core::fmt;

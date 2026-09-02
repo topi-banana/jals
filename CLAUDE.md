@@ -134,6 +134,14 @@ filesystem reads into portable interfaces.
     and a union carries both sides' entries, so it is re-declared whenever *either* input declared
     it. Signature digests are the opposite case and go from both sides. Getting this wrong is not
     visible in a build: it is a class loaded from the wrong multi-release variant at run time.
+  - **A transform's output version folds itself into whatever memoizes around it.** `remap.rs`'s
+    `REMAP_OUTPUT_VERSION` / `MERGE_OUTPUT_VERSION` say what this crate *writes*, and a consumer
+    that records a task's artifacts and replays them — `jals-project`'s `BuildTaskState` — names the
+    transform's inputs in its key and nothing about the transform, so a bump here would be served
+    the old bytes out of a warm cache. That happened twice, both times invisibly. `JarTransforms` is
+    the fold that ends it: the consumer folds it into its key once, and a transform added or bumped
+    here moves every such key with no edit on the consumer's side. Do not reintroduce a version
+    number a consumer has to copy.
   - Mappings parsing, hierarchy-aware jar remapping, and compile-oriented jar decompilation into
     source trees live under `archive` too. Two grammars are read into one `Mappings` index —
     Mojang/ProGuard and Fabric's tiny v2 — and a format that names more than two namespaces carries
@@ -171,6 +179,12 @@ filesystem reads into portable interfaces.
   - Two edges reaching one `path` dependency are one node — identity is the canonicalized directory
     — and the features every in-edge routed to it are unioned there. A test-support library and its
     consumer can therefore both depend on the same SDK without becoming two selections.
+  - What `TASK_EXECUTION_VERSION` versions is the *record*, not the transforms it names the
+    artifacts of: `jals-classpath`'s `JarTransforms::fold` goes into the same provenance, so a remap
+    or merge that starts writing different bytes invalidates every memo without that number moving.
+    It is structural because the discipline it replaces failed twice — a shipped fix stayed
+    invisible behind a warm cache, once for a jar that kept its signature block and once for a
+    merged jar that kept saying `Multi-Release: false`.
   - Dependency snapshots are immutable and must never receive generated output: a dependency's
     build tasks run under `BuildTaskHost::Snapshot`, so their JARs and declared source trees are
     projected into the *consumer's* artifact cache instead of being published to the project they
