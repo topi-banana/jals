@@ -675,9 +675,14 @@ jobs:
       # test, which is exactly what the cell is for — and, for the two `minecraft_mod` cells that
       # select none, it is also the only command that resolves `[dev-dependencies]` and so the only
       # one that leaves the offline lint below anything to read.
+      #
+      # `wait-all`, not `wait: headless-gl`: the install is `if`-guarded, so a cell that boots no
+      # client has no such step to name — and a wait step carries no `if:` of its own to guard it
+      # with. Nothing else is outstanding by here (the vendor JARs were joined before the build),
+      # so on every other cell this is a no-op, and the rule that every `background:` is joined on
+      # every path to the end of its job holds unconditionally rather than on the client path alone.
       - name: Wait for the headless OpenGL stack
-        if: ${{ matrix.example.headless_gl }}
-        wait: headless-gl
+        wait-all:
       # The two `LIBGL_*` variables are set for every cell and read by none but the client one:
       # they only mean anything to a Mesa that a GL context is being asked of.
       - name: Test
