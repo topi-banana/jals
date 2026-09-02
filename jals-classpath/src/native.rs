@@ -286,7 +286,12 @@ impl NativeProjectPlan {
             |locator| Self::classify(project_root, locator),
             &mut result.warnings,
         );
-        for (raw_name, dependency) in manifest.declared_dependencies(scope) {
+        // `active_dependencies`, exactly as the jar half above reaches it through
+        // `add_jar_dependencies`: that is the single spelling of "is this entry present?", and one
+        // lowering answering it two ways would lower an `optional` `git`/`path` entry no selection
+        // activated — an index input, and under `Compile` a compiler input, that the same
+        // selection's jars were correctly denied.
+        for (raw_name, dependency) in manifest.active_dependencies(scope, features) {
             if matches!(dependency, Dependency::Jar(_)) {
                 continue;
             }
