@@ -473,18 +473,16 @@ nothing in this snippet names a release.
 
 Three things, and each is here because it cannot live on the other side of the edge:
 
-- **`client-test`.** `["client", "mc-client-test/enabled"]` — it implies `client` so this project
-  compiles against the client jar, and it says the harness is wanted. It names no release: each of
-  the 43 version features carries its own `mc-client-test/<release>` beside its
-  `minecraft/<release>`, so the release reaches the harness by the route it already took to the SDK.
-  Everything under `src/test/java` is `#[cfg]`-gated on `client-test`, so a selection that does not
-  name it compiles and lints as if the tests were not there, which is what keeps the other two
-  `minecraft_mod` CI cells unchanged.
-- **The second route on every version feature.** It is the one real cost of the split, and it is
-  paid here rather than in the harness because a feature reaches a dependency only through the
-  manifest that declares the edge. It costs a selection that never asks for the harness nothing: the
-  harness registers no task and compiles no type without `enabled`, and the release it is handed is
-  the one this project already routed to the same SDK node.
+- **`client-test`.** `["client"]` — it implies `client` so this project compiles against the client
+  jar, and it gates everything under `src/test/java`, so a selection that does not name it compiles
+  and lints as if the tests were not there. That is what keeps the other two `minecraft_mod` CI
+  cells unchanged. It says nothing about the harness: the harness has no presence switch, because
+  being named in `[dev-dependencies]` is already the statement that these tests boot a client.
+- **The second route on every version feature.** A feature reaches a dependency only through the
+  manifest that declares the edge, so each of the 43 rows carries its own
+  `mc-client-test/<release>` beside its `minecraft/<release>` — the release reaches the harness by
+  the route it already took to the same SDK node. It is one line per row and it is the whole of
+  what this project tells the harness.
 - **`-Xmx2G`.** `build.add_jvm_arg` reaches a test JVM only from the *root* project's script, so a
   dependency cannot contribute it. `build.rhai` writes the line; without it the boot dies inside the
   resource reload with an `OutOfMemoryError`.

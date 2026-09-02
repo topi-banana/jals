@@ -59,11 +59,13 @@ build.add_javac_arg("-proc:none");
 // --- the client end-to-end tests -------------------------------------------------------------
 //
 // `client-test` selects the whole test arrangement: it implies `client` (so this project compiles
-// against the client jar) and routes `enabled` into the `mc-client-test` dev-dependency, whose own
-// build script then puts that release's ~60 runtime libraries on the classpath. Which release is
-// not decided here either — every version feature in `jals.toml` routes itself to the harness the
-// same way it routes itself to the SDK. None of that is here, and none of it is mod-specific — see
-// `examples/minecraft_client_test/`.
+// against the client jar) and gates everything under `src/test/java`, which is what drives the
+// `mc-client-test` dev-dependency. The harness itself needs no switch — it is a
+// `[dev-dependencies]` entry, resolved by `jals test` and by nothing that produces output, and its
+// build script puts the release's ~60 runtime libraries on the classpath whenever it runs. Which
+// release is not decided here either: every version feature in `jals.toml` routes itself to the
+// harness the same way it routes itself to the SDK. None of that is here, and none of it is
+// mod-specific — see `examples/minecraft_client_test/`.
 //
 // There is no release guard left to write. `since-1.14.4` above already rejected a selection that
 // named no release, and the harness supports every release that names one.

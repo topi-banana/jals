@@ -1,12 +1,11 @@
 [package]
 name = "mc-client-test"
 version = "0.1.0"
-# `#[cfg]` is what makes this project resolvable under a selection that does not want it, and what
-# lets one source tree be written against 43 releases of a moving client API. A consumer declares
-# this project in `[dev-dependencies]`, and a dependency is a graph node whether or not the
-# selection routes a feature to it — so under a selection that never asked for the harness every
-# declaration in `GameClient.java` is blanked and the file lowers to its `package` line. Without the
-# dialect feature that gate would be a syntax error instead.
+# `#[cfg]` is what lets one source tree be written against 43 releases of a moving client API. The
+# game's API moved at fourteen points across them, and a `cfg`-disabled declaration is blanked
+# before anything tries to resolve it — so one file carries every spelling and each release
+# compiles the one it named. Without the dialect feature those attributes would be a syntax error
+# instead.
 features = ["attributes"]
 
 [features]
@@ -15,15 +14,6 @@ features = ["attributes"]
 # consumer makes — a default release would be forwarded into the SDK as a second version alongside
 # the one the consumer chose, and the SDK rejects that before any download.
 default = []
-
-# The presence switch, and the only feature that names a *side*. It carries no release, which is
-# what keeps a consumer's `jals test --features 1.20.1` (no `client-test`) resolving exactly the SDK
-# selection its `jals build --features 1.20.1` resolves: the release reaches the SDK either way,
-# and only this feature adds the client jar and the runtime library fetches on top.
-#
-# It is also the gate every declaration in `GameClient.java` carries, so a selection without it
-# compiles no type and fetches nothing.
-enabled = ["minecraft/client"]
 
 # The threshold chain. A release names exactly one of these and inherits the rest, so `#[cfg]` in
 # `GameClient.java` and the `--release` cascade in `build.rhai` never name a version — which is what
@@ -36,8 +26,10 @@ enabled = ["minecraft/client"]
 #
 # What each one buys, oldest first:
 #
-# - `since-1.14.4` — the bottom of the chain. `build.rhai` errors when `enabled` is on and this is
-#   off, which is what makes "no release was named" distinguishable from "the oldest release was".
+# - `since-1.14.4` — the bottom of the chain. Every release reaches it, so it is the one question
+#   the chain can answer that no single release can: was a release named at all? `build.rhai`
+#   errors when it is off, because the SDK falls back to its own newest release while every
+#   threshold here stays off — the oldest source against the newest game.
 # - `since-1.15` — the game window is behind `Minecraft.getWindow()`; on 1.14.4 it is the public
 #   `window` field and there is no accessor.
 # - `since-1.16` — `AbstractWidget.getMessage()` returns a `Component` rather than a `String`;
@@ -77,10 +69,11 @@ enabled = ["minecraft/client"]
 "since-26.1" = ["since-1.21.11"]
 "since-26.2" = ["since-26.1"]
 
-# The 43 releases. Each routes its release into the SDK and names its threshold — and routes no
-# side, so selecting one without `enabled` costs a consumer nothing. `minecraft` is reached from
-# both sides of a diamond and a `path` dependency's node identity is its canonicalized directory, so
-# `minecraft/1.20.1` written here and written by the consumer are one selection and one remap.
+# The 43 releases. Each routes its release into the SDK and names its threshold, and that is the
+# whole of what selects this harness: there is no second feature asking whether it is wanted.
+# `minecraft` is reached from both sides of a diamond and a `path` dependency's node identity is its
+# canonicalized directory, so `minecraft/1.20.1` written here and written by the consumer are one
+# selection and one remap.
 #
 # "At most one release" is not restated here: `[features]` resolution is additive and cannot express
 # exclusivity, so the rule lives where it can be enforced — the SDK's own build script, which the
@@ -141,7 +134,11 @@ enabled = ["minecraft/client"]
 # next build captures the previous run's tree as authored source and hands it to `javac`. Two
 # projects sharing one SDK directory therefore have to agree about which roots are published, and
 # agreeing on "the defaults" is the cheapest way to do that.
-minecraft = { path = "../minecraft" }
+#
+# `client` rides the edge rather than a feature of this project's own, because there is no selection
+# here that wants a harness with no client jar to compile it against. The 43 release features name
+# the *release*; which side of the game is not a question anyone asks this project.
+minecraft = { path = "../minecraft", features = ["client"] }
 
 [build]
 script = { type = "rhai", file = "build.rhai" }

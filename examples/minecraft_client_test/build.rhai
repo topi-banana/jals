@@ -2402,70 +2402,66 @@ const RUNTIME = [
 ];
 // >>> end generated
 
-// Nothing at all unless a consumer asked for the harness. `enabled` is the release-independent
-// presence feature: a consumer routes it from its own `client-test`, and it is the same name every
-// declaration in `GameClient.java` is `#[cfg]`-ed on.
+// A release has to be named, and naming one is the whole of how this harness is selected. There is
+// no second feature asking whether it is wanted: a consumer declares this project in
+// `[dev-dependencies]` precisely because its tests boot a client, and every version feature it owns
+// routes itself here the same way it routes itself to the SDK.
 //
-// This is deliberately not a `build.error`. A consumer that declares this project in
-// `[dev-dependencies]` discovers it under *every* selection — a dependency is a node whether or not
-// the selection routes a feature to it — and this script runs for each one. Erroring would make
-// `jals lint --features 1.20.1` on that consumer fail for a harness it never asked for. Registering
-// no task instead is also what keeps those selections free of network I/O: the task plan is empty,
-// so nothing is fetched, and `GameClient.java` is blanked by the same missing feature.
-if build.feature("enabled") {
-    // A release, on the other hand, *is* required once the harness is wanted. Without one the SDK
-    // falls back to its own default release and this project would compile against a game jar no
-    // `#[cfg]` branch here was selected for — the one failure mode that reads as a harness bug and
-    // is not one. `since-1.14.4` is the bottom of the threshold chain, so it is on for every
-    // release in the catalog and off only when none was named.
-    if !build.feature("since-1.14.4") {
-        build.error(
-            "`enabled` selects the client harness but no Minecraft release was named. Run it as \
-             `--features <release>,enabled`, or from a consumer as `--features <release>,client-test`."
-        );
-        return;
-    }
+// `since-1.14.4` is the bottom of the threshold chain and every one of the 43 releases reaches it,
+// so it is the one question the chain can answer that no single release can: was a release selected
+// at all? Without one the SDK still falls back to its own newest release — it has a `default` and
+// this project does not — while every threshold here stays off, and `GameClient.java` would take
+// its oldest branch against the newest game. Saying so costs one line; finding out from `javac`
+// costs a client download and a wall of "cannot find symbol".
+if !build.feature("since-1.14.4") {
+    build.error(
+        "select a Minecraft version feature, e.g. `--features 1.20.1`. This harness is written \
+         against 43 releases and compiles the one it is told about; there is deliberately no \
+         default, because a release chooses the game jar, the runtime libraries and every `#[cfg]` \
+         branch at once."
+    );
+    return;
+}
 
-    // The class-file level for *this project's own* `jals build` — the cell that checks the harness
-    // still compiles against the release it claims. It governs nothing on a consumer's side: a
-    // dependency's `build.add_javac_arg` does not cross the edge any more than its
-    // `build.add_jvm_arg` does, so `GameClient.java` is compiled by whoever consumes it, at that
-    // project's own `--release`.
-    //
-    // The numbers are the game's own `javaVersion.majorVersion` per era, because a client's classes
-    // are loaded by the JVM that release runs on: a 1.14.4 client wants a Java 8 JVM, and a Java 21
-    // class file on its classpath would not load. That is also why `GameClient.java` is written in
-    // Java 8 source — no `ProcessHandle`, no `Files.writeString`, no `Stream.toList`, no pattern
-    // `instanceof`. It caps at 21 rather than following 26.x to 25: 21 loads on every JVM from 21
-    // up, and nothing in the harness needs a later language level.
-    let release = 8;
-    if build.feature("since-1.20.5") {
-        release = 21;
-    } else if build.feature("since-1.18") {
-        release = 17;
-    } else if build.feature("since-1.17") {
-        release = 16;
-    }
-    build.add_javac_arg("--release");
-    build.add_javac_arg("" + release);
-    if release <= 8 {
-        // `--release 8` is supported and warned about in the same breath. The warning is about the
-        // toolchain, not about this source, and CI reads warnings.
-        build.add_javac_arg("-Xlint:-options");
-    }
+// The class-file level for *this project's own* `jals build` — the cell that checks the harness
+// still compiles against the release it claims. It governs nothing on a consumer's side: a
+// dependency's `build.add_javac_arg` does not cross the edge any more than its
+// `build.add_jvm_arg` does, so `GameClient.java` is compiled by whoever consumes it, at that
+// project's own `--release`.
+//
+// The numbers are the game's own `javaVersion.majorVersion` per era, because a client's classes
+// are loaded by the JVM that release runs on: a 1.14.4 client wants a Java 8 JVM, and a Java 21
+// class file on its classpath would not load. That is also why `GameClient.java` is written in
+// Java 8 source — no `ProcessHandle`, no `Files.writeString`, no `Stream.toList`, no pattern
+// `instanceof`. It caps at 21 rather than following 26.x to 25: 21 loads on every JVM from 21
+// up, and nothing in the harness needs a later language level.
+let release = 8;
+if build.feature("since-1.20.5") {
+    release = 21;
+} else if build.feature("since-1.18") {
+    release = 17;
+} else if build.feature("since-1.17") {
+    release = 16;
+}
+build.add_javac_arg("--release");
+build.add_javac_arg("" + release);
+if release <= 8 {
+    // `--release 8` is supported and warned about in the same breath. The warning is about the
+    // toolchain, not about this source, and CI reads warnings.
+    build.add_javac_arg("-Xlint:-options");
+}
 
-    // The selected release's libraries. "At most one release" is enforced by the SDK's own build
-    // script — the release features here route `minecraft/<version>` into it — so this loop does not
-    // restate the rule, exactly as `examples/minecraft_mod/jals.toml` declines to restate it.
-    for entry in RUNTIME {
-        if build.feature(entry[0]) {
-            for library in entry[1] {
-                tasks.add_classpath(tasks.fetch_jar(
-                    tasks.https_url("https://libraries.minecraft.net/" + library[0]),
-                    tasks.sha1(library[1]),
-                    tasks.bytes(library[2])
-                ));
-            }
+// The selected release's libraries. "At most one release" is enforced by the SDK's own build
+// script — the release features here route `minecraft/<version>` into it — so this loop does not
+// restate the rule, exactly as `examples/minecraft_mod/jals.toml` declines to restate it.
+for entry in RUNTIME {
+    if build.feature(entry[0]) {
+        for library in entry[1] {
+            tasks.add_classpath(tasks.fetch_jar(
+                tasks.https_url("https://libraries.minecraft.net/" + library[0]),
+                tasks.sha1(library[1]),
+                tasks.bytes(library[2])
+            ));
         }
     }
 }

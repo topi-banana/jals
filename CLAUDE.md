@@ -584,22 +584,26 @@ the moment it has a tracked `.java`. Seven consequences for an example:
   `CATALOG`, so no release list is restated and no mutable version manifest is consulted — and it
   refuses to write at all when it cannot read one library of one release, because a table that is
   partly regenerated is a boot that dies in `SharedLibraryLoader` with its cause two files away.
-- The client harness supports the same 43 releases the SDK does, and **two features select it**:
-  `enabled` (is the harness wanted; routes `minecraft/client`) and a release feature (which release;
-  routes `minecraft/<version>` and names one threshold). Keeping the release out of `enabled` is
-  what makes a consumer's `jals test --features <version>` resolve the same SDK selection its
-  `jals build --features <version>` resolves — so a consumer routes `mc-client-test/enabled` from
-  its `client-test` and `mc-client-test/<version>` from each of its own version features. The
-  `#[cfg]` in `GameClient.java` names a *threshold*, never a release, and the fourteen thresholds
-  are that project's own: `examples/minecraft_mod` reads the same catalog through five of its own,
-  because it branches on different things. Two of the fourteen boundaries are invisible in a mapping
-  file, which carries no access flags — they were found by compiling, which is what the 43-cell
-  matrix is for.
+- The client harness supports the same 43 releases the SDK does, and **one feature selects it** — a
+  release (`minecraft/<version>` into the SDK, plus one threshold). There is deliberately no second
+  feature asking whether the harness is wanted: being a `[dev-dependencies]` entry is already that
+  answer, since `jals test` and the analysis hosts resolve one and nothing that produces output
+  does. `client` is therefore on the dependency edge (`features = ["client"]`) rather than in a
+  feature, and a consumer routes only `mc-client-test/<version>` from each of its own version
+  features. The cost is stated rather than hidden: `jals test --features <version>` pulls the client
+  jar and the ~60 runtime libraries even without the consumer's own `client-test`, so the test-side
+  classpath is wider than the build-side one. `build.rhai` rejects a selection naming no release,
+  because the SDK falls back to its newest while every threshold stays off. The `#[cfg]` in
+  `GameClient.java` names a *threshold*, never a release, and the fourteen thresholds are that
+  project's own: `examples/minecraft_mod` reads the same catalog through five of its own, because it
+  branches on different things. Two of the fourteen boundaries are invisible in a mapping file,
+  which carries no access flags — they were found by compiling, which is what the 43-cell matrix is
+  for.
 - The harness is **Java 8 source** and its `--release` follows the game's own
   `javaVersion.majorVersion` (8/16/17/21), because it is loaded by the JVM the release runs on. That
   is also the one place `jals build` and `jals test` want different JDKs, and `$JAVAC`/`$JAVA`
   resolve independently so one command can say both.
 - `client harness (<release>)` is a 43-cell matrix modelled on `mod jar`, and its assertion is not
-  the exit status: a selection without `enabled` compiles a file blanked to its `package` line and
-  succeeds, so the cell checks `GameClient.class` exists. Running the build script is also what
-  verifies all 2287 pinned library digests.
+  the exit status: a green build says a selection resolved, not that a type came out, so the cell
+  checks `GameClient.class` exists. Running the build script is also what verifies all 2287 pinned
+  library digests.

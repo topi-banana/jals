@@ -44,11 +44,11 @@ features = ["attributes"]
 #
 # Each row routes its release to two places: the SDK, which fetches and remaps that release's game
 # jar, and the `mc-client-test` dev-dependency, which pins that release's client runtime libraries
-# and selects the `#[cfg]` branches its harness is written in. The second route costs a selection
-# that never asked for the harness nothing — `mc-client-test` registers no task and compiles no type
-# without `mc-client-test/enabled`, which only `client-test` routes — and it reaches the *same* SDK
-# node this row already reached, so `jals test --features 1.20.1` resolves the classpath
-# `jals build --features 1.20.1` resolves, not a wider one.
+# and selects the `#[cfg]` branches its harness is written in. The second reaches the *same* SDK
+# node the first did — a `path` dependency's identity is its canonicalized directory — so the two
+# routes are one selection and one remap. It is also the route only `jals test` and the analysis
+# hosts follow: a `[dev-dependencies]` entry is absent from everything that produces output, which
+# is why `jals build` never resolves the harness whatever it is told.
 [features]
 server = ["minecraft/server"]
 client = ["minecraft/client"]
@@ -66,11 +66,10 @@ mixinextras = ["minecraft/mixinextras"]
 #
 # It names no release, and cannot: the harness supports all 43 and the release reaching it is routed
 # by whichever version feature the command line named — see the table below, where every row carries
-# a `mc-client-test/<version>` beside its `minecraft/<version>`. `mc-client-test/enabled` is the
-# other half, and the half that is a *choice*: it says the harness is wanted at all, which is what
-# adds the client jar and the ~60 runtime downloads on top of a selection that would otherwise
-# resolve exactly as `jals build` resolves it.
-client-test = ["client", "mc-client-test/enabled"]
+# a `mc-client-test/<version>` beside its `minecraft/<version>`. There is nothing else to route:
+# the harness carries no presence switch, so what this feature selects is this project's own test
+# sources and the JVM argument `build.rhai` writes for them.
+client-test = ["client"]
 "since-1.14.4" = []
 "since-1.17" = ["since-1.14.4"]
 "since-1.18" = ["since-1.17"]

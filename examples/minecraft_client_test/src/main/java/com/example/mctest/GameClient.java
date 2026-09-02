@@ -1,119 +1,101 @@
 package com.example.mctest;
 
-// Every declaration in this file is `#[cfg(feature = "enabled")]`, imports included — the release
-// this harness is written against, and the only feature it declares.
+// One file, 43 releases. Every attribute here names a *threshold* — `since-1.16`, never `1.16.5` —
+// so a release names one threshold in `jals.toml`, inherits the rest, and a 44th release is a row
+// in that file and no edit to this one. Nothing asks whether the harness is wanted: naming a
+// release is the whole of how it is selected, and `build.rhai` rejects a selection that names none.
 //
-// Two things need the gate. Without the release the SDK dependency resolves no client jar at all,
-// so `net.minecraft.client.*` names nothing; and a consumer that declares this project in
-// `[dev-dependencies]` still discovers it under every *other* selection, because a dependency is a
-// node whether or not the selection routes a feature to it. A `cfg`-disabled declaration is blanked
-// before anything tries to resolve it, so under those selections this file lowers to its `package`
-// line and nothing else — a compilation unit that declares no type and emits no class.
-//
-// Java allows no annotation on an import, but the jals dialect's `#[cfg]` is not an annotation:
-// `jals-syntax` treats an import as an attribute host like any other declaration.
-#[cfg(feature = "enabled")] import java.io.IOException;
-#[cfg(feature = "enabled")] import java.io.UncheckedIOException;
-#[cfg(feature = "enabled")] import java.lang.management.ManagementFactory;
-#[cfg(feature = "enabled")] import java.nio.charset.StandardCharsets;
-#[cfg(feature = "enabled")] import java.nio.file.Files;
-#[cfg(feature = "enabled")] import java.nio.file.Path;
-#[cfg(feature = "enabled")] import java.nio.file.Paths;
-#[cfg(feature = "enabled")] import java.time.Duration;
-#[cfg(feature = "enabled")] import java.util.Comparator;
-#[cfg(feature = "enabled")] import java.util.List;
-#[cfg(feature = "enabled")] import java.util.concurrent.CompletableFuture;
-#[cfg(feature = "enabled")] import java.util.concurrent.ExecutionException;
-#[cfg(feature = "enabled")] import java.util.concurrent.Executor;
-#[cfg(feature = "enabled")] import java.util.concurrent.TimeUnit;
-#[cfg(feature = "enabled")] import java.util.concurrent.TimeoutException;
-#[cfg(feature = "enabled")] import java.util.function.Predicate;
-#[cfg(feature = "enabled")] import java.util.function.Supplier;
-#[cfg(feature = "enabled")] import java.util.stream.Collectors;
-#[cfg(feature = "enabled")] import java.util.stream.Stream;
-#[cfg(feature = "enabled")] import net.minecraft.client.Minecraft;
-#[cfg(feature = "enabled")] import net.minecraft.client.gui.components.AbstractWidget;
-#[cfg(feature = "enabled")] import net.minecraft.client.gui.components.events.GuiEventListener;
-#[cfg(feature = "enabled")] import net.minecraft.client.gui.screens.Overlay;
-#[cfg(feature = "enabled")] import net.minecraft.client.gui.screens.Screen;
-#[cfg(feature = "enabled")] import net.minecraft.client.gui.screens.TitleScreen;
+// The imports carry attributes too, and have to: a type that moved package between releases is two
+// imports of which exactly one may exist, and a disabled declaration is blanked before anything
+// tries to resolve it. Java allows no annotation on an import, but the jals dialect's attribute is
+// not an annotation — `jals-syntax` treats an import as an attribute host like any other
+// declaration.
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.lang.management.ManagementFactory;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.time.Duration;
+import java.util.Comparator;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.function.Predicate;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.components.AbstractWidget;
+import net.minecraft.client.gui.components.events.GuiEventListener;
+import net.minecraft.client.gui.screens.Overlay;
+import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.client.gui.screens.TitleScreen;
 #[cfg(
     all(
-        feature = "enabled", feature = "since-1.16",
+        feature = "since-1.16",
         not(
             feature = "since-1.18")))] import net.minecraft.client.gui.screens.worldselection.WorldPreset;
 #[cfg(
-    all(
-        feature = "enabled", feature = "since-1.18",
-        not(feature = "since-1.19.3")))] import net.minecraft.core.Registry;
+    all(feature = "since-1.18", not(feature = "since-1.19.3")))] import net.minecraft.core.Registry;
 #[cfg(
     all(
-        feature = "enabled", feature = "since-1.16",
+        feature = "since-1.16",
         not(feature = "since-1.19.3")))] import net.minecraft.core.RegistryAccess;
 #[cfg(
     all(
-        feature = "enabled", feature = "since-1.19.3",
+        feature = "since-1.19.3",
         not(feature = "since-1.21.2")))] import net.minecraft.core.registries.Registries;
-#[cfg(feature = "enabled")] import net.minecraft.server.MinecraftServer;
-#[cfg(feature = "enabled")] import net.minecraft.server.level.ServerLevel;
-#[cfg(all(feature = "enabled", feature = "since-1.16"))] import net.minecraft.world.Difficulty;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
+#[cfg(feature = "since-1.16")] import net.minecraft.world.Difficulty;
 #[cfg(
     all(
-        feature = "enabled", feature = "since-1.16",
+        feature = "since-1.16",
         not(feature = "since-1.19.3")))] import net.minecraft.world.level.DataPackConfig;
 #[cfg(
     all(
-        feature = "enabled", feature = "since-1.16",
+        feature = "since-1.16",
         not(feature = "since-1.21.11")))] import net.minecraft.world.level.GameRules;
-#[cfg(feature = "enabled")] import net.minecraft.world.level.GameType;
-#[cfg(feature = "enabled")] import net.minecraft.world.level.LevelSettings;
+import net.minecraft.world.level.GameType;
+import net.minecraft.world.level.LevelSettings;
+#[cfg(not(feature = "since-1.16"))] import net.minecraft.world.level.LevelType;
+#[cfg(feature = "since-1.19.3")] import net.minecraft.world.level.WorldDataConfiguration;
+#[cfg(
+    any(
+        not(feature = "since-1.16"),
+        all(
+            feature = "since-1.18",
+            not(
+                feature = "since-1.19"))))] import net.minecraft.world.level.dimension.DimensionType;
 #[cfg(
     all(
-        feature = "enabled",
-        not(feature = "since-1.16")))] import net.minecraft.world.level.LevelType;
-#[cfg(
-    all(
-        feature = "enabled",
-        feature = "since-1.19.3"))] import net.minecraft.world.level.WorldDataConfiguration;
-#[cfg(
-    all(
-        feature = "enabled",
-        any(
-            not(feature = "since-1.16"),
-            all(
-                feature = "since-1.18",
-                not(
-                    feature = "since-1.19")))))] import net.minecraft.world.level.dimension.DimensionType;
-#[cfg(
-    all(
-        feature = "enabled", feature = "since-1.21.11",
+        feature = "since-1.21.11",
         not(feature = "since-26.1")))] import net.minecraft.world.level.gamerules.GameRules;
 #[cfg(
     all(
-        feature = "enabled", feature = "since-1.18",
+        feature = "since-1.18",
         not(feature = "since-1.19")))] import net.minecraft.world.level.levelgen.FlatLevelSource;
 #[cfg(
     all(
-        feature = "enabled", feature = "since-1.18",
+        feature = "since-1.18",
         not(feature = "since-1.19")))] import net.minecraft.world.level.levelgen.WorldGenSettings;
+#[cfg(feature = "since-1.19.3")] import net.minecraft.world.level.levelgen.WorldOptions;
 #[cfg(
     all(
-        feature = "enabled",
-        feature = "since-1.19.3"))] import net.minecraft.world.level.levelgen.WorldOptions;
-#[cfg(
-    all(
-        feature = "enabled", feature = "since-1.18",
+        feature = "since-1.18",
         not(
             feature = "since-1.19")))] import net.minecraft.world.level.levelgen.flat.FlatLevelGeneratorSettings;
 #[cfg(
     all(
-        feature = "enabled", feature = "since-1.19.3",
+        feature = "since-1.19.3",
         not(
             feature = "since-1.21.2")))] import net.minecraft.world.level.levelgen.presets.WorldPreset;
-#[cfg(
-    all(
-        feature = "enabled",
-        feature = "since-1.19"))] import net.minecraft.world.level.levelgen.presets.WorldPresets;
+#[cfg(feature = "since-1.19")] import net.minecraft.world.level.levelgen.presets.WorldPresets;
 
 /**
  * A Minecraft client, booted in this JVM and driven from a {@code #[test]} method.
@@ -140,7 +122,6 @@ package com.example.mctest;
  * <p>Linux only. GLFW wants the main thread on macOS ({@code -XstartOnFirstThread}), and the main
  * thread belongs to the test.
  */
-#[cfg(feature = "enabled")]
 public final class GameClient implements AutoCloseable {
     /** Where the client's `saves/`, `logs/` and `options.txt` go. */
     private static final String RUN_ROOT = "target/jals/build/mc-client";
@@ -487,7 +468,7 @@ public final class GameClient implements AutoCloseable {
      * one is the range over which a call actually compiles. The `jals.toml` threshold table says
      * what each boundary is; this says what it costs.
      */
-    #[cfg(all(feature = "enabled", feature = "since-26.2"))]
+    #[cfg(feature = "since-26.2")]
     private static void createWorld(Minecraft client, String levelName) {
         // 26.2 renamed the flat preset's helper. `FLAT_ALL_DIMENSIONS` rather than `FLAT` is the
         // only difference in the body it replaced.
@@ -501,7 +482,7 @@ public final class GameClient implements AutoCloseable {
     }
 
     /** Ask the client to create and join the world. Only safe on the render thread. */
-    #[cfg(all(feature = "enabled", feature = "since-1.21.2", not(feature = "since-26.2")))]
+    #[cfg(all(feature = "since-1.21.2", not(feature = "since-26.2")))]
     private static void createWorld(Minecraft client, String levelName) {
         client.createWorldOpenFlows()
             .createFreshLevel(
@@ -518,7 +499,7 @@ public final class GameClient implements AutoCloseable {
      * <p>Before 1.21.2 there is no {@code createFlatWorldDimensions}, so the flat preset is looked
      * up in the world-preset registry by hand — which is what that helper does.
      */
-    #[cfg(all(feature = "enabled", feature = "since-1.20.3", not(feature = "since-1.21.2")))]
+    #[cfg(all(feature = "since-1.20.3", not(feature = "since-1.21.2")))]
     private static void createWorld(Minecraft client, String levelName) {
         client.createWorldOpenFlows()
             .createFreshLevel(
@@ -541,7 +522,7 @@ public final class GameClient implements AutoCloseable {
      * <p>1.20.3 gave {@code createFreshLevel} a trailing screen to return to; before it, there are
      * four arguments and no screen.
      */
-    #[cfg(all(feature = "enabled", feature = "since-1.19.3", not(feature = "since-1.20.3")))]
+    #[cfg(all(feature = "since-1.19.3", not(feature = "since-1.20.3")))]
     private static void createWorld(Minecraft client, String levelName) {
         client.createWorldOpenFlows()
             .createFreshLevel(
@@ -563,7 +544,7 @@ public final class GameClient implements AutoCloseable {
      * <p>1.19 through 1.19.2 pass the registries and a fully built {@code WorldGenSettings} rather
      * than a seed and a function that builds the dimensions from them.
      */
-    #[cfg(all(feature = "enabled", feature = "since-1.19", not(feature = "since-1.19.3")))]
+    #[cfg(all(feature = "since-1.19", not(feature = "since-1.19.3")))]
     private static void createWorld(Minecraft client, String levelName) {
         RegistryAccess.Writable registries = RegistryAccess.builtinCopy();
         client.createWorldOpenFlows()
@@ -590,7 +571,7 @@ public final class GameClient implements AutoCloseable {
      * refuses: a {@code GenericSignatureFormatError} out of {@code NoiseChunk}, five minutes into
      * a world load. A flat world never reaches that code.
      */
-    #[cfg(all(feature = "enabled", feature = "since-1.18.2", not(feature = "since-1.19")))]
+    #[cfg(all(feature = "since-1.18.2", not(feature = "since-1.19")))]
     private static void createWorld(Minecraft client, String levelName) {
         RegistryAccess.Writable registries = RegistryAccess.builtinCopy();
         client.createLevel(
@@ -618,7 +599,7 @@ public final class GameClient implements AutoCloseable {
      * the flat settings nor the generator takes one, and the builtin registries come back as a
      * {@code RegistryHolder}. Java 8 has no {@code var}, so the local names it.
      */
-    #[cfg(all(feature = "enabled", feature = "since-1.18", not(feature = "since-1.18.2")))]
+    #[cfg(all(feature = "since-1.18", not(feature = "since-1.18.2")))]
     private static void createWorld(Minecraft client, String levelName) {
         RegistryAccess.RegistryHolder registries = RegistryAccess.builtin();
         client.createLevel(
@@ -644,7 +625,7 @@ public final class GameClient implements AutoCloseable {
      * {@code WorldPreset.NORMAL} instead. These are the releases whose world is not superflat —
      * nothing a test asserts depends on the terrain, and unlike 1.18 nothing here trips over it.
      */
-    #[cfg(all(feature = "enabled", feature = "since-1.16", not(feature = "since-1.18")))]
+    #[cfg(all(feature = "since-1.16", not(feature = "since-1.18")))]
     private static void createWorld(Minecraft client, String levelName) {
         RegistryAccess.RegistryHolder registries = RegistryAccess.builtin();
         client.createLevel(
@@ -660,7 +641,7 @@ public final class GameClient implements AutoCloseable {
      * <p>The oldest shape, and the simplest: a world type is one enum constant, there are no
      * registries to build, and the save directory and the level name are passed separately.
      */
-    #[cfg(all(feature = "enabled", not(feature = "since-1.16")))]
+    #[cfg(not(feature = "since-1.16"))]
     private static void createWorld(Minecraft client, String levelName) {
         // Built here rather than through `settings`, because this shape carries no level name —
         // `selectLevel` takes it twice instead, once as the save directory and once as the world's
@@ -680,7 +661,7 @@ public final class GameClient implements AutoCloseable {
      * difficulty, the hardcore flag and the difficulty lock into one {@code DifficultySettings} and
      * dropped the game rules entirely.
      */
-    #[cfg(all(feature = "enabled", feature = "since-26.1"))]
+    #[cfg(feature = "since-26.1")]
     private static LevelSettings settings(String levelName) {
         return new LevelSettings(
             levelName,
@@ -691,7 +672,7 @@ public final class GameClient implements AutoCloseable {
     }
 
     /** The world's settings. */
-    #[cfg(all(feature = "enabled", feature = "since-1.21.2", not(feature = "since-26.1")))]
+    #[cfg(all(feature = "since-1.21.2", not(feature = "since-26.1")))]
     private static LevelSettings settings(String levelName) {
         // 1.21.2 made the game rules depend on which feature flags the data configuration turns on,
         // so the two are built together rather than the rules being built from nothing.
@@ -707,7 +688,7 @@ public final class GameClient implements AutoCloseable {
     }
 
     /** The world's settings. */
-    #[cfg(all(feature = "enabled", feature = "since-1.19.3", not(feature = "since-1.21.2")))]
+    #[cfg(all(feature = "since-1.19.3", not(feature = "since-1.21.2")))]
     private static LevelSettings settings(String levelName) {
         return new LevelSettings(
             levelName,
@@ -720,7 +701,7 @@ public final class GameClient implements AutoCloseable {
     }
 
     /** The world's settings. */
-    #[cfg(all(feature = "enabled", feature = "since-1.16", not(feature = "since-1.19.3")))]
+    #[cfg(all(feature = "since-1.16", not(feature = "since-1.19.3")))]
     private static LevelSettings settings(String levelName) {
         return new LevelSettings(
             levelName,
@@ -1074,7 +1055,7 @@ public final class GameClient implements AutoCloseable {
      * field. Both are still public and neither changed shape, so this is a two-line difference
      * rather than a different way of driving the game.
      */
-    #[cfg(all(feature = "enabled", not(feature = "since-26.2")))]
+    #[cfg(not(feature = "since-26.2"))]
     private static Screen showing(Minecraft client) {
         return client.screen;
     }
@@ -1087,13 +1068,13 @@ public final class GameClient implements AutoCloseable {
      * the singleton exists. Reading through a null there is an {@code NullPointerException} on
      * every 26.2 boot rather than a wait — measured, not guessed.
      */
-    #[cfg(all(feature = "enabled", feature = "since-26.2"))]
+    #[cfg(feature = "since-26.2")]
     private static Screen showing(Minecraft client) {
         return client.gui == null ? null : client.gui.screen();
     }
 
     /** Put {@code screen} up. Only safe on the render thread. */
-    #[cfg(all(feature = "enabled", not(feature = "since-26.2")))]
+    #[cfg(not(feature = "since-26.2"))]
     private static void show(Minecraft client, Screen screen) {
         client.setScreen(screen);
     }
@@ -1104,13 +1085,13 @@ public final class GameClient implements AutoCloseable {
      * <p>{@code Minecraft.setScreenAndShow} exists on 26.2 too, but it renders a frame on the way
      * out. This is the plain setter the older releases have, so a caller gets the same thing.
      */
-    #[cfg(all(feature = "enabled", feature = "since-26.2"))]
+    #[cfg(feature = "since-26.2")]
     private static void show(Minecraft client, Screen screen) {
         client.gui.setScreen(screen);
     }
 
     /** The overlay the client is showing, or {@code null}. */
-    #[cfg(all(feature = "enabled", not(feature = "since-26.2")))]
+    #[cfg(not(feature = "since-26.2"))]
     private static Overlay overlay(Minecraft client) {
         return client.getOverlay();
     }
@@ -1122,7 +1103,7 @@ public final class GameClient implements AutoCloseable {
      * {@code gui} yet means no overlay yet, and the boot is settled only once the overlay is gone
      * <em>and</em> the title screen is up — a test the missing {@code gui} correctly fails.
      */
-    #[cfg(all(feature = "enabled", feature = "since-26.2"))]
+    #[cfg(feature = "since-26.2")]
     private static Overlay overlay(Minecraft client) {
         return client.gui == null ? null : client.gui.overlay();
     }
@@ -1134,19 +1115,19 @@ public final class GameClient implements AutoCloseable {
      * how {@link #widget} finds a button at all — it is the one property that survives both
      * obfuscation and a layout change — so the difference has to be crossed rather than avoided.
      */
-    #[cfg(all(feature = "enabled", feature = "since-1.16"))]
+    #[cfg(feature = "since-1.16")]
     private static String label(AbstractWidget widget) {
         return widget.getMessage().getString();
     }
 
     /** What a widget says. */
-    #[cfg(all(feature = "enabled", not(feature = "since-1.16")))]
+    #[cfg(not(feature = "since-1.16"))]
     private static String label(AbstractWidget widget) {
         return widget.getMessage();
     }
 
     /** The overworld, from the server. */
-    #[cfg(all(feature = "enabled", feature = "since-1.16"))]
+    #[cfg(feature = "since-1.16")]
     private static ServerLevel overworld(MinecraftServer server) {
         return server.overworld();
     }
@@ -1157,7 +1138,7 @@ public final class GameClient implements AutoCloseable {
      * <p>Before 1.16 a level is asked for by dimension rather than named, and the dimension itself
      * is a {@code DimensionType} constant rather than a registry key.
      */
-    #[cfg(all(feature = "enabled", not(feature = "since-1.16")))]
+    #[cfg(not(feature = "since-1.16"))]
     private static ServerLevel overworld(MinecraftServer server) {
         return server.getLevel(DimensionType.OVERWORLD);
     }
@@ -1168,13 +1149,13 @@ public final class GameClient implements AutoCloseable {
      * <p>1.15 put the window behind an accessor. On 1.14.4 the field is public and there is no
      * accessor to call.
      */
-    #[cfg(all(feature = "enabled", feature = "since-1.15"))]
+    #[cfg(feature = "since-1.15")]
     private static int windowWidth(Minecraft client) {
         return client.getWindow().getWidth();
     }
 
     /** The width of the game window, in pixels. */
-    #[cfg(all(feature = "enabled", not(feature = "since-1.15")))]
+    #[cfg(not(feature = "since-1.15"))]
     private static int windowWidth(Minecraft client) {
         return client.window.getWidth();
     }

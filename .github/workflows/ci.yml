@@ -541,7 +541,7 @@ jobs:
           # any consumer selected it.
           - name: minecraft_client_test
             dir: examples/minecraft_client_test
-            features: --features 1.21.11,enabled
+            features: --features 1.21.11
           # One cell per side of the `#[cfg(feature = "since-1.21.6")]` branch in the mod's own
           # source: 1.20.1 compiles the `getName()` spelling and 1.21.11 the `name()` one, and a
           # matrix that built only one of them would let the other rot until someone selected it by
@@ -549,12 +549,25 @@ jobs:
           # whole cost of keeping a conditional honest. The other 41 releases are not cells: they
           # reach the same two branches through the same threshold, and each one is a ~50 MiB fetch
           # and a whole-game remap.
+          #
+          # Both select no test and still run `jals test`, which is not a contradiction: `jals build`
+          # does not resolve `[dev-dependencies]`, the harness fetches the release's ~60 runtime
+          # libraries whenever it is resolved, and the fmt/lint step below is unconditionally
+          # offline. Without a command that has put those jars in the verified cache, lint falls
+          # back to a root-only analysis that reports nothing and fails nothing. `--no-tests warn`
+          # is what says the empty selection is the expected one here — `client-test` is off, so
+          # `src/test/java` is blanked — while the compile it does perform is worth having on its
+          # own: it is the harness building *inside a consumer*, at the consumer's own `--release`.
           - name: minecraft_mod (1.20.1)
             dir: examples/minecraft_mod
             features: --features 1.20.1
+            test: true
+            test_flags: --no-tests warn
           - name: minecraft_mod (1.21.11)
             dir: examples/minecraft_mod
             features: --features 1.21.11
+            test: true
+            test_flags: --no-tests warn
           # The third `minecraft_mod` cell is the one that *runs* Minecraft rather than compiling
           # against it: `client-test` puts a client's ~60 runtime libraries on the classpath and
           # `src/test/java` boots one headless, from inside a `#[test]` method, and asserts against
@@ -639,7 +652,9 @@ jobs:
         run: jals run ${{ matrix.example.features }}
       # `jals test` compiles a second time (the test lowering keeps the `#[test]` methods the
       # build removes) and then runs each test in its own JVM. A non-zero status here is a failing
-      # test, which is exactly what the cell is for.
+      # test, which is exactly what the cell is for — and, for the two `minecraft_mod` cells that
+      # select none, it is also the only command that resolves `[dev-dependencies]` and so the only
+      # one that leaves the offline lint below anything to read.
       #
       # The two `LIBGL_*` variables are set for every cell and read by none but the client one:
       # they only mean anything to a Mesa that a GL context is being asked of.
@@ -665,10 +680,11 @@ jobs:
           if-no-files-found: ignore
       # After the build *and* the test, not before them: an example whose dependency fetches
       # (`minecraft_mod`) can only be analysed once that fetch has landed in the verified cache,
-      # because analysis is always offline. For the client cell that means after the test step
-      # specifically — the ~60 client runtime jars come from a `[dev-dependencies]` entry, which
-      # `jals build` does not resolve and `jals test` does. Reordering these two steps would leave
-      # that cell's lint on a root-only fallback, which reports nothing and fails nothing.
+      # because analysis is always offline. For all three `minecraft_mod` cells that means after the
+      # test step specifically — the ~60 client runtime jars come from a `[dev-dependencies]` entry,
+      # which `jals build` does not resolve and `jals test` does, whether or not that run selects a
+      # test. Reordering these two steps would leave their lint on a root-only fallback, which
+      # reports nothing and fails nothing.
       #
       # Tracked files only. Everything a build script publishes into a source root is untracked by
       # construction (the examples' `.gitignore`s reserve those roots), so `git ls-files` is what
@@ -875,11 +891,10 @@ jobs:
   client-harness:
     # One cell per Minecraft release, compiling `GameClient.java` against that release's client jar.
     #
-    # `enabled` is not optional here and the step after the build is why. Without that feature the
-    # harness's `#[cfg]` blanks every declaration in the file, `javac` is handed a compilation unit
-    # that is one `package` line, and the build succeeds having compiled nothing — a green cell that
-    # proves only that a selection can be resolved. So the cell asserts the class file exists, the
-    # same way the `minecraft` cell asserts its publication roots are not empty.
+    # The step after the build is not redundant with its exit status. A green `jals build` says the
+    # selection resolved and `javac` raised nothing; it does not say a type came out, and how much
+    # of this file there is to compile is what its `#[cfg]` decides. So the cell asserts the class
+    # file exists, the same way the `minecraft` cell asserts its publication roots are not empty.
     name: client harness (${{ matrix.minecraft }})
     needs: client-harness-setup
     runs-on: ubuntu-latest
@@ -910,8 +925,8 @@ jobs:
           echo "${RUNNER_TEMP}/jals-bin" >>"$GITHUB_PATH"
       - name: Compile the harness against this release
         working-directory: examples/minecraft_client_test
-        run: jals build --features ${{ matrix.minecraft }},enabled
-      - name: Check it compiled a type and not a blanked file
+        run: jals build --features ${{ matrix.minecraft }}
+      - name: Check it compiled a type and not merely a selection
         working-directory: examples/minecraft_client_test
         run: |
           set -euo pipefail

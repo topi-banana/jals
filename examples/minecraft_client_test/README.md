@@ -50,18 +50,21 @@ Leaving it out does not fail cleanly — the boot dies inside the resource reloa
 
 ## 43 releases, and where the lines are
 
-Two names select this harness, and they answer different questions:
+One name selects this harness, and it answers one question: **which release**. A release feature
+(`1.20.1`) routes `minecraft/1.20.1` into the SDK and names one *threshold*. `build.rhai` rejects a
+selection that names none, because the SDK would fall back to its own newest release while every
+threshold here stayed off — the oldest source compiled against the newest game.
 
-- **`enabled`** — is the harness wanted at all? It routes `minecraft/client` and nothing else. A
-  consumer routes it from its own `client-test`.
-- **a release feature** (`1.20.1`) — which release? It routes `minecraft/1.20.1` and names one
-  *threshold*.
+There is deliberately no second feature asking whether the harness is *wanted*. Being a
+`[dev-dependencies]` entry is already that answer: `jals test` and the analysis hosts resolve one,
+and nothing that produces output does. A consumer that names this project in its manifest has said
+its tests boot a client; asking again on every command line would be the same statement written
+twice, and two copies of a statement are a pair that eventually disagrees.
 
-Splitting them is what keeps a consumer honest. A release feature routed on its own costs nothing:
-`build.rhai` registers no task, `GameClient.java` blanks to its `package` line, and the SDK is
-reached with the selection the consumer had already made. So `jals test --features 1.20.1` resolves
-exactly the classpath `jals build --features 1.20.1` resolves — the harness is additive or it is
-absent, never a third thing in between.
+The price is worth stating rather than burying: `jals test --features 1.20.1` resolves the client
+jar and the ~60 runtime libraries whether or not the consumer's own `client-test` is named, so the
+test-side classpath is wider than `jals build --features 1.20.1`'s. `jals build` is unaffected —
+it never resolves a `[dev-dependencies]` entry at all.
 
 ### The threshold chain
 
@@ -72,7 +75,7 @@ fourteen and not forty-three:
 
 | threshold       | what moves at it                                                                                             |
 | --------------- | ------------------------------------------------------------------------------------------------------------ |
-| `since-1.14.4`  | the bottom of the chain: `build.rhai` errors when `enabled` is on and no release was named                     |
+| `since-1.14.4`  | the bottom of the chain: every release reaches it, so `build.rhai` errors when it is off — no release was named |
 | `since-1.15`    | the game window is behind `getWindow()`; on 1.14.4 it is the public `window` field                             |
 | `since-1.16`    | `getMessage()` returns a `Component`; the overworld is `overworld()` rather than `getLevel(DimensionType.OVERWORLD)`; `LevelSettings` takes a name and a difficulty; `createLevel` replaces `selectLevel` |
 | `since-1.17`    | `--release 16`                                                                                                 |
@@ -161,10 +164,10 @@ JAVAC=$JDK25/bin/javac JAVA=$JDK8/bin/java jals test --features 1.14.4,client-te
 
 Two claims, verified two ways, because they cost two very different amounts.
 
-**All 43 compile.** `jals build --features <release>,enabled`, every release, checking that a class
-file comes out — a selection without `enabled` compiles a file blanked to its `package` line and
-succeeds, so the exit status alone proves nothing. CI runs this as a 43-cell matrix, which is also
-what verifies all 2287 pinned library digests: a build script's fetches execute.
+**All 43 compile.** `jals build --features <release>`, every release, checking that a class file
+comes out rather than trusting the exit status — the same way the `minecraft` cell checks its
+publication roots are not empty. CI runs this as a 43-cell matrix, which is also what verifies all
+2287 pinned library digests: a build script's fetches execute.
 
 **Every branch boots.** A client boot costs a minute or two and a GL context, so the boot matrix is
 run locally rather than in CI. 32 of the 43 have been booted, three tests each, zero failures — and
@@ -172,25 +175,30 @@ between them they cover **every one of the fourteen threshold bands**, which is 
 matters: two releases in the same band compile the same source and differ only in the game jar. The
 JVM is the one the release asks for, from the table above.
 
-## Why every declaration carries `#[cfg(feature = "enabled")]`
+## Why the imports carry attributes too
 
-A dependency is a graph node whether or not the selection routes a feature to it, so this project's
-build script runs and its sources are lowered under *every* selection a consumer makes — including
-`jals lint --features 1.20.1`, where no client jar exists and `net.minecraft.client.*` names
-nothing. Under those selections the `#[cfg]` blanks the file down to its `package` line: a
-compilation unit that declares no type and emits no class. `build.rhai` registers no task for the
-same reason, so those selections fetch nothing.
+`#[cfg]` here is not only about which *body* compiles. A type that moved package between releases is
+two imports of which exactly one may exist — `net.minecraft.world.level.GameRules` through 1.21.10,
+`net.minecraft.world.level.gamerules.GameRules` from 1.21.11 — and an import naming a type the game
+does not have is an error before any body is looked at. A `cfg`-disabled declaration is blanked
+before anything tries to resolve it, so the attribute is what lets both spellings live in one file.
+Java allows no annotation on an import; the jals dialect's `#[cfg]` is not an annotation, and
+`jals-syntax` treats an import as an attribute host like any other declaration. That is why the
+project declares `[package] features = ["attributes"]`.
 
-The selection that *does* name the release is the other half of that, and worth knowing:
-`jals lint` is unconditionally offline, so under `--features <release>,client-test` it wants that
-release's ~60 jars already in the consumer's verified cache. `jals build` no longer puts them there
-— that is the point of the table — so a `jals test` has to have run. Without it the graph does not
-resolve and lint degrades to a root-only analysis with a warning, the same way it does for any
-dependency whose artifacts are not yet built.
+`[features] default` is empty, and must stay that way. A consumer reaches this project through a
+`[dev-dependencies]` edge whose `default-features` is on, so a default release would be forwarded
+into the SDK as a *second* version beside the one the consumer chose, and the SDK rejects that
+before any download.
 
-That is why the project declares `[package] features = ["attributes"]`, and why `[features]
-default` is empty — a default release would be forwarded into the SDK as a *second* version beside
-the one the consumer chose, and the SDK rejects that before any download.
+The offline half is worth knowing as well. `jals lint` is unconditionally offline, so it wants the
+selected release's ~60 jars already in the consumer's verified cache — under *any* selection now,
+not only one that named `client-test`, because this project fetches them whenever it is resolved.
+`jals build` never puts them there — a `[dev-dependencies]` entry is absent from everything that
+produces output — so a `jals test` has to have run first. Without it the graph does not resolve and
+lint degrades to a root-only analysis with a warning, the same way it does for any dependency whose
+artifacts are not yet built. That is why all three `minecraft_mod` CI cells run `jals test` before
+they lint, and why the two that select no test pass `--no-tests warn`.
 
 ## Booting it
 
@@ -269,7 +277,7 @@ jals test --features 1.21.11,client-test -j 1
 
 Any of the 43 releases goes in place of `1.21.11`.
 
-Here, `jals build --features <release>,enabled` is the whole of what this project does on its own:
+Here, `jals build --features <release>` is the whole of what this project does on its own:
 it proves the harness compiles against the release it claims. CI runs that for all 43, which is also
 what verifies all 2287 pinned digests — a build script's fetches execute.
 
