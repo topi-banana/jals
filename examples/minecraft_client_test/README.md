@@ -237,6 +237,11 @@ Two things a launcher provides and this does not, both measured rather than assu
 - **No native library directory.** The `-natives-linux` classifier jars go on the classpath like
   every other one; LWJGL's `SharedLibraryLoader` extracts what it needs out of them, so there is no
   `-Djava.library.path` and no unpacked directory.
+- **No log next to your manifest.** `--gameDir` does not move the log: the configuration inside the
+  game jar names `logs/` and log4j resolves that against the working directory, which for a test is
+  the project root. The harness writes its own configuration into the run directory and points log4j
+  at it under **both** property names — log4j renamed it at 2.10, and the catalog spans that
+  boundary, so a single spelling leaves the oldest releases writing where they always did.
 - **No asset store.** The harness writes an asset index with no objects in it. Almost every object a
   launcher downloads is a sound or a translation; the textures, models and shaders a boot needs are
   inside the client jar.

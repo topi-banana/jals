@@ -1003,6 +1003,14 @@ public final class GameClient implements AutoCloseable {
                 + "    </Root>\n"
                 + "  </Loggers>\n"
                 + "</Configuration>\n");
+        // Both spellings, because the catalog spans the release that renamed the property. log4j
+        // read `log4j.configurationFile` until 2.10 and `log4j2.configurationFile` from it, and the
+        // game pins 2.8.1 through 1.16.5 and 2.14.1 or later after. Setting only the newer name is
+        // silently ignored by the older log4j, which then uses the configuration inside the game
+        // jar — one that names `logs/` and resolves it against the working directory, which for a
+        // test is the project root. So the oldest releases wrote a `logs/` next to `jals.toml` on
+        // every run. Setting the name a build does not read costs nothing.
+        System.setProperty("log4j.configurationFile", configuration.toString());
         System.setProperty("log4j2.configurationFile", configuration.toString());
     }
 
