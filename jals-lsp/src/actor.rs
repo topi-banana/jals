@@ -3496,6 +3496,12 @@ mod tests {
     /// just emptied. `discover` opens with `Manifest::validate`, so a routing entry left behind
     /// names an entry that no longer exists and the fallback fails exactly where it is needed —
     /// which is every real project, `examples/minecraft_mod` included.
+    ///
+    /// **Both** tables, and the fixture declares a `[dev-dependencies]` cycle of its own for that
+    /// reason: the fallback rediscovers under [`DependencyScope::Test`], so a dev entry left in
+    /// place is walked again and fails the walk again — and a fallback that fails the way the first
+    /// attempt did leaves the workspace with no analysis at all. Routing a feature into it as well
+    /// covers the `[features]` half against the same table.
     #[test]
     fn the_root_only_fallback_survives_a_manifest_that_routes_features_to_a_dependency() {
         block_on_inline(async {
@@ -3504,8 +3510,9 @@ mod tests {
                 dir.path(),
                 "jals.toml",
                 "[build]\nsource-dirs = [\"src\"]\n\
-                 [features]\nclient = [\"a/client\"]\n\
-                 [dependencies]\na = { path = \"a\" }\n",
+                 [features]\nclient = [\"a/client\", \"harness/client\"]\n\
+                 [dependencies]\na = { path = \"a\" }\n\
+                 [dev-dependencies]\nharness = { path = \"harness\" }\n",
             );
             write(
                 dir.path(),
@@ -3516,6 +3523,18 @@ mod tests {
                 dir.path(),
                 "b/jals.toml",
                 "[dependencies]\na-again = { path = \"../a\" }\n",
+            );
+            // A cycle of its own, so a dev table the fallback failed to empty takes it down for a
+            // reason nothing in `[dependencies]` could have caused.
+            write(
+                dir.path(),
+                "harness/jals.toml",
+                "[features]\nclient = []\n[dependencies]\nloop = { path = \"../loop\" }\n",
+            );
+            write(
+                dir.path(),
+                "loop/jals.toml",
+                "[dependencies]\nharness-again = { path = \"../harness\" }\n",
             );
             write(dir.path(), "src/Main.java", "class Main {}");
             let manifest = Manifest::from_file(&dir.path().join("jals.toml"))
