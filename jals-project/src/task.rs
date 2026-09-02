@@ -266,7 +266,11 @@ struct OwnedFile {
 /// digest strip that leaves a manifest with no digests alone. Note that 3's claim held only in one
 /// direction — `REMAP_OUTPUT_VERSION` was *not* moved when the signature block was first dropped,
 /// so this record was the only thing standing between a warm cache and the jar a JVM refuses.
-const TASK_EXECUTION_VERSION: u32 = 4;
+///
+/// 5: the outer half of `REMAP_OUTPUT_VERSION` 3 / `MERGE_OUTPUT_VERSION` 4 — `META-INF/` matched
+/// however an archive spells it, and a `Main-Class` folded across continuation lines read and
+/// rewritten as the one attribute it is.
+const TASK_EXECUTION_VERSION: u32 = 5;
 
 /// A [`BuildTaskExecution`] recorded in the verified cache, addressed by what produced it.
 ///

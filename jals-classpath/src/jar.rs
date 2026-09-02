@@ -23,7 +23,7 @@ use crate::zip::{StoredZip, WriteMember};
 /// The jar specification caps a line at 72 bytes and is read both ways on whether the terminator
 /// counts against it. Counting it is the strict reading, so a manifest this writer produces is
 /// legal under either.
-const MAX_LINE: usize = 72;
+pub(crate) const MAX_LINE: usize = 72;
 
 /// Manifest lines end with CRLF, not the host's line ending — the format is not text-mode.
 const EOL: &str = "\r\n";

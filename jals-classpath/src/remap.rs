@@ -13,7 +13,7 @@
 //! [`JarMerge::merge`] unions two jars by member path: the overlay wins on conflicts, the base
 //! keeps everything else, both in deterministic input order.
 
-use alloc::borrow::ToOwned;
+use alloc::borrow::{Cow, ToOwned};
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -61,7 +61,14 @@ const JAR_LIMITS: SourceTreeLimits = SourceTreeLimits {
 /// alphanumerics is a resource and is kept, a rewritten `Main-Class` carries its own line's
 /// terminator rather than an LF, and a manifest with no digest in it comes back byte-identical
 /// rather than re-terminated and re-closed.
-const REMAP_OUTPUT_VERSION: u32 = 2;
+///
+/// 3: `META-INF/` is matched however the archive spells it, as the JVM matches it, so a
+/// `meta-inf/`-spelled signature block goes and a `meta-inf/`-spelled manifest is stripped instead
+/// of the pass leaving half a claim standing. And a `Main-Class` folded onto continuation lines —
+/// which is every entry point whose name runs past the manifest's 72-byte cap, `jar.rs`'s own
+/// output included — is read as one attribute and written back folded, rather than being missed
+/// and left naming a class the remap has since renamed.
+const REMAP_OUTPUT_VERSION: u32 = 3;
 
 /// The same, for what a merge writes.
 ///
@@ -69,7 +76,10 @@ const REMAP_OUTPUT_VERSION: u32 = 2;
 ///
 /// 3: the two sides' manifests are one conflict however either spells the name, the survivor is
 /// written first, and the digest strip leaves a manifest that has no digests in it alone.
-const MERGE_OUTPUT_VERSION: u32 = 3;
+///
+/// 4: the `META-INF/` component is matched case-insensitively, so a `meta-inf/`-spelled manifest is
+/// the manifest for the conflict, the `Multi-Release` read and the digest strip alike.
+const MERGE_OUTPUT_VERSION: u32 = 4;
 
 /// Obfuscated class-hierarchy index used to walk supers/interfaces for inherited member lookups.
 #[derive(Debug, Default)]
@@ -646,6 +656,23 @@ mod helpers {
         bytes.len() >= 4 && bytes.starts_with(b"PK")
     }
 
+    /// What `name` spells directly under `META-INF/`, or `None` when it is not under it at all.
+    ///
+    /// The directory component is compared case-insensitively, exactly as the basenames below are
+    /// and for the same reason: the JVM matches it that way. `JarFile::getManEntry` falls back to
+    /// an `equalsIgnoreCase` sweep of the `META-INF/` names, and
+    /// `SignatureFileVerifier::isSigningRelated` upper-cases the whole entry name before testing
+    /// it — so in an archive that spells the directory `meta-inf/`, the JVM still reads the
+    /// manifest and still verifies the block. Matching only the specification's spelling here left
+    /// precisely the half-a-claim archive this pass exists to prevent: the `.RSA` copied through
+    /// because it was not recognised, and the manifest's per-entry digests never stripped for the
+    /// same reason, over classes every one of which had just been rewritten.
+    fn under_meta_inf(name: &str) -> Option<&str> {
+        const META_INF: &str = "META-INF/";
+        let (prefix, base) = name.split_at_checked(META_INF.len())?;
+        prefix.eq_ignore_ascii_case(META_INF).then_some(base)
+    }
+
     /// Whether `name` is a jar signature block: `META-INF/<base>.{SF,DSA,RSA,EC}`, or the
     /// `META-INF/SIG-*` spelling.
     ///
@@ -663,7 +690,7 @@ mod helpers {
     /// is a class — which this predicate is asked about *before* the remapped bytes are collected,
     /// so matching it would have thrown away a class this pass had already rewritten.
     pub(super) fn is_signature_member(name: &str) -> bool {
-        let Some(base) = name.strip_prefix("META-INF/") else {
+        let Some(base) = under_meta_inf(name) else {
             return false;
         };
         if base.contains('/') {
@@ -688,13 +715,13 @@ mod helpers {
 
     /// Whether `name` is the jar manifest: `META-INF/MANIFEST.MF`, at that one depth.
     ///
-    /// Case-insensitively, for the same reason [`is_signature_member`] is — a jar tool is free not
-    /// to write the specification's spelling, and a JVM finds the manifest either way. Matching
-    /// this one exactly while matching the signature block loosely is the asymmetry that would
-    /// drop a jar's `.SF` and keep the manifest digests saying the same thing about it.
+    /// Case-insensitively in both components (see [`under_meta_inf`]), for the same reason
+    /// [`is_signature_member`] is — a jar tool is free not to write the specification's spelling,
+    /// and a JVM finds the manifest either way. Matching this one exactly while matching the
+    /// signature block loosely is the asymmetry that would drop a jar's `.SF` and keep the manifest
+    /// digests saying the same thing about it.
     pub(super) fn is_manifest_member(name: &str) -> bool {
-        name.strip_prefix("META-INF/")
-            .is_some_and(|base| base.eq_ignore_ascii_case("MANIFEST.MF"))
+        under_meta_inf(name).is_some_and(|base| base.eq_ignore_ascii_case("MANIFEST.MF"))
     }
 
     /// Whether a manifest attribute line declares a digest of something.
@@ -881,32 +908,110 @@ mod helpers {
         out.into_bytes()
     }
 
+    /// One physical manifest line without its terminator.
+    fn without_terminator(line: &str) -> &str {
+        line.trim_end_matches(['\r', '\n'])
+    }
+
+    /// The terminator a physical manifest line carried — empty for a final line the archive left
+    /// unterminated.
+    fn terminator_of(line: &str) -> &str {
+        &line[without_terminator(line).len()..]
+    }
+
+    /// Append `Main-Class: {value}` to `out`, folded onto continuation lines the way
+    /// [`crate::jar::JarPackage`] writes an attribute: every physical line, terminator included,
+    /// stays within [`MAX_LINE`] bytes and a continuation opens with exactly one space. Emitting it
+    /// as one long line instead would answer a manifest this crate could read with one it could
+    /// not, and an over-long line is an invalid manifest rather than a cosmetic matter.
+    ///
+    /// The manifest's own terminators, not the writer's CRLF: this pass edits an archive somebody
+    /// else may have written, and putting one CRLF line into an LF manifest leaves a file whose
+    /// terminators disagree. `fold` breaks the intermediate lines and `end` closes the last one, so
+    /// a final attribute the archive left unterminated stays that way.
+    fn write_main_class(out: &mut String, value: &str, fold: &str, end: &str) {
+        let mut attribute = String::with_capacity("Main-Class: ".len() + value.len());
+        let _ = write!(attribute, "Main-Class: {value}");
+        let mut rest = attribute.as_str();
+        // The first physical line spends its whole budget on content; a continuation gives one byte
+        // back to the leading space that marks it as one.
+        let mut budget = crate::jar::MAX_LINE.saturating_sub(fold.len());
+        loop {
+            if rest.len() <= budget {
+                out.push_str(rest);
+                out.push_str(end);
+                return;
+            }
+            let mut take = budget;
+            while take > 0 && !rest.is_char_boundary(take) {
+                take -= 1;
+            }
+            if take == 0 {
+                // Unreachable while the budget exceeds four bytes, but emitting one whole character
+                // keeps the loop total rather than spinning on a zero-length split.
+                take = rest.chars().next().map_or(rest.len(), char::len_utf8);
+            }
+            let (head, tail) = rest.split_at(take);
+            out.push_str(head);
+            out.push_str(fold);
+            out.push(' ');
+            rest = tail;
+            budget = crate::jar::MAX_LINE.saturating_sub(fold.len() + 1);
+        }
+    }
+
     /// Rewrite `Main-Class:` in a manifest body when the target maps under `mappings`.
+    ///
+    /// Read from the *logical* line rather than the physical one. A manifest attribute may be
+    /// folded across continuation lines, each opening with a single space, and
+    /// [`crate::jar::JarPackage`] is what folds a long `Main-Class` in the first place — its cap is
+    /// 72 bytes including the terminator, so any entry point whose name runs past 58 characters
+    /// arrives here wrapped. A reader matching physical lines therefore missed exactly the jars
+    /// this crate writes: the reobfuscated archive kept the deobfuscated entry-point name and
+    /// `java -jar` answered it with `ClassNotFoundException`.
     pub(super) fn rewrite_manifest_main_class(bytes: &[u8], mappings: &Mappings) -> Vec<u8> {
         let Ok(text) = core::str::from_utf8(bytes) else {
             return bytes.to_vec();
         };
         let mut out = String::with_capacity(text.len());
-        for line in text.split_inclusive('\n') {
-            let trimmed = line.trim_end_matches(['\r', '\n']);
-            if let Some(value) = trimmed
-                .strip_prefix("Main-Class:")
-                .or_else(|| trimmed.strip_prefix("Main-Class: "))
-            {
-                let dotted = value.trim();
-                let internal = dotted.replace('.', "/");
+        let mut physical = text.split_inclusive('\n').peekable();
+        while let Some(first) = physical.next() {
+            let mut folded: Vec<&str> = vec![first];
+            while physical.peek().is_some_and(|next| next.starts_with(' ')) {
+                folded.push(physical.next().expect("peeked"));
+            }
+            // Borrowed for the overwhelming majority — one physical line — so a manifest with a
+            // section per member is not one allocation per line to find one attribute.
+            let logical: Cow<'_, str> = if folded.len() == 1 {
+                Cow::Borrowed(without_terminator(first))
+            } else {
+                let mut joined = String::new();
+                for (index, line) in folded.iter().enumerate() {
+                    let body = without_terminator(line);
+                    // The one space that marks a continuation is syntax, not value. It is ASCII, so
+                    // byte 1 is always a character boundary.
+                    joined.push_str(if index == 0 { body } else { &body[1..] });
+                }
+                Cow::Owned(joined)
+            };
+            if let Some(value) = logical.strip_prefix("Main-Class:") {
+                let internal = value.trim().replace('.', "/");
                 if let Some(official) = mappings.remap_class(&internal) {
                     let rewritten = official.replace('/', ".");
-                    // The line's own terminator, not `writeln!`'s: a manifest is CRLF and writing
-                    // one LF line into the middle of one leaves a file whose terminators disagree.
-                    // `trimmed` is a prefix of `line`, so the remainder is exactly what was there —
-                    // including nothing, for a final line the archive left unterminated.
-                    let terminator = &line[trimmed.len()..];
-                    let _ = write!(out, "Main-Class: {rewritten}{terminator}");
+                    // An unterminated attribute is the file's last line and cannot have been
+                    // folded, so the fallback below is only ever reached when nothing is folded.
+                    let fold = match terminator_of(first) {
+                        "" => "\r\n",
+                        terminator => terminator,
+                    };
+                    let end = terminator_of(folded[folded.len() - 1]);
+                    write_main_class(&mut out, &rewritten, fold, end);
                     continue;
                 }
             }
-            out.push_str(line);
+            for line in folded {
+                out.push_str(line);
+            }
         }
         out.into_bytes()
     }
@@ -1870,8 +1975,87 @@ mod tests {
 
     use super::helpers::{
         declares_multi_release, is_manifest_member, is_signature_member, multi_release_prefix,
-        strip_manifest_digests, with_multi_release,
+        rewrite_manifest_main_class, strip_manifest_digests, with_multi_release,
     };
+    use crate::mappings::Mappings;
+    use crate::{MappingFormat, RemapDirection};
+
+    /// A manifest's logical attributes: continuation lines joined back onto the line above, each
+    /// paired with the widest physical line it was written across.
+    fn attributes(manifest: &[u8]) -> Vec<(String, usize)> {
+        let text = core::str::from_utf8(manifest).expect("the rewritten manifest stays UTF-8");
+        let mut folded: Vec<(String, usize)> = Vec::new();
+        for line in text.split_inclusive('\n') {
+            let body = line.trim_end_matches(['\r', '\n']);
+            match (body.strip_prefix(' '), folded.last_mut()) {
+                (Some(rest), Some((attribute, widest))) => {
+                    attribute.push_str(rest);
+                    *widest = (*widest).max(line.len());
+                }
+                _ => folded.push((String::from(body), line.len())),
+            }
+        }
+        folded
+    }
+
+    /// A `Main-Class` too long for one manifest line is one attribute in both directions.
+    ///
+    /// `JarPackage::write_attribute` caps a physical line at 72 bytes including its terminator, so
+    /// every entry point whose name runs past 58 characters reaches the remap already folded — and
+    /// this crate is what wrote it that way. A pass that matched physical lines read no
+    /// `Main-Class` at all there, and the reobfuscated jar shipped naming a class the remap had
+    /// just renamed away.
+    #[test]
+    fn a_main_class_too_long_for_one_line_is_read_and_written_as_one_attribute() {
+        const LONG: &str = "com.example.application.launcher.VeryLongApplicationEntryPoint";
+        assert!(
+            "Main-Class: ".len() + LONG.len() > super::super::jar::MAX_LINE,
+            "the fixture has to be long enough to need folding"
+        );
+        let widened = Mappings::parse(
+            &alloc::format!("{LONG} -> a:\n"),
+            &MappingFormat::Proguard,
+            RemapDirection::Deobfuscate,
+        )
+        .expect("parses");
+        let narrowed = Mappings::parse(
+            &alloc::format!("com.example.Short -> {LONG}:\n"),
+            &MappingFormat::Proguard,
+            RemapDirection::Deobfuscate,
+        )
+        .expect("parses");
+
+        // Writing: a short name maps to a long one, and the result is folded rather than emitted as
+        // one over-long line, which is not a legal manifest.
+        let written = rewrite_manifest_main_class(
+            b"Manifest-Version: 1.0\r\nMain-Class: a\r\n\r\n",
+            &widened,
+        );
+        let out = attributes(&written);
+        assert!(
+            out.contains(&(alloc::format!("Main-Class: {LONG}"), 72)),
+            "the long name is one attribute folded onto 72-byte lines: {out:?}"
+        );
+        assert!(
+            out.iter()
+                .all(|(_, widest)| *widest <= super::super::jar::MAX_LINE),
+            "no physical line may exceed the cap: {out:?}"
+        );
+
+        // Reading: the folded form this crate writes is what a reobfuscating remap is handed back.
+        let read = rewrite_manifest_main_class(&written, &narrowed);
+        assert!(
+            attributes(&read).contains(&(String::from("Main-Class: com.example.Short"), 31)),
+            "a folded `Main-Class` is the attribute the mapping is applied to"
+        );
+        // Everything else survives, terminators included.
+        assert!(
+            core::str::from_utf8(&read)
+                .expect("utf-8")
+                .starts_with("Manifest-Version: 1.0\r\n"),
+            "the rest of the manifest is untouched"
+        );
+    }
 
     /// A multi-release jar stores the same class twice — once at its plain path and once under
     /// `META-INF/versions/<n>/` — and both copies share a `this_class`. Naming the remapped output
@@ -1924,6 +2108,13 @@ mod tests {
         assert!(!is_signature_member("META-INF/services/provider.sf"));
         assert!(!is_signature_member("net/minecraft/Client.sf"));
         assert!(!is_signature_member("META-INF/"));
+
+        // The directory component too, because the JDK upper-cases the whole entry name before
+        // testing it. A block this spelling hid would ride through a remap that had already
+        // stripped the manifest half of its claim.
+        assert!(is_signature_member("meta-inf/SIGNER.RSA"));
+        assert!(is_signature_member("Meta-Inf/signer.sf"));
+        assert!(!is_signature_member("meta-inf/services/provider.sf"));
     }
 
     /// `Multi-Release` is read from the main section only, and only as `true`.
@@ -1979,6 +2170,10 @@ mod tests {
     fn the_manifest_is_recognised_the_way_a_signature_block_is() {
         assert!(is_manifest_member("META-INF/MANIFEST.MF"));
         assert!(is_manifest_member("META-INF/manifest.mf"));
+        // Both components, exactly as `is_signature_member` reads them and as
+        // `JarFile::getManEntry`'s `equalsIgnoreCase` sweep finds the manifest.
+        assert!(is_manifest_member("meta-inf/MANIFEST.MF"));
+        assert!(is_manifest_member("Meta-Inf/Manifest.mf"));
 
         assert!(!is_manifest_member("META-INF/versions/9/MANIFEST.MF"));
         assert!(!is_manifest_member("MANIFEST.MF"));
