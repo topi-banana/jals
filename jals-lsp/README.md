@@ -9,8 +9,9 @@ inference.
 formatting, the base semantic-token classification) are driven by the same lossless parse that
 `jals fmt` uses. Everything that needs to understand code across files — hover, go-to-definition,
 find-references, rename, completion, signature help, and cross-file diagnostics — is backed by a
-per-project `jals-hir` `ProjectIndex` that also folds in the project's compiled classpath and
-`[dependencies]`.
+per-project `jals-hir` `ProjectIndex` that also folds in the project's compiled classpath and both
+dependency tables (`[dependencies]` and `[dev-dependencies]`: the server resolves under
+`DependencyScope::Test`, because a `[test] source-dirs` file is open like any other).
 
 ```
 editor ◀── stdio (LSP) ──▶ jals lsp
@@ -29,7 +30,8 @@ editor ◀── stdio (LSP) ──▶ jals lsp
                                           │
                      Workspace (state.rs): one jals-hir ProjectIndex per open jals.toml
                      project — its source files, [build] classpath, resolved
-                     [dependencies] jars/sources, git/path source deps, and features
+                     [dependencies]/[dev-dependencies] jars/sources, git/path
+                     source deps, and features
 ```
 
 ## What it does today
@@ -80,7 +82,10 @@ file in that project is opened (walking up from the file to find its manifest) a
 other file in the same project — or a detached workspace of its own (below).
 
 A project workspace folds in the project's
-`[build] classpath` `.class` files and resolved `[dependencies]` jars (via `jals-classpath`; the
+`[build] classpath` `.class` files and the resolved jars of both dependency tables (via
+`jals-classpath`; the graph is assembled under `DependencyScope::Test`, so a `[dev-dependencies]`
+entry is an analysis input and a change to it reassembles the workspace exactly as a
+`[dependencies]` one does; the
 `reqwest` download runs on a dedicated thread to stay off the Tokio runtime), successful Rhai
 build-script generated sources and additional classpath entries, each dependency's
 extracted `sources` jar `.java` — or, when a jar ships none, a decompiled skeleton `.java` — as

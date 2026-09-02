@@ -157,9 +157,13 @@ has to be able to *read* the game's class files; the runtime has to be one the r
 One JDK 25 compiles all 43 — `javac` accepts any `--release` from 8 up and reads a newer classpath
 class without complaint — which is why CI installs exactly that one, and why the harness's
 `--release` cascade tops out at 21 rather than following 26.x to 25. Booting an older release wants
-its own JVM, and the fourth column is not advice: 1.17 asks for 16 and means it.
+its own JVM, and the `boots on` column is not advice: 1.17 asks for 16 and means it.
+
+The two variables are read by whichever command runs the JDK, and the run is the consumer's — so
+this is the same invocation as under *Running the tests that use it*, with the JDKs named:
 
 ```sh
+cd ../minecraft_mod
 JAVAC=$JDK25/bin/javac JAVA=$JDK8/bin/java jals test --features 1.14.4,client-test -j 1
 ```
 

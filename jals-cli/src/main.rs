@@ -1833,6 +1833,7 @@ impl App {
     /// and it carries the execution context, so there is no separate `exec` to hand over and no
     /// way to hand over one that is not the aggregate's. `jals_editor::Workspace::load` takes its
     /// own the same way.
+    ///
     /// Eight parameters, and none of them collapses into another: three are the project (aggregate,
     /// manifest, root), two are the selection a host states (`scope` and `options`, deliberately
     /// orthogonal — *which entries* against *what is taken out of them*), and three are the phase
