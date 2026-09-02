@@ -20,6 +20,7 @@ import java.nio.file.Paths;
 import java.time.Duration;
 import java.util.Comparator;
 import java.util.List;
+#[cfg(feature = "since-26.2")] import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
@@ -464,7 +465,7 @@ public final class GameClient implements AutoCloseable {
     /**
      * Ask the client to create and join the world. Only safe on the render thread.
      *
-     * <p>Eight bodies, newest first, and the boundaries are measured rather than remembered: each
+     * <p>Nine bodies, newest first, and the boundaries are measured rather than remembered: each
      * one is the range over which a call actually compiles. The `jals.toml` threshold table says
      * what each boundary is; this says what it costs.
      */
@@ -769,27 +770,24 @@ public final class GameClient implements AutoCloseable {
      * <p>The wait runs to a deadline rather than to the first interrupt. An interrupt that ended it
      * early would halt the JVM before the generated harness had printed its sentinel, and {@code
      * jals test} reads the verdict from that line rather than from the exit status — so a passing
-     * test would come back a failure with nothing in the capture to explain it. The flag is
-     * restored once at the end rather than inside the loop, where restoring it would make the next
-     * {@code sleep} throw straight away and spin the remaining seconds off.
+     * test would come back a failure with nothing in the capture to explain it. The interrupt is
+     * therefore swallowed rather than restored: {@code halt} runs no shutdown hook and never
+     * returns, so nothing downstream of this loop could observe the flag anyway.
      */
     private static void armHalt() {
         Thread watchdog =
             new Thread(
                 () -> {
                     long deadline = System.nanoTime() + HALT_AFTER.toNanos();
-                    boolean wasInterrupted = false;
                     long remaining = deadline - System.nanoTime();
                     while (remaining > 0L) {
                         try {
                             Thread.sleep(Math.max(1L, remaining / 1_000_000L));
                         } catch (InterruptedException _interrupted) {
-                            wasInterrupted = true;
+                            // Deliberately ignored; the loop below re-reads the clock and waits out
+                            // whatever is left of the deadline.
                         }
                         remaining = deadline - System.nanoTime();
-                    }
-                    if (wasInterrupted) {
-                        Thread.currentThread().interrupt();
                     }
                     Runtime.getRuntime().halt(0);
                 },
@@ -1070,7 +1068,11 @@ public final class GameClient implements AutoCloseable {
      */
     #[cfg(feature = "since-26.2")]
     private static Screen showing(Minecraft client) {
-        return client.gui == null ? null : client.gui.screen();
+        // One read of `gui`, not two. It is a plain field the render thread writes during the
+        // boot and this is called from the test thread, so a null check and a dereference over
+        // two reads may disagree — and the second one returning the `null` the first ruled out is
+        // exactly the `NullPointerException` the check is here to prevent.
+        return Optional.ofNullable(client.gui).map(gui -> gui.screen()).orElse(null);
     }
 
     /** Put {@code screen} up. Only safe on the render thread. */
@@ -1105,7 +1107,8 @@ public final class GameClient implements AutoCloseable {
      */
     #[cfg(feature = "since-26.2")]
     private static Overlay overlay(Minecraft client) {
-        return client.gui == null ? null : client.gui.overlay();
+        // One read, for the reason {@link #showing} takes one.
+        return Optional.ofNullable(client.gui).map(gui -> gui.overlay()).orElse(null);
     }
 
     /**
