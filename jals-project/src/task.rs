@@ -256,7 +256,17 @@ struct OwnedFile {
 /// running at all — so a warm cache would keep serving the jar that cannot be loaded. An output
 /// version is only reached through a task that re-executes, which makes this the outer half of the
 /// same rule.
-const TASK_EXECUTION_VERSION: u32 = 3;
+///
+/// 4: the outer half of two further rounds of the same rule, and the demonstration of why it is
+/// written down at all. A merged jar re-declares `Multi-Release` when either input's manifest did,
+/// which landed with `MERGE_OUTPUT_VERSION` alone — so every warm memo kept replaying the jar
+/// without the attribute and the client kept dying in the same static initializer. Beside it,
+/// `REMAP_OUTPUT_VERSION` 2 and `MERGE_OUTPUT_VERSION` 3: what a `META-INF/` member has to be to
+/// count as a signature block, which manifest survives a union and where it is written, and a
+/// digest strip that leaves a manifest with no digests alone. Note that 3's claim held only in one
+/// direction — `REMAP_OUTPUT_VERSION` was *not* moved when the signature block was first dropped,
+/// so this record was the only thing standing between a warm cache and the jar a JVM refuses.
+const TASK_EXECUTION_VERSION: u32 = 4;
 
 /// A [`BuildTaskExecution`] recorded in the verified cache, addressed by what produced it.
 ///

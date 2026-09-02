@@ -101,7 +101,14 @@ impl Frontend for DialectFrontend {
             // Bumped whenever this frontend's *output* changes for unchanged input — the
             // generated test harness included, since a cached lowering is restored without the
             // frontend running at all and would otherwise keep an older harness alive.
-            version: 2,
+            //
+            // 3: the harness imports each shim and calls it by its simple name, and a shim is
+            // named after its class's whole qualified name to keep that name unique. Both halves
+            // are what a cached lowering keeps alive: the emitted call site *and* the emitted
+            // file's path. Without this, a project that ran `jals test` before the fix keeps
+            // compiling the qualified call the fix removed — which is the whole failure, since a
+            // classpath carrying a class named `com` resolves `com.example.Foo` as a field of it.
+            version: 3,
         }
     }
 
