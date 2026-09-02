@@ -246,6 +246,23 @@ impl NativeProjectPlan {
                     .push(Self::resolve_host_path(project_root, source)),
             }
         }
+        // `[test] source-dirs` too, and unconditionally, for the reason [`Self::snapshot_scopes`]
+        // captures them unconditionally: these roots are the *shape of the project* an index walks,
+        // and scoping them to what one invocation compiles would make the same project read
+        // differently under `jals build` and `jals test`. Nothing on a compile path reads this list
+        // — a compiler is handed the sources `jals-cli`'s own `discover_sources` gathers per
+        // lowering — so what it decides is only which files an analysis host indexes. Leaving them
+        // out is what put a `[test] source-dirs` file outside `Workspace::owns_path`, so the
+        // language server answered it from a detached group with no `[package] features` and
+        // reported every `#[test]` in it as an error.
+        for source in &manifest.test.source_dirs {
+            match Self::project_relative(project_root, source) {
+                Some(path) => result.source_roots.push(DirKey::new(path)),
+                None => result
+                    .external_source_roots
+                    .push(Self::resolve_host_path(project_root, source)),
+            }
+        }
         for classpath in &manifest.build.classpath {
             let Some(path) = Self::project_relative(project_root, classpath) else {
                 result
