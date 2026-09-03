@@ -1329,6 +1329,7 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "gloo-net",
+ "gloo-timers",
  "jals-build",
  "jals-classpath",
  "jals-config",

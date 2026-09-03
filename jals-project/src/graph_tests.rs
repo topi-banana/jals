@@ -32,14 +32,25 @@ impl jals_classpath::Fetcher for UnreachableFetcher {
         jals_classpath::NetworkPolicy::Online
     }
 
-    fn fetch_admitted(&self, locator: &str) -> impl Future<Output = Result<Vec<u8>, String>> {
+    fn retry(&self) -> jals_classpath::RetrySchedule {
+        jals_classpath::RetrySchedule::none()
+    }
+
+    fn delay(&self, _: u32) -> impl Future<Output = ()> {
+        ready(())
+    }
+
+    fn fetch_admitted(
+        &self,
+        locator: &str,
+    ) -> impl Future<Output = Result<Vec<u8>, jals_classpath::FetchError>> {
         ready(Self::refuse(locator))
     }
 }
 
 impl UnreachableFetcher {
     /// Diverges: being asked at all is the failure this fixture asserts against.
-    fn refuse(locator: &str) -> Result<Vec<u8>, String> {
+    fn refuse(locator: &str) -> Result<Vec<u8>, jals_classpath::FetchError> {
         panic!("this graph must not fetch, but asked for `{locator}`")
     }
 }
@@ -873,6 +884,7 @@ fn native_compile_classpath_keeps_mixed_local_and_remote_order() {
                 &jals_classpath::ReqwestFetcher::for_project(
                     project.path().to_path_buf(),
                     jals_classpath::NetworkPolicy::Online,
+                    jals_classpath::RetrySchedule::none(),
                 ),
                 ProjectInputOptions::Compile,
             )
@@ -1696,15 +1708,23 @@ impl jals_classpath::Fetcher for CountingFetcher {
         jals_classpath::NetworkPolicy::Online
     }
 
-    fn fetch_admitted(&self, locator: &str) -> impl Future<Output = Result<Vec<u8>, String>> {
+    fn retry(&self) -> jals_classpath::RetrySchedule {
+        jals_classpath::RetrySchedule::none()
+    }
+
+    fn delay(&self, _: u32) -> impl Future<Output = ()> {
+        ready(())
+    }
+
+    fn fetch_admitted(
+        &self,
+        locator: &str,
+    ) -> impl Future<Output = Result<Vec<u8>, jals_classpath::FetchError>> {
         self.calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        ready(
-            self.responses
-                .get(locator)
-                .cloned()
-                .ok_or_else(|| format!("unexpected fetch `{locator}`")),
-        )
+        ready(self.responses.get(locator).cloned().ok_or_else(|| {
+            jals_classpath::FetchError::permanent(format!("unexpected fetch `{locator}`"))
+        }))
     }
 }
 
@@ -3005,14 +3025,25 @@ impl jals_classpath::Fetcher for RefusingFetcher {
         jals_classpath::NetworkPolicy::Offline
     }
 
-    fn fetch_admitted(&self, locator: &str) -> impl Future<Output = Result<Vec<u8>, String>> {
+    fn retry(&self) -> jals_classpath::RetrySchedule {
+        jals_classpath::RetrySchedule::none()
+    }
+
+    fn delay(&self, _: u32) -> impl Future<Output = ()> {
+        ready(())
+    }
+
+    fn fetch_admitted(
+        &self,
+        locator: &str,
+    ) -> impl Future<Output = Result<Vec<u8>, jals_classpath::FetchError>> {
         ready(Self::refuse(locator))
     }
 }
 
 impl RefusingFetcher {
     /// Diverges: the gate must refuse before an ask can reach this adapter.
-    fn refuse(locator: &str) -> Result<Vec<u8>, String> {
+    fn refuse(locator: &str) -> Result<Vec<u8>, jals_classpath::FetchError> {
         panic!("the gate must refuse before this runs, but `{locator}` reached it")
     }
 }

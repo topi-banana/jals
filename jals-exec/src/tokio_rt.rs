@@ -29,7 +29,7 @@ impl Exec {
     }
 }
 
-pub use api::{on_blocking_pool, run};
+pub use api::{on_blocking_pool, run, sleep_millis};
 
 /// The free-function surface, grouped per the repository's no-free-functions layout; re-exported
 /// at the module root.
@@ -51,6 +51,18 @@ mod api {
             },
             Err(_) => f(),
         }
+    }
+
+    /// Suspend the current task for `millis` milliseconds.
+    ///
+    /// The native half of a portable wait — `jals-classpath`'s fetch retry asks its host to wait
+    /// between attempts, and this is what the native host does. It lives beside
+    /// [`on_blocking_pool`] because it is the same kind of thing: the one line of a runtime a
+    /// native adapter is allowed to name, so that portable code never has to.
+    ///
+    /// Requires a tokio runtime with the timer driver enabled; [`run`] builds one.
+    pub async fn sleep_millis(millis: u32) {
+        tokio::time::sleep(core::time::Duration::from_millis(u64::from(millis))).await;
     }
 
     /// Builds a current-thread tokio runtime and a `LocalSet`, hands the program an [`Exec`],

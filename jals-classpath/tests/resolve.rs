@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use jals_classpath::{
     DependencyLocation, DependencyResolver, DependencySpec, ExpectedDigest,
-    ExternalArtifactResolver, ExternalArtifactSpec, ExternalLocator, Fetcher, MappingResolver,
-    MappingSpec, NetworkPolicy,
+    ExternalArtifactResolver, ExternalArtifactSpec, ExternalLocator, FetchError, Fetcher,
+    MappingResolver, MappingSpec, NetworkPolicy, RetrySchedule,
 };
 use jals_exec::block_on_inline;
 use jals_storage::{
@@ -48,7 +48,15 @@ impl Fetcher for MockFetcher {
         self.network
     }
 
-    fn fetch_admitted(&self, _locator: &str) -> impl Future<Output = Result<Vec<u8>, String>> {
+    fn retry(&self) -> RetrySchedule {
+        RetrySchedule::none()
+    }
+
+    fn delay(&self, _: u32) -> impl Future<Output = ()> {
+        ready(())
+    }
+
+    fn fetch_admitted(&self, _locator: &str) -> impl Future<Output = Result<Vec<u8>, FetchError>> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         ready(Ok(self.bytes.clone()))
     }
@@ -238,14 +246,22 @@ impl Fetcher for OfflineFetcher {
         NetworkPolicy::Offline
     }
 
-    fn fetch_admitted(&self, locator: &str) -> impl Future<Output = Result<Vec<u8>, String>> {
+    fn retry(&self) -> RetrySchedule {
+        RetrySchedule::none()
+    }
+
+    fn delay(&self, _: u32) -> impl Future<Output = ()> {
+        ready(())
+    }
+
+    fn fetch_admitted(&self, locator: &str) -> impl Future<Output = Result<Vec<u8>, FetchError>> {
         ready(Self::refuse(locator))
     }
 }
 
 impl OfflineFetcher {
     /// Diverges: locator-index recovery must answer before anything reaches the fetch seam.
-    fn refuse(locator: &str) -> Result<Vec<u8>, String> {
+    fn refuse(locator: &str) -> Result<Vec<u8>, FetchError> {
         panic!("resolution must not fetch, but asked for `{locator}`")
     }
 }

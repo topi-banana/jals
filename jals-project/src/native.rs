@@ -921,14 +921,25 @@ mod tests {
             jals_classpath::NetworkPolicy::Online
         }
 
-        fn fetch_admitted(&self, locator: &str) -> impl Future<Output = Result<Vec<u8>, String>> {
+        fn retry(&self) -> jals_classpath::RetrySchedule {
+            jals_classpath::RetrySchedule::none()
+        }
+
+        fn delay(&self, _: u32) -> impl Future<Output = ()> {
+            ready(())
+        }
+
+        fn fetch_admitted(
+            &self,
+            locator: &str,
+        ) -> impl Future<Output = Result<Vec<u8>, jals_classpath::FetchError>> {
             ready(Self::refuse(locator))
         }
     }
 
     impl UnreachableFetcher {
         /// Diverges: being asked at all is the failure this fixture asserts against.
-        fn refuse(locator: &str) -> Result<Vec<u8>, String> {
+        fn refuse(locator: &str) -> Result<Vec<u8>, jals_classpath::FetchError> {
             panic!("this graph must not fetch, but asked for `{locator}`")
         }
     }
