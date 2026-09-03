@@ -3805,6 +3805,20 @@ impl Lowering<'_> {
             self.operand(&operand, target, insn)?;
             return Ok(target.val());
         }
+        // A cast to a **type variable** erases to its bound (JLS §5.5), and the bound is `Object`
+        // unless declared — the top of the reference hierarchy, which every reference already is.
+        // So it is a cast to nothing: the erasure this backend gives `T` *is* `anyref`, and a
+        // `ref.cast` to the top would say nothing the validator does not already know. Resolving the
+        // written name instead reported `T` as an unresolved type, which is a report about a type
+        // the source declared.
+        if matches!(
+            self.input.type_of_expr(Facts::span(cast.syntax())),
+            Some(Ty::TypeVar { .. })
+        ) {
+            self.expr(&operand, insn)?
+                .ok_or(WasmError::Unsupported("a cast of nothing"))?;
+            return Ok(ValType::Ref(RefType::nullable(HeapType::Any)));
+        }
         let heap = self.named_type(&ty)?;
         self.expr(&operand, insn)?
             .ok_or(WasmError::Unsupported("a cast of nothing"))?;
@@ -5174,9 +5188,16 @@ impl Lowering<'_> {
                     ty => Some(self.layout.val_type(&ty)?),
                 });
             }
+            // The owner is not a type this module lays out at all, so it is a *library* type — and
+            // needing one is what puts a case outside this backend's subset, not a gap in it.
+            // `System.out.println` is the everyday shape: nothing in such a file declares a library
+            // type, so the case reached this far before naming the one it needs.
             None => {
-                return Err(WasmError::Unsupported(
-                    "a call to a method outside this module",
+                return Err(WasmError::NoRepresentation(
+                    self.index
+                        .item(self.index.member(member).owner)
+                        .fqn
+                        .to_string(),
                 ));
             }
         };

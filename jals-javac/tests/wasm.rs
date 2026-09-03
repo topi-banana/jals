@@ -3320,6 +3320,35 @@ public class Generic {
     assert_invoke(&[source], "run", &["41"], "42");
 }
 
+/// A cast to a type variable erases to nothing here.
+///
+/// JLS §5.5 erases it to the variable's bound, and the bound is `Object` unless declared — the top
+/// of the reference hierarchy, which every reference already is. Resolving the written name instead
+/// reported `T` as an unresolved *type*, which is a report about a type the source declared.
+#[test]
+fn a_cast_to_a_type_variable_erases() {
+    let source = r"
+class Cell {
+    int value;
+    Cell(int value) { this.value = value; }
+}
+
+class Unchecked<T extends Cell> {
+    int through(Object o) {
+        T narrowed = (T) o;
+        return narrowed.value;
+    }
+}
+
+public class Erased {
+    public static int run(int n) {
+        return new Unchecked<Cell>().through(new Cell(n));
+    }
+}
+";
+    assert_invoke(&[source], "run", &["42"], "42");
+}
+
 /// A primitive where a reference is wanted needs a *wrapper*, which is a library type.
 ///
 /// Erasure is what makes it common rather than exotic: a type variable is `anyref` here, so
