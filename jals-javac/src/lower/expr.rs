@@ -809,11 +809,17 @@ impl Expr {
         if is_static {
             emit.asm
                 .invoke_static(&owner, &name, &descriptor, interface_owner)?;
-        } else if is_private || constructor || super_qualified {
-            // Not dispatched. A `private` method is one body the call site already knows, and
-            // `invokevirtual` would look it up in a table it is not in; a `super.` call names the
-            // superclass's body *because* it is not the one virtual dispatch would find — emitting
-            // `invokevirtual` for it is how an override calls itself forever.
+        } else if (is_private && owner_item == context.this_item) || constructor || super_qualified
+        {
+            // Not dispatched. A `private` method **of this class** is one body the call site already
+            // knows, and `invokevirtual` would look it up in a table it is not in; a `super.` call
+            // names the superclass's body *because* it is not the one virtual dispatch would find —
+            // emitting `invokevirtual` for it is how an override calls itself forever.
+            //
+            // A **nestmate's** private method is another class's, and `invokespecial` may name only
+            // the current class, a superclass, or a direct superinterface (JVMS §6.5) — so it takes
+            // the dispatched arm below. That is what the `NestHost` / `NestMembers` attributes are
+            // for: §5.4.4 grants a nestmate the access, and the resolution finds the body.
             emit.asm
                 .invoke_special(&owner, &name, &descriptor, interface_owner)?;
         } else if interface_owner {

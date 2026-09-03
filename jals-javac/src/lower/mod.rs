@@ -43,7 +43,9 @@
 //!
 //! A nested type is its own class file, named `Outer$Inner`, listed in an `InnerClasses`
 //! attribute — the only place a nested type's `private` and `static` can live — and reachable by simple
-//! or partly-qualified name. Whether it *is* `static` is not the keyword alone: a member interface,
+//! or partly-qualified name. A top-level declaration and everything inside it form a **nest**
+//! (`NestHost` / `NestMembers`), which is what lets one member reach another's `private` members at
+//! all: JVMS §5.4.4 grants that access between nestmates and to nobody else. Whether it *is* `static` is not the keyword alone: a member interface,
 //! `@interface`, `enum`, and `record` are implicitly `static`, and so is every member type of an
 //! interface. An `implements` clause reaches the `interfaces` list. An inner class, a local one, and
 //! an anonymous one carry their enclosing instance and their captures.
@@ -635,6 +637,7 @@ impl Compile {
         Self::bridges(item, &context, &mut pool, &members, &mut methods)?;
 
         let mut nesting = Self::inner_classes(node, &context, &mut pool)?;
+        nesting.extend(Self::nest(node, &context, &mut pool)?);
         // A generic declaration's type parameters survive erasure only in this attribute. Nothing at run
         // time reads it — the JVM links on descriptors — but every reflective reader does, and a class
         // whose `Signature` is missing reports `Box` where the source wrote `Box<T>`.
@@ -685,6 +688,74 @@ impl Compile {
             internal_name,
             bytes: class.write(),
         })
+    }
+
+    /// The item a type declaration declares: a named one by its name token, an anonymous body by
+    /// the creation's own position — which is the only offset either has to be found by.
+    fn declared_item(node: &SyntaxNode, context: &Context<'_>) -> Option<ItemId> {
+        let at = match node.kind() {
+            CLASS_DECL | INTERFACE_DECL | ENUM_DECL | ANNOTATION_TYPE_DECL | RECORD_DECL => {
+                usize::from(ast::Decl::name_token_of(node)?.text_range().start())
+            }
+            _ if Facts::is_anonymous_body(node) => usize::from(node.text_range().start()),
+            _ => return None,
+        };
+        context.index.item_by_decl(context.file, at)
+    }
+
+    /// The `NestHost` / `NestMembers` attribute this type carries (JVMS §4.7.28, §4.7.29).
+    ///
+    /// A *nest* is a top-level declaration and every type declared inside it, and it is what lets
+    /// one member reach another's `private` members: JVMS §5.4.4 grants access between nestmates and
+    /// to nobody else. Without these attributes a nested class calling its outer class's `private`
+    /// method is an `IllegalAccessError` at run time — a class file that loads, verifies, and then
+    /// refuses the call — which is why javac has emitted them for every nested type since Java 11.
+    ///
+    /// The host writes the list and every member points back at it, so exactly one of the two is
+    /// emitted per class file. An anonymous, local, and `enum`-constant body are members like any
+    /// other; the nest is *lexical*, and a supertype outside it is no part of it.
+    fn nest(
+        node: &SyntaxNode,
+        context: &Context<'_>,
+        pool: &mut ConstantPool,
+    ) -> Result<Option<jals_classfile::Attribute>> {
+        let outermost = node
+            .ancestors()
+            .filter(|ancestor| Self::declared_item(ancestor, context).is_some())
+            .last();
+        let Some(outermost) = outermost else {
+            return Ok(None);
+        };
+        if outermost != *node {
+            let host = Self::declared_item(&outermost, context)
+                .ok_or(LowerError::Unsupported("a nest host with no item"))?;
+            let name_index = pool.utf8_index("NestHost").ok_or(AsmError::PoolFull)?;
+            let host_class_index = pool
+                .class_index(&Descriptor::internal_name_of(host, context.index))
+                .ok_or(AsmError::PoolFull)?;
+            return Ok(Some(jals_classfile::Attribute {
+                name_index,
+                body: jals_classfile::AttributeBody::NestHost { host_class_index },
+            }));
+        }
+        let mut classes = Vec::new();
+        for descendant in node.descendants().skip(1) {
+            let Some(member) = Self::declared_item(&descendant, context) else {
+                continue;
+            };
+            let index = pool
+                .class_index(&Descriptor::internal_name_of(member, context.index))
+                .ok_or(AsmError::PoolFull)?;
+            classes.push(index);
+        }
+        if classes.is_empty() {
+            return Ok(None);
+        }
+        let name_index = pool.utf8_index("NestMembers").ok_or(AsmError::PoolFull)?;
+        Ok(Some(jals_classfile::Attribute {
+            name_index,
+            body: jals_classfile::AttributeBody::NestMembers { classes },
+        }))
     }
 
     /// The `InnerClasses` attribute: this type if it is nested, plus every type nested directly in it.

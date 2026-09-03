@@ -6541,3 +6541,118 @@ public class Cloning {
     }
     assert_eq!(run(source, "Cloning"), "1 9 b 2\n");
 }
+
+/// A nest: one top-level type and everything declared inside it, which is how `private` is reached.
+///
+/// JVMS §5.4.4 grants a nestmate access to another's `private` members and grants it to nobody
+/// else, so without the `NestHost` / `NestMembers` attributes a nested class calling its outer
+/// class's `private` method is an `IllegalAccessError` at run time — a class file that loads,
+/// verifies, and then refuses the call. javac has emitted them for every nested type since Java 11.
+///
+/// The call itself is `invokevirtual`, not `invokespecial`: that one may name only the current
+/// class, a superclass, or a direct superinterface (JVMS §6.5), so a nestmate's body is reached by
+/// resolution rather than by naming.
+#[test]
+fn a_nest_reaches_its_members_private_declarations() {
+    let source = r#"
+public class Nest {
+    private int seed = 7;
+
+    private static String label() { return "outer"; }
+
+    private int doubled() { return seed * 2; }
+
+    static class Inner {
+        String read(Nest host) { return label() + " " + host.seed + " " + host.doubled(); }
+    }
+
+    interface Job { String run(); }
+
+    String anonymous() {
+        Job job = new Job() {
+            public String run() { return label() + "/" + doubled(); }
+        };
+        return job.run();
+    }
+
+    public static void main(String[] args) {
+        Nest host = new Nest();
+        System.out.println(new Inner().read(host));
+        System.out.println(host.anonymous());
+    }
+}
+"#;
+    let classes = compile(source).expect("compile");
+    let host =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(classes[0].bytes.as_slice()))
+            .expect("reparse");
+    let members = host
+        .attributes
+        .iter()
+        .find_map(|attribute| match &attribute.body {
+            jals_classfile::AttributeBody::NestMembers { classes } => Some(classes.len()),
+            _ => None,
+        })
+        .expect("the host lists its members");
+    // `Inner`, `Job`, and the anonymous body — the nest is lexical, so all three are in it.
+    assert_eq!(members, 3);
+    let nested = jals_exec::block_on_inline(jals_classfile::ClassFile::read(
+        classes
+            .iter()
+            .find(|class| class.internal_name == "Nest$Inner")
+            .expect("the nested class")
+            .bytes
+            .as_slice(),
+    ))
+    .expect("reparse");
+    assert!(
+        nested.attributes.iter().any(|attribute| matches!(
+            attribute.body,
+            jals_classfile::AttributeBody::NestHost { .. }
+        )),
+        "a member points back at its host"
+    );
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Nest"), "outer 7 14\nouter/14\n");
+}
+
+/// `this` inside an anonymous class body is that class, not the one the `new` was written in.
+///
+/// An anonymous body is a type of its own, and reading past it typed `this` as the outer class —
+/// so `test(this)` against `test(Outer)` / `test(Base)` selected the first, which is a call the
+/// verifier refuses and, where it does not, the wrong method outright. What travels with it is the
+/// lexical lookup a bare call needs: the method a bare name binds to is the innermost enclosing
+/// type's *of which it is a member* (JLS §15.12.1), which need not be the innermost type at all.
+#[test]
+fn this_in_an_anonymous_body_is_the_anonymous_class() {
+    let source = r#"
+public class Which {
+    interface Base { String run(); }
+
+    private static String test(Which w) { return "outer"; }
+
+    private static String test(Base b) { return "base"; }
+
+    private static String helper() { return "helper"; }
+
+    String pick() {
+        Base b = new Base() {
+            public String run() { return test(this) + " " + helper(); }
+        };
+        return b.run();
+    }
+
+    public static void main(String[] args) {
+        System.out.println(new Which().pick());
+    }
+}
+"#;
+    if !java_available() {
+        compile(source).expect("compile");
+        return;
+    }
+    assert_eq!(run(source, "Which"), "base helper\n");
+}

@@ -785,18 +785,23 @@ impl TypeInference {
             ast::Expr::NameRef(n) => {
                 let name = jals_syntax::decoded_ident(&Collect::first_ident_token(n.syntax())?)
                     .into_owned();
-                // A bare call is an implicit `this` first (JLS §15.12.1); a `static` import is what
-                // answers when the enclosing type has no such method. Falling back to the enclosing
-                // type when *neither* has it keeps the report about the call the source wrote.
-                let enclosing = index.enclosing_item(file, call.syntax());
-                let owner = enclosing
-                    .filter(|&item| {
+                // A bare call names the *innermost enclosing type of which the method is a member*
+                // (JLS §15.12.1), which need not be the innermost type at all: a nested, local, or
+                // anonymous class calling its outer class's method is ordinary Java, and reading
+                // only the nearest one found nothing there. A `static` import answers when no
+                // enclosing type has it. Falling back to the innermost when *nothing* has it keeps
+                // the report about the call the source wrote.
+                let lexical = index.enclosing_items(file, call.syntax());
+                let owner = lexical
+                    .iter()
+                    .copied()
+                    .find(|&item| {
                         index
                             .resolve_member(item, &name, Namespace::Method)
                             .is_some()
                     })
                     .or_else(|| index.static_import_owner(file, &name, Namespace::Method))
-                    .or(enclosing)?;
+                    .or_else(|| lexical.first().copied())?;
                 Some((owner, name))
             }
             _ => None,
@@ -2231,11 +2236,52 @@ impl ProjectIndex {
     /// The nearest ancestor type declaration of `node` that is an indexed project item, in `file`.
     /// Shared by the [`Inferer`] (bare-call resolution) and argument checking.
     fn enclosing_item(&self, file: FileId, node: &SyntaxNode) -> Option<ItemId> {
-        let decl = node
-            .ancestors()
-            .find(|a| Collect::type_decl_kind(a.kind()).is_some())?;
-        let name = Collect::first_ident_token(&decl)?;
-        self.item_by_decl(file, Collect::token_start(&name))
+        self.enclosing_items(file, node).first().copied()
+    }
+
+    /// Every type declaration lexically around `node`, innermost first.
+    ///
+    /// A bare name is looked up on the innermost enclosing type *of which it is a member* (JLS
+    /// §6.5.6.1, §15.12.1), which is not the same as the innermost enclosing type: a nested, local,
+    /// or anonymous class calling its outer class's method is ordinary Java. The whole chain is
+    /// returned rather than searched here, because the search differs by name space and only the
+    /// caller knows which.
+    fn enclosing_items(&self, file: FileId, node: &SyntaxNode) -> Vec<ItemId> {
+        let mut out = Vec::new();
+        for ancestor in node.ancestors() {
+            if let Some(item) = self.declared_item(file, &ancestor) {
+                out.push(item);
+            }
+        }
+        out
+    }
+
+    /// The item `node` *is* the declaration of, when it is one.
+    ///
+    /// An **anonymous** class body is one, which is why this is not simply a named-declaration test:
+    /// it is a type of its own, so `this` inside one is *it* rather than the class the `new` was
+    /// written in. Reading past it typed `this` as the outer class, and `test(this)` in
+    /// `new Base() { void run() { test(this); } }` selected `test(Outer)` over `test(Base)` — a
+    /// wrong overload rather than a missing one.
+    ///
+    /// The *body* is what counts and not the whole `new`: a `new Foo(arg) { … }`'s arguments are
+    /// evaluated where the `new` is written, so a node in one belongs to the enclosing class. The
+    /// body is keyed by the creation's own position, which is how the index recorded it.
+    fn declared_item(&self, file: FileId, node: &SyntaxNode) -> Option<ItemId> {
+        if Collect::type_decl_kind(node.kind()).is_some() {
+            let name = Collect::first_ident_token(node)?;
+            return self.item_by_decl(file, Collect::token_start(&name));
+        }
+        let creation = node
+            .parent()
+            .filter(|_| node.kind() == SyntaxKind::CLASS_BODY)
+            .filter(|creation| {
+                matches!(
+                    creation.kind(),
+                    SyntaxKind::NEW_EXPR | SyntaxKind::ENUM_CONSTANT
+                )
+            })?;
+        self.item_by_decl(file, usize::from(creation.text_range().start()))
     }
 }
 
