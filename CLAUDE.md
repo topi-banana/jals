@@ -169,6 +169,17 @@ filesystem reads into portable interfaces.
     only (`ExternalLocator::is_remote`, never `is_url`): the same seam carries `file://` and the
     host paths `NativeProjectPlan::classify` lowers an out-of-project `jar = "../lib/x.jar"` to,
     and refusing those offline breaks a build that never wanted the network.
+  - **`RetrySchedule` rides the `Fetcher` for the same reason, and `Fetch` owns the loop.** A
+    transient HTTP failure is retried with exponential backoff plus per-locator jitter — the jitter
+    is derived from the locator rather than drawn, because `DependencyResolver::resolve` fetches
+    concurrently and one shared schedule sends the whole fan-out back at the origin in one wave.
+    `Fetch::admit` runs **outside** the loop, which is what makes an offline refusal structurally
+    unretryable. The transient/permanent split is a `FetchError` an implementor states, because the
+    only place it is knowable is where the `reqwest::Error` still exists; it stops at `Fetch`, so
+    every layer above still sees the same `String` it always did. `ReqwestFetcher` carries the
+    `connect`/`read` timeouts that make a retry reachable at all — a hung connection never becomes
+    a failure a loop can classify — and deliberately no whole-request timeout, which would fail a
+    slow link downloading a jar it was making steady progress on.
 - `jals-project`: transitive path/Git/JAR project-graph discovery, stable node identity,
   dependency-first preprocessing, and artifact-only projection into `jals-classpath`. The portable
   memory graph operates on one captured `CodeTree`; only the `native` adapter may acquire host path

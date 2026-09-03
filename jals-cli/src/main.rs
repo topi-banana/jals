@@ -200,6 +200,10 @@ struct BuildArgs {
     /// Resolve build-task artifacts only from the verified project cache.
     #[arg(long)]
     offline: bool,
+    /// Extra attempts a transient network failure (a timeout, a refused connection, a 5xx) is
+    /// given before the fetch fails. `0` disables retrying.
+    #[arg(long, value_name = "N", default_value_t = jals_classpath::RetrySchedule::DEFAULT_RETRIES)]
+    network_retry: u32,
 
     #[command(flatten)]
     features: FeatureArgs,
@@ -234,6 +238,10 @@ struct RunArgs {
     /// Resolve build-task artifacts only from the verified project cache.
     #[arg(long)]
     offline: bool,
+    /// Extra attempts a transient network failure (a timeout, a refused connection, a 5xx) is
+    /// given before the fetch fails. `0` disables retrying.
+    #[arg(long, value_name = "N", default_value_t = jals_classpath::RetrySchedule::DEFAULT_RETRIES)]
+    network_retry: u32,
 
     #[command(flatten)]
     features: FeatureArgs,
@@ -333,6 +341,10 @@ struct TestArgs {
     /// Never fetch a dependency over the network.
     #[arg(long)]
     offline: bool,
+    /// Extra attempts a transient network failure (a timeout, a refused connection, a 5xx) is
+    /// given before the fetch fails. `0` disables retrying.
+    #[arg(long, value_name = "N", default_value_t = jals_classpath::RetrySchedule::DEFAULT_RETRIES)]
+    network_retry: u32,
     /// Print the compile command before running it.
     #[arg(short, long)]
     verbose: bool,
@@ -821,6 +833,7 @@ impl BuildArgs {
         let fetcher = jals_classpath::ReqwestFetcher::for_project(
             root.clone(),
             jals_classpath::NetworkPolicy::when_offline(self.offline),
+            jals_classpath::RetrySchedule::new(self.network_retry),
         );
         let (sources, tree, inputs) = App::prepare_compile_inputs(
             &mut manifest,
@@ -897,6 +910,7 @@ impl RunArgs {
         let fetcher = jals_classpath::ReqwestFetcher::for_project(
             root.clone(),
             jals_classpath::NetworkPolicy::when_offline(self.offline),
+            jals_classpath::RetrySchedule::new(self.network_retry),
         );
         let (sources, tree, inputs) = App::prepare_compile_inputs(
             &mut manifest,
@@ -978,6 +992,7 @@ impl TestArgs {
         let fetcher = jals_classpath::ReqwestFetcher::for_project(
             root.clone(),
             jals_classpath::NetworkPolicy::when_offline(self.offline),
+            jals_classpath::RetrySchedule::new(self.network_retry),
         );
         let (sources, tree, inputs) = App::prepare_compile_inputs(
             &mut manifest,
@@ -1450,6 +1465,8 @@ impl LintProject {
             &jals_classpath::ReqwestFetcher::for_project(
                 root.to_path_buf(),
                 jals_classpath::NetworkPolicy::Offline,
+                // Nothing to retry: the refusal comes before an attempt is made.
+                jals_classpath::RetrySchedule::none(),
             ),
         )
         .await

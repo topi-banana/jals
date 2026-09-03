@@ -1436,14 +1436,22 @@ mod tests {
             self.network
         }
 
-        fn fetch_admitted(&self, locator: &str) -> impl Future<Output = Result<Vec<u8>, String>> {
+        fn retry(&self) -> jals_classpath::RetrySchedule {
+            jals_classpath::RetrySchedule::none()
+        }
+
+        fn delay(&self, _: u32) -> impl Future<Output = ()> {
+            ready(())
+        }
+
+        fn fetch_admitted(
+            &self,
+            locator: &str,
+        ) -> impl Future<Output = Result<Vec<u8>, jals_classpath::FetchError>> {
             self.calls.fetch_add(1, Ordering::Relaxed);
-            ready(
-                self.responses
-                    .get(locator)
-                    .cloned()
-                    .ok_or_else(|| format!("unexpected fetch `{locator}`")),
-            )
+            ready(self.responses.get(locator).cloned().ok_or_else(|| {
+                jals_classpath::FetchError::permanent(format!("unexpected fetch `{locator}`"))
+            }))
         }
     }
 

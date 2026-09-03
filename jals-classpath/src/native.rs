@@ -8,6 +8,7 @@ use std::fs;
 use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -17,7 +18,7 @@ use jals_config::{
     Dependency, DependencyScope, GitDependency, GitRef, Manifest, PathDependency,
     ResolvedBuildFeatures,
 };
-use jals_exec::tokio_rt::on_blocking_pool;
+use jals_exec::tokio_rt::{on_blocking_pool, sleep_millis};
 use jals_storage::{
     CacheKey, CacheNamespace, ContentDigest, DirKey, EntryRef, FileKey, MemoryCache, Name,
     NativeScope, NativeSource, NativeStorage, ProjectStorage, ProjectView, ProvenanceFold,
@@ -26,8 +27,9 @@ use jals_storage::{
 
 use crate::io::Fetch;
 use crate::{
-    ClasspathEntry, DependencyLocation, ExternalLocator, Fetcher, LibrarySource, NetworkPolicy,
-    ProjectInputOptions, ProjectInputPlan, ProjectInputs, Warning, WarningOrigin,
+    ClasspathEntry, DependencyLocation, ExternalLocator, FetchError, Fetcher, LibrarySource,
+    NetworkPolicy, ProjectInputOptions, ProjectInputPlan, ProjectInputs, RetrySchedule, Warning,
+    WarningOrigin,
 };
 
 /// A fetcher backed by `reqwest`'s async client.
@@ -35,21 +37,81 @@ pub struct ReqwestFetcher {
     client: reqwest::Client,
     project_root: PathBuf,
     network: NetworkPolicy,
+    retry: RetrySchedule,
 }
 
 impl ReqwestFetcher {
-    /// Build the host fetch adapter for one project. Relative and `file://` locators are read by
-    /// this adapter; HTTP remains the only network capability, and `network` is whether that
-    /// capability may be used.
+    /// How long a connection may take to establish.
+    const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+    /// How long a transfer may go without delivering anything.
     ///
-    /// There is deliberately no `Default`: it could answer neither question, and one that guessed
-    /// the policy is exactly how a host ends up fetching under `--offline`.
-    pub fn for_project(project_root: PathBuf, network: NetworkPolicy) -> Self {
+    /// Deliberately *not* a whole-request timeout. A release's client jar is hundreds of
+    /// megabytes, and a ceiling on the total transfer would fail a slow link that was making
+    /// steady progress — which is a build broken by the fix for a build that broke.
+    const READ_TIMEOUT: Duration = Duration::from_secs(60);
+
+    /// Build the host fetch adapter for one project. Relative and `file://` locators are read by
+    /// this adapter; HTTP remains the only network capability, `network` is whether that
+    /// capability may be used, and `retry` is how many further attempts a transient failure gets.
+    ///
+    /// There is deliberately no `Default`: it could answer none of those questions, and one that
+    /// guessed the policy is exactly how a host ends up fetching under `--offline`.
+    pub fn for_project(
+        project_root: PathBuf,
+        network: NetworkPolicy,
+        retry: RetrySchedule,
+    ) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: Self::client(),
             project_root,
             network,
+            retry,
         }
+    }
+
+    /// The HTTP client, with the two timeouts that make a retry reachable.
+    ///
+    /// A hung connection never returns, so it never becomes a failure the retry loop can classify:
+    /// without these, retrying buys nothing for exactly the case it was added for. The builder
+    /// configures nothing but timeouts and can therefore only fail if the statically-linked rustls
+    /// backend will not initialize; a client with no timeouts is still better than no client, and
+    /// it keeps `for_project` infallible at its six call sites.
+    fn client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .connect_timeout(Self::CONNECT_TIMEOUT)
+            .read_timeout(Self::READ_TIMEOUT)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    }
+
+    /// Whether another attempt at `error` could plausibly succeed.
+    ///
+    /// The classification exists only here — one line further up every one of these is a `String`
+    /// — so this is the whole of what the retry loop has to go on.
+    ///
+    /// `is_body` is deliberately absent. A truncated body is not obviously transient, and
+    /// [`fetch_bounded_admitted`](Fetcher::fetch_bounded_admitted) streams: treating a body error
+    /// as retryable would restart a partly-received jar from byte zero, three times over.
+    fn classify(error: &reqwest::Error) -> FetchError {
+        let transient = error.is_timeout()
+            || error.is_connect()
+            || error.status().is_some_and(Self::retryable_status);
+        let message = error.to_string();
+        if transient {
+            FetchError::transient(message)
+        } else {
+            FetchError::permanent(message)
+        }
+    }
+
+    /// Which statuses another attempt could get past.
+    ///
+    /// Every 5xx but 501 (which says the server will not implement the method, however often it is
+    /// asked), plus 408 and 429. Stated as a range rather than a list of codes so that a
+    /// vendor-specific one is covered by construction — the CI failure this was written for was a
+    /// Cloudflare 522, which no list assembled from the RFCs would have contained.
+    fn retryable_status(status: reqwest::StatusCode) -> bool {
+        matches!(status.as_u16(), 408 | 429) || (status.is_server_error() && status != 501)
     }
 }
 
@@ -58,18 +120,29 @@ impl Fetcher for ReqwestFetcher {
         self.network
     }
 
-    async fn fetch_admitted(&self, locator: &str) -> Result<Vec<u8>, String> {
+    fn retry(&self) -> RetrySchedule {
+        self.retry
+    }
+
+    async fn delay(&self, millis: u32) {
+        sleep_millis(millis).await;
+    }
+
+    async fn fetch_admitted(&self, locator: &str) -> Result<Vec<u8>, FetchError> {
         if let Some(path) = locator.strip_prefix("file://") {
             let path = path.to_owned();
             return on_blocking_pool(move || {
-                fs::read(&path).map_err(|error| format!("reading {path}: {error}"))
+                fs::read(&path)
+                    .map_err(|error| FetchError::permanent(format!("reading {path}: {error}")))
             })
             .await;
         }
         if !ExternalLocator::is_url(locator) {
             let path = self.project_root.join(locator);
             return on_blocking_pool(move || {
-                fs::read(&path).map_err(|error| format!("reading {}: {error}", path.display()))
+                fs::read(&path).map_err(|error| {
+                    FetchError::permanent(format!("reading {}: {error}", path.display()))
+                })
             })
             .await;
         }
@@ -78,21 +151,21 @@ impl Fetcher for ReqwestFetcher {
             .get(locator)
             .send()
             .await
-            .map_err(|error| error.to_string())?
+            .map_err(|error| Self::classify(&error))?
             .error_for_status()
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| Self::classify(&error))?;
         response
             .bytes()
             .await
             .map(|bytes| bytes.to_vec())
-            .map_err(|error| format!("reading response: {error}"))
+            .map_err(|error| FetchError::permanent(format!("reading response: {error}")))
     }
 
     async fn fetch_bounded_admitted(
         &self,
         locator: &str,
         max_bytes: usize,
-    ) -> Result<Vec<u8>, String> {
+    ) -> Result<Vec<u8>, FetchError> {
         if let Some(path) = locator.strip_prefix("file://") {
             return Self::read_file_bounded(PathBuf::from(path), max_bytes).await;
         }
@@ -105,14 +178,16 @@ impl Fetcher for ReqwestFetcher {
             .get(locator)
             .send()
             .await
-            .map_err(|error| error.to_string())?
+            .map_err(|error| Self::classify(&error))?
             .error_for_status()
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| Self::classify(&error))?;
         if response
             .content_length()
             .is_some_and(|length| length > max_bytes as u64)
         {
-            return Err(format!("response exceeds the limit of {max_bytes} bytes"));
+            return Err(FetchError::permanent(format!(
+                "response exceeds the limit of {max_bytes} bytes"
+            )));
         }
         let mut bytes = Vec::with_capacity(
             response
@@ -124,14 +199,16 @@ impl Fetcher for ReqwestFetcher {
         while let Some(chunk) = response
             .chunk()
             .await
-            .map_err(|error| format!("reading response: {error}"))?
+            .map_err(|error| FetchError::permanent(format!("reading response: {error}")))?
         {
             if bytes
                 .len()
                 .checked_add(chunk.len())
                 .is_none_or(|length| length > max_bytes)
             {
-                return Err(format!("response exceeds the limit of {max_bytes} bytes"));
+                return Err(FetchError::permanent(format!(
+                    "response exceeds the limit of {max_bytes} bytes"
+                )));
             }
             bytes.extend_from_slice(&chunk);
         }
@@ -140,22 +217,23 @@ impl Fetcher for ReqwestFetcher {
 }
 
 impl ReqwestFetcher {
-    async fn read_file_bounded(path: PathBuf, max_bytes: usize) -> Result<Vec<u8>, String> {
+    async fn read_file_bounded(path: PathBuf, max_bytes: usize) -> Result<Vec<u8>, FetchError> {
         on_blocking_pool(move || {
-            let file = fs::File::open(&path)
-                .map_err(|error| format!("opening {}: {error}", path.display()))?;
+            let file = fs::File::open(&path).map_err(|error| {
+                FetchError::permanent(format!("opening {}: {error}", path.display()))
+            })?;
             let limit = u64::try_from(max_bytes)
                 .unwrap_or(u64::MAX)
                 .saturating_add(1);
             let mut bytes = Vec::new();
-            file.take(limit)
-                .read_to_end(&mut bytes)
-                .map_err(|error| format!("reading {}: {error}", path.display()))?;
+            file.take(limit).read_to_end(&mut bytes).map_err(|error| {
+                FetchError::permanent(format!("reading {}: {error}", path.display()))
+            })?;
             if bytes.len() > max_bytes {
-                return Err(format!(
+                return Err(FetchError::permanent(format!(
                     "{} exceeds the limit of {max_bytes} bytes",
                     path.display()
-                ));
+                )));
             }
             Ok(bytes)
         })

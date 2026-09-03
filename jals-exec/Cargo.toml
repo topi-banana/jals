@@ -14,7 +14,7 @@ tokio = ["std", "dep:tokio"]
 wasm = ["dep:wasm-bindgen-futures", "dep:gloo-timers"]
 
 [dependencies]
-tokio = { workspace = true, optional = true, features = ["sync"] }
+tokio = { workspace = true, optional = true, features = ["sync", "time"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 gloo-timers = { version = "0.4", optional = true, features = ["futures"] }

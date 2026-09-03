@@ -32,6 +32,9 @@ jals-syntax = { workspace = true }
 futures = { workspace = true }
 # Browser `fetch` for downloading dependency jars (already in the tree via yew's `gloo`).
 gloo-net = { version = "0.7", default-features = false, features = ["http"] }
+# `setTimeout` as a future: the browser half of `Fetcher::delay`, which `jals-classpath`'s fetch
+# retry calls between attempts. Also already in the tree via yew's `gloo`.
+gloo-timers = { version = "0.4", features = ["futures"] }
 js-sys = "0.3"
 # Parses the `jalsfmt.toml` editor buffer into `jals_config::fmt::Config` (the `jals.toml` buffer
 # goes through `Manifest::from_str`, which already pulls in `toml`).

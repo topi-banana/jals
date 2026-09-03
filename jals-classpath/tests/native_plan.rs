@@ -30,14 +30,25 @@ impl Fetcher for NoFetch {
         jals_classpath::NetworkPolicy::Online
     }
 
-    fn fetch_admitted(&self, _: &str) -> impl Future<Output = Result<Vec<u8>, String>> {
+    fn retry(&self) -> jals_classpath::RetrySchedule {
+        jals_classpath::RetrySchedule::none()
+    }
+
+    fn delay(&self, _: u32) -> impl Future<Output = ()> {
+        ready(())
+    }
+
+    fn fetch_admitted(
+        &self,
+        _: &str,
+    ) -> impl Future<Output = Result<Vec<u8>, jals_classpath::FetchError>> {
         ready(Self::refuse())
     }
 }
 
 impl NoFetch {
     /// Diverges: being asked at all is the failure this fixture asserts against.
-    fn refuse() -> Result<Vec<u8>, String> {
+    fn refuse() -> Result<Vec<u8>, jals_classpath::FetchError> {
         panic!("unexpected fetch")
     }
 }

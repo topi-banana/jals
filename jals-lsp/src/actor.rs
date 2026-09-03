@@ -1738,6 +1738,8 @@ impl AssembledWorkspace {
         let fetcher = jals_classpath::ReqwestFetcher::for_project(
             root.to_path_buf(),
             jals_classpath::NetworkPolicy::Offline,
+            // Nothing to retry: the policy refuses before an attempt is made.
+            jals_classpath::RetrySchedule::none(),
         );
         // The script's text, read once and unconditionally when one is configured: it costs an
         // in-memory read of a file this aggregate already holds, and a failure that turns out to
@@ -1920,6 +1922,8 @@ impl AssembledWorkspace {
                     fetcher: &jals_classpath::ReqwestFetcher::for_project(
                         root.to_path_buf(),
                         jals_classpath::NetworkPolicy::Offline,
+                        // See above: an offline capability never reaches an attempt.
+                        jals_classpath::RetrySchedule::none(),
                     ),
                     environment: scripts.environment,
                     root_features: scripts.features,
