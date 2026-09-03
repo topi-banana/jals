@@ -6656,3 +6656,49 @@ public class Which {
     }
     assert_eq!(run(source, "Which"), "base helper\n");
 }
+
+/// `assert cond : detail` picks the `AssertionError` constructor the detail's *type* names.
+///
+/// JLS §14.10 selects among the eight, and passing every message to the `(Object)` one handed the
+/// constructor an `int` where a reference belongs — refused by the assembler, and had it been
+/// emitted, a class file no JVM loads. A `byte` and a `short` are already `int` on the operand
+/// stack and take the `int` constructor; `char` has one of its own.
+#[test]
+fn an_assert_message_selects_its_constructor() {
+    let source = "
+public class Detail {
+    static int count;
+
+    static void check(int mode) {
+        int n = 3;
+        long l = 4L;
+        char c = 'x';
+        Object o = \"text\";
+        assert mode != 0 : n;
+        assert mode != 1 : l;
+        assert mode != 2 : c;
+        assert mode != 3 : o;
+        assert mode != 4 : mode > 0;
+    }
+
+    public static void main(String[] args) {
+        for (int mode = 0; mode < 5; mode++) {
+            try {
+                check(mode);
+            } catch (AssertionError e) {
+                count++;
+                System.out.println(e.getMessage());
+            }
+        }
+        System.out.println(count);
+    }
+}
+";
+    // Without `-ea` nothing fires, so the run below asserts only the shape it compiled to; the
+    // constructor choice is what the assembler was refusing.
+    compile(source).expect("compile");
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Detail"), "0\n");
+}

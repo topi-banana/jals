@@ -402,9 +402,11 @@ fn a_branch_rejects_an_operand_that_is_not_an_int() {
     asm.load(0).expect("lload_0");
     asm.load(2).expect("lload_2");
     let taken = asm.label();
-    assert_eq!(
-        asm.branch(Branch::IntCmp(Compare::Eq), taken),
-        Err(jals_javac::jvm::AsmError::TypeMismatch),
+    assert!(
+        matches!(
+            asm.branch(Branch::IntCmp(Compare::Eq), taken),
+            Err(jals_javac::jvm::AsmError::TypeMismatch(_))
+        ),
         "two `long`s are not an `if_icmpeq`"
     );
 }
@@ -604,9 +606,11 @@ fn a_long_shift_takes_an_int_count() {
     let mut asm = Assembler::new(&mut pool, Receiver::Static, "(JJ)V").expect("assembler");
     asm.load(0).expect("lload_0");
     asm.load(2).expect("lload_2");
-    assert_eq!(
-        asm.binary(BinOp::Shl, &VerificationType::Long),
-        Err(AsmError::TypeMismatch),
+    assert!(
+        matches!(
+            asm.binary(BinOp::Shl, &VerificationType::Long),
+            Err(AsmError::TypeMismatch(_))
+        ),
         "`lshl` does not shift by a `long`"
     );
 }
@@ -707,9 +711,11 @@ fn a_reference_ordering_is_reported() {
     asm.load(0).expect("aload_0");
     asm.load(0).expect("aload_0");
     let taken = asm.label();
-    assert_eq!(
-        asm.branch_compare(&VerificationType::Null, Compare::Lt, taken),
-        Err(AsmError::TypeMismatch),
+    assert!(
+        matches!(
+            asm.branch_compare(&VerificationType::Null, Compare::Lt, taken),
+            Err(AsmError::TypeMismatch(_))
+        ),
         "`<` is not defined over two references"
     );
 }
@@ -735,9 +741,8 @@ fn iinc_updates_a_local_in_place() {
     let mut pool = ConstantPool::new();
     pool.class_index("java/lang/Object").expect("Object");
     let mut asm = Assembler::new(&mut pool, Receiver::Static, "(J)V").expect("assembler");
-    assert_eq!(
-        asm.increment(0, 1),
-        Err(AsmError::TypeMismatch),
+    assert!(
+        matches!(asm.increment(0, 1), Err(AsmError::TypeMismatch(_))),
         "`iinc` does not increment a `long`"
     );
     assert_eq!(
@@ -808,9 +813,8 @@ fn a_dup_across_half_a_wide_value_is_reported() {
     let mut asm = Assembler::new(&mut pool, Receiver::Static, "(JI)V").expect("assembler");
     asm.load(0).expect("lload_0");
     asm.load(2).expect("iload_2");
-    assert_eq!(
-        asm.dup_below(1),
-        Err(AsmError::TypeMismatch),
+    assert!(
+        matches!(asm.dup_below(1), Err(AsmError::TypeMismatch(_))),
         "`dup_x1` cannot reach over one half of a `long`"
     );
 
@@ -819,9 +823,8 @@ fn a_dup_across_half_a_wide_value_is_reported() {
     let mut asm = Assembler::new(&mut pool, Receiver::Static, "(JJ)V").expect("assembler");
     asm.load(0).expect("lload_0");
     asm.load(2).expect("lload_2");
-    assert_eq!(
-        asm.swap(),
-        Err(AsmError::TypeMismatch),
+    assert!(
+        matches!(asm.swap(), Err(AsmError::TypeMismatch(_))),
         "the JVM has no `swap2`"
     );
 }
