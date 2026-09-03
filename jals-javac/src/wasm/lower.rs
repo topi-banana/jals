@@ -309,7 +309,13 @@ impl CompileWasm {
                 locals: body.locals,
                 body: body.code,
             });
-            if let Some(name) = &method.export {
+            // A wasm export carries a bare name and no owner, so two `static` methods of one name —
+            // an overload pair, or one method per class — name the same export. A module with two
+            // is not a module at all, so the second is dropped: the name is ambiguous, and an
+            // ambiguous export cannot be paired with a javac method either.
+            if let Some(name) = &method.export
+                && !module.exports.iter().any(|(exported, ..)| exported == name)
+            {
                 module
                     .exports
                     .push((name.clone(), ExportKind::Func, method.index));
@@ -1449,6 +1455,15 @@ impl Layout {
                     .ok_or_else(|| WasmError::NoRepresentation(ty.to_string()))?;
                 ValType::Ref(RefType::nullable(HeapType::Concrete(array)))
             }
+            // A type variable erases to its bound, and to `Object` with none (JLS §4.6) — so its
+            // representation is the top of the reference hierarchy, exactly where an `Object` and an
+            // interface-typed value sit. Every use at a concrete type comes back down with a
+            // `ref.cast`, which is what erasure costs on this target as it does on the JVM.
+            //
+            // Not the bound's own struct type even when the bound is a class this module lays out:
+            // a field of type `T` is one field whatever a use instantiates it at, and typing it at
+            // the bound would make two instantiations two different structs.
+            Ty::TypeVar { .. } => ValType::Ref(RefType::nullable(HeapType::Any)),
             other => return Err(WasmError::NoRepresentation(other.to_string())),
         })
     }
@@ -3631,9 +3646,12 @@ impl Lowering<'_> {
         {
             return self.operand(value, target, insn);
         }
-        self.expr(value, insn)?
+        let produced = self
+            .expr(value, insn)?
             .ok_or(WasmError::Unsupported("a value that produced nothing"))?;
-        Ok(())
+        // The declaration is what says which type is wanted, so erasure's top-of-hierarchy value
+        // comes back down here — the same `ref.cast` an argument and a `return` get.
+        self.narrow(produced, declared_ty, insn)
     }
 
     /// `array[index]`.
@@ -3687,7 +3705,9 @@ impl Lowering<'_> {
         let receiver = access
             .receiver()
             .ok_or(WasmError::Unsupported("a field access with no receiver"))?;
-        self.expr(&receiver, insn)?;
+        // At the owner's type, for the reason a call's receiver is: `struct.get` names one struct.
+        let receiver_ty = self.layout.class_ref(owner)?;
+        self.expr_as(&receiver, receiver_ty, insn)?;
         let slot = self
             .layout
             .field_slot(owner, member)
@@ -4360,9 +4380,10 @@ impl Lowering<'_> {
                 let receiver = access.receiver().ok_or(WasmError::Unsupported(
                     "a field assignment with no receiver",
                 ))?;
-                let receiver_ty = self
-                    .expr(&receiver, insn)?
-                    .ok_or(WasmError::Unsupported("a field of something with no value"))?;
+                // At the *owner's* type: a receiver read through an interface, an `Object`, or a
+                // type variable is `anyref`, and `struct.set` names one struct in particular.
+                let receiver_ty = self.layout.class_ref(owner)?;
+                self.expr_as(&receiver, receiver_ty, insn)?;
                 let receiver_slot = self.scratch(receiver_ty);
                 insn.local_set(receiver_slot);
                 Ok(Place::Field {
@@ -5046,7 +5067,7 @@ impl Lowering<'_> {
     /// Emit the `ref.cast` that takes a top-of-hierarchy value down to `target`, if one is needed.
     fn narrow(&self, produced: ValType, target: ValType, insn: &mut Insn) -> Result<()> {
         let (ValType::Ref(from), ValType::Ref(to)) = (produced, target) else {
-            return Ok(());
+            return Self::boxed(produced, target);
         };
         if from.heap == to.heap {
             return Ok(());
@@ -5068,6 +5089,30 @@ impl Lowering<'_> {
             ));
         }
         Ok(())
+    }
+
+    /// Whether a value of type `produced` fits a position wanting `target`, reporting the *library*
+    /// type a conversion between them would need.
+    ///
+    /// A primitive where a reference is wanted is a boxing conversion (JLS §5.1.7) and a reference
+    /// where a primitive is wanted an unboxing one, and both go through a **wrapper** — a
+    /// `java.lang` type a wasm host has no `java.base` to supply. Erasure is what makes the pair
+    /// common rather than exotic: a type variable is `anyref` here, so `List<Integer>.add(1)` puts
+    /// an `i32` where a reference belongs. Reported as the library type it needs, which is the same
+    /// answer every other unrepresentable type gets, rather than as a compiler gap it is not.
+    fn boxed(produced: ValType, target: ValType) -> Result<()> {
+        let wrapper = |ty: ValType| match ty {
+            ValType::I32 => Some("java.lang.Integer"),
+            ValType::I64 => Some("java.lang.Long"),
+            ValType::F32 => Some("java.lang.Float"),
+            ValType::F64 => Some("java.lang.Double"),
+            ValType::Ref(_) => None,
+        };
+        match (wrapper(produced), wrapper(target)) {
+            (Some(from), None) => Err(WasmError::NoRepresentation(from.to_owned())),
+            (None, Some(needed)) => Err(WasmError::NoRepresentation(needed.to_owned())),
+            _ => Ok(()),
+        }
     }
 
     /// A fresh unnamed local of type `ty`, for values that must outlive the stack.
@@ -5141,7 +5186,10 @@ impl Lowering<'_> {
                     let receiver = access
                         .receiver()
                         .ok_or(WasmError::Unsupported("a call with no receiver"))?;
-                    self.expr(&receiver, insn)?;
+                    // At the *owner's* type: a receiver read through an interface, an `Object`, or a
+                    // type variable is `anyref`, and the function being called takes the struct.
+                    let target = self.layout.class_ref(self.index.member(member).owner)?;
+                    self.expr_as(&receiver, target, insn)?;
                 }
                 // A bare call in an instance method is an implicit `this` — but not necessarily
                 // *this* `this`. From a class that holds an enclosing instance the method may be an

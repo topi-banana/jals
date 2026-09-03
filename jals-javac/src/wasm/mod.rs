@@ -12,11 +12,15 @@
 //! unrelated classes and gets no struct type: a value of interface type is held as `anyref` and
 //! narrowed with `ref.cast` at each use. `java.lang.Object` sits in exactly the same place and for
 //! exactly the same reason — it is the root of Java's reference hierarchy and `anyref` is wasm's —
-//! which makes it the one library type this backend needs no `java.base` to represent. A value comes
-//! back down with the `ref.cast` the JVM backend spells `checkcast` wherever the *declaration* says
-//! what type is wanted: an argument at its parameter, and a `return` at its result. A field store, a
-//! local store, and an array element store do not narrow yet, and a value erasure left at the top
-//! reaching one of those is a module the validator refuses rather than anything silently wrong.
+//! which makes it the one library type this backend needs no `java.base` to represent. A **type
+//! variable** joins them: JLS §4.6 erases it to its bound and to `Object` with none, and a field of
+//! type `T` is one field whatever a use instantiates it at.
+//!
+//! A value comes back down with the `ref.cast` the JVM backend spells `checkcast` wherever the
+//! *declaration* says what type is wanted: a receiver at its owner, an argument at its parameter, a
+//! `return` at its result, and any store at what it was declared to hold. What erasure cannot reach
+//! is the other conversion Java does at those places — a **boxing** one, whose result is a wrapper
+//! this host has no `java.base` to supply, and which is reported as the library type it needs.
 //!
 //! Unlike the JVM backend, this one lowers from the syntax tree directly. wasm's control flow is
 //! structured (`block` / `loop` / `if`), so the nesting the source already has is the nesting the

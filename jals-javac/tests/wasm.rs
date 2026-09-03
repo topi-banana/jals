@@ -3282,3 +3282,68 @@ public class Covariant {
         "got {error}"
     );
 }
+
+/// A type variable erases to the top of the reference hierarchy, and every use comes back down.
+///
+/// JLS §4.6 erases it to its bound and to `Object` with none, and a field of type `T` is one field
+/// whatever a use instantiates it at — so `anyref` is the representation, exactly as it is for an
+/// `Object` and for an interface. What that costs is a `ref.cast` at each use, which is what the
+/// JVM backend spells `checkcast`: a receiver, an argument, a `return`, and a store all narrow.
+#[test]
+fn a_type_variable_is_erased_and_cast_back() {
+    let source = r"
+class Cell {
+    int value;
+    Cell(int value) { this.value = value; }
+    int read() { return value; }
+}
+
+class Holder<T extends Cell> {
+    T held;
+
+    void put(T value) { held = value; }
+
+    T get() { return held; }
+
+    int through(T value) { return value.read(); }
+}
+
+public class Generic {
+    public static int run(int n) {
+        Holder<Cell> holder = new Holder<Cell>();
+        holder.put(new Cell(n));
+        Cell back = holder.get();
+        return back.read() + holder.through(new Cell(1));
+    }
+}
+";
+    assert_invoke(&[source], "run", &["41"], "42");
+}
+
+/// A primitive where a reference is wanted needs a *wrapper*, which is a library type.
+///
+/// Erasure is what makes it common rather than exotic: a type variable is `anyref` here, so
+/// `Holder<Integer>.put(1)` puts an `i32` where a reference belongs. It is reported as the
+/// `java.lang` type it needs — the same answer every other unrepresentable type gets — rather than
+/// as a gap in this backend, because a boxing conversion is not one.
+#[test]
+fn a_boxing_conversion_names_the_wrapper_it_needs() {
+    let source = r"
+class Holder<T> {
+    T held;
+    void put(T value) { held = value; }
+}
+
+public class Boxing {
+    public static void run() {
+        Holder<Integer> holder = new Holder<Integer>();
+        holder.put(1);
+    }
+}
+";
+    let error = compile(&[source]).expect_err("a wasm host has no `java.lang.Integer`");
+    assert!(
+        matches!(error, WasmError::NoRepresentation(ref what) if what == "java.lang.Integer"),
+        "got {error}"
+    );
+}
