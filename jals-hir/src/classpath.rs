@@ -282,6 +282,10 @@ impl ClasspathLower {
                 .map(|p| Param {
                     name: None,
                     ty: Self::type_sig_to_member_type(p),
+                    // A class file's `RuntimeVisible[Parameter]Annotations` is decoded in full by
+                    // `jals-classfile` and not read here yet, so this is *unknown* rather than
+                    // none — which is what `ItemOrigin::carries_annotations` answers `false` for.
+                    annotations: Vec::new(),
                 })
                 .collect();
             let ret = match &ms.result {
@@ -307,6 +311,7 @@ impl ClasspathLower {
                 .map(|p| Param {
                     name: None,
                     ty: Self::field_type_to_member_type(p),
+                    annotations: Vec::new(),
                 })
                 .collect();
             let ret = match &md.return_type {

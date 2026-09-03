@@ -13,17 +13,18 @@ use rowan::WalkEvent;
 use rowan::ast::support;
 
 use super::{
-    AssignmentExpr, AstNode, AstSupport, AttrMeta, Attribute, BinaryExpr, BreakStmt, CatchClause,
-    ContinueStmt, Decl, Expr, FieldAccess, FieldDecl, ForStmt, Literal, LocalVarDecl, MethodDecl,
-    Modifiers, Param, QualifiedName, Resource, Stmt, SwitchExpr, Type, YieldStmt,
+    Annotation, AssignmentExpr, AstNode, AstSupport, AttrMeta, Attribute, BinaryExpr, BreakStmt,
+    CatchClause, ContinueStmt, Decl, Expr, FieldAccess, FieldDecl, ForStmt, Literal, LocalVarDecl,
+    MethodDecl, Modifiers, Param, QualifiedName, Resource, SourceFile, Stmt, SwitchExpr, Type,
+    YieldStmt,
 };
 use crate::language::{SyntaxNode, SyntaxToken};
-use crate::syntax_kind::SyntaxKind::{
-    self, COMMA, DOT, EQ, FOR_KW, IDENT, LBRACK, RPAREN, SEMICOLON, SWITCH_EXPR, SWITCH_STMT,
-    THIS_KW, UNDERSCORE, YIELD_STMT,
-};
 #[cfg(test)]
-use crate::syntax_kind::SyntaxKind::{MODIFIERS, NON_SEALED_KW};
+use crate::syntax_kind::SyntaxKind::NON_SEALED_KW;
+use crate::syntax_kind::SyntaxKind::{
+    self, COMMA, DOT, EQ, FOR_KW, IDENT, LBRACK, MODIFIERS, RPAREN, SEMICOLON, SWITCH_EXPR,
+    SWITCH_STMT, THIS_KW, UNDERSCORE, YIELD_STMT,
+};
 
 /// The declarator-level reader every binding form shares: a name and the array dimensions written
 /// after it.
@@ -113,6 +114,88 @@ impl Declarators {
             }
         }
         out
+    }
+}
+
+/// The annotations written on a declaration, and the type each one denotes.
+///
+/// Its own namespace for the reason [`Declarators`] is: the same two questions are asked from three
+/// places — `jals-hir` capturing a member's annotations into the project index, `jals-lint` reading
+/// a declaration in the file it is linting, and the suppression map — and each answer has a way to
+/// be subtly wrong that only shows up in one of them. Where an annotation *lives* has two shapes,
+/// and a reader that knows only the common one silently misses every type parameter and enum
+/// constant; what a written `@Nullable` *denotes* depends on the file's imports, and a reader that
+/// skips them accepts anybody's `Nullable` as everybody's.
+pub struct Annotations;
+
+impl Annotations {
+    /// Every annotation written directly on `decl`.
+    ///
+    /// Both shapes, because the parser produces both: most declarations park their annotations in a
+    /// `MODIFIERS` child, while a type parameter, an enum constant, and a parameter's varargs
+    /// type-use position write them as direct children instead.
+    pub fn on(decl: &SyntaxNode) -> Vec<Annotation> {
+        let mut out = Vec::new();
+        for child in decl.children() {
+            if child.kind() == MODIFIERS {
+                out.extend(child.children().filter_map(Annotation::cast));
+            } else if let Some(annotation) = Annotation::cast(child) {
+                out.push(annotation);
+            }
+        }
+        out
+    }
+
+    /// The single-type imports of the compilation unit `node` sits in, as (simple name, fully
+    /// qualified name) pairs in source order.
+    ///
+    /// A wildcard, `static` or `module` import contributes nothing: none of the three names one
+    /// type, so none can settle what a simple name denotes. A jals grouped import
+    /// (`import a.{B, C};`) contributes each member qualified with the declaration's shared prefix.
+    pub fn imports_of(node: &SyntaxNode) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        let Some(unit) = node.ancestors().last().and_then(SourceFile::cast) else {
+            return out;
+        };
+        for import in unit.imports() {
+            if import.is_static() || import.is_module() {
+                continue;
+            }
+            let Some(name) = import.name() else {
+                continue;
+            };
+            if let Some(group) = import.group() {
+                let prefix = name.text();
+                for member in group.members() {
+                    if let Some(last) = member.last_segment() {
+                        out.push((last, alloc::format!("{prefix}.{}", member.text())));
+                    }
+                }
+            } else if let Some(last) = name.last_segment() {
+                out.push((last, name.text()));
+            }
+        }
+        out
+    }
+
+    /// The type `annotation` denotes, read against `imports`.
+    ///
+    /// A name written qualified is already the answer. A simple name a single-type import resolves
+    /// is that import's type — which is what makes `import com.acme.Nullable;` mean com.acme's and
+    /// nobody else's. A simple name nothing resolves comes back **as written**, still simple: what
+    /// an unresolved simple name may stand for is the caller's policy, not this walk's, and the
+    /// answer says which case it is by whether it carries a dot.
+    pub fn denoted(annotation: &Annotation, imports: &[(String, String)]) -> Option<String> {
+        let written = annotation.name()?.text();
+        if written.contains('.') {
+            return Some(written);
+        }
+        Some(
+            imports
+                .iter()
+                .find(|(simple, _)| *simple == written)
+                .map_or(written, |(_, fqn)| fqn.clone()),
+        )
     }
 }
 

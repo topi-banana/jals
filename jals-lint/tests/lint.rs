@@ -1139,6 +1139,129 @@ fn the_nullable_list_is_the_whole_vocabulary() {
     ));
 }
 
+/// The `nullness-mismatch` findings of `sources[0]`, linted with every source indexed as one
+/// project — the route a real run takes, and the only one that can read a contract another file
+/// wrote.
+fn nullness_in_project(sources: &[&str], stdlib: bool) -> String {
+    let parses: Vec<jals_syntax::Parse> = sources
+        .iter()
+        .map(|src| jals_exec::block_on_inline(jals_syntax::Parse::parse(src)))
+        .collect();
+    let nodes: Vec<(jals_hir::FileId, jals_syntax::SyntaxNode)> = parses
+        .iter()
+        .enumerate()
+        .map(|(i, parse)| (jals_hir::FileId(u32::try_from(i).unwrap()), parse.syntax()))
+        .collect();
+    let mut builder = jals_hir::ProjectIndex::builder(&nodes);
+    if stdlib {
+        builder = builder.with_stdlib();
+    }
+    let index = jals_exec::block_on_inline(builder.build());
+    let analysis = jals_exec::block_on_inline(jals_hir::FileAnalysis::of(&nodes[0].1));
+    let semantics = analysis.in_project(&index, jals_hir::FileId(0));
+    let out = jals_exec::block_on_inline(LintOutput::lint(
+        LintRequest {
+            file: Some(&semantics),
+            ..LintRequest::new(&parses[0])
+        },
+        &Config::default(),
+    ));
+    let mut s = String::new();
+    for d in out
+        .diagnostics
+        .iter()
+        .filter(|d| d.rule == "nullness-mismatch")
+    {
+        writeln!(s, "{}..{}: {}", d.range.start, d.range.end, d.message).unwrap();
+    }
+    s
+}
+
+#[test]
+fn another_files_nullable_is_read_through_the_index() {
+    // The finding a project actually needs: the `@Nullable` a call has to respect is almost never
+    // in the file making the call, and the file-local route cannot see it at all.
+    expect![[r"
+        51..59: a nullable value cannot be assigned to `s`, which is non-null
+    "]]
+    .assert_eq(&nullness_in_project(
+        &[
+            "class C { void m() { Api a = new Api(); String s = a.find(); } }",
+            "public class Api { @org.jspecify.annotations.Nullable public String find() { return null; } }",
+        ],
+        false,
+    ));
+}
+
+#[test]
+fn the_overload_the_index_selected_is_the_one_checked() {
+    // Two overloads, and `null` fits only one of them. The file-local route stands down on an
+    // overloaded name because the scope chain binds *an* overload rather than the selected one;
+    // the index has no such doubt, so this is a case the project route answers rather than skips.
+    expect![[r"
+        47..51: `null` cannot be passed to parameter `s` of `take`, which is non-null
+    "]]
+    .assert_eq(&nullness_in_project(
+        &[
+            "class C { void m() { Api a = new Api(); a.take(null); } }",
+            "public class Api {\n  public void take(int n) {}\n  public void take(String s) {}\n}",
+        ],
+        false,
+    ));
+}
+
+#[test]
+fn a_nullable_parameter_in_another_file_accepts_null() {
+    // The mirror of the case above, and the false positive Stage 1's silence was avoiding: without
+    // the index, `take`'s parameter would read as unannotated and therefore non-null. The
+    // unannotated twin below is the control — without it, "no findings" would also be what a
+    // project route that never fired produces.
+    let call = "class C { void m() { Api a = new Api(); a.take(null); } }";
+    assert_eq!(
+        nullness_in_project(
+            &[
+                call,
+                "public class Api { public void take(@org.jspecify.annotations.Nullable String s) {} }",
+            ],
+            false,
+        ),
+        ""
+    );
+    expect![[r"
+        47..51: `null` cannot be passed to parameter `s` of `take`, which is non-null
+    "]]
+    .assert_eq(&nullness_in_project(
+        &[call, "public class Api { public void take(String s) {} }"],
+        false,
+    ));
+}
+
+#[test]
+fn a_library_member_is_unknown_rather_than_unannotated() {
+    // `String.equals(Object)` accepts `null` and says so nowhere jals can read: the embedded stubs
+    // carry no annotations at all. Reading that silence as "the author wrote none" — and therefore,
+    // under `default = "non-null"`, as a claim — would report every `null` passed to the standard
+    // library. `ItemOrigin::carries_annotations` is the question that keeps it quiet, and the
+    // project-declared twin below is what shows the route was live either way.
+    assert_eq!(
+        nullness_in_project(
+            &["class C { boolean m(String s) { return s.equals(null); } }"],
+            true,
+        ),
+        ""
+    );
+    expect![[r"
+        45..49: `null` cannot be passed to parameter `o` of `equals`, which is non-null
+    "]]
+    .assert_eq(&nullness_in_project(
+        &[
+            "class C { boolean m(Api a) { return a.equals(null); } }",
+            "public class Api { public boolean equals(Object o) { return false; } }",
+        ],
+        true,
+    ));
+}
+
 // ===== rule options =====
 
 #[test]

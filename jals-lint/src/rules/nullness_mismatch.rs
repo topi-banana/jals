@@ -1,10 +1,10 @@
 //! `nullness-mismatch`: a value that may be `null` written into a slot declared never to hold one.
 //!
 //! The rule reads **annotations**, not inference. Which annotation types count is
-//! [`NullnessMismatch::nullable`] / [`NullnessMismatch::non_null`] — fully-qualified names, matched
-//! against the annotation as written and qualified through the file's own single-type imports — and
-//! what a declaration carrying neither means is [`NullnessMismatch::default`], whose built-in value
-//! is [`Nullness::NonNull`]. That is the strict reading: an unannotated slot rejects `null`.
+//! [`Options::nullable`] / [`Options::non_null`] — fully-qualified names, matched against the
+//! annotation as written and qualified through the declaring file's own single-type imports — and
+//! what a declaration carrying neither means is [`Options::default`], whose built-in value is
+//! [`Nullness::NonNull`]. That is the strict reading: an unannotated slot rejects `null`.
 //!
 //! # The four contexts, and why there is no fifth
 //!
@@ -16,22 +16,37 @@
 //! constant folder and nothing else, and `jals_syntax::CfgMap` is conditional compilation rather
 //! than control flow. A rule in `[correctness]` that guessed there would be wrong on ordinary Java.
 //!
+//! # Two ways to reach a declaration, and what each one settles
+//!
+//! With a project index the rule asks it: `call_target_of` / `field_target_of` name the member the
+//! call or access actually resolves to — the *selected* overload, in whichever file declares it —
+//! and [`Member::annotations`] carries what that declaration wrote. That is the half a real project
+//! needs, because the `@Nullable` a call has to respect is almost never in the file making the call.
+//!
+//! Without one (`LintOutput::lint_source`, and any file whose parse the driver rejected) it falls
+//! back to what this file alone settles: a name the scope chain binds to a declaration here. The
+//! fallback is a strict subset, so the two never disagree — the index answers more, never
+//! differently.
+//!
 //! # Conservative by construction
 //!
 //! Only a value whose nullness is *known* is reported, and only into a slot whose nullness is
-//! *known*. Everything else is `Unknown` and silent:
+//! *known*. Everything else is [`Value::Unknown`] and silent:
 //!
+//! - A member the index did not read annotations for. An embedded stub carries none at all and a
+//!   class file's are decoded by `jals-classfile` and not yet lowered, so for those two an empty
+//!   annotation list means *nobody looked* rather than *the author wrote none* —
+//!   [`ItemOrigin::carries_annotations`] is the question, and `Map.put(k, null)` is what asking it
+//!   wrong would report.
 //! - A **conditional** (`cond ? find() : "x"`) is unknown even when one arm is nullable. A reader
 //!   sees a guarded expression, and reporting the arm would be the false positive this scope was
 //!   chosen to avoid.
-//! - A name or call this file cannot bind — an inherited member, another file's method, a
-//!   qualified receiver (`obj.find()`) — is unknown. The file-local pass records no reference for
-//!   the right-hand name of a member access, so there is nothing to read an annotation off.
-//! - An **overloaded** callee is unknown: the scope chain binds a call to *an* overload rather than
-//!   to the one the arguments select, so a parameter read off the wrong one would be a finding
-//!   about a declaration the call never reaches.
+//! - A name neither route binds — an inherited member, a receiver whose type is unresolved.
+//! - An **overloaded** callee, on the file-local route only: the scope chain binds a call to *an*
+//!   overload rather than to the one the arguments select. With an index there is no such doubt,
+//!   which is one more thing the project route answers rather than skips.
 //!
-//! # What it does report about a declaration itself
+//! # What it reports about a declaration itself
 //!
 //! One thing: a declaration annotated **both** nullable and non-null. That is not a value flowing
 //! anywhere, it is a contract that contradicts itself, and it is the one finding here that needs no
@@ -43,18 +58,16 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::ops::Range;
 
-use alloc::collections::BTreeMap;
-
 use jals_config::Category;
 use jals_config::lint::{Config, Nullness, NullnessMismatch as Options};
 use jals_exec::{LocalBoxFuture, Yielder};
-use jals_hir::{DefKind, FileAnalysis, Namespace};
+use jals_hir::{DefKind, FileAnalysis, FileSemantics, Member, Namespace, TypedFile};
 use jals_syntax::SyntaxKind::{
-    ASSIGNMENT_EXPR, CALL_EXPR, CONSTRUCTOR_DECL, FIELD_DECL, LAMBDA_EXPR, LOCAL_VAR_DECL,
-    METHOD_DECL, MODIFIERS, NULL_KW, PARAM,
+    ASSIGNMENT_EXPR, CALL_EXPR, CONSTRUCTOR_DECL, FIELD_DECL, IDENT, LAMBDA_EXPR, LOCAL_VAR_DECL,
+    METHOD_DECL, NULL_KW, PARAM, RETURN_STMT,
 };
 use jals_syntax::ast::{self, AstNode};
-use jals_syntax::{SyntaxNode, SyntaxToken};
+use jals_syntax::{SyntaxElement, SyntaxNode};
 
 use crate::rules::{Checker, Finding, RuleMeta, Significant};
 
@@ -67,7 +80,7 @@ pub(crate) const RULE: RuleMeta = RuleMeta {
     // turns a declaration that was saying something into one that says nothing, and this rule
     // then reports the slot it was told to leave alone.
     needs_clean_parse: true,
-    check: Checker::Analyzed(NullnessRule::check),
+    check: Checker::Semantic(NullnessRule::check),
 };
 
 /// What a declaration says about `null`.
@@ -95,7 +108,7 @@ enum Value {
 }
 
 impl Value {
-    /// How the finding names this value, or `None` when there is nothing to report.
+    /// How a finding names this value, or `None` when there is nothing to report.
     const fn subject(self) -> Option<&'static str> {
         match self {
             Self::Null => Some("`null`"),
@@ -109,77 +122,49 @@ impl Value {
 /// single-type imports, which are what turn a written `@Nullable` into a fully-qualified name.
 struct Vocabulary<'a> {
     options: &'a Options,
-    /// Simple name → fully-qualified name, from this file's single-type imports. A wildcard import
-    /// contributes nothing: it names no single type, so it cannot settle which `Nullable` a bare
-    /// `@Nullable` means.
-    imports: BTreeMap<String, String>,
+    /// This file's single-type imports, as `ast::Annotations::denoted` takes them.
+    imports: Vec<(String, String)>,
 }
 
 impl<'a> Vocabulary<'a> {
     /// Reads the file's imports once.
     fn of(root: &SyntaxNode, options: &'a Options) -> Self {
-        let mut imports = BTreeMap::new();
-        if let Some(file) = ast::SourceFile::cast(root.clone()) {
-            for import in file.imports() {
-                if import.is_static() || import.is_module() {
-                    continue;
-                }
-                let Some(name) = import.name() else {
-                    continue;
-                };
-                // A jals grouped import (`import a.{B, C};`) writes the shared prefix on the
-                // declaration and the types in the group, so each member is qualified with it.
-                if let Some(group) = import.group() {
-                    let prefix = name.text();
-                    for member in group.members() {
-                        if let Some(last) = member.last_segment() {
-                            imports.insert(last, format!("{prefix}.{}", member.text()));
-                        }
-                    }
-                } else if let Some(last) = name.last_segment() {
-                    imports.insert(last, name.text());
-                }
-            }
+        Self {
+            options,
+            imports: ast::Annotations::imports_of(root),
         }
-        Self { options, imports }
     }
 
-    /// An entry's simple name — what an annotation whose own name no import resolves is matched on.
+    /// An entry's simple name — what an annotation whose own name nothing resolves is matched on.
     fn last_segment(entry: &str) -> &str {
         entry.rsplit('.').next().unwrap_or(entry)
     }
 
-    /// Whether `annotation` is one of `list`.
+    /// Whether the annotation type `name` denotes is one of `list`.
     ///
-    /// Three readings, in the order the source settles them. A name written qualified is already a
-    /// fully-qualified name. A simple name a single-type import resolves *is* that import's type,
-    /// so `import com.acme.Nullable;` makes `@Nullable` com.acme's and no configured entry matches
-    /// it — which is the precision an FQN list is for. A simple name nothing resolves falls back to
-    /// matching an entry's last segment: the same limit `@SuppressWarnings` carries in
-    /// `crate::suppress`, and for the same reason — an on-demand import leaves the question open,
-    /// and resolving the annotation *type* would need the analysis the rules have not run yet.
-    fn matches(&self, list: &[String], annotation: &ast::Annotation) -> bool {
-        let Some(written) = annotation.name().map(|name| name.text()) else {
-            return false;
-        };
-        if written.contains('.') {
-            return list.contains(&written);
+    /// `name` arrives from [`ast::Annotations::denoted`] — the same shape whether this file read it
+    /// off the tree or the index captured it in the file that declared it — and says which case it
+    /// is by carrying a dot or not. A fully-qualified name is compared whole, which is the
+    /// precision an FQN list is for: `import com.acme.Nullable;` makes `@Nullable` com.acme's, and
+    /// no configured entry matches it. A simple name nothing resolved falls back to matching an
+    /// entry's last segment — the same limit `@SuppressWarnings` carries in `crate::suppress`, and
+    /// for the same reason: an on-demand import leaves the question open, and resolving the
+    /// annotation *type* would need the analysis the rules have not run yet.
+    fn matches(list: &[String], name: &str) -> bool {
+        if name.contains('.') {
+            return list.iter().any(|entry| entry == name);
         }
-        if let Some(fqn) = self.imports.get(&written) {
-            return list.iter().any(|entry| entry == fqn);
-        }
-        list.iter()
-            .any(|entry| Self::last_segment(entry) == written)
+        list.iter().any(|entry| Self::last_segment(entry) == name)
     }
 
-    /// What `decl` says about `null`.
-    fn declared(&self, decl: &SyntaxNode) -> Declared {
-        let mut nullable = false;
-        let mut non_null = false;
-        for annotation in Self::annotations_on(decl) {
-            nullable |= self.matches(&self.options.nullable, &annotation);
-            non_null |= self.matches(&self.options.non_null, &annotation);
-        }
+    /// What a declaration carrying `names` says about `null`.
+    fn declared_from(&self, names: &[String]) -> Declared {
+        let nullable = names
+            .iter()
+            .any(|name| Self::matches(&self.options.nullable, name));
+        let non_null = names
+            .iter()
+            .any(|name| Self::matches(&self.options.non_null, name));
         match (nullable, non_null) {
             (true, true) => Declared::Contradictory,
             (true, false) => Declared::Nullable,
@@ -188,27 +173,22 @@ impl<'a> Vocabulary<'a> {
         }
     }
 
-    /// The annotations written on `decl`.
-    ///
-    /// Both shapes, because the parser produces both: most declarations park their annotations in a
-    /// `MODIFIERS` child, while a type parameter, an enum constant and a parameter's type-use
-    /// position write them as direct children — the same two `jals-hir`'s `decl_facts` distinguishes
-    /// when it records whether a declaration is annotated at all.
-    fn annotations_on(decl: &SyntaxNode) -> Vec<ast::Annotation> {
-        let mut out = Vec::new();
-        for child in decl.children() {
-            if child.kind() == MODIFIERS {
-                out.extend(child.children().filter_map(ast::Annotation::cast));
-            } else if let Some(annotation) = ast::Annotation::cast(child) {
-                out.push(annotation);
-            }
-        }
-        out
+    /// The annotation types written on `decl`, read in this file's import context.
+    fn denoted_on(&self, decl: &SyntaxNode) -> Vec<String> {
+        ast::Annotations::on(decl)
+            .iter()
+            .filter_map(|annotation| ast::Annotations::denoted(annotation, &self.imports))
+            .collect()
     }
 
-    /// Whether `decl` is a slot that rejects `null`.
-    fn rejects_null(&self, decl: &SyntaxNode) -> bool {
-        match self.declared(decl) {
+    /// What `decl` says about `null`.
+    fn declared(&self, decl: &SyntaxNode) -> Declared {
+        self.declared_from(&self.denoted_on(decl))
+    }
+
+    /// Whether a declaration carrying `names` is a slot that rejects `null`.
+    fn rejects_null_from(&self, names: &[String]) -> bool {
+        match self.declared_from(names) {
             Declared::NonNull => true,
             // A contradictory declaration is reported as one; nothing is concluded from it.
             Declared::Nullable | Declared::Contradictory => false,
@@ -216,13 +196,23 @@ impl<'a> Vocabulary<'a> {
         }
     }
 
-    /// Whether reading `decl` may produce `null`.
-    fn produces_null(&self, decl: &SyntaxNode) -> bool {
-        match self.declared(decl) {
+    /// Whether reading a declaration carrying `names` may produce `null`.
+    fn produces_null_from(&self, names: &[String]) -> bool {
+        match self.declared_from(names) {
             Declared::Nullable => true,
             Declared::NonNull | Declared::Contradictory => false,
             Declared::Absent => self.options.default == Nullness::Nullable,
         }
+    }
+
+    /// [`rejects_null_from`](Self::rejects_null_from) for a declaration in this file.
+    fn rejects_null(&self, decl: &SyntaxNode) -> bool {
+        self.rejects_null_from(&self.denoted_on(decl))
+    }
+
+    /// [`produces_null_from`](Self::produces_null_from) for a declaration in this file.
+    fn produces_null(&self, decl: &SyntaxNode) -> bool {
+        self.produces_null_from(&self.denoted_on(decl))
     }
 }
 
@@ -233,28 +223,39 @@ impl NullnessRule {
     /// The table-edge shim: boxes the async rule body once per file.
     fn check<'a>(
         analysis: &'a FileAnalysis,
+        project: Option<&'a FileSemantics<'a>>,
         config: &'a Config,
     ) -> LocalBoxFuture<'a, Vec<Finding>> {
-        alloc::boxed::Box::pin(Self::check_impl(analysis, config))
+        alloc::boxed::Box::pin(Self::check_impl(analysis, project, config))
     }
 
-    async fn check_impl(analysis: &FileAnalysis, config: &Config) -> Vec<Finding> {
+    async fn check_impl(
+        analysis: &FileAnalysis,
+        project: Option<&FileSemantics<'_>>,
+        config: &Config,
+    ) -> Vec<Finding> {
         let root = analysis.root();
         let vocabulary = Vocabulary::of(root, &config.correctness.nullness_mismatch.options);
+        let typed = match project {
+            Some(semantics) => Some(semantics.typed().await),
+            None => None,
+        };
         let mut yielder = Yielder::new();
         let mut out = Vec::new();
         for node in root.descendants() {
             yielder.tick().await;
             match node.kind() {
                 LOCAL_VAR_DECL | FIELD_DECL => {
-                    Self::check_declaration(&node, analysis, &vocabulary, &mut out);
+                    Self::check_declaration(&node, analysis, typed, &vocabulary, &mut out);
                 }
-                PARAM | METHOD_DECL => Self::check_contradiction(&node, &vocabulary, &mut out),
-                ASSIGNMENT_EXPR => Self::check_assignment(&node, analysis, &vocabulary, &mut out),
-                jals_syntax::SyntaxKind::RETURN_STMT => {
-                    Self::check_return(&node, analysis, &vocabulary, &mut out);
+                PARAM | METHOD_DECL | CONSTRUCTOR_DECL => {
+                    Self::check_contradiction(&node, &vocabulary, &mut out);
                 }
-                CALL_EXPR => Self::check_call(&node, analysis, &vocabulary, &mut out),
+                ASSIGNMENT_EXPR => {
+                    Self::check_assignment(&node, analysis, typed, &vocabulary, &mut out);
+                }
+                RETURN_STMT => Self::check_return(&node, analysis, typed, &vocabulary, &mut out),
+                CALL_EXPR => Self::check_call(&node, analysis, typed, &vocabulary, &mut out),
                 _ => {}
             }
         }
@@ -262,7 +263,7 @@ impl NullnessRule {
     }
 
     /// A declarator's initializer against the declarator's own nullness, plus the contradiction
-    /// check the declaration shares with every other declaring form.
+    /// check every declaring form shares.
     ///
     /// One node can declare several names (`String a = null, b;`), and only the token order says
     /// which initializer belongs to which — which is why the pairs come from the one walk that
@@ -270,6 +271,7 @@ impl NullnessRule {
     fn check_declaration(
         node: &SyntaxNode,
         analysis: &FileAnalysis,
+        typed: Option<TypedFile<'_>>,
         vocabulary: &Vocabulary<'_>,
         out: &mut Vec<Finding>,
     ) {
@@ -278,7 +280,8 @@ impl NullnessRule {
             return;
         }
         for (name, value) in ast::Declarators::initializers(node) {
-            let Some(subject) = Self::value_of(&value, analysis, vocabulary).subject() else {
+            let Some(subject) = Self::value_of(&value, analysis, typed, vocabulary).subject()
+            else {
                 continue;
             };
             out.push(Finding::at_range(
@@ -305,10 +308,11 @@ impl NullnessRule {
         ));
     }
 
-    /// A simple `=` whose target is a name this file declares.
+    /// A simple `=` whose target is a declaration either route binds.
     fn check_assignment(
         node: &SyntaxNode,
         analysis: &FileAnalysis,
+        typed: Option<TypedFile<'_>>,
         vocabulary: &Vocabulary<'_>,
         out: &mut Vec<Finding>,
     ) {
@@ -322,13 +326,17 @@ impl NullnessRule {
         let (Some(target), Some(value)) = (assignment.target(), assignment.value()) else {
             return;
         };
-        let Some(decl) = Self::declaration_of(target.syntax(), analysis, Namespace::Value) else {
-            return;
-        };
-        if !vocabulary.rejects_null(&decl) {
+        let rejects = Self::member_of(typed, target.syntax()).map_or_else(
+            || {
+                Self::declaration_of(target.syntax(), analysis, Namespace::Value)
+                    .is_some_and(|decl| vocabulary.rejects_null(&decl))
+            },
+            |member| vocabulary.rejects_null_from(&member.annotations),
+        );
+        if !rejects {
             return;
         }
-        let Some(subject) = Self::value_of(&value, analysis, vocabulary).subject() else {
+        let Some(subject) = Self::value_of(&value, analysis, typed, vocabulary).subject() else {
             return;
         };
         let name = Self::name_text(target.syntax());
@@ -342,6 +350,7 @@ impl NullnessRule {
     fn check_return(
         node: &SyntaxNode,
         analysis: &FileAnalysis,
+        typed: Option<TypedFile<'_>>,
         vocabulary: &Vocabulary<'_>,
         out: &mut Vec<Finding>,
     ) {
@@ -354,7 +363,7 @@ impl NullnessRule {
         if !vocabulary.rejects_null(&method) {
             return;
         }
-        let Some(subject) = Self::value_of(&value, analysis, vocabulary).subject() else {
+        let Some(subject) = Self::value_of(&value, analysis, typed, vocabulary).subject() else {
             return;
         };
         let name = ast::MethodDecl::cast(method)
@@ -366,10 +375,15 @@ impl NullnessRule {
         ));
     }
 
-    /// A call's arguments against the parameters of the method this file resolves it to.
+    /// A call's arguments against the parameters of the method it resolves to.
+    ///
+    /// The index route needs no arity or overload guard: `call_target_of` names the member the call
+    /// selected, so its parameters are the ones this call fills. The file-local route has to guard
+    /// both, and does.
     fn check_call(
         node: &SyntaxNode,
         analysis: &FileAnalysis,
+        typed: Option<TypedFile<'_>>,
         vocabulary: &Vocabulary<'_>,
         out: &mut Vec<Finding>,
     ) {
@@ -379,10 +393,32 @@ impl NullnessRule {
         let (Some(callee), Some(args)) = (call.callee(), call.args()) else {
             return;
         };
-        let Some(decl) = Self::declaration_of(callee.syntax(), analysis, Namespace::Method) else {
+        let arguments: Vec<ast::Expr> = args.args().collect();
+        if let Some(member) = Self::member_of(typed, node) {
+            // A varargs call does not line arguments up with parameters one for one past the last
+            // declared parameter, so only the fixed prefix is asked about.
+            if member.varargs && arguments.len() != member.params.len() {
+                return;
+            }
+            for (param, argument) in member.params.iter().zip(&arguments) {
+                if !vocabulary.rejects_null_from(&param.annotations) {
+                    continue;
+                }
+                Self::report_argument(
+                    argument,
+                    param.name.as_deref().unwrap_or_default(),
+                    &member.name,
+                    analysis,
+                    typed,
+                    vocabulary,
+                    out,
+                );
+            }
             return;
-        };
-        let Some(method) = ast::MethodDecl::cast(decl) else {
+        }
+        let Some(method) = Self::declaration_of(callee.syntax(), analysis, Namespace::Method)
+            .and_then(ast::MethodDecl::cast)
+        else {
             return;
         };
         // The scope chain binds a call to *an* overload, so a second method of the same name means
@@ -394,9 +430,8 @@ impl NullnessRule {
             return;
         };
         let params: Vec<ast::Param> = params.params().collect();
-        let arguments: Vec<ast::Expr> = args.args().collect();
-        // A varargs or arity-mismatched call does not line arguments up with parameters one for
-        // one, and guessing the pairing would report against a parameter the call never fills.
+        // Guessing the pairing across an arity mismatch would report against a parameter the call
+        // never fills.
         if params.len() != arguments.len() {
             return;
         }
@@ -405,32 +440,56 @@ impl NullnessRule {
             if !vocabulary.rejects_null(param.syntax()) {
                 continue;
             }
-            let Some(subject) = Self::value_of(argument, analysis, vocabulary).subject() else {
-                continue;
-            };
-            let param_name = param.name().unwrap_or_default();
-            out.push(Finding::at_range(
-                Self::span(argument.syntax()),
-                format!(
-                    "{subject} cannot be passed to parameter `{param_name}` of `{name}`, which is \
-                     non-null"
-                ),
-            ));
+            Self::report_argument(
+                argument,
+                &param.name().unwrap_or_default(),
+                &name,
+                analysis,
+                typed,
+                vocabulary,
+                out,
+            );
         }
     }
 
+    /// One argument's finding, shared by the two routes so they word it identically.
+    fn report_argument(
+        argument: &ast::Expr,
+        param: &str,
+        method: &str,
+        analysis: &FileAnalysis,
+        typed: Option<TypedFile<'_>>,
+        vocabulary: &Vocabulary<'_>,
+        out: &mut Vec<Finding>,
+    ) {
+        let Some(subject) = Self::value_of(argument, analysis, typed, vocabulary).subject() else {
+            return;
+        };
+        out.push(Finding::at_range(
+            Self::span(argument.syntax()),
+            format!(
+                "{subject} cannot be passed to parameter `{param}` of `{method}`, which is non-null"
+            ),
+        ));
+    }
+
     /// What `value` is known to produce.
-    fn value_of(value: &ast::Expr, analysis: &FileAnalysis, vocabulary: &Vocabulary<'_>) -> Value {
+    fn value_of(
+        value: &ast::Expr,
+        analysis: &FileAnalysis,
+        typed: Option<TypedFile<'_>>,
+        vocabulary: &Vocabulary<'_>,
+    ) -> Value {
         match value {
             // Parentheses change nothing about what the expression produces.
             ast::Expr::Paren(paren) => paren.expr().map_or(Value::Unknown, |inner| {
-                Self::value_of(&inner, analysis, vocabulary)
+                Self::value_of(&inner, analysis, typed, vocabulary)
             }),
             ast::Expr::Literal(literal) => {
                 if literal
                     .syntax()
                     .children_with_tokens()
-                    .filter_map(jals_syntax::SyntaxElement::into_token)
+                    .filter_map(SyntaxElement::into_token)
                     .any(|token| token.kind() == NULL_KW)
                 {
                     Value::Null
@@ -438,10 +497,36 @@ impl NullnessRule {
                     Value::Unknown
                 }
             }
-            ast::Expr::NameRef(_) => {
-                Self::from_declaration(value.syntax(), analysis, vocabulary, Namespace::Value)
+            ast::Expr::Call(_) | ast::Expr::FieldAccess(_) | ast::Expr::NameRef(_) => {
+                Self::read_value(value, analysis, typed, vocabulary)
             }
-            ast::Expr::Call(call) => call.callee().map_or(Value::Unknown, |callee| {
+            _ => Value::Unknown,
+        }
+    }
+
+    /// The nullness of a name, field access or call — the index first, this file second.
+    fn read_value(
+        value: &ast::Expr,
+        analysis: &FileAnalysis,
+        typed: Option<TypedFile<'_>>,
+        vocabulary: &Vocabulary<'_>,
+    ) -> Value {
+        if let Some(member) = Self::member_of(typed, value.syntax()) {
+            return if vocabulary.produces_null_from(&member.annotations) {
+                Value::Nullable
+            } else {
+                Value::Unknown
+            };
+        }
+        let (node, namespace) = match value {
+            ast::Expr::NameRef(_) => (value.syntax().clone(), Namespace::Value),
+            ast::Expr::Call(call) => {
+                let Some(callee) = call.callee() else {
+                    return Value::Unknown;
+                };
+                // Without an index the scope chain binds a call to *an* overload rather than to the
+                // one the arguments select, so an annotation read off it is about a declaration
+                // this call may never reach.
                 if Self::is_overloaded(
                     analysis,
                     Self::declaration_of(callee.syntax(), analysis, Namespace::Method)
@@ -451,29 +536,48 @@ impl NullnessRule {
                 ) {
                     return Value::Unknown;
                 }
-                Self::from_declaration(callee.syntax(), analysis, vocabulary, Namespace::Method)
-            }),
-            _ => Value::Unknown,
-        }
-    }
-
-    /// [`Value::Nullable`] when `node` names a declaration this file says may hold `null`.
-    fn from_declaration(
-        node: &SyntaxNode,
-        analysis: &FileAnalysis,
-        vocabulary: &Vocabulary<'_>,
-        namespace: Namespace,
-    ) -> Value {
-        Self::declaration_of(node, analysis, namespace)
+                (callee.syntax().clone(), Namespace::Method)
+            }
+            // A member access records no reference at all in the file-local pass — the right-hand
+            // name is a bare token — so without an index there is nothing to read.
+            _ => return Value::Unknown,
+        };
+        Self::declaration_of(&node, analysis, namespace)
             .filter(|decl| vocabulary.produces_null(decl))
             .map_or(Value::Unknown, |_| Value::Nullable)
+    }
+
+    /// The member `node` resolves to, when there is an index **and** it read that member's
+    /// annotations.
+    ///
+    /// The second half is the whole point of [`ItemOrigin::carries_annotations`]: an embedded stub
+    /// carries no annotations at all and a class file's are not lowered yet, so an empty list there
+    /// means *nobody looked*. Reading it as *the author wrote none* is what would report
+    /// `map.put(k, null)` against a method that documents itself as taking one.
+    ///
+    /// [`ItemOrigin::carries_annotations`]: jals_hir::ItemOrigin::carries_annotations
+    fn member_of<'s>(typed: Option<TypedFile<'s>>, node: &SyntaxNode) -> Option<&'s Member> {
+        let typed = typed?;
+        // The inference memo is keyed on the node's own range, leading trivia included — not on the
+        // significant span a finding is ranged with.
+        let span = Self::memo_span(node);
+        let id = typed
+            .call_target_of(span.clone())
+            .or_else(|| typed.field_target_of(span))?;
+        let member = typed.index().member(id);
+        typed
+            .index()
+            .item(member.owner)
+            .origin
+            .carries_annotations()
+            .then_some(member)
     }
 
     /// The declaration `node` names, when this file binds it in `namespace`.
     ///
     /// `None` for everything the file-local pass leaves open — an inherited member, a name another
-    /// file declares, the right-hand side of a member access (which records no reference at all).
-    /// That is the silence the rule's conservatism rests on.
+    /// file declares, the right-hand side of a member access. That is the silence the fallback
+    /// route's conservatism rests on.
     fn declaration_of(
         node: &SyntaxNode,
         analysis: &FileAnalysis,
@@ -519,19 +623,22 @@ impl NullnessRule {
             .filter(|ancestor| ancestor.kind() == METHOD_DECL)
     }
 
+    /// A node's own byte range — the key the inference memo records against.
+    fn memo_span(node: &SyntaxNode) -> Range<usize> {
+        let range = node.text_range();
+        usize::from(range.start())..usize::from(range.end())
+    }
+
     /// A node's significant span, falling back to its own range when it holds no significant token.
     fn span(node: &SyntaxNode) -> Range<usize> {
-        Significant::range(node).unwrap_or_else(|| {
-            let range = node.text_range();
-            usize::from(range.start())..usize::from(range.end())
-        })
+        Significant::range(node).unwrap_or_else(|| Self::memo_span(node))
     }
 
     /// The text of the first identifier under `node` — how a finding names an assignment target.
     fn name_text(node: &SyntaxNode) -> String {
         node.descendants_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .find(|token: &SyntaxToken| token.kind() == jals_syntax::SyntaxKind::IDENT)
+            .filter_map(SyntaxElement::into_token)
+            .find(|token| token.kind() == IDENT)
             .map_or_else(String::new, |token| token.text().to_owned())
     }
 }
