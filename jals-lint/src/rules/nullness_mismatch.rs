@@ -8,9 +8,12 @@
 //!
 //! # The four contexts, and why there is no fifth
 //!
-//! A value reaches a slot in exactly the places `jals-hir`'s own assignment checking looks
-//! (`TypeInference::mismatches`): a declarator's initializer, a simple `=`, a `return`, and a call
-//! argument. A fifth — dereferencing a nullable value — is deliberately absent. Answering it
+//! A value reaches a slot in four places: a declarator's initializer, a simple `=`, a `return`, and
+//! an argument — a call's, and the constructor arguments of a `new`. The first four are the places
+//! `jals-hir`'s own assignment checking looks (`TypeInference::mismatches`); the `new` is one it
+//! does not reach, and this rule reaches it for nothing because `record_member_targets` already
+//! keys the constructor a `new` selected on the `NEW_EXPR`'s own span, in the same map a call's
+//! target lives in. A fifth — dereferencing a nullable value — is deliberately absent. Answering it
 //! without false positives needs to know whether a guard ran (`if (x != null)`), and there is no
 //! control-flow or definite-assignment layer anywhere below this crate to ask: `jals-hir` has a
 //! constant folder and nothing else, and `jals_syntax::CfgMap` is conditional compilation rather
@@ -27,6 +30,21 @@
 //! back to what this file alone settles: a name the scope chain binds to a declaration here. The
 //! fallback is a strict subset, so the two never disagree — the index answers more, never
 //! differently.
+//!
+//! **What an assignment target has to be**, and which route reaches it, is the same split read from
+//! the other side. A **bare name** is this file's scope chain and only it — the memo keys a target
+//! on a `CALL_EXPR`, a `NEW_EXPR` or a `FIELD_ACCESS` span, so a `NAME_REF` has no entry to ask
+//! for. A **member access** (`o.s`, `this.s`, `a.b.c`) is the index's answer and only the index's:
+//! the name after the dot is a bare `IDENT` token rather than a `NAME_REF`, so the file-local pass
+//! records no reference for it and the first identifier under the node is the *receiver*. That is
+//! why an index-less run does not check one at all, rather than checking the receiver in its place
+//! — and why the name a finding uses comes off the same [`Member`] as the verdict, so the two
+//! cannot end up describing different slots. An **array element** (`a[0] = null`) is neither: no
+//! target is recorded for an `INDEX_EXPR`, and what an element may hold is a nested type-use
+//! annotation (`String @Nullable []` against `@Nullable String[]`) this rule does not read — so
+//! resolving it to the array variable would check an element against the array's own annotation,
+//! which is the conflation [`check_call`](NullnessRule::check_call) refuses for a varargs
+//! parameter.
 //!
 //! # Conservative by construction
 //!
@@ -48,9 +66,10 @@
 //!
 //! # What it reports about a declaration itself
 //!
-//! One thing: a declaration annotated **both** nullable and non-null. That is not a value flowing
-//! anywhere, it is a contract that contradicts itself, and it is the one finding here that needs no
-//! second declaration to compare against.
+//! One thing: a declaration annotated **both** nullable and non-null — every declaring form the
+//! walk visits, an enum constant included. That is not a value flowing anywhere, it is a contract
+//! that contradicts itself, and it is the one finding here that needs no second declaration to
+//! compare against.
 
 use alloc::borrow::ToOwned;
 use alloc::format;
@@ -63,8 +82,8 @@ use jals_config::lint::{Config, Nullness, NullnessMismatch as Options};
 use jals_exec::{LocalBoxFuture, Yielder};
 use jals_hir::{DefKind, FileAnalysis, FileSemantics, Member, Namespace, TypedFile};
 use jals_syntax::SyntaxKind::{
-    ASSIGNMENT_EXPR, CALL_EXPR, CONSTRUCTOR_DECL, FIELD_DECL, IDENT, LAMBDA_EXPR, LOCAL_VAR_DECL,
-    METHOD_DECL, NULL_KW, PARAM, RESOURCE, RETURN_STMT,
+    ASSIGNMENT_EXPR, CALL_EXPR, CONSTRUCTOR_DECL, ENUM_CONSTANT, FIELD_DECL, IDENT, LAMBDA_EXPR,
+    LOCAL_VAR_DECL, METHOD_DECL, NEW_EXPR, NULL_KW, PARAM, RESOURCE, RETURN_STMT,
 };
 use jals_syntax::ast::{self, AstNode};
 use jals_syntax::{SyntaxElement, SyntaxNode};
@@ -116,6 +135,20 @@ impl Value {
             Self::Unknown => None,
         }
     }
+}
+
+/// A resolved assignment target: the slot's own name, and whether writing `null` into it is a
+/// finding.
+///
+/// The point of the type is that the name travels with the verdict it belongs to. Reading the
+/// verdict off one declaration and the name off the first `IDENT` under the target let the two
+/// disagree: `a.s = null` reported the receiver `a` while judging the field `s`, and `a[0] = null`
+/// reported and judged the array variable for a write into an element.
+struct Slot {
+    /// How the finding names the slot — the member's or variable's own name, never a receiver's.
+    name: String,
+    /// Whether the slot's declaration says it never holds `null`.
+    rejects_null: bool,
 }
 
 /// The nullness vocabulary one file is read with: the configured name lists, plus the file's own
@@ -251,7 +284,10 @@ impl NullnessRule {
                 LOCAL_VAR_DECL | FIELD_DECL | RESOURCE => {
                     Self::check_declaration(&node, analysis, typed, &vocabulary, &mut out);
                 }
-                PARAM | METHOD_DECL | CONSTRUCTOR_DECL => {
+                // An enum constant declares a name too, and writes its annotations as direct
+                // children rather than into a `MODIFIERS` child — the second shape
+                // `ast::Annotations::on` reads, and the reason it reads two.
+                PARAM | METHOD_DECL | CONSTRUCTOR_DECL | ENUM_CONSTANT => {
                     Self::check_contradiction(&node, &vocabulary, &mut out);
                 }
                 ASSIGNMENT_EXPR => {
@@ -259,6 +295,7 @@ impl NullnessRule {
                 }
                 RETURN_STMT => Self::check_return(&node, analysis, typed, &vocabulary, &mut out),
                 CALL_EXPR => Self::check_call(&node, analysis, typed, &vocabulary, &mut out),
+                NEW_EXPR => Self::check_new(&node, analysis, typed, &vocabulary, &mut out),
                 _ => {}
             }
         }
@@ -311,7 +348,7 @@ impl NullnessRule {
         ));
     }
 
-    /// A simple `=` whose target is a declaration either route binds.
+    /// A simple `=` whose target is a slot one of the two routes resolves.
     fn check_assignment(
         node: &SyntaxNode,
         analysis: &FileAnalysis,
@@ -329,24 +366,67 @@ impl NullnessRule {
         let (Some(target), Some(value)) = (assignment.target(), assignment.value()) else {
             return;
         };
-        let rejects = Self::member_of(typed, target.syntax()).map_or_else(
-            || {
-                Self::declaration_of(target.syntax(), analysis, Namespace::Value)
-                    .is_some_and(|decl| vocabulary.rejects_null(&decl))
-            },
-            |member| vocabulary.rejects_null_from(&member.annotations),
-        );
-        if !rejects {
+        let Some(slot) = Self::target_slot(&target, analysis, typed, vocabulary) else {
+            return;
+        };
+        if !slot.rejects_null {
             return;
         }
         let Some(subject) = Self::value_of(&value, analysis, typed, vocabulary).subject() else {
             return;
         };
-        let name = Self::name_text(target.syntax());
         out.push(Finding::at_range(
             Self::span(value.syntax()),
-            format!("{subject} cannot be assigned to `{name}`, which is non-null"),
+            format!(
+                "{subject} cannot be assigned to `{}`, which is non-null",
+                slot.name
+            ),
         ));
+    }
+
+    /// The slot `target` writes into, or `None` where this rule cannot say which declaration that
+    /// is.
+    ///
+    /// Resolving the *slot* is the whole job, and the shape of the target decides which route can:
+    ///
+    /// - A **simple name** is what the file-local pass binds, and only it: a bare `NAME_REF` gets
+    ///   no entry in the inference memo, so the index has nothing to add here. A name it does not
+    ///   bind — an inherited field written unqualified — is therefore silent on both routes.
+    /// - A **member access** (`o.s`, `this.s`, `super.s`) is the mirror case: the name on the right
+    ///   is a bare `IDENT` token rather than a `NAME_REF`, so the file-local pass records no
+    ///   reference for it and only the index can say which member it denotes. The index is keyed on
+    ///   the whole node's span, which is what picks the outer `c` out of `a.b.c` rather than the
+    ///   inner `a.b` the two share a start with. Asking the *file-local* route here is what named
+    ///   the receiver instead of the field, and read the receiver's contract as if it were the
+    ///   field's.
+    /// - **Everything else** is `None`, and an array element (`a[0]`) is the case that matters:
+    ///   what an element may hold is a nested type-use annotation (`String @Nullable []` against
+    ///   `@Nullable String[]`) this rule does not read, and the array variable's own annotation is
+    ///   a contract about the array rather than about what it holds. Reading one for the other is
+    ///   the conflation [`check_call`](Self::check_call) refuses for a varargs trailing parameter.
+    fn target_slot(
+        target: &ast::Expr,
+        analysis: &FileAnalysis,
+        typed: Option<TypedFile<'_>>,
+        vocabulary: &Vocabulary<'_>,
+    ) -> Option<Slot> {
+        match target {
+            ast::Expr::NameRef(_) => {
+                let decl = Self::declaration_of(target.syntax(), analysis, Namespace::Value)?;
+                Some(Slot {
+                    name: Self::ident_text(target.syntax()),
+                    rejects_null: vocabulary.rejects_null(&decl),
+                })
+            }
+            ast::Expr::FieldAccess(_) => {
+                let member = Self::member_of(typed, target.syntax())?;
+                Some(Slot {
+                    name: member.name.clone(),
+                    rejects_null: vocabulary.rejects_null_from(&member.annotations),
+                })
+            }
+            _ => None,
+        }
     }
 
     /// A `return` against the nullness its enclosing method declares.
@@ -398,31 +478,7 @@ impl NullnessRule {
         };
         let arguments: Vec<ast::Expr> = args.args().collect();
         if let Some(member) = Self::member_of(typed, node) {
-            // The index needs no arity guard: a target is recorded only from a *selected* overload,
-            // and selection admits a non-varargs member only at `params.len() == args.len()` (JLS
-            // §15.12.2.2, and `resolve_explicit_constructor` for the `this(…)` / `super(…)` forms).
-            // A varargs member is the one that can disagree, and only past its fixed prefix — the
-            // trailing parameter stands for any number of arguments, so pairing it with one of them
-            // would check an element against the array's own annotation.
-            let fixed = if member.varargs {
-                member.params.len().saturating_sub(1)
-            } else {
-                member.params.len()
-            };
-            for (param, argument) in member.params.iter().take(fixed).zip(&arguments) {
-                if !vocabulary.rejects_null_from(&param.annotations) {
-                    continue;
-                }
-                Self::report_argument(
-                    argument,
-                    param.name.as_deref().unwrap_or_default(),
-                    &member.name,
-                    analysis,
-                    typed,
-                    vocabulary,
-                    out,
-                );
-            }
+            Self::check_member_arguments(member, &arguments, analysis, typed, vocabulary, out);
             return;
         }
         let Some(method) = Self::declaration_of(callee.syntax(), analysis, Namespace::Method)
@@ -453,6 +509,69 @@ impl NullnessRule {
                 argument,
                 &param.name().unwrap_or_default(),
                 &name,
+                analysis,
+                typed,
+                vocabulary,
+                out,
+            );
+        }
+    }
+
+    /// A `new C(…)`'s arguments against the constructor the index says it selected.
+    ///
+    /// The index route only, and deliberately no file-local fallback beside it: a call has a name
+    /// the scope chain can bind and then be guarded for overloading, while a constructor's
+    /// declarations all share the type's name, so there is nothing the file-local pass could bind
+    /// that would say *which* one this `new` reaches. An anonymous class body changes none of that
+    /// — the target is still the superclass constructor the arguments select — and an array
+    /// creation (`new String[]{null}`) has no `ArgList` at all, so it never arrives here.
+    fn check_new(
+        node: &SyntaxNode,
+        analysis: &FileAnalysis,
+        typed: Option<TypedFile<'_>>,
+        vocabulary: &Vocabulary<'_>,
+        out: &mut Vec<Finding>,
+    ) {
+        let Some(args) = ast::NewExpr::cast(node.clone()).and_then(|new| new.args()) else {
+            return;
+        };
+        let Some(member) = Self::member_of(typed, node) else {
+            return;
+        };
+        let arguments: Vec<ast::Expr> = args.args().collect();
+        Self::check_member_arguments(member, &arguments, analysis, typed, vocabulary, out);
+    }
+
+    /// Each argument against the parameter of `member` it fills — the index route's body, shared by
+    /// a call and a `new` so the pairing rule is written once.
+    ///
+    /// No arity guard is needed and none is written: a target is recorded only from a *selected*
+    /// overload, and selection admits a non-varargs member only at `params.len() == args.len()`
+    /// (JLS §15.12.2.2, and `resolve_explicit_constructor` for the `this(…)` / `super(…)` forms).
+    /// A varargs member is the one that can disagree, and only past its fixed prefix — the trailing
+    /// parameter stands for any number of arguments, so pairing it with one of them would check an
+    /// element against the array's own annotation.
+    fn check_member_arguments(
+        member: &Member,
+        arguments: &[ast::Expr],
+        analysis: &FileAnalysis,
+        typed: Option<TypedFile<'_>>,
+        vocabulary: &Vocabulary<'_>,
+        out: &mut Vec<Finding>,
+    ) {
+        let fixed = if member.varargs {
+            member.params.len().saturating_sub(1)
+        } else {
+            member.params.len()
+        };
+        for (param, argument) in member.params.iter().take(fixed).zip(arguments) {
+            if !vocabulary.rejects_null_from(&param.annotations) {
+                continue;
+            }
+            Self::report_argument(
+                argument,
+                param.name.as_deref().unwrap_or_default(),
+                &member.name,
                 analysis,
                 typed,
                 vocabulary,
@@ -643,9 +762,13 @@ impl NullnessRule {
         Significant::range(node).unwrap_or_else(|| Self::memo_span(node))
     }
 
-    /// The text of the first identifier under `node` — how a finding names an assignment target.
-    fn name_text(node: &SyntaxNode) -> String {
-        node.descendants_with_tokens()
+    /// The text of `node`'s own identifier token — how a finding names a simple-name slot.
+    ///
+    /// Direct children only, because that is the difference between a name and a name's receiver:
+    /// a `NAME_REF` holds exactly one, while descending into a `FIELD_ACCESS` would find the
+    /// receiver's first.
+    fn ident_text(node: &SyntaxNode) -> String {
+        node.children_with_tokens()
             .filter_map(SyntaxElement::into_token)
             .find(|token| token.kind() == IDENT)
             .map_or_else(String::new, |token| token.text().to_owned())

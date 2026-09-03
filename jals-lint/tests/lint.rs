@@ -1167,6 +1167,78 @@ fn the_nullable_list_is_the_whole_vocabulary() {
     ));
 }
 
+#[test]
+fn a_member_access_target_needs_an_index() {
+    // The name after the dot is a bare `IDENT` token, so the file-local pass records no reference
+    // for it and the first identifier under the target is the *receiver*. Reading that one is how
+    // a `@Nullable` field came to be reported through a non-null receiver — the slot judged was
+    // never the slot written.
+    assert_eq!(
+        nullness("class C { @Nullable String s; void m(C o) { o.s = null; } }"),
+        ""
+    );
+    // The same silence through `this`, which is the same shape.
+    assert_eq!(
+        nullness("class C { String s; void m() { this.s = null; } }"),
+        ""
+    );
+    // The control: a bare name in the same file is still resolved and still reported, so the two
+    // silences above are this route declining to answer rather than the assignment check being
+    // dead.
+    expect![[r"
+        48..52: `null` cannot be assigned to `o`, which is non-null
+    "]]
+    .assert_eq(&nullness(
+        "class C { @Nullable String s; void m(C o) { o = null; } }",
+    ));
+}
+
+#[test]
+fn an_array_element_is_not_the_array() {
+    // `a` is non-null and stays non-null; what `a[0]` may hold is a nested type-use annotation
+    // (`String @Nullable []` against `@Nullable String[]`) this rule does not read. Resolving the
+    // element to the array variable would check an element against the array's own annotation —
+    // the conflation `check_call` refuses for a varargs trailing parameter.
+    assert_eq!(
+        nullness("class C { void m(String[] a) { a[0] = null; } }"),
+        ""
+    );
+    // The control: the array *variable* is a slot like any other, so the route is live.
+    expect![[r"
+        35..39: `null` cannot be assigned to `a`, which is non-null
+    "]]
+    .assert_eq(&nullness("class C { void m(String[] a) { a = null; } }"));
+}
+
+#[test]
+fn an_enum_constant_can_contradict_itself() {
+    // An enum constant writes its annotations as direct children rather than into a `MODIFIERS`
+    // child — the second shape `ast::Annotations::on` reads, and the reason it reads two. Nothing
+    // flows *into* a constant, so the contradiction is the only thing it can be asked.
+    expect![[r"
+        9..29: this declaration is annotated both nullable and non-null
+    "]]
+    .assert_eq(&nullness("enum E { @Nullable @NonNull A, B }"));
+    // The control: one annotation is a contract, not a contradiction.
+    assert_eq!(nullness("enum E { @Nullable A, B }"), "");
+}
+
+#[test]
+fn a_new_is_not_checked_without_an_index() {
+    // A constructor is not a name any scope chain binds — every constructor of a type shares the
+    // type's name — so the file-local route has nothing to pick an overload with. The project twin
+    // below reports this same source.
+    assert_eq!(
+        nullness("class C { C(String s) {} void m() { new C(null); } }"),
+        ""
+    );
+    // An array creation carries no argument list at all, so it never reaches the check.
+    assert_eq!(
+        nullness("class C { void m() { String[] a = new String[]{null}; } }"),
+        ""
+    );
+}
+
 /// The `nullness-mismatch` findings of `sources[0]`, linted with every source indexed as one
 /// project — the route a real run takes, and the only one that can read a contract another file
 /// wrote.
@@ -1288,6 +1360,132 @@ fn a_library_member_is_unknown_rather_than_unannotated() {
         ],
         true,
     ));
+}
+
+#[test]
+fn a_member_target_is_named_by_the_member_it_resolves_to() {
+    // The verdict and the name come off one `Member`, so they cannot describe different slots.
+    // Reading the name off the first identifier under the target named the receiver `a` while
+    // judging the field `s`.
+    expect![[r"
+        32..36: `null` cannot be assigned to `s`, which is non-null
+    "]]
+    .assert_eq(&nullness_in_project(
+        &[
+            "class C { void m(Api a) { a.s = null; } }",
+            "public class Api { public String s; }",
+        ],
+        false,
+    ));
+    // The discriminating case. `a.b` and `a.b.c` are both recorded and share a start, differing
+    // only in where they end — so a start-keyed lookup cannot tell them apart and would name `b`.
+    // Only the exact-span lookup reaches `c`.
+    expect![[r"
+        32..36: `null` cannot be assigned to `c`, which is non-null
+    "]]
+    .assert_eq(&nullness_in_project(
+        &[
+            "class C { void m(A a) { a.b.c = null; } }",
+            "public class A { public D b; }",
+            "public class D { public String c; }",
+        ],
+        false,
+    ));
+}
+
+#[test]
+fn another_files_nullable_field_accepts_null() {
+    // The false positive the file-local route used to produce, seen from the side that can answer
+    // it: the field says it holds `null`, and it is the field that is written.
+    let call = "class C { void m(Api a) { a.s = null; } }";
+    assert_eq!(
+        nullness_in_project(
+            &[
+                call,
+                "public class Api { @org.jspecify.annotations.Nullable public String s; }",
+            ],
+            false,
+        ),
+        ""
+    );
+    // The unannotated twin, without which "no findings" would also be what a route that never
+    // fired produces.
+    expect![[r"
+        32..36: `null` cannot be assigned to `s`, which is non-null
+    "]]
+    .assert_eq(&nullness_in_project(
+        &[call, "public class Api { public String s; }"],
+        false,
+    ));
+}
+
+#[test]
+fn a_this_qualified_target_is_checked_through_the_index() {
+    // What the file-local route's silence costs nothing for in a real run: `this.s` is a member
+    // access like any other, and the index resolves it.
+    expect![[r"
+        40..44: `null` cannot be assigned to `s`, which is non-null
+    "]]
+    .assert_eq(&nullness_in_project(
+        &["class C { String s; void m() { this.s = null; } }"],
+        false,
+    ));
+    // `super.x` names the field the superclass declares, which is the one the write reaches.
+    expect![[r"
+        41..45: `null` cannot be assigned to `x`, which is non-null
+    "]]
+    .assert_eq(&nullness_in_project(
+        &[
+            "class C extends B { void m() { super.x = null; } }",
+            "public class B { public String x; }",
+        ],
+        false,
+    ));
+}
+
+#[test]
+fn an_inherited_field_written_by_simple_name_is_silent() {
+    // Neither route binds it: the index records a target only for a member *access*, and the
+    // file-local scope chain does not reach a superclass. A documented false negative rather than
+    // a guess — and the twin shows the same write through an access is reported.
+    assert_eq!(
+        nullness_in_project(
+            &[
+                "class C extends B { void m() { x = null; } }",
+                "public class B { public String x; }",
+            ],
+            false,
+        ),
+        ""
+    );
+}
+
+#[test]
+fn a_constructor_argument_is_checked_through_the_index() {
+    // The context `jals-hir`'s own assignment checking does not reach, and this rule gets for
+    // nothing: the constructor a `new` selected is already keyed on the `NEW_EXPR`'s own span.
+    expect![[r"
+        37..41: `null` cannot be passed to parameter `s` of `Api`, which is non-null
+    "]]
+    .assert_eq(&nullness_in_project(
+        &[
+            "class C { void m() { Api a = new Api(null); } }",
+            "public class Api { public Api(String s) {} }",
+        ],
+        false,
+    ));
+    // The annotated twin, which is what says the check read the parameter's contract rather than
+    // just counting arguments.
+    assert_eq!(
+        nullness_in_project(
+            &[
+                "class C { void m() { Api a = new Api(null); } }",
+                "public class Api { public Api(@org.jspecify.annotations.Nullable String s) {} }",
+            ],
+            false,
+        ),
+        ""
+    );
 }
 
 // ===== rule options =====

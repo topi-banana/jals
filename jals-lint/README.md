@@ -97,7 +97,9 @@ from the same place: an on-demand import (`import org.jspecify.annotations.*;`) 
 open, and resolving the annotation *type* would need the analysis the rules have not run yet.
 
 Four contexts are checked — a declarator's initializer (a `try` resource included), a simple `=`, a
-`return`, and a call argument — the same four `jals-hir`'s own assignment checking looks at. Six things are deliberately
+`return`, and an argument, a call's and a `new`'s alike. The first four are what `jals-hir`'s own
+assignment checking looks at; the `new` is one it does not reach, and this rule gets it for nothing
+because the index already records the constructor a `new` selected. Eight things are deliberately
 silent, and each is a **false negative** rather than a guess:
 
 - **A dereference.** `x.length()` on a `@Nullable x` is not reported at all. Answering it without
@@ -117,6 +119,16 @@ silent, and each is a **false negative** rather than a guess:
 - **A type-use annotation one level down** (`List<@Nullable String>`). A declaration's leading
   `@Nullable` is read — the parser puts it in the declaration's `MODIFIERS` — but a nested one is
   not.
+- **An array element.** `a[0] = null` is not checked. What an element may hold is the nested
+  type-use annotation the bullet above already says is not read (`String @Nullable []` against
+  `@Nullable String[]`), and the array variable's own annotation is a contract about the array
+  rather than about what it holds — checking one against the other is the conflation a varargs
+  trailing parameter gets refused for.
+- **A member access as an assignment target, without a project index.** `o.s = null` needs the
+  index to say which member `s` is: the file-local pass records no reference for the name after the
+  dot, because the parser writes it as a bare `IDENT` token rather than a name. With an index it is
+  checked, so this one goes away as soon as the run has a project — like the overloaded callee
+  above.
 
 Two more are not implemented rather than not decided: an **override** that widens nullness against
 its supertype, and a **package-level** default (`@NullMarked`, `package-info.java`).
