@@ -1011,6 +1011,15 @@ fn a_contradictory_declaration_is_flagged() {
         10..38: this declaration is annotated both nullable and non-null
     "]]
     .assert_eq(&nullness("class C { @Nullable @NonNull String s; }"));
+    // A parameter and a method reach the check through the walk's *other* arm — the declaring
+    // forms that are not declarators — so each is reported exactly once and neither twice.
+    expect![[r"
+        10..78: this declaration is annotated both nullable and non-null
+        38..62: this declaration is annotated both nullable and non-null
+    "]]
+    .assert_eq(&nullness(
+        "class C { @Nullable @NonNull String m(@Nullable @NonNull int x) { return \"\"; } }",
+    ));
 }
 
 #[test]

@@ -398,12 +398,18 @@ impl NullnessRule {
         };
         let arguments: Vec<ast::Expr> = args.args().collect();
         if let Some(member) = Self::member_of(typed, node) {
-            // A varargs call does not line arguments up with parameters one for one past the last
-            // declared parameter, so only the fixed prefix is asked about.
-            if member.varargs && arguments.len() != member.params.len() {
-                return;
-            }
-            for (param, argument) in member.params.iter().zip(&arguments) {
+            // The index needs no arity guard: a target is recorded only from a *selected* overload,
+            // and selection admits a non-varargs member only at `params.len() == args.len()` (JLS
+            // §15.12.2.2, and `resolve_explicit_constructor` for the `this(…)` / `super(…)` forms).
+            // A varargs member is the one that can disagree, and only past its fixed prefix — the
+            // trailing parameter stands for any number of arguments, so pairing it with one of them
+            // would check an element against the array's own annotation.
+            let fixed = if member.varargs {
+                member.params.len().saturating_sub(1)
+            } else {
+                member.params.len()
+            };
+            for (param, argument) in member.params.iter().take(fixed).zip(&arguments) {
                 if !vocabulary.rejects_null_from(&param.annotations) {
                     continue;
                 }
