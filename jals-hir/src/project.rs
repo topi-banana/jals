@@ -124,11 +124,6 @@ pub enum ItemOrigin {
 }
 
 impl ItemOrigin {
-    /// Whether an item of this origin lives in a file the host owns and may rewrite — the only origin
-    /// the LSP renames or treats as a project input. Every other origin (a `java.lang` stub, a
-    /// classpath `.class`, or a `git`/`path` library source) is external: navigable at most, never
-    /// edited. An exhaustive match so a new origin must explicitly opt in here rather than silently
-    /// becoming renamable.
     /// Whether an item of this origin was indexed from Java **source**, so what its declarations
     /// do not say is a fact rather than a gap.
     ///
@@ -146,6 +141,11 @@ impl ItemOrigin {
         }
     }
 
+    /// Whether an item of this origin lives in a file the host owns and may rewrite — the only origin
+    /// the LSP renames or treats as a project input. Every other origin (a `java.lang` stub, a
+    /// classpath `.class`, or a `git`/`path` library source) is external: navigable at most, never
+    /// edited. An exhaustive match so a new origin must explicitly opt in here rather than silently
+    /// becoming renamable.
     pub const fn is_host_editable(self) -> bool {
         match self {
             Self::Project => true,
