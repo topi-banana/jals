@@ -1,7 +1,9 @@
 use std::fmt::Write;
 
 use expect_test::{Expect, expect};
-use jals_config::lint::{AnnotatedMembers, BracePolicy, Config, ConsoleStreams, ThisScope};
+use jals_config::lint::{
+    AnnotatedMembers, BracePolicy, Config, ConsoleStreams, Nullness, ThisScope,
+};
 use jals_config::{Feature, FeatureSet, LintLevel};
 use jals_lint::{LintOutput, LintRequest};
 
@@ -49,7 +51,7 @@ fn specific_import_ok() {
     // The file uses what it imports: an import nothing spells is `unused-imports`' finding, not
     // this rule's, and the fixture keeps the two apart.
     check(
-        "import java.util.List;\nclass Foo { List<String> l = null; }",
+        "import java.util.List;\nclass Foo { List<String> l; }",
         expect![""],
     );
 }
@@ -65,7 +67,7 @@ fn wildcard_group_member_flagged() {
         wildcard-import:27..39: avoid wildcard imports; import the specific types you use
     "]]
     .assert_eq(&lint_with_features(
-        "import java.util.{HashMap, concurrent.*};\nclass Foo { HashMap<String, String> m = null; }",
+        "import java.util.{HashMap, concurrent.*};\nclass Foo { HashMap<String, String> m; }",
         &[Feature::GroupedImports],
     ));
 }
@@ -75,7 +77,7 @@ fn grouped_import_without_a_wildcard_member_ok() {
     assert_eq!(
         lint_with_features(
             "import java.util.{HashMap, regex.Pattern};\n\
-             class Foo { HashMap<String, String> m = null; Pattern p = null; }",
+             class Foo { HashMap<String, String> m; Pattern p; }",
             &[Feature::GroupedImports],
         ),
         ""
@@ -396,7 +398,7 @@ fn a_resource_is_never_flagged() {
     // try-with-resources exists for the `close()` it runs; the name is the syntax's demand, not
     // the author's, so there is no change the diagnostic could be asking for.
     check(
-        "class Foo { void m() throws Exception { try (AutoCloseable c = open()) {} } AutoCloseable open() { return null; } }",
+        "class Foo { void m() throws Exception { try (AutoCloseable c = open()) {} } AutoCloseable open() { return () -> {}; } }",
         expect![""],
     );
 }
@@ -461,7 +463,7 @@ fn the_serialization_members_are_not_flagged() {
     // The one line that is reported comes from `naming-convention`: the name is the serialization
     // contract's, not the author's, and that is a separate rule's quarrel with the JDK.
     check(
-        "class Foo { private static final long serialVersionUID = 1L; private Object writeReplace() { return null; } }",
+        "class Foo { private static final long serialVersionUID = 1L; private Object writeReplace() { return this; } }",
         expect![[r"
             naming-convention:38..54: constant name `serialVersionUID` should be UPPER_SNAKE_CASE
         "]],
@@ -526,7 +528,7 @@ fn a_private_constructor_is_not_flagged() {
 #[test]
 fn unused_import_flagged() {
     check(
-        "import java.util.List;\nimport java.util.Map;\nclass Foo { List<String> l = null; }",
+        "import java.util.List;\nimport java.util.Map;\nclass Foo { List<String> l; }",
         expect![[r"
             unused-imports:23..44: unused import `java.util.Map`
         "]],
@@ -916,6 +918,576 @@ fn implicit_this_is_suppressible_by_rule_and_by_section() {
     }
 }
 
+// ===== nullness-mismatch =====
+
+/// The `nullness-mismatch` findings of `src` under `config`, one `start..end: message` line each.
+///
+/// Filtered to the one rule because the fixtures below are about nullness and nothing else: a
+/// declaration written to exercise a slot should not have to also satisfy `naming-convention`.
+fn nullness_with(src: &str, config: &Config) -> String {
+    let out = jals_exec::block_on_inline(LintOutput::lint_source(src, config));
+    let mut s = String::new();
+    for d in out
+        .diagnostics
+        .iter()
+        .filter(|d| d.rule == "nullness-mismatch")
+    {
+        writeln!(s, "{}..{}: {}", d.range.start, d.range.end, d.message).unwrap();
+    }
+    s
+}
+
+fn nullness(src: &str) -> String {
+    nullness_with(src, &Config::default())
+}
+
+#[test]
+fn null_into_an_unannotated_field_is_flagged() {
+    // The built-in `default = "non-null"`: silence in the declaration is a claim, and `null`
+    // contradicts it.
+    expect![[r"
+        21..25: `null` cannot be assigned to `s`, which is non-null
+    "]]
+    .assert_eq(&nullness("class C { String s = null; }"));
+}
+
+#[test]
+fn null_into_an_unannotated_local_is_flagged() {
+    // A local is not exempt. JSpecify leaves locals out of `@NullMarked` on the grounds that their
+    // nullness is inferred from the initializer; jals does not, because a project that asked for
+    // the strict reading asked for it about the code it writes.
+    expect![[r"
+        32..36: `null` cannot be assigned to `s`, which is non-null
+    "]]
+    .assert_eq(&nullness("class C { void m() { String s = null; } }"));
+}
+
+#[test]
+fn null_returned_from_an_unannotated_method_is_flagged() {
+    expect![[r"
+        30..34: `null` cannot be returned from `m`, which is non-null
+    "]]
+    .assert_eq(&nullness("class C { String m() { return null; } }"));
+}
+
+#[test]
+fn null_passed_to_an_unannotated_parameter_is_flagged() {
+    expect![[r"
+        50..54: `null` cannot be passed to parameter `x` of `take`, which is non-null
+    "]]
+    .assert_eq(&nullness(
+        "class C { void take(String x) {} void go() { take(null); } }",
+    ));
+}
+
+#[test]
+fn a_nullable_value_flowing_into_a_non_null_slot_is_flagged() {
+    // The finding the rule exists for, and the one that needs no `null` literal anywhere: the
+    // contract says the call may answer `null` and the slot says it never holds one.
+    expect![[r"
+        74..80: a nullable value cannot be returned from `name`, which is non-null
+    "]]
+    .assert_eq(&nullness(
+        "class C { @Nullable String find() { return null; } String name() { return find(); } }",
+    ));
+}
+
+#[test]
+fn a_nullable_declaration_accepts_null() {
+    // Both halves of the contract in one fixture: `find` may answer `null`, and `keep` may hold
+    // what it answers.
+    assert_eq!(
+        nullness(
+            "class C { @Nullable String find() { return null; } @Nullable String keep = find(); }"
+        ),
+        ""
+    );
+}
+
+#[test]
+fn a_contradictory_declaration_is_flagged() {
+    // The one finding that is about a declaration rather than about a value reaching it.
+    expect![[r"
+        10..38: this declaration is annotated both nullable and non-null
+    "]]
+    .assert_eq(&nullness("class C { @Nullable @NonNull String s; }"));
+    // A parameter and a method reach the check through the walk's *other* arm — the declaring
+    // forms that are not declarators — so each is reported exactly once and neither twice.
+    expect![[r"
+        10..78: this declaration is annotated both nullable and non-null
+        38..62: this declaration is annotated both nullable and non-null
+    "]]
+    .assert_eq(&nullness(
+        "class C { @Nullable @NonNull String m(@Nullable @NonNull int x) { return \"\"; } }",
+    ));
+}
+
+#[test]
+fn a_conditional_stands_down() {
+    // One arm is nullable and the expression as a whole is guarded — a reader sees a choice, not a
+    // violation. Reporting the arm is the false positive this rule's scope was chosen to avoid.
+    assert_eq!(
+        nullness(
+            "class C { @Nullable String find() { return null; } \
+             String name(boolean c) { return c ? find() : \"x\"; } }"
+        ),
+        ""
+    );
+}
+
+#[test]
+fn an_overloaded_callee_stands_down() {
+    // The scope chain binds a call to *an* overload rather than to the one the arguments select,
+    // so neither the parameter nor the return type read off `take` is known to be the one this
+    // call reaches.
+    assert_eq!(
+        nullness(
+            "class C { void take(String x) {} void take(Integer x, int y) {} \
+             void go() { take(null); } }"
+        ),
+        ""
+    );
+}
+
+#[test]
+fn a_lambda_return_stands_down() {
+    // `return null;` inside a lambda returns from the lambda, whose nullness belongs to the
+    // functional interface rather than to the method the lambda is written in.
+    assert_eq!(
+        nullness("class C { Object m() { Runnable r = () -> { return null; }; return r; } }"),
+        ""
+    );
+}
+
+#[test]
+fn a_declaration_without_an_initializer_is_not_a_finding() {
+    // Nothing flows into it. The later assignment is what the rule has to answer, and it does.
+    expect![[r"
+        35..39: `null` cannot be assigned to `s`, which is non-null
+    "]]
+    .assert_eq(&nullness("class C { void m() { String s; s = null; } }"));
+}
+
+#[test]
+fn each_declarator_is_paired_with_its_own_initializer() {
+    // The CST is flat — one `LOCAL_VAR_DECL` holds both names and both initializers — so only the
+    // token order says which value belongs to which name. Reading the first-name accessor would
+    // report `a` for a `null` written after `b`.
+    expect![[r"
+        32..36: `null` cannot be assigned to `a`, which is non-null
+        42..46: `null` cannot be assigned to `b`, which is non-null
+    "]]
+    .assert_eq(&nullness(
+        "class C { void m() { String a = null, b = null; } }",
+    ));
+}
+
+#[test]
+fn a_try_resource_is_a_declarator_too() {
+    // It declares a name and takes an initializer, so it is the same context — and a `null` there
+    // is an NPE at the implicit `close()`, which is the reading a `[correctness]` rule owes.
+    expect![[r"
+        61..65: `null` cannot be assigned to `c`, which is non-null
+    "]]
+    .assert_eq(&nullness(
+        "class C { void m() throws Exception { try (AutoCloseable c = null) {} } }",
+    ));
+    // …and a resource that is an existing variable declares nothing, so nothing flows into it.
+    assert_eq!(
+        nullness(
+            "class C { void m(AutoCloseable existing) throws Exception { try (existing) {} } }"
+        ),
+        ""
+    );
+}
+
+#[test]
+fn an_import_says_which_nullable_it_is() {
+    // The precision an FQN list buys. `com.acme.Nullable` is a perfectly good annotation and it is
+    // not one of the ten this rule knows, so the declaration still reads as non-null — where a
+    // last-segment match would have silently accepted it.
+    expect![[r"
+        57..61: `null` cannot be assigned to `s`, which is non-null
+    "]]
+    .assert_eq(&nullness(
+        "import com.acme.Nullable;\nclass C { @Nullable String s = null; }",
+    ));
+    // …and the same file with a configured import is silent, so it is the import that decided.
+    assert_eq!(
+        nullness(
+            "import org.jspecify.annotations.Nullable;\nclass C { @Nullable String s = null; }"
+        ),
+        ""
+    );
+}
+
+#[test]
+fn a_qualified_annotation_needs_no_import() {
+    assert_eq!(
+        nullness("class C { @org.jspecify.annotations.Nullable String s = null; }"),
+        ""
+    );
+}
+
+#[test]
+fn unspecified_checks_only_what_the_source_annotated() {
+    // The one-line escape hatch for a codebase that annotates part of itself: the unannotated
+    // declaration goes quiet and the annotated one still speaks.
+    let mut config = Config::default();
+    config.correctness.nullness_mismatch.options.default = Nullness::Unspecified;
+    assert_eq!(nullness_with("class C { String s = null; }", &config), "");
+    expect![[r"
+        55..59: `null` cannot be assigned to `s`, which is non-null
+    "]]
+    .assert_eq(&nullness_with(
+        "class C { @org.jspecify.annotations.NonNull String s = null; }",
+        &config,
+    ));
+}
+
+#[test]
+fn the_nullable_list_is_the_whole_vocabulary() {
+    // Replaces rather than extends, so a project on one in-house annotation writes just that one —
+    // and the families it did not name stop counting.
+    let mut config = Config::default();
+    config.correctness.nullness_mismatch.options.nullable = vec!["com.acme.MaybeNull".to_owned()];
+    assert_eq!(
+        nullness_with(
+            "import com.acme.MaybeNull;\nclass C { @MaybeNull String s = null; }",
+            &config
+        ),
+        ""
+    );
+    expect![[r"
+        73..77: `null` cannot be assigned to `s`, which is non-null
+    "]]
+    .assert_eq(&nullness_with(
+        "import org.jspecify.annotations.Nullable;\nclass C { @Nullable String s = null; }",
+        &config,
+    ));
+}
+
+#[test]
+fn a_member_access_target_needs_an_index() {
+    // The name after the dot is a bare `IDENT` token, so the file-local pass records no reference
+    // for it and the first identifier under the target is the *receiver*. Reading that one is how
+    // a `@Nullable` field came to be reported through a non-null receiver — the slot judged was
+    // never the slot written.
+    assert_eq!(
+        nullness("class C { @Nullable String s; void m(C o) { o.s = null; } }"),
+        ""
+    );
+    // The same silence through `this`, which is the same shape.
+    assert_eq!(
+        nullness("class C { String s; void m() { this.s = null; } }"),
+        ""
+    );
+    // The control: a bare name in the same file is still resolved and still reported, so the two
+    // silences above are this route declining to answer rather than the assignment check being
+    // dead.
+    expect![[r"
+        48..52: `null` cannot be assigned to `o`, which is non-null
+    "]]
+    .assert_eq(&nullness(
+        "class C { @Nullable String s; void m(C o) { o = null; } }",
+    ));
+}
+
+#[test]
+fn an_array_element_is_not_the_array() {
+    // `a` is non-null and stays non-null; what `a[0]` may hold is a nested type-use annotation
+    // (`String @Nullable []` against `@Nullable String[]`) this rule does not read. Resolving the
+    // element to the array variable would check an element against the array's own annotation —
+    // the conflation `check_call` refuses for a varargs trailing parameter.
+    assert_eq!(
+        nullness("class C { void m(String[] a) { a[0] = null; } }"),
+        ""
+    );
+    // The control: the array *variable* is a slot like any other, so the route is live.
+    expect![[r"
+        35..39: `null` cannot be assigned to `a`, which is non-null
+    "]]
+    .assert_eq(&nullness("class C { void m(String[] a) { a = null; } }"));
+}
+
+#[test]
+fn an_enum_constant_can_contradict_itself() {
+    // An enum constant writes its annotations as direct children rather than into a `MODIFIERS`
+    // child — the second shape `ast::Annotations::on` reads, and the reason it reads two. Nothing
+    // flows *into* a constant, so the contradiction is the only thing it can be asked.
+    expect![[r"
+        9..29: this declaration is annotated both nullable and non-null
+    "]]
+    .assert_eq(&nullness("enum E { @Nullable @NonNull A, B }"));
+    // The control: one annotation is a contract, not a contradiction.
+    assert_eq!(nullness("enum E { @Nullable A, B }"), "");
+}
+
+#[test]
+fn a_new_is_not_checked_without_an_index() {
+    // A constructor is not a name any scope chain binds — every constructor of a type shares the
+    // type's name — so the file-local route has nothing to pick an overload with. The project twin
+    // below reports this same source.
+    assert_eq!(
+        nullness("class C { C(String s) {} void m() { new C(null); } }"),
+        ""
+    );
+    // An array creation carries no argument list at all, so it never reaches the check.
+    assert_eq!(
+        nullness("class C { void m() { String[] a = new String[]{null}; } }"),
+        ""
+    );
+}
+
+/// The `nullness-mismatch` findings of `sources[0]`, linted with every source indexed as one
+/// project — the route a real run takes, and the only one that can read a contract another file
+/// wrote.
+fn nullness_in_project(sources: &[&str], stdlib: bool) -> String {
+    let parses: Vec<jals_syntax::Parse> = sources
+        .iter()
+        .map(|src| jals_exec::block_on_inline(jals_syntax::Parse::parse(src)))
+        .collect();
+    let nodes: Vec<(jals_hir::FileId, jals_syntax::SyntaxNode)> = parses
+        .iter()
+        .enumerate()
+        .map(|(i, parse)| (jals_hir::FileId(u32::try_from(i).unwrap()), parse.syntax()))
+        .collect();
+    let mut builder = jals_hir::ProjectIndex::builder(&nodes);
+    if stdlib {
+        builder = builder.with_stdlib();
+    }
+    let index = jals_exec::block_on_inline(builder.build());
+    let analysis = jals_exec::block_on_inline(jals_hir::FileAnalysis::of(&nodes[0].1));
+    let semantics = analysis.in_project(&index, jals_hir::FileId(0));
+    let out = jals_exec::block_on_inline(LintOutput::lint(
+        LintRequest {
+            file: Some(&semantics),
+            ..LintRequest::new(&parses[0])
+        },
+        &Config::default(),
+    ));
+    let mut s = String::new();
+    for d in out
+        .diagnostics
+        .iter()
+        .filter(|d| d.rule == "nullness-mismatch")
+    {
+        writeln!(s, "{}..{}: {}", d.range.start, d.range.end, d.message).unwrap();
+    }
+    s
+}
+
+#[test]
+fn another_files_nullable_is_read_through_the_index() {
+    // The finding a project actually needs: the `@Nullable` a call has to respect is almost never
+    // in the file making the call, and the file-local route cannot see it at all.
+    expect![[r"
+        51..59: a nullable value cannot be assigned to `s`, which is non-null
+    "]]
+    .assert_eq(&nullness_in_project(
+        &[
+            "class C { void m() { Api a = new Api(); String s = a.find(); } }",
+            "public class Api { @org.jspecify.annotations.Nullable public String find() { return null; } }",
+        ],
+        false,
+    ));
+}
+
+#[test]
+fn the_overload_the_index_selected_is_the_one_checked() {
+    // Two overloads, and `null` fits only one of them. The file-local route stands down on an
+    // overloaded name because the scope chain binds *an* overload rather than the selected one;
+    // the index has no such doubt, so this is a case the project route answers rather than skips.
+    expect![[r"
+        47..51: `null` cannot be passed to parameter `s` of `take`, which is non-null
+    "]]
+    .assert_eq(&nullness_in_project(
+        &[
+            "class C { void m() { Api a = new Api(); a.take(null); } }",
+            "public class Api {\n  public void take(int n) {}\n  public void take(String s) {}\n}",
+        ],
+        false,
+    ));
+}
+
+#[test]
+fn a_nullable_parameter_in_another_file_accepts_null() {
+    // The mirror of the case above, and the false positive Stage 1's silence was avoiding: without
+    // the index, `take`'s parameter would read as unannotated and therefore non-null. The
+    // unannotated twin below is the control — without it, "no findings" would also be what a
+    // project route that never fired produces.
+    let call = "class C { void m() { Api a = new Api(); a.take(null); } }";
+    assert_eq!(
+        nullness_in_project(
+            &[
+                call,
+                "public class Api { public void take(@org.jspecify.annotations.Nullable String s) {} }",
+            ],
+            false,
+        ),
+        ""
+    );
+    expect![[r"
+        47..51: `null` cannot be passed to parameter `s` of `take`, which is non-null
+    "]]
+    .assert_eq(&nullness_in_project(
+        &[call, "public class Api { public void take(String s) {} }"],
+        false,
+    ));
+}
+
+#[test]
+fn a_library_member_is_unknown_rather_than_unannotated() {
+    // `String.equals(Object)` accepts `null` and says so nowhere jals can read: the embedded stubs
+    // carry no annotations at all. Reading that silence as "the author wrote none" — and therefore,
+    // under `default = "non-null"`, as a claim — would report every `null` passed to the standard
+    // library. `ItemOrigin::carries_annotations` is the question that keeps it quiet, and the
+    // project-declared twin below is what shows the route was live either way.
+    assert_eq!(
+        nullness_in_project(
+            &["class C { boolean m(String s) { return s.equals(null); } }"],
+            true,
+        ),
+        ""
+    );
+    expect![[r"
+        45..49: `null` cannot be passed to parameter `o` of `equals`, which is non-null
+    "]]
+    .assert_eq(&nullness_in_project(
+        &[
+            "class C { boolean m(Api a) { return a.equals(null); } }",
+            "public class Api { public boolean equals(Object o) { return false; } }",
+        ],
+        true,
+    ));
+}
+
+#[test]
+fn a_member_target_is_named_by_the_member_it_resolves_to() {
+    // The verdict and the name come off one `Member`, so they cannot describe different slots.
+    // Reading the name off the first identifier under the target named the receiver `a` while
+    // judging the field `s`.
+    expect![[r"
+        32..36: `null` cannot be assigned to `s`, which is non-null
+    "]]
+    .assert_eq(&nullness_in_project(
+        &[
+            "class C { void m(Api a) { a.s = null; } }",
+            "public class Api { public String s; }",
+        ],
+        false,
+    ));
+    // The discriminating case. `a.b` and `a.b.c` are both recorded and share a start, differing
+    // only in where they end — so a start-keyed lookup cannot tell them apart and would name `b`.
+    // Only the exact-span lookup reaches `c`.
+    expect![[r"
+        32..36: `null` cannot be assigned to `c`, which is non-null
+    "]]
+    .assert_eq(&nullness_in_project(
+        &[
+            "class C { void m(A a) { a.b.c = null; } }",
+            "public class A { public D b; }",
+            "public class D { public String c; }",
+        ],
+        false,
+    ));
+}
+
+#[test]
+fn another_files_nullable_field_accepts_null() {
+    // The false positive the file-local route used to produce, seen from the side that can answer
+    // it: the field says it holds `null`, and it is the field that is written.
+    let call = "class C { void m(Api a) { a.s = null; } }";
+    assert_eq!(
+        nullness_in_project(
+            &[
+                call,
+                "public class Api { @org.jspecify.annotations.Nullable public String s; }",
+            ],
+            false,
+        ),
+        ""
+    );
+    // The unannotated twin, without which "no findings" would also be what a route that never
+    // fired produces.
+    expect![[r"
+        32..36: `null` cannot be assigned to `s`, which is non-null
+    "]]
+    .assert_eq(&nullness_in_project(
+        &[call, "public class Api { public String s; }"],
+        false,
+    ));
+}
+
+#[test]
+fn a_this_qualified_target_is_checked_through_the_index() {
+    // What the file-local route's silence costs nothing for in a real run: `this.s` is a member
+    // access like any other, and the index resolves it.
+    expect![[r"
+        40..44: `null` cannot be assigned to `s`, which is non-null
+    "]]
+    .assert_eq(&nullness_in_project(
+        &["class C { String s; void m() { this.s = null; } }"],
+        false,
+    ));
+    // `super.x` names the field the superclass declares, which is the one the write reaches.
+    expect![[r"
+        41..45: `null` cannot be assigned to `x`, which is non-null
+    "]]
+    .assert_eq(&nullness_in_project(
+        &[
+            "class C extends B { void m() { super.x = null; } }",
+            "public class B { public String x; }",
+        ],
+        false,
+    ));
+}
+
+#[test]
+fn an_inherited_field_written_by_simple_name_is_silent() {
+    // Neither route binds it: the index records a target only for a member *access*, and the
+    // file-local scope chain does not reach a superclass. A documented false negative rather than
+    // a guess — and the twin shows the same write through an access is reported.
+    assert_eq!(
+        nullness_in_project(
+            &[
+                "class C extends B { void m() { x = null; } }",
+                "public class B { public String x; }",
+            ],
+            false,
+        ),
+        ""
+    );
+}
+
+#[test]
+fn a_constructor_argument_is_checked_through_the_index() {
+    // The context `jals-hir`'s own assignment checking does not reach, and this rule gets for
+    // nothing: the constructor a `new` selected is already keyed on the `NEW_EXPR`'s own span.
+    expect![[r"
+        37..41: `null` cannot be passed to parameter `s` of `Api`, which is non-null
+    "]]
+    .assert_eq(&nullness_in_project(
+        &[
+            "class C { void m() { Api a = new Api(null); } }",
+            "public class Api { public Api(String s) {} }",
+        ],
+        false,
+    ));
+    // The annotated twin, which is what says the check read the parameter's contract rather than
+    // just counting arguments.
+    assert_eq!(
+        nullness_in_project(
+            &[
+                "class C { void m() { Api a = new Api(null); } }",
+                "public class Api { public Api(@org.jspecify.annotations.Nullable String s) {} }",
+            ],
+            false,
+        ),
+        ""
+    );
+}
+
 // ===== rule options =====
 
 #[test]
@@ -1216,14 +1788,14 @@ fn ordinary_import_not_flagged_on_java24() {
     // a module import declaration (`is_module()` stays false), so it is never flagged.
     assert_eq!(
         lint_with_features(
-            "import java.util.List;\nclass Foo { List<String> l = null; }",
+            "import java.util.List;\nclass Foo { List<String> l; }",
             &[Feature::Java24]
         ),
         ""
     );
     assert_eq!(
         lint_with_features(
-            "import module.foo.Bar;\nclass Foo { Bar b = null; }",
+            "import module.foo.Bar;\nclass Foo { Bar b; }",
             &[Feature::Java24]
         ),
         ""
@@ -1299,7 +1871,7 @@ fn ordinary_import_is_not_a_grouped_import() {
     // A plain import has no group, so it is never flagged by `grouped-import`.
     assert_eq!(
         lint_with_features(
-            "import java.util.List;\nclass Foo { List<String> l = null; }",
+            "import java.util.List;\nclass Foo { List<String> l; }",
             &[Feature::Java25]
         ),
         ""

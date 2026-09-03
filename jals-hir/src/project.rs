@@ -124,6 +124,23 @@ pub enum ItemOrigin {
 }
 
 impl ItemOrigin {
+    /// Whether an item of this origin was indexed from Java **source**, so what its declarations
+    /// do not say is a fact rather than a gap.
+    ///
+    /// [`Member::annotations`] is empty for two very different reasons. A project or library-source
+    /// member is empty because its author wrote no annotation; a stub or class-file member is empty
+    /// because neither is read for one — a stub has no annotations at all, and this crate does not
+    /// yet decode a class file's `RuntimeVisibleAnnotations`. A consumer that reads an unannotated
+    /// declaration as a *claim* (`jals-lint`'s `nullness-mismatch` under `default = "non-null"`)
+    /// must ask this first, or it reports every `null` passed to a library method that documents
+    /// itself as accepting one. Exhaustive, so a new origin has to answer deliberately.
+    pub const fn carries_annotations(self) -> bool {
+        match self {
+            Self::Project | Self::Source => true,
+            Self::Stdlib | Self::Classpath => false,
+        }
+    }
+
     /// Whether an item of this origin lives in a file the host owns and may rewrite — the only origin
     /// the LSP renames or treats as a project input. Every other origin (a `java.lang` stub, a
     /// classpath `.class`, or a `git`/`path` library source) is external: navigable at most, never
@@ -295,6 +312,15 @@ pub struct Member {
     /// Public because a *code generator* needs it: the JVM has no variable arity, so a varargs call
     /// site is the thing that builds the array, and it cannot know to unless it can ask.
     pub varargs: bool,
+    /// The annotation types written on the declaration, each fully qualified where the declaring
+    /// file's single-type imports settle it and left as the written simple name where nothing does
+    /// (see [`ast::Annotations::denoted`]). Empty for a member the source annotated with none.
+    ///
+    /// **Empty is not "unknown".** A member decoded from a class file or read out of an embedded
+    /// stub carries none because neither is *read* for annotations, not because its author wrote
+    /// none — [`ItemOrigin::carries_annotations`] is the question a consumer that reads silence as
+    /// a claim has to ask first.
+    pub annotations: Vec<String>,
     /// The method's or constructor's **own** type parameters (`static <E> E pick(E, E)`), captured
     /// like [`Item::type_params`]. Empty for a field, an enum constant, and a non-generic method.
     ///
@@ -351,6 +377,9 @@ pub struct Param {
     pub name: Option<String>,
     /// The parameter's declared type.
     pub ty: MemberType,
+    /// The annotation types written on the parameter, captured like [`Member::annotations`] and
+    /// carrying the same "empty is not unknown" caveat.
+    pub annotations: Vec<String>,
 }
 
 /// A member's declared type, captured at index time as self-contained data so the [`ProjectIndex`]
@@ -1194,6 +1223,9 @@ impl ProjectIndex {
                     modifiers: MemberModifiers::default(),
                     params: shape.params.clone(),
                     varargs: false,
+                    // A synthesised lambda body carries the shape's contract, annotations included:
+                    // it *is* the implemented method for every purpose a consumer asks about.
+                    annotations: shape.annotations.clone(),
                     throws: Vec::new(),
                     source_location: None,
                 };
@@ -1360,6 +1392,10 @@ impl ProjectIndex {
                     params: member.params.clone(),
                     varargs: member.varargs,
                     throws: member.throws.clone(),
+                    // A class-file member carries none because none is *read* — see
+                    // `ItemOrigin::carries_annotations`, which is what keeps that gap from being
+                    // mistaken for the author having written no annotation.
+                    annotations: Vec::new(),
                     // A real-source go-to-definition target, when the library source is indexed.
                     source_location: sources.member_location(
                         &class.fqn,
@@ -2219,6 +2255,9 @@ impl ProjectIndex {
         };
         // An interface's members carry modifiers the source is allowed to leave unwritten.
         let in_interface = matches!(node.kind(), INTERFACE_DECL | ANNOTATION_TYPE_DECL);
+        // Read once per type declaration: every member below is annotated in this file's import
+        // context, and climbing to the compilation unit per member would walk it again each time.
+        let imports = ast::Annotations::imports_of(node);
         // A member of `owner`/`file` with no params/varargs/throws; each call site overrides (via
         // struct-update) only the fields that apply to its member kind.
         let new_member = |name_tok: &SyntaxToken, kind: DefKind, ty: MemberType| Member {
@@ -2237,6 +2276,10 @@ impl ProjectIndex {
             params: Vec::new(),
             varargs: false,
             throws: Vec::new(),
+            // Overridden by every arm that has a declaration node to read; a synthesised member
+            // (an enum's `values()`, a record's accessor) is written by the compiler and carries
+            // whatever the component it stands for does, which its own arm supplies.
+            annotations: Vec::new(),
             // A project / stub member's own `file` already points at real (or no) source.
             source_location: None,
         };
@@ -2257,9 +2300,11 @@ impl ProjectIndex {
                         // Each declarator carries its own array dimensions (`int a[], b;` declares
                         // an `int[]` and an `int`), so the type is per name rather than per
                         // declaration.
+                        let annotations = Self::annotations_of(&member, &imports);
                         for (name, dims) in field.names_with_dims() {
                             members.push(Member {
                                 modifiers,
+                                annotations: annotations.clone(),
                                 ..new_member(
                                     &name,
                                     DefKind::Field,
@@ -2282,7 +2327,7 @@ impl ProjectIndex {
                                 .as_ref()
                                 .map_or(0, ast::MethodDecl::extra_return_dims),
                         );
-                        let (params, varargs) = Self::params_of(&member);
+                        let (params, varargs) = Self::params_of(&member, &imports);
                         let throws = Self::throws_of(&member);
                         // An interface method is implicitly `public` (JLS §9.4), which is the bit
                         // §9.2 reads back when it decides which of `Object`'s members an interface
@@ -2309,13 +2354,14 @@ impl ProjectIndex {
                             // node carrying a `TypeParams` child — a method declaration as much as
                             // a type declaration.
                             type_params: Self::type_params_of(&member),
+                            annotations: Self::annotations_of(&member, &imports),
                             ..new_member(&name, DefKind::Method, ty)
                         });
                     }
                 }
                 CONSTRUCTOR_DECL => {
                     if let Some(name) = Collect::first_ident_token(&member) {
-                        let (params, varargs) = Self::params_of(&member);
+                        let (params, varargs) = Self::params_of(&member, &imports);
                         let throws = Self::throws_of(&member);
                         members.push(Member {
                             modifiers: MemberModifiers::of(&member),
@@ -2323,6 +2369,7 @@ impl ProjectIndex {
                             varargs,
                             throws,
                             type_params: Self::type_params_of(&member),
+                            annotations: Self::annotations_of(&member, &imports),
                             ..new_member(&name, DefKind::Constructor, MemberType::Unknown)
                         });
                     }
@@ -2343,6 +2390,7 @@ impl ProjectIndex {
                                 is_public: true,
                                 is_abstract: false,
                             },
+                            annotations: Self::annotations_of(&member, &imports),
                             ..new_member(&name, DefKind::EnumConstant, ty)
                         });
                     }
@@ -2355,7 +2403,10 @@ impl ProjectIndex {
         // canonical constructor. Nothing in the body declares any of them, so without this a
         // component was not a member at all — `r.x()` resolved to nothing and the field had no type.
         if node.kind() == RECORD_DECL {
-            let components: Vec<(SyntaxToken, MemberType)> = node
+            // A component's annotations stand for all three declarations it becomes, exactly as its
+            // type does: `record P(@Nullable String x)` is a nullable field, a nullable accessor,
+            // and a nullable canonical-constructor parameter, all written once.
+            let components: Vec<(SyntaxToken, MemberType, Vec<String>)> = node
                 .children()
                 .find(|child| child.kind() == RECORD_HEADER)
                 .into_iter()
@@ -2372,7 +2423,7 @@ impl ProjectIndex {
                     {
                         ty = ty.with_extra_dimension();
                     }
-                    Some((name, ty))
+                    Some((name, ty, Self::annotations_of(&component, &imports)))
                 })
                 .collect();
             // An accessor or the canonical constructor may also be written out by hand, and then the
@@ -2394,9 +2445,9 @@ impl ProjectIndex {
                     && m.params
                         .iter()
                         .zip(&components)
-                        .all(|(param, (_, ty))| param.ty.same_erasure(ty))
+                        .all(|(param, (_, ty, _))| param.ty.same_erasure(ty))
             });
-            for (name, ty) in &components {
+            for (name, ty, annotations) in &components {
                 // The component's own name range: it *is* the field's declaration, which is what makes
                 // "go to definition" on the field land on the header rather than nowhere.
                 members.push(Member {
@@ -2406,6 +2457,7 @@ impl ProjectIndex {
                         is_public: false,
                         is_abstract: false,
                     },
+                    annotations: annotations.clone(),
                     ..new_member(name, DefKind::Field, ty.clone())
                 });
                 let decoded = jals_syntax::decoded_ident(name).into_owned();
@@ -2424,6 +2476,7 @@ impl ProjectIndex {
                         params: Vec::new(),
                         varargs: false,
                         throws: Vec::new(),
+                        annotations: annotations.clone(),
                         // Where it is *written*, though, is the component — so "go to definition" on
                         // `p.x()` lands on the header. This is the same field the classpath uses to
                         // point a `.class` member at real source, and it is what an editor prefers.
@@ -2443,13 +2496,17 @@ impl ProjectIndex {
                     modifiers: MemberModifiers::default(),
                     params: components
                         .iter()
-                        .map(|(name, ty)| Param {
+                        .map(|(name, ty, annotations)| Param {
                             name: Some(jals_syntax::decoded_ident(name).into_owned()),
                             ty: ty.clone(),
+                            annotations: annotations.clone(),
                         })
                         .collect(),
                     varargs: false,
                     throws: Vec::new(),
+                    // The constructor itself is synthesised and carries nothing; what the source
+                    // wrote is on its parameters, above.
+                    annotations: Vec::new(),
                     source_location: None,
                 });
             }
@@ -2496,6 +2553,8 @@ impl ProjectIndex {
                 params,
                 varargs: false,
                 throws: Vec::new(),
+                // Written by the compiler rather than by anyone's source.
+                annotations: Vec::new(),
                 source_location: None,
             };
             members.push(synthetic("values", array, Vec::new()));
@@ -2505,6 +2564,7 @@ impl ProjectIndex {
                 alloc::vec![Param {
                     name: Some("name".to_owned()),
                     ty: string,
+                    annotations: Vec::new(),
                 }],
             ));
         }
@@ -2512,11 +2572,28 @@ impl ProjectIndex {
     }
 }
 
+/// The annotation types written on a declaration, qualified in its own file's import context.
+impl ProjectIndex {
+    /// Each annotation on `node` as the type it denotes — fully qualified where `imports` settles
+    /// it, the written simple name where nothing does.
+    ///
+    /// Both halves of the question belong to [`ast::Annotations`], which `jals-lint` reads the same
+    /// declarations through: where an annotation lives has two shapes, and what a written
+    /// `@Nullable` denotes depends on the imports. Answering either of them a second time here is
+    /// how one reader ends up accepting anybody's `Nullable` while the other does not.
+    fn annotations_of(node: &SyntaxNode, imports: &[(String, String)]) -> Vec<String> {
+        ast::Annotations::on(node)
+            .iter()
+            .filter_map(|annotation| ast::Annotations::denoted(annotation, imports))
+            .collect()
+    }
+}
+
 /// A method declaration's formal parameters (in order) and whether it is varargs (its last
 /// parameter is `int... xs`). Each parameter's name and type are captured as self-contained data,
 /// the type like a field's. Pure.
 impl ProjectIndex {
-    fn params_of(method: &SyntaxNode) -> (Vec<Param>, bool) {
+    fn params_of(method: &SyntaxNode, imports: &[(String, String)]) -> (Vec<Param>, bool) {
         let mut params = Vec::new();
         let mut varargs = false;
         // Read the `PARAM_LIST` child directly rather than through a typed cast: a constructor's
@@ -2548,6 +2625,7 @@ impl ProjectIndex {
                 params.push(Param {
                     name: param.name(),
                     ty,
+                    annotations: Self::annotations_of(param.syntax(), imports),
                 });
             }
         }

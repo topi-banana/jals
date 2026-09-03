@@ -2291,24 +2291,13 @@ impl Cst {
     }
 
     /// The declarator-name → initializer pairs of a (possibly multi-declarator) variable or field
-    /// declaration. The CST is flat (`final int a = 1, b = 2;` has no per-declarator node), so each
-    /// direct `IDENT` token takes the next direct expression child as its initializer; a declarator
-    /// without one yields no pair. The declared `TYPE` / `MODIFIERS` children are not expressions, so
-    /// the `Expr::cast` skips them and they are never mistaken for an initializer.
-    pub(crate) fn declarator_initializers(
-        node: &SyntaxNode,
-    ) -> impl Iterator<Item = (SyntaxToken, ast::Expr)> {
-        let mut current: Option<SyntaxToken> = None;
-        node.children_with_tokens().filter_map(move |elem| {
-            if let Some(token) = elem.as_token() {
-                if token.kind() == IDENT {
-                    current = Some(token.clone());
-                }
-                return None;
-            }
-            let value = elem.into_node().and_then(ast::Expr::cast)?;
-            Some((current.take()?, value))
-        })
+    /// declaration.
+    ///
+    /// Delegates to [`ast::Declarators::initializers`], which owns the walk: the flat-CST rule that
+    /// pairs `int a = 1, b = 2;` up is the same rule `jals-lint`'s nullness rule needs, and it is
+    /// written where the other declarator reader ([`ast::Declarators::dims_of`]) already lives.
+    pub(crate) fn declarator_initializers(node: &SyntaxNode) -> Vec<(SyntaxToken, ast::Expr)> {
+        ast::Declarators::initializers(node)
     }
 }
 

@@ -35,6 +35,7 @@ mod implicit_this;
 mod missing_braces;
 mod module_import;
 mod naming;
+mod nullness_mismatch;
 mod print_to_console;
 mod type_mismatch;
 mod unreported_exception;
@@ -287,6 +288,7 @@ pub(crate) const RULES: &[RuleMeta] = &[
     cannot_resolve::RULE,
     type_mismatch::RULE,
     unreported_exception::RULE,
+    nullness_mismatch::RULE,
     // [compatibility]
     compact_source_file::RULE,
     module_import::RULE,

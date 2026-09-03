@@ -32,6 +32,13 @@ class Sink {
   private int Bad_Field = 2;
   @Deprecated private int injected = 3;
   private static int Bad_Static = 4;
+  // `nullness-mismatch`: `maybe` is the nullable source, `required` the non-null slot it flows
+  // into, and `confused` the declaration that contradicts itself — one per option key.
+  @Nullable @NonNull private String confused;
+
+  @Nullable private String maybe() { return null; }
+
+  private String required() { return maybe(); }
 
   int Bad_Method(int Bad_Param) {
     int Bad_Local = 0;
@@ -95,6 +102,13 @@ fn variant(section: &str, rule: &str, key: &str) -> Value {
         ("style", "wildcard-import", "static-imports") => Value::from("allow"),
         ("style", "missing-braces", "policy") => Value::from("multi-line"),
         ("naming", "naming-convention", _) => Value::from("any"),
+        ("correctness", "nullness-mismatch", "default") => Value::from("unspecified"),
+        // Emptying either list un-teaches the annotation, which is a different finding set rather
+        // than a smaller one: `maybe` stops being a nullable source *and* starts being a non-null
+        // slot its own `return null` violates.
+        ("correctness", "nullness-mismatch", "nullable" | "non-null") => {
+            Value::from(Vec::<&str>::new())
+        }
         ("restriction", "print-to-console", "streams") => Value::from("stderr"),
         ("restriction", "implicit-this", "scope") => Value::from("shadowed-only"),
         _ => panic!("no non-default value known for [{section}] {rule}.{key}"),
@@ -107,6 +121,16 @@ fn all_enabled() -> Config {
     let mut config = Config::default().with_features(FeatureSet::resolve(&[Feature::Java25]));
     config.restriction.print_to_console.level = LintLevel::Warn;
     config
+}
+
+#[test]
+fn the_fixture_parses_cleanly() {
+    // A precondition of the sweep rather than a nicety. `nullness-mismatch` carries
+    // `needs_clean_parse`, and the driver skips such a rule outright on a broken parse — so one
+    // syntax error in the fixture would take all three of its option keys out of the sweep and
+    // report them, by name, as options that reach no rule.
+    let parse = jals_exec::block_on_inline(jals_syntax::Parse::parse(KITCHEN_SINK));
+    assert!(parse.errors().is_empty(), "{:?}", parse.errors());
 }
 
 #[test]
@@ -185,6 +209,7 @@ fn the_default_config_enables_exactly_these_rules() {
             "implicit-this",
             "missing-braces",
             "naming-convention",
+            "nullness-mismatch",
             "type-mismatch",
             "unreported-exception",
             "unused-imports",

@@ -457,3 +457,63 @@ fn object_s_public_methods_do_not_count_toward_the_single_abstract_method() {
     // And an interface whose only abstract method *is* excluded has none left.
     assert!(of("OnlyObject").is_none());
 }
+
+#[test]
+fn a_members_annotations_are_captured_and_qualified_by_the_declaring_files_imports() {
+    // The capture is what lets a *consumer in another file* read a contract this one wrote. A
+    // simple name is qualified through this file's single-type imports, so two files importing
+    // different `Nullable`s do not look alike; a name already written qualified is kept; a name
+    // nothing resolves stays simple, which is how the reader can tell the two cases apart.
+    let sources = ["import org.jspecify.annotations.Nullable;\n\
+         class T {\n\
+           @Nullable String field;\n\
+           @Nullable String find(@Nullable String key, @com.acme.Marker int n) { return null; }\n\
+           @Unresolved String bare;\n\
+         }"];
+    let (_nodes, index) = build(&sources);
+    let t = item(&index, &sources, 0, "T");
+    let member = |name: &str, ns| index.member(index.resolve_member(t, name, ns).unwrap());
+
+    assert_eq!(
+        member("field", Namespace::Value).annotations,
+        ["org.jspecify.annotations.Nullable"]
+    );
+    let find = member("find", Namespace::Method);
+    assert_eq!(find.annotations, ["org.jspecify.annotations.Nullable"]);
+    assert_eq!(
+        find.params[0].annotations,
+        ["org.jspecify.annotations.Nullable"]
+    );
+    // Written qualified, so no import is consulted and none is needed.
+    assert_eq!(find.params[1].annotations, ["com.acme.Marker"]);
+    // Nothing resolves it, so it stays as written — simple, and therefore visibly unresolved.
+    assert_eq!(member("bare", Namespace::Value).annotations, ["Unresolved"]);
+}
+
+#[test]
+fn a_record_components_annotations_reach_all_three_declarations_it_stands_for() {
+    // One place in the source, three members: the field, the accessor, and the canonical
+    // constructor's parameter. A component annotated in the header and an accessor that came out
+    // unannotated would be a contract that holds when read one way and not the other.
+    let sources = ["record P(@com.acme.Nullable String x) {}"];
+    let (_nodes, index) = build(&sources);
+    let p = item(&index, &sources, 0, "P");
+
+    let field = index.member(index.resolve_member(p, "x", Namespace::Value).unwrap());
+    assert_eq!(field.annotations, ["com.acme.Nullable"]);
+    let accessor = index.member(index.resolve_member(p, "x", Namespace::Method).unwrap());
+    assert_eq!(accessor.annotations, ["com.acme.Nullable"]);
+    let ctor = index.member(index.resolve_member(p, "P", Namespace::Method).unwrap());
+    assert_eq!(ctor.params[0].annotations, ["com.acme.Nullable"]);
+}
+
+#[test]
+fn an_origin_that_reads_no_annotations_says_so() {
+    // The distinction the capture would otherwise lose: an empty list means "the author wrote
+    // none" for source and "nobody looked" for a stub or a class file, and a consumer reading
+    // silence as a claim has to be able to tell which.
+    assert!(jals_hir::ItemOrigin::Project.carries_annotations());
+    assert!(jals_hir::ItemOrigin::Source.carries_annotations());
+    assert!(!jals_hir::ItemOrigin::Stdlib.carries_annotations());
+    assert!(!jals_hir::ItemOrigin::Classpath.carries_annotations());
+}

@@ -353,6 +353,17 @@ filesystem reads into portable interfaces.
   than its declaration, because the scope chain binds a call to *an* overload rather than to the one
   the arguments select. The mirror fact — "nothing *defines* this" — under-approximates definition
   for the same reason, so `UnresolvedName` stands down in each of those positions instead.
+
+  `Member`/`Param` carry the **annotation types a declaration wrote**, qualified through the
+  declaring file's own single-type imports — a fact about source, with no consumer's policy in it,
+  which is what lets `jals-lint`'s `nullness-mismatch` read a contract another file wrote. Where an
+  annotation *sits* and what a written `@Nullable` *denotes* both live in `jals_syntax::ast::Annotations`
+  and are asked there by the index capture and by the linter alike; a second reader of either
+  question is a reader that misses the direct-`ANNOTATION` shape or accepts anybody's `Nullable`.
+  **An empty annotation list is not "the author wrote none".** A stub has no annotations to carry
+  and a class file's are decoded by `jals-classfile` and not lowered here, so for those two it means
+  *nobody looked* — `ItemOrigin::carries_annotations` is the question a consumer that reads silence
+  as a claim must ask first, and getting it wrong reports every `null` the standard library accepts.
 - `jals-lint`: the rule engine. A rule is a name, a `Category` (the `jalslint.toml` section it is
   configured under), a level accessor into `jals_config::lint`, and a checker; `RuleInfo::all()`
   publishes the registry so a consumer enumerates rules instead of restating them. **The rule name

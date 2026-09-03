@@ -293,7 +293,7 @@ public final class GameClient implements AutoCloseable {
     public MinecraftServer server() {
         MinecraftServer server = evalOnClient(Minecraft::getSingleplayerServer);
         if (server == null) {
-            throw new GameFailure("no integrated server is running; open a world first", null);
+            throw new GameFailure("no integrated server is running; open a world first");
         }
         return server;
     }
@@ -830,7 +830,7 @@ public final class GameClient implements AutoCloseable {
         long limit = System.nanoTime() + BOOT_DEADLINE.toNanos();
         while (System.nanoTime() < limit) {
             if (!game.isAlive()) {
-                throw new GameFailure("the game thread died before the client existed", null);
+                throw new GameFailure("the game thread died before the client existed");
             }
             Minecraft instance = Minecraft.getInstance();
             if (instance != null) {
@@ -847,8 +847,7 @@ public final class GameClient implements AutoCloseable {
             }
             pause();
         }
-        throw new GameFailure(
-            "waited " + BOOT_DEADLINE + " for the client to be constructed", null);
+        throw new GameFailure("waited " + BOOT_DEADLINE + " for the client to be constructed");
     }
 
     /**
@@ -1197,8 +1196,7 @@ public final class GameClient implements AutoCloseable {
                 requireAlive(waiting);
                 long remaining = limit - System.nanoTime();
                 if (remaining <= 0) {
-                    throw new GameFailure(
-                        where + " did not run the action within " + deadline, null);
+                    throw new GameFailure(where + " did not run the action within " + deadline);
                 }
                 try {
                     return result.get(
@@ -1249,6 +1247,15 @@ public final class GameClient implements AutoCloseable {
 
     /** Something the game did, or failed to do. */
     public static final class GameFailure extends RuntimeException {
+        // Two constructors rather than one taking a `null` cause: "nothing threw" is a state this
+        // harness genuinely reaches — the liveness checks that run before `failure` has a field to
+        // write, and every deadline that simply ran out — and `RuntimeException(String)` is how
+        // Java spells it. A `null` argument says the same thing to the JVM and the opposite thing
+        // to a reader, which is the contradiction `nullness-mismatch` reports.
+        private GameFailure(String message) {
+            super(message);
+        }
+
         private GameFailure(String message, Throwable cause) {
             super(message, cause);
         }

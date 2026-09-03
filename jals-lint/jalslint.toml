@@ -17,6 +17,40 @@ cannot-resolve = "error"
 type-mismatch = "warn"
 unreported-exception = "warn"
 
+# `nullness-mismatch` is the one rule here with options, and it is spelled long because its two
+# vocabularies do not fit an inline table. `default` says how a declaration carrying neither
+# annotation reads — it is about the *code*, not about this rule's built-in level — and
+# "non-null" is the strict reading: an unannotated slot rejects `null`. A codebase that annotates
+# only part of itself writes "unspecified" here and keeps the checking to what it did annotate.
+# Setting `nullable` or `non-null` replaces the list rather than adding to it.
+[correctness.nullness-mismatch]
+level = "warn"
+default = "non-null"
+nullable = [
+  "org.jspecify.annotations.Nullable",
+  "javax.annotation.Nullable",
+  "javax.annotation.CheckForNull",
+  "jakarta.annotation.Nullable",
+  "org.jetbrains.annotations.Nullable",
+  "androidx.annotation.Nullable",
+  "org.checkerframework.checker.nullness.qual.Nullable",
+  "org.eclipse.jdt.annotation.Nullable",
+  "edu.umd.cs.findbugs.annotations.Nullable",
+  "org.springframework.lang.Nullable",
+]
+non-null = [
+  "org.jspecify.annotations.NonNull",
+  "javax.annotation.Nonnull",
+  "jakarta.annotation.Nonnull",
+  "org.jetbrains.annotations.NotNull",
+  "androidx.annotation.NonNull",
+  "org.checkerframework.checker.nullness.qual.NonNull",
+  "org.eclipse.jdt.annotation.NonNull",
+  "edu.umd.cs.findbugs.annotations.NonNull",
+  "org.springframework.lang.NonNull",
+  "lombok.NonNull",
+]
+
 # The code is legal here and not everywhere it has to run. Every rule is gated on the project's
 # `[package] features`, so a plain Java project only ever sees the jals dialect rules.
 [compatibility]

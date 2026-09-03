@@ -29,7 +29,7 @@
 | rustc lint 一覧 | 出力の "Lint checks provided by rustc" — **244 lint** |
 | clippy lint 一覧 | 出力の "Lint checks loaded by this crate" — **815 lint** |
 | clippy group | 出力の "Lint groups loaded by this crate"（`clippy::all` を除く 9 group、排他） |
-| jals 側 | `jals_lint::RuleInfo::all()` — 10 section **20 rule**（`jals-lint/tests/registry.rs` が固定） |
+| jals 側 | `jals_lint::RuleInfo::all()` — 10 section **21 rule**（`jals-lint/tests/registry.rs` が固定） |
 
 **なぜ `clippy-driver -Whelp` なのか。** clippy の lint 定義はソースツリー上では `declare_clippy_lint!`
 マクロに散っていて、group 所属は宣言の第 1 引数にある。ドライバに聞けば「このバージョンが実際に
