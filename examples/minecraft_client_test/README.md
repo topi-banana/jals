@@ -1,16 +1,18 @@
 # A Minecraft client, as a test-only dependency
 
 This project is one Java class — `com.example.mctest.GameClient` — that boots a real Minecraft
-client inside the test JVM and hands a `#[test]` method a typed handle on it, plus the ~60 runtime
-libraries that boot needs. It has no `main`, produces no jar anybody ships, and is never compiled
-into a consumer's output. It exists to be named in one line of somebody else's manifest:
+client inside the test JVM and hands a `#[test]` method a typed handle on it, plus the runtime
+libraries that boot needs, for **every release the SDK carries: 1.14.4 through 26.2, 43 of them**.
+It has no `main`, produces no jar anybody ships, and is never compiled into a consumer's output. It
+exists to be named in one line of somebody else's manifest:
 
 ```toml
 [dev-dependencies]
 mc-client-test = { path = "../minecraft_client_test" }
 ```
 
-`examples/minecraft_mod` is the consumer in this repository; a second mod is the same one line.
+`examples/minecraft_mod` is the consumer in this repository; a second mod is the same one line, plus
+one `mc-client-test/<release>` route on each of its own release features — see below.
 
 ## Why `[dev-dependencies]` and not `[dependencies]`
 
@@ -32,7 +34,7 @@ never sees this project.
 | the ~60 runtime jars                       | yes, onto the consumer's classpath | `tasks.add_classpath` in `build.rhai`                                      |
 | the game jar and its navigation sources    | yes                                | the `minecraft` SDK, reached from both sides of a diamond                  |
 | **`-Xmx2G`**                               | **no**                             | `build.add_jvm_arg` reaches a test JVM only from the *root* project's script |
-| **`--release 21`**                         | **no**                             | `build.add_javac_arg` is the same rule, so `GameClient.java` is compiled at whatever `--release` the consumer set |
+| **`--release`**                            | **no**                             | `build.add_javac_arg` is the same rule, so `GameClient.java` is compiled at whatever `--release` the consumer set |
 
 So a consumer writes the JVM argument itself; the compiler one it already has, because a mod
 compiled against a release is capped at that release's class-file level either way:
@@ -46,52 +48,171 @@ if build.feature("client-test") {
 Leaving it out does not fail cleanly — the boot dies inside the resource reload with an
 `OutOfMemoryError`, which reads as a harness bug and is not one.
 
-## One release, and where the pin lives
+## 43 releases, and where the lines are
 
-The canonical pin is the `[features]` key in `jals.toml`: **`1.21.11`**. Six other places name it
-and none of them is the source of truth — `build.rhai`'s guard, the `#[cfg]` on every declaration in
-`GameClient.java`, the consumer's `client-test` entry, the consumer's own `build.rhai` guard, this
-repository's two CI cells (`minecraft_client_test` and `minecraft_mod (client)`), and the default in
-`examples/scripts/gen-client-runtime.py`.
+One name selects this harness, and it answers one question: **which release**. A release feature
+(`1.20.1`) routes `minecraft/1.20.1` into the SDK and names one *threshold*. `build.rhai` rejects a
+selection that names none, because the SDK would fall back to its own newest release while every
+threshold here stayed off — the oldest source compiled against the newest game.
 
-One release rather than the SDK's 43, because the harness is written against a client API that
-moves: `openFlatWorld` builds a `LevelSettings` and a `WorldOptions` whose shapes are release
-specific, and the pinned library set is per release and per platform anyway. Supporting a second
-release means a second `[features]` key, a second generated block, and a `#[cfg]` branch at each
-call site that moved.
+There is deliberately no second feature asking whether the harness is *wanted*. Being a
+`[dev-dependencies]` entry is already that answer: `jals test` and the analysis hosts resolve one,
+and nothing that produces output does. A consumer that names this project in its manifest has said
+its tests boot a client; asking again on every command line would be the same statement written
+twice, and two copies of a statement are a pair that eventually disagrees.
 
-Regenerating the library set for another release:
+The price is worth stating rather than burying. `jals test --features 1.20.1` resolves the client
+jar and the ~60 runtime libraries whether or not the consumer's own `client-test` is named, so the
+test-side classpath is wider than `jals build --features 1.20.1`'s — and *wider* understates it: a
+consumer whose own defaults route `minecraft/server` now hands the SDK a node carrying both sides,
+and the SDK answers that with the **merged** jar. The two commands compile against different game
+jars, at the cost of a second fetch and a second whole-game remap. `jals build` itself is
+unaffected: it never resolves a `[dev-dependencies]` entry at all.
+
+### The threshold chain
+
+`#[cfg]` in `GameClient.java` never names a release. It names a threshold; a release names exactly
+one threshold and inherits the rest, so a 44th release is one row in `jals.toml` and no change to
+any source file. A threshold exists only where the game's API actually moved, which is why there are
+fourteen and not forty-three:
+
+| threshold       | what moves at it                                                                                             |
+| --------------- | ------------------------------------------------------------------------------------------------------------ |
+| `since-1.14.4`  | the bottom of the chain: every release reaches it, so `build.rhai` errors when it is off — no release was named |
+| `since-1.15`    | the game window is behind `getWindow()`; on 1.14.4 it is the public `window` field                             |
+| `since-1.16`    | `getMessage()` returns a `Component`; the overworld is `overworld()` rather than `getLevel(DimensionType.OVERWORLD)`; `LevelSettings` takes a name and a difficulty; `createLevel` replaces `selectLevel` |
+| `since-1.17`    | `--release 16`                                                                                                 |
+| `since-1.18`    | `--release 17`                                                                                                 |
+| `since-1.18.2`  | the builtin registries come from `builtinCopy()` as a `Writable`, not `builtin()` as a `RegistryHolder`         |
+| `since-1.19`    | world creation moves onto `Minecraft.createWorldOpenFlows()`                                                   |
+| `since-1.19.3`  | `createFreshLevel` takes a `WorldOptions` and a dimensions function                                            |
+| `since-1.20.3`  | `createFreshLevel` gains its trailing `Screen`                                                                 |
+| `since-1.20.5`  | `--release 21`                                                                                                 |
+| `since-1.21.2`  | `WorldPresets.createFlatWorldDimensions` exists; `GameRules` takes the enabled feature flags                   |
+| `since-1.21.11` | `GameRules` moves to `net.minecraft.world.level.gamerules`                                                     |
+| `since-26.1`    | `LevelSettings` becomes a record carrying a `DifficultySettings` and no game rules                             |
+| `since-26.2`    | the showing screen and the overlay move onto `Minecraft.gui`; the flat preset helper is renamed                |
+
+The set is *this project's*. `examples/minecraft_mod` reads the same 43 releases through five
+thresholds of its own, because it branches on different things — that two consumers of one catalog
+disagree about where the interesting lines are is why the SDK publishes no chain for them to share.
+
+### What that costs the source
+
+One file. The whole of the drift is eight short private methods and 25 bodies between them:
+`showing`, `show`, `overlay`, `label`, `windowWidth` and `overworld` have two each, `settings` has
+four and `createWorld` has nine. Everything a consumer calls is one method on all 43, and
+everything that could be avoided was — `runCommand` dispatches through the server's own Brigadier
+dispatcher, because the three calls that takes are identical on every release, while the
+client-side spelling moved four times.
+
+Two of the fourteen boundaries are ones no mapping file could have shown, because a ProGuard mapping
+carries names and descriptors and no access flags: 1.15's window accessor and 1.16–1.18.2's private
+flat preset were both found by compiling.
+
+One thing the harness does *not* hide, because hiding it would be a lie: `openWorld` opens a
+**superflat** world on 35 of the 43 releases and the **default** generator on 1.16–1.17.1. Those
+eight keep the flat preset in a private field of the client's own `WorldPreset`, and the only public
+route to it is to assemble the generator out of a `FlatLevelGeneratorSettings`, a `FlatLevelSource`
+and `DimensionType.defaultDimensions` whose spellings differ again on each of 1.16–1.17.1,
+1.18–1.18.1 and 1.18.2. The 1.18 spellings *are* assembled, because there a normal world is not just
+slower: it loads the noise generator, which reads a generic signature that the remapped jar carries
+in a form the JVM refuses — a `GenericSignatureFormatError` out of `NoiseChunk`, five minutes into a
+world load. That is a defect in the remap rather than in the harness, and worth its own change;
+1.16–1.17.1 do not hit it. Nothing a test asserts depends on the terrain, so what those three
+releases cost is a few seconds of generation.
+
+`GameClient.java` is also **Java 8 source** throughout: no `ProcessHandle`, no `Files.writeString`,
+no `Stream.toList`, no pattern `instanceof`. It is loaded by the JVM the release runs on, and the
+oldest releases run on Java 8.
+
+### The library pins
+
+The ~60 jars a client loads at boot are per release and per platform, so all 43 sets are pinned in
+`build.rhai` — 2287 rows, 379 distinct jars, linux/x86_64 — as data the script loops over. A
+generator writes them:
 
 ```sh
-python3 examples/scripts/gen-client-runtime.py 1.21.11
+python3 examples/scripts/gen-client-runtime.py
 ```
 
-## Why every declaration carries `#[cfg(feature = "1.21.11")]`
+It takes no arguments and rewrites every release, reading the release list and each release's
+metadata digest out of `examples/minecraft/build.rhai`'s own `CATALOG` rather than restating either.
+It refuses to write anything at all if it cannot read one library of one release: a table that is
+partly regenerated is a boot that dies in `SharedLibraryLoader` with its cause two files away.
 
-A dependency is a graph node whether or not the selection routes a feature to it, so this project's
-build script runs and its sources are lowered under *every* selection a consumer makes — including
-`jals lint --features 1.20.1`, where no client jar exists and `net.minecraft.client.*` names
-nothing. Under those selections the `#[cfg]` blanks the file down to its `package` line: a
-compilation unit that declares no type and emits no class. `build.rhai` registers no task for the
-same reason, so those selections fetch nothing.
+## Which JDK
 
-The selection that *does* name the release is the other half of that, and worth knowing:
-`jals lint` is unconditionally offline, so under `--features 1.21.11,client-test` it wants the ~60
-jars already in the consumer's verified cache. `jals build` no longer puts them there — that is the
-point of the table — so a `jals test` has to have run. Without it the graph does not resolve and
+Two JDKs, chosen independently — `$JAVAC` and `$JAVA` are how a caller says so. The compiler only
+has to be able to *read* the game's class files; the runtime has to be one the release can boot on:
+
+| releases         | compiles with | boots on |
+| ---------------- | ------------- | -------- |
+| 1.14.4 – 1.16.5  | 9+            | 8        |
+| 1.17 – 1.17.1    | 16+           | 16       |
+| 1.18 – 1.20.4    | 17+           | 17       |
+| 1.20.5 – 1.21.11 | 21+           | 21       |
+| 26.x             | 25+           | 25       |
+
+One JDK 25 compiles all 43 — `javac` accepts any `--release` from 8 up and reads a newer classpath
+class without complaint — which is why CI installs exactly that one, and why the harness's
+`--release` cascade tops out at 21 rather than following 26.x to 25. Booting an older release wants
+its own JVM, and the `boots on` column is not advice: 1.17 asks for 16 and means it.
+
+The two variables are read by whichever command runs the JDK, and the run is the consumer's — so
+this is the same invocation as under *Running the tests that use it*, with the JDKs named:
+
+```sh
+cd ../minecraft_mod
+JAVAC=$JDK25/bin/javac JAVA=$JDK8/bin/java jals test --features 1.14.4,client-test -j 1
+```
+
+## What has actually been run
+
+Two claims, verified two ways, because they cost two very different amounts.
+
+**All 43 compile.** `jals build --features <release>`, every release, checking that a class file
+comes out rather than trusting the exit status — the same way the `minecraft` cell checks its
+publication roots are not empty. CI runs this as a 43-cell matrix, which is also what verifies all
+2287 pinned library digests: a build script's fetches execute.
+
+**Every branch boots.** A client boot costs a minute or two and a GL context, so the boot matrix is
+run locally rather than in CI. 32 of the 43 have been booted, three tests each, zero failures — and
+between them they cover **every one of the fourteen threshold bands**, which is the property that
+matters: two releases in the same band compile the same source and differ only in the game jar. The
+JVM is the one the release asks for, from the table above.
+
+## Why the imports carry attributes too
+
+`#[cfg]` here is not only about which *body* compiles. A type that moved package between releases is
+two imports of which exactly one may exist — `net.minecraft.world.level.GameRules` through 1.21.10,
+`net.minecraft.world.level.gamerules.GameRules` from 1.21.11 — and an import naming a type the game
+does not have is an error before any body is looked at. A `cfg`-disabled declaration is blanked
+before anything tries to resolve it, so the attribute is what lets both spellings live in one file.
+Java allows no annotation on an import; the jals dialect's `#[cfg]` is not an annotation, and
+`jals-syntax` treats an import as an attribute host like any other declaration. That is why the
+project declares `[package] features = ["attributes"]`.
+
+`[features] default` is empty, and must stay that way. A consumer reaches this project through a
+`[dev-dependencies]` edge whose `default-features` is on, so a default release would be forwarded
+into the SDK as a *second* version beside the one the consumer chose, and the SDK rejects that
+before any download.
+
+The offline half is worth knowing as well. `jals lint` is unconditionally offline, so it wants the
+selected release's ~60 jars already in the consumer's verified cache — under *any* selection now,
+not only one that named `client-test`, because this project fetches them whenever it is resolved.
+`jals build` never puts them there — a `[dev-dependencies]` entry is absent from everything that
+produces output — so a `jals test` has to have run first. Without it the graph does not resolve and
 lint degrades to a root-only analysis with a warning, the same way it does for any dependency whose
-artifacts are not yet built.
-
-That is why the project declares `[package] features = ["attributes"]`, and why `[features]
-default` is empty — a default release would be forwarded into the SDK as a *second* version beside
-the one the consumer chose, and the SDK rejects that before any download.
+artifacts are not yet built. That is why all three `minecraft_mod` CI cells run `jals test` before
+they lint, and why the two that select no test pass `--no-tests warn`.
 
 ## Booting it
 
 ```java
 try (GameClient game = GameClient.launch()) {
     assert game.screen() instanceof TitleScreen;
-    game.openFlatWorld("jals-test");
+    game.openWorld("jals-test");
     game.runCommand("setblock 0 2 0 minecraft:gold_block");
     assert game.evalOnServer(server -> server.getPlayerList().getPlayerCount()) == 1;
 }
@@ -117,8 +238,12 @@ Four constraints come from `jals test` rather than from Minecraft:
   exits. It halts with status `0`, which is only safe while the sentinel is what is being read — so
   **do not run these tests with `--no-capture`**, where there is nothing captured to read and the
   runner falls back to the exit status this forces.
-- A screen appearing is not readiness. The boot is settled when the overlay is gone *and* the title
-  screen is up.
+- A screen appearing is not readiness, and neither is one sample of it. The boot is settled when the
+  overlay is gone *and* the title screen is up *and* both have stayed that way for a moment: on
+  1.16.5 the singleton is assigned inside the constructor, so a driver that starts as soon as
+  `Minecraft.getInstance()` answers can see a bare, quiet client before the reload overlay is
+  installed at all. Nothing waits when the condition is false, so a slow boot is still as slow as it
+  is; the interval only bounds how quickly a boot may be *called* finished.
 
 ## What it does not supply
 
@@ -127,6 +252,11 @@ Two things a launcher provides and this does not, both measured rather than assu
 - **No native library directory.** The `-natives-linux` classifier jars go on the classpath like
   every other one; LWJGL's `SharedLibraryLoader` extracts what it needs out of them, so there is no
   `-Djava.library.path` and no unpacked directory.
+- **No log next to your manifest.** `--gameDir` does not move the log: the configuration inside the
+  game jar names `logs/` and log4j resolves that against the working directory, which for a test is
+  the project root. The harness writes its own configuration into the run directory and points log4j
+  at it under **both** property names — log4j renamed it at 2.10, and the catalog spans that
+  boundary, so a single spelling leaves the oldest releases writing where they always did.
 - **No asset store.** The harness writes an asset index with no objects in it. Almost every object a
   launcher downloads is a sound or a translation; the textures, models and shaders a boot needs are
   inside the client jar.
@@ -152,8 +282,11 @@ cd ../minecraft_mod
 jals test --features 1.21.11,client-test -j 1
 ```
 
-Here, `jals build --features 1.21.11` is the whole of what this project does on its own: it proves
-the harness compiles against the release it claims.
+Any of the 43 releases goes in place of `1.21.11`.
+
+Here, `jals build --features <release>` is the whole of what this project does on its own:
+it proves the harness compiles against the release it claims. CI runs that for all 43, which is also
+what verifies all 2287 pinned digests — a build script's fetches execute.
 
 ## Legal note
 

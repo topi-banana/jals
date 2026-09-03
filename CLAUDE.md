@@ -110,20 +110,53 @@ filesystem reads into portable interfaces.
 - `jals-classpath`: resolution over project bytes and cache artifacts.
   - The in-house zip reader is isolated in `zip.rs` behind `archive` (portable, `no_std`, over the
     async io seam; also a stored-only writer for jar remap/merge; the `zip` crate is a dev-only
-    fixture oracle). `jar.rs` is the only public surface over that writer: `JarPackage::write`
-    packages compiled classes, generating the `META-INF/MANIFEST.MF` a jar needs (first member,
-    CRLF, 72-byte wrapped) and keeping `StoredZip`/`WriteMember` sealed.
+    fixture oracle). `jar.rs` is the **only** route to that writer — `JarPackage::write` packages
+    compiled classes and `JarPackage::write_members` serializes a union somebody else assembled —
+    and both put the manifest first, because `JarInputStream::getManifest` reads the first member
+    and no other. `StoredZip`/`WriteMember` stay sealed, and a second caller reaching them is a
+    second place that has to remember the ordering.
+  - **What a manifest *is* lives in `manifest.rs`, and only there.** Two places write one — `jar.rs`
+    packaging a fresh manifest, `remap.rs` editing one somebody else wrote — and they used to agree
+    by writing the 72-byte fold rule and the `META-INF/` name matching down twice, which is two
+    copies of a specification with one of them a release behind. `MetaInf` owns the member names a
+    JVM matches case-insensitively (manifest, signature block, `META-INF/versions/<n>/`) and
+    `Manifest` owns the bytes: attributes folded across continuation lines, main-section semantics,
+    the digest strip. Three rules travel with it. A manifest is **edited, not re-rendered** — every
+    transform returns the bytes it was given when it changes nothing, and writes an untouched
+    attribute back verbatim, because normalizing a manifest nobody asked about is a diff in an
+    artifact whose determinism is a stated invariant. A **main** attribute is not an individual one:
+    `Multi-Release` and `Main-Class` are read and written in the main section and nowhere else. And
+    a **member name is matched the way the JVM matches it** in both components, since matching one
+    of the two loosely and the other exactly is what leaves half a claim standing.
+  - **A manifest attribute that describes the archive survives a merge; one that describes the
+    manifest's own side does not.** Only one `META-INF/MANIFEST.MF` can win a path conflict, and the
+    overlay's does — but `Multi-Release` says the union's `META-INF/versions/<n>/` entries are live,
+    and a union carries both sides' entries, so it is re-declared whenever *either* input declared
+    it. Signature digests are the opposite case and go from both sides. Getting this wrong is not
+    visible in a build: it is a class loaded from the wrong multi-release variant at run time.
+  - **A transform's output version folds itself into whatever memoizes around it.** `remap.rs`'s
+    `REMAP_OUTPUT_VERSION` / `MERGE_OUTPUT_VERSION` say what this crate *writes*, and a consumer
+    that records a task's artifacts and replays them — `jals-project`'s `BuildTaskState` — names the
+    transform's inputs in its key and nothing about the transform, so a bump here would be served
+    the old bytes out of a warm cache. That happened twice, both times invisibly. `JarTransforms` is
+    the fold that ends it: the consumer folds it into its key once, and a transform added or bumped
+    here moves every such key with no edit on the consumer's side. Do not reintroduce a version
+    number a consumer has to copy.
   - Mappings parsing, hierarchy-aware jar remapping, and compile-oriented jar decompilation into
     source trees live under `archive` too. Two grammars are read into one `Mappings` index —
     Mojang/ProGuard and Fabric's tiny v2 — and a format that names more than two namespaces carries
     the pair it is read through *inside* its `MappingFormat` variant, so the selection reaches the
     remap's provenance fold with it: `official→named` and `official→intermediary` over one tiny
     file are two jars.
-  - A manifest's `[build]` section is lowered into `ProjectInputPlan` by exactly two siblings —
-    portable `MemoryProjectPlan` and host-path `NativeProjectPlan` — and there must never be a
-    third: a host that lowers `[build] classpath` itself is a second rule that will drift.
-    `MemoryProjectPlan` has no external fallback because an in-memory project has one address
-    space; an entry reaching outside it is a warning, not a host path.
+  - A manifest is lowered into `ProjectInputPlan` by exactly two siblings — portable
+    `MemoryProjectPlan` and host-path `NativeProjectPlan` — and there must never be a third: a host
+    that lowers `[build] classpath` itself is a second rule that will drift. They differ only where
+    a host path forces it: `MemoryProjectPlan` has no external fallback, because an in-memory
+    project has one address space and an entry reaching outside it is a warning rather than a host
+    path. **Everything else they must answer the same way**, `[test] source-dirs` included — a
+    source root is the *shape of the project* an index walks and is captured unconditionally, so a
+    sibling that lowered it and one that did not would be one project changing shape when it moves
+    in-memory. What a command compiles is decided where its sources are gathered, never here.
   - A `Warning` carries its subject in `origin`, not in `message` — several messages name no
     location at all — so a host reports one by rendering the whole `Warning` through its `Display`,
     never `warning.message` alone.
@@ -146,6 +179,12 @@ filesystem reads into portable interfaces.
   - Two edges reaching one `path` dependency are one node — identity is the canonicalized directory
     — and the features every in-edge routed to it are unioned there. A test-support library and its
     consumer can therefore both depend on the same SDK without becoming two selections.
+  - What `TASK_EXECUTION_VERSION` versions is the *record*, not the transforms it names the
+    artifacts of: `jals-classpath`'s `JarTransforms::fold` goes into the same provenance, so a remap
+    or merge that starts writing different bytes invalidates every memo without that number moving.
+    It is structural because the discipline it replaces failed twice — a shipped fix stayed
+    invisible behind a warm cache, once for a jar that kept its signature block and once for a
+    merged jar that kept saying `Multi-Release: false`.
   - Dependency snapshots are immutable and must never receive generated output: a dependency's
     build tasks run under `BuildTaskHost::Snapshot`, so their JARs and declared source trees are
     projected into the *consumer's* artifact cache instead of being published to the project they
@@ -554,7 +593,7 @@ example's **tracked** `.java` files. Tracked is what separates authored source f
 output — a build script's publication into a source root is untracked by construction — so the gate
 never scores a decompiled skeleton as something someone wrote. The fmt/lint step runs under the
 cell's own `dir`, so a project reached only through a dependency edge still needs a cell of its own
-the moment it has a tracked `.java`. Four consequences for an example:
+the moment it has a tracked `.java`. Seven consequences for an example:
 
 - A `tasks.project_jar` example needs its JAR, and a JAR is a binary, so none is committed:
   `examples/scripts/gen-vendor-jars.sh` writes the two the `task_dependency` and
@@ -572,7 +611,34 @@ the moment it has a tracked `.java`. Four consequences for an example:
   having run: analysis is always offline, and the client's runtime jars are fetched by a
   `[dev-dependencies]` entry, which `jals build` does not resolve.
 - `examples/scripts/gen-client-runtime.py` is a **generator, not a build step**: it rewrites the
-  pinned library block in `examples/minecraft_client_test/build.rhai` between two exact markers,
-  and its output is committed. CI never runs it. The release it pins is the `[features]` key in
-  that project's `jals.toml`, which six other places name and none of them owns — the consumer's
-  own `build.rhai` guard is one of them, and two CI cells rather than one.
+  `const RUNTIME` table in `examples/minecraft_client_test/build.rhai` between two exact markers,
+  and its output is committed. CI never runs it. It takes no arguments and writes **every** release
+  — the list and each release's metadata digest come from `examples/minecraft/build.rhai`'s own
+  `CATALOG`, so no release list is restated and no mutable version manifest is consulted — and it
+  refuses to write at all when it cannot read one library of one release, because a table that is
+  partly regenerated is a boot that dies in `SharedLibraryLoader` with its cause two files away.
+- The client harness supports the same 43 releases the SDK does, and **one feature selects it** — a
+  release (`minecraft/<version>` into the SDK, plus one threshold). There is deliberately no second
+  feature asking whether the harness is wanted: being a `[dev-dependencies]` entry is already that
+  answer, since `jals test` and the analysis hosts resolve one and nothing that produces output
+  does. `client` is therefore on the dependency edge (`features = ["client"]`) rather than in a
+  feature, and a consumer routes only `mc-client-test/<version>` from each of its own version
+  features. The cost is stated rather than hidden: `jals test --features <version>` pulls the client
+  jar and the ~60 runtime libraries even without the consumer's own `client-test`, so a consumer
+  whose defaults route `minecraft/server` compiles its tests against the SDK's **merged** jar where
+  its build used the server one — a second fetch and a second whole-game remap, which is why all
+  three `minecraft_mod` cells now run `jals test` before their offline lint. `build.rhai` rejects a selection naming no release,
+  because the SDK falls back to its newest while every threshold stays off. The `#[cfg]` in
+  `GameClient.java` names a *threshold*, never a release, and the fourteen thresholds are that
+  project's own: `examples/minecraft_mod` reads the same catalog through five of its own, because it
+  branches on different things. Two of the fourteen boundaries are invisible in a mapping file,
+  which carries no access flags — they were found by compiling, which is what the 43-cell matrix is
+  for.
+- The harness is **Java 8 source** and its `--release` follows the game's own
+  `javaVersion.majorVersion` (8/16/17/21), because it is loaded by the JVM the release runs on. That
+  is also the one place `jals build` and `jals test` want different JDKs, and `$JAVAC`/`$JAVA`
+  resolve independently so one command can say both.
+- `client harness (<release>)` is a 43-cell matrix modelled on `mod jar`, and its assertion is not
+  the exit status: a green build says a selection resolved, not that a type came out, so the cell
+  checks `GameClient.class` exists. Running the build script is also what verifies all 2287 pinned
+  library digests.

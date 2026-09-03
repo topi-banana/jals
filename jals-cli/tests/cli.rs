@@ -3171,8 +3171,9 @@ fn an_ordinary_build_compiles_no_test_method() {
     // The class exists...
     let classes = dir.path().join("target/classes/com/example");
     assert!(classes.join("Calc.class").is_file());
-    // ...and no harness was generated beside it.
-    assert!(!classes.join("JalsTest$Calc.class").exists());
+    // ...and no harness was generated beside it. The shim is named after the test class's whole
+    // qualified name, so that this file names the class the generator would actually have written.
+    assert!(!classes.join("JalsTest$com$example$Calc.class").exists());
     assert!(
         !dir.path()
             .join("target/classes/JalsTestHarness.class")

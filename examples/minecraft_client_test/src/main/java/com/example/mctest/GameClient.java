@@ -1,45 +1,102 @@
 package com.example.mctest;
 
-// Every declaration in this file is `#[cfg(feature = "1.21.11")]`, imports included — the release
-// this harness is written against, and the only feature it declares.
+// One file, 43 releases. Every attribute here names a *threshold* — `since-1.16`, never `1.16.5` —
+// so a release names one threshold in `jals.toml`, inherits the rest, and a 44th release is a row
+// in that file and no edit to this one. Nothing asks whether the harness is wanted: naming a
+// release is the whole of how it is selected, and `build.rhai` rejects a selection that names none.
 //
-// Two things need the gate. Without the release the SDK dependency resolves no client jar at all,
-// so `net.minecraft.client.*` names nothing; and a consumer that declares this project in
-// `[dev-dependencies]` still discovers it under every *other* selection, because a dependency is a
-// node whether or not the selection routes a feature to it. A `cfg`-disabled declaration is blanked
-// before anything tries to resolve it, so under those selections this file lowers to its `package`
-// line and nothing else — a compilation unit that declares no type and emits no class.
-//
-// Java allows no annotation on an import, but the jals dialect's `#[cfg]` is not an annotation:
-// `jals-syntax` treats an import as an attribute host like any other declaration.
-#[cfg(feature = "1.21.11")] import java.io.IOException;
-#[cfg(feature = "1.21.11")] import java.io.UncheckedIOException;
-#[cfg(feature = "1.21.11")] import java.nio.file.Files;
-#[cfg(feature = "1.21.11")] import java.nio.file.Path;
-#[cfg(feature = "1.21.11")] import java.time.Duration;
-#[cfg(feature = "1.21.11")] import java.util.Comparator;
-#[cfg(feature = "1.21.11")] import java.util.List;
-#[cfg(feature = "1.21.11")] import java.util.concurrent.CompletableFuture;
-#[cfg(feature = "1.21.11")] import java.util.concurrent.ExecutionException;
-#[cfg(feature = "1.21.11")] import java.util.concurrent.Executor;
-#[cfg(feature = "1.21.11")] import java.util.concurrent.TimeUnit;
-#[cfg(feature = "1.21.11")] import java.util.concurrent.TimeoutException;
-#[cfg(feature = "1.21.11")] import java.util.function.Predicate;
-#[cfg(feature = "1.21.11")] import java.util.function.Supplier;
-#[cfg(feature = "1.21.11")] import java.util.stream.Stream;
-#[cfg(feature = "1.21.11")] import net.minecraft.client.Minecraft;
-#[cfg(feature = "1.21.11")] import net.minecraft.client.gui.components.AbstractWidget;
-#[cfg(feature = "1.21.11")] import net.minecraft.client.gui.components.events.GuiEventListener;
-#[cfg(feature = "1.21.11")] import net.minecraft.client.gui.screens.Screen;
-#[cfg(feature = "1.21.11")] import net.minecraft.client.gui.screens.TitleScreen;
-#[cfg(feature = "1.21.11")] import net.minecraft.server.MinecraftServer;
-#[cfg(feature = "1.21.11")] import net.minecraft.world.Difficulty;
-#[cfg(feature = "1.21.11")] import net.minecraft.world.level.GameType;
-#[cfg(feature = "1.21.11")] import net.minecraft.world.level.LevelSettings;
-#[cfg(feature = "1.21.11")] import net.minecraft.world.level.WorldDataConfiguration;
-#[cfg(feature = "1.21.11")] import net.minecraft.world.level.gamerules.GameRules;
-#[cfg(feature = "1.21.11")] import net.minecraft.world.level.levelgen.WorldOptions;
-#[cfg(feature = "1.21.11")] import net.minecraft.world.level.levelgen.presets.WorldPresets;
+// The imports carry attributes too, and have to: a type that moved package between releases is two
+// imports of which exactly one may exist, and a disabled declaration is blanked before anything
+// tries to resolve it. Java allows no annotation on an import, but the jals dialect's attribute is
+// not an annotation — `jals-syntax` treats an import as an attribute host like any other
+// declaration.
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.lang.management.ManagementFactory;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.time.Duration;
+import java.util.Comparator;
+import java.util.List;
+#[cfg(feature = "since-26.2")] import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.function.Predicate;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.components.AbstractWidget;
+import net.minecraft.client.gui.components.events.GuiEventListener;
+import net.minecraft.client.gui.screens.Overlay;
+import net.minecraft.client.gui.screens.Screen;
+import net.minecraft.client.gui.screens.TitleScreen;
+#[cfg(
+    all(
+        feature = "since-1.16",
+        not(
+            feature = "since-1.18")))] import net.minecraft.client.gui.screens.worldselection.WorldPreset;
+#[cfg(
+    all(feature = "since-1.18", not(feature = "since-1.19.3")))] import net.minecraft.core.Registry;
+#[cfg(
+    all(
+        feature = "since-1.16",
+        not(feature = "since-1.19.3")))] import net.minecraft.core.RegistryAccess;
+#[cfg(
+    all(
+        feature = "since-1.19.3",
+        not(feature = "since-1.21.2")))] import net.minecraft.core.registries.Registries;
+import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.level.ServerLevel;
+#[cfg(feature = "since-1.16")] import net.minecraft.world.Difficulty;
+#[cfg(
+    all(
+        feature = "since-1.16",
+        not(feature = "since-1.19.3")))] import net.minecraft.world.level.DataPackConfig;
+#[cfg(
+    all(
+        feature = "since-1.16",
+        not(feature = "since-1.21.11")))] import net.minecraft.world.level.GameRules;
+import net.minecraft.world.level.GameType;
+import net.minecraft.world.level.LevelSettings;
+#[cfg(not(feature = "since-1.16"))] import net.minecraft.world.level.LevelType;
+#[cfg(feature = "since-1.19.3")] import net.minecraft.world.level.WorldDataConfiguration;
+#[cfg(
+    any(
+        not(feature = "since-1.16"),
+        all(
+            feature = "since-1.18",
+            not(
+                feature = "since-1.19"))))] import net.minecraft.world.level.dimension.DimensionType;
+#[cfg(
+    all(
+        feature = "since-1.21.11",
+        not(feature = "since-26.1")))] import net.minecraft.world.level.gamerules.GameRules;
+#[cfg(
+    all(
+        feature = "since-1.18",
+        not(feature = "since-1.19")))] import net.minecraft.world.level.levelgen.FlatLevelSource;
+#[cfg(
+    all(
+        feature = "since-1.18",
+        not(feature = "since-1.19")))] import net.minecraft.world.level.levelgen.WorldGenSettings;
+#[cfg(feature = "since-1.19.3")] import net.minecraft.world.level.levelgen.WorldOptions;
+#[cfg(
+    all(
+        feature = "since-1.18",
+        not(
+            feature = "since-1.19")))] import net.minecraft.world.level.levelgen.flat.FlatLevelGeneratorSettings;
+#[cfg(
+    all(
+        feature = "since-1.19.3",
+        not(
+            feature = "since-1.21.2")))] import net.minecraft.world.level.levelgen.presets.WorldPreset;
+#[cfg(feature = "since-1.19")] import net.minecraft.world.level.levelgen.presets.WorldPresets;
 
 /**
  * A Minecraft client, booted in this JVM and driven from a {@code #[test]} method.
@@ -66,7 +123,6 @@ package com.example.mctest;
  * <p>Linux only. GLFW wants the main thread on macOS ({@code -XstartOnFirstThread}), and the main
  * thread belongs to the test.
  */
-#[cfg(feature = "1.21.11")]
 public final class GameClient implements AutoCloseable {
     /** Where the client's `saves/`, `logs/` and `options.txt` go. */
     private static final String RUN_ROOT = "target/jals/build/mc-client";
@@ -81,7 +137,38 @@ public final class GameClient implements AutoCloseable {
      */
     private static final String ASSET_INDEX = "jals-empty";
 
+    /**
+     * The seed the releases that take one are given.
+     *
+     * <p>Fixed rather than random, so a failure on an old release is reproducible. A superflat world
+     * looks the same whatever it is — the seed decides where the structures go, and this world has
+     * none.
+     *
+     * <p>Every era takes it, which is why it is one constant and not four spellings.
+     * {@code WorldOptions} has convenience factories, but *which* ones is release-specific
+     * ({@code testWorldWithRandomSeed} arrived at 1.21.2, {@code defaultWithRandomSeed} at 1.19.3),
+     * while its {@code (seed, structures, bonusChest)} constructor is the same on all of them.
+     */
+    private static final long FLAT_SEED = 0L;
+
     private static final Duration BOOT_DEADLINE = Duration.ofSeconds(300);
+
+    /**
+     * How long the boot has to keep looking finished before it is believed.
+     *
+     * <p>"No overlay and the title screen showing" is a state the boot passes *through* on some
+     * releases as well as ending in. On 1.16.5 the client is observable before it installs the
+     * reload overlay at all: the singleton is assigned inside the constructor, so a driver that
+     * starts polling as soon as `Minecraft.getInstance()` answers can see a bare, quiet client,
+     * return, and have the overlay appear underneath it a moment later. Requiring the state to hold
+     * across an interval rather than at an instant is what tells the two apart, and it costs a
+     * settled boot only this much.
+     *
+     * <p>It is not a sleep. Nothing waits for it when the condition is false, and a boot that takes
+     * five minutes still takes five minutes; this only bounds how quickly a boot may be *called*
+     * finished.
+     */
+    private static final Duration BOOT_SETTLE = Duration.ofSeconds(2);
     private static final Duration STEP_DEADLINE = Duration.ofSeconds(60);
     private static final Duration WORLD_DEADLINE = Duration.ofSeconds(300);
     private static final long POLL_MILLIS = 50L;
@@ -115,8 +202,7 @@ public final class GameClient implements AutoCloseable {
 
     /** Boot a client and return once the title screen is up. */
     public static GameClient launch() {
-        Path directory =
-            Path.of(RUN_ROOT, Long.toString(ProcessHandle.current().pid())).toAbsolutePath();
+        Path directory = Paths.get(RUN_ROOT, jvmIdentity()).toAbsolutePath();
         try {
             GameClient game = start(directory);
             game.awaitTitleScreen();
@@ -189,6 +275,16 @@ public final class GameClient implements AutoCloseable {
     }
 
     /**
+     * The overworld of the running integrated server.
+     *
+     * <p>Published so a consumer's test does not have to know that 1.16 replaced
+     * {@code getLevel(DimensionType.OVERWORLD)} with an {@code overworld()} of its own.
+     */
+    public ServerLevel overworld() {
+        return evalOnServer(GameClient::overworld);
+    }
+
+    /**
      * The running integrated server.
      *
      * <p>Vanilla publishes no static accessor for a {@code MinecraftServer} — this is the one that
@@ -225,7 +321,10 @@ public final class GameClient implements AutoCloseable {
     public <S extends Screen> S waitForScreen(Class<S> type, Duration deadline) {
         return pollOnClient(
             type.getSimpleName() + " to be showing",
-            client -> type.isInstance(client.screen) ? type.cast(client.screen) : null,
+            client -> {
+                Screen showing = showing(client);
+                return type.isInstance(showing) ? type.cast(showing) : null;
+            },
             deadline);
     }
 
@@ -269,7 +368,22 @@ public final class GameClient implements AutoCloseable {
 
     /** The screen currently showing, or {@code null}. */
     public Screen screen() {
-        return evalOnClient(client -> client.screen);
+        return evalOnClient(GameClient::showing);
+    }
+
+    /**
+     * The overlay currently showing, or {@code null}.
+     *
+     * <p>Published because a consumer's test wants to say "the resource reload has finished" without
+     * naming the release-specific way of asking.
+     */
+    public Overlay overlay() {
+        return evalOnClient(GameClient::overlay);
+    }
+
+    /** The width of the game window, in pixels. */
+    public int windowWidth() {
+        return evalOnClient(GameClient::windowWidth);
     }
 
     /**
@@ -279,7 +393,7 @@ public final class GameClient implements AutoCloseable {
      * constructor is free to touch the resources only that thread owns.
      */
     public <S extends Screen> S openScreen(Class<S> type, Supplier<S> screen) {
-        runOnClient(client -> client.setScreen(screen.get()));
+        runOnClient(client -> show(client, screen.get()));
         return waitForScreen(type, STEP_DEADLINE);
     }
 
@@ -292,15 +406,17 @@ public final class GameClient implements AutoCloseable {
     public AbstractWidget widget(String label) {
         return evalOnClient(
             client -> {
-                Screen showing = client.screen;
+                Screen showing = showing(client);
                 if (showing == null) {
                     return null;
                 }
                 List<? extends GuiEventListener> children = showing.children();
                 for (GuiEventListener child : children) {
-                    if (child instanceof AbstractWidget widget
-                        && widget.getMessage().getString().equals(label)) {
-                        return widget;
+                    if (child instanceof AbstractWidget) {
+                        AbstractWidget widget = (AbstractWidget) child;
+                        if (label(widget).equals(label)) {
+                            return widget;
+                        }
                     }
                 }
                 return null;
@@ -310,36 +426,29 @@ public final class GameClient implements AutoCloseable {
     // --- worlds --------------------------------------------------------------------------------
 
     /**
-     * Create a superflat world, join it, and return once the player and the integrated server are
-     * both up.
+     * Create a world, join it, and return once the player and the integrated server are both up.
      *
-     * <p>Creative, peaceful, cheats on, no structures: a world that generates fast and then holds
-     * still, which is what a test wants to assert against. This is the one method whose call is
-     * specific to a Minecraft release — hence the single pinned release the `client-test` feature
-     * is wired to.
+     * <p>Creative, peaceful, no structures, one fixed seed: a world that generates quickly and then
+     * holds still, which is what a test wants to assert against.
+     *
+     * <p><b>Superflat on 35 of the 43 releases, and the default generator on 1.16–1.17.1.</b>
+     * 1.14.4–1.15.2 name flat with a {@code LevelType} constant and 1.19 onwards with a world-preset
+     * registry key, but 1.16–1.18.2 keep the flat preset in a <em>private</em> field of the client's
+     * own {@code WorldPreset}: the only public route is to assemble the generator, and its pieces
+     * are spelled differently on each of 1.16–1.17.1, 1.18–1.18.1 and 1.18.2. The 1.18 spellings are
+     * assembled below because there a normal world does not merely cost time — it loads the noise
+     * generator, which reads a generic signature the remapped jar carries in a form the JVM refuses.
+     * 1.16–1.17.1 have no such problem and take {@code WorldPreset.NORMAL}.
+     *
+     * <p>Nothing a test asserts depends on the terrain — a block set at a fixed position is set
+     * whatever is around it — so what those eight releases cost is seconds of generation, and naming
+     * the method for what it always does costs nothing.
+     *
+     * <p>This is where the game's API actually moved, and the nine {@code createWorld} bodies below
+     * are the whole of it. The public method is one method on all 43 releases because they are.
      */
-    public void openFlatWorld(String levelName) {
-        runOnClient(
-            client -> {
-                WorldDataConfiguration configuration = WorldDataConfiguration.DEFAULT;
-                LevelSettings settings =
-                    new LevelSettings(
-                        levelName,
-                        GameType.CREATIVE,
-                        false,
-                        Difficulty.PEACEFUL,
-                        true,
-                        new GameRules(configuration.enabledFeatures()),
-                        configuration);
-                client.createWorldOpenFlows()
-                    .createFreshLevel(
-                        levelName,
-                        settings,
-                        WorldOptions.testWorldWithRandomSeed(),
-                        WorldPresets::createFlatWorldDimensions,
-                        client.screen);
-            },
-            WORLD_DEADLINE);
+    public void openWorld(String levelName) {
+        runOnClient(client -> createWorld(client, levelName), WORLD_DEADLINE);
         waitUntil(
             "the world to load",
             client -> client.level != null && client.player != null,
@@ -353,25 +462,282 @@ public final class GameClient implements AutoCloseable {
             WORLD_DEADLINE);
     }
 
-    /** Run a command as the server console and return once the server has executed it. */
+    /**
+     * Ask the client to create and join the world. Only safe on the render thread.
+     *
+     * <p>Nine bodies, newest first, and the boundaries are measured rather than remembered: each
+     * one is the range over which a call actually compiles. The `jals.toml` threshold table says
+     * what each boundary is; this says what it costs.
+     */
+    #[cfg(feature = "since-26.2")]
+    private static void createWorld(Minecraft client, String levelName) {
+        // 26.2 renamed the flat preset's helper. `FLAT_ALL_DIMENSIONS` rather than `FLAT` is the
+        // only difference in the body it replaced.
+        client.createWorldOpenFlows()
+            .createFreshLevel(
+                levelName,
+                settings(levelName),
+                new WorldOptions(FLAT_SEED, false, false),
+                WorldPresets::createTestWorldDimensions,
+                showing(client));
+    }
+
+    /** Ask the client to create and join the world. Only safe on the render thread. */
+    #[cfg(all(feature = "since-1.21.2", not(feature = "since-26.2")))]
+    private static void createWorld(Minecraft client, String levelName) {
+        client.createWorldOpenFlows()
+            .createFreshLevel(
+                levelName,
+                settings(levelName),
+                new WorldOptions(FLAT_SEED, false, false),
+                WorldPresets::createFlatWorldDimensions,
+                showing(client));
+    }
+
+    /**
+     * Ask the client to create and join the world. Only safe on the render thread.
+     *
+     * <p>Before 1.21.2 there is no {@code createFlatWorldDimensions}, so the flat preset is looked
+     * up in the world-preset registry by hand — which is what that helper does.
+     */
+    #[cfg(all(feature = "since-1.20.3", not(feature = "since-1.21.2")))]
+    private static void createWorld(Minecraft client, String levelName) {
+        client.createWorldOpenFlows()
+            .createFreshLevel(
+                levelName,
+                settings(levelName),
+                new WorldOptions(FLAT_SEED, false, false),
+                registries ->
+                    // Cast because the chain erases: `registryOrThrow` hands back a raw `Registry`
+                    // here, so `value()` is typed `Object` and the call below is not found.
+                    ((WorldPreset)
+                            registries.registryOrThrow(Registries.WORLD_PRESET)
+                                .getHolderOrThrow(WorldPresets.FLAT).value())
+                        .createWorldDimensions(),
+                showing(client));
+    }
+
+    /**
+     * Ask the client to create and join the world. Only safe on the render thread.
+     *
+     * <p>1.20.3 gave {@code createFreshLevel} a trailing screen to return to; before it, there are
+     * four arguments and no screen.
+     */
+    #[cfg(all(feature = "since-1.19.3", not(feature = "since-1.20.3")))]
+    private static void createWorld(Minecraft client, String levelName) {
+        client.createWorldOpenFlows()
+            .createFreshLevel(
+                levelName,
+                settings(levelName),
+                new WorldOptions(FLAT_SEED, false, false),
+                registries ->
+                    // Cast because the chain erases: `registryOrThrow` hands back a raw `Registry`
+                    // here, so `value()` is typed `Object` and the call below is not found.
+                    ((WorldPreset)
+                            registries.registryOrThrow(Registries.WORLD_PRESET)
+                                .getHolderOrThrow(WorldPresets.FLAT).value())
+                        .createWorldDimensions());
+    }
+
+    /**
+     * Ask the client to create and join the world. Only safe on the render thread.
+     *
+     * <p>1.19 through 1.19.2 pass the registries and a fully built {@code WorldGenSettings} rather
+     * than a seed and a function that builds the dimensions from them.
+     */
+    #[cfg(all(feature = "since-1.19", not(feature = "since-1.19.3")))]
+    private static void createWorld(Minecraft client, String levelName) {
+        RegistryAccess.Writable registries = RegistryAccess.builtinCopy();
+        client.createWorldOpenFlows()
+            .createFreshLevel(
+                levelName,
+                settings(levelName),
+                registries,
+                registries.registryOrThrow(Registry.WORLD_PRESET_REGISTRY)
+                    .getHolderOrThrow(WorldPresets.FLAT).value()
+                    .createWorldGenSettings(FLAT_SEED, false, false));
+    }
+
+    /**
+     * Ask the client to create and join the world. Only safe on the render thread.
+     *
+     * <p>Before 1.19 there is no {@code WorldOpenFlows}: the client creates the world itself. And
+     * the flat preset cannot be <em>asked</em> for — 1.16 through 1.18.2 keep it in a private field
+     * of the client's own {@code WorldPreset}, whose {@code NORMAL} is public and whose
+     * {@code FLAT} is not — so the generator is assembled here out of the four public pieces
+     * vanilla assembles it from.
+     *
+     * <p>On 1.18 that is not a nicety. The noise generator a normal world uses reads a generic
+     * signature reflectively, and the remapped jar this compiles against carries one the JVM
+     * refuses: a {@code GenericSignatureFormatError} out of {@code NoiseChunk}, five minutes into
+     * a world load. A flat world never reaches that code.
+     */
+    #[cfg(all(feature = "since-1.18.2", not(feature = "since-1.19")))]
+    private static void createWorld(Minecraft client, String levelName) {
+        RegistryAccess.Writable registries = RegistryAccess.builtinCopy();
+        client.createLevel(
+            levelName,
+            settings(levelName),
+            registries,
+            new WorldGenSettings(
+                FLAT_SEED,
+                false,
+                false,
+                WorldGenSettings.withOverworld(
+                    registries.registryOrThrow(Registry.DIMENSION_TYPE_REGISTRY),
+                    DimensionType.defaultDimensions(registries, FLAT_SEED),
+                    new FlatLevelSource(
+                        registries.registryOrThrow(Registry.STRUCTURE_SET_REGISTRY),
+                        FlatLevelGeneratorSettings.getDefault(
+                            registries.registryOrThrow(Registry.BIOME_REGISTRY),
+                            registries.registryOrThrow(Registry.STRUCTURE_SET_REGISTRY))))));
+    }
+
+    /**
+     * Ask the client to create and join the world. Only safe on the render thread.
+     *
+     * <p>The same assembly one release earlier: there is no structure-set registry yet, so neither
+     * the flat settings nor the generator takes one, and the builtin registries come back as a
+     * {@code RegistryHolder}. Java 8 has no {@code var}, so the local names it.
+     */
+    #[cfg(all(feature = "since-1.18", not(feature = "since-1.18.2")))]
+    private static void createWorld(Minecraft client, String levelName) {
+        RegistryAccess.RegistryHolder registries = RegistryAccess.builtin();
+        client.createLevel(
+            levelName,
+            settings(levelName),
+            registries,
+            new WorldGenSettings(
+                FLAT_SEED,
+                false,
+                false,
+                WorldGenSettings.withOverworld(
+                    registries.registryOrThrow(Registry.DIMENSION_TYPE_REGISTRY),
+                    DimensionType.defaultDimensions(registries, FLAT_SEED),
+                    new FlatLevelSource(
+                        FlatLevelGeneratorSettings.getDefault(
+                            registries.registryOrThrow(Registry.BIOME_REGISTRY))))));
+    }
+
+    /**
+     * Ask the client to create and join the world. Only safe on the render thread.
+     *
+     * <p>1.16 through 1.17.1 spell that assembly a third way, and take the client's public
+     * {@code WorldPreset.NORMAL} instead. These are the releases whose world is not superflat —
+     * nothing a test asserts depends on the terrain, and unlike 1.18 nothing here trips over it.
+     */
+    #[cfg(all(feature = "since-1.16", not(feature = "since-1.18")))]
+    private static void createWorld(Minecraft client, String levelName) {
+        RegistryAccess.RegistryHolder registries = RegistryAccess.builtin();
+        client.createLevel(
+            levelName,
+            settings(levelName),
+            registries,
+            WorldPreset.NORMAL.create(registries, FLAT_SEED, false, false));
+    }
+
+    /**
+     * Ask the client to create and join the world. Only safe on the render thread.
+     *
+     * <p>The oldest shape, and the simplest: a world type is one enum constant, there are no
+     * registries to build, and the save directory and the level name are passed separately.
+     */
+    #[cfg(not(feature = "since-1.16"))]
+    private static void createWorld(Minecraft client, String levelName) {
+        // Built here rather than through `settings`, because this shape carries no level name —
+        // `selectLevel` takes it twice instead, once as the save directory and once as the world's
+        // own name — and a shared helper would have to take one it could not use.
+        client.selectLevel(
+            levelName,
+            levelName,
+            new LevelSettings(FLAT_SEED, GameType.CREATIVE, false, false, LevelType.FLAT));
+    }
+
+    /**
+     * The world's settings.
+     *
+     * <p>Four shapes, and only from 1.16: before that a {@code LevelSettings} carries a seed and a
+     * world type rather than a name and a difficulty, and the one release range that wants it builds
+     * it in place. The change that is not just a parameter moving is 26.1's, which folded the
+     * difficulty, the hardcore flag and the difficulty lock into one {@code DifficultySettings} and
+     * dropped the game rules entirely.
+     */
+    #[cfg(feature = "since-26.1")]
+    private static LevelSettings settings(String levelName) {
+        return new LevelSettings(
+            levelName,
+            GameType.CREATIVE,
+            new LevelSettings.DifficultySettings(Difficulty.PEACEFUL, false, false),
+            true,
+            WorldDataConfiguration.DEFAULT);
+    }
+
+    /** The world's settings. */
+    #[cfg(all(feature = "since-1.21.2", not(feature = "since-26.1")))]
+    private static LevelSettings settings(String levelName) {
+        // 1.21.2 made the game rules depend on which feature flags the data configuration turns on,
+        // so the two are built together rather than the rules being built from nothing.
+        WorldDataConfiguration configuration = WorldDataConfiguration.DEFAULT;
+        return new LevelSettings(
+            levelName,
+            GameType.CREATIVE,
+            false,
+            Difficulty.PEACEFUL,
+            true,
+            new GameRules(configuration.enabledFeatures()),
+            configuration);
+    }
+
+    /** The world's settings. */
+    #[cfg(all(feature = "since-1.19.3", not(feature = "since-1.21.2")))]
+    private static LevelSettings settings(String levelName) {
+        return new LevelSettings(
+            levelName,
+            GameType.CREATIVE,
+            false,
+            Difficulty.PEACEFUL,
+            true,
+            new GameRules(),
+            WorldDataConfiguration.DEFAULT);
+    }
+
+    /** The world's settings. */
+    #[cfg(all(feature = "since-1.16", not(feature = "since-1.19.3")))]
+    private static LevelSettings settings(String levelName) {
+        return new LevelSettings(
+            levelName,
+            GameType.CREATIVE,
+            false,
+            Difficulty.PEACEFUL,
+            true,
+            new GameRules(),
+            DataPackConfig.DEFAULT);
+    }
+
+    /**
+     * Run a command as the server console and return once the server has executed it.
+     *
+     * <p>Dispatched on the server rather than sent from the client, and that is what makes this one
+     * method rather than four. The client-side spelling moved twice inside 1.19 alone — {@code
+     * LocalPlayer.chat("/…")}, then {@code command(…)}, then {@code commandUnsigned(…)}, then
+     * {@code ClientPacketListener.sendCommand(…)} from 1.19.3 — while {@code
+     * MinecraftServer.getCommands()}, {@code Commands.getDispatcher()} and {@code
+     * createCommandSourceStack()} are the same three calls on every release in the catalog.
+     *
+     * <p>It also removes a wait. A command sent from the client travels as a packet the server
+     * drains on a later tick, so the old spelling had to watch the tick counter cross two
+     * boundaries before an assertion could read the world. Brigadier's {@code execute} runs the
+     * command on the thread that calls it, and this calls it on the server thread — so by the time
+     * the hop returns, the command has run.
+     *
+     * <p>The source is the console, so it carries permission level 4 and the world does not have to
+     * have been created with cheats on.
+     */
     public void runCommand(String command) {
-        runOnClient(client -> client.player.connection.sendCommand(command));
-        // Two tick boundaries, not one. A command travels as a packet the server drains once per
-        // tick, and `before` is read on the server thread *after* the packet was queued — so the
-        // packet is in the queue no later than during tick `before`, and the drain that runs it
-        // happens by the end of tick `before + 1`. Waiting only for `> before` would be satisfied
-        // by the boundary into `before + 1`, which the command has not necessarily crossed, and
-        // the assertion after it would read the world as it was. (Sampling before the send instead
-        // is not the fix: `before` would then be an arbitrarily stale count and the wait could be
-        // over before it began.)
-        int before = evalOnServer(MinecraftServer::getTickCount);
-        waitUntil(
-            "the server to tick past the command",
-            client -> {
-                MinecraftServer server = client.getSingleplayerServer();
-                return server != null && server.getTickCount() > before + 1;
-            },
-            STEP_DEADLINE);
+        runOnServer(
+            server ->
+                server.getCommands().getDispatcher()
+                    .execute(command, server.createCommandSourceStack()));
     }
 
     // --- shutdown ------------------------------------------------------------------------------
@@ -400,15 +766,28 @@ public final class GameClient implements AutoCloseable {
      * and takes the watchdog with it before the sleep is up. Armed by {@link #close()} on the way
      * out of a test, and by {@link #launch()} when a boot failed before there was anything to
      * close.
+     *
+     * <p>The wait runs to a deadline rather than to the first interrupt. An interrupt that ended it
+     * early would halt the JVM before the generated harness had printed its sentinel, and {@code
+     * jals test} reads the verdict from that line rather than from the exit status — so a passing
+     * test would come back a failure with nothing in the capture to explain it. The interrupt is
+     * therefore swallowed rather than restored: {@code halt} runs no shutdown hook and never
+     * returns, so nothing downstream of this loop could observe the flag anyway.
      */
     private static void armHalt() {
         Thread watchdog =
             new Thread(
                 () -> {
-                    try {
-                        Thread.sleep(HALT_AFTER.toMillis());
-                    } catch (InterruptedException _interrupted) {
-                        Thread.currentThread().interrupt();
+                    long deadline = System.nanoTime() + HALT_AFTER.toNanos();
+                    long remaining = deadline - System.nanoTime();
+                    while (remaining > 0L) {
+                        try {
+                            Thread.sleep(Math.max(1L, remaining / 1_000_000L));
+                        } catch (InterruptedException _interrupted) {
+                            // Deliberately ignored; the loop below re-reads the clock and waits out
+                            // whatever is left of the deadline.
+                        }
+                        remaining = deadline - System.nanoTime();
                     }
                     Runtime.getRuntime().halt(0);
                 },
@@ -483,17 +862,55 @@ public final class GameClient implements AutoCloseable {
      *
      * <p>Polled off the render thread rather than through {@link #evalOnClient}, because during a
      * reload there is no promise that the render thread is draining its queue.
+     *
+     * <p>And held rather than sampled: see {@link #BOOT_SETTLE} for the release this distinguishes.
      */
     private void awaitTitleScreen() {
         long limit = System.nanoTime() + BOOT_DEADLINE.toNanos();
+        boolean settling = false;
+        long settledSince = 0L;
         while (System.nanoTime() < limit) {
             requireAlive("the title screen");
-            if (this.client.getOverlay() == null && this.client.screen instanceof TitleScreen) {
-                return;
+            if (overlay(this.client) == null && showing(this.client) instanceof TitleScreen) {
+                if (!settling) {
+                    settling = true;
+                    settledSince = System.nanoTime();
+                } else if (System.nanoTime() - settledSince >= BOOT_SETTLE.toNanos()) {
+                    return;
+                }
+            } else {
+                // Whatever it was, it was not the end of the boot. The clock starts again.
+                settling = false;
             }
             pause();
         }
         throw timedOut("the title screen", BOOT_DEADLINE);
+    }
+
+    /**
+     * The pid of this JVM, as the name of the directory this run owns.
+     *
+     * <p>Not {@code ProcessHandle.current().pid()}: this file is compiled at {@code --release 8}
+     * for the oldest releases in the catalog, and {@code ProcessHandle} is Java 9. {@code
+     * RuntimeMXBean.getName()} is the JDK's own answer to "which JVM is this" and every
+     * implementation that matters here spells it {@code <pid>@<host>}. The host half is dropped
+     * because a run directory is *named*, not addressed, and everything outside
+     * {@code [0-9A-Za-z]} goes with it — the value ends up as a path segment, and no JVM promises
+     * what it puts in that string.
+     */
+    private static String jvmIdentity() {
+        String name = ManagementFactory.getRuntimeMXBean().getName();
+        StringBuilder identity = new StringBuilder();
+        for (int index = 0; index < name.length(); index++) {
+            char character = name.charAt(index);
+            if (character == '@') {
+                break;
+            }
+            if (Character.isLetterOrDigit(character)) {
+                identity.append(character);
+            }
+        }
+        return identity.length() == 0 ? "jvm" : identity.toString();
     }
 
     /** Write the run directory the client boots into. */
@@ -504,21 +921,21 @@ public final class GameClient implements AutoCloseable {
             // reading its `options.txt` after this harness has changed what it writes there.
             if (Files.exists(directory)) {
                 try (Stream<Path> entries = Files.walk(directory)) {
-                    for (Path entry : entries.sorted(Comparator.reverseOrder()).toList()) {
+                    for (Path entry :
+                        entries.sorted(Comparator.reverseOrder()).collect(Collectors.toList())) {
                         Files.deleteIfExists(entry);
                     }
                 }
             }
             Files.createDirectories(directory.resolve("assets/indexes"));
             Files.createDirectories(directory.resolve("assets/objects"));
-            Files.writeString(
-                directory.resolve("assets/indexes/" + ASSET_INDEX + ".json"), "{\"objects\":{}}");
+            write(directory.resolve("assets/indexes/" + ASSET_INDEX + ".json"), "{\"objects\":{}}");
             redirectLogging(directory);
             // Written rather than left to the defaults so the client makes the same choices on a
             // CI runner as on a workstation: no vsync to pace the boot, no narrator to start a
             // speech synthesizer, no sound to open an audio device, and no tutorial or multiplayer
             // notice to put a screen in front of the one under test.
-            Files.writeString(
+            write(
                 directory.resolve("options.txt"),
                 "guiScale:2\n"
                     + "enableVsync:false\n"
@@ -556,7 +973,7 @@ public final class GameClient implements AutoCloseable {
         Files.createDirectories(logs);
         Path configuration = directory.resolve("log4j2.xml");
         String pattern = "[%d{HH:mm:ss}] [%t/%level]: %msg{nolookups}%n";
-        Files.writeString(
+        write(
             configuration,
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
                 + "<Configuration status=\"WARN\">\n"
@@ -581,7 +998,27 @@ public final class GameClient implements AutoCloseable {
                 + "    </Root>\n"
                 + "  </Loggers>\n"
                 + "</Configuration>\n");
+        // Both spellings, because the catalog spans the release that renamed the property. log4j
+        // read `log4j.configurationFile` until 2.10 and `log4j2.configurationFile` from it, and the
+        // game pins 2.8.1 through 1.16.5 and 2.14.1 or later after. Setting only the newer name is
+        // silently ignored by the older log4j, which then uses the configuration inside the game
+        // jar — one that names `logs/` and resolves it against the working directory, which for a
+        // test is the project root. So the oldest releases wrote a `logs/` next to `jals.toml` on
+        // every run. Setting the name a build does not read costs nothing.
+        System.setProperty("log4j.configurationFile", configuration.toString());
         System.setProperty("log4j2.configurationFile", configuration.toString());
+    }
+
+    /**
+     * Write {@code text} to {@code file} as UTF-8.
+     *
+     * <p>{@code Files.writeString} is Java 11 and this file is compiled at {@code --release 8} for
+     * the oldest releases, so the charset is named rather than defaulted — the platform default is
+     * what a launcher's locale decides, and the log4j configuration below has to be read back by
+     * log4j.
+     */
+    private static void write(Path file, String text) throws IOException {
+        Files.write(file, text.getBytes(StandardCharsets.UTF_8));
     }
 
     /**
@@ -595,6 +1032,135 @@ public final class GameClient implements AutoCloseable {
     private static String attribute(String value) {
         return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
             .replace("\"", "&quot;");
+    }
+
+    // --- what moved between releases -------------------------------------------------------------
+    //
+    // Everything above is written once for 43 releases because the four things that actually moved
+    // are named here and nowhere else. A branch inlined at its use is a branch to find again the
+    // next time the API turns over; a branch behind a name is a line in the table in `jals.toml`.
+    //
+    // Note what is *not* here. `Minecraft.getInstance`, `getSingleplayerServer`, `getWindow`, the
+    // `level` and `player` fields, `MinecraftServer.isReady` / `getPlayerList`, `Screen.children`
+    // and `net.minecraft.client.main.Main.main` are the same on all 43, and the two places the
+    // source could have named a type that moved — the client level's class, the value
+    // `SharedConstants` hands back — it chains through instead.
+
+    /**
+     * The screen the client is showing, or {@code null}.
+     *
+     * <p>26.2 moved the showing screen and the overlay off {@code Minecraft} onto its {@code gui}
+     * field. Both are still public and neither changed shape, so this is a two-line difference
+     * rather than a different way of driving the game.
+     */
+    #[cfg(not(feature = "since-26.2"))]
+    private static Screen showing(Minecraft client) {
+        return client.screen;
+    }
+
+    /**
+     * The screen the client is showing, or {@code null}.
+     *
+     * <p>The {@code gui} is null-checked because it is built during the boot, not before it: the
+     * first thing this harness does is poll for the title screen, and it starts polling as soon as
+     * the singleton exists. Reading through a null there is an {@code NullPointerException} on
+     * every 26.2 boot rather than a wait — measured, not guessed.
+     */
+    #[cfg(feature = "since-26.2")]
+    private static Screen showing(Minecraft client) {
+        // One read of `gui`, not two. It is a plain field the render thread writes during the
+        // boot and this is called from the test thread, so a null check and a dereference over
+        // two reads may disagree — and the second one returning the `null` the first ruled out is
+        // exactly the `NullPointerException` the check is here to prevent.
+        return Optional.ofNullable(client.gui).map(gui -> gui.screen()).orElse(null);
+    }
+
+    /** Put {@code screen} up. Only safe on the render thread. */
+    #[cfg(not(feature = "since-26.2"))]
+    private static void show(Minecraft client, Screen screen) {
+        client.setScreen(screen);
+    }
+
+    /**
+     * Put {@code screen} up. Only safe on the render thread.
+     *
+     * <p>{@code Minecraft.setScreenAndShow} exists on 26.2 too, but it renders a frame on the way
+     * out. This is the plain setter the older releases have, so a caller gets the same thing.
+     */
+    #[cfg(feature = "since-26.2")]
+    private static void show(Minecraft client, Screen screen) {
+        client.gui.setScreen(screen);
+    }
+
+    /** The overlay the client is showing, or {@code null}. */
+    #[cfg(not(feature = "since-26.2"))]
+    private static Overlay overlay(Minecraft client) {
+        return client.getOverlay();
+    }
+
+    /**
+     * The overlay the client is showing, or {@code null}.
+     *
+     * <p>Null-checked for the reason {@link #showing} is, and the answer is right either way: no
+     * {@code gui} yet means no overlay yet, and the boot is settled only once the overlay is gone
+     * <em>and</em> the title screen is up — a test the missing {@code gui} correctly fails.
+     */
+    #[cfg(feature = "since-26.2")]
+    private static Overlay overlay(Minecraft client) {
+        // One read, for the reason {@link #showing} takes one.
+        return Optional.ofNullable(client.gui).map(gui -> gui.overlay()).orElse(null);
+    }
+
+    /**
+     * What a widget says.
+     *
+     * <p>1.16 turned a button's message from a {@code String} into a {@code Component}. The label is
+     * how {@link #widget} finds a button at all — it is the one property that survives both
+     * obfuscation and a layout change — so the difference has to be crossed rather than avoided.
+     */
+    #[cfg(feature = "since-1.16")]
+    private static String label(AbstractWidget widget) {
+        return widget.getMessage().getString();
+    }
+
+    /** What a widget says. */
+    #[cfg(not(feature = "since-1.16"))]
+    private static String label(AbstractWidget widget) {
+        return widget.getMessage();
+    }
+
+    /** The overworld, from the server. */
+    #[cfg(feature = "since-1.16")]
+    private static ServerLevel overworld(MinecraftServer server) {
+        return server.overworld();
+    }
+
+    /**
+     * The overworld, from the server.
+     *
+     * <p>Before 1.16 a level is asked for by dimension rather than named, and the dimension itself
+     * is a {@code DimensionType} constant rather than a registry key.
+     */
+    #[cfg(not(feature = "since-1.16"))]
+    private static ServerLevel overworld(MinecraftServer server) {
+        return server.getLevel(DimensionType.OVERWORLD);
+    }
+
+    /**
+     * The width of the game window, in pixels.
+     *
+     * <p>1.15 put the window behind an accessor. On 1.14.4 the field is public and there is no
+     * accessor to call.
+     */
+    #[cfg(feature = "since-1.15")]
+    private static int windowWidth(Minecraft client) {
+        return client.getWindow().getWidth();
+    }
+
+    /** The width of the game window, in pixels. */
+    #[cfg(not(feature = "since-1.15"))]
+    private static int windowWidth(Minecraft client) {
+        return client.window.getWidth();
     }
 
     // --- plumbing ------------------------------------------------------------------------------

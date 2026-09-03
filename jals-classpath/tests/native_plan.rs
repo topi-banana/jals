@@ -89,6 +89,65 @@ classpath = ["./libs/dep.jar"]
     ));
 }
 
+/// `[test] source-dirs` is a source root of the project too, and under either scope.
+///
+/// Nothing on a compile path reads this list — a compiler is handed the sources `jals-cli`'s own
+/// per-lowering `discover_sources` gathers — so what it decides is which files an *analysis* host
+/// indexes. Leaving the test tree out put every file in it outside `Workspace::owns_path`, so the
+/// language server answered one from a detached group with no `[package] features` and reported
+/// each `#[test]` in it as an error, and `jals lint` saw a named test file's siblings not at all.
+/// Unconditional for the reason `snapshot_scopes` captures the same tree unconditionally: the shape
+/// of a project must not depend on which subcommand asked.
+#[test]
+fn the_test_source_dirs_are_source_roots_under_either_scope() {
+    let project = tempfile::tempdir().unwrap();
+    fs::create_dir_all(project.path().join("src/main/java")).unwrap();
+    fs::create_dir_all(project.path().join("src/test/java")).unwrap();
+    let manifest = manifest(
+        r#"
+[build]
+source-dirs = ["src/main/java"]
+
+[test]
+source-dirs = ["src/test/java"]
+"#,
+    );
+
+    let roots = jals_exec::tokio_rt::run(|exec| async move {
+        let storage = NativeStorage::native(
+            project.path(),
+            project.path().join("target/jals/cache"),
+            exec,
+        )
+        .await
+        .unwrap();
+        [DependencyScope::Build, DependencyScope::Test].map(|scope| {
+            NativeProjectPlan::from_manifest(
+                &manifest,
+                scope,
+                &features(&manifest),
+                project.path(),
+                &storage.view(),
+            )
+            .source_roots
+        })
+    })
+    .expect("test runtime bootstraps");
+    for (scope, source_roots) in [DependencyScope::Build, DependencyScope::Test]
+        .iter()
+        .zip(&roots)
+    {
+        assert_eq!(
+            source_roots,
+            &[
+                DirKey::parse("src/main/java").unwrap(),
+                DirKey::parse("src/test/java").unwrap()
+            ],
+            "source roots under {scope:?}"
+        );
+    }
+}
+
 #[test]
 fn in_project_path_dependency_auto_detects_conventional_source_root() {
     let project = tempfile::tempdir().unwrap();

@@ -1,34 +1,144 @@
 [package]
 name = "mc-client-test"
 version = "0.1.0"
-# `#[cfg]` is what makes this project resolvable under a selection that does not want it. A
-# consumer declares it in `[dev-dependencies]`, and a dependency is a graph node whether or not the
-# selection routes a feature to it — so under `--features 1.20.1` the release below is off, every
-# declaration in `GameClient.java` is blanked, and the file lowers to its `package` line. Without
-# the dialect feature that gate would be a syntax error instead.
+# `#[cfg]` is what lets one source tree be written against 43 releases of a moving client API. The
+# game's API moved at fourteen points across them, and a `cfg`-disabled declaration is blanked
+# before anything tries to resolve it — so one file carries every spelling and each release
+# compiles the one it named. Without the dialect feature those attributes would be a syntax error
+# instead.
 features = ["attributes"]
 
-# One release, and it is the **canonical pin**: `build.rhai`'s library set, the SDK jar this
-# compiles against, `README.md`, the CI cell and `examples/scripts/gen-client-runtime.py` all name
-# this key. Supporting a second release means a second key here, a second generated block, and a
-# second `#[cfg]` branch anywhere `GameClient` touches an API that moved — `openFlatWorld` is the
-# one call site that does.
-#
-# `default` is empty and must stay that way. A consumer reaches this project through a
-# `[dev-dependencies]` edge whose `default-features` is on, so a default release would be forwarded
-# into the SDK as a *second* version alongside the one the consumer chose, and the SDK rejects that
-# before any download. Leaving it empty is what lets one consumer select `1.21.11` and another
-# select nothing at all.
 [features]
+# Empty, and it must stay that way. A consumer reaches this project through a `[dev-dependencies]`
+# edge whose `default-features` is on, so anything here is enabled under *every* selection that
+# consumer makes — a default release would be forwarded into the SDK as a second version alongside
+# the one the consumer chose, and the SDK rejects that before any download.
 default = []
-"1.21.11" = ["minecraft/client", "minecraft/1.21.11"]
 
-# The same SDK a consumer depends on, and — because a `path` dependency's node identity is its
-# canonicalized directory — the *same node*. The features every edge routes to it are unioned
-# there, so `minecraft/1.21.11` written here and written by the consumer are one selection and one
-# remap, not two.
+# The threshold chain. A release names exactly one of these and inherits the rest, so `#[cfg]` in
+# `GameClient.java` and the `--release` cascade in `build.rhai` never name a version — which is what
+# makes a 44th release an edit to this file alone.
+#
+# A threshold exists only where something here actually branches, and the set is *this project's*.
+# `examples/minecraft_mod` reads the same 43 releases through a different chain, because it branches
+# on different things; that two consumers of one catalog disagree about where the interesting lines
+# are is the point of the thresholds being per-project rather than published by the SDK.
+#
+# What each one buys, oldest first:
+#
+# - `since-1.14.4` — the bottom of the chain. Every release reaches it, so it is the one question
+#   the chain can answer that no single release can: was a release named at all? `build.rhai`
+#   errors when it is off, because the SDK falls back to its own newest release while every
+#   threshold here stays off — the oldest source against the newest game.
+# - `since-1.15` — the game window is behind `Minecraft.getWindow()`; on 1.14.4 it is the public
+#   `window` field and there is no accessor.
+# - `since-1.16` — `AbstractWidget.getMessage()` returns a `Component` rather than a `String`;
+#   `LevelSettings` takes a level name and a `Difficulty` rather than a seed and a `LevelType`; and
+#   `Minecraft.createLevel` replaces `Minecraft.selectLevel`.
+# - `since-1.17` — `--release 16`, the game's own `javaVersion.majorVersion`.
+# - `since-1.18` — `--release 17`.
+# - `since-1.18.2` — the builtin registries come from `RegistryAccess.builtinCopy()` as a
+#   `RegistryAccess.Writable`, where 1.16–1.18.1 take them from `RegistryAccess.builtin()` as a
+#   `RegistryAccess.RegistryHolder`. Java 8 has no `var`, so the local has to name one of the two.
+# - `since-1.19` — world creation moves off `Minecraft` onto `Minecraft.createWorldOpenFlows()`.
+# - `since-1.19.3` — `createFreshLevel` takes a `WorldOptions` and a dimensions `Function` rather
+#   than a `RegistryAccess` and a `WorldGenSettings`, and `LevelSettings` takes a
+#   `WorldDataConfiguration` rather than a `DataPackConfig`.
+# - `since-1.20.3` — `createFreshLevel` gains its trailing `Screen`.
+# - `since-1.20.5` — `--release 21`.
+# - `since-1.21.2` — `WorldPresets.createFlatWorldDimensions` exists, so the flat dimensions stop
+#   having to be looked up through the world-preset registry by hand.
+# - `since-1.21.11` — `GameRules` moves to `net.minecraft.world.level.gamerules`.
+# - `since-26.1` — `LevelSettings` becomes a record whose difficulty, hardcore flag and difficulty
+#   lock are one `DifficultySettings`, and which carries no `GameRules` at all.
+# - `since-26.2` — the showing screen and the overlay move off `Minecraft` onto `Minecraft.gui`, and
+#   `WorldPresets.createFlatWorldDimensions` becomes `createTestWorldDimensions`.
+
+"since-1.14.4" = []
+"since-1.15" = ["since-1.14.4"]
+"since-1.16" = ["since-1.15"]
+"since-1.17" = ["since-1.16"]
+"since-1.18" = ["since-1.17"]
+"since-1.18.2" = ["since-1.18"]
+"since-1.19" = ["since-1.18.2"]
+"since-1.19.3" = ["since-1.19"]
+"since-1.20.3" = ["since-1.19.3"]
+"since-1.20.5" = ["since-1.20.3"]
+"since-1.21.2" = ["since-1.20.5"]
+"since-1.21.11" = ["since-1.21.2"]
+"since-26.1" = ["since-1.21.11"]
+"since-26.2" = ["since-26.1"]
+
+# The 43 releases. Each routes its release into the SDK and names its threshold, and that is the
+# whole of what selects this harness: there is no second feature asking whether it is wanted.
+# `minecraft` is reached from both sides of a diamond and a `path` dependency's node identity is its
+# canonicalized directory, so `minecraft/1.20.1` written here and written by the consumer are one
+# selection and one remap.
+#
+# "At most one release" is not restated here: `[features]` resolution is additive and cannot express
+# exclusivity, so the rule lives where it can be enforced — the SDK's own build script, which the
+# forwarded selection reaches.
+"26.2" = ["since-26.2", "minecraft/26.2"]
+"26.1.2" = ["since-26.1", "minecraft/26.1.2"]
+"26.1.1" = ["since-26.1", "minecraft/26.1.1"]
+"26.1" = ["since-26.1", "minecraft/26.1"]
+"1.21.11" = ["since-1.21.11", "minecraft/1.21.11"]
+"1.21.10" = ["since-1.21.2", "minecraft/1.21.10"]
+"1.21.9" = ["since-1.21.2", "minecraft/1.21.9"]
+"1.21.8" = ["since-1.21.2", "minecraft/1.21.8"]
+"1.21.7" = ["since-1.21.2", "minecraft/1.21.7"]
+"1.21.6" = ["since-1.21.2", "minecraft/1.21.6"]
+"1.21.5" = ["since-1.21.2", "minecraft/1.21.5"]
+"1.21.4" = ["since-1.21.2", "minecraft/1.21.4"]
+"1.21.3" = ["since-1.21.2", "minecraft/1.21.3"]
+"1.21.2" = ["since-1.21.2", "minecraft/1.21.2"]
+"1.21.1" = ["since-1.20.5", "minecraft/1.21.1"]
+"1.21" = ["since-1.20.5", "minecraft/1.21"]
+"1.20.6" = ["since-1.20.5", "minecraft/1.20.6"]
+"1.20.5" = ["since-1.20.5", "minecraft/1.20.5"]
+"1.20.4" = ["since-1.20.3", "minecraft/1.20.4"]
+"1.20.3" = ["since-1.20.3", "minecraft/1.20.3"]
+"1.20.2" = ["since-1.19.3", "minecraft/1.20.2"]
+"1.20.1" = ["since-1.19.3", "minecraft/1.20.1"]
+"1.20" = ["since-1.19.3", "minecraft/1.20"]
+"1.19.4" = ["since-1.19.3", "minecraft/1.19.4"]
+"1.19.3" = ["since-1.19.3", "minecraft/1.19.3"]
+"1.19.2" = ["since-1.19", "minecraft/1.19.2"]
+"1.19.1" = ["since-1.19", "minecraft/1.19.1"]
+"1.19" = ["since-1.19", "minecraft/1.19"]
+"1.18.2" = ["since-1.18.2", "minecraft/1.18.2"]
+"1.18.1" = ["since-1.18", "minecraft/1.18.1"]
+"1.18" = ["since-1.18", "minecraft/1.18"]
+"1.17.1" = ["since-1.17", "minecraft/1.17.1"]
+"1.17" = ["since-1.17", "minecraft/1.17"]
+"1.16.5" = ["since-1.16", "minecraft/1.16.5"]
+"1.16.4" = ["since-1.16", "minecraft/1.16.4"]
+"1.16.3" = ["since-1.16", "minecraft/1.16.3"]
+"1.16.2" = ["since-1.16", "minecraft/1.16.2"]
+"1.16.1" = ["since-1.16", "minecraft/1.16.1"]
+"1.16" = ["since-1.16", "minecraft/1.16"]
+"1.15.2" = ["since-1.15", "minecraft/1.15.2"]
+"1.15.1" = ["since-1.15", "minecraft/1.15.1"]
+"1.15" = ["since-1.15", "minecraft/1.15"]
+"1.14.4" = ["since-1.14.4", "minecraft/1.14.4"]
+
 [dependencies]
-minecraft = { path = "../minecraft" }
+# The same SDK a consumer depends on, with its default features — and, because a `path` dependency's
+# node identity is its canonicalized directory, the *same node*. The features every edge routes to
+# it are unioned there, so `minecraft/1.20.1` written here and written by the consumer are one
+# selection and one remap, not two.
+#
+# The defaults are left alone deliberately. `default-features = false` would spare a standalone
+# build here the server download, but the SDK's `mixin` and `mixinextras` publications write into
+# its *own* `src/main/java`, and a root a selection stops publishing does not stop existing: the
+# next build captures the previous run's tree as authored source and hands it to `javac`. Two
+# projects sharing one SDK directory therefore have to agree about which roots are published, and
+# agreeing on "the defaults" is the cheapest way to do that.
+#
+# `client` rides the edge rather than a feature of this project's own, because there is no selection
+# here that wants a harness with no client jar to compile it against. The 43 release features name
+# the *release*; which side of the game is not a question anyone asks this project.
+minecraft = { path = "../minecraft", features = ["client"] }
 
 [build]
 script = { type = "rhai", file = "build.rhai" }

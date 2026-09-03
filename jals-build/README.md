@@ -1030,6 +1030,19 @@ public final class Calculator {
   about the code as written, and the code as written calls that helper. The cost is one
   unreachable `private` method in the built class, which is what a test helper is.
 
+The flags follow `cargo nextest run`: positional substring filters plus `--exact` and `--skip`,
+`--run-ignored`, `--partition count:M/N|hash:M/N`, `-j/--test-threads`, `--retries`,
+`--fail-fast`/`--max-fail`, `--timeout`/`--slow-timeout`, `--no-capture`, `--status-level` /
+`--final-status-level`, `--failure-output`/`--success-output`, `--list`, `--message-format`,
+`--no-run`, `--hide-progress-bar`, `--color` and `--no-tests`.
+[`examples/unit_tests`](../examples/unit_tests) is a worked example.
+
+**Still open:** a filter *expression* language (nextest's `-E`), JUnit XML output, reusing a
+compiled test build across runs (`--archive-file`), interoperating with an existing JUnit suite,
+and `jals bench` (JMH) once dependencies (§3) exist. Two known limits: `-j` can only narrow the
+worker pool the executor already sized to the machine, and interrupting a run leaves the test JVMs
+it had already started to finish on their own.
+
 ### Test-only dependencies
 
 `[dev-dependencies]` takes the same three entry shapes as `[dependencies]` — `jar`, `git`, `path`
@@ -1061,19 +1074,6 @@ mc-client-test = { path = "../minecraft_client_test" }
   *root* project's script, so a dev-dependency contributes classpath and sources but no JVM flags.
   [`examples/minecraft_client_test`](../examples/minecraft_client_test) is a worked example, and
   documents what a consumer therefore writes itself.
-
-The flags follow `cargo nextest run`: positional substring filters plus `--exact` and `--skip`,
-`--run-ignored`, `--partition count:M/N|hash:M/N`, `-j/--test-threads`, `--retries`,
-`--fail-fast`/`--max-fail`, `--timeout`/`--slow-timeout`, `--no-capture`, `--status-level` /
-`--final-status-level`, `--failure-output`/`--success-output`, `--list`, `--message-format`,
-`--no-run`, `--hide-progress-bar`, `--color` and `--no-tests`.
-[`examples/unit_tests`](../examples/unit_tests) is a worked example.
-
-**Still open:** a filter *expression* language (nextest's `-E`), JUnit XML output, reusing a
-compiled test build across runs (`--archive-file`), interoperating with an existing JUnit suite,
-and `jals bench` (JMH) once dependencies (§3) exist. Two known limits: `-j` can only narrow the
-worker pool the executor already sized to the machine, and interrupting a run leaves the test JVMs
-it had already started to finish on their own.
 
 ## 6. Operational / CLI flags (language-agnostic)
 

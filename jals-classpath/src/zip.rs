@@ -616,6 +616,7 @@ impl<R: sio::Read + sio::Seek> sio::Read for MemberStream<R> {
 }
 
 /// One member to write into a stored archive: its `/`-separated name and uncompressed bytes.
+#[derive(Clone)]
 pub(crate) struct WriteMember {
     pub(crate) name: String,
     pub(crate) bytes: Vec<u8>,

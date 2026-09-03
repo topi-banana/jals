@@ -246,6 +246,23 @@ impl NativeProjectPlan {
                     .push(Self::resolve_host_path(project_root, source)),
             }
         }
+        // `[test] source-dirs` too, and unconditionally, for the reason [`Self::snapshot_scopes`]
+        // captures them unconditionally: these roots are the *shape of the project* an index walks,
+        // and scoping them to what one invocation compiles would make the same project read
+        // differently under `jals build` and `jals test`. Nothing on a compile path reads this list
+        // — a compiler is handed the sources `jals-cli`'s own `discover_sources` gathers per
+        // lowering — so what it decides is only which files an analysis host indexes. Leaving them
+        // out is what put a `[test] source-dirs` file outside `Workspace::owns_path`, so the
+        // language server answered it from a detached group with no `[package] features` and
+        // reported every `#[test]` in it as an error.
+        for source in &manifest.test.source_dirs {
+            match Self::project_relative(project_root, source) {
+                Some(path) => result.source_roots.push(DirKey::new(path)),
+                None => result
+                    .external_source_roots
+                    .push(Self::resolve_host_path(project_root, source)),
+            }
+        }
         for classpath in &manifest.build.classpath {
             let Some(path) = Self::project_relative(project_root, classpath) else {
                 result
@@ -286,7 +303,12 @@ impl NativeProjectPlan {
             |locator| Self::classify(project_root, locator),
             &mut result.warnings,
         );
-        for (raw_name, dependency) in manifest.declared_dependencies(scope) {
+        // `active_dependencies`, exactly as the jar half above reaches it through
+        // `add_jar_dependencies`: that is the single spelling of "is this entry present?", and one
+        // lowering answering it two ways would lower an `optional` `git`/`path` entry no selection
+        // activated — an index input, and under `Compile` a compiler input, that the same
+        // selection's jars were correctly denied.
+        for (raw_name, dependency) in manifest.active_dependencies(scope, features) {
             if matches!(dependency, Dependency::Jar(_)) {
                 continue;
             }

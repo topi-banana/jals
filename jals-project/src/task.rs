@@ -17,7 +17,7 @@ use jals_build::task::{
 };
 use jals_classpath::{
     ExpectedDigest, ExternalArtifactResolver, ExternalArtifactSpec, ExternalLocator, Fetcher,
-    LibrarySource, SourceTree, SourceTreeExtraction, SourceTreeLimits,
+    JarTransforms, LibrarySource, SourceTree, SourceTreeExtraction, SourceTreeLimits,
 };
 use jals_config::Manifest;
 use jals_exec::Exec;
@@ -242,21 +242,27 @@ struct OwnedFile {
     digest: String,
 }
 
-/// Wire version of a memoized snapshot execution. Bump it whenever the record's meaning changes for
-/// unchanged bytes; a mismatch is a miss, never a misread.
+/// Wire version of a memoized snapshot execution. Bump it whenever the *record's* meaning changes
+/// for unchanged bytes; a mismatch is a miss, never a misread.
+///
+/// It versions this record and nothing below it. What a `jals-classpath` transform writes is
+/// versioned by that crate and folded into the provenance by [`Self::fold_transform_versions`], so
+/// a remap or a merge that starts producing different bytes invalidates every memo here without
+/// this number moving. That is deliberate and was learned the expensive way: this record names the
+/// artifacts a *previous* transform produced and reusing it is what stops the new transform from
+/// running at all, so for two rounds a shipped fix was invisible behind a warm cache — a remapped
+/// jar that kept its signature block, and a merged jar that kept saying `Multi-Release: false` and
+/// killed the client in the same static initializer. Both were fixed by remembering to bump this
+/// as well. Nothing has to be remembered now.
 ///
 /// 2: a publication records the intent it was declared with, which decides where the consumer
 /// routes it. The plan fingerprint already folds that intent into the provenance, so a pre-intent
 /// record is unreachable by key as well — this is the belt to that's braces.
 ///
-/// 3: a remapped or merged jar no longer carries the signature block and per-entry manifest digests
-/// its source jar had, because a JVM refuses such an archive. Bumped here and not only in
-/// `jals-classpath`'s own `REMAP_OUTPUT_VERSION` / `MERGE_OUTPUT_VERSION`: this record names the
-/// artifacts a *previous* transform produced, and reusing it is what stops the new transform from
-/// running at all — so a warm cache would keep serving the jar that cannot be loaded. An output
-/// version is only reached through a task that re-executes, which makes this the outer half of the
-/// same rule.
-const TASK_EXECUTION_VERSION: u32 = 3;
+/// 3, 4, 5: the outer half of three rounds of `jals-classpath`'s own `REMAP_OUTPUT_VERSION` /
+/// `MERGE_OUTPUT_VERSION`, back when that half was a thing a person had to write down. Kept as
+/// history: they are why the fold exists.
+const TASK_EXECUTION_VERSION: u32 = 5;
 
 /// A [`BuildTaskExecution`] recorded in the verified cache, addressed by what produced it.
 ///
@@ -553,12 +559,26 @@ impl BuildTaskExecutor {
         fold.version(TASK_EXECUTION_VERSION)
             .digest(options.identity)
             .digest(Self::plan_fingerprint(plan)?);
+        Self::fold_transform_versions(&mut fold);
         // The feature set is already ordered and deduplicated by `BTreeSet`, and every append is
         // length-framed, so two different selections can never fold to one digest.
         for feature in options.features {
             fold.bytes(feature.as_bytes());
         }
         Ok(fold.finish())
+    }
+
+    /// Fold the output versions of the `jals-classpath` jar transforms this record can name the
+    /// artifacts of.
+    ///
+    /// A task's own inputs say what went *into* a remap or a merge and nothing about what that
+    /// transform does with them, so without this a bump over there would be replayed straight past:
+    /// the memo hits, the task never runs, and the jar the fix replaced is served again. Every
+    /// transform is folded rather than only the ones this plan happens to reach — which
+    /// over-invalidates a task that remaps nothing, on the rare deliberate occasion a version moves,
+    /// and is the cheap side of the trade.
+    fn fold_transform_versions(fold: &mut ProvenanceFold) {
+        JarTransforms::fold(fold);
     }
 
     /// A recorded execution whose every artifact is still present, or `None` — a partially evicted
@@ -1668,5 +1688,39 @@ mod tests {
             );
             assert!(storage.view().file(&manual).is_err());
         });
+    }
+
+    /// The jar transforms' output versions reach the task provenance.
+    ///
+    /// This record names the artifacts a remap or a merge produced and replays them without the
+    /// task running, so a transform whose bytes changed has to reach the *key* — the memo is what
+    /// stops the new transform from ever executing. It went unnoticed twice while the rule was a
+    /// comment asking for [`TASK_EXECUTION_VERSION`] to be bumped alongside, so the fold is what
+    /// enforces it and this is what keeps the fold.
+    #[test]
+    fn a_jar_transform_version_reaches_the_task_provenance() {
+        let plan = TaskPlan::new();
+        let features = BTreeSet::new();
+        let options = SnapshotTaskOptions {
+            identity: ContentDigest::of(b"node"),
+            features: &features,
+            runtime: TaskRuntime { max_fetch_bytes: 1 },
+        };
+        let provenance = BuildTaskExecutor::snapshot_provenance(&plan, &options)
+            .expect("the empty plan fingerprints");
+
+        // The same fold with the transform versions left out. Written here rather than reached
+        // through a flag so that deleting the call in `snapshot_provenance` fails this rather than
+        // changing what both sides compute.
+        let mut without = ProvenanceFold::new(b"jals.build-task.snapshot\0");
+        without
+            .version(TASK_EXECUTION_VERSION)
+            .digest(options.identity)
+            .digest(BuildTaskExecutor::plan_fingerprint(&plan).expect("fingerprints"));
+        assert_ne!(
+            provenance,
+            without.finish(),
+            "a task memo that does not fold in what a transform writes replays the old bytes"
+        );
     }
 }

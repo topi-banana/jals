@@ -549,24 +549,50 @@ jobs:
           # whole cost of keeping a conditional honest. The other 41 releases are not cells: they
           # reach the same two branches through the same threshold, and each one is a ~50 MiB fetch
           # and a whole-game remap.
+          #
+          # Both select no test and still run `jals test`, which is not a contradiction: `jals build`
+          # does not resolve `[dev-dependencies]`, the harness fetches the release's ~60 runtime
+          # libraries whenever it is resolved, and the fmt/lint step below is unconditionally
+          # offline. Without a command that has put those jars in the verified cache, lint falls
+          # back to a root-only analysis that reports nothing and fails nothing. `--no-tests warn`
+          # is what says the empty selection is the expected one here — `client-test` is off, so
+          # `src/test/java` is blanked — while the compile it does perform is worth having on its
+          # own: it is the harness building *inside a consumer*, at the consumer's own `--release`.
+          #
+          # It is not a cheap step, and the reason is worth naming: the harness's edge routes
+          # `minecraft/client` while this project's own defaults route `minecraft/server`, and the
+          # SDK answers a node carrying both with the *merged* jar. So the test step is a second
+          # game-jar fetch and a second whole-game remap on top of what the build step already did
+          # — the same cost this file cites as the reason the other 41 releases are not cells.
           - name: minecraft_mod (1.20.1)
             dir: examples/minecraft_mod
             features: --features 1.20.1
+            test: true
+            test_flags: --no-tests warn
           - name: minecraft_mod (1.21.11)
             dir: examples/minecraft_mod
             features: --features 1.21.11
+            test: true
+            test_flags: --no-tests warn
           # The third `minecraft_mod` cell is the one that *runs* Minecraft rather than compiling
           # against it: `client-test` puts a client's ~60 runtime libraries on the classpath and
           # `src/test/java` boots one headless, from inside a `#[test]` method, and asserts against
           # the client and its integrated server. One release, because the library set is pinned per
           # release; `-j 1`, because each test boots its own client and two at once want two GL
           # contexts.
+          #
+          # `--timeout` is the outer bound and has to sit *above* the harness's own, not below it:
+          # `jals test`'s deadline kills the JVM outright, while `GameClient`'s deadlines are what
+          # print where the boot was waiting and append the game thread's stack. Its worst case is
+          # two `BOOT_DEADLINE`s through `launch()` plus three `WORLD_DEADLINE`s through
+          # `openWorld()` — 1500s — so a shorter kill is the one that throws away the only account
+          # of a hung boot. It only bites on a hang: the three tests take about two minutes.
           - name: minecraft_mod (client)
             dir: examples/minecraft_mod
             features: --features 1.21.11,client-test
             test: true
             headless_gl: true
-            test_flags: -j 1 --timeout 600
+            test_flags: -j 1 --timeout 1800
     steps:
       - parallel:
           - uses: actions/checkout@v7
@@ -599,8 +625,15 @@ jobs:
       # `xvfb` supplies the display GLFW opens a window on, and `libgl1-mesa-dri` supplies llvmpipe,
       # the software rasterizer `LIBGL_ALWAYS_SOFTWARE` selects below. Neither is on the runner
       # image, and only the cell that boots a client has any use for them.
+      #
+      # Beside the binary build rather than ahead of it, for the reason the vendor JARs are: apt
+      # shares nothing with cargo but the CPU and the network, and the Test step below is the first
+      # thing that reads either package. It is joined there rather than left unwaited, so a failed
+      # install is still a failed cell.
       - name: Install a headless OpenGL stack
+        id: headless-gl
         if: ${{ matrix.example.headless_gl }}
+        background: true
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends xvfb libgl1-mesa-dri libglx-mesa0
@@ -639,8 +672,17 @@ jobs:
         run: jals run ${{ matrix.example.features }}
       # `jals test` compiles a second time (the test lowering keeps the `#[test]` methods the
       # build removes) and then runs each test in its own JVM. A non-zero status here is a failing
-      # test, which is exactly what the cell is for.
+      # test, which is exactly what the cell is for — and, for the two `minecraft_mod` cells that
+      # select none, it is also the only command that resolves `[dev-dependencies]` and so the only
+      # one that leaves the offline lint below anything to read.
       #
+      # `wait-all`, not `wait: headless-gl`: the install is `if`-guarded, so a cell that boots no
+      # client has no such step to name — and a wait step carries no `if:` of its own to guard it
+      # with. Nothing else is outstanding by here (the vendor JARs were joined before the build),
+      # so on every other cell this is a no-op, and the rule that every `background:` is joined on
+      # every path to the end of its job holds unconditionally rather than on the client path alone.
+      - name: Wait for the headless OpenGL stack
+        wait-all:
       # The two `LIBGL_*` variables are set for every cell and read by none but the client one:
       # they only mean anything to a Mesa that a GL context is being asked of.
       - name: Test
@@ -657,18 +699,22 @@ jobs:
         if: ${{ failure() && matrix.example.headless_gl }}
         uses: actions/upload-artifact@v7
         with:
-          name: minecraft-mod-client-run
+          # The cell's own directory and its own name, as every other step in this job takes them:
+          # a second `headless_gl` cell would otherwise upload the first one's paths under a name
+          # the two collide on, and lose the logs in the one place they are the whole account.
+          name: client-run-${{ matrix.example.name }}
           path: |
-            examples/minecraft_mod/target/jals/build/mc-client/**/logs/**
-            examples/minecraft_mod/target/jals/build/mc-client/**/crash-reports/**
-            examples/minecraft_mod/target/jals/build/test-run/**
+            ${{ matrix.example.dir }}/target/jals/build/mc-client/**/logs/**
+            ${{ matrix.example.dir }}/target/jals/build/mc-client/**/crash-reports/**
+            ${{ matrix.example.dir }}/target/jals/build/test-run/**
           if-no-files-found: ignore
       # After the build *and* the test, not before them: an example whose dependency fetches
       # (`minecraft_mod`) can only be analysed once that fetch has landed in the verified cache,
-      # because analysis is always offline. For the client cell that means after the test step
-      # specifically — the ~60 client runtime jars come from a `[dev-dependencies]` entry, which
-      # `jals build` does not resolve and `jals test` does. Reordering these two steps would leave
-      # that cell's lint on a root-only fallback, which reports nothing and fails nothing.
+      # because analysis is always offline. For all three `minecraft_mod` cells that means after the
+      # test step specifically — the ~60 client runtime jars come from a `[dev-dependencies]` entry,
+      # which `jals build` does not resolve and `jals test` does, whether or not that run selects a
+      # test. Reordering these two steps would leave their lint on a root-only fallback, which
+      # reports nothing and fails nothing.
       #
       # Tracked files only. Everything a build script publishes into a source root is untracked by
       # construction (the examples' `.gitignore`s reserve those roots), so `git ls-files` is what
@@ -829,6 +875,97 @@ jobs:
           name: hellomod-jars
           pattern: hellomod-jar-*
           delete-merged: true
+
+  client-harness-setup:
+    # The same two things `mod-jar-setup` produces, for the other end of the same claim. That job
+    # checks all 43 releases *compile a mod*; this one checks all 43 compile the **harness** those
+    # mods are tested with — and, because a build script's tasks execute, it is also what verifies
+    # every one of the 2287 library digests `examples/minecraft_client_test/build.rhai` pins.
+    #
+    # A separate list from `mod-jar-setup`'s, read out of the harness's own manifest, because the
+    # two projects declare their releases independently. They agree today; a cell that fails because
+    # they stopped agreeing is the point.
+    name: client harness setup
+    runs-on: ubuntu-latest
+    outputs:
+      versions: ${{ steps.versions.outputs.versions }}
+    steps:
+      - parallel:
+          - uses: actions/checkout@v7
+          - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: client-harness
+      - name: Read the release list out of the harness's manifest
+        id: versions
+        run: |
+          set -euo pipefail
+          versions=$(python3 -c '
+          import json, tomllib
+
+          manifest = tomllib.load(open("examples/minecraft_client_test/jals.toml", "rb"))
+          print(json.dumps([k for k in manifest["features"] if k[0].isdigit()]))
+          ')
+          echo "${versions}"
+          echo "versions=${versions}" >>"$GITHUB_OUTPUT"
+      - name: Build the jals binary
+        run: cargo build --release --package jals-cli
+      - name: Upload the jals binary for the matrix
+        uses: actions/upload-artifact@v7
+        with:
+          name: client-harness-jals
+          path: target/release/jals
+          if-no-files-found: error
+          retention-days: 1
+
+  client-harness:
+    # One cell per Minecraft release, compiling `GameClient.java` against that release's client jar.
+    #
+    # The step after the build is not redundant with its exit status. A green `jals build` says the
+    # selection resolved and `javac` raised nothing; it does not say a type came out, and how much
+    # of this file there is to compile is what its `#[cfg]` decides. So the cell asserts the class
+    # file exists, the same way the `minecraft` cell asserts its publication roots are not empty.
+    name: client harness (${{ matrix.minecraft }})
+    needs: client-harness-setup
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        minecraft: ${{ fromJSON(needs.client-harness-setup.outputs.versions) }}
+    steps:
+      - parallel:
+          - uses: actions/checkout@v7
+          # One JDK for all 43, for the reason `mod-jar` gives: `javac` compiles at any `--release`
+          # it still supports and reads a newer classpath class without complaint. The harness's
+          # own `build.rhai` derives `--release` from the release's era, 8 through 21.
+          - name: Set up JDK (the harness compiles against the game's class files)
+            uses: actions/setup-java@v6
+            with:
+              distribution: temurin
+              java-version: "25"
+          - name: Download the jals binary built once for this matrix
+            uses: actions/download-artifact@v8
+            with:
+              name: client-harness-jals
+              path: ${{ runner.temp }}/jals-bin
+      - name: Put jals on PATH
+        run: |
+          set -euo pipefail
+          chmod +x "${RUNNER_TEMP}/jals-bin/jals"
+          echo "${RUNNER_TEMP}/jals-bin" >>"$GITHUB_PATH"
+      - name: Compile the harness against this release
+        working-directory: examples/minecraft_client_test
+        run: jals build --features ${{ matrix.minecraft }}
+      - name: Check it compiled a type and not merely a selection
+        working-directory: examples/minecraft_client_test
+        run: |
+          set -euo pipefail
+          class=target/classes/com/example/mctest/GameClient.class
+          if [ ! -f "${class}" ]; then
+            echo "::error::${class} is missing: the build resolved but compiled no type"
+            exit 1
+          fi
+          echo "compiled ${class} ($(stat -c%s "${class}") bytes)"
 
   setup-action:
     # The repository-root `action.yml` claims a consumer installs `jals` in one step. A claim is
