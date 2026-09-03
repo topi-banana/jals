@@ -747,3 +747,33 @@ fn a_nested_type_qualifies_a_member() {
                class Use { Object read() { return Outer.Kind.ERROR; } }";
     assert_eq!(expr_ty(src, "Outer.Kind.ERROR"), "Kind");
 }
+
+/// A class that declares no constructor still has one: the default (JLS §8.8.9).
+///
+/// Nothing in the source writes it, so nothing in the walk produced it — and a `super()` naming a
+/// superclass that declared none resolved to nothing, as did `new Base()`. A `record` is excluded
+/// because its canonical constructor is the one it gets instead.
+#[test]
+fn a_class_with_no_constructor_still_has_the_default_one() {
+    let src = "class Base { int v; }
+               class Sub extends Base { Sub() { super(); } }
+               class Use { Base make() { return new Base(); } }";
+    let fixture = Fixture::new(src);
+    let semantics = fixture.semantics();
+    let typed = jals_exec::block_on_inline(semantics.typed());
+    // Both the delegation and the creation resolve to it, which is the whole of what it is for.
+    for text in ["super()", "new Base()"] {
+        let call = fixture
+            .node
+            .descendants()
+            .find(|n| n.text().to_string().trim() == text)
+            .unwrap_or_else(|| panic!("no `{text}`"));
+        let range = call.text_range();
+        assert!(
+            typed
+                .call_target_of(usize::from(range.start())..usize::from(range.end()))
+                .is_some(),
+            "`{text}` resolves to the default constructor"
+        );
+    }
+}

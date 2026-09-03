@@ -998,6 +998,30 @@ struct Layout {
 }
 
 impl Layout {
+    /// The constructors of `item` this module actually lowered a function for.
+    ///
+    /// Not every indexed constructor is one. The index gives a class that writes none the **default**
+    /// constructor JLS §8.8.9 says it has, and nothing lowers a body for that: whatever it would run
+    /// — the field initialisers — is in [`default_constructors`](Self::default_constructors)
+    /// instead. So "does this class have a constructor" and "is there a function to call" are two
+    /// questions, and asking the first where the second was meant found a member with no function
+    /// and stopped there: a `new` that skipped every initialiser above it, in a module that
+    /// validates.
+    fn constructors<'a>(
+        &'a self,
+        index: &'a ProjectIndex,
+        item: ItemId,
+    ) -> impl Iterator<Item = MemberId> + 'a {
+        index
+            .own_members(item)
+            .iter()
+            .copied()
+            .filter(move |&member| {
+                index.member(member).kind == DefKind::Constructor
+                    && self.functions.contains_key(&member)
+            })
+    }
+
     /// Reserve `item`'s struct type index and work out which fields it holds.
     ///
     /// Reserving rather than declaring is what makes an array-typed field work: the field's *type*
@@ -1465,10 +1489,12 @@ impl Body {
                 let struct_type = layout.structs[&created];
                 insn.struct_new_default(struct_type);
                 let arity = index.member(member).params.len();
-                let constructor = index.own_members(created).iter().copied().find(|&id| {
-                    let info = index.member(id);
-                    info.kind == DefKind::Constructor && info.params.len() == arity
-                });
+                // Only one with a *body*: the index also holds the default constructor every class
+                // without a written one has (JLS §8.8.9), which nothing lowered a function for —
+                // and which is the arm below, not a constructor this can call.
+                let constructor = layout
+                    .constructors(index, created)
+                    .find(|&id| index.member(id).params.len() == arity);
                 if let Some(constructor) = constructor {
                     let function =
                         *layout
@@ -1692,12 +1718,7 @@ impl Body {
     fn super_constructor(owner: ItemId, index: &ProjectIndex, layout: &Layout) -> Option<u32> {
         let mut candidate = Hierarchy::of(index).superclass(owner);
         while let Some(item) = candidate {
-            let mut declared = index
-                .own_members(item)
-                .iter()
-                .copied()
-                .filter(|&member| index.member(member).kind == DefKind::Constructor)
-                .peekable();
+            let mut declared = layout.constructors(index, item).peekable();
             if declared.peek().is_some() {
                 return declared
                     .find(|&member| index.member(member).params.is_empty())
@@ -1832,14 +1853,9 @@ impl Lowering<'_> {
             owner
         };
         let mut matching = self
-            .index
-            .own_members(owner)
-            .iter()
-            .copied()
-            .filter(|&member| {
-                let info = self.index.member(member);
-                info.kind == DefKind::Constructor && info.params.len() == arguments.len()
-            });
+            .layout
+            .constructors(self.index, owner)
+            .filter(|&member| self.index.member(member).params.len() == arguments.len());
         let selected = matching.next();
         if selected.is_some() && matching.next().is_some() {
             return Err(WasmError::Unsupported(
@@ -4437,12 +4453,15 @@ impl Lowering<'_> {
         // Which constructor, read from the index rather than re-picked here. Matching on argument
         // *count* alone took the first of any same-arity pair, and a second selection free to
         // disagree with the analysis is the drift `call_target_of` exists to prevent.
-        let constructor = self.input.call_target_of(Facts::span(new.syntax()));
-        let declares_constructor = self
-            .index
-            .own_members(item)
-            .iter()
-            .any(|&member| self.index.member(member).kind == DefKind::Constructor);
+        // Only a constructor with a *body* counts on either side. The index also holds the default
+        // constructor every class without a written one has (JLS §8.8.9), which nothing lowered a
+        // function for — and resolving to that one is the same case as resolving to none, which is
+        // the second arm below.
+        let constructor = self
+            .input
+            .call_target_of(Facts::span(new.syntax()))
+            .filter(|target| self.layout.functions.contains_key(target));
+        let declares_constructor = self.layout.constructors(self.index, item).next().is_some();
 
         insn.struct_new_default(struct_type);
         match constructor {

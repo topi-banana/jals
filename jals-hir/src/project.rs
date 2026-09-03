@@ -597,6 +597,21 @@ struct RawType {
     raw_supertypes: Vec<MemberType>,
 }
 
+/// Whether a compilation unit *declares* its types or merely records their signatures.
+///
+/// It decides one thing, and only because absence means two different things in the two: a class
+/// that lists no constructor has the default one JLS §8.8.9 gives it, while a **stub** that lists
+/// none has simply not written it down. `java.lang.Integer` has no no-argument constructor at all,
+/// so reading the stub's silence as a declaration invents a member the JDK does not have — and
+/// every consumer is then free to call it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Declarations {
+    /// Real source: what is not written is what the language implies.
+    Complete,
+    /// A signature record: what is not written is simply not recorded.
+    SignaturesOnly,
+}
+
 /// One source file's cacheable contribution to a [`ProjectIndex`]: its resolution context (package +
 /// imports) and its type declarations' facts.
 ///
@@ -892,12 +907,28 @@ impl ProjectIndex {
         Self::extract_file_with_cfg(root, &CfgMap::default()).await
     }
 
+    /// Extract a **stub** file's facts: the same walk, minus every member a declaration only
+    /// *implies*.
+    ///
+    /// A stub is a signature record and is deliberately partial ([`crate::stdlib`]), so a
+    /// constructor it does not list is one nobody wrote down — not one the class does not have.
+    /// Reading the absence the way [`extract_file`](Self::extract_file) does gives
+    /// `java.lang.Integer` a no-argument constructor the JDK does not declare, which is a member
+    /// every consumer would then be free to call.
+    async fn extract_stub_file(root: &SyntaxNode) -> FileFacts {
+        Self::extract(root, &CfgMap::default(), Declarations::SignaturesOnly).await
+    }
+
     /// Like [`extract_file`](Self::extract_file), but skipping every `cfg`-disabled host in
     /// `cfg` (computed over the same text as `root`): a disabled type contributes no facts,
     /// a disabled member no [`Member`], a disabled import no entry in the import tables — the
     /// analysis-side mirror of the compile frontend blanking the host. An empty (default) map
     /// extracts identically to [`extract_file`](Self::extract_file).
     pub async fn extract_file_with_cfg(root: &SyntaxNode, cfg: &CfgMap) -> FileFacts {
+        Self::extract(root, cfg, Declarations::Complete).await
+    }
+
+    async fn extract(root: &SyntaxNode, cfg: &CfgMap, declarations: Declarations) -> FileFacts {
         let Some(src) = ast::SourceFile::cast(root.clone()) else {
             return FileFacts {
                 meta: None,
@@ -967,7 +998,7 @@ impl ProjectIndex {
             }
         }
         let mut types = Vec::new();
-        Self::extract_types(root, package.as_deref(), &mut types, cfg).await;
+        Self::extract_types(root, package.as_deref(), &mut types, cfg, declarations).await;
         FileFacts {
             meta: Some(FileMeta {
                 package,
@@ -989,7 +1020,10 @@ impl ProjectIndex {
         let mut facts = Vec::with_capacity(sources.len());
         for (i, src) in sources.iter().enumerate() {
             let root = jals_syntax::Parse::parse(src).await.syntax();
-            facts.push((FileId(u32::MAX - i as u32), Self::extract_file(&root).await));
+            facts.push((
+                FileId(u32::MAX - i as u32),
+                Self::extract_stub_file(&root).await,
+            ));
         }
         facts
     }
@@ -2055,9 +2089,14 @@ impl SourceLocations {
                     .or_insert_with(|| (file, Collect::byte_range(&name_tok)));
                 // Library sources are never `cfg`-filtered (they are navigation-only and a
                 // dependency's own feature selection does not reach this seam), so the empty map.
-                for member in
-                    ProjectIndex::members_of_decl(ItemId(0), file, &node, &name, &CfgMap::default())
-                {
+                for member in ProjectIndex::members_of_decl(
+                    ItemId(0),
+                    file,
+                    &node,
+                    &name,
+                    &CfgMap::default(),
+                    Declarations::Complete,
+                ) {
                     let loc = (member.file, member.name_range.clone());
                     self.members
                         .entry((fqn.clone(), member.name.clone(), member.params.len()))
@@ -2103,6 +2142,7 @@ impl ProjectIndex {
         package: Option<&str>,
         out: &mut Vec<RawType>,
         cfg: &CfgMap,
+        declarations: Declarations,
     ) {
         let mut yielder = Yielder::new();
         // The recursion's `enclosing` parameter, made explicit: each frame carries the enclosing
@@ -2179,7 +2219,14 @@ impl ProjectIndex {
                     kind: DefKind::Class,
                     name_range: start..start,
                     type_params: Vec::new(),
-                    members: Self::members_of_decl(ItemId(0), FileId(0), &node, &simple, cfg),
+                    members: Self::members_of_decl(
+                        ItemId(0),
+                        FileId(0),
+                        &node,
+                        &simple,
+                        cfg,
+                        declarations,
+                    ),
                     raw_supertypes: supertype.into_iter().collect(),
                 });
             }
@@ -2199,7 +2246,14 @@ impl ProjectIndex {
                     kind: DefKind::Class,
                     name_range: start..start,
                     type_params: Vec::new(),
-                    members: Self::members_of_decl(ItemId(0), FileId(0), &node, &simple, cfg),
+                    members: Self::members_of_decl(
+                        ItemId(0),
+                        FileId(0),
+                        &node,
+                        &simple,
+                        cfg,
+                        declarations,
+                    ),
                     raw_supertypes: Self::raw_supertypes_of(&node),
                 });
             }
@@ -2214,7 +2268,14 @@ impl ProjectIndex {
                     name_range: Collect::byte_range(&name_tok),
                     type_params: Self::type_params_of(&node),
                     // Placeholder owner/file, fixed up when these facts are folded into an index.
-                    members: Self::members_of_decl(ItemId(0), FileId(0), &node, &name, cfg),
+                    members: Self::members_of_decl(
+                        ItemId(0),
+                        FileId(0),
+                        &node,
+                        &name,
+                        cfg,
+                        declarations,
+                    ),
                     raw_supertypes: Self::raw_supertypes_of(&node),
                 });
                 Some(alloc::rc::Rc::<str>::from(fqn.as_str()))
@@ -2243,6 +2304,7 @@ impl ProjectIndex {
         node: &SyntaxNode,
         owner_simple: &str,
         cfg: &CfgMap,
+        declarations: Declarations,
     ) -> Vec<Member> {
         let mut members = Vec::new();
         // The body holds the members directly (a `ClassBody`, or an `EnumBody` whose constants and
@@ -2567,6 +2629,40 @@ impl ProjectIndex {
                     annotations: Vec::new(),
                 }],
             ));
+        }
+        // A class that declares no constructor has one anyway: the *default* constructor, taking no
+        // arguments and with the class's own access (JLS §8.8.9). Nothing in the source writes it, so
+        // nothing above produces it — and without it a `super()` naming a superclass that declared
+        // none resolved to nothing, as did `new Base()`. A `record` is excluded because its
+        // canonical constructor is the one it gets instead, and an interface and `@interface` have
+        // no constructor at all. An `enum`'s implicit one is `private ()`, exactly as a class's is,
+        // and the two synthetic parameters a backend adds to it are the backend's business.
+        if declarations == Declarations::Complete
+            && matches!(node.kind(), SyntaxKind::CLASS_DECL | SyntaxKind::ENUM_DECL)
+            && !members.iter().any(|m| m.kind == DefKind::Constructor)
+        {
+            let is_enum = node.kind() == ENUM_DECL;
+            members.push(Member {
+                owner,
+                name: owner_simple.to_owned(),
+                kind: DefKind::Constructor,
+                type_params: Vec::new(),
+                file,
+                // Nothing declares it, so there is no name range to point at — which is what keeps
+                // `member_by_decl` from ever finding it.
+                name_range: 0..0,
+                ty: MemberType::Unknown,
+                modifiers: MemberModifiers {
+                    is_static: false,
+                    is_private: is_enum,
+                    is_public: !is_enum && MemberModifiers::of(node).is_public,
+                    is_abstract: false,
+                },
+                params: Vec::new(),
+                varargs: false,
+                throws: Vec::new(),
+                source_location: None,
+            });
         }
         members
     }
