@@ -581,8 +581,9 @@ impl TypeInference {
             .copied()
             .filter(|&id| {
                 let member = index.member(id);
+                // Precise, not the diagnostic relation: see [`Ty::is_applicable_to`].
                 let fits = |arg_ty: Option<&Ty>, target: &Ty| {
-                    arg_ty.is_none_or(|ty| ty.is_assignable_to(target, Some(index)))
+                    arg_ty.is_none_or(|ty| ty.is_applicable_to(target, index))
                 };
                 let declared = |param: &crate::Param| {
                     index.member_type_to_ty(member.file, member.owner, Some(id), &param.ty)
@@ -748,9 +749,9 @@ impl TypeInference {
             left.params.iter().zip(&right.params).all(|(from, to)| {
                 index
                     .member_type_to_ty(left.file, left.owner, Some(left_id), &from.ty)
-                    .is_assignable_to(
+                    .is_applicable_to(
                         &index.member_type_to_ty(right.file, right.owner, Some(right_id), &to.ty),
-                        Some(index),
+                        index,
                     )
             })
         };
@@ -970,6 +971,19 @@ impl<'a> Inferer<'a> {
                 let ty = self.item_ty(item);
                 self.set_def_type(Collect::token_start(&name), ty);
             }
+            // A **multi-catch** parameter's type is the *lub* of its arms (JLS §14.20), not the
+            // first of them. Its erasure — what the local's descriptor says, and what the verifier
+            // computes by merging the handler's two entry states — is their nearest common
+            // superclass, and typing it as one arm emitted an `invokevirtual` on that arm against a
+            // value the verifier knows only as the common supertype.
+            if node.kind() == CATCH_CLAUSE
+                && let Some(common) = self.multi_catch_ty(&node)
+            {
+                for (token, _) in ast::Declarators::dims_of(&node) {
+                    self.set_def_type(Collect::token_start(&token), common.clone());
+                }
+                continue;
+            }
             if Self::declares_typed_bindings(node.kind()) {
                 let ty = node.children().find_map(ast::Type::cast);
                 if !ty.as_ref().is_some_and(Cst::is_var_type) {
@@ -1127,6 +1141,46 @@ impl<'a> Inferer<'a> {
         }
     }
 
+    /// The type a `catch (A | B e)` binding has: the nearest class every arm is a subtype of.
+    ///
+    /// `None` for a single-arm `catch`, which the ordinary declared-type path already handles, and
+    /// for one whose arms this index cannot relate — where staying with the written type is the
+    /// lenient answer this module prefers to a guess.
+    fn multi_catch_ty(&self, node: &SyntaxNode) -> Option<Ty> {
+        let (index, file) = self.project?;
+        let arms: Vec<ItemId> = node
+            .children()
+            .filter_map(ast::Type::cast)
+            .map(|written| {
+                let name = written.simple_name()?;
+                let qualified = written
+                    .is_qualified()
+                    .then(|| written.qualified_text())
+                    .flatten();
+                index
+                    .resolve_type_name(file, &name, qualified.as_deref())
+                    .project_id()
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let [first, rest @ ..] = arms.as_slice() else {
+            return None;
+        };
+        if rest.is_empty() {
+            return None;
+        }
+        // Up the first arm's class chain, nearest first, to the first ancestor every other arm also
+        // has. Only the *class* chain: the lub's interfaces are part of it too, and no descriptor
+        // records them — a class file writes the erasure, which is the class.
+        let mut candidate = Some(*first);
+        while let Some(item) = candidate {
+            if rest.iter().all(|&arm| index.is_subtype(arm, item)) {
+                return Some(self.item_ty(item));
+            }
+            candidate = index.superclass_of(item);
+        }
+        None
+    }
+
     fn set_def_type(&mut self, name_start: usize, ty: Ty) {
         if let Some(&id) = self.def_by_name_start.get(&name_start) {
             self.inference.def_types[id.0 as usize] = ty;
@@ -1187,7 +1241,7 @@ impl<'a> Inferer<'a> {
     /// Computes an expression's type from its (already-typed) children.
     fn compute_expr_ty(&self, expr: &ast::Expr) -> Ty {
         match expr {
-            ast::Expr::Literal(l) => Self::literal_ty(l),
+            ast::Expr::Literal(l) => self.literal_ty(l),
             ast::Expr::NameRef(n) => self.nameref_ty(n.syntax()),
             ast::Expr::Paren(p) => self.child_ty(p.expr()),
             ast::Expr::Unary(u) => self.unary_ty(u),
@@ -1473,7 +1527,7 @@ impl<'a> Inferer<'a> {
             // `+` is string concatenation when either side is a `String`, else arithmetic.
             [PLUS] => {
                 if lhs.is_string() || rhs.is_string() {
-                    Ty::string()
+                    self.java_lang_ty("String")
                 } else {
                     lhs.binary_numeric(&rhs)
                 }
@@ -2235,7 +2289,7 @@ impl Inferer<'_> {
     }
 
     /// The type of a literal, by its token kind (and suffix, for numbers).
-    fn literal_ty(l: &ast::Literal) -> Ty {
+    fn literal_ty(&self, l: &ast::Literal) -> Ty {
         fn ends_with_ignore_case(text: &str, suffix: char) -> bool {
             text.chars()
                 .next_back()
@@ -2262,7 +2316,13 @@ impl Inferer<'_> {
                 }
             }
             CHAR_LITERAL => Ty::Primitive(Primitive::Char),
-            STRING_LITERAL | TEXT_BLOCK => Ty::string(),
+            // The *indexed* `java.lang.String` wherever the index holds one. Typing a literal by
+            // name alone made it `External`, and an external type is assignable to every project
+            // type by design (it might be an unindexed project type) — so every one-argument
+            // overload was applicable to `f("")` and the winner was declaration order.
+            // `PrintStream(OutputStream)` is declared before `PrintStream(String)`, and `super("")`
+            // compiled to the first of them.
+            STRING_LITERAL | TEXT_BLOCK => self.java_lang_ty("String"),
             TRUE_KW | FALSE_KW => Ty::Primitive(Primitive::Boolean),
             NULL_KW => Ty::Null,
             _ => Ty::Unknown,

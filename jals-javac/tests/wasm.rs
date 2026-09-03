@@ -3108,6 +3108,28 @@ public class Reachable {
 ";
     // It compiles and validates; the unreachable bodies are never entered.
     assert_invoke(&[source], "run", &["21"], "42");
+
+    // And the arm is only sound while `overriders` is complete, so the discriminating case is a
+    // *reachable* call whose implementation is in another compilation unit: if the subtype relation
+    // missed the edge, this would trap where it must answer.
+    let declared = "
+public interface Answer {
+    int give(int n);
+}
+";
+    let implemented = "
+public class Doubling implements Answer {
+    public int give(int n) { return n * 2; }
+}
+
+public class Through {
+    public static int run(int n) {
+        Answer answer = new Doubling();
+        return answer.give(n);
+    }
+}
+";
+    assert_invoke(&[declared, implemented], "run", &["21"], "42");
 }
 
 /// `java.lang.Object` is represented, and it is the one library type that needs no `java.base`.

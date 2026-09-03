@@ -135,6 +135,8 @@ struct Method {
     /// Whether the function's signature has a result, which decides whether its body needs a trailing
     /// `unreachable`.
     has_result: bool,
+    /// The type that result has, which is what a `return` narrows its value to.
+    result: Option<ValType>,
 }
 
 /// Compiles a whole project to one WebAssembly module.
@@ -802,6 +804,7 @@ impl CompileWasm {
                     ty => alloc::vec![layout.val_type(&ty)?],
                 };
                 let has_result = !results.is_empty();
+                let result = results.first().copied();
                 let signature = module.add_type(SubType::plain(CompType::Func { params, results }));
                 let function = Module::func_index(out.len());
                 layout.functions.insert(member, function);
@@ -814,6 +817,7 @@ impl CompileWasm {
                     export: None,
                     is_constructor: false,
                     has_result,
+                    result,
                     encloses: None,
                     captures: 0,
                     initialises: None,
@@ -859,6 +863,7 @@ impl CompileWasm {
                     export: None,
                     is_constructor: false,
                     has_result: false,
+                    result: None,
                     encloses: None,
                     captures: 0,
                     initialises: Some(item),
@@ -914,6 +919,7 @@ impl CompileWasm {
                 };
 
                 let has_result = !results.is_empty();
+                let result = results.first().copied();
                 let signature = module.add_type(SubType::plain(CompType::Func { params, results }));
                 let function = Module::func_index(out.len());
                 layout.functions.insert(member, function);
@@ -926,6 +932,7 @@ impl CompileWasm {
                     // A `public static` method is the module's surface: a wasm host has no `main`
                     // convention, so every one of them is exported by name.
                     has_result,
+                    result,
                     encloses,
                     captures: captured.len(),
                     initialises: None,
@@ -1501,6 +1508,7 @@ impl Body {
             pending_label: None,
             cleanups: Vec::new(),
             yields: Vec::new(),
+            result: method.result,
         };
         // `this` is parameter 0 of an instance method or a constructor.
         if method.owner.is_some() || method.is_constructor {
@@ -1856,6 +1864,12 @@ struct Lowering<'a> {
     /// Enclosing `switch` *expressions*, innermost last: where a `yield` branches to, and the type the
     /// value it carries must have.
     yields: Vec<(u32, ValType)>,
+    /// The function's declared result, which is what a `return` narrows its value to.
+    ///
+    /// The same erasure that puts an argument at the top of the reference hierarchy puts a returned
+    /// value there: a method declared to return a concrete type may compute one through an
+    /// interface, an `Object`, or a type variable, and the signature wants the struct.
+    result: Option<ValType>,
 }
 
 /// One arm of a lowered `switch`: which keys reach it, in the order the arms are written.
@@ -1916,6 +1930,8 @@ impl Lowering<'_> {
             pending_label: None,
             cleanups: Vec::new(),
             yields: Vec::new(),
+            // A class initialiser returns nothing, so there is no `return` value to narrow.
+            result: None,
         }
     }
 
@@ -2148,7 +2164,12 @@ impl Lowering<'_> {
                 // leaves — which is the order §14.20.2 gives and the reason a cleanup can observe the
                 // value's side effects but not change what is returned.
                 if let Some(value) = statement.expr() {
-                    self.expr(&value, insn)?;
+                    match self.result {
+                        Some(target) => self.expr_as(&value, target, insn)?,
+                        None => {
+                            self.expr(&value, insn)?;
+                        }
+                    }
                 }
                 // A `return` leaves the frame, so it leaves *every* open cleanup behind.
                 self.run_cleanups(0, insn)?;

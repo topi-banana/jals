@@ -777,3 +777,37 @@ fn a_class_with_no_constructor_still_has_the_default_one() {
         );
     }
 }
+
+/// A multi-catch parameter is the *lub* of its arms, not the first of them (JLS §14.20).
+///
+/// Its erasure — what a local's descriptor says, and what a verifier computes by merging the
+/// handler's two entry states — is the arms' nearest common superclass. Typing it as one arm made a
+/// call on it an `invokevirtual` naming that arm, against a value that may be the other.
+#[test]
+fn a_multi_catch_parameter_is_the_lub_of_its_arms() {
+    let src = "class Parent extends RuntimeException {}
+               class Son extends Parent {}
+               class Daughter extends Parent {}
+               class Use {
+                   void run() {
+                       try { throw new Son(); }
+                       catch (Son | Daughter e) { e.hashCode(); }
+                   }
+                   void one() {
+                       try { throw new Son(); }
+                       catch (Son e) { e.hashCode(); }
+                   }
+               }";
+    let fixture = Fixture::new(src);
+    let semantics = fixture.semantics();
+    let typed = jals_exec::block_on_inline(semantics.typed());
+    let types: Vec<String> = typed
+        .analysis()
+        .defs()
+        .iter()
+        .filter(|d| d.name == "e")
+        .map(|d| typed.type_of_def(d.id).to_string())
+        .collect();
+    // The multi-catch binding is the common superclass; a single-arm one keeps what it wrote.
+    assert_eq!(types, ["Parent", "Son"]);
+}

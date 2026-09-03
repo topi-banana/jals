@@ -785,6 +785,31 @@ impl<'a> Facts<'a> {
         })
     }
 
+    /// The array type whose `clone()` a call names, and `None` for every other call.
+    ///
+    /// JLS §10.7 gives every array two members and neither is declared anywhere: `length`, which
+    /// [`is_array_length`](Self::is_array_length) answers, and `clone()`. The second *is* a call, so
+    /// it is not simply refused — what is special is only its owner and its return, both of which
+    /// are the array's own type rather than `Object`'s. The index resolves the name to
+    /// `Object.clone()`, whose descriptor returns `java/lang/Object`, and emitting that leaves an
+    /// `Object` on the stack where the next use is verified against the array.
+    pub(crate) fn array_clone(self, call: &ast::CallExpr) -> Option<Ty> {
+        let ast::Expr::FieldAccess(access) = call.callee()? else {
+            return None;
+        };
+        if jals_syntax::decoded_ident(&Self::field_token(&access)?) != "clone" {
+            return None;
+        }
+        if call.args().is_some_and(|list| list.args().next().is_some()) {
+            return None;
+        }
+        let receiver = access.receiver()?;
+        match self.typed.type_of_expr(Self::span(receiver.syntax())) {
+            Some(ty @ Ty::Array(_)) => Some(ty.clone()),
+            _ => None,
+        }
+    }
+
     /// The indexed member a file-local definition declares.
     ///
     /// A name that resolved to a definition but to no *local* is one of the enclosing type's own

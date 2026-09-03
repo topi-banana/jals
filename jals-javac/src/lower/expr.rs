@@ -697,8 +697,35 @@ impl Expr {
         Ok(())
     }
 
+    /// An array's `clone()`, whose owner and return are the array's own type (JLS §10.7).
+    ///
+    /// The one member a call resolves to `Object.clone()` and must not be emitted as. The *owner*
+    /// is the array's own type — a `CONSTANT_Class` naming an array descriptor, which is how javac
+    /// spells it — while the descriptor stays `Object`'s, because that is the method the JVM
+    /// actually resolves. Java's covariant return is then the `checkcast` that puts the array type
+    /// back, exactly as it does for an erased generic return; emitting `Object.clone()` with no cast
+    /// left an `Object` on the stack where the next use is verified against the array.
+    fn array_clone(
+        array: &Ty,
+        call: &ast::CallExpr,
+        context: &Context<'_>,
+        emit: &mut Emit<'_, '_>,
+    ) -> Result<()> {
+        let Some(ast::Expr::FieldAccess(access)) = call.callee() else {
+            return Err(LowerError::Unsupported("an array `clone` with no receiver"));
+        };
+        Self::lower(&Self::inner(access.receiver())?, context, emit)?;
+        let owner = Descriptor::class_entry(array, context.index)?;
+        emit.asm
+            .invoke_virtual(&owner, "clone", "()Ljava/lang/Object;")?;
+        Ok(emit.asm.check_cast(&owner)?)
+    }
+
     /// A call, dispatched by how the selected member is reached.
     fn call(call: &ast::CallExpr, context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
+        if let Some(array) = context.facts().array_clone(call) {
+            return Self::array_clone(&array, call, context, emit);
+        }
         let member = context
             .typed
             .call_target_of(Facts::span(call.syntax()))

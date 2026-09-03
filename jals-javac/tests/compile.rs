@@ -6481,3 +6481,63 @@ public class Constants {
     }
     assert_eq!(run(source, "Constants"), "crimson\nGREEN\n");
 }
+
+/// A `String` literal has the *indexed* `java.lang.String` type, not a name.
+///
+/// An external type is assignable to every project type by design — it might be an unindexed
+/// project type — so typing the literal by name alone made every one-argument overload applicable
+/// to `f("")` and left declaration order to pick the winner. `PrintStream(OutputStream)` is
+/// declared before `PrintStream(String)`, and `super("")` compiled to the first of them: a class
+/// file whose `invokespecial` the verifier refuses.
+///
+/// Checked here rather than only in `jals-hir` because the claim is about a *classpath* type, and
+/// this is the crate whose tests have one.
+#[test]
+fn a_string_literal_selects_the_string_overload() {
+    let source = r#"
+public class Choosing {
+    static String pick(Object o) { return "object"; }
+    static String pick(String s) { return "string"; }
+    static String pick(StringBuilder b) { return "builder"; }
+
+    public static void main(String[] args) {
+        System.out.println(pick("x"));
+        System.out.println(pick("a" + "b"));
+        System.out.println(pick(new StringBuilder()));
+    }
+}
+"#;
+    if !java_available() {
+        compile(source).expect("compile");
+        return;
+    }
+    assert_eq!(run(source, "Choosing"), "string\nstring\nbuilder\n");
+}
+
+/// An array's `clone()` names the array as its owner and casts the covariant return back.
+///
+/// JLS §10.7 gives every array a `public T[] clone()` that no declaration anywhere holds, so the
+/// index resolves the name to `Object.clone()` — whose descriptor returns `Object`. javac names the
+/// *array* type as the `CONSTANT_Class` owner, keeps `Object`'s descriptor (that is the method the
+/// JVM resolves), and puts the array type back with a `checkcast`. Emitting `Object.clone()` alone
+/// left an `Object` in a local the verifier had already typed as the array.
+#[test]
+fn an_array_clone_keeps_the_array_type() {
+    let source = "
+public class Cloning {
+    public static void main(String[] args) {
+        int[] numbers = {1, 2, 3};
+        int[] copy = numbers.clone();
+        copy[0] = 9;
+        String[] names = {\"a\", \"b\"};
+        String[] also = names.clone();
+        System.out.println(numbers[0] + \" \" + copy[0] + \" \" + also[1] + \" \" + also.length);
+    }
+}
+";
+    if !java_available() {
+        compile(source).expect("compile");
+        return;
+    }
+    assert_eq!(run(source, "Cloning"), "1 9 b 2\n");
+}
