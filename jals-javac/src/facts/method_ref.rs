@@ -103,7 +103,7 @@ impl Facts<'_> {
     /// `String.class`'s base is a name reference, not a type node, because nothing tells the parser
     /// which of the two it is until the `.class` arrives. So the dotted text is resolved against
     /// the index directly.
-    fn ty_of_name(self, node: &SyntaxNode) -> Result<Ty> {
+    pub(crate) fn ty_of_name(self, node: &SyntaxNode) -> Result<Ty> {
         let mut text = alloc::string::String::new();
         for token in node
             .children_with_tokens()

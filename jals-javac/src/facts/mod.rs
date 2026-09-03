@@ -96,7 +96,7 @@ pub(crate) use switch::ArmLabels;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use jals_hir::{DefId, DefKind, FileId, MemberId, ProjectIndex, Ty, TypedFile};
+use jals_hir::{DefId, DefKind, FileId, ItemId, MemberId, ProjectIndex, Ty, TypedFile};
 use jals_syntax::ast::{self, AstNode as _};
 use jals_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
@@ -215,6 +215,43 @@ impl<'a> Facts<'a> {
     /// is not dispatched at all.
     pub(crate) fn is_super(node: &SyntaxNode) -> bool {
         Self::has_keyword(node, SyntaxKind::SUPER_KW)
+    }
+
+    /// The type whose enclosing instance a *qualified* `this` or `super` names — `Outer` in both
+    /// `Outer.this` and `Outer.super.f` (JLS §15.8.4, §15.11.2).
+    ///
+    /// Neither is a member access: the access carries the keyword where a field name would be, so
+    /// there is no identifier for a member lookup to use and the ordinary path reports an *empty*
+    /// name. Both push the same value — `Outer.super.f` is `Outer.this` with the field looked up one
+    /// level higher, and a field is bound by where it is declared rather than by dispatch. What they
+    /// do not share is a *call*: `Outer.super.m()` is not dispatched at all, which is why
+    /// [`is_qualified_super_call`](Self::is_qualified_super_call) exists beside this.
+    pub(crate) fn qualified_enclosing(self, access: &ast::FieldAccess) -> Option<ItemId> {
+        access
+            .syntax()
+            .children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .find(|token| matches!(token.kind(), SyntaxKind::THIS_KW | SyntaxKind::SUPER_KW))?;
+        let receiver = access.receiver()?;
+        self.ty_of_name(receiver.syntax()).ok()?.project_id()
+    }
+
+    /// Whether a call's receiver is a *qualified* `super` — `Outer.super.m()` (JLS §15.11.2) or
+    /// `Iface.super.m()` (§15.12.1).
+    ///
+    /// Both name one body in particular and are not dispatched, and neither is reachable by the
+    /// `invokespecial` the bare `super.` uses: JVMS §6.5 lets that name only the direct superclass
+    /// or a direct superinterface, and `Outer`'s superclass is neither of the compiled class's.
+    /// Reported rather than emitted as a virtual call on the enclosing instance, which is the same
+    /// bytes calling the override the source wrote `super` to avoid.
+    pub(crate) fn is_qualified_super_call(call: &ast::CallExpr) -> bool {
+        let Some(ast::Expr::FieldAccess(callee)) = call.callee() else {
+            return false;
+        };
+        let Some(ast::Expr::FieldAccess(receiver)) = callee.receiver() else {
+            return false;
+        };
+        Self::has_keyword(receiver.syntax(), SyntaxKind::SUPER_KW)
     }
 
     /// Whether a call is `super.`-qualified: its callee is a field access whose receiver is the

@@ -693,3 +693,57 @@ fn a_calls_type_is_the_selected_overloads() {
     assert_eq!(expr_ty(src, "call(3, x -> x * 2)"), "int");
     assert_eq!(expr_ty(src, "call(\"a\")"), "String");
 }
+
+// --- Enclosing instances and enum constants ---------------------------------------------------
+
+/// `Outer.this` and `Outer.super` name an enclosing instance, not a member.
+///
+/// The access carries the keyword where a field name would be, so there is no identifier for a
+/// member lookup to use and the ordinary path answered `Unknown` — leaving everything the value was
+/// then used for untyped with it. `super` resolves to the *superclass* of the named type, by the
+/// same rule the bare `super` follows: answering with the named type would bind an overridden member
+/// to the override.
+#[test]
+fn a_qualified_this_names_the_enclosing_instance() {
+    let src = "class Base { int v; }
+               class Outer extends Base {
+                   int field;
+                   class Inner {
+                       int read() { return Outer.this.field; }
+                       Object self() { return Outer.this; }
+                       int inherited() { return Outer.super.v; }
+                   }
+               }";
+    assert_eq!(expr_ty(src, "Outer.this"), "Outer");
+    assert_eq!(expr_ty(src, "Outer.super"), "Base");
+    assert_eq!(expr_ty(src, "Outer.this.field"), "int");
+    assert_eq!(expr_ty(src, "Outer.super.v"), "int");
+}
+
+/// An `enum` constant writes no type and *is* an instance of the enum that declares it (JLS §8.9.3).
+///
+/// Nothing else can supply one: a constant is not a `FIELD_DECL` and has no `Type` node beside its
+/// name. Without it a bare constant inside its own enum had no type at all — so `red.name()`
+/// resolved to nothing, and a call taking one had no argument type to select an overload against.
+#[test]
+fn an_enum_constant_is_typed_as_its_enum() {
+    // `label()` is declared on the enum itself rather than inherited from `java.lang.Enum`, so the
+    // claim is about the constant's own type and not about whether the stubs are in reach.
+    let src =
+        "enum Colour { RED, GREEN; int label() { return 1; } int read() { return RED.label(); } }";
+    assert_eq!(def_ty(src, "RED"), "Colour");
+    assert_eq!(expr_ty(src, "RED"), "Colour");
+    assert_eq!(expr_ty(src, "RED.label()"), "int");
+}
+
+/// A **nested** type is spelled with a dot, so a name qualified by one is a field access.
+///
+/// `Outer.Inner.CONSTANT` reads `Outer.Inner` as a receiver whose own type is unknown — it is not a
+/// value at all — and the qualifier lookup read only the simple form. That left every constant of a
+/// nested `enum` untyped, which is the ordinary way one is named.
+#[test]
+fn a_nested_type_qualifies_a_member() {
+    let src = "class Outer { enum Kind { ERROR, WARNING } }
+               class Use { Object read() { return Outer.Kind.ERROR; } }";
+    assert_eq!(expr_ty(src, "Outer.Kind.ERROR"), "Kind");
+}

@@ -323,7 +323,15 @@ impl Expr {
     /// where it gave up, and treating it as a type would turn a gap into a wrong descriptor.
     pub(crate) fn type_of(node: &SyntaxNode, context: &Context<'_>) -> Result<Ty> {
         match context.typed.type_of_expr(Facts::span(node)) {
-            Some(Ty::Unknown) | None => Err(DescError::Unknown.into()),
+            // Named rather than reported bare: a `Ty::Unknown` has lost every trace of what it was
+            // asked about, so a report built from one sends a reader to a whole file.
+            Some(Ty::Unknown) | None => Err(LowerError::Untyped(
+                node.text()
+                    .to_string()
+                    .split_whitespace()
+                    .collect::<alloc::vec::Vec<_>>()
+                    .join(" "),
+            )),
             Some(ty) => Ok(ty.clone()),
         }
     }
@@ -584,6 +592,13 @@ impl Expr {
             emit.asm.array_length()?;
             return Ok(());
         }
+        // `Outer.this` names a lexically enclosing instance rather than a member (JLS §15.8.4), and
+        // `Outer.super` names the same instance with the lookup one level higher. The walk out
+        // through `this$0` is the one an unqualified member of that class already takes, with the
+        // target written in the source instead of derived from where a member resolved.
+        if let Some(item) = context.facts().qualified_enclosing(access) {
+            return Self::load_unqualified_receiver(item, context, emit);
+        }
         let member = context.facts().field_target(access)?;
         let (owner, name, descriptor) = Self::field_ref(member, context)?;
         if context.index.member(member).modifiers.is_static {
@@ -713,6 +728,9 @@ impl Expr {
         // parses as a name reference holding a keyword, so it has neither a definition to load nor an
         // inferred type — lowering it as an ordinary expression pushes nothing at all.
         let super_qualified = Facts::is_super_call(call);
+        if Facts::is_qualified_super_call(call) {
+            return Err(LowerError::Unsupported("a qualified `super` call"));
+        }
         // Which class the `Methodref` names. Ordinarily it is where the member is *declared*, which
         // is what the member walk found. A `super.` call is the exception, and not an optional one:
         // JVMS §6.5 lets `invokespecial` name only the direct superclass or a *direct*

@@ -35,12 +35,12 @@ use jals_exec::Yielder;
 use jals_syntax::SyntaxKind::{
     AMP, AMP_AMP, ARG_LIST, ASSIGNMENT_EXPR, BANG, BANG_EQ, BOOLEAN_KW, BYTE_KW, CALL_EXPR, CARET,
     CAST_EXPR, CATCH_CLAUSE, CHAR_KW, CHAR_LITERAL, COMMA, CONSTRUCTOR_DECL, DOT, DOUBLE_KW,
-    ELLIPSIS, EQ, EQ_EQ, FALSE_KW, FIELD_ACCESS, FIELD_DECL, FLOAT_KW, FLOAT_LITERAL,
-    FOR_EACH_STMT, GT, IDENT, INSTANCEOF_KW, INT_KW, INT_LITERAL, LAMBDA_EXPR, LBRACK,
-    LOCAL_VAR_DECL, LONG_KW, LSHIFT, LT, LT_EQ, METHOD_DECL, MINUS, NEW_EXPR, NULL_KW, PARAM,
-    PERCENT, PIPE, PIPE_PIPE, PLUS, RECORD_COMPONENT, RESOURCE, RETURN_STMT, SHORT_KW, SLASH, STAR,
-    STRING_LITERAL, SUPER_KW, TERNARY_EXPR, TEXT_BLOCK, THIS_KW, TILDE, TRUE_KW, TYPE_PATTERN,
-    VAR_KW, VOID_KW,
+    ELLIPSIS, ENUM_CONSTANT, EQ, EQ_EQ, FALSE_KW, FIELD_ACCESS, FIELD_DECL, FLOAT_KW,
+    FLOAT_LITERAL, FOR_EACH_STMT, GT, IDENT, INSTANCEOF_KW, INT_KW, INT_LITERAL, LAMBDA_EXPR,
+    LBRACK, LOCAL_VAR_DECL, LONG_KW, LSHIFT, LT, LT_EQ, METHOD_DECL, MINUS, NEW_EXPR, NULL_KW,
+    PARAM, PERCENT, PIPE, PIPE_PIPE, PLUS, RECORD_COMPONENT, RESOURCE, RETURN_STMT, SHORT_KW,
+    SLASH, STAR, STRING_LITERAL, SUPER_KW, TERNARY_EXPR, TEXT_BLOCK, THIS_KW, TILDE, TRUE_KW,
+    TYPE_PATTERN, VAR_KW, VOID_KW,
 };
 use jals_syntax::ast::{self, AstNode};
 use jals_syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
@@ -959,6 +959,17 @@ impl<'a> Inferer<'a> {
         let mut yielder = Yielder::new();
         for node in root.descendants() {
             yielder.tick().await;
+            // An `enum` constant writes no type and *is* an instance of the enum that declares it
+            // (JLS §8.9.3), so this is the only place its binding can be typed. Without it a bare
+            // constant name inside its own enum had no type at all: `red.name()` resolved to
+            // nothing, and `println(red)` had no argument type to select an overload against.
+            if node.kind() == ENUM_CONSTANT
+                && let Some(name) = Collect::first_ident_token(&node)
+                && let Some(item) = self.enclosing_item(&node)
+            {
+                let ty = self.item_ty(item);
+                self.set_def_type(Collect::token_start(&name), ty);
+            }
             if Self::declares_typed_bindings(node.kind()) {
                 let ty = node.children().find_map(ast::Type::cast);
                 if !ty.as_ref().is_some_and(Cst::is_var_type) {
@@ -1417,7 +1428,14 @@ impl<'a> Inferer<'a> {
     /// Raw — no type arguments — because inside a generic type's own body its parameters stand for
     /// themselves, and a member read through `this` substitutes them by name.
     fn self_ty(&self, node: &SyntaxNode) -> Ty {
-        let (Some(item), Some((index, _))) = (self.enclosing_item(node), self.project) else {
+        self.enclosing_item(node)
+            .map_or(Ty::Unknown, |item| self.item_ty(item))
+    }
+
+    /// An indexed type as a raw class type — no type arguments, for the reason
+    /// [`self_ty`](Self::self_ty) gives.
+    fn item_ty(&self, item: ItemId) -> Ty {
+        let Some((index, _)) = self.project else {
             return Ty::Unknown;
         };
         let fqn = index.item(item).fqn.as_str();
@@ -1657,7 +1675,41 @@ impl<'a> Inferer<'a> {
     /// when the receiver is an indexed project type; an external receiver (a JDK type) stays
     /// [`Ty::Unknown`], since its members are not indexed.
     fn field_access_ty(&self, fa: &ast::FieldAccess) -> Ty {
+        // `Outer.this` and `Outer.super` name an *enclosing instance*, not a member (JLS §15.8.4,
+        // §15.11.2). There is no identifier after the dot for a member lookup to use, so the
+        // ordinary path answers `Unknown` — and everything the value is then used for goes untyped
+        // with it, which is what left `Outer.this.field` and `x != Outer.this` with no type at all.
+        if let Some(ty) = self.qualified_instance_ty(fa) {
+            return ty;
+        }
         self.field_access_member_ty(fa, Namespace::Value)
+    }
+
+    /// The type `Outer.this` / `Outer.super` denotes, and `None` for an access that names a member.
+    ///
+    /// The keyword is the whole test: an access carrying one has no identifier after the dot. What
+    /// it denotes is the *named* type for `this` and that type's superclass for `super`, by the same
+    /// rule the bare `super` follows — answering `super` with the named type itself would bind an
+    /// overridden member to the override.
+    fn qualified_instance_ty(&self, fa: &ast::FieldAccess) -> Option<Ty> {
+        let keyword = fa
+            .syntax()
+            .children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .find(|token| matches!(token.kind(), THIS_KW | SUPER_KW))?;
+        let (index, file) = self.project?;
+        let named = Cst::type_qualifier(&fa.receiver()?, index, file)?;
+        let item = if keyword.kind() == SUPER_KW {
+            index.superclass_of(named)?
+        } else {
+            named
+        };
+        let fqn = index.item(item).fqn.as_str();
+        Some(Ty::Class(ClassTy::Project {
+            id: item,
+            name: fqn.rsplit('.').next().unwrap_or(fqn).to_owned(),
+            args: Vec::new(),
+        }))
     }
 
     /// `receiver.member` resolved in `namespace`: the member's type on the receiver's project type.
@@ -2239,13 +2291,52 @@ impl Cst {
     /// Only a simple name is handled. A fully-qualified qualifier (`java.io.PrintStream.out`) is a
     /// nested field access, not a name reference, and is not modelled.
     fn type_qualifier(receiver: &ast::Expr, index: &ProjectIndex, file: FileId) -> Option<ItemId> {
-        let ast::Expr::NameRef(name) = receiver else {
-            return None;
-        };
-        let token = Collect::first_ident_token(name.syntax())?;
-        index
-            .resolve_type_name(file, &jals_syntax::decoded_ident(&token), None)
-            .project_id()
+        match receiver {
+            ast::Expr::NameRef(name) => {
+                let token = Collect::first_ident_token(name.syntax())?;
+                index
+                    .resolve_type_name(file, &jals_syntax::decoded_ident(&token), None)
+                    .project_id()
+            }
+            // A **nested** type is spelled with a dot, so its qualifier is a field access rather
+            // than a name — `Diagnostic.Kind.ERROR` reads `Diagnostic.Kind` as a receiver whose own
+            // type is unknown, because it is not a value at all. Reading only the simple form left
+            // every constant of a nested `enum` untyped, which is the ordinary way one is named.
+            ast::Expr::FieldAccess(_) => {
+                let dotted = Self::dotted_name(receiver.syntax())?;
+                let simple = dotted.rsplit('.').next()?;
+                index
+                    .resolve_type_name(file, simple, Some(&dotted))
+                    .project_id()
+            }
+            _ => None,
+        }
+    }
+
+    /// The dotted text of an expression that is nothing but identifiers and dots, and `None` for
+    /// one holding anything else — a call, an index, a literal.
+    ///
+    /// What separates `Outer.Inner` from `outer.field` is not the shape but what the segments
+    /// resolve to, so this hands back the spelling and lets the index decide.
+    fn dotted_name(node: &SyntaxNode) -> Option<String> {
+        let mut out = String::new();
+        for element in node.descendants_with_tokens() {
+            let Some(token) = element.into_token() else {
+                continue;
+            };
+            match token.kind() {
+                IDENT => {
+                    if !out.is_empty() {
+                        out.push('.');
+                    }
+                    out.push_str(&jals_syntax::decoded_ident(&token));
+                }
+                DOT => {}
+                kind if kind.is_trivia() => {}
+                _ => return None,
+            }
+        }
+        (!out.is_empty()).then_some(out)
     }
 
     /// Whether a receiver is the bare `super`.

@@ -6350,3 +6350,134 @@ public class Bound {
     }
     assert_eq!(run(source, "Bound"), "own\ncalled\nfresh\n");
 }
+
+/// `Outer.this` reaches a lexically enclosing instance, and `Outer.super` reads the field it hides.
+///
+/// Neither is a member access — the access carries the keyword where a field name would be — so the
+/// member path reported an *empty* name for both. The walk out through `this$0` is the one an
+/// unqualified member of that class already takes; what is different is that the target is written
+/// in the source rather than derived from where a member resolved.
+#[test]
+fn a_qualified_this_reaches_the_enclosing_instance() {
+    let source = "
+public class Qualified {
+    int value = 1;
+
+    class Inner {
+        int value = 2;
+
+        class Deeper {
+            int value = 3;
+
+            String all() {
+                return value + \" \" + Inner.this.value + \" \" + Qualified.this.value;
+            }
+        }
+    }
+
+    public static void main(String[] args) {
+        Qualified outer = new Qualified();
+        Inner middle = outer.new Inner();
+        System.out.println(middle.new Deeper().all());
+    }
+}
+";
+    if !java_available() {
+        compile(source).expect("compile");
+        return;
+    }
+    assert_eq!(run(source, "Qualified"), "3 2 1\n");
+}
+
+/// A qualified `super` **call** is refused rather than compiled as a virtual one.
+///
+/// `Outer.super.m()` names one body in particular and is not dispatched, and no `invokespecial`
+/// reaches it: JVMS §6.5 lets that name only the direct superclass or a direct superinterface, and
+/// `Outer`'s superclass is neither of the compiled class's. Emitting the enclosing instance and an
+/// `invokevirtual` is the same bytes calling the override the source wrote `super` to avoid — a
+/// program that runs and answers wrongly, which is the one outcome a refusal is better than.
+#[test]
+fn a_qualified_super_call_is_refused() {
+    let source = "
+class Base { String who() { return \"base\"; } }
+public class Outer extends Base {
+    public String who() { return \"outer\"; }
+    class Inner {
+        String ask() { return Outer.super.who(); }
+    }
+}
+";
+    let error = compile(source).expect_err("a qualified `super` call has no handle");
+    assert!(
+        matches!(error, LowerError::Unsupported("a qualified `super` call")),
+        "got {error}"
+    );
+}
+
+/// A lambda inside a lambda: every call site is planned before any body is lowered.
+///
+/// `s.submit(() -> run(() -> {}))` is the ordinary shape, and lowering the outer body as soon as it
+/// was planned reached the inner lambda before its `invokedynamic` existed — reported as *a lambda
+/// outside a class body*, which is a sentence about a lambda that is very much inside one.
+#[test]
+fn a_lambda_may_contain_another() {
+    let source = "
+public class Nested {
+    interface Run { void go(); }
+    static String log = \"\";
+
+    static void take(Run run) { run.go(); }
+
+    static void twice(Run run) {
+        // The inner lambda is written inside the outer one's body, so its call site has to exist
+        // before that body is lowered.
+        take(() -> {
+            run.go();
+            take(() -> log = log + \"!\");
+        });
+    }
+
+    public static void main(String[] args) {
+        String tag = \"t\";
+        twice(() -> log = log + tag);
+        System.out.println(log);
+    }
+}
+";
+    if !java_available() {
+        compile(source).expect("compile");
+        return;
+    }
+    assert_eq!(run(source, "Nested"), "t!\n");
+}
+
+/// An `enum` constant is a value of its own enum, wherever it is named.
+///
+/// The constant writes no type and is not a field declaration, so nothing else could supply one:
+/// a bare constant inside its own enum had no type at all, and a call taking one had no argument
+/// type to select an overload against. The nested-enum spelling — `Outer.Kind.ERROR`, whose
+/// qualifier is a field access rather than a name — is the same claim from the other side, and is
+/// pinned in `jals-hir`'s own inference tests where a nested type needs no classpath to exist.
+#[test]
+fn an_enum_constant_is_a_value_of_its_enum() {
+    let source = "
+enum Colour {
+    RED { public String toString() { return \"crimson\"; } },
+    GREEN;
+
+    String pretty() { return toString(); }
+}
+
+public class Constants {
+    public static void main(String[] args) {
+        System.out.println(Colour.RED.pretty());
+        System.out.println(Colour.GREEN.pretty());
+    }
+}
+";
+    if !java_available() {
+        compile(source).expect("compile");
+        return;
+    }
+    assert_eq!(run(source, "Constants"), "crimson\nGREEN\n");
+}

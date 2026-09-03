@@ -132,6 +132,12 @@ pub enum LowerError {
     Unresolved(String),
     /// A type could not be turned into a descriptor.
     Descriptor(DescError),
+    /// Inference produced no type for a particular expression.
+    ///
+    /// [`DescError::Unknown`] says the same thing about a `Ty` that already lost its provenance, so
+    /// a report built from it names no expression at all — and a bucket of sixty of those says
+    /// nothing about where to look. This one carries the source it was asked about.
+    Untyped(String),
     /// The assembler rejected an emission.
     Assembly(AsmError),
 }
@@ -163,6 +169,7 @@ impl From<AsmError> for LowerError {
 impl core::fmt::Display for LowerError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::Untyped(what) => write!(f, "the type of `{what}` could not be inferred"),
             Self::Unsupported(what) => write!(f, "{what} is not compiled yet"),
             Self::Unresolved(name) => write!(f, "`{name}` did not resolve to an indexed member"),
             Self::Descriptor(error) => write!(f, "{error}"),
@@ -286,6 +293,25 @@ impl Lambda {
     const fn bound(&self) -> Option<&SyntaxNode> {
         self.bound.as_ref()
     }
+}
+
+/// One lambda whose call site is settled and whose body is not yet emitted.
+///
+/// The two halves are separated because a lambda body may contain another lambda: every call site
+/// has to be recorded before any body is lowered, or the inner one has no `invokedynamic` to reach
+/// for when the outer body walks over it.
+struct PlannedLambda {
+    decl: ast::LambdaExpr,
+    /// What the functional interface's method returns, which is what the body converts to.
+    returns: jals_hir::Ty,
+    /// The locals the body reads from its leading parameters.
+    captured: alloc::vec::Vec<jals_hir::DefId>,
+    /// Whether the synthetic method is an instance one, taking the enclosing instance as `this`.
+    receiver: bool,
+    /// The synthetic method's name.
+    name: String,
+    /// Its descriptor: the captures, then the interface method's own parameters.
+    descriptor: String,
 }
 
 /// The source-to-class-file lowering.
@@ -957,10 +983,11 @@ impl Compile {
     /// Find every lambda in `members`, synthesise the method that holds each body, and build the
     /// `BootstrapMethods` entry that links it.
     ///
-    /// Only a *non-capturing* lambda with an expression body is emitted. A capturing one needs its captures
-    /// as leading parameters of both the synthetic method and the call site, and a block body needs the
-    /// statement lowering; each is its own step, and reporting beats emitting a call site whose arguments do
-    /// not match its handle.
+    /// **Two passes, because a lambda may contain another.** The call sites are all planned and
+    /// recorded first, and only then is any body lowered — so an inner lambda's `invokedynamic` is
+    /// already in [`Context::lambdas`] when the outer body reaches it. Doing both in one pass
+    /// reported the inner one as *a lambda outside a class body*, which is what
+    /// `s.submit(() -> run(() -> {}))` is made of.
     fn synthesise_lambdas<'a>(
         mut context: Context<'a>,
         owner: &SyntaxNode,
@@ -971,9 +998,6 @@ impl Compile {
         Vec<MethodInfo>,
         Vec<jals_classfile::BootstrapMethod>,
     )> {
-        const METAFACTORY: &str = "java/lang/invoke/LambdaMetafactory";
-        const METAFACTORY_DESCRIPTOR: &str = "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;";
-        let mut out = Vec::new();
         let mut bootstraps = Vec::new();
         let lambdas: Vec<SyntaxNode> = members
             .iter()
@@ -992,6 +1016,8 @@ impl Compile {
             // whose kind the class it landed in does not permit.
             .filter(|node| Self::lexically_owned_by(node, owner))
             .collect();
+
+        let mut planned = Vec::new();
         for (ordinal, lambda) in lambdas.iter().enumerate() {
             // A method reference needs no synthetic method at all: the handle points straight at the method
             // the source named, which is the whole difference between the two forms.
@@ -1009,192 +1035,235 @@ impl Compile {
                 );
                 continue;
             }
-            let decl = ast::LambdaExpr::cast(lambda.clone())
-                .ok_or(LowerError::Unsupported("a malformed lambda"))?;
-
-            // The interface the context asked for, and the one method it declares.
-            let item = expr::Expr::type_of(lambda, &context)?
-                .project_id()
-                .ok_or(LowerError::Unsupported("a lambda with no target type"))?;
-            let member = context
-                .index
-                .functional_member(item)
-                .ok_or(LowerError::Unsupported(
-                    "a lambda target with no single method",
-                ))?;
-            let name = context.index.member(member).name.clone();
-            let descriptor = MethodDescriptor::to_string(&Descriptor::method_descriptor(
-                member,
-                context.index,
-                false,
+            planned.push(Self::plan_lambda(
+                lambda,
+                ordinal,
+                &mut context,
+                &mut bootstraps,
+                pool,
             )?);
-            let interface = Descriptor::internal_name_of(item, context.index);
-            let returns = context.index.resolved_member_ty(member);
-            // Each captured local is a *leading* parameter of the synthetic method and an argument of the
-            // call site — leading, because the metafactory prepends the captured values to the interface
-            // method's own arguments when it invokes the handle.
-            // A capturing lambda is *nearly* here: the captures are collected, the leading parameters and
-            // the call-site arguments line up, and the body still reads `bump` as neither a local nor a
-            // field. Reported until that is chased down, rather than emitted as a handle whose parameter
-            // nothing fills.
-            let captured = context.facts().captured_by(lambda);
+        }
 
-            // A lambda written where there *is* a `this` captures it, and the enclosing instance is
-            // captured the way `LambdaMetafactory` takes any capture: as a leading argument of the
-            // call site. So the synthetic method is an ordinary `private` instance one and the
-            // handle names it — which is what javac emits, and what lets the body reach an
-            // unqualified field or an instance call at all. A lambda in a `static` context, or in a
-            // constructor's early construction context, has no `this` to capture and stays
-            // `static`.
-            let receiver = !Facts::in_static_context(lambda);
-            let mut prefix = String::new();
-            for &id in &captured {
-                prefix.push_str(&Self::capture_descriptor(id, &context)?);
-            }
-            // The receiver is not in the *method's* descriptor — an instance method's is implicit —
-            // but it is in the call site's, because the metafactory's handle type carries it.
-            let call_prefix = if receiver {
-                alloc::format!("L{};{prefix}", context.this_class)
-            } else {
-                prefix.clone()
-            };
-            // The body is lowered against the parameters' *inferred* types — `s -> s.length()`
-            // against `Function<String, String>` reads `s` as a `String` — so the synthetic method
-            // has to spell them that way too. The interface's own descriptor is erased
-            // (`(Ljava/lang/Object;)Ljava/lang/Object;`), and emitting the body under it left the
-            // frame calling `s` an `Object` while every instruction in it assumed a `String`.
-            //
-            // That specialised shape is exactly `LambdaMetafactory`'s `instantiatedMethodType`: the
-            // first bootstrap argument stays the interface's erased `samMethodType`, and the
-            // metafactory inserts the casts between them. Passing the erased shape for both is what
-            // this used to do, and it is only right when the two coincide.
-            let instantiated = Self::lambda_shape(&decl, &descriptor, &context);
-            let synthetic_descriptor =
-                alloc::format!("({prefix}{}", instantiated.trim_start_matches('('));
-
-            // The synthetic method takes the interface's descriptor with the captures prepended, which is
-            // also what seeds its initial locals. The assembler borrows the pool for as long as it lives,
-            // so its code comes out first and every entry the method *info* needs is interned after.
-            let synthetic = alloc::format!("lambda${ordinal}");
-            let code =
-                {
-                    let mut asm = Assembler::new(
-                        pool,
-                        if receiver {
-                            Receiver::Instance(&context.this_class)
-                        } else {
-                            Receiver::Static
-                        },
-                        &synthetic_descriptor,
-                    )?;
-                    let mut slots = Slots::new(&context, None, !receiver);
-                    // The captures come first, in the order the call site pushes them: the metafactory prepends
-                    // the captured values to the interface method's own arguments when it invokes the handle.
-                    for &id in &captured {
-                        let width = Slots::ty_width(context.typed.type_of_def(id));
-                        slots.declare(id, width);
-                    }
-                    for param in decl.params().into_iter().flat_map(|list| list.params()) {
-                        let id = context.facts().def_at(param.syntax()).ok_or(
-                            LowerError::Unsupported("a lambda parameter with no binding"),
-                        )?;
-                        let width = Slots::ty_width(context.typed.type_of_def(id));
-                        slots.declare(id, width);
-                    }
-                    let mut emit = Emit::new(&mut asm, slots, returns.clone(), receiver);
-                    match (decl.expr_body(), decl.block_body()) {
-                        // An expression body *is* the returned value, or is evaluated for its effect when the
-                        // interface method returns nothing.
-                        (Some(value), _) => {
-                            if matches!(returns, jals_hir::Ty::Void) {
-                                stmt::Stmt::discarded(&value, &context, &mut emit)?;
-                                asm.return_(None)?;
-                            } else {
-                                expr::Expr::lower_as(&value, &returns, &context, &mut emit)?;
-                                let top = asm.stack_top().ok_or(LowerError::Unsupported(
-                                    "a lambda body with no value",
-                                ))?;
-                                asm.return_(Some(&top))?;
-                            }
-                        }
-                        // A block body returns for itself, except that a `void` one may run off its end.
-                        (None, Some(block)) => {
-                            stmt::Stmt::block(&block, &context, &mut emit)?;
-                            if matches!(returns, jals_hir::Ty::Void) && asm.reachable() {
-                                asm.return_(None)?;
-                            }
-                        }
-                        (None, None) => {
-                            return Err(LowerError::Unsupported("a lambda with no body"));
-                        }
-                    }
-                    asm.finish()?
-                };
-            out.push(MethodInfo {
-                // private | synthetic, and `static` only where there was no `this` to capture.
-                access_flags: MethodAccessFlags(
-                    0x0002 | 0x1000 | if receiver { 0 } else { 0x0008 },
-                ),
-                name_index: pool.utf8_index(&synthetic).ok_or(AsmError::PoolFull)?,
-                descriptor_index: pool
-                    .utf8_index(&synthetic_descriptor)
-                    .ok_or(AsmError::PoolFull)?,
-                attributes: alloc::vec![code],
-            });
-
-            // `metafactory` is handed the interface's erased shape, a handle to the body, and the
-            // shape the call site is specialised to. The last two differ from the first exactly
-            // where generics erase.
-            // `REF_invokeStatic` for the static shape, `REF_invokeVirtual` for the instance one and
-            // `REF_invokeInterface` for an instance one in an interface (JVMS §4.4.8, Table
-            // 5.4.3.5-A). The last is not a stylistic choice: §4.4.8 lets a kind-6 handle name an
-            // `InterfaceMethodref` from major version 52 on and lets a kind-5 handle name only a
-            // `Methodref`, so a body in an interface is reachable by kind 9 and by nothing else. A
-            // `Methodref` naming an interface's method is an `IncompatibleClassChangeError` at the
-            // first call, and an `InterfaceMethodref` under kind 5 is a `ClassFormatError` at load —
-            // neither is anything the verifier reports.
-            let kind = match (receiver, context.in_interface) {
-                (true, true) => 9,
-                (true, false) => 5,
-                (false, _) => 6,
-            };
-            let handle = pool
-                .method_handle_index(
-                    kind,
-                    &context.this_class,
-                    &synthetic,
-                    &synthetic_descriptor,
-                    context.in_interface,
-                )
-                .ok_or(AsmError::PoolFull)?;
-            let shape = pool
-                .method_type_index(&descriptor)
-                .ok_or(AsmError::PoolFull)?;
-            let specialised = pool
-                .method_type_index(&instantiated)
-                .ok_or(AsmError::PoolFull)?;
-            let bootstrap = pool
-                .method_handle_index(6, METAFACTORY, "metafactory", METAFACTORY_DESCRIPTOR, false)
-                .ok_or(AsmError::PoolFull)?;
-            bootstraps.push(jals_classfile::BootstrapMethod {
-                bootstrap_method_ref: bootstrap,
-                bootstrap_arguments: alloc::vec![shape, handle, specialised],
-            });
-            let index = u16::try_from(bootstraps.len() - 1).map_err(|_| AsmError::PoolFull)?;
-            let span = Facts::span(lambda);
-            context.lambdas.insert(
-                (span.start, span.end),
-                Lambda {
-                    interface_method: name,
-                    call_descriptor: alloc::format!("({call_prefix})L{interface};"),
-                    bootstrap: index,
-                    receiver,
-                    bound: None,
-                    captured,
-                },
-            );
+        let mut out = Vec::new();
+        for plan in planned {
+            out.push(Self::lambda_body(&plan, &context, pool)?);
         }
         Ok((context, out, bootstraps))
+    }
+
+    /// Plan one lambda: its call site, its `BootstrapMethods` entry, and the shape its body will be
+    /// emitted under — everything that can be settled without lowering a single instruction.
+    fn plan_lambda(
+        lambda: &SyntaxNode,
+        ordinal: usize,
+        context: &mut Context<'_>,
+        bootstraps: &mut Vec<jals_classfile::BootstrapMethod>,
+        pool: &mut ConstantPool,
+    ) -> Result<PlannedLambda> {
+        const METAFACTORY: &str = "java/lang/invoke/LambdaMetafactory";
+        const METAFACTORY_DESCRIPTOR: &str = "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;";
+        let decl = ast::LambdaExpr::cast(lambda.clone())
+            .ok_or(LowerError::Unsupported("a malformed lambda"))?;
+
+        // The interface the context asked for, and the one method it declares.
+        let item = expr::Expr::type_of(lambda, context)?
+            .project_id()
+            .ok_or(LowerError::Unsupported("a lambda with no target type"))?;
+        let member = context
+            .index
+            .functional_member(item)
+            .ok_or(LowerError::Unsupported(
+                "a lambda target with no single method",
+            ))?;
+        let name = context.index.member(member).name.clone();
+        let descriptor = MethodDescriptor::to_string(&Descriptor::method_descriptor(
+            member,
+            context.index,
+            false,
+        )?);
+        let interface = Descriptor::internal_name_of(item, context.index);
+        let returns = context.index.resolved_member_ty(member);
+        // Each captured local is a *leading* parameter of the synthetic method and an argument of the
+        // call site — leading, because the metafactory prepends the captured values to the interface
+        // method's own arguments when it invokes the handle.
+        let captured = context.facts().captured_by(lambda);
+
+        // A lambda written where there *is* a `this` captures it, and the enclosing instance is
+        // captured the way `LambdaMetafactory` takes any capture: as a leading argument of the
+        // call site. So the synthetic method is an ordinary `private` instance one and the
+        // handle names it — which is what javac emits, and what lets the body reach an
+        // unqualified field or an instance call at all. A lambda in a `static` context, or in a
+        // constructor's early construction context, has no `this` to capture and stays
+        // `static`.
+        let receiver = !Facts::in_static_context(lambda);
+        let mut prefix = String::new();
+        for &id in &captured {
+            prefix.push_str(&Self::capture_descriptor(id, context)?);
+        }
+        // The receiver is not in the *method's* descriptor — an instance method's is implicit —
+        // but it is in the call site's, because the metafactory's handle type carries it.
+        let call_prefix = if receiver {
+            alloc::format!("L{};{prefix}", context.this_class)
+        } else {
+            prefix.clone()
+        };
+        // The body is lowered against the parameters' *inferred* types — `s -> s.length()`
+        // against `Function<String, String>` reads `s` as a `String` — so the synthetic method
+        // has to spell them that way too. The interface's own descriptor is erased
+        // (`(Ljava/lang/Object;)Ljava/lang/Object;`), and emitting the body under it left the
+        // frame calling `s` an `Object` while every instruction in it assumed a `String`.
+        //
+        // That specialised shape is exactly `LambdaMetafactory`'s `instantiatedMethodType`: the
+        // first bootstrap argument stays the interface's erased `samMethodType`, and the
+        // metafactory inserts the casts between them. Passing the erased shape for both is what
+        // this used to do, and it is only right when the two coincide.
+        let instantiated = Self::lambda_shape(&decl, &descriptor, context);
+        let synthetic_descriptor =
+            alloc::format!("({prefix}{}", instantiated.trim_start_matches('('));
+        let synthetic = alloc::format!("lambda${ordinal}");
+
+        // `metafactory` is handed the interface's erased shape, a handle to the body, and the
+        // shape the call site is specialised to. The last two differ from the first exactly
+        // where generics erase.
+        // `REF_invokeStatic` for the static shape, `REF_invokeVirtual` for the instance one and
+        // `REF_invokeInterface` for an instance one in an interface (JVMS §4.4.8, Table
+        // 5.4.3.5-A). The last is not a stylistic choice: §4.4.8 lets a kind-6 handle name an
+        // `InterfaceMethodref` from major version 52 on and lets a kind-5 handle name only a
+        // `Methodref`, so a body in an interface is reachable by kind 9 and by nothing else. A
+        // `Methodref` naming an interface's method is an `IncompatibleClassChangeError` at the
+        // first call, and an `InterfaceMethodref` under kind 5 is a `ClassFormatError` at load —
+        // neither is anything the verifier reports.
+        let kind = match (receiver, context.in_interface) {
+            (true, true) => 9,
+            (true, false) => 5,
+            (false, _) => 6,
+        };
+        let handle = pool
+            .method_handle_index(
+                kind,
+                &context.this_class,
+                &synthetic,
+                &synthetic_descriptor,
+                context.in_interface,
+            )
+            .ok_or(AsmError::PoolFull)?;
+        let shape = pool
+            .method_type_index(&descriptor)
+            .ok_or(AsmError::PoolFull)?;
+        let specialised = pool
+            .method_type_index(&instantiated)
+            .ok_or(AsmError::PoolFull)?;
+        let bootstrap = pool
+            .method_handle_index(6, METAFACTORY, "metafactory", METAFACTORY_DESCRIPTOR, false)
+            .ok_or(AsmError::PoolFull)?;
+        bootstraps.push(jals_classfile::BootstrapMethod {
+            bootstrap_method_ref: bootstrap,
+            bootstrap_arguments: alloc::vec![shape, handle, specialised],
+        });
+        let index = u16::try_from(bootstraps.len() - 1).map_err(|_| AsmError::PoolFull)?;
+        let span = Facts::span(lambda);
+        context.lambdas.insert(
+            (span.start, span.end),
+            Lambda {
+                interface_method: name,
+                call_descriptor: alloc::format!("({call_prefix})L{interface};"),
+                bootstrap: index,
+                receiver,
+                bound: None,
+                captured: captured.clone(),
+            },
+        );
+        Ok(PlannedLambda {
+            decl,
+            returns,
+            captured,
+            receiver,
+            name: synthetic,
+            descriptor: synthetic_descriptor,
+        })
+    }
+
+    /// Emit the `private` synthetic method one planned lambda's body becomes.
+    fn lambda_body(
+        plan: &PlannedLambda,
+        context: &Context<'_>,
+        pool: &mut ConstantPool,
+    ) -> Result<MethodInfo> {
+        let PlannedLambda {
+            decl,
+            returns,
+            captured,
+            receiver,
+            name,
+            descriptor,
+        } = plan;
+        let receiver = *receiver;
+        // The synthetic method takes the interface's descriptor with the captures prepended, which is
+        // also what seeds its initial locals. The assembler borrows the pool for as long as it lives,
+        // so its code comes out first and every entry the method *info* needs is interned after.
+        let code = {
+            let mut asm = Assembler::new(
+                pool,
+                if receiver {
+                    Receiver::Instance(&context.this_class)
+                } else {
+                    Receiver::Static
+                },
+                descriptor,
+            )?;
+            let mut slots = Slots::new(context, None, !receiver);
+            // The captures come first, in the order the call site pushes them: the metafactory prepends
+            // the captured values to the interface method's own arguments when it invokes the handle.
+            for &id in captured {
+                let width = Slots::ty_width(context.typed.type_of_def(id));
+                slots.declare(id, width);
+            }
+            for param in decl.params().into_iter().flat_map(|list| list.params()) {
+                let id = context
+                    .facts()
+                    .def_at(param.syntax())
+                    .ok_or(LowerError::Unsupported(
+                        "a lambda parameter with no binding",
+                    ))?;
+                let width = Slots::ty_width(context.typed.type_of_def(id));
+                slots.declare(id, width);
+            }
+            let mut emit = Emit::new(&mut asm, slots, returns.clone(), receiver);
+            match (decl.expr_body(), decl.block_body()) {
+                // An expression body *is* the returned value, or is evaluated for its effect when the
+                // interface method returns nothing.
+                (Some(value), _) => {
+                    if matches!(returns, jals_hir::Ty::Void) {
+                        stmt::Stmt::discarded(&value, context, &mut emit)?;
+                        asm.return_(None)?;
+                    } else {
+                        expr::Expr::lower_as(&value, returns, context, &mut emit)?;
+                        let top = asm
+                            .stack_top()
+                            .ok_or(LowerError::Unsupported("a lambda body with no value"))?;
+                        asm.return_(Some(&top))?;
+                    }
+                }
+                // A block body returns for itself, except that a `void` one may run off its end.
+                (None, Some(block)) => {
+                    stmt::Stmt::block(&block, context, &mut emit)?;
+                    if matches!(returns, jals_hir::Ty::Void) && asm.reachable() {
+                        asm.return_(None)?;
+                    }
+                }
+                (None, None) => {
+                    return Err(LowerError::Unsupported("a lambda with no body"));
+                }
+            }
+            asm.finish()?
+        };
+        Ok(MethodInfo {
+            // private | synthetic, and `static` only where there was no `this` to capture.
+            access_flags: MethodAccessFlags(0x0002 | 0x1000 | if receiver { 0 } else { 0x0008 }),
+            name_index: pool.utf8_index(name).ok_or(AsmError::PoolFull)?,
+            descriptor_index: pool.utf8_index(descriptor).ok_or(AsmError::PoolFull)?,
+            attributes: alloc::vec![code],
+        })
     }
 
     /// The shape a lambda's body is actually compiled to: the interface method's descriptor with each
