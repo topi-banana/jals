@@ -158,6 +158,14 @@ impl CompileWasm {
     /// encoding is what lets a caller ask what was emitted — the same footing
     /// [`Assembler`](crate::jvm::Assembler) gives the other backend, and the only way to assert a
     /// lowering without an engine to run it.
+    /// How many locals a function may declare beyond its parameters.
+    ///
+    /// The format itself allows far more, and every engine caps it — 50 000 is what `wasmparser`
+    /// (and so `wasm-tools` and `wasmtime`) enforces. A body over the cap is refused for the same
+    /// reason a method over the JVM's 64 KiB code limit is: the target says no, and saying so here
+    /// is the difference between a gap and a module that will not load.
+    const MAX_LOCALS: usize = 50_000;
+
     pub fn module(inputs: &[TypedFile<'_>], index: &ProjectIndex) -> Result<Module> {
         let mut module = Module::new();
         let mut layout = Layout {
@@ -287,6 +295,13 @@ impl CompileWasm {
         for method in &methods {
             let input = &inputs[method.input];
             let body = Body::lower(method, input, index, &layout)?;
+            // Every engine caps a function's locals, and a body that walks past the cap is a module
+            // no engine loads. Said here rather than left to the validator: a generated source with
+            // thousands of locals is a *refusal* like any other format limit, and emitting the bytes
+            // anyway reports it as a compiler defect.
+            if body.locals.len() > Self::MAX_LOCALS {
+                return Err(WasmError::TooLarge);
+            }
             module.funcs.push(Func {
                 type_index: method.signature,
                 locals: body.locals,
@@ -991,6 +1006,23 @@ struct Layout {
     arrays: Vec<(ValType, u32)>,
 }
 
+/// One value a call site pushes.
+enum Arg<'e> {
+    /// An argument, at the type its parameter declares.
+    Value(&'e ast::Expr, ValType),
+    /// An argument past the last declared parameter, which only a malformed call has: pushed at
+    /// whatever type it has, so the validator names the mismatch rather than this layer guessing.
+    Untyped(&'e ast::Expr),
+    /// The array a variable-arity call builds out of its trailing arguments.
+    Packed {
+        values: &'e [ast::Expr],
+        /// The element type each value is converted to.
+        element: Ty,
+        /// The array type index the values are gathered into.
+        array: u32,
+    },
+}
+
 /// One field of a class's wasm struct, in the order the struct declares them.
 ///
 /// The synthetic ones are *in* the list rather than appended when the struct is written, because
@@ -1352,6 +1384,16 @@ impl Layout {
             .iter()
             .find(|(candidate, _)| *candidate == element)
             .map(|(_, index)| *index)
+    }
+
+    /// Whether `index` names one of this module's array types.
+    ///
+    /// The one place a Java type relation has no wasm counterpart: arrays are *covariant* in Java
+    /// (`String[]` is an `Object[]`) and **invariant** here, because a wasm array is mutable and
+    /// declared subtyping over it would let a write of the wrong element type through. So a
+    /// covariant array assignment is refused rather than emitted.
+    fn is_array(&self, index: u32) -> bool {
+        self.arrays.iter().any(|&(_, candidate)| candidate == index)
     }
 
     /// A nullable reference to `item`'s struct type — how every Java reference is represented.
@@ -1947,14 +1989,10 @@ impl Lowering<'_> {
         };
         if let Some(function) = enum_constructor {
             insn.local_get(slot);
-            let params = selected.map(|member| self.index.resolved_param_tys(member));
-            for (position, argument) in arguments.iter().enumerate() {
-                match params.as_ref().and_then(|params| params.get(position)) {
-                    Some(declared) => {
-                        let target = self.layout.val_type(declared)?;
-                        self.expr_as(argument, target, insn)?;
-                    }
-                    None => {
+            match selected {
+                Some(member) => self.push_arguments(member, &arguments, insn)?,
+                None => {
+                    for argument in &arguments {
                         self.expr(argument, insn)?;
                     }
                 }
@@ -4459,8 +4497,18 @@ impl Lowering<'_> {
         let ty = self.ty_of(new.syntax())?;
         // `new T[n]`: one instruction, and every element starts at its type's default — which is
         // exactly Java's rule for a fresh array.
-        if let Some(Ty::Array(element)) = self.input.type_of_expr(Facts::span(new.syntax())) {
-            let element = self.layout.val_type(element)?;
+        if let Some(Ty::Array(element)) =
+            self.input.type_of_expr(Facts::span(new.syntax())).cloned()
+        {
+            // `new T[] { … }` writes its elements out, and the initialiser *is* the array — one
+            // `array.new_fixed` with the values on the stack. Reading its node as the length instead
+            // built the array twice: `array.new_fixed` and then `array.new_default` consuming it as
+            // a count, which is a reference where an `i32` belongs.
+            if let Some(init) = new.syntax().children().find_map(ast::ArrayInit::cast) {
+                let written = Ty::Array(element);
+                return self.array_initializer(&init, Some(&written), insn);
+            }
+            let element = self.layout.val_type(&element)?;
             let array_type = self
                 .layout
                 .array_type(element)
@@ -4547,24 +4595,28 @@ impl Lowering<'_> {
                 // that only surfaced once a `new` sat inside a `block`.
                 let slot = self.scratch(ty);
                 insn.local_set(slot).local_get(slot);
-                // The enclosing instance is the constructor's first declared argument.
-                if let Some(encloses) = encloses {
-                    self.enclosing_instance(qualifier.as_ref(), encloses, insn)?;
+                // An **anonymous** class declares no constructor, so the one resolved here is its
+                // *superclass's* and everything about the call is that class's: its enclosing
+                // instance, its parameters, and — since it stores nothing of this class — none of
+                // this class's captures. Passing this class's enclosing instance to a constructor
+                // that does not take one is a call one argument long, which the validator refuses.
+                let declaring = self.index.member(constructor).owner;
+                if let Some(&needed) = self.layout.inner.get(&declaring) {
+                    self.enclosing_instance(qualifier.as_ref(), needed, insn)?;
                 }
-                let params = self.index.resolved_param_tys(constructor);
-                for (position, argument) in arguments.iter().enumerate() {
-                    match params.get(position) {
-                        Some(declared) => {
-                            let target = self.layout.val_type(declared)?;
-                            self.expr_as(argument, target, insn)?;
-                        }
-                        None => {
-                            self.expr(argument, insn)?;
-                        }
-                    }
+                self.push_arguments(constructor, &arguments, insn)?;
+                // The captures the *callee* declares, which for an anonymous class's `new` are its
+                // superclass's rather than its own: the function being called is that class's, and
+                // its trailing parameters are the locals *it* captured.
+                self.push_captures(declaring, insn)?;
+                insn.call(function);
+                insn.local_get(slot);
+                // What that constructor did not write because it belongs to another class: this
+                // class's own enclosing instance and captures. Its own constructor wrote both from
+                // its parameters, so there is nothing left over there.
+                if declaring != item {
+                    self.fill_synthetic_fields(item, struct_type, ty, qualifier.as_ref(), insn)?;
                 }
-                self.push_captures(item, insn)?;
-                insn.call(function).local_get(slot);
             }
             // No declared constructor: the implicit default one initialises nothing, so the
             // allocation is already the finished object — except for an inner class, whose synthetic
@@ -4581,47 +4633,60 @@ impl Lowering<'_> {
                     insn.local_set(slot).local_get(slot).call(initialise);
                     insn.local_get(slot);
                 }
-                // No constructor function to fill the capture fields either, so the `new` fills them — the
-                // same way it fills an inner class's single enclosing instance. An anonymous class is always
-                // this case: it never declares a constructor.
-                let captured = self.layout.captures.get(&item).cloned().unwrap_or_default();
-                if !captured.is_empty() {
-                    let slot = self.scratch(ty);
-                    let first = *self
-                        .layout
-                        .capture_slot
-                        .get(&item)
-                        .ok_or(WasmError::Unsupported("a capture with no field"))?;
-                    insn.local_set(slot);
-                    for (offset, (id, _)) in captured.iter().enumerate() {
-                        insn.local_get(slot);
-                        self.push_capture(*id, insn)?;
-                        let field =
-                            first + u32::try_from(offset).map_err(|_| WasmError::TooLarge)?;
-                        insn.struct_set(struct_type, field);
-                    }
-                    insn.local_get(slot);
-                }
-                if encloses.is_some() {
-                    let slot = self.scratch(ty);
-                    let field = self
-                        .layout
-                        .outer
-                        .get(&item)
-                        .copied()
-                        .ok_or(WasmError::Unsupported("an inner class with no outer field"))?;
-                    insn.local_set(slot);
-                    insn.local_get(slot);
-                    let encloses = encloses
-                        .ok_or(WasmError::Unsupported("an inner class with no outer field"))?;
-                    self.enclosing_instance(qualifier.as_ref(), encloses, insn)?;
-                    insn.struct_set(struct_type, field);
-                    insn.local_get(slot);
-                }
+                self.fill_synthetic_fields(item, struct_type, ty, qualifier.as_ref(), insn)?;
             }
             None => return Err(WasmError::Unresolved("a matching constructor".into())),
         }
         Ok(ty)
+    }
+
+    /// Write the synthetic fields no constructor function wrote, onto the value on top of the stack,
+    /// and leave it there.
+    ///
+    /// Two cases reach here and they are the same case: a class with no constructor at all, and a
+    /// class whose `new` ran *another* class's constructor. An anonymous class is the second — it
+    /// declares none, so the constructor a `new` of it calls is its superclass's, and that function
+    /// stores nothing about the class actually being built.
+    fn fill_synthetic_fields(
+        &mut self,
+        item: ItemId,
+        struct_type: u32,
+        ty: ValType,
+        qualifier: Option<&ast::Expr>,
+        insn: &mut Insn,
+    ) -> Result<()> {
+        let captured = self.layout.captures.get(&item).cloned().unwrap_or_default();
+        if !captured.is_empty() {
+            let slot = self.scratch(ty);
+            let first = *self
+                .layout
+                .capture_slot
+                .get(&item)
+                .ok_or(WasmError::Unsupported("a capture with no field"))?;
+            insn.local_set(slot);
+            for (offset, (id, _)) in captured.iter().enumerate() {
+                insn.local_get(slot);
+                self.push_capture(*id, insn)?;
+                let field = first + u32::try_from(offset).map_err(|_| WasmError::TooLarge)?;
+                insn.struct_set(struct_type, field);
+            }
+            insn.local_get(slot);
+        }
+        if let Some(&encloses) = self.layout.inner.get(&item) {
+            let slot = self.scratch(ty);
+            let field = self
+                .layout
+                .outer
+                .get(&item)
+                .copied()
+                .ok_or(WasmError::Unsupported("an inner class with no outer field"))?;
+            insn.local_set(slot);
+            insn.local_get(slot);
+            self.enclosing_instance(qualifier, encloses, insn)?;
+            insn.struct_set(struct_type, field);
+            insn.local_get(slot);
+        }
+        Ok(())
     }
 
     /// Every class in this module that overrides `member`, most-derived first.
@@ -4706,22 +4771,13 @@ impl Lowering<'_> {
 
         // Lowered untargeted, exactly as the direct-call path does: an argument's own inferred type is
         // what both use, so a virtual call converts no differently from a static one.
-        let params = self.index.resolved_param_tys(member);
-        let mut slots = Vec::with_capacity(arguments.len());
-        for (position, argument) in arguments.iter().enumerate() {
-            // At the parameter's type where there is one: every branch of the dispatch chain calls a
-            // function declared over these, so a value erasure left at the top has to come down here
-            // rather than once per branch.
-            let value = match params.get(position) {
-                Some(declared) => {
-                    let target = self.layout.val_type(declared)?;
-                    self.expr_as(argument, target, insn)?;
-                    target
-                }
-                None => self
-                    .expr(argument, insn)?
-                    .ok_or(WasmError::Unsupported("an argument with no value"))?,
-            };
+        // Each into a local of its own before the dispatch block opens: every branch calls a
+        // function declared over the *parameters*, so a value erasure left at the top comes down
+        // here rather than once per branch, and a variable-arity call builds its array once.
+        let planned = self.plan_arguments(member, arguments)?;
+        let mut slots = Vec::with_capacity(planned.len());
+        for arg in &planned {
+            let value = self.push_argument(arg, insn)?;
             let slot = self.scratch(value);
             insn.local_set(slot);
             slots.push(slot);
@@ -4854,6 +4910,101 @@ impl Lowering<'_> {
         Ok(())
     }
 
+    /// One value a call site pushes: an argument at its parameter's type, or the array a **varargs**
+    /// call builds out of its trailing arguments.
+    ///
+    /// Planned before anything is emitted because the two call paths push at different moments — the
+    /// direct one straight onto the stack, the virtual one into a local apiece before the dispatch
+    /// block opens — and both have to pass the same values.
+    fn plan_arguments<'e>(
+        &self,
+        member: MemberId,
+        arguments: &'e [ast::Expr],
+    ) -> Result<Vec<Arg<'e>>> {
+        let params = self.index.resolved_param_tys(member);
+        let varargs = self.index.member(member).varargs;
+        // The JVM has no variable arity and neither has wasm: `f(int...)` takes an `int[]` and the
+        // call site builds it (JLS §15.12.4.2). One argument that is already an array of the right
+        // type passes straight through instead — packing it would build an `int[][]`.
+        let packs = varargs
+            && !params.is_empty()
+            && !(arguments.len() == params.len()
+                && arguments.last().is_some_and(|last| {
+                    matches!(
+                        self.input.type_of_expr(Facts::span(last.syntax())),
+                        Some(Ty::Array(_))
+                    )
+                }));
+        let fixed = if packs {
+            params.len() - 1
+        } else {
+            params.len()
+        };
+        let mut out = Vec::with_capacity(arguments.len());
+        for (position, argument) in arguments.iter().take(fixed).enumerate() {
+            match params.get(position) {
+                Some(declared) => out.push(Arg::Value(argument, self.layout.val_type(declared)?)),
+                None => out.push(Arg::Untyped(argument)),
+            }
+        }
+        if packs {
+            let Some(Ty::Array(element)) = params.last().cloned() else {
+                return Err(WasmError::Unsupported(
+                    "a variable-arity parameter that is no array",
+                ));
+            };
+            let element_ty = self.layout.val_type(&element)?;
+            let array = self
+                .layout
+                .array_type(element_ty)
+                .ok_or_else(|| WasmError::NoRepresentation("an array".to_owned()))?;
+            out.push(Arg::Packed {
+                values: &arguments[fixed.min(arguments.len())..],
+                element: *element,
+                array,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Push one planned argument, and say what type it left on the stack.
+    fn push_argument(&mut self, arg: &Arg<'_>, insn: &mut Insn) -> Result<ValType> {
+        match arg {
+            Arg::Value(expr, target) => {
+                self.expr_as(expr, *target, insn)?;
+                Ok(*target)
+            }
+            Arg::Untyped(expr) => self
+                .expr(expr, insn)?
+                .ok_or(WasmError::Unsupported("an argument with no value")),
+            Arg::Packed {
+                values,
+                element,
+                array,
+            } => {
+                for value in *values {
+                    self.value_as(value, element, insn)?;
+                }
+                let count = u32::try_from(values.len()).map_err(|_| WasmError::TooLarge)?;
+                insn.array_new_fixed(*array, count);
+                Ok(ValType::Ref(RefType::nullable(HeapType::Concrete(*array))))
+            }
+        }
+    }
+
+    /// Push every planned argument in order.
+    fn push_arguments(
+        &mut self,
+        member: MemberId,
+        arguments: &[ast::Expr],
+        insn: &mut Insn,
+    ) -> Result<()> {
+        for arg in self.plan_arguments(member, arguments)? {
+            self.push_argument(&arg, insn)?;
+        }
+        Ok(())
+    }
+
     /// Push `expr` and narrow the value to `target` when erasure left it at the top of the
     /// reference hierarchy.
     ///
@@ -4868,22 +5019,34 @@ impl Lowering<'_> {
         let produced = self
             .expr(expr, insn)?
             .ok_or(WasmError::Unsupported("an argument with no value"))?;
-        Self::narrow(produced, target, insn);
-        Ok(())
+        self.narrow(produced, target, insn)
     }
 
     /// Emit the `ref.cast` that takes a top-of-hierarchy value down to `target`, if one is needed.
-    fn narrow(produced: ValType, target: ValType, insn: &mut Insn) {
+    fn narrow(&self, produced: ValType, target: ValType, insn: &mut Insn) -> Result<()> {
         let (ValType::Ref(from), ValType::Ref(to)) = (produced, target) else {
-            return;
+            return Ok(());
         };
         if from.heap == to.heap {
-            return;
+            return Ok(());
         }
         // `HeapType::None` is the *bottom* and already fits everywhere, so only the top needs one.
         if matches!(to.heap, HeapType::Concrete(_)) && from.heap == HeapType::Any {
             insn.ref_cast(to.heap, true);
+            return Ok(());
         }
+        // Java's arrays are covariant and wasm's are invariant, so `Object[] o = new String[1]` has
+        // no representation here at all: the two array types are unrelated, and no cast relates
+        // them. Said out loud rather than emitted, because the bytes would be a module no engine
+        // loads.
+        if let (HeapType::Concrete(from), HeapType::Concrete(to)) = (from.heap, to.heap)
+            && (self.layout.is_array(from) || self.layout.is_array(to))
+        {
+            return Err(WasmError::Unsupported(
+                "an array where an array of another type is wanted",
+            ));
+        }
+        Ok(())
     }
 
     /// A fresh unnamed local of type `ty`, for values that must outlive the stack.
@@ -4977,19 +5140,12 @@ impl Lowering<'_> {
         {
             self.enclosing_instance(None, encloses, insn)?;
         }
-        // Each argument at the *parameter's* type, so erasure's top-of-hierarchy value is narrowed
-        // where the callee wants a struct in particular.
-        let params = self.index.resolved_param_tys(member);
-        for (position, argument) in arguments.iter().enumerate() {
-            match params.get(position) {
-                Some(declared) => {
-                    let target = self.layout.val_type(declared)?;
-                    self.expr_as(argument, target, insn)?;
-                }
-                None => {
-                    self.expr(argument, insn)?;
-                }
-            }
+        self.push_arguments(member, &arguments, insn)?;
+        // A local or anonymous class's constructor takes its captures as *trailing* parameters, and
+        // a `this(…)` reaching one has to pass them like every other argument. They are read from
+        // the synthetic fields, which this constructor's prologue filled before its body ran.
+        if info.kind == DefKind::Constructor {
+            self.push_captures(info.owner, insn)?;
         }
         insn.call(function);
 

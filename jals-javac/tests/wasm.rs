@@ -3146,3 +3146,117 @@ public class Boxes {
 ";
     assert_invoke(&[source], "run", &["41"], "42");
 }
+
+/// A variable-arity call builds the array the callee actually takes.
+///
+/// wasm has no variable arity and neither has the JVM: `f(int...)`'s parameter is an `int[]` and
+/// the call site builds it (JLS §15.12.4.2). Pushing the trailing arguments raw handed the callee
+/// two values where one array belongs, which the validator refuses — and one argument that is
+/// already an array of the right type passes straight through, since packing it would build an
+/// `int[][]`.
+#[test]
+fn a_variable_arity_call_packs_its_trailing_arguments() {
+    let source = r"
+public class Packing {
+    static int total(int first, int... rest) {
+        int sum = first;
+        for (int n : rest) {
+            sum = sum + n;
+        }
+        return sum;
+    }
+
+    static int none() { return total(1); }
+
+    static int several() { return total(1, 2, 3, 4); }
+
+    static int passthrough() {
+        int[] already = {5, 6};
+        return total(1, already);
+    }
+
+    public static int run(int n) { return none() + several() + passthrough() + n; }
+}
+";
+    assert_invoke(&[source], "run", &["0"], "23");
+}
+
+/// `new T[] { … }` is one array, not two.
+///
+/// The initialiser *is* the array — one `array.new_fixed` with the values on the stack — and
+/// reading its node as the creation's length built it twice: an `array.new_fixed` followed by an
+/// `array.new_default` consuming the result as a count, which is a reference where an `i32` belongs.
+#[test]
+fn an_array_creation_with_an_initialiser_builds_one_array() {
+    let source = r"
+public class Written {
+    static boolean[] flags;
+
+    static {
+        boolean x = false, y = true;
+        flags = new boolean[] {!x, y};
+    }
+
+    public static int run(int n) {
+        int[][] grid = new int[][] {{1, 2}, {3, 4}};
+        return (flags[0] ? 1 : 0) + (flags[1] ? 2 : 0) + grid[1][0] + n;
+    }
+}
+";
+    assert_invoke(&[source], "run", &["10"], "16");
+}
+
+/// An anonymous class whose superclass constructor takes arguments — and captures.
+///
+/// The `new` of one calls the *superclass's* constructor, so everything about that call is the
+/// superclass's: its enclosing instance, its parameters, and its captures. What the anonymous class
+/// itself holds — its own enclosing instance and its own captures — no constructor function writes,
+/// because it has none, so the `new` writes them afterwards.
+#[test]
+fn an_anonymous_class_passes_what_its_superclass_constructor_takes() {
+    let source = r"
+public class Host {
+    int base = 100;
+
+    int build(int seed) {
+        int captured = 7;
+
+        class Local {
+            int held;
+            Local(int start) { held = start + captured + base; }
+            int read() { return held; }
+        }
+
+        Local made = new Local(seed) { };
+        return made.read();
+    }
+
+    public static int run(int n) { return new Host().build(n); }
+}
+";
+    assert_invoke(&[source], "run", &["3"], "110");
+}
+
+/// Java's arrays are covariant and wasm's are invariant, so one is not the other.
+///
+/// A wasm array is mutable, and declared subtyping over it would let a write of the wrong element
+/// type through — so `(array anyref)` and `(array (ref null $x))` are unrelated and no cast relates
+/// them. Said out loud rather than emitted, because the bytes are a module no engine loads.
+#[test]
+fn a_covariant_array_assignment_is_refused() {
+    let source = r"
+public class Covariant {
+    static class Cell {}
+    static void take(Object[] any) { }
+    static void run() { take(new Cell[] { null }); }
+}
+";
+    let error = compile(&[source]).expect_err("wasm arrays are invariant");
+    assert!(
+        matches!(
+            error,
+            WasmError::Unsupported("an array where an array of another type is wanted")
+        ),
+        "got {error}"
+    );
+}
