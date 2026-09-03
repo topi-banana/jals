@@ -160,7 +160,10 @@ impl CompileWasm {
     /// lowering without an engine to run it.
     pub fn module(inputs: &[TypedFile<'_>], index: &ProjectIndex) -> Result<Module> {
         let mut module = Module::new();
-        let mut layout = Layout::default();
+        let mut layout = Layout {
+            object: index.item_by_fqn("java.lang.Object"),
+            ..Layout::default()
+        };
 
         // Pass 1: every class *reserves* a struct type index, in an order where a supertype comes
         // first so its field prefix is known when the subtype is laid out. Only the index is fixed
@@ -181,16 +184,6 @@ impl CompileWasm {
         }
         for (item, captured) in captured_items {
             layout.captures.insert(item, captured);
-        }
-        // A subclass's own fields start after its supertype's, and an inner class's synthetic field sits
-        // after *its* own — so a subclass would place its first field on top of it. Reported rather than
-        // laid out wrong.
-        for &item in &classes {
-            if let Some(parent) = Hierarchy::of(index).superclass(item)
-                && layout.inner.contains_key(&parent)
-            {
-                return Err(WasmError::Unsupported("a subclass of an inner class"));
-            }
         }
         // An interface has no struct type, so it is registered before any class is laid out: a field or
         // a parameter of interface type has to resolve to *something* while the structs are built.
@@ -509,8 +502,16 @@ impl CompileWasm {
                 let owner = Layout::owner_of(&node, input, index)?;
                 let struct_type = layout.structs[&owner];
                 let this = layout.class_ref(owner)?;
-                let components: Vec<MemberId> =
-                    layout.fields.get(&owner).cloned().unwrap_or_default();
+                let components: Vec<MemberId> = layout
+                    .fields
+                    .get(&owner)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|slot| match slot {
+                        Slot::Declared(member) => Some(*member),
+                        Slot::Enclosing(_) | Slot::Capture(_) => None,
+                    })
+                    .collect();
 
                 // The canonical constructor, unless the body wrote one: `this` then one parameter per
                 // component, each stored into its own slot.
@@ -639,16 +640,15 @@ impl CompileWasm {
         let mut declared = Vec::new();
         for input in inputs {
             for node in Self::type_declarations(input.root()) {
-                // A type this backend does not lay out at all. Dropping one is what the class walk used
-                // to do to *every* nested declaration: the type never exists, and the first use of it
-                // reports an unresolved name that points at nothing a reader can act on.
-                if let Some(what) = Self::unrepresentable_kind(node.kind()) {
-                    return Err(WasmError::Unsupported(what));
-                }
                 let Some(item) = Self::item_of(&node, input, index)? else {
                     continue;
                 };
-                if node.kind() == INTERFACE_DECL {
+                // An `@interface` **is** an interface (JLS §9.6) and is laid out as one: its
+                // elements are abstract methods, so nothing declares a function for them, and its
+                // uses are metadata a wasm host has no reflection to read. Refusing the declaration
+                // instead stopped every file that merely *declared* one — a sixth of this backend's
+                // own corpus — over a type nothing in the module ever calls.
+                if matches!(node.kind(), INTERFACE_DECL | ANNOTATION_TYPE_DECL) {
                     interfaces.push(item);
                     continue;
                 }
@@ -686,19 +686,6 @@ impl CompileWasm {
             Self::push_with_supertypes(item, index, &declared, &mut ordered);
         }
         Ok(ordered)
-    }
-
-    /// The declaration kinds this backend lays out no type for, each naming itself.
-    ///
-    /// An interface needs a dispatch mechanism (a function table or a per-type vtable struct), and an
-    /// `enum` and a `record` need the synthesised members the JVM backend builds. None is laid out yet,
-    /// and every one of them would otherwise vanish without a word.
-    const fn unrepresentable_kind(kind: jals_syntax::SyntaxKind) -> Option<&'static str> {
-        use jals_syntax::SyntaxKind::ANNOTATION_TYPE_DECL;
-        match kind {
-            ANNOTATION_TYPE_DECL => Some("an `@interface` declaration"),
-            _ => None,
-        }
     }
 
     /// Every type declaration in `root`, nested ones included.
@@ -957,7 +944,7 @@ struct Layout {
     /// Each class's struct type index.
     structs: BTreeMap<ItemId, u32>,
     /// Each class's instance fields, in slot order, including those inherited.
-    fields: BTreeMap<ItemId, Vec<MemberId>>,
+    fields: BTreeMap<ItemId, Vec<Slot>>,
     /// Each method's function index.
     functions: BTreeMap<MemberId, u32>,
     /// A non-`static` nested class and the class that encloses it. Its instance holds the enclosing one
@@ -982,6 +969,13 @@ struct Layout {
     /// subtyping is single-inheritance, so it could not be a supertype of two unrelated classes — so a
     /// value of interface type is held at the top of the reference hierarchy and narrowed at each use.
     interfaces: BTreeSet<ItemId>,
+    /// `java.lang.Object`, when the index holds it.
+    ///
+    /// The one library type this backend needs no `java.base` to represent: it is the root of Java's
+    /// reference hierarchy and `anyref` is wasm's, so a value of it is held exactly where an
+    /// interface-typed one is. Refusing it instead put every file that so much as declares an
+    /// `Object` field outside the subset, over a type whose representation the target already has.
+    object: Option<ItemId>,
     /// Each `static` field's global index. A Java `static` field is module state, which is what a
     /// wasm global is; an instance field is a struct slot instead.
     statics: BTreeMap<MemberId, u32>,
@@ -995,6 +989,23 @@ struct Layout {
     /// `(element type, array type index)`. A `Vec` because `ValType` has no ordering and a program
     /// has a handful of distinct element types.
     arrays: Vec<(ValType, u32)>,
+}
+
+/// One field of a class's wasm struct, in the order the struct declares them.
+///
+/// The synthetic ones are *in* the list rather than appended when the struct is written, because
+/// wasm's declared subtyping requires a subtype's fields to extend its supertype's as a prefix. A
+/// list holding only the declared fields put a subclass's first field on top of its superclass's
+/// enclosing instance — which is why a subclass of an inner class had to be refused outright.
+#[derive(Clone)]
+enum Slot {
+    /// A field the source declared.
+    Declared(MemberId),
+    /// The enclosing instance an inner class holds, and the type of it.
+    Enclosing(ItemId),
+    /// One local a local or anonymous class captured, with the type it was captured at — read from
+    /// the declaring file, which is the only place it is known.
+    Capture(Ty),
 }
 
 impl Layout {
@@ -1039,62 +1050,59 @@ impl Layout {
         let parent = Hierarchy::of(index)
             .superclass(item)
             .filter(|id| self.structs.contains_key(id));
-        let mut members: Vec<MemberId> = parent
+        // The supertype's *whole* list, synthetic fields included: a subtype's fields extend its
+        // supertype's as a prefix, so anything the supertype holds occupies a slot here too.
+        let mut slots: Vec<Slot> = parent
             .and_then(|id| self.fields.get(&id))
             .cloned()
             .unwrap_or_default();
         for &member in index.own_members(item) {
             let info = index.member(member);
             if info.kind == DefKind::Field && !info.modifiers.is_static {
-                members.push(member);
+                slots.push(Slot::Declared(member));
+            }
+        }
+        // Then this class's own synthetic fields, after every field it declares.
+        if let Some(&enclosing) = self.inner.get(&item) {
+            self.outer
+                .insert(item, u32::try_from(slots.len()).unwrap_or(u32::MAX));
+            slots.push(Slot::Enclosing(enclosing));
+        }
+        let captured = self.captures.get(&item).cloned().unwrap_or_default();
+        if !captured.is_empty() {
+            self.capture_slot
+                .insert(item, u32::try_from(slots.len()).unwrap_or(u32::MAX));
+            for (_, ty) in &captured {
+                slots.push(Slot::Capture(ty.clone()));
             }
         }
         self.structs.insert(item, module.reserve_type());
-        self.fields.insert(item, members);
+        self.fields.insert(item, slots);
     }
 
     /// Write `item`'s struct body: its supertype's fields followed by its own, at their wasm types.
-    fn fill_class(
-        &mut self,
-        item: ItemId,
-        index: &ProjectIndex,
-        module: &mut Module,
-    ) -> Result<()> {
+    ///
+    /// The order and the synthetic entries were settled by
+    /// [`reserve_class`](Self::reserve_class) — which is what makes a subtype's fields a real prefix
+    /// extension of its supertype's — so this only resolves each slot to a wasm type.
+    fn fill_class(&self, item: ItemId, index: &ProjectIndex, module: &mut Module) -> Result<()> {
         let Some(&type_index) = self.structs.get(&item) else {
             return Ok(());
         };
-        let members = self.fields.get(&item).cloned().unwrap_or_default();
-        let mut fields = Vec::with_capacity(members.len());
-        for &member in &members {
+        let slots = self.fields.get(&item).cloned().unwrap_or_default();
+        let mut fields = Vec::with_capacity(slots.len());
+        for slot in &slots {
+            let ty = match slot {
+                Slot::Declared(member) => self.val_type(&index.resolved_member_ty(*member))?,
+                Slot::Enclosing(enclosing) => self.class_ref(*enclosing)?,
+                Slot::Capture(ty) => self.val_type(ty)?,
+            };
             fields.push(FieldType {
-                storage: StorageType::Val(self.val_type(&index.resolved_member_ty(member))?),
+                storage: StorageType::Val(ty),
                 // Every Java field is assignable unless `final`, and even a `final` one is written
                 // once by a constructor — after `struct.new_default` has already made it.
                 mutable: true,
             });
-        }
-        // The enclosing instance goes last, so every real field keeps the slot `field_slot` computes.
-        let outer = self.inner.get(&item).copied();
-        if let Some(enclosing) = outer {
-            let slot = u32::try_from(fields.len()).map_err(|_| WasmError::TooLarge)?;
-            fields.push(FieldType {
-                storage: StorageType::Val(self.class_ref(enclosing)?),
-                mutable: true,
-            });
-            self.outer.insert(item, slot);
-        }
-        // One field per captured local, after the enclosing instance: the class outlives the frame the
-        // local lived in, so the value has to be copied into it.
-        let captured = self.captures.get(&item).cloned().unwrap_or_default();
-        if !captured.is_empty() {
-            let first = u32::try_from(fields.len()).map_err(|_| WasmError::TooLarge)?;
-            self.capture_slot.insert(item, first);
-            for (_, ty) in &captured {
-                fields.push(FieldType {
-                    storage: StorageType::Val(self.val_type(ty)?),
-                    mutable: true,
-                });
-            }
         }
         let parent = Hierarchy::of(index)
             .superclass(item)
@@ -1348,7 +1356,9 @@ impl Layout {
 
     /// A nullable reference to `item`'s struct type — how every Java reference is represented.
     fn class_ref(&self, item: ItemId) -> Result<ValType> {
-        if self.interfaces.contains(&item) {
+        // `java.lang.Object` sits where an interface does, and for the same reason: both are
+        // satisfied by a value of *any* reference type, and wasm's `anyref` is exactly that.
+        if self.interfaces.contains(&item) || self.object == Some(item) {
             return Ok(ValType::Ref(RefType::nullable(HeapType::Any)));
         }
         let index = self
@@ -1375,7 +1385,11 @@ impl Layout {
             Ty::Class(_) => {
                 let item = ty
                     .project_id()
-                    .filter(|id| self.structs.contains_key(id) || self.interfaces.contains(id))
+                    .filter(|id| {
+                        self.structs.contains_key(id)
+                            || self.interfaces.contains(id)
+                            || self.object == Some(*id)
+                    })
                     .ok_or_else(|| WasmError::NoRepresentation(ty.to_string()))?;
                 self.class_ref(item)?
             }
@@ -1391,7 +1405,11 @@ impl Layout {
     }
 
     fn field_slot(&self, owner: ItemId, member: MemberId) -> Option<u32> {
-        let slot = self.fields.get(&owner)?.iter().position(|&f| f == member)?;
+        let slot = self
+            .fields
+            .get(&owner)?
+            .iter()
+            .position(|slot| matches!(slot, Slot::Declared(id) if *id == member))?;
         u32::try_from(slot).ok()
     }
 }
@@ -1465,9 +1483,14 @@ impl Body {
             let under_enum = Hierarchy::of(index)
                 .superclass(owner)
                 .is_some_and(|parent| index.item(parent).kind == DefKind::Enum);
-            if let Some(function) = Self::super_constructor(owner, index, layout)
+            if let Some((declaring, function)) = Self::super_constructor(owner, index, layout)
                 && !under_enum
             {
+                if layout.inner.contains_key(&declaring) {
+                    return Err(WasmError::Unsupported(
+                        "an implicit `super()` to an inner class's constructor",
+                    ));
+                }
                 insn.local_get(0).call(function);
             }
             lowering.initializers(owner, &method.node, 0, &mut insn)?;
@@ -1516,11 +1539,8 @@ impl Body {
                     return Err(WasmError::Unsupported(
                         "a constructor reference with no matching constructor",
                     ));
-                } else if let Some(initialise) = layout
-                    .default_constructors
-                    .get(&created)
-                    .copied()
-                    .or_else(|| Self::super_constructor(created, index, layout))
+                } else if let Some(initialise) =
+                    Self::inherited_initialiser(created, index, layout)?
                 {
                     // Declaring no constructor does not mean there is nothing to run: the synthesised one
                     // runs the field initialisers, and it is the same function a plain `new` calls.
@@ -1668,9 +1688,22 @@ impl Body {
             // default in a module that validates.
             if let Some(owner) = method.owner
                 && !block.as_ref().is_some_and(Self::delegates_to_super)
-                && let Some(function) = Self::super_constructor(owner, index, layout)
+                && let Some((declaring, function)) = Self::super_constructor(owner, index, layout)
             {
-                insn.local_get(0).call(function);
+                insn.local_get(0);
+                // The superclass may itself be an inner class, whose constructor takes the
+                // enclosing instance right after `this`. It is *this* constructor's own — the
+                // parameter at slot 1, already written into the synthetic field above — because a
+                // subclass of an inner class is enclosed by the same type its superclass is.
+                if layout.inner.contains_key(&declaring) {
+                    if method.encloses.is_none() {
+                        return Err(WasmError::Unsupported(
+                            "a subclass of an inner class with no enclosing instance of its own",
+                        ));
+                    }
+                    insn.local_get(1);
+                }
+                insn.call(function);
             }
             // The constructor's parent *is* the class body, which is where the initialisers are and
             // the reason they need no search: they are this declaration's siblings, in order.
@@ -1715,17 +1748,44 @@ impl Body {
     ///
     /// `None` at a class whose declared constructors all take arguments: Java requires an explicit
     /// `super(…)` there, so there is nothing implicit to call, and the source wrote what to run.
-    fn super_constructor(owner: ItemId, index: &ProjectIndex, layout: &Layout) -> Option<u32> {
+    /// The function that runs `owner`'s inherited initialisers when nothing else will: its own
+    /// synthesised one, or the nearest ancestor's.
+    ///
+    /// Every caller has only the receiver to pass, so a constructor that takes an enclosing instance
+    /// too is reported rather than called one argument short — and rather than skipped, which would
+    /// leave the inherited fields at their defaults in a module that validates.
+    fn inherited_initialiser(
+        owner: ItemId,
+        index: &ProjectIndex,
+        layout: &Layout,
+    ) -> Result<Option<u32>> {
+        if let Some(&function) = layout.default_constructors.get(&owner) {
+            return Ok(Some(function));
+        }
+        match Self::super_constructor(owner, index, layout) {
+            Some((declaring, _)) if layout.inner.contains_key(&declaring) => Err(
+                WasmError::Unsupported("an inherited initialiser on an inner class"),
+            ),
+            found => Ok(found.map(|(_, function)| function)),
+        }
+    }
+
+    fn super_constructor(
+        owner: ItemId,
+        index: &ProjectIndex,
+        layout: &Layout,
+    ) -> Option<(ItemId, u32)> {
         let mut candidate = Hierarchy::of(index).superclass(owner);
         while let Some(item) = candidate {
             let mut declared = layout.constructors(index, item).peekable();
             if declared.peek().is_some() {
                 return declared
                     .find(|&member| index.member(member).params.is_empty())
-                    .and_then(|member| layout.functions.get(&member).copied());
+                    .and_then(|member| layout.functions.get(&member).copied())
+                    .map(|function| (item, function));
             }
             if let Some(&function) = layout.default_constructors.get(&item) {
-                return Some(function);
+                return Some((item, function));
             }
             candidate = Hierarchy::of(index).superclass(item);
         }
@@ -1887,8 +1947,17 @@ impl Lowering<'_> {
         };
         if let Some(function) = enum_constructor {
             insn.local_get(slot);
-            for argument in &arguments {
-                self.expr(argument, insn)?;
+            let params = selected.map(|member| self.index.resolved_param_tys(member));
+            for (position, argument) in arguments.iter().enumerate() {
+                match params.as_ref().and_then(|params| params.get(position)) {
+                    Some(declared) => {
+                        let target = self.layout.val_type(declared)?;
+                        self.expr_as(argument, target, insn)?;
+                    }
+                    None => {
+                        self.expr(argument, insn)?;
+                    }
+                }
             }
             insn.call(function);
         }
@@ -4482,8 +4551,17 @@ impl Lowering<'_> {
                 if let Some(encloses) = encloses {
                     self.enclosing_instance(qualifier.as_ref(), encloses, insn)?;
                 }
-                for argument in &arguments {
-                    self.expr(argument, insn)?;
+                let params = self.index.resolved_param_tys(constructor);
+                for (position, argument) in arguments.iter().enumerate() {
+                    match params.get(position) {
+                        Some(declared) => {
+                            let target = self.layout.val_type(declared)?;
+                            self.expr_as(argument, target, insn)?;
+                        }
+                        None => {
+                            self.expr(argument, insn)?;
+                        }
+                    }
                 }
                 self.push_captures(item, insn)?;
                 insn.call(function).local_get(slot);
@@ -4496,12 +4574,8 @@ impl Lowering<'_> {
                 // `class Box { int value = 9; }` read back as 0 — a wrong value in a module that validates.
                 // Its own synthesised constructor, or — when it has no initialisers of its own — the
                 // nearest ancestor's, whose initialisers still have to run.
-                if let Some(initialise) = self
-                    .layout
-                    .default_constructors
-                    .get(&item)
-                    .copied()
-                    .or_else(|| Body::super_constructor(item, self.index, self.layout))
+                if let Some(initialise) =
+                    Body::inherited_initialiser(item, self.index, self.layout)?
                 {
                     let slot = self.scratch(ty);
                     insn.local_set(slot).local_get(slot).call(initialise);
@@ -4632,11 +4706,22 @@ impl Lowering<'_> {
 
         // Lowered untargeted, exactly as the direct-call path does: an argument's own inferred type is
         // what both use, so a virtual call converts no differently from a static one.
+        let params = self.index.resolved_param_tys(member);
         let mut slots = Vec::with_capacity(arguments.len());
-        for argument in arguments {
-            let value = self
-                .expr(argument, insn)?
-                .ok_or(WasmError::Unsupported("an argument with no value"))?;
+        for (position, argument) in arguments.iter().enumerate() {
+            // At the parameter's type where there is one: every branch of the dispatch chain calls a
+            // function declared over these, so a value erasure left at the top has to come down here
+            // rather than once per branch.
+            let value = match params.get(position) {
+                Some(declared) => {
+                    let target = self.layout.val_type(declared)?;
+                    self.expr_as(argument, target, insn)?;
+                    target
+                }
+                None => self
+                    .expr(argument, insn)?
+                    .ok_or(WasmError::Unsupported("an argument with no value"))?,
+            };
             let slot = self.scratch(value);
             insn.local_set(slot);
             slots.push(slot);
@@ -4769,6 +4854,38 @@ impl Lowering<'_> {
         Ok(())
     }
 
+    /// Push `expr` and narrow the value to `target` when erasure left it at the top of the
+    /// reference hierarchy.
+    ///
+    /// An `Object`, an interface, and a type variable are all `anyref` here, and every use at a
+    /// *concrete* type — a parameter, a field, a return — wants that struct in particular. The JVM
+    /// backend emits a `checkcast` at exactly these places and for exactly this reason; the
+    /// validator is stricter than the verifier only in that it will not let one through unchecked.
+    ///
+    /// Nullable, because Java's `null` is assignable everywhere: a non-null cast would trap on a
+    /// value the source is entitled to pass.
+    fn expr_as(&mut self, expr: &ast::Expr, target: ValType, insn: &mut Insn) -> Result<()> {
+        let produced = self
+            .expr(expr, insn)?
+            .ok_or(WasmError::Unsupported("an argument with no value"))?;
+        Self::narrow(produced, target, insn);
+        Ok(())
+    }
+
+    /// Emit the `ref.cast` that takes a top-of-hierarchy value down to `target`, if one is needed.
+    fn narrow(produced: ValType, target: ValType, insn: &mut Insn) {
+        let (ValType::Ref(from), ValType::Ref(to)) = (produced, target) else {
+            return;
+        };
+        if from.heap == to.heap {
+            return;
+        }
+        // `HeapType::None` is the *bottom* and already fits everywhere, so only the top needs one.
+        if matches!(to.heap, HeapType::Concrete(_)) && from.heap == HeapType::Any {
+            insn.ref_cast(to.heap, true);
+        }
+    }
+
     /// A fresh unnamed local of type `ty`, for values that must outlive the stack.
     fn scratch(&mut self, ty: ValType) -> u32 {
         let slot = self.next;
@@ -4806,13 +4923,34 @@ impl Lowering<'_> {
         // Only now: a method with no function index is abstract, and an abstract one is only ever
         // reached through the chain above. Looking it up first reported "outside this module" for every
         // interface call, which named the wrong problem.
-        let function = *self
-            .layout
-            .functions
-            .get(&member)
-            .ok_or(WasmError::Unsupported(
-                "a call to a method outside this module",
-            ))?;
+        let function = match self.layout.functions.get(&member).copied() {
+            Some(function) => function,
+            // No function, and the owner is a type this module *does* lay out: the method has no
+            // body anywhere in the module, and the chain above found nothing that overrides it. So
+            // no object carrying an implementation of it can exist here, and the call is
+            // dynamically unreachable — which `unreachable` says exactly. An abstract class calling
+            // its own abstract method is ordinary Java, and refusing it stopped the whole file.
+            None if self
+                .layout
+                .structs
+                .contains_key(&self.index.member(member).owner)
+                || self
+                    .layout
+                    .interfaces
+                    .contains(&self.index.member(member).owner) =>
+            {
+                insn.unreachable();
+                return Ok(match self.index.resolved_member_ty(member) {
+                    Ty::Void => None,
+                    ty => Some(self.layout.val_type(&ty)?),
+                });
+            }
+            None => {
+                return Err(WasmError::Unsupported(
+                    "a call to a method outside this module",
+                ));
+            }
+        };
         if !is_static {
             match call.callee() {
                 Some(ast::Expr::FieldAccess(access)) => {
@@ -4830,8 +4968,28 @@ impl Lowering<'_> {
                 }
             }
         }
-        for argument in &arguments {
-            self.expr(argument, insn)?;
+        // A constructor of an inner class takes the enclosing instance right after `this`, before
+        // every declared argument — which is exactly where a `new` puts it. A `super(…)` or
+        // `this(…)` reaching one is a call to that constructor and passes it too; leaving it out is
+        // a call one argument short, which the validator refuses.
+        if info.kind == DefKind::Constructor
+            && let Some(&encloses) = self.layout.inner.get(&info.owner)
+        {
+            self.enclosing_instance(None, encloses, insn)?;
+        }
+        // Each argument at the *parameter's* type, so erasure's top-of-hierarchy value is narrowed
+        // where the callee wants a struct in particular.
+        let params = self.index.resolved_param_tys(member);
+        for (position, argument) in arguments.iter().enumerate() {
+            match params.get(position) {
+                Some(declared) => {
+                    let target = self.layout.val_type(declared)?;
+                    self.expr_as(argument, target, insn)?;
+                }
+                None => {
+                    self.expr(argument, insn)?;
+                }
+            }
         }
         insn.call(function);
 

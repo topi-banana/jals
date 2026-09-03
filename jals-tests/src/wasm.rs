@@ -584,11 +584,13 @@ impl WasmReport {
     ///
     /// The counterpart of [`buckets`](Self::buckets) rather than a replacement: a bucket says what
     /// the shape of the remaining work is, and this says which file to open to work on it. A case
-    /// outside the subset is not a gap and is not listed — that is the denominator, not the rate.
+    /// outside the subset is not a gap and is not listed — that is the denominator, not the rate —
+    /// and neither is one that *lowered*, whose remaining rungs are the engine's answer rather than
+    /// the compiler's refusal.
     pub fn gaps(&self) -> Vec<&CaseResult> {
         self.results
             .iter()
-            .filter(|result| result.outcome.in_subset())
+            .filter(|result| result.outcome.in_subset() && !result.outcome.lowered())
             .filter(|result| {
                 !result.outcome.is_invariant_violation() && result.outcome.detail().is_some()
             })

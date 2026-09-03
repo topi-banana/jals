@@ -1261,29 +1261,35 @@ public class Outer {
     assert_invoke(&[source], "through_a_nested_subclass", &["5"], "12");
 }
 
-/// A type declaration this backend lays out nothing for reports *itself*.
+/// An `@interface` is laid out as the interface it is (JLS §9.6).
 ///
-/// Dropping one is what the class walk used to do to every nested declaration: the type never exists,
-/// and the first use of it reports an unresolved name pointing at nothing a reader can act on. An
-/// interface needs a dispatch mechanism (a function table or a per-type vtable struct); an `enum` and a
-/// `record` need the synthesised members the JVM backend builds. Saying which is missing is the
-/// difference between a compiler with a gap and one that looks broken.
+/// Refusing the declaration stopped every file that merely *contained* one — a sixth of this
+/// backend's own corpus — over a type nothing in the module ever calls. Its elements are abstract
+/// methods, so nothing declares a function for them, and an annotation's *use* is metadata a wasm
+/// host has no reflection to read.
 #[test]
-fn each_unrepresentable_type_declaration_names_itself() {
-    for (source, expected) in [
-        ("@interface M {}", "an `@interface` declaration"),
-        // Nested, which is where the silent drop used to happen.
-        (
-            "public class O { @interface M {} }",
-            "an `@interface` declaration",
-        ),
+fn an_annotation_type_is_laid_out_as_the_interface_it_is() {
+    // JLS §9.6: an `@interface` *is* an interface. Its elements are abstract methods, so nothing
+    // declares a function for them, and its uses are metadata a wasm host has no reflection to
+    // read — but refusing the declaration stopped every file that merely contained one.
+    for source in [
+        "@interface M {}",
+        "public class O { @interface M {} }",
+        "@interface M { int value() default 1; String name() default \"x\"; }",
     ] {
-        let error = compile(&[source]).expect_err("this declaration is not laid out yet");
-        assert!(
-            matches!(error, WasmError::Unsupported(what) if what == expected),
-            "`{source}` should report {expected:?}, got {error}"
-        );
+        compile(&[source]).unwrap_or_else(|error| panic!("`{source}`: {error}"));
     }
+
+    // And a program that carries one still runs.
+    let annotated = r"
+@interface Marked { int value() default 3; }
+
+public class Uses {
+    @Marked(7)
+    public static int run(int n) { return n + 1; }
+}
+";
+    assert_invoke(&[annotated], "run", &["4"], "5");
 }
 
 /// `{1, 2, 3}`, whose elements are written rather than defaulted.
@@ -1871,17 +1877,41 @@ public class Outer {
         ),
         "got {error}"
     );
+}
 
-    // A subclass of an inner class would place its first field on top of the synthetic one.
-    let extended = "public class O { int f; class I { int g; } class J extends I {} }";
-    let error = compile(&[extended]).expect_err("a subclass of an inner class is not laid out");
-    assert!(
-        matches!(
-            error,
-            WasmError::Unsupported("a subclass of an inner class")
-        ),
-        "got {error}"
-    );
+/// A subclass of an inner class: the synthetic enclosing instance is a field like any other.
+///
+/// wasm's declared subtyping wants a subtype's fields to extend its supertype's as a *prefix*, and a
+/// field list holding only the *declared* fields put a subclass's first field on top of its
+/// superclass's `this$0`. Recording the synthetic ones in the same list is what makes the extension
+/// a real prefix — and what turns a refusal into a module an engine runs.
+#[test]
+fn a_subclass_of_an_inner_class_extends_its_fields() {
+    let source = r"
+public class Host {
+    int base;
+
+    Host(int base) { this.base = base; }
+
+    class Inner {
+        int own;
+        Inner(int own) { this.own = own; }
+        int total() { return base + own; }
+    }
+
+    class Deeper extends Inner {
+        int extra;
+        Deeper(int own, int extra) { super(own); this.extra = extra; }
+        int all() { return total() + extra; }
+    }
+
+    public static int run(int n) {
+        Host host = new Host(100);
+        return host.new Deeper(n, 7).all();
+    }
+}
+";
+    assert_invoke(&[source], "run", &["3"], "110");
 }
 
 /// A local class — one declared inside a method body.
@@ -3047,4 +3077,72 @@ fn an_assignment_to_an_arrays_length_says_what_is_wrong() {
         ),
         "got {error}"
     );
+}
+
+/// A call to a method nothing in the module implements is a trap, not a refusal.
+///
+/// An abstract class calling its own abstract method is ordinary Java, and so is an interface method
+/// no class in the file implements. The dispatch chain finds nothing to call — which is the point:
+/// no object carrying an implementation can exist in a module that is the whole program, so the call
+/// is dynamically unreachable and `unreachable` says exactly that. Refusing it stopped the file.
+#[test]
+fn a_call_nothing_implements_traps_rather_than_refusing() {
+    let source = r"
+interface Sink {
+    void take(int n);
+}
+
+abstract class Partial implements Sink {
+    void forward(int n) {
+        take(n);
+    }
+
+    abstract int missing();
+
+    int ask() { return missing(); }
+}
+
+public class Reachable {
+    public static int run(int n) { return n * 2; }
+}
+";
+    // It compiles and validates; the unreachable bodies are never entered.
+    assert_invoke(&[source], "run", &["21"], "42");
+}
+
+/// `java.lang.Object` is represented, and it is the one library type that needs no `java.base`.
+///
+/// It is the root of Java's reference hierarchy and `anyref` is wasm's, so a value of it sits
+/// exactly where an interface-typed one does. Refusing it put every file that so much as declares an
+/// `Object` field outside the subset — over a type whose representation the target already has —
+/// and a value coming back down to a concrete type gets the `ref.cast` the JVM backend spells
+/// `checkcast`.
+#[test]
+fn an_object_is_the_top_of_the_reference_hierarchy() {
+    let source = r"
+public class Boxes {
+    static class Cell {
+        int value;
+        Cell(int value) { this.value = value; }
+    }
+
+    Object held;
+
+    static int unwrap(Object o) {
+        Cell cell = (Cell) o;
+        return cell.value;
+    }
+
+    static int through(Cell cell) {
+        Boxes box = new Boxes();
+        box.held = cell;
+        return unwrap(box.held);
+    }
+
+    public static int run(int n) {
+        return through(new Cell(n)) + 1;
+    }
+}
+";
+    assert_invoke(&[source], "run", &["41"], "42");
 }
