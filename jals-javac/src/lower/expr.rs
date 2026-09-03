@@ -697,6 +697,99 @@ impl Expr {
         Ok(())
     }
 
+    /// Refuse a `protected` member of a superclass in another package reached through a receiver
+    /// the current class is not assignable from.
+    ///
+    /// JVMS §4.10.1.8 is stricter than JLS §6.6.1: the language permits the access anywhere in the
+    /// top-level class, and the *verifier* permits it only through a reference of the accessing
+    /// class's own type. So `Outer.this.finalize()` written inside `Outer`'s anonymous class is
+    /// legal Java and a class file no JVM loads — javac reaches it through a synthetic `access$N`
+    /// emitted in the class that *may* make the call. This backend synthesises no such method, so it
+    /// says so rather than emitting the call: a report is recoverable and a rejected class file is
+    /// not.
+    ///
+    /// "`protected`" is derived rather than recorded: a member that is neither `public` nor
+    /// `private`, on a *superclass in another package*, is reachable at all only by being
+    /// `protected` — a package-private one would not have resolved.
+    fn check_protected_receiver(
+        call: &ast::CallExpr,
+        member: MemberId,
+        context: &Context<'_>,
+    ) -> Result<()> {
+        let info = context.index.member(member);
+        if info.modifiers.is_public
+            || info.modifiers.is_private
+            || info.modifiers.is_static
+            || info.owner == context.this_item
+            || !context.index.is_subtype(context.this_item, info.owner)
+            || Self::package_of(info.owner, context) == Self::package_of(context.this_item, context)
+        {
+            return Ok(());
+        }
+        // Only a call through *another* value can trip it. An unqualified one is reached through
+        // `this`, and so are `this.m()` and `super.m()` — the accessing class by construction, and
+        // neither carries an inferred type to read (`super`'s is deliberately unknown).
+        let Some(ast::Expr::FieldAccess(access)) = call.callee() else {
+            return Ok(());
+        };
+        let Some(receiver) = access.receiver() else {
+            return Ok(());
+        };
+        // The *bare* keyword only: `Outer.this` is a field access naming another instance, and it is
+        // the shape this check exists for.
+        if matches!(&receiver, ast::Expr::NameRef(name)
+            if Facts::is_this(name.syntax()) || Facts::is_super(name.syntax()))
+        {
+            return Ok(());
+        }
+        // Through the *erasure*: a receiver of type-variable type is the bound at run time, and it
+        // is the bound the verifier reads too — `<T extends C & I> void m(T t) { t.clone(); }` is
+        // reached through a `C`, which is the accessing class.
+        let through = Self::type_of(receiver.syntax(), context)
+            .ok()
+            .map(|ty| Self::erased(ty, context))
+            .and_then(|ty| ty.project_id());
+        match through {
+            Some(item) if context.index.is_subtype(item, context.this_item) => Ok(()),
+            _ => Err(LowerError::Unsupported(
+                "a `protected` member reached through another type",
+            )),
+        }
+    }
+
+    /// A type with its type variables erased to their bounds (JLS §4.6), one level at a time until a
+    /// nominal type or nothing is left.
+    fn erased(ty: Ty, context: &Context<'_>) -> Ty {
+        /// A `<T extends U, U extends V>` chain is one lookup per step; `<T extends U, U extends T>`
+        /// is not a Java program but a reader of one has to terminate anyway.
+        const DEPTH: u8 = 8;
+        let mut ty = ty;
+        for _ in 0..DEPTH {
+            let Ty::TypeVar {
+                owner,
+                member,
+                name,
+            } = &ty
+            else {
+                return ty;
+            };
+            let Some(bound) = context.index.type_var_bound(*owner, *member, name) else {
+                return ty;
+            };
+            ty = bound;
+        }
+        ty
+    }
+
+    /// The runtime package of an indexed type — everything before the last `/` of its internal name,
+    /// which is the one spelling in which a nested type's `$` is not a package separator.
+    fn package_of(item: ItemId, context: &Context<'_>) -> String {
+        let internal = Descriptor::internal_name_of(item, context.index);
+        internal
+            .rsplit_once('/')
+            .map_or_else(String::new, |(package, _)| package.to_owned())
+    }
+
     /// An array's `clone()`, whose owner and return are the array's own type (JLS §10.7).
     ///
     /// The one member a call resolves to `Object.clone()` and must not be emitted as. The *owner*
@@ -781,6 +874,7 @@ impl Expr {
                     Descriptor::internal_name_of(info.owner, context.index),
                 )
             };
+        Self::check_protected_receiver(call, member, context)?;
         let interface_owner = context.index.item(owner_item).kind == DefKind::Interface;
         // The receiver comes first on the stack, below the arguments.
         if !is_static {

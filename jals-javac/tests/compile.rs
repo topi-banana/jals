@@ -43,6 +43,30 @@ fn compile(source: &str) -> Result<Vec<CompiledClass>, LowerError> {
     Compile::file(typed, MAJOR_JAVA_25)
 }
 
+/// Compile the *last* of `sources` as part of a project holding all of them.
+///
+/// A file declares one package, so a rule about crossing a package boundary needs two — and this is
+/// the smallest thing that gives one: the other files are indexed and only the last is lowered,
+/// exactly as a project build compiles one file at a time against the whole index.
+fn compile_across(sources: &[&str]) -> Result<Vec<CompiledClass>, LowerError> {
+    let roots: Vec<(FileId, jals_syntax::SyntaxNode)> = sources
+        .iter()
+        .enumerate()
+        .map(|(index, text)| {
+            (
+                FileId(u32::try_from(index).expect("file id")),
+                jals_exec::block_on_inline(jals_syntax::Parse::parse(text)).syntax(),
+            )
+        })
+        .collect();
+    let index = jals_exec::block_on_inline(ProjectIndex::builder(&roots).with_stdlib().build());
+    let last = FileId(u32::try_from(sources.len() - 1).expect("file id"));
+    let analysis = jals_exec::block_on_inline(FileAnalysis::of(&roots[sources.len() - 1].1));
+    let semantics = analysis.in_project(&index, last);
+    let typed = jals_exec::block_on_inline(semantics.typed());
+    Compile::file(typed, MAJOR_JAVA_25)
+}
+
 /// Compile `source`, run its `main` class on a real JVM, and return stdout.
 fn run(source: &str, main_class: &str) -> String {
     let classes = compile(source).unwrap_or_else(|error| panic!("compile: {error}"));
@@ -6701,4 +6725,68 @@ public class Detail {
         return;
     }
     assert_eq!(run(source, "Detail"), "0\n");
+}
+
+/// A `protected` member of a superclass in another package, reached through another instance.
+///
+/// JVMS §4.10.1.8 is stricter than JLS §6.6.1: the language permits the access anywhere in the
+/// top-level class, and the *verifier* permits it only through a reference of the accessing class's
+/// own type. So `Outer.this.finalize()` written inside `Outer`'s anonymous class is legal Java and
+/// a class file no JVM loads — javac reaches it through a synthetic `access$N` emitted in the class
+/// that may make the call. This backend synthesises no such method and says so, because a report is
+/// recoverable and a rejected class file is not.
+///
+/// What must *not* trip it is every ordinary shape: `super.clone()`, `this.clone()`, and a receiver
+/// whose type is a type variable bounded by the accessing class — the erasure is that class.
+#[test]
+fn a_protected_member_through_another_instance_is_refused() {
+    let base = "
+package base;
+
+public class Base {
+    public Base() {}
+
+    protected int secret() { return 1; }
+}
+";
+    let refused = "
+package app;
+
+import base.Base;
+
+public class Reaching extends Base {
+    int through() {
+        // The anonymous class *is* a subclass of `Base`, in another package — so the verifier
+        // admits a call to `secret()` through nothing but its own type, and the receiver here is a
+        // `Reaching`.
+        Base inner = new Base() {
+            int reach() { return Reaching.this.secret(); }
+        };
+        return 0;
+    }
+}
+";
+    let error = compile_across(&[base, refused]).expect_err("the verifier admits no such call");
+    assert!(
+        matches!(
+            error,
+            LowerError::Unsupported("a `protected` member reached through another type")
+        ),
+        "got {error}"
+    );
+
+    let allowed = "
+package app;
+
+import base.Base;
+
+public class Allowed extends Base {
+    interface Marker {}
+
+    int own() { return this.secret() + super.secret(); }
+
+    <T extends Allowed & Marker> int through(T other) { return other.secret(); }
+}
+";
+    compile_across(&[base, allowed]).expect("every ordinary shape still compiles");
 }

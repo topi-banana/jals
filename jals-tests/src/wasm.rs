@@ -221,7 +221,7 @@ impl Outcome {
     /// These are the outcomes that should fail a run rather than lower a percentage: a panic, a
     /// module the validator refuses, a syntax error on a file that is valid Java by construction,
     /// and a compiled program that computes something else than javac's.
-    pub(crate) const fn is_invariant_violation(&self) -> bool {
+    const fn is_invariant_violation(&self) -> bool {
         matches!(
             self,
             Self::Panicked | Self::Rejected(_) | Self::ParseError(_) | Self::Disagreed(_)

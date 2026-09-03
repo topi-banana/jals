@@ -263,10 +263,14 @@ pub struct MemberModifiers {
     /// `interface I { int clone(); }` acquired a bridge from. `is_private` is still separate rather
     /// than folded in: the two answer different questions, and a package-private member is neither.
     ///
-    /// `pub(crate)` where its two siblings are `pub`: they decide an *instruction* a code generator
-    /// emits, and this decides a *member set* the resolver answers with, so no consumer outside this
-    /// crate reads it. The struct stays constructible only in here, which it already was.
-    pub(crate) is_public: bool,
+    /// It decides an *instruction* as well now, which is why it is `pub` like its siblings.
+    /// `protected` has no bit of its own, and it does not need one: a member that is neither
+    /// `public` nor `private`, resolved on a **superclass in another package**, is reachable at all
+    /// only by being `protected` — a package-private one would not have resolved there. That is the
+    /// derivation `jals-javac` reads it for, because JVMS §4.10.1.8 admits such a call only through
+    /// a reference of the accessing class's own type and a class file that ignores the rule is one
+    /// no JVM loads. The struct stays constructible only in here, which it already was.
+    pub is_public: bool,
     /// Declared `abstract`, or implicitly so because its owner is an interface and it is none of
     /// `default`, `static`, or `private` (JLS §9.4.1.1).
     ///

@@ -324,9 +324,11 @@ empty. What is open, by family:
   type the method's own descriptor does not admit.
 - **an operand whose type the analysis got wrong** at a call — the same cause seen from the call
   site rather than from the `return`.
-- **`protected` access across packages** (JLS §6.6.2): a `protected` member of a superclass in
-  another package may be reached only through a reference of the accessing class's own type, and
-  the emitted `invokevirtual` names the declaring one.
+
+Every open defect is now that one thing. `protected` access across packages (JVMS §4.10.1.8) is
+*reported* rather than emitted: javac reaches such a member through a synthetic `access$N` in the
+class that may make the call, and this backend synthesises none, so it says so instead of writing a
+class file no JVM loads.
 
 The parser is no longer among them: every file in the corpus parses, so `parsed` is 100% and a
 syntax error there would now be a regression rather than a known gap.
@@ -434,6 +436,13 @@ otherwise manufacture disagreements that say nothing about the compiler:
 The two comparison counts are reported separately, because they are different claims: a returned
 value that matches is *"computed the same answer"*, while a `void` method that completes on both
 sides is only *"neither side failed"*.
+
+**Read the denominator with the count.** This backend's subset moves as the compiler does, and it
+has moved *down*: a case that used to stop at an `@interface` or a type variable now gets far
+enough to name the library type it really needs, so it leaves the rate and joins the denominator.
+The scoped percentage and the absolute count therefore tell different halves of one story, and only
+the second is monotone — a four-point jump in the rate is not four points' worth of new
+compilation, and a drop in the subset is not a loss of scope.
 
 **What the numbers mean today.** On the current corpus the rung judges 23 cases — 5 value
 comparisons and 26 completions — because a Java entry point takes `String[]` and a file naming
