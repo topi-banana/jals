@@ -692,8 +692,10 @@ public class Outer {
         listed,
         [
             ("Counter".to_owned(), 0x0008),
-            // An interface entry keeps `ACC_INTERFACE | ACC_ABSTRACT` and gains no `ACC_SUPER`.
-            ("Named".to_owned(), 0x0200 | 0x0400),
+            // An interface entry keeps `ACC_INTERFACE | ACC_ABSTRACT`, gains no `ACC_SUPER`, and is
+            // `ACC_STATIC` without writing the word: a member interface is implicitly `static`
+            // (JLS §9.5), and this entry is the only place that can be recorded.
+            ("Named".to_owned(), 0x0200 | 0x0400 | 0x0008),
             ("Person".to_owned(), 0x0008),
         ]
     );
@@ -6024,4 +6026,327 @@ fn an_assignment_to_an_arrays_length_says_what_is_wrong() {
         ),
         "got {error}"
     );
+}
+
+/// A loop whose condition is the constant `true` has no test and no forward branch.
+///
+/// JLS §14.21 makes the statement after `while (true)` unreachable, so javac emits no conditional
+/// at all and the method simply ends with the back edge. Emitting the test anyway left a branch to
+/// an offset past the last instruction — which the verifier reports as *control flow falls through
+/// code end*, or, once a frame is required there, as a `StackMapTable` offset on no instruction.
+/// All three loop forms spell the same loop and all three are checked, because each emits its own
+/// branch.
+#[test]
+fn a_constant_loop_condition_emits_no_exit_branch() {
+    let source = r#"
+public class Forever {
+    static String whileTrue() {
+        int n = 0;
+        while (true) {
+            n++;
+            if (n > 2) return "while " + n;
+        }
+    }
+
+    static String doTrue() {
+        int n = 0;
+        do {
+            n++;
+            if (n > 3) return "do " + n;
+        } while (true);
+    }
+
+    static String forTrue() {
+        int n = 0;
+        for (; true; n++) {
+            if (n > 4) return "for " + n;
+        }
+    }
+
+    static String broken() {
+        while (true) {
+            break;
+        }
+        return "broke";
+    }
+
+    public static void main(String[] args) {
+        System.out.println(whileTrue());
+        System.out.println(doTrue());
+        System.out.println(forTrue());
+        System.out.println(broken());
+    }
+}
+"#;
+    let classes = compile(source).expect("compile");
+    let class =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(classes[0].bytes.as_slice()))
+            .expect("reparse");
+    // A loop with no `break` has no exit at all, so the last instruction is the back edge and
+    // nothing can fall out past it. The forward branch this used to emit landed *at* the code
+    // length, which is where the two verifier reports come from.
+    let last = |name: &str| {
+        let method = class
+            .methods
+            .iter()
+            .find(|method| {
+                class
+                    .constant_pool
+                    .utf8(method.name_index)
+                    .is_some_and(|written| written == name)
+            })
+            .unwrap_or_else(|| panic!("no method {name}"));
+        method
+            .attributes
+            .iter()
+            .find_map(|attribute| match &attribute.body {
+                jals_classfile::AttributeBody::Code(code) => code.code.last().cloned(),
+                _ => None,
+            })
+            .expect("a body")
+    };
+    for name in ["whileTrue", "doTrue", "forTrue"] {
+        assert!(
+            matches!(
+                last(name),
+                jals_classfile::Instruction::Goto(_) | jals_classfile::Instruction::GotoW(_)
+            ),
+            "`{name}` ends with its back edge, not with a branch past the code end: {:?}",
+            last(name)
+        );
+    }
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Forever"), "while 3\ndo 4\nfor 5\nbroke\n");
+}
+
+/// A member type of an interface is implicitly `static`, and so is a member interface, `enum`, or
+/// `record` anywhere (JLS §8.5.1, §9.5).
+///
+/// Two records have to say so and they are derived once: the type's own access flags, and the
+/// `InnerClasses` entry that is the *only* place `ACC_STATIC` can live for a nested type. Reading
+/// the `static` keyword alone gave `interface I { class C {} }` an enclosing instance, so `C`'s
+/// constructor took an `I` that `new I.C()` in a `static` method had nothing to pass.
+#[test]
+fn a_member_type_of_an_interface_is_implicitly_static() {
+    let source = r#"
+interface Holder {
+    class Boxed {
+        int value;
+        Boxed(int value) { this.value = value; }
+        int doubled() { return value * 2; }
+    }
+
+    Object ANON = new Object() {
+        public String toString() { return "anon"; }
+    };
+}
+
+public class Implicit {
+    public static void main(String[] args) {
+        System.out.println(new Holder.Boxed(21).doubled());
+        System.out.println(Holder.ANON.toString());
+    }
+}
+"#;
+    let classes = compile(source).expect("compile");
+    let boxed = classes
+        .iter()
+        .find(|class| class.internal_name == "Holder$Boxed")
+        .expect("the member class");
+    let class = jals_exec::block_on_inline(jals_classfile::ClassFile::read(boxed.bytes.as_slice()))
+        .expect("reparse");
+    // No enclosing instance means no synthetic field and a constructor of exactly the declared
+    // parameters.
+    assert!(
+        class.fields.iter().all(|field| {
+            class
+                .constant_pool
+                .utf8(field.name_index)
+                .is_some_and(|name| name != "this$0")
+        }),
+        "a member class of an interface holds no enclosing instance"
+    );
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Implicit"), "42\nanon\n");
+}
+
+/// A constructor may run statements *before* its explicit `super(…)` — JEP 447, final in Java 25.
+///
+/// The delegation used to be the body's first statement or nowhere, so a body that put anything
+/// ahead of it was read as having none: the implicit `super()` prologue was emitted **as well as**
+/// the explicit call the body still contained, and `Object.<init>` ran twice on one object. What the
+/// prologue may not do is touch `this`, which is `uninitializedThis` across all of it — so a local
+/// class declared there holds no enclosing instance, exactly as one declared in a `static` method
+/// does.
+#[test]
+fn a_constructor_may_run_statements_before_its_delegation() {
+    let source = r#"
+public class Early {
+    static StringBuilder log = new StringBuilder();
+
+    static class Base {
+        Base(int n) { log.append("base").append(n); }
+    }
+
+    static class Derived extends Base {
+        final int kept;
+
+        Derived(int n) {
+            log.append("pre");
+            int doubled = n * 2;
+            super(doubled);
+            this.kept = doubled;
+            log.append("post").append(kept);
+        }
+    }
+
+    public static void main(String[] args) {
+        Derived d = new Derived(3);
+        System.out.println(log + " " + d.kept);
+    }
+}
+"#;
+    let classes = compile(source).expect("compile");
+    let derived = classes
+        .iter()
+        .find(|class| class.internal_name == "Early$Derived")
+        .expect("the subclass");
+    let class =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(derived.bytes.as_slice()))
+            .expect("reparse");
+    let constructor = class
+        .methods
+        .iter()
+        .find(|method| {
+            class
+                .constant_pool
+                .utf8(method.name_index)
+                .is_some_and(|name| name == "<init>")
+        })
+        .expect("the constructor");
+    // Exactly one `<init>` call: the delegation the source wrote. A second is the implicit prologue
+    // the body already replaced.
+    let initialisations = constructor
+        .attributes
+        .iter()
+        .filter_map(|attribute| match &attribute.body {
+            jals_classfile::AttributeBody::Code(code) => Some(&code.code),
+            _ => None,
+        })
+        .flatten()
+        .filter(|instruction| matches!(instruction, jals_classfile::Instruction::InvokeSpecial(_)))
+        .count();
+    assert_eq!(initialisations, 1, "one `<init>` call, not two");
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Early"), "prebase6post6 6\n");
+}
+
+/// A lambda that reads the enclosing instance becomes a `private` **instance** method, and the call
+/// site passes `this` as the first captured argument.
+///
+/// `LambdaMetafactory` takes the receiver of an instance-method handle as the leading captured
+/// argument, so a lambda captures `this` exactly the way it captures a local. Emitting every body
+/// as a `static` method instead is what made an unqualified field read or an instance call inside
+/// one report `` `this` in a `static` method ``.
+#[test]
+fn a_lambda_captures_the_enclosing_instance_it_reads() {
+    let source = "
+public class Capture {
+    interface Sink { int get(); }
+
+    int field = 10;
+
+    int scaled() { return field * 2; }
+
+    Sink instanceLambda() {
+        int local = 5;
+        return () -> scaled() + field + local;
+    }
+
+    static Sink staticLambda() {
+        int local = 7;
+        return () -> local * 3;
+    }
+
+    public static void main(String[] args) {
+        System.out.println(new Capture().instanceLambda().get());
+        System.out.println(staticLambda().get());
+    }
+}
+";
+    let classes = compile(source).expect("compile");
+    let class =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(classes[0].bytes.as_slice()))
+            .expect("reparse");
+    let statics: Vec<bool> = class
+        .methods
+        .iter()
+        .filter(|method| {
+            class
+                .constant_pool
+                .utf8(method.name_index)
+                .is_some_and(|name| name.starts_with("lambda$"))
+        })
+        .map(|method| method.access_flags.is_static())
+        .collect();
+    assert_eq!(statics.len(), 2, "one synthetic method per lambda");
+    // The one that reads `this` is an instance method; the one that reads only a local stays static.
+    assert_eq!(statics, [false, true]);
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Capture"), "35\n21\n");
+}
+
+/// A bound method reference's qualifier is any expression, not only a local.
+///
+/// JLS §15.13.3 evaluates it once, when the method reference expression is evaluated — which is the
+/// call site, so it is lowered there. Reading it as a local instead reported `this::m`,
+/// `System.err::println`, and `supplier.get()::m` alike as *a qualifier that is no local*, which
+/// was the single largest gap in the corpus.
+#[test]
+fn a_bound_method_reference_takes_any_qualifier() {
+    let source = r#"
+public class Bound {
+    interface Sink { String get(); }
+
+    static class Box {
+        final String held;
+        Box(String held) { this.held = held; }
+        String held() { return held; }
+        Box self() { return this; }
+    }
+
+    String name = "own";
+
+    String own() { return name; }
+
+    Sink viaThis() { return this::own; }
+
+    static Sink viaCall(Box box) { return box.self()::held; }
+
+    static Sink viaNew() { return new Box("fresh")::held; }
+
+    public static void main(String[] args) {
+        System.out.println(new Bound().viaThis().get());
+        System.out.println(viaCall(new Box("called")).get());
+        System.out.println(viaNew().get());
+    }
+}
+"#;
+    if !java_available() {
+        compile(source).expect("compile");
+        return;
+    }
+    assert_eq!(run(source, "Bound"), "own\ncalled\nfresh\n");
 }

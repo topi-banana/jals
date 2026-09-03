@@ -41,16 +41,26 @@
 //! erased return gets the `checkcast` that puts its static type back, which is what lets the next use
 //! of the value verify.
 //!
-//! A `static` nested type is its own class file, named `Outer$Inner`, listed in an `InnerClasses`
+//! A nested type is its own class file, named `Outer$Inner`, listed in an `InnerClasses`
 //! attribute — the only place a nested type's `private` and `static` can live — and reachable by simple
-//! or partly-qualified name. An `implements` clause reaches the `interfaces` list.
+//! or partly-qualified name. Whether it *is* `static` is not the keyword alone: a member interface,
+//! `@interface`, `enum`, and `record` are implicitly `static`, and so is every member type of an
+//! interface. An `implements` clause reaches the `interfaces` list. An inner class, a local one, and
+//! an anonymous one carry their enclosing instance and their captures.
 //!
 //! An `enum` gets the four member groups its source never writes: a field per constant, the `$VALUES`
-//! array, a `(String, int)` constructor reaching `Enum`'s, and `values()` / `valueOf()`.
+//! array, a `(String, int)` constructor reaching `Enum`'s, and `values()` / `valueOf()`. A `record`
+//! gets its components, canonical constructor, accessors, and the three `Object` methods.
 //!
-//! Not yet at all: varargs, `Signature` attributes and bridge methods, lambdas, method references,
-//! non-`static` inner classes, local and anonymous classes, and `record` / `@interface` declarations.
-//! Each arrives with the milestone that can test it.
+//! Varargs, `Signature` attributes and bridge methods, lambdas, and method references are here too.
+//! A lambda becomes a `private` synthetic method plus an `invokedynamic` through
+//! `LambdaMetafactory`; one that reads the enclosing instance is an *instance* method whose call
+//! site passes `this` as the leading captured argument, the way the metafactory takes any capture.
+//! A constructor may also run statements before its explicit `super(…)` (JEP 447), which is an
+//! *early construction context*: nothing there may touch `this`.
+//!
+//! Not yet: a `super::method` reference, whose non-virtual call no `MethodHandle` kind spells
+//! without a synthetic bridge. Each remaining gap is reported by name rather than mis-emitted.
 
 mod emit;
 // The wasm backend reads a literal the same way: the two lowerings are separate, but `0xFF` and
@@ -232,6 +242,16 @@ pub(crate) struct Lambda {
     call_descriptor: String,
     /// Index into the class's `BootstrapMethods`.
     bootstrap: u16,
+    /// Whether the call site pushes `this` ahead of the captures.
+    ///
+    /// A lambda written where there is a `this` captures it exactly as it captures a local, and the
+    /// metafactory takes the receiver as the *first* captured argument — which is why the synthetic
+    /// method is an instance one and the call-site descriptor leads with the enclosing class.
+    receiver: bool,
+    /// The qualifier a **bound** method reference evaluates for its receiver: `x` in `x::m`, and
+    /// equally `this`, `System.err`, or `supplier.get()`. Evaluated once, at the call site, which is
+    /// where JLS §15.13.3 says the method reference expression is evaluated.
+    bound: Option<SyntaxNode>,
     /// The locals the call site passes, in the order the descriptor names them.
     captured: alloc::vec::Vec<jals_hir::DefId>,
 }
@@ -255,6 +275,16 @@ impl Lambda {
     /// The locals the call site passes, in descriptor order.
     fn captured(&self) -> &[jals_hir::DefId] {
         &self.captured
+    }
+
+    /// Whether the call site pushes `this` before those locals.
+    const fn receiver(&self) -> bool {
+        self.receiver
+    }
+
+    /// The bound reference's qualifier, evaluated at the call site for its receiver.
+    const fn bound(&self) -> Option<&SyntaxNode> {
+        self.bound.as_ref()
     }
 }
 
@@ -386,33 +416,14 @@ impl Compile {
             interfaces.push(name);
         }
 
-        // An `enum`'s members live under an `EnumBody`, after the constants and the `;`.
-        let members: Vec<SyntaxNode> = if is_enum {
-            node.children()
-                .find_map(ast::EnumBody::cast)
-                .map(|body| {
-                    body.members()
-                        .map(|member| member.syntax().clone())
-                        .collect()
-                })
-                .unwrap_or_default()
-        } else {
-            node.children()
-                .find(|child| ast::ClassBody::cast(child.clone()).is_some())
-                .map(|body| body.children().collect())
-                .unwrap_or_default()
-        };
-        let constants: Vec<ast::EnumConstant> = node
-            .children()
-            .find_map(ast::EnumBody::cast)
-            .map(|body| body.constants().collect())
-            .unwrap_or_default();
+        let members = Self::body_members(node);
+        let constants = Self::declared_constants(node);
 
         let mut fields = Vec::new();
         let mut methods = Vec::new();
         // Worked out before any body is lowered, because a body cannot add a method to the class it is in.
         let (context, lambda_methods, bootstraps) =
-            Self::synthesise_lambdas(context, &members, &mut pool)?;
+            Self::synthesise_lambdas(context, node, &members, &mut pool)?;
         methods.extend(lambda_methods);
 
         let mut saw_constructor = false;
@@ -634,27 +645,10 @@ impl Compile {
         }
 
         let mut class = ClassFile::new(class_version, 0, pool);
-        let mut flags = Self::class_flags(node, is_interface, is_annotation);
-        if is_enum {
-            // `ACC_ENUM` is what makes `Enum.valueOf` and a `switch` over the type work at run time.
-            // `ACC_FINAL` is what an enum with no constant bodies is — one *with* a body has a subclass,
-            // and a `final` class with a subclass is a `VerifyError` at load.
-            flags |= ClassAccessFlags::ENUM;
-            if constants.iter().all(|constant| constant.body().is_none()) {
-                flags |= ClassAccessFlags::FINAL;
-            } else if members.iter().any(|member| {
-                member.kind() == METHOD_DECL
-                    && Facts::has_modifier(member, jals_syntax::SyntaxKind::ABSTRACT_KW)
-            }) {
-                // A constant body may implement an `abstract` member, which the enum itself does not.
-                flags |= ClassAccessFlags::ABSTRACT;
-            }
-        }
-        if is_record {
-            // Every record is implicitly final (JLS §8.10), and the source never writes it.
-            flags |= ClassAccessFlags::FINAL;
-        }
-        class.access_flags = ClassAccessFlags(flags);
+        class.access_flags = ClassAccessFlags(Self::declared_type_flags(
+            node,
+            context.index.item(item).kind,
+        ));
         class.this_class = this_class;
         class.super_class = super_class;
         class.interfaces = interfaces;
@@ -742,15 +736,25 @@ impl Compile {
                 .utf8_index(&jals_syntax::decoded_ident(&name))
                 .ok_or(AsmError::PoolFull)?;
             // The flags the *source* wrote, which is where a nested type's `private` and `static` go.
+            // `ACC_SUPER` is the one bit that does not travel: it selects an `invokespecial`
+            // semantics for the class file that holds the code, and this entry holds none.
             let kind = context.index.item(item).kind;
-            let is_annotation = kind == DefKind::AnnotationType;
-            let is_interface = is_annotation || kind == DefKind::Interface;
-            let mut flags = Self::class_flags(declaration, is_interface, is_annotation)
-                & !ClassAccessFlags::SUPER;
-            flags |= Self::access_level(declaration);
-            if Facts::has_modifier(declaration, jals_syntax::SyntaxKind::STATIC_KW) {
+            let mut flags = Self::declared_type_flags(declaration, kind) & !ClassAccessFlags::SUPER;
+            // A member of an interface is implicitly `public` (JLS §9.5), exactly as its fields and
+            // methods are — and here that level is the only record of it.
+            flags |= if Facts::is_interface_member(declaration) {
+                match Self::access_level(declaration) {
+                    0 => ClassAccessFlags::PUBLIC,
+                    level => level,
+                }
+            } else {
+                Self::access_level(declaration)
+            };
+            if Facts::is_static_member_type(declaration) {
                 // `ClassAccessFlags` has no `STATIC`, because a *class* file cannot be static — only
-                // an `InnerClasses` entry records it (JVMS §4.7.6, `ACC_STATIC` = 0x0008).
+                // an `InnerClasses` entry records it (JVMS §4.7.6, `ACC_STATIC` = 0x0008). The
+                // modifier is not the whole answer: a member interface, `@interface`, `enum`, and
+                // `record` are implicitly `static`, and so is every member type of an interface.
                 flags |= MethodAccessFlags::STATIC;
             }
             entries.push(jals_classfile::InnerClassEntry::new(
@@ -789,6 +793,68 @@ impl Compile {
         } else {
             0
         }
+    }
+
+    /// The access flags a *type declaration* carries, wherever they are written down.
+    ///
+    /// Two places record them and they have to agree: the type's own `access_flags`, and the
+    /// `InnerClasses` entry an enclosing type writes for it. A nested `enum` whose class file says
+    /// `ACC_ENUM | ACC_FINAL` while its `InnerClasses` entry says neither is one type reflection
+    /// describes two ways, so the derivation is written once and read twice. What the entry adds on
+    /// top is only what a class file has nowhere to put: `ACC_STATIC`, and the access level an
+    /// enclosing interface implies.
+    fn declared_type_flags(node: &SyntaxNode, kind: DefKind) -> u16 {
+        let is_annotation = kind == DefKind::AnnotationType;
+        let is_interface = is_annotation || kind == DefKind::Interface;
+        let mut flags = Self::class_flags(node, is_interface, is_annotation);
+        if kind == DefKind::Enum {
+            // `ACC_ENUM` is what makes `Enum.valueOf` and a `switch` over the type work at run time.
+            // `ACC_FINAL` is what an enum with no constant bodies is — one *with* a body has a
+            // subclass, and a `final` class with a subclass is a `VerifyError` at load.
+            flags |= ClassAccessFlags::ENUM;
+            let constants = Self::declared_constants(node);
+            if constants.iter().all(|constant| constant.body().is_none()) {
+                flags |= ClassAccessFlags::FINAL;
+            } else if Self::body_members(node).iter().any(|member| {
+                member.kind() == METHOD_DECL
+                    && Facts::has_modifier(member, jals_syntax::SyntaxKind::ABSTRACT_KW)
+            }) {
+                // A constant body may implement an `abstract` member, which the enum itself does not.
+                flags |= ClassAccessFlags::ABSTRACT;
+            }
+        }
+        if kind == DefKind::Record {
+            // Every record is implicitly final (JLS §8.10), and the source never writes it.
+            flags |= ClassAccessFlags::FINAL;
+        }
+        flags
+    }
+
+    /// The declarations directly inside a type declaration's body.
+    ///
+    /// An `enum`'s live under an `EnumBody`, after the constants and the `;`, so the two shapes are
+    /// read here rather than at each site that walks members — a site that knew only the
+    /// `ClassBody` shape sees an `enum` as having no members at all, which is how the `abstract` an
+    /// enum with constant bodies needs came to depend on which caller asked.
+    fn body_members(node: &SyntaxNode) -> Vec<SyntaxNode> {
+        if let Some(body) = node.children().find_map(ast::EnumBody::cast) {
+            return body
+                .members()
+                .map(|member| member.syntax().clone())
+                .collect();
+        }
+        node.children()
+            .find(|child| ast::ClassBody::cast(child.clone()).is_some())
+            .map(|body| body.children().collect())
+            .unwrap_or_default()
+    }
+
+    /// The constants an `enum` declaration lists, and nothing for any other declaration.
+    fn declared_constants(node: &SyntaxNode) -> Vec<ast::EnumConstant> {
+        node.children()
+            .find_map(ast::EnumBody::cast)
+            .map(|body| body.constants().collect())
+            .unwrap_or_default()
     }
 
     fn class_flags(node: &SyntaxNode, is_interface: bool, is_annotation: bool) -> u16 {
@@ -861,6 +927,23 @@ impl Compile {
         out
     }
 
+    /// Whether the nearest type declaration around `node` is `owner` itself.
+    ///
+    /// "Nearest" counts an anonymous class body and an `enum` constant's body, since each is a type
+    /// of its own — and does *not* count an `enum` constant without one, whose arguments are
+    /// evaluated by the enum's own `<clinit>`.
+    fn lexically_owned_by(node: &SyntaxNode, owner: &SyntaxNode) -> bool {
+        node.ancestors()
+            .skip(1)
+            .find(|ancestor| {
+                matches!(
+                    ancestor.kind(),
+                    CLASS_DECL | INTERFACE_DECL | ENUM_DECL | ANNOTATION_TYPE_DECL | RECORD_DECL
+                ) || Facts::is_anonymous_body(ancestor)
+            })
+            .is_some_and(|ancestor| &ancestor == owner)
+    }
+
     /// The synthetic field name a captured local gets, as javac names it.
     fn capture_field(id: jals_hir::DefId, context: &Context<'_>) -> String {
         alloc::format!("val${}", context.typed.analysis().def(id).name)
@@ -880,6 +963,7 @@ impl Compile {
     /// not match its handle.
     fn synthesise_lambdas<'a>(
         mut context: Context<'a>,
+        owner: &SyntaxNode,
         members: &[SyntaxNode],
         pool: &mut ConstantPool,
     ) -> Result<(
@@ -900,6 +984,13 @@ impl Compile {
                     jals_syntax::SyntaxKind::LAMBDA_EXPR | jals_syntax::SyntaxKind::METHOD_REF_EXPR
                 )
             })
+            // A member's descendants run *through* every type declared inside it, so a lambda in a
+            // nested, local, or anonymous class is reached from the enclosing type's walk as well as
+            // from its own. It belongs to the one that lexically holds it and to nothing else: the
+            // other copy is a synthetic method nothing calls, emitted into a class whose `this` is a
+            // different object — and once such a body is an *instance* method, that copy is a handle
+            // whose kind the class it landed in does not permit.
+            .filter(|node| Self::lexically_owned_by(node, owner))
             .collect();
         for (ordinal, lambda) in lambdas.iter().enumerate() {
             // A method reference needs no synthetic method at all: the handle points straight at the method
@@ -948,13 +1039,25 @@ impl Compile {
             // nothing fills.
             let captured = context.facts().captured_by(lambda);
 
-            // A capturing lambda: the descriptor, the leading slots, and the call-site arguments now all
-            // line up, and the synthetic method still fails the assembler's frame check — reported until
-            // that is chased down, rather than emitted as code the verifier would reject.
+            // A lambda written where there *is* a `this` captures it, and the enclosing instance is
+            // captured the way `LambdaMetafactory` takes any capture: as a leading argument of the
+            // call site. So the synthetic method is an ordinary `private` instance one and the
+            // handle names it — which is what javac emits, and what lets the body reach an
+            // unqualified field or an instance call at all. A lambda in a `static` context, or in a
+            // constructor's early construction context, has no `this` to capture and stays
+            // `static`.
+            let receiver = !Facts::in_static_context(lambda);
             let mut prefix = String::new();
             for &id in &captured {
                 prefix.push_str(&Self::capture_descriptor(id, &context)?);
             }
+            // The receiver is not in the *method's* descriptor — an instance method's is implicit —
+            // but it is in the call site's, because the metafactory's handle type carries it.
+            let call_prefix = if receiver {
+                alloc::format!("L{};{prefix}", context.this_class)
+            } else {
+                prefix.clone()
+            };
             // The body is lowered against the parameters' *inferred* types — `s -> s.length()`
             // against `Function<String, String>` reads `s` as a `String` — so the synthetic method
             // has to spell them that way too. The interface's own descriptor is erased
@@ -975,8 +1078,16 @@ impl Compile {
             let synthetic = alloc::format!("lambda${ordinal}");
             let code =
                 {
-                    let mut asm = Assembler::new(pool, Receiver::Static, &synthetic_descriptor)?;
-                    let mut slots = Slots::new(&context, None, true);
+                    let mut asm = Assembler::new(
+                        pool,
+                        if receiver {
+                            Receiver::Instance(&context.this_class)
+                        } else {
+                            Receiver::Static
+                        },
+                        &synthetic_descriptor,
+                    )?;
+                    let mut slots = Slots::new(&context, None, !receiver);
                     // The captures come first, in the order the call site pushes them: the metafactory prepends
                     // the captured values to the interface method's own arguments when it invokes the handle.
                     for &id in &captured {
@@ -990,7 +1101,7 @@ impl Compile {
                         let width = Slots::ty_width(context.typed.type_of_def(id));
                         slots.declare(id, width);
                     }
-                    let mut emit = Emit::new(&mut asm, slots, returns.clone(), false);
+                    let mut emit = Emit::new(&mut asm, slots, returns.clone(), receiver);
                     match (decl.expr_body(), decl.block_body()) {
                         // An expression body *is* the returned value, or is evaluated for its effect when the
                         // interface method returns nothing.
@@ -1020,8 +1131,10 @@ impl Compile {
                     asm.finish()?
                 };
             out.push(MethodInfo {
-                // private | static | synthetic
-                access_flags: MethodAccessFlags(0x0002 | 0x0008 | 0x1000),
+                // private | synthetic, and `static` only where there was no `this` to capture.
+                access_flags: MethodAccessFlags(
+                    0x0002 | 0x1000 | if receiver { 0 } else { 0x0008 },
+                ),
                 name_index: pool.utf8_index(&synthetic).ok_or(AsmError::PoolFull)?,
                 descriptor_index: pool
                     .utf8_index(&synthetic_descriptor)
@@ -1032,13 +1145,26 @@ impl Compile {
             // `metafactory` is handed the interface's erased shape, a handle to the body, and the
             // shape the call site is specialised to. The last two differ from the first exactly
             // where generics erase.
+            // `REF_invokeStatic` for the static shape, `REF_invokeVirtual` for the instance one and
+            // `REF_invokeInterface` for an instance one in an interface (JVMS §4.4.8, Table
+            // 5.4.3.5-A). The last is not a stylistic choice: §4.4.8 lets a kind-6 handle name an
+            // `InterfaceMethodref` from major version 52 on and lets a kind-5 handle name only a
+            // `Methodref`, so a body in an interface is reachable by kind 9 and by nothing else. A
+            // `Methodref` naming an interface's method is an `IncompatibleClassChangeError` at the
+            // first call, and an `InterfaceMethodref` under kind 5 is a `ClassFormatError` at load —
+            // neither is anything the verifier reports.
+            let kind = match (receiver, context.in_interface) {
+                (true, true) => 9,
+                (true, false) => 5,
+                (false, _) => 6,
+            };
             let handle = pool
                 .method_handle_index(
-                    6,
+                    kind,
                     &context.this_class,
                     &synthetic,
                     &synthetic_descriptor,
-                    false,
+                    context.in_interface,
                 )
                 .ok_or(AsmError::PoolFull)?;
             let shape = pool
@@ -1060,8 +1186,10 @@ impl Compile {
                 (span.start, span.end),
                 Lambda {
                     interface_method: name,
-                    call_descriptor: alloc::format!("({prefix})L{interface};"),
+                    call_descriptor: alloc::format!("({call_prefix})L{interface};"),
                     bootstrap: index,
+                    receiver,
+                    bound: None,
                     captured,
                 },
             );
@@ -1140,10 +1268,9 @@ impl Compile {
         // method named through its *type*, whose receiver the interface supplies as its first
         // argument. The `Cell` that used to carry the second out of a selection closure is gone
         // with the closure.
-        let receiver = match reference.receiver {
-            crate::facts::RefReceiver::Bound(id) => Some(id),
-            _ => None,
-        };
+        let bound = (reference.receiver == crate::facts::RefReceiver::Bound)
+            .then_some(reference.qualifier.as_ref())
+            .flatten();
         let unbound = reference.receiver == crate::facts::RefReceiver::Unbound;
         // A constructor reference names `new` rather than a method: the handle is `newInvokeSpecial`
         // on the type's own constructor, and there is nothing to capture.
@@ -1161,12 +1288,29 @@ impl Compile {
             false,
         )?);
 
-        // 6 is `invokeStatic` and 5 is `invokeVirtual` (JVMS Table 5.4.3.5-A): both a bound reference and an
-        // unbound one call the method *on* a receiver — the difference is only where that receiver comes
-        // from, and the handle cannot tell.
-        let kind = if receiver.is_some() || unbound { 5 } else { 6 };
+        // 6 is `invokeStatic`, 5 is `invokeVirtual`, and 9 is `invokeInterface` (JVMS Table
+        // 5.4.3.5-A). Both a bound reference and an unbound one call the method *on* a receiver —
+        // the difference is only where that receiver comes from, and the handle cannot tell — but
+        // whether the owner is an interface it very much can, and a `Methodref` naming an
+        // interface's method is an `IncompatibleClassChangeError` at the first call rather than
+        // anything the verifier reports.
+        let owner_is_interface = matches!(
+            context.index.item(owner_item).kind,
+            DefKind::Interface | DefKind::AnnotationType
+        );
+        let kind = match (bound.is_some() || unbound, owner_is_interface) {
+            (true, true) => 9,
+            (true, false) => 5,
+            (false, _) => 6,
+        };
         let handle = pool
-            .method_handle_index(kind, &owner, &referenced_name, &target_descriptor, false)
+            .method_handle_index(
+                kind,
+                &owner,
+                &referenced_name,
+                &target_descriptor,
+                owner_is_interface,
+            )
             .ok_or(AsmError::PoolFull)?;
         let shape = pool
             .method_type_index(&descriptor)
@@ -1174,17 +1318,24 @@ impl Compile {
         let bootstrap = pool
             .method_handle_index(6, METAFACTORY, "metafactory", METAFACTORY_DESCRIPTOR, false)
             .ok_or(AsmError::PoolFull)?;
-        // A bound reference's call site takes the receiver, which is the one value it captures.
-        let (prefix, captured) = receiver.map_or_else(
-            || (String::new(), alloc::vec::Vec::new()),
-            |id| (alloc::format!("L{owner};"), alloc::vec![id]),
-        );
+        // A bound reference's call site takes the receiver, which is the one value it captures —
+        // and that value is whatever its qualifier evaluates to, not necessarily a local.
+        let prefix = if bound.is_some() {
+            alloc::format!("L{owner};")
+        } else {
+            String::new()
+        };
         Ok((
             Lambda {
                 interface_method: name,
                 call_descriptor: alloc::format!("({prefix})L{interface};"),
                 bootstrap: 0,
-                captured,
+                // A method reference names a method that already exists, so nothing about it is
+                // written against the enclosing instance: a bound one evaluates its own qualifier
+                // and an unbound one takes the receiver from the interface's own argument.
+                receiver: false,
+                bound: bound.map(|expr| expr.syntax().clone()),
+                captured: alloc::vec::Vec::new(),
             },
             jals_classfile::BootstrapMethod {
                 bootstrap_method_ref: bootstrap,
@@ -1251,6 +1402,9 @@ impl Compile {
                 interface_method: name,
                 call_descriptor: alloc::format!("()L{interface};"),
                 bootstrap: 0,
+                // `newInvokeSpecial` allocates the object itself, so the call site passes nothing.
+                receiver: false,
+                bound: None,
                 captured: alloc::vec::Vec::new(),
             },
             jals_classfile::BootstrapMethod {
@@ -1884,11 +2038,18 @@ impl Compile {
             // both would run that part twice (JLS §8.8.7). `this(…)` replaces all of it — the
             // constructor it delegates to has already run the field initialisers — while `super(…)`
             // replaces only the `super()` call, so the initialisers still follow it.
-            Some(call) => {
-                // `this` is `uninitializedThis` until this call returns, so the arguments cannot
-                // read a synthetic field off it — the values are still in the parameters they
-                // arrived in.
-                emit.while_uninitialized(|emit| {
+            Some((at, call)) => {
+                // Everything up to the delegation is the *prologue* JEP 447 admits, and `this` is
+                // `uninitializedThis` across all of it — so neither those statements nor the call's
+                // own arguments can read a synthetic field off it. A captured value is still in the
+                // parameter it arrived in, and the verifier refuses the object for anything but
+                // another `<init>`.
+                emit.while_uninitialized(|emit| -> Result<()> {
+                    if let Some(body) = &body {
+                        for statement in body.stmts().take(*at) {
+                            stmt::Stmt::lower(&statement, context, emit)?;
+                        }
+                    }
                     expr::Expr::lower(&ast::Expr::Call(call.clone()), context, emit)
                 })?;
                 if !Facts::delegates_to(call, jals_syntax::SyntaxKind::THIS_KW) {
@@ -1898,8 +2059,10 @@ impl Compile {
             None => Self::prologue(context, &mut emit, super_name, super_item, members, None)?,
         }
         if let Some(body) = &body {
-            // The explicit invocation is the body's first statement, and it has already been emitted.
-            for statement in body.stmts().skip(usize::from(delegation.is_some())) {
+            // The prologue and the explicit invocation itself have already been emitted, so what is
+            // left is the body from just past it — the whole body when there is no delegation.
+            let emitted = delegation.as_ref().map_or(0, |(at, _)| at + 1);
+            for statement in body.stmts().skip(emitted) {
                 stmt::Stmt::lower(&statement, context, &mut emit)?;
             }
         }

@@ -221,7 +221,7 @@ impl Outcome {
     /// These are the outcomes that should fail a run rather than lower a percentage: a panic, a
     /// module the validator refuses, a syntax error on a file that is valid Java by construction,
     /// and a compiled program that computes something else than javac's.
-    const fn is_invariant_violation(&self) -> bool {
+    pub(crate) const fn is_invariant_violation(&self) -> bool {
         matches!(
             self,
             Self::Panicked | Self::Rejected(_) | Self::ParseError(_) | Self::Disagreed(_)
@@ -577,6 +577,21 @@ impl WasmReport {
         self.results
             .iter()
             .filter(|result| matches!(result.outcome, Outcome::Trapped(_)))
+            .collect()
+    }
+
+    /// The in-subset gap cases one per line, with their messages unelided.
+    ///
+    /// The counterpart of [`buckets`](Self::buckets) rather than a replacement: a bucket says what
+    /// the shape of the remaining work is, and this says which file to open to work on it. A case
+    /// outside the subset is not a gap and is not listed — that is the denominator, not the rate.
+    pub fn gaps(&self) -> Vec<&CaseResult> {
+        self.results
+            .iter()
+            .filter(|result| result.outcome.in_subset())
+            .filter(|result| {
+                !result.outcome.is_invariant_violation() && result.outcome.detail().is_some()
+            })
             .collect()
     }
 

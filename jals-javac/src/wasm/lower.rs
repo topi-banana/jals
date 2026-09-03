@@ -1515,7 +1515,7 @@ impl Body {
             let target = reference.target.ok_or(WasmError::Unsupported(
                 "a method reference to a constructor",
             ))?;
-            let bound = matches!(reference.receiver, crate::facts::RefReceiver::Bound(_));
+            let bound = reference.receiver == crate::facts::RefReceiver::Bound;
             let function = *layout.functions.get(&target).ok_or(WasmError::Unsupported(
                 "a method reference to a method outside this module",
             ))?;

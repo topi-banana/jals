@@ -234,6 +234,19 @@ exists to bundle failures of one shape, and these have none in common: each name
 of a different class, so eliding the names leaves one row saying `a descriptor javac spells
 differently` forty-seven times over. `--limit` bounds the listing the way it bounds the gaps.
 
+### Working a bucket: `--list-gaps`
+
+A bucket says what the remaining work *is*; it does not say which file to open. `--list-gaps` prints
+every gap case by name with its message unelided, so a bucket of 55 becomes 55 paths. It is
+deliberately not bounded by `--limit` — that flag bounds a listing chosen for a summary, and this one
+is asked for by name to be worked through. Both `jals-compile` and `jals-wasm` take it; on the wasm
+side it lists the *in-subset* gaps only, since a case outside the subset is the denominator rather
+than the rate.
+
+```sh
+cargo run --release -p jals-tests --bin jals-compile -- langtools --limit 0 --list-gaps
+```
+
 ```sh
 git submodule update --init --depth 1 jals-tests/sources/openjdk
 jals-tests/scripts/gen-javac-corpus.sh 0          # or a COUNT, for a quick local sample

@@ -88,6 +88,27 @@ impl Facts<'_> {
         .eval(expr)
     }
 
+    /// The `boolean` a loop's condition is *constantly* — `Some(true)` for `while (true)`, and
+    /// `None` for a condition whose value the source does not fix.
+    ///
+    /// JLS §14.21 makes this a fact about **reachability** and not an optimisation: the statement
+    /// after `while (true) { }` is unreachable, so javac emits no test and no forward branch at
+    /// all, and the loop's only exit is a `break`. A backend that emits the test anyway ends the
+    /// method with a conditional branch to an offset past the last instruction — a class file whose
+    /// verifier says *"control flow falls through code end"*, and a `StackMapTable` frame at an
+    /// offset that lands on no instruction.
+    ///
+    /// A constant `false` is deliberately answered too, though only `for (;false;)` can legally
+    /// write one (JLS §14.21 rejects `while (false)`): the caller that skips a body it can never
+    /// enter reads the same fact, and an evaluator that answered only one of the two would be a
+    /// second rule about the same expression.
+    pub(crate) fn constant_condition(self, expr: &ast::Expr) -> Option<bool> {
+        match self.constant(expr) {
+            Ok(ConstValue::Bool(value)) => Some(value),
+            _ => None,
+        }
+    }
+
     /// The constant a `case` label names, narrowed to what a `switch` can dispatch on.
     pub(crate) fn case_key(self, expr: &ast::Expr) -> Result<CaseKey> {
         match self.constant(expr)? {

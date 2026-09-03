@@ -128,6 +128,11 @@ impl Expr {
                     .ok_or(LowerError::Unsupported("a lambda outside a class body"))?;
                 // The captured values, in the order the call site's descriptor names them: the metafactory
                 // prepends them to the interface method's own arguments when it invokes the handle.
+                // The enclosing instance is one of them and it comes first, because the handle it is
+                // passed to is an instance method's and its receiver leads the handle's own type.
+                if info.receiver() {
+                    emit.load_this()?;
+                }
                 for &id in info.captured() {
                     let slot = emit
                         .slots
@@ -148,13 +153,14 @@ impl Expr {
                 let info = context.lambda_at(&span).ok_or(LowerError::Unsupported(
                     "a method reference outside a class body",
                 ))?;
-                // A *bound* reference captures its receiver, which the call site passes like any capture.
-                for &id in info.captured() {
-                    let slot = emit
-                        .slots
-                        .slot_of(id)
-                        .ok_or(LowerError::Unsupported("a receiver with no local here"))?;
-                    emit.asm.load(slot)?;
+                // A *bound* reference passes its receiver, and the receiver is whatever its
+                // qualifier evaluates to — a local, `this`, a field, or a call. Evaluated here
+                // because here is where the method reference expression itself is evaluated
+                // (JLS §15.13.3), which is what makes "exactly once" true of it.
+                if let Some(qualifier) = info.bound() {
+                    let expr = ast::Expr::cast(qualifier.clone())
+                        .ok_or(LowerError::Unsupported("a bound reference with no value"))?;
+                    Self::lower(&expr, context, emit)?;
                 }
                 Ok(emit.asm.invoke_dynamic(
                     info.bootstrap(),

@@ -14,7 +14,7 @@
 //! One rule now, the stricter one, with the owner resolved through the index rather than through
 //! text.
 
-use jals_hir::{DefId, ItemId, MemberId, Ty};
+use jals_hir::{ItemId, MemberId, Ty};
 use jals_syntax::ast::{self, AstNode as _};
 use jals_syntax::{SyntaxKind, SyntaxNode};
 
@@ -25,8 +25,15 @@ use super::{FactError, Facts, Result};
 pub(crate) enum RefReceiver {
     /// `Type::staticMethod` — there is none.
     Static,
-    /// `value::method` — the reference captures the local it is qualified by.
-    Bound(DefId),
+    /// `value::method` — the reference captures whatever its qualifier denotes, and
+    /// [`MethodRef::qualifier`] is the expression that produces it.
+    ///
+    /// It used to carry a [`DefId`], which said *a local* rather than *a value*: `this::run`,
+    /// `System.err::println`, `supplier.get()::getB` and `new I()::m` are all bound references
+    /// whose qualifier is no local, and every one of them was reported instead of compiled. JLS
+    /// §15.13.3 evaluates that expression exactly once, when the method reference itself is
+    /// evaluated — which is the call site, so lowering it there is both simpler and the rule.
+    Bound,
     /// `Type::instanceMethod` — the interface passes it as the first argument.
     Unbound,
     /// `Type::new` — an allocation rather than a call.
@@ -45,6 +52,9 @@ pub(crate) struct MethodRef {
     /// the descriptor `()V` exists where the member does not.
     pub(crate) target: Option<MemberId>,
     pub(crate) receiver: RefReceiver,
+    /// The expression a [`RefReceiver::Bound`] reference is qualified by, and `None` for every
+    /// other shape.
+    pub(crate) qualifier: Option<ast::Expr>,
 }
 
 impl Facts<'_> {
@@ -151,27 +161,44 @@ impl Facts<'_> {
                     .and_then(|ty| ty.project_id())
             },
         );
-        // Not a type: the qualifier is a *value*, so the reference is bound to it and the receiver
-        // is what the call site captures. Only a local is read, because a capture loads from a slot.
+        // Not a type: the qualifier is a *value*, so the reference is bound to it and the call site
+        // evaluates it. Which type that value has is asked three ways, because the three shapes are
+        // recorded in three places: inference holds a type for an ordinary expression, `this` is
+        // not an expression inference records at all, and a plain local name may be bound by the
+        // resolver without the inference memo carrying its span.
+        let mut bound_to = None;
         let (owner, mut receiver) = if let Some(item) = named_type {
             (item, RefReceiver::Static)
         } else {
-            {
-                let expr = qualifier.as_ref().ok_or(FactError::Unsupported(
-                    "a method reference with no qualifier",
-                ))?;
-                let id = self.def_at(expr.syntax()).ok_or(FactError::Unsupported(
-                    "a method reference whose qualifier is no local",
-                ))?;
-                let item =
-                    self.typed()
-                        .type_of_def(id)
-                        .project_id()
-                        .ok_or(FactError::Unsupported(
-                            "a method reference on a value of an unindexed type",
-                        ))?;
-                (item, RefReceiver::Bound(id))
+            let expr = qualifier.as_ref().ok_or(FactError::Unsupported(
+                "a method reference with no qualifier",
+            ))?;
+            // `super::m` is a *non-virtual* call on an inherited method, which no
+            // `LambdaMetafactory` handle spells: javac synthesises a bridge that makes the
+            // `invokespecial` and points the handle at that. Reported rather than compiled as
+            // `this::m`, which is the same bytes dispatching virtually — a program that runs and
+            // calls the override the source wrote `super` to avoid.
+            if Self::is_super(expr.syntax()) {
+                return Err(FactError::Unsupported("a `super` method reference"));
             }
+            let item = self
+                .typed()
+                .type_of_expr(Self::span(expr.syntax()))
+                .and_then(Ty::project_id)
+                .or_else(|| {
+                    Self::is_this(expr.syntax())
+                        .then(|| Self::enclosing_type_of(node, self.file(), self.index()).ok())
+                        .flatten()
+                })
+                .or_else(|| {
+                    self.def_at(expr.syntax())
+                        .and_then(|id| self.typed().type_of_def(id).project_id())
+                })
+                .ok_or(FactError::Unsupported(
+                    "a method reference on a value of an unindexed type",
+                ))?;
+            bound_to = Some(expr.clone());
+            (item, RefReceiver::Bound)
         };
 
         if constructs {
@@ -190,6 +217,7 @@ impl Facts<'_> {
                 owner,
                 target,
                 receiver: RefReceiver::Constructs,
+                qualifier: None,
             });
         }
 
@@ -202,7 +230,7 @@ impl Facts<'_> {
             .last()
             .ok_or(FactError::Unsupported("a method reference with no name"))?;
         let name = jals_syntax::decoded_ident(&referenced);
-        let is_bound = matches!(receiver, RefReceiver::Bound(_));
+        let is_bound = receiver == RefReceiver::Bound;
 
         let target = index
             .own_members(owner)
@@ -246,6 +274,7 @@ impl Facts<'_> {
             owner,
             target: Some(target),
             receiver,
+            qualifier: bound_to,
         })
     }
 }

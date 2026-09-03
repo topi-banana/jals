@@ -828,8 +828,14 @@ impl Stmt {
         let done = emit.asm.label();
 
         emit.asm.bind(test)?;
-        Expr::lower(&condition, context, emit)?;
-        emit.asm.branch(Branch::IntZero(Compare::Eq), done)?;
+        // `while (true)` has no test and no exit but a `break` (JLS §14.21): the statement after it
+        // is unreachable, so emitting the branch anyway leaves a conditional jump to an offset past
+        // the last instruction — which is a `StackMapTable` frame on no instruction and a verifier
+        // saying the control flow falls through the code end.
+        if context.facts().constant_condition(&condition) != Some(true) {
+            Expr::lower(&condition, context, emit)?;
+            emit.asm.branch(Branch::IntZero(Compare::Eq), done)?;
+        }
         // A `while`'s condition is also where a `continue` goes, which is the one loop shape where
         // the two labels coincide.
         Self::in_scope(labels, done, Some(test), emit, |emit| {
@@ -864,8 +870,15 @@ impl Stmt {
         })?;
         if emit.asm.reachable() || emit.asm.is_targeted(test)? {
             emit.asm.bind(test)?;
-            Expr::lower(&condition, context, emit)?;
-            emit.asm.branch(Branch::IntZero(Compare::Ne), top)?;
+            // The back edge of a `do … while (true)` is unconditional, for the same reason a
+            // `while (true)` has no forward one. The label is still bound: a `continue` in the body
+            // jumps to the condition, and here that is the `goto` itself.
+            if context.facts().constant_condition(&condition) == Some(true) {
+                emit.asm.branch(Branch::Always, top)?;
+            } else {
+                Expr::lower(&condition, context, emit)?;
+                emit.asm.branch(Branch::IntZero(Compare::Ne), top)?;
+            }
         }
         Self::join(done, emit)
     }
@@ -888,8 +901,13 @@ impl Stmt {
         let next = emit.asm.label();
         let done = emit.asm.label();
         emit.asm.bind(test)?;
-        // `for (;;)` has no condition, which means no exit but a `break`.
-        if let Some(condition) = statement.condition() {
+        // `for (;;)` has no condition, which means no exit but a `break` — and `for (; true;)` is
+        // the same loop written out, so a constantly-true condition takes the same arm rather than
+        // emitting a branch past the end of the method.
+        if let Some(condition) = statement
+            .condition()
+            .filter(|condition| context.facts().constant_condition(condition) != Some(true))
+        {
             Expr::lower(&condition, context, emit)?;
             emit.asm.branch(Branch::IntZero(Compare::Eq), done)?;
         }

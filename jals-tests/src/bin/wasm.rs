@@ -37,6 +37,13 @@ struct Cli {
     #[arg(long, value_name = "N", default_value_t = 20)]
     limit: usize,
 
+    /// Also list every in-subset gap case by name, with its message unelided.
+    ///
+    /// The bucket list says what the remaining work looks like; this says which file to open to
+    /// do it. Off by default because it is one line per case.
+    #[arg(long)]
+    list_gaps: bool,
+
     /// Number of parallel worker threads (defaults to the number of logical CPUs).
     #[arg(short = 'j', long, value_name = "N")]
     jobs: Option<usize>,
@@ -325,6 +332,7 @@ impl Cli {
         }
 
         self.print_counts("what stopped the rest:", &report.buckets());
+        self.print_gaps(report);
         self.print_counts(
             "why the agreement rung compared nothing:",
             &report.unjudged_reasons(),
@@ -333,6 +341,29 @@ impl Cli {
             "the types that put a case outside the subset:",
             &report.out_of_subset_types(),
         );
+    }
+
+    /// Every in-subset gap case by name, with its message unelided — `--list-gaps` only.
+    ///
+    /// Deliberately unbounded by `--limit`: `--limit` bounds a listing chosen for a summary, and
+    /// this one is asked for by name to be worked through.
+    fn print_gaps(&self, report: &WasmReport) {
+        if !self.list_gaps {
+            return;
+        }
+        let gaps = report.gaps();
+        if gaps.is_empty() {
+            return;
+        }
+        println!("  {} gap case(s):", gaps.len());
+        for result in gaps {
+            println!(
+                "    {:<14} {}  {}",
+                result.outcome.label(),
+                result.rel.display(),
+                result.outcome.detail().unwrap_or_default(),
+            );
+        }
     }
 
     /// One `--limit`-bounded count-and-message list, printed only when there is something in it.
