@@ -16,7 +16,7 @@ belong to the parse, and a caller reads them from `Parse::errors`.
 
 ## The rule set
 
-**20 rules in 10 sections.** A section is a **defect class** — what kind of thing the rule found —
+**21 rules in 10 sections.** A section is a **defect class** — what kind of thing the rule found —
 and it is the `jalslint.toml` table the rule is configured under. Every rule is in exactly one.
 
 | rule | section | default | what it reports |
@@ -24,6 +24,7 @@ and it is the `jalslint.toml` table the rule is configured under. Every rule is 
 | `cannot-resolve` | `[correctness]` | `error` | a type, variable or method the project index does not define |
 | `type-mismatch` | `[correctness]` | `warn` | a value written into a slot its type cannot inhabit |
 | `unreported-exception` | `[correctness]` | `warn` | a checked exception no `catch` or `throws` admits |
+| `nullness-mismatch` | `[correctness]` | `warn` | a `null`, or a `@Nullable` value, written into a non-null slot |
 | `compact-source-file` | `[compatibility]` | `error` | a top-level `main` / member without the feature (JEP 512) |
 | `module-import` | `[compatibility]` | `error` | `import module …;` without the feature (JEP 511) |
 | `grouped-import` | `[compatibility]` | `error` | `import a.{B, C};` without the jals dialect feature |
@@ -67,6 +68,58 @@ misses a real undefined name rather than inventing one:
 One further property is worth stating because it is not a limit: a name whose only declaration sits
 in a `#[cfg]`-disabled host **is** reported, since the compile frontend blanks that host. The
 verdict therefore belongs to the feature set the run was given, and `--features` changes it.
+
+### What `nullness-mismatch` reads, and what it stands down on
+
+Two vocabularies and one reading, all three configurable:
+
+```toml
+[correctness.nullness-mismatch]
+default = "non-null"                                  # how an *unannotated* declaration reads
+nullable = ["org.jspecify.annotations.Nullable", …]   # replaces the built-in list, never extends it
+non-null = ["org.jspecify.annotations.NonNull", …]
+```
+
+`default` is about the **code**, not about this rule's built-in level: it says what a declaration
+carrying neither annotation claims. `non-null` is the built-in and the strict reading — an
+unannotated slot rejects `null` — and it applies to every declaring form alike, **local variables
+included**. JSpecify exempts locals from `@NullMarked` on the grounds that a local's nullness is
+inferred from its initializer; that is a narrower rule than "how is an unannotated declaration
+read", so `String s = null;` is reported. `unspecified` is the one-line answer for a codebase that
+annotates only part of itself: unannotated declarations go quiet and the annotated ones still speak.
+`nullable` reads silence the other way, for a project that annotates only what it guarantees.
+
+The lists are **fully-qualified names**, matched against the annotation as written and qualified
+through the declaring file's own single-type imports — so `import com.acme.Nullable;` makes
+`@Nullable` com.acme's and no built-in entry matches it. A simple name nothing resolves falls back
+to matching an entry's last segment, which is the same limit `@SuppressWarnings` carries and comes
+from the same place: an on-demand import (`import org.jspecify.annotations.*;`) leaves the question
+open, and resolving the annotation *type* would need the analysis the rules have not run yet.
+
+Four contexts are checked — a declarator's initializer, a simple `=`, a `return`, and a call
+argument — the same four `jals-hir`'s own assignment checking looks at. Six things are deliberately
+silent, and each is a **false negative** rather than a guess:
+
+- **A dereference.** `x.length()` on a `@Nullable x` is not reported at all. Answering it without
+  false positives means knowing whether a guard ran, and there is no control-flow or
+  definite-assignment layer below this crate to ask — `jals-hir` has a constant folder and nothing
+  else, and `jals_syntax::CfgMap` is conditional compilation rather than control flow.
+- **A conditional.** `cond ? find() : "x"` is unknown even with a nullable arm: a reader sees a
+  guarded expression, and reporting the arm would be the false positive this scope avoids.
+- **A member the index read no annotations for.** An embedded stub carries none and a class file's
+  are decoded but not yet lowered, so for those two an empty annotation list means *nobody looked*
+  rather than *the author wrote none*. Reading it the other way would report `map.put(k, null)`.
+- **A `return` inside a lambda**, which returns from the lambda — whose nullness belongs to the
+  functional interface, not to the enclosing method.
+- **An overloaded callee, without a project index.** The scope chain binds a call to *an* overload
+  rather than to the one the arguments select. With an index there is no such doubt, so this one
+  goes away as soon as the run has a project.
+- **A type-use annotation one level down** (`List<@Nullable String>`). A declaration's leading
+  `@Nullable` is read — the parser puts it in the declaration's `MODIFIERS` — but a nested one is
+  not.
+
+Two more are not implemented rather than not decided: an **override** that widens nullness against
+its supertype, and a **package-level** default (`@NullMarked`, `package-info.java`).
 
 That the rules are *implemented*, and not merely declared, is a test rather than a claim:
 `tests/registry.rs` joins the registry against the serialized schema in both directions, pins the
@@ -189,11 +242,16 @@ Java question — clippy's `shadow_same` / `shadow_reuse` / `shadow_unrelated` a
 with a `kinds` key, and its `print_stdout` / `print_stderr` are the one `print-to-console` that is
 already implemented.
 
-Eleven of today's twenty rules have **no** rustc or clippy ancestor and are jals's own: the four
-`[compatibility]` feature gates (no other tool has this dialect to gate), the three
-`[correctness]` rules that are Java semantics rustc has no analogue for, and `constant-condition`,
-`empty-catch`, `missing-braces` and `implicit-this` — the last because Rust has no implicit
-receiver to leave out.
+Twelve of today's twenty-one rules have **no** rustc or clippy ancestor and are jals's own: the
+four `[compatibility]` feature gates (no other tool has this dialect to gate), the four
+`[correctness]` rules that are Java semantics rustc has no analogue for — `nullness-mismatch`
+among them, because Rust encodes absence in the type system and so has no `null` to be strict
+about — and `constant-condition`, `empty-catch`, `missing-braces` and `implicit-this`, the last
+because Rust has no implicit receiver to leave out.
+
+`rustc::invalid-null-arguments` is the one null-shaped row in either ledger and is *not* this
+rule's ancestor: it is about a raw pointer crossing an FFI boundary, not about a declaration's
+contract, so it stays an `N` row for the `null-argument` rule that will port it.
 
 ### Prerequisite: in-source suppression — **done**
 
