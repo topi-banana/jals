@@ -247,6 +247,23 @@ than the rate.
 cargo run --release -p jals-tests --bin jals-compile -- langtools --limit 0 --list-gaps
 ```
 
+### Working a case: the `emit` example
+
+A gap listing names a file; `emit` turns that file into the bytes. It hands the same source to the
+same front end and writes the class files or the WebAssembly module, so `javap -c`,
+`wasm-tools print`, and a real JVM or engine can be pointed at what the compiler actually produced.
+It resolves against the host JDK's `ct.sym` like `jals-compile` does — which is what makes a corpus
+case reproduce — and `--stdlib` switches to the embedded stubs, which is what `jals-javac`'s own
+tests resolve against.
+
+```sh
+cargo run --release -p jals-tests --example emit -- <File.java> <out-dir>
+cargo run --release -p jals-tests --example emit -- --wasm <File.java> <out.wasm>
+```
+
+An example rather than a fifth binary: it answers no question and reports no rate, so it is not one
+of the four this README's table is about.
+
 ```sh
 git submodule update --init --depth 1 jals-tests/sources/openjdk
 jals-tests/scripts/gen-javac-corpus.sh 0          # or a COUNT, for a quick local sample
@@ -302,19 +319,14 @@ CI leaves `--strict` off: known defects are still open, so the report is a measu
 gate. Turning it on is what would make it one, and that is a decision to take once the list is
 empty. What is open, by family:
 
-- **statements before `super()`** (JEP 447). A constructor that runs code before its delegation
-  leaves `this` as `uninitializedThis` across it, and the frame at the `invokespecial` says the
-  class is already initialised. Reading a *parameter* while `this` is uninitialized is handled; the
-  frame across an intervening statement is not.
-- **an overload selected against a classpath type**, where the candidates differ only in a
-  parameter this analysis cannot order — `PrintStream(String)` against `PrintStream(OutputStream)`,
-  `StringBuffer` against `String`. The wrong choice is a wrong `invokespecial` argument rather than
-  a diagnostic.
 - **an inferred type the analysis does not compute**: a `return` whose value comes from an
-  inference this crate does not run (`generics/inference`), and a multi-catch parameter, whose type
-  is the *lub* of its arms rather than the first of them.
-- **the assembler's own frames**: a `StackMapTable` offset that does not land on an instruction, and
-  one method whose control flow runs off the end.
+  inference this crate does not run (`generics/inference`), where the emitted `areturn` carries a
+  type the method's own descriptor does not admit.
+- **an operand whose type the analysis got wrong** at a call — the same cause seen from the call
+  site rather than from the `return`.
+- **`protected` access across packages** (JLS §6.6.2): a `protected` member of a superclass in
+  another package may be reached only through a reference of the accessing class's own type, and
+  the emitted `invokevirtual` names the declaring one.
 
 The parser is no longer among them: every file in the corpus parses, so `parsed` is 100% and a
 syntax error there would now be a regression rather than a known gap.
@@ -378,8 +390,14 @@ and compute the wrong number — and it is the wasm counterpart of `descriptor-e
 `String` is **outside what this backend compiles**, by design, exactly as a file javac declines
 alone is outside `jals-compile`'s corpus. Those cases are reported as *out of subset* and excluded
 from the rate that measures the compiler; the corpus total is printed beside it so the scoped rate
-can never read as coverage of Java. On the current corpus that is 1272 of 2188 cases, 615 of them
-for `String` alone.
+can never read as coverage of Java. On the current corpus that is 1316 of 2188 cases, `String`
+alone accounting for the largest share of them.
+
+Three types the backend *does* represent are not in that count, and each is a rule rather than a
+stub: `java.lang.Object` is the root of Java's reference hierarchy and `anyref` is wasm's, a **type
+variable** erases to its bound and to `Object` with none (JLS §4.6), and an `@interface` is an
+interface (§9.6). What still needs `java.base` after that is what a **value** of a library type
+needs — a `String`, a wrapper for a boxing conversion, a `PrintStream` for a call.
 
 The classification is **post hoc and order-dependent**: lowering reports the first thing it cannot
 do, so a file that both names `String` *and* declares an `@interface` lands in whichever the
@@ -417,8 +435,8 @@ The two comparison counts are reported separately, because they are different cl
 value that matches is *"computed the same answer"*, while a `void` method that completes on both
 sides is only *"neither side failed"*.
 
-**What the numbers mean today.** On the current corpus the rung judges 18 cases — 5 value
-comparisons and 19 completions — because a Java entry point takes `String[]` and a file naming
+**What the numbers mean today.** On the current corpus the rung judges 23 cases — 5 value
+comparisons and 26 completions — because a Java entry point takes `String[]` and a file naming
 `String` never reaches this rung at all. That is a fact about the corpus, not a claim about the
 compiler, which is why `jals-wasm` **lists the judged cases by name** rather than only counting
 them: a reader has to be able to tell a rate of 2% that means "2% of the compiler is checked" from
