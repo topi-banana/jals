@@ -96,8 +96,8 @@ to matching an entry's last segment, which is the same limit `@SuppressWarnings`
 from the same place: an on-demand import (`import org.jspecify.annotations.*;`) leaves the question
 open, and resolving the annotation *type* would need the analysis the rules have not run yet.
 
-Four contexts are checked — a declarator's initializer, a simple `=`, a `return`, and a call
-argument — the same four `jals-hir`'s own assignment checking looks at. Six things are deliberately
+Four contexts are checked — a declarator's initializer (a `try` resource included), a simple `=`, a
+`return`, and a call argument — the same four `jals-hir`'s own assignment checking looks at. Six things are deliberately
 silent, and each is a **false negative** rather than a guess:
 
 - **A dereference.** `x.length()` on a `@Nullable x` is not reported at all. Answering it without

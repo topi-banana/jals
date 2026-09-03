@@ -1074,6 +1074,25 @@ fn each_declarator_is_paired_with_its_own_initializer() {
 }
 
 #[test]
+fn a_try_resource_is_a_declarator_too() {
+    // It declares a name and takes an initializer, so it is the same context — and a `null` there
+    // is an NPE at the implicit `close()`, which is the reading a `[correctness]` rule owes.
+    expect![[r"
+        61..65: `null` cannot be assigned to `c`, which is non-null
+    "]]
+    .assert_eq(&nullness(
+        "class C { void m() throws Exception { try (AutoCloseable c = null) {} } }",
+    ));
+    // …and a resource that is an existing variable declares nothing, so nothing flows into it.
+    assert_eq!(
+        nullness(
+            "class C { void m(AutoCloseable existing) throws Exception { try (existing) {} } }"
+        ),
+        ""
+    );
+}
+
+#[test]
 fn an_import_says_which_nullable_it_is() {
     // The precision an FQN list buys. `com.acme.Nullable` is a perfectly good annotation and it is
     // not one of the ten this rule knows, so the declaration still reads as non-null — where a

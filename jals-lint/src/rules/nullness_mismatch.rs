@@ -64,7 +64,7 @@ use jals_exec::{LocalBoxFuture, Yielder};
 use jals_hir::{DefKind, FileAnalysis, FileSemantics, Member, Namespace, TypedFile};
 use jals_syntax::SyntaxKind::{
     ASSIGNMENT_EXPR, CALL_EXPR, CONSTRUCTOR_DECL, FIELD_DECL, IDENT, LAMBDA_EXPR, LOCAL_VAR_DECL,
-    METHOD_DECL, NULL_KW, PARAM, RETURN_STMT,
+    METHOD_DECL, NULL_KW, PARAM, RESOURCE, RETURN_STMT,
 };
 use jals_syntax::ast::{self, AstNode};
 use jals_syntax::{SyntaxElement, SyntaxNode};
@@ -245,7 +245,10 @@ impl NullnessRule {
         for node in root.descendants() {
             yielder.tick().await;
             match node.kind() {
-                LOCAL_VAR_DECL | FIELD_DECL => {
+                // A `try` resource is a declarator like any other — it declares a name, and a
+                // `null` written into it is an NPE at the implicit `close()` rather than a
+                // different kind of finding.
+                LOCAL_VAR_DECL | FIELD_DECL | RESOURCE => {
                     Self::check_declaration(&node, analysis, typed, &vocabulary, &mut out);
                 }
                 PARAM | METHOD_DECL | CONSTRUCTOR_DECL => {
