@@ -197,6 +197,11 @@ fn every_implemented_rule_that_ports_one_is_reachable_from_the_ledger() {
         "cannot-resolve",
         "type-mismatch",
         "unreported-exception",
+        // Rust encodes absence in the type system, so it has no null to be strict about — and
+        // `rustc::invalid-null-arguments`, the one null-shaped row in either ledger, is about a
+        // raw pointer passed across FFI rather than about a declaration's contract. It stays an
+        // `N` row for the `null-argument` rule that will port it.
+        "nullness-mismatch",
         // Java-shaped rules the two tools do not carry.
         "constant-condition",
         "empty-catch",

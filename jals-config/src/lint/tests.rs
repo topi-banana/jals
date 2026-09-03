@@ -8,6 +8,14 @@ fn defaults_are_the_built_in_levels() {
     let c = Config::default();
     assert_eq!(c.correctness.cannot_resolve.level, LintLevel::Error);
     assert_eq!(c.correctness.type_mismatch.level, LintLevel::Warn);
+    assert_eq!(c.correctness.nullness_mismatch.level, LintLevel::Warn);
+    // The strict reading is the built-in one, and it is a property of the *option* rather than of
+    // the level: `nullness-mismatch` speaks about unannotated declarations until a project says
+    // `default = "unspecified"`.
+    assert_eq!(
+        c.correctness.nullness_mismatch.options.default,
+        Nullness::NonNull
+    );
     assert_eq!(c.restriction.print_to_console.level, LintLevel::Allow);
     assert!(c.unknown_keys().is_empty());
 }

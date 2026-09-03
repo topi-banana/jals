@@ -179,7 +179,7 @@ mod tests;
 
 pub use compatibility::Compatibility;
 pub use complexity::Complexity;
-pub use correctness::Correctness;
+pub use correctness::{Correctness, Nullness, NullnessMismatch};
 pub use documentation::Documentation;
 pub use level::{Lint, LintLevel, NoOptions, UnknownKeys};
 // Neither is part of the public surface. `LintPatch` is a deserialization detail, and the sections

@@ -81,6 +81,39 @@ impl Declarators {
         }
         out
     }
+
+    /// Each directly-declared name of `node` paired with the initializer written for it, in source
+    /// order. A declarator with no initializer yields no pair.
+    ///
+    /// The companion of [`dims_of`](Self::dims_of) and walked for the same reason: the CST is flat,
+    /// so `int a = 1, b = 2;` puts two names and two initializers under one node and only their
+    /// order says which belongs to which. The declaration's `TYPE` and `MODIFIERS` children are not
+    /// expressions, so the `Expr::cast` steps over them and neither is ever mistaken for a value.
+    ///
+    /// One namespace rather than an accessor on `FieldDecl` and another on `LocalVarDecl`, because
+    /// a consumer that checks what a declaration is initialized *with* — `jals-hir`'s assignment
+    /// typing, `jals-lint`'s nullness rule — asks the same question of both.
+    pub fn initializers(node: &SyntaxNode) -> Vec<(SyntaxToken, Expr)> {
+        let mut out = Vec::new();
+        let mut current: Option<SyntaxToken> = None;
+        for elem in node.children_with_tokens() {
+            match elem {
+                rowan::NodeOrToken::Token(token) => {
+                    if token.kind() == IDENT {
+                        current = Some(token);
+                    }
+                }
+                rowan::NodeOrToken::Node(node) => {
+                    if let Some(value) = Expr::cast(node)
+                        && let Some(name) = current.take()
+                    {
+                        out.push((name, value));
+                    }
+                }
+            }
+        }
+        out
+    }
 }
 
 impl QualifiedName {
