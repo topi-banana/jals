@@ -1,0 +1,28 @@
+id: no-raw-print
+
+valid:
+    # The sanctioned paths, one per kind of line.
+    - |
+        shell.status(Verb::Compiling, App::package_ref(&manifest));
+    - |
+        shell.warn(format_args!("project analysis inputs unavailable: {error}"));
+    - |
+        shell.machine(plan.backend.describe(&request));
+    # `write!` into a buffer the caller owns is not a stream write.
+    - |
+        let _ = write!(block, "    {line}");
+    # A different macro whose name merely contains one of these.
+    - |
+        sprintln!("not a print macro");
+
+invalid:
+    - |
+        println!("created {}", path.display());
+    - |
+        eprintln!("error: {err:#}");
+    - |
+        print!("{}", out.formatted);
+    - |
+        eprint!("warning: ");
+    - |
+        bar.suspend(|| eprintln!("{text}"));

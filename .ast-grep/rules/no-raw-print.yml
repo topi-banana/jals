@@ -1,0 +1,30 @@
+id: no-raw-print
+language: Rust
+severity: error
+message: The CLI writes through `Shell`, not through a print macro.
+note: |
+  Every byte `jals` shows a person or a script leaves through `jals_cli::shell::Shell`, and that is
+  what makes three rules answerable in one place: human output goes to stderr and machine output to
+  stdout, `--color` is decided once per stream, and a line written while a progress bar is up
+  suspends the bar instead of tearing it.
+
+  A raw `println!` bypasses all three at once. It also cannot be seen to: the failure is a bar
+  redrawn over a diagnostic, or a colour escape in a redirected file, and neither shows up in a
+  test that captures both streams into strings.
+
+  Use `Shell::status` / `verbose_status` for narration, `warn` / `error` / `note` for news, `plain`
+  for a block a caller already assembled, and `machine` / `machine_bytes` for what a script reads.
+  `shell.rs` itself is the one exception, because it is where the macros finally get called.
+
+files:
+  - 'jals-cli/src/**/*.rs'
+
+rule:
+  kind: macro_invocation
+  has:
+    field: macro
+    regex: '^(print|println|eprint|eprintln)$'
+
+ignores:
+  # The funnel itself: this is where the two streams are finally written to.
+  - 'jals-cli/src/shell.rs'

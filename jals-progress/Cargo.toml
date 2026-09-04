@@ -1,0 +1,22 @@
+[package]
+name = "jals-progress"
+version.workspace = true
+edition.workspace = true
+
+# Deliberately featureless, for the same reason `jals-frontend` is: an event vocabulary needs no
+# host capability, so there is no `native`/`std` split to express — and having no feature at all is
+# what makes portability impossible to regress silently. There is no configuration in which this
+# crate stops being `no_std + alloc`.
+#
+# It must never depend on another workspace crate. Everything below it in the stack
+# (`jals-classpath`, `jals-project`, `jals-build`, `jals-cli`) emits through it, so a dependency
+# here would be a cycle waiting to happen — and the vocabulary is deliberately about *work*, not
+# about jars, manifests, or class files.
+[dependencies]
+# `Event` and `Span` serialize for `--message-format json` and `--timings=json`. Nothing here
+# deserializes: a report is written, never read back.
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

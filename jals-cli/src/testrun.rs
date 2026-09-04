@@ -6,16 +6,20 @@
 //!
 //! The stream split matters and is easy to get wrong: **machine output goes to stdout, everything
 //! else to stderr**. `--list` and `--message-format json` are the two things a script consumes, so
-//! they are the two things that must not be interleaved with a progress bar.
+//! they are the two things that must not be interleaved with a progress bar. That rule now belongs
+//! to [`Shell`], which every command in the crate shares; what stays here is this command's own
+//! vocabulary, because `cargo nextest` is what it is modelled on.
 
 use std::fmt::Write as _;
-use std::io::IsTerminal;
+use std::sync::Arc;
 use std::time::Duration;
 
 use clap::ValueEnum;
-use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
+use indicatif::{ProgressBar, ProgressStyle};
 
 use jals_build::{TestCase, TestOutcome, TestVerdict};
+
+use crate::shell::{MessageFormat, Shell, Style};
 
 /// How much a run says about each test as it finishes.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
@@ -90,56 +94,18 @@ pub(crate) enum NoTests {
     Fail,
 }
 
-/// How `--list` and the run report themselves.
-#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub(crate) enum MessageFormat {
-    /// For a person.
-    Human,
-    /// One JSON object per line, on stdout.
-    Json,
-}
-
-/// When to colour.
-#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub(crate) enum ColorWhen {
-    /// Colour when stderr is a terminal and `NO_COLOR` is unset.
-    Auto,
-    Always,
-    Never,
-}
-
-impl ColorWhen {
-    /// Whether this run colours its output.
-    pub(crate) fn enabled(self) -> bool {
-        match self {
-            Self::Always => true,
-            Self::Never => false,
-            Self::Auto => std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none(),
-        }
-    }
-}
-
-/// ANSI escapes, matching `report.rs` rather than pulling a second styling crate in.
-const RESET: &str = "\x1b[0m";
-const BOLD: &str = "\x1b[1m";
-const RED: &str = "\x1b[31m";
-const GREEN: &str = "\x1b[32m";
-const YELLOW: &str = "\x1b[33m";
-const CYAN: &str = "\x1b[36m";
-const DIM: &str = "\x1b[2m";
-
 /// The progress line: a `cargo`-style verb, the elapsed time, a bar filling the width left over,
-/// and the test currently running.
-const BAR_TEMPLATE: &str = "{prefix:>12} [{elapsed_precise}] {wide_bar} {pos}/{len}: {msg}";
+/// and the test currently running. The prefix is painted and padded before it gets here, so the
+/// template counts no escapes.
+const BAR_TEMPLATE: &str = "{prefix} [{elapsed_precise}] {wide_bar} {pos}/{len}: {msg}";
 
 /// How a [`TestReporter`] presents a run.
 #[derive(Clone, Copy)]
 pub(crate) struct ReporterConfig {
     /// How many tests the bar counts up to.
     pub(crate) total: u64,
-    pub(crate) color: bool,
-    /// Whether a progress bar is wanted at all. It is still suppressed when stderr is not a
-    /// terminal.
+    /// Whether a progress bar is wanted at all. It is still suppressed when the shell draws none —
+    /// stderr is not a terminal, the run is quiet, or `--progress never`.
     pub(crate) show_bar: bool,
     pub(crate) status_level: StatusLevel,
     pub(crate) final_status_level: StatusLevel,
@@ -151,7 +117,7 @@ pub(crate) struct ReporterConfig {
 
 /// The live display and the report, sharing one set of policies.
 pub(crate) struct TestReporter {
-    color: bool,
+    shell: Arc<Shell>,
     status_level: StatusLevel,
     final_status_level: StatusLevel,
     failure_output: OutputWhen,
@@ -164,21 +130,22 @@ impl TestReporter {
     /// Build a reporter, deciding once whether there is a progress bar at all.
     ///
     /// There is none when the caller asked for none, when output is not captured (the tests write
-    /// straight to this terminal and would fight the bar for it), or when stderr is not a
-    /// terminal — a redirected run must produce the same bytes every time.
-    pub(crate) fn new(config: ReporterConfig) -> Self {
-        let bar =
-            (config.show_bar && std::io::stderr().is_terminal() && config.total > 0).then(|| {
-                let bar =
-                    ProgressBar::with_draw_target(Some(config.total), ProgressDrawTarget::stderr());
+    /// straight to this terminal and would fight the bar for it), or when the shell draws none at
+    /// all — a redirected run must produce the same bytes every time.
+    pub(crate) fn new(shell: Arc<Shell>, config: ReporterConfig) -> Self {
+        let bar = shell
+            .bars()
+            .filter(|_| config.show_bar && config.total > 0)
+            .map(|bars| {
+                let bar = ProgressBar::new(config.total);
                 if let Ok(style) = ProgressStyle::with_template(BAR_TEMPLATE) {
                     bar.set_style(style.progress_chars("=> "));
                 }
-                bar.set_prefix("Running");
-                bar
+                bar.set_prefix(shell.pad("Running", Style::Good));
+                bars.add(bar)
             });
         Self {
-            color: config.color,
+            shell,
             status_level: config.status_level,
             final_status_level: config.final_status_level,
             failure_output: config.failure_output,
@@ -188,33 +155,21 @@ impl TestReporter {
         }
     }
 
-    /// Paint `text` when colour is on.
-    fn paint(&self, style: &str, text: &str) -> String {
-        if self.color {
-            format!("{style}{text}{RESET}")
-        } else {
-            text.to_owned()
-        }
-    }
-
-    /// Write one line to stderr, suspending the bar so it is not overwritten.
+    /// Write one line to stderr. The shell suspends the live display around it.
     fn line(&self, text: &str) {
-        match &self.bar {
-            Some(bar) => bar.suspend(|| eprintln!("{text}")),
-            None => eprintln!("{text}"),
-        }
+        self.shell.plain(text);
     }
 
     /// A `cargo`-style leading verb: right-aligned in twelve columns, coloured.
-    fn verb(&self, style: &str, verb: &str) -> String {
-        self.paint(style, &format!("{verb:>12}"))
+    fn verb(&self, style: Style, verb: &str) -> String {
+        self.shell.pad(verb, style)
     }
 
     /// Announce what the run is about to do.
     pub(crate) fn starting(&self, selected: usize, classes: usize, skipped: usize) {
         let mut message = format!(
             "{} {selected} test{} across {classes} class{}",
-            self.verb(&format!("{BOLD}{GREEN}"), "Starting"),
+            self.verb(Style::Good, "Starting"),
             if selected == 1 { "" } else { "s" },
             if classes == 1 { "" } else { "es" },
         );
@@ -256,18 +211,16 @@ impl TestReporter {
     /// One `PASS`/`FAIL` line: verb, duration, id.
     fn status_line(&self, outcome: &TestOutcome) -> String {
         let (style, verb) = match outcome.verdict {
-            TestVerdict::Passed if outcome.attempts > 1 => (format!("{BOLD}{YELLOW}"), "TRY OK"),
-            TestVerdict::Passed if outcome.is_slow(self.slow_timeout) => {
-                (format!("{BOLD}{YELLOW}"), "SLOW")
-            }
-            TestVerdict::Passed => (format!("{BOLD}{GREEN}"), "PASS"),
-            TestVerdict::Failed { .. } => (format!("{BOLD}{RED}"), "FAIL"),
-            TestVerdict::TimedOut => (format!("{BOLD}{RED}"), "TIMEOUT"),
-            TestVerdict::Skipped => (format!("{BOLD}{CYAN}"), "SKIP"),
+            TestVerdict::Passed if outcome.attempts > 1 => (Style::Warn, "TRY OK"),
+            TestVerdict::Passed if outcome.is_slow(self.slow_timeout) => (Style::Warn, "SLOW"),
+            TestVerdict::Passed => (Style::Good, "PASS"),
+            TestVerdict::Failed { .. } => (Style::Bad, "FAIL"),
+            TestVerdict::TimedOut => (Style::Bad, "TIMEOUT"),
+            TestVerdict::Skipped => (Style::Note, "SKIP"),
         };
         format!(
             "{} [{:>8.3}s] {}",
-            self.verb(&style, verb),
+            self.verb(style, verb),
             outcome.duration.as_secs_f64(),
             outcome.id
         )
@@ -293,7 +246,8 @@ impl TestReporter {
             let _ = writeln!(
                 block,
                 "{}",
-                self.paint(DIM, &format!("--- {label}: {} ---", outcome.id))
+                self.shell
+                    .paint(&format!("--- {label}: {} ---", outcome.id), Style::Faint)
             );
             for line in body.lines() {
                 let _ = writeln!(block, "    {line}");
@@ -355,12 +309,8 @@ impl TestReporter {
             }
         }
 
-        self.line(&self.paint(DIM, "------------"));
-        let style = if failed > 0 {
-            format!("{BOLD}{RED}")
-        } else {
-            format!("{BOLD}{GREEN}")
-        };
+        self.line(&self.shell.paint("------------", Style::Faint));
+        let style = if failed > 0 { Style::Bad } else { Style::Good };
         let mut tail = format!("{passed} passed");
         if failed > 0 {
             let _ = write!(tail, ", {failed} failed");
@@ -370,7 +320,7 @@ impl TestReporter {
         }
         self.line(&format!(
             "{} [{:>8.3}s] {} test{} run: {tail}",
-            self.verb(&style, "Summary"),
+            self.verb(style, "Summary"),
             elapsed.as_secs_f64(),
             outcomes.len(),
             if outcomes.len() == 1 { "" } else { "s" },
@@ -379,30 +329,30 @@ impl TestReporter {
     }
 
     /// Print the selected tests and nothing else. **stdout**, because this is what a script reads.
-    pub(crate) fn list(cases: &[TestCase], format: MessageFormat) {
+    pub(crate) fn list(shell: &Shell, cases: &[TestCase], format: MessageFormat) {
         match format {
             MessageFormat::Human => {
                 for case in cases {
-                    println!("{}", case.id());
+                    shell.machine(case.id());
                 }
             }
             MessageFormat::Json => {
                 for case in cases {
-                    println!(
+                    shell.machine(format_args!(
                         "{{\"id\":{},\"class\":{},\"method\":{},\"ignore\":{},\"should_fail\":{}}}",
                         Self::json_string(case.id()),
                         Self::json_string(case.class()),
                         Self::json_string(case.method()),
                         case.is_ignored(),
                         case.should_fail()
-                    );
+                    ));
                 }
             }
         }
     }
 
     /// One line of JSON per outcome, on stdout.
-    pub(crate) fn report_json(outcomes: &[TestOutcome]) {
+    pub(crate) fn report_json(shell: &Shell, outcomes: &[TestOutcome]) {
         for outcome in outcomes {
             let (verdict, code) = match outcome.verdict {
                 TestVerdict::Passed => ("passed", None),
@@ -410,14 +360,14 @@ impl TestReporter {
                 TestVerdict::TimedOut => ("timed-out", None),
                 TestVerdict::Skipped => ("skipped", None),
             };
-            println!(
+            shell.machine(format_args!(
                 "{{\"id\":{},\"verdict\":\"{verdict}\",\"exit-code\":{},\"duration-ms\":{},\
                  \"attempts\":{}}}",
                 Self::json_string(&outcome.id),
                 code.map_or_else(|| "null".to_owned(), |code| code.to_string()),
                 outcome.duration.as_millis(),
                 outcome.attempts
-            );
+            ));
         }
     }
 
@@ -446,20 +396,9 @@ impl TestReporter {
         out
     }
 
-    /// Say that a compile is starting, matching `cargo`'s leading verb.
-    pub(crate) fn compiling(&self, name: &str) {
-        self.line(&format!(
-            "{} {name}",
-            self.verb(&format!("{BOLD}{GREEN}"), "Compiling")
-        ));
-    }
-
     /// Say that a run selected nothing.
     pub(crate) fn no_tests(&self, reason: &str) {
-        self.line(&format!(
-            "{} {reason}",
-            self.verb(&format!("{BOLD}{YELLOW}"), "Warning")
-        ));
+        self.line(&format!("{} {reason}", self.verb(Style::Warn, "Warning")));
     }
 
     /// How many distinct classes a selection spans, for the opening line.

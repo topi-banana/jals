@@ -17,6 +17,7 @@ members = [
   "jals-lint",
   "jals-lsp",
   "jals-playground",
+  "jals-progress",
   "jals-project",
   "jals-syntax",
   "jals-tests",
@@ -66,6 +67,7 @@ jals-hir = { path = "jals-hir" }
 jals-javac = { path = "jals-javac" }
 jals-lint = { path = "jals-lint" }
 jals-lsp = { path = "jals-lsp" }
+jals-progress = { path = "jals-progress" }
 jals-project = { path = "jals-project", default-features = false }
 jals-syntax = { path = "jals-syntax" }
 miniz_oxide = { version = "0.9", default-features = false, features = [

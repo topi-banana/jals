@@ -1186,8 +1186,10 @@ dependencies = [
  "jals-fmt",
  "jals-frontend",
  "jals-lsp",
+ "jals-progress",
  "jals-project",
  "jals-storage",
+ "serde_json",
  "similar",
  "tempfile",
  "zip",
@@ -1347,6 +1349,14 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "yew",
+]
+
+[[package]]
+name = "jals-progress"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

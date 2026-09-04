@@ -2326,10 +2326,12 @@ fn fmt_writes_one_config_for_two_group_roots() {
     let (stdout, stderr, code) = run_full(&["fmt", a.to_str().unwrap(), b.to_str().unwrap()]);
 
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    // The `Created` line is narration, so it is on stderr with every other status line; stdout
+    // carries only what a command was asked to produce.
     assert_eq!(
-        stdout.matches("jalsfmt.toml").count(),
+        stderr.matches("jalsfmt.toml").count(),
         1,
-        "one project, one generated config: {stdout}"
+        "one project, one generated config: {stderr}"
     );
     assert!(!dir.path().join("src/jalsfmt.toml").exists());
     assert!(!dir.path().join("other/jalsfmt.toml").exists());
