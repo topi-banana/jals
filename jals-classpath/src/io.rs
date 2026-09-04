@@ -5,6 +5,8 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use jals_progress::Task;
+
 use crate::ExternalLocator;
 
 /// Whether a fetch capability may reach the network.
@@ -233,7 +235,13 @@ pub trait Fetcher {
     ///
     /// Whether the returned [`FetchError`] is transient is the implementor's judgement and is
     /// where a retry decision is made possible — see [`FetchError`].
-    async fn fetch_admitted(&self, locator: &str) -> Result<Vec<u8>, FetchError>;
+    ///
+    /// `report` is the caller's already-started unit of work, and it is the caller's because only
+    /// the caller knows what the bytes are *for*: a dependency's name, a task node's jar. An
+    /// implementor that streams calls [`Task::set_total`] once it learns a length and
+    /// [`Task::set_done`] as it reads; one that cannot stream leaves it alone and the display shows
+    /// a spinner, which is the honest picture of a fetch nobody can measure.
+    async fn fetch_admitted(&self, locator: &str, report: &Task) -> Result<Vec<u8>, FetchError>;
 
     /// Fetch at most `max_bytes`, rejecting an oversized result. Carries the same precondition as
     /// [`fetch_admitted`](Self::fetch_admitted).
@@ -244,8 +252,9 @@ pub trait Fetcher {
         &self,
         locator: &str,
         max_bytes: usize,
+        report: &Task,
     ) -> Result<Vec<u8>, FetchError> {
-        let bytes = self.fetch_admitted(locator).await?;
+        let bytes = self.fetch_admitted(locator, report).await?;
         if bytes.len() > max_bytes {
             return Err(FetchError::permanent(format!(
                 "response has {} bytes, exceeding the limit of {max_bytes}",
@@ -277,21 +286,23 @@ enum Request {
 pub(crate) struct Fetch;
 
 impl Fetch {
-    /// Fetch `locator` in full.
+    /// Fetch `locator` in full, reporting into `report`.
     pub(crate) async fn bytes<F: Fetcher>(
         fetcher: &F,
         locator: &ExternalLocator,
+        report: &Task,
     ) -> Result<Vec<u8>, String> {
-        Self::run(fetcher, locator, Request::Full).await
+        Self::run(fetcher, locator, Request::Full, report).await
     }
 
-    /// Fetch `locator` under a byte ceiling.
+    /// Fetch `locator` under a byte ceiling, reporting into `report`.
     pub(crate) async fn bounded<F: Fetcher>(
         fetcher: &F,
         locator: &ExternalLocator,
         max_bytes: usize,
+        report: &Task,
     ) -> Result<Vec<u8>, String> {
-        Self::run(fetcher, locator, Request::Bounded(max_bytes)).await
+        Self::run(fetcher, locator, Request::Bounded(max_bytes), report).await
     }
 
     /// Apply the capability's policy to one locator.
@@ -320,18 +331,23 @@ impl Fetch {
         fetcher: &F,
         locator: &ExternalLocator,
         request: Request,
+        report: &Task,
     ) -> Result<Vec<u8>, String> {
         Self::admit(fetcher, locator)?;
         let schedule = fetcher.retry();
         let mut attempt = 0;
         loop {
-            match Self::attempt(fetcher, locator.as_str(), request).await {
+            match Self::attempt(fetcher, locator.as_str(), request, report).await {
                 Ok(bytes) => return Ok(bytes),
                 Err(error) if error.is_transient() && attempt < schedule.retries() => {
                     fetcher
                         .delay(RetrySchedule::backoff_millis(attempt, locator.as_str()))
                         .await;
                     attempt += 1;
+                    // A retry starts the transfer over, so what the previous attempt got through is
+                    // no longer progress. Left as it was, a bar would sit at 80% and then count up
+                    // from there.
+                    report.set_done(0);
                 }
                 Err(error) => return Err(Self::render(error, attempt + 1)),
             }
@@ -343,10 +359,15 @@ impl Fetch {
         fetcher: &F,
         locator: &str,
         request: Request,
+        report: &Task,
     ) -> Result<Vec<u8>, FetchError> {
         match request {
-            Request::Full => fetcher.fetch_admitted(locator).await,
-            Request::Bounded(max_bytes) => fetcher.fetch_bounded_admitted(locator, max_bytes).await,
+            Request::Full => fetcher.fetch_admitted(locator, report).await,
+            Request::Bounded(max_bytes) => {
+                fetcher
+                    .fetch_bounded_admitted(locator, max_bytes, report)
+                    .await
+            }
         }
     }
 

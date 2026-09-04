@@ -347,6 +347,7 @@ mod tests {
         fn fetch_admitted(
             &self,
             locator: &str,
+            _: &jals_progress::Task,
         ) -> impl Future<Output = Result<Vec<u8>, jals_classpath::FetchError>> {
             ready(Self::refuse(locator))
         }
@@ -367,6 +368,7 @@ mod tests {
         };
         ($environment:expr, $features:expr, $limits:expr) => {
             GraphPreprocess {
+                progress: &jals_progress::Progress::SILENT,
                 exec: &jals_exec::Exec::inline(),
                 fetcher: &UnreachableFetcher,
                 environment: $environment,

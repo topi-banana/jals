@@ -21,6 +21,7 @@ use jals_classpath::{
 };
 use jals_config::Manifest;
 use jals_exec::Exec;
+use jals_progress::{Activity, Outcome, Progress, Task};
 use jals_storage::{
     ArtifactCache, CacheBackend, CacheKey, CacheNamespace, Change, ContentDigest, DirKey, FileKey,
     ProjectStorage, ProjectView, ProvenanceFold, RelativePath, SourceBackend,
@@ -112,11 +113,22 @@ pub(crate) struct RootBuildScriptOutput {
 ///
 /// Whether a fetch may reach the network is not here: it is carried by the `Fetcher` the execution
 /// is handed, so the two cannot be paired wrongly.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Default)]
 pub struct TaskRuntime {
     /// Ceiling on any single fetch, including a size projected out of fetched JSON with
     /// `tasks.json_u64`. A fetch buffers up to this many bytes before its digest is checked.
     pub(crate) max_fetch_bytes: u64,
+    /// Where each node reports what it is doing.
+    ///
+    /// This is the right home for it and not a convenience: the type is already documented as
+    /// carrying "ceilings on how an execution runs, not inputs that change what it produces", and
+    /// is deliberately excluded from the memo key for exactly that reason. An observer has the same
+    /// property — a plan watched and a plan unwatched must produce the same bytes — so folding it
+    /// in here is what keeps it out of every provenance in the crate.
+    ///
+    /// It costs the type its `Copy`: `Progress` is an `Arc` handle, so the node loop clones one
+    /// refcount bump per node.
+    pub(crate) progress: Progress,
 }
 
 /// Whether a root run may apply the exclusive source-tree publications its plan declares.
@@ -145,6 +157,8 @@ pub struct RootBuildScriptOptions<'a> {
     /// Whether exclusive source-tree publications may touch the project. See
     /// [`SourcePublication`].
     pub publications: SourcePublication,
+    /// Where the root's task nodes report what they are doing.
+    pub progress: &'a Progress,
 }
 
 /// Identity of one memoized snapshot task execution, plus the runtime it executes under.
@@ -153,7 +167,7 @@ pub struct RootBuildScriptOptions<'a> {
 /// fingerprint — see [`snapshot_provenance`](BuildTaskExecutor::snapshot_provenance), which folds
 /// exactly those and nothing else. `runtime` is deliberately *not* part of that key: it carries
 /// ceilings on how an execution runs, not inputs that change what it produces.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct SnapshotTaskOptions<'a> {
     /// Stable identity of the project the plan belongs to — a graph node's digest.
     pub(crate) identity: ContentDigest,
@@ -362,7 +376,11 @@ impl BuildTaskExecutor {
             .filter_map(|root| DirKey::parse(root).ok())
             .collect();
         let view = storage.view();
-        let prepared = prepare_build_script(
+        // The root's script phase, reported the way a dependency node's is — the two are the same
+        // phase, and a reader waiting on `build.rhai` should not have to know which project it
+        // belongs to before the line appears.
+        let script = options.progress.begin(Activity::Script, "");
+        let prepared = match prepare_build_script(
             &view,
             storage.artifacts(),
             BuildScriptCacheScope::ROOT,
@@ -370,7 +388,23 @@ impl BuildTaskExecutor {
             options.environment,
             options.limits,
         )
-        .await?;
+        .await
+        {
+            Ok(prepared) => {
+                script.finish(if prepared.is_some() {
+                    Outcome::Completed
+                } else {
+                    // No `[build] script` at all: nothing ran, and saying so is what keeps a
+                    // `--timings` report honest about which phases cost anything.
+                    Outcome::Skipped
+                });
+                prepared
+            }
+            Err(error) => {
+                script.finish(Outcome::Failed);
+                return Err(error.into());
+            }
+        };
         let Some(prepared) = prepared else {
             Self::reject_blocked_roots(
                 &Self::owned_publication_roots(&view, &source_roots)?,
@@ -411,8 +445,9 @@ impl BuildTaskExecutor {
             &view,
             storage.artifacts_mut(),
             &plan,
-            TaskRuntime {
+            &TaskRuntime {
                 max_fetch_bytes: options.limits.max_fetch_bytes,
+                progress: options.progress.clone(),
             },
             options.host,
         )
@@ -542,7 +577,7 @@ impl BuildTaskExecutor {
             view,
             cache,
             plan,
-            options.runtime,
+            &options.runtime,
             BuildTaskHost::Snapshot,
         )
         .await?;
@@ -689,7 +724,7 @@ impl BuildTaskExecutor {
         view: &ProjectView,
         cache: &mut ArtifactCache<C>,
         plan: &TaskPlan,
-        runtime: TaskRuntime,
+        runtime: &TaskRuntime,
         host: BuildTaskHost,
     ) -> Result<BuildTaskExecution, BuildTaskRunError> {
         match host {
@@ -714,13 +749,27 @@ impl BuildTaskExecutor {
             if !reachable.contains(&node.id) {
                 continue;
             }
-            let value =
-                Self::execute_node(exec, fetcher, view, cache, &values, &node.kind, runtime)
-                    .await
-                    .map_err(|message| BuildTaskRunError::Node {
+            // One unit per node, named here rather than inside each arm: the plan's own
+            // vocabulary is the phase vocabulary a reader wants, and deriving it once is what keeps
+            // a node added later from arriving as unnamed work.
+            let report = Self::node_report(&runtime.progress, &node.kind);
+            let value = match Self::execute_node(
+                exec, fetcher, view, cache, &values, &node.kind, runtime, &report,
+            )
+            .await
+            {
+                Ok(value) => {
+                    report.finish(Outcome::Completed);
+                    value
+                }
+                Err(message) => {
+                    report.finish(Outcome::Failed);
+                    return Err(BuildTaskRunError::Node {
                         id: node.id,
                         message,
-                    })?;
+                    });
+                }
+            };
             values[node.id.index()] = Some(value);
         }
 
@@ -750,9 +799,11 @@ impl BuildTaskExecutor {
                     intent,
                     ..
                 } => {
+                    let report = runtime.progress.begin(Activity::Publish, owner.clone());
                     let tree = Self::source_tree(&values, *tree)
                         .map_err(BuildTaskRunError::Terminal)?
                         .clone();
+                    report.finish(Outcome::Completed);
                     if tree.files.is_empty() {
                         return Err(BuildTaskRunError::Terminal(format!(
                             "publication owner `{owner}` produced an empty source tree"
@@ -773,6 +824,29 @@ impl BuildTaskExecutor {
             }
         }
         Ok(output)
+    }
+
+    /// The unit of work one plan node is, or `None` for a node that is not worth watching.
+    ///
+    /// A value node — a URL, a digest, a byte count, a projection out of already-fetched JSON — is
+    /// arithmetic, and a line for it would bury the four steps that actually take minutes. A
+    /// [`TaskNodeKind::Fetch`] is deliberately absent too: the resolver beneath it reports the
+    /// fetch itself, with the locator's own name and the transfer's byte count, and this would be
+    /// the same news with less in it.
+    fn node_report(progress: &Progress, node: &TaskNodeKind) -> Task {
+        let (activity, subject) = match node {
+            TaskNodeKind::ExtractJava { prefix, .. } => (Activity::Extract, prefix.as_str()),
+            TaskNodeKind::NestedJar { member, .. } => (Activity::Extract, member.as_str()),
+            TaskNodeKind::RemapJar { .. } => (Activity::Remap, ""),
+            TaskNodeKind::MergeJars { .. } => (Activity::Merge, ""),
+            TaskNodeKind::DecompileJava { prefix, .. } => (Activity::Decompile, prefix.as_str()),
+            // A value node is arithmetic — a URL, a digest, a byte count, a projection out of
+            // already-fetched JSON — and a line for it would bury the four steps that take minutes.
+            // A `Fetch` is deliberately silent here too: the resolver beneath it reports the
+            // transfer itself, with the locator's own name and its byte count.
+            _ => return Task::silent(),
+        };
+        progress.begin(activity, subject)
     }
 
     /// Publication destinations declared by a plan, in terminal order.
@@ -1035,6 +1109,10 @@ impl BuildTaskExecutor {
         Ok(state)
     }
 
+    // One arm per `TaskNodeKind`, and every parameter is something one of them needs: how to
+    // execute, what may fetch, what to read, where to publish, what the earlier nodes produced,
+    // the node itself, its ceilings, and the unit the caller opened for it.
+    #[allow(clippy::too_many_arguments)]
     async fn execute_node<F: Fetcher, C: CacheBackend>(
         exec: &Exec,
         fetcher: &F,
@@ -1042,7 +1120,8 @@ impl BuildTaskExecutor {
         cache: &mut ArtifactCache<C>,
         values: &[Option<TaskValue>],
         node: &TaskNodeKind,
-        runtime: TaskRuntime,
+        runtime: &TaskRuntime,
+        report: &Task,
     ) -> Result<TaskValue, String> {
         match node {
             TaskNodeKind::HttpsUrl { value } => {
@@ -1107,7 +1186,9 @@ impl BuildTaskExecutor {
                     max_bytes,
                     namespace: CacheNamespace::BuildTaskArtifact,
                 };
-                let key = ExternalArtifactResolver::resolve(fetcher, cache, &spec).await?;
+                let key =
+                    ExternalArtifactResolver::resolve(fetcher, cache, &spec, &runtime.progress)
+                        .await?;
                 match kind {
                     TaskFetchKind::Jar => Ok(TaskValue::Jar(key)),
                     TaskFetchKind::Json => {
@@ -1208,6 +1289,7 @@ impl BuildTaskExecutor {
                         max_file_bytes: 16 * 1_048_576,
                         max_total_bytes: 1_024 * 1_048_576,
                     },
+                    report,
                 )
                 .await
                 .map(TaskValue::SourceTree)
@@ -1241,6 +1323,7 @@ impl BuildTaskExecutor {
                         direction: Self::remap_direction(*direction),
                         hierarchy: &hierarchy,
                     },
+                    report,
                 )
                 .await
                 .map(TaskValue::Jar)
@@ -1248,7 +1331,7 @@ impl BuildTaskExecutor {
             TaskNodeKind::MergeJars { base, overlay } => {
                 let base = Self::jar(values, *base)?.clone();
                 let overlay = Self::jar(values, *overlay)?.clone();
-                jals_classpath::JarMerge::merge(exec, cache, &base, &overlay)
+                jals_classpath::JarMerge::merge(exec, cache, &base, &overlay, report)
                     .await
                     .map(TaskValue::Jar)
             }
@@ -1266,6 +1349,7 @@ impl BuildTaskExecutor {
                         max_file_bytes: 16 * 1_048_576,
                         max_total_bytes: 1_024 * 1_048_576,
                     },
+                    report,
                 )
                 .await
                 .map(TaskValue::SourceTree)
@@ -1447,6 +1531,7 @@ mod tests {
         fn fetch_admitted(
             &self,
             locator: &str,
+            _: &jals_progress::Task,
         ) -> impl Future<Output = Result<Vec<u8>, jals_classpath::FetchError>> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             ready(self.responses.get(locator).cloned().ok_or_else(|| {
@@ -1517,6 +1602,7 @@ mod tests {
                 &mut storage,
                 &mut BuildScriptSession::new(),
                 RootBuildScriptOptions {
+                    progress: &Progress::SILENT,
                     manifest: &manifest(),
                     environment: &BuildScriptEnvironment::new(),
                     limits: &BuildScriptLimits::default(),
@@ -1539,6 +1625,7 @@ mod tests {
                 &mut storage,
                 &mut BuildScriptSession::new(),
                 RootBuildScriptOptions {
+                    progress: &Progress::SILENT,
                     manifest: &manifest(),
                     environment: &BuildScriptEnvironment::new(),
                     limits: &BuildScriptLimits::default(),
@@ -1577,6 +1664,7 @@ mod tests {
                 &mut storage,
                 &mut BuildScriptSession::new(),
                 RootBuildScriptOptions {
+                    progress: &Progress::SILENT,
                     manifest: &manifest(),
                     environment: &BuildScriptEnvironment::new(),
                     limits: &BuildScriptLimits::default(),
@@ -1712,7 +1800,10 @@ mod tests {
         let options = SnapshotTaskOptions {
             identity: ContentDigest::of(b"node"),
             features: &features,
-            runtime: TaskRuntime { max_fetch_bytes: 1 },
+            runtime: TaskRuntime {
+                max_fetch_bytes: 1,
+                progress: Progress::SILENT,
+            },
         };
         let provenance = BuildTaskExecutor::snapshot_provenance(&plan, &options)
             .expect("the empty plan fingerprints");

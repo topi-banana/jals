@@ -49,7 +49,7 @@ build front end (`jals build` / `run` / `test` / `clean` / `init`) wraps the JDK
 
 ## Workspace layout
 
-`jals` is a Cargo workspace of sixteen product crates, including a browser playground:
+`jals` is a Cargo workspace of seventeen product crates, including a browser playground:
 
 | Crate                                | Description                                                                                                                                                                                                                                                                                                                                                                                                         |
 | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -68,7 +68,8 @@ build front end (`jals build` / `run` / `test` / `clean` / `init`) wraps the JDK
 | [`jals-project`](jals-project)       | Discovers the transitive path/Git/JAR project graph with stable node identity, probes only each selected root's exact `jals.toml`, enforces the resolved-to-preprocessed phase transition, and publishes dependency inputs only as node-scoped verified artifacts for `jals-classpath`. Includes portable in-memory and native acquisition hosts.                                                                   |
 | [`jals-build`](jals-build)           | A Cargo-style build orchestrator: it turns `jals.toml` into `javac`/`java` plans, clean keys, and scaffolding, and optionally runs sandboxed Rhai pre-build scripts over revisioned project storage. Backs `jals build`/`run`/`clean`/`init` and the LSP/playground build phase.                                                                                                                                    |
 | [`jals-lsp`](jals-lsp)               | A Language Server Protocol server (the `jals lsp` subcommand) providing diagnostics, document symbols, formatting, hover, go-to-definition, find-references, and more from the same CST and semantic layer. Host-only.                                                                                                                                                                                              |
-| [`jals-cli`](jals-cli)               | The `jals` command-line binary.                                                                                                                                                                                                                                                                                                                                                                                     |
+| [`jals-progress`](jals-progress)     | What a run is doing, as data: the event vocabulary portable crates report through, plus the timing ledger `--timings` renders as a self-contained HTML page. Draws nothing — a host decides what a fact looks like.                                                                                                                            |
+| [`jals-cli`](jals-cli)               | The `jals` command-line binary. Owns the terminal: one `Shell` writes every byte, and a cargo-shaped display turns the event stream into status lines and progress bars.                                                                                                                                                                                                                                                                                                                                                                                     |
 | [`jals-playground`](jals-playground) | A browser playground built with [Yew](https://yew.rs) and served by [Trunk](https://trunkrs.dev). It compiles to `wasm32` and runs the syntax/formatting/analysis layers entirely in the browser.                                                                                                                                                                                                                   |
 
 Two more workspace members are development-only tooling, not part of the shipped product:
@@ -88,6 +89,7 @@ jals/
 ├── jals-classpath/   # classpath + dependency resolution        (no_std + wasm-compatible core)
 ├── jals-config/      # jals.toml/jalsfmt.toml/jalslint.toml models (no_std, wasm-compatible)
 ├── jals-exec/        # current-thread execution + worker fan-out (no_std, wasm-compatible)
+├── jals-progress/    # what a run is doing, as data + --timings  (no_std, wasm-compatible)
 ├── jals-storage/     # revisioned project storage               (no_std, wasm-compatible)
 ├── jals-project/     # transitive source-project graph          (no_std + wasm-compatible core)
 ├── jals-build/       # Cargo-style javac/java build planner     (no_std + wasm-compatible core)
@@ -193,6 +195,40 @@ Linux, macOS and Windows runners are all supported, on `x64` and `arm64`.
 
 `jals` is invoked through subcommands: `fmt` (format source), `lint` (lint source), `lsp`
 (language server), and a Cargo-style build front end — `init`, `build`, `run`, and `clean`.
+
+### Global options
+
+Every subcommand shares these, and — as in Cargo — they may be written on either side of it, so
+`jals --quiet build` and `jals build --quiet` are the same run.
+
+| Option | Description |
+| --- | --- |
+| `-q, --quiet` | Warnings and errors only: no status lines, no progress display. |
+| `-v, --verbose` | Say more — memo hits (`Fresh`), individual downloads, and the `javac`/`java` command line before it runs. |
+| `--color <auto\|always\|never>` | Whether to use ANSI colour. `NO_COLOR`, `CLICOLOR_FORCE` and `TERM=dumb` are honoured under `auto`. |
+| `--message-format <human\|json>` | `json` writes one JSON object per line on stdout — the same event stream the display draws. |
+| `--progress <auto\|always\|never>` | Whether to draw the live progress display. `auto` draws when stderr is a terminal. |
+| `--timings[=html,json]` | Write a report of where the run's time went to `target/jals/timings/`. |
+
+Output follows one rule: **anything for a person goes to stderr, anything for a script goes to
+stdout.** A run narrates itself the way `cargo` does — `Downloading`, `Remapping`, `Decompiling`,
+`Compiling`, `Fresh`, `Finished` — with a progress bar per unit of work when stderr is a terminal:
+
+```console
+$ jals build
+    Preparing minecraft v1.21.8
+  Downloaded 61 files (52.3 MiB) in 12.4s
+    Remapping minecraft v1.21.8   [00:00:41] [====>          ] 8213/29184
+   Decompiling minecraft v1.21.8
+    Publishing game
+    Compiling my-mod v0.1.0
+    Packaging build/libs/my-mod.jar
+     Finished `java21` profile in 184.02s
+```
+
+`--timings` writes a self-contained HTML page — one bar per unit of work, a concurrency plot, and
+where the time went by activity — plus a stable `jals-timings.html` beside it, the way
+`cargo build --timings` does.
 
 ### Format files in place
 

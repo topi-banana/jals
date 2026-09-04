@@ -43,6 +43,7 @@ impl jals_classpath::Fetcher for UnreachableFetcher {
     fn fetch_admitted(
         &self,
         locator: &str,
+        _: &jals_progress::Task,
     ) -> impl Future<Output = Result<Vec<u8>, jals_classpath::FetchError>> {
         ready(Self::refuse(locator))
     }
@@ -69,6 +70,7 @@ macro_rules! inert {
     };
     ($environment:expr, $features:expr, $limits:expr) => {
         GraphPreprocess {
+            progress: &jals_progress::Progress::SILENT,
             exec: &Exec::inline(),
             fetcher: &UnreachableFetcher,
             environment: $environment,
@@ -887,6 +889,7 @@ fn native_compile_classpath_keeps_mixed_local_and_remote_order() {
                     jals_classpath::RetrySchedule::none(),
                 ),
                 ProjectInputOptions::Compile,
+                &jals_progress::Progress::SILENT,
             )
             .await;
         assert!(assembly.errors.is_empty(), "{:?}", assembly.errors);
@@ -1225,6 +1228,7 @@ fn native_projection_returns_watch_paths_and_applies_mode_downstream() {
                 &mut root_storage,
                 &UnreachableFetcher,
                 ProjectInputOptions::Analysis,
+                &jals_progress::Progress::SILENT,
             )
             .await;
         assert_eq!(
@@ -1244,6 +1248,7 @@ fn native_projection_returns_watch_paths_and_applies_mode_downstream() {
                 &mut root_storage,
                 &UnreachableFetcher,
                 ProjectInputOptions::Editor,
+                &jals_progress::Progress::SILENT,
             )
             .await;
         assert_eq!(editor.inputs.source_dep_sources.len(), 1);
@@ -1719,6 +1724,7 @@ impl jals_classpath::Fetcher for CountingFetcher {
     fn fetch_admitted(
         &self,
         locator: &str,
+        _: &jals_progress::Task,
     ) -> impl Future<Output = Result<Vec<u8>, jals_classpath::FetchError>> {
         self.calls
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1754,6 +1760,7 @@ fn a_dependency_build_task_puts_its_jar_on_the_consumer_classpath() {
                 .preprocess(
                     cache.artifacts_mut(),
                     GraphPreprocess {
+                        progress: &jals_progress::Progress::SILENT,
                         exec: &Exec::inline(),
                         fetcher: &fetcher,
                         environment: &BuildScriptEnvironment::new(),
@@ -1813,6 +1820,7 @@ fn a_dependency_publication_becomes_navigation_source_and_never_touches_the_snap
             .preprocess(
                 cache.artifacts_mut(),
                 GraphPreprocess {
+                    progress: &jals_progress::Progress::SILENT,
                     exec: &Exec::inline(),
                     fetcher: &fetcher,
                     environment: &BuildScriptEnvironment::new(),
@@ -1885,6 +1893,7 @@ fn a_dependency_publication_outside_a_source_root_is_rejected() {
                 .preprocess(
                     cache.artifacts_mut(),
                     GraphPreprocess {
+                        progress: &jals_progress::Progress::SILENT,
                         exec: &Exec::inline(),
                         fetcher: &fetcher,
                         environment: &BuildScriptEnvironment::new(),
@@ -1927,6 +1936,7 @@ fn a_dependency_build_script_error_reaches_the_consumer_with_its_message() {
                 .preprocess(
                     cache.artifacts_mut(),
                     GraphPreprocess {
+                        progress: &jals_progress::Progress::SILENT,
                         exec: &Exec::inline(),
                         fetcher: &UnreachableFetcher,
                         environment: &BuildScriptEnvironment::new(),
@@ -2076,6 +2086,7 @@ fn a_dependency_publication_reaches_the_editor_but_not_the_compiler() {
                 .preprocess(
                     cache.artifacts_mut(),
                     GraphPreprocess {
+                        progress: &jals_progress::Progress::SILENT,
                         exec: &Exec::inline(),
                         fetcher: &fetcher,
                         environment: &BuildScriptEnvironment::new(),
@@ -2094,6 +2105,7 @@ fn a_dependency_publication_reaches_the_editor_but_not_the_compiler() {
             &mut cache,
             &assembly.plan,
             ProjectInputOptions::Editor,
+            &jals_progress::Progress::SILENT,
         )
         .await;
         assert!(
@@ -2114,6 +2126,7 @@ fn a_dependency_publication_reaches_the_editor_but_not_the_compiler() {
             &mut cache,
             &assembly.plan,
             ProjectInputOptions::Compile,
+            &jals_progress::Progress::SILENT,
         )
         .await;
         assert!(compile.library_sources.is_empty());
@@ -2191,6 +2204,7 @@ fn a_compile_intent_publication_reaches_the_compiler() {
                 &mut cache,
                 &assembly.plan,
                 options,
+                &jals_progress::Progress::SILENT,
             )
             .await;
             assert!(
@@ -3036,6 +3050,7 @@ impl jals_classpath::Fetcher for RefusingFetcher {
     fn fetch_admitted(
         &self,
         locator: &str,
+        _: &jals_progress::Task,
     ) -> impl Future<Output = Result<Vec<u8>, jals_classpath::FetchError>> {
         ready(Self::refuse(locator))
     }
@@ -3071,6 +3086,7 @@ fn an_offline_graph_does_not_fetch_a_remote_jar_dependency() {
                 project.path(),
                 &mut root_storage,
                 GraphPreprocess {
+                    progress: &jals_progress::Progress::SILENT,
                     exec: &exec,
                     fetcher: &RefusingFetcher,
                     environment: &BuildScriptEnvironment::new(),

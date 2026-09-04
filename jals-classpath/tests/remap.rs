@@ -105,9 +105,15 @@ Renamed -> Box:
         let exec = Exec::inline();
         let mut cache = ArtifactCache::new(MemoryCache::default());
         let jar = publish(&mut cache, b"fixture", &jar_bytes).await;
-        let remapped = JarRemap::remap(&exec, &mut cache, &jar, &deobfuscate(mappings))
-            .await
-            .expect("remap succeeds");
+        let remapped = JarRemap::remap(
+            &exec,
+            &mut cache,
+            &jar,
+            &deobfuscate(mappings),
+            &jals_progress::Task::silent(),
+        )
+        .await
+        .expect("remap succeeds");
         let bytes = cache
             .lookup(&remapped)
             .await
@@ -143,6 +149,7 @@ fn tiny_v2_remaps_the_same_jar_the_proguard_text_does() {
             &mut cache,
             &jar,
             &deobfuscate_tiny(BOX_TINY, "official", "named"),
+            &jals_progress::Task::silent(),
         )
         .await
         .expect("remap succeeds");
@@ -169,6 +176,7 @@ fn the_namespace_pair_a_tiny_file_is_read_through_is_part_of_the_cache_key() {
             &mut cache,
             &jar,
             &deobfuscate_tiny(BOX_TINY, "official", "named"),
+            &jals_progress::Task::silent(),
         )
         .await
         .expect("remap succeeds");
@@ -177,6 +185,7 @@ fn the_namespace_pair_a_tiny_file_is_read_through_is_part_of_the_cache_key() {
             &mut cache,
             &jar,
             &deobfuscate_tiny(BOX_TINY, "official", "intermediary"),
+            &jals_progress::Task::silent(),
         )
         .await
         .expect("remap succeeds");
@@ -200,9 +209,15 @@ fn merge_overlay_wins_on_conflict() {
         let mut cache = ArtifactCache::new(MemoryCache::default());
         let base_key = publish(&mut cache, b"base", &base).await;
         let overlay_key = publish(&mut cache, b"overlay", &overlay).await;
-        let merged = JarMerge::merge(&exec, &mut cache, &base_key, &overlay_key)
-            .await
-            .expect("merge");
+        let merged = JarMerge::merge(
+            &exec,
+            &mut cache,
+            &base_key,
+            &overlay_key,
+            &jals_progress::Task::silent(),
+        )
+        .await
+        .expect("merge");
         let bytes = cache
             .lookup(&merged)
             .await
@@ -243,6 +258,7 @@ fn decompile_strips_prefix_and_drops_field_final() {
                 max_file_bytes: 1_048_576,
                 max_total_bytes: 4 * 1_048_576,
             },
+            &jals_progress::Task::silent(),
         )
         .await
         .expect("decompile");
@@ -326,9 +342,15 @@ evolution.RenamedRoot -> evolution.HierarchyRoot:
         let jar = publish(&mut cache, b"subject", &subject).await;
         let supers = publish(&mut cache, b"supertypes", &supertypes).await;
 
-        let alone = JarRemap::remap(&exec, &mut cache, &jar, &deobfuscate(mappings))
-            .await
-            .expect("remap succeeds");
+        let alone = JarRemap::remap(
+            &exec,
+            &mut cache,
+            &jar,
+            &deobfuscate(mappings),
+            &jals_progress::Task::silent(),
+        )
+        .await
+        .expect("remap succeeds");
         let alone = member_bytes(
             &cache.lookup(&alone).await.unwrap().unwrap(),
             "evolution/HierarchyEvolution.class",
@@ -347,6 +369,7 @@ evolution.RenamedRoot -> evolution.HierarchyRoot:
                 hierarchy: &supers,
                 ..deobfuscate(mappings)
             },
+            &jals_progress::Task::silent(),
         )
         .await
         .expect("remap succeeds");
@@ -382,9 +405,15 @@ Renamed -> Box:
         )
         .await;
 
-        let deobf = JarRemap::remap(&exec, &mut cache, &jar, &deobfuscate(mappings))
-            .await
-            .expect("deobfuscate succeeds");
+        let deobf = JarRemap::remap(
+            &exec,
+            &mut cache,
+            &jar,
+            &deobfuscate(mappings),
+            &jals_progress::Task::silent(),
+        )
+        .await
+        .expect("deobfuscate succeeds");
         let reobf = JarRemap::remap(
             &exec,
             &mut cache,
@@ -393,6 +422,7 @@ Renamed -> Box:
                 direction: RemapDirection::Reobfuscate,
                 ..deobfuscate(mappings)
             },
+            &jals_progress::Task::silent(),
         )
         .await
         .expect("reobfuscate succeeds");
@@ -441,9 +471,15 @@ Renamed -> Box:
         let exec = Exec::inline();
         let mut cache = ArtifactCache::new(MemoryCache::default());
         let jar = publish(&mut cache, b"signed", &jar_bytes).await;
-        let remapped = JarRemap::remap(&exec, &mut cache, &jar, &deobfuscate(mappings))
-            .await
-            .expect("remap succeeds");
+        let remapped = JarRemap::remap(
+            &exec,
+            &mut cache,
+            &jar,
+            &deobfuscate(mappings),
+            &jals_progress::Task::silent(),
+        )
+        .await
+        .expect("remap succeeds");
         let bytes = cache.lookup(&remapped).await.unwrap().unwrap();
 
         let names: Vec<String> = zip::ZipArchive::new(Cursor::new(bytes.clone()))
@@ -495,9 +531,15 @@ fn merge_drops_both_sides_signatures_and_stale_digests() {
         let mut cache = ArtifactCache::new(MemoryCache::default());
         let base = publish(&mut cache, b"base", &base_bytes).await;
         let overlay = publish(&mut cache, b"overlay", &overlay_bytes).await;
-        let merged = JarMerge::merge(&Exec::inline(), &mut cache, &base, &overlay)
-            .await
-            .expect("merge succeeds");
+        let merged = JarMerge::merge(
+            &Exec::inline(),
+            &mut cache,
+            &base,
+            &overlay,
+            &jals_progress::Task::silent(),
+        )
+        .await
+        .expect("merge succeeds");
         let bytes = cache.lookup(&merged).await.unwrap().unwrap();
 
         let names: Vec<String> = zip::ZipArchive::new(Cursor::new(bytes.clone()))
@@ -537,9 +579,15 @@ fn a_merged_jar_carries_one_manifest_and_carries_it_first() {
         let mut cache = ArtifactCache::new(MemoryCache::default());
         let base = publish(&mut cache, b"base", &base_bytes).await;
         let overlay = publish(&mut cache, b"overlay", &overlay_bytes).await;
-        let merged = JarMerge::merge(&Exec::inline(), &mut cache, &base, &overlay)
-            .await
-            .expect("merge succeeds");
+        let merged = JarMerge::merge(
+            &Exec::inline(),
+            &mut cache,
+            &base,
+            &overlay,
+            &jals_progress::Task::silent(),
+        )
+        .await
+        .expect("merge succeeds");
         let bytes = cache.lookup(&merged).await.unwrap().unwrap();
 
         let names: Vec<String> = zip::ZipArchive::new(Cursor::new(bytes.clone()))
@@ -598,9 +646,15 @@ fn a_multi_release_base_re_declares_the_attribute_on_the_surviving_manifest() {
         let mut cache = ArtifactCache::new(MemoryCache::default());
         let base = publish(&mut cache, b"base", &base_bytes).await;
         let overlay = publish(&mut cache, b"overlay", &overlay_bytes).await;
-        let merged = JarMerge::merge(&Exec::inline(), &mut cache, &base, &overlay)
-            .await
-            .expect("merge succeeds");
+        let merged = JarMerge::merge(
+            &Exec::inline(),
+            &mut cache,
+            &base,
+            &overlay,
+            &jals_progress::Task::silent(),
+        )
+        .await
+        .expect("merge succeeds");
         let bytes = cache.lookup(&merged).await.unwrap().unwrap();
 
         let manifest = String::from_utf8(member_bytes(&bytes, "META-INF/MANIFEST.MF"))
@@ -653,9 +707,15 @@ fn a_manifest_spelled_differently_on_the_two_sides_is_still_one_conflict() {
         let mut cache = ArtifactCache::new(MemoryCache::default());
         let base = publish(&mut cache, b"base", &base_bytes).await;
         let overlay = publish(&mut cache, b"overlay", &overlay_bytes).await;
-        let merged = JarMerge::merge(&Exec::inline(), &mut cache, &base, &overlay)
-            .await
-            .expect("merge succeeds");
+        let merged = JarMerge::merge(
+            &Exec::inline(),
+            &mut cache,
+            &base,
+            &overlay,
+            &jals_progress::Task::silent(),
+        )
+        .await
+        .expect("merge succeeds");
         let bytes = cache.lookup(&merged).await.unwrap().unwrap();
 
         let names: Vec<String> = zip::ZipArchive::new(Cursor::new(bytes.clone()))

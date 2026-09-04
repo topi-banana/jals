@@ -25,6 +25,7 @@ jals-syntax = { workspace = true }
 # handle and the blocking-pool escape the native half runs its syscalls through.
 jals-config.workspace = true
 jals-exec.workspace = true
+jals-progress.workspace = true
 jals-storage.workspace = true
 rhai = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }

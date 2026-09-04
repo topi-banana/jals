@@ -51,7 +51,7 @@ linter・language server（LSP）を提供しており、いずれも名前解�
 
 ## ワークスペース構成
 
-`jals` はブラウザ向け playground を含む 16 個のプロダクト crate からなる Cargo ワークスペースです。
+`jals` はブラウザ向け playground を含む 17 個のプロダクト crate からなる Cargo ワークスペースです。
 
 | Crate                                | 説明                                                                                                                                                                                                                                                                                                                                                            |
 | ------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -70,7 +70,8 @@ linter・language server（LSP）を提供しており、いずれも名前解�
 | [`jals-project`](jals-project)       | stable な node identity を持つ transitive path/Git/JAR project graph を探索し、選択 root 直下の正確な `jals.toml` だけを probe し、resolved から preprocessed への phase transition を必須にして、dependency input を node-scoped な検証済み artifact としてのみ `jals-classpath` へ公開します。portable in-memory host と native acquisition host を含みます。 |
 | [`jals-build`](jals-build)           | Cargo 風のビルドオーケストレータ。`jals.toml` を `javac`/`java` の計画・clean key・プロジェクト雛形へ変換し、任意の Rhai pre-build script を revision 付き project storage 上で実行します。`jals build`/`run`/`test`/`clean`/`init` と LSP/playground の build phase を支えます。                                                                                      |
 | [`jals-lsp`](jals-lsp)               | Language Server Protocol サーバ（`jals lsp` サブコマンド）。同じ CST とセマンティック層から診断・ドキュメントシンボル・整形・hover・定義へのジャンプ・参照検索などを提供。ホスト専用。                                                                                                                                                                          |
-| [`jals-cli`](jals-cli)               | `jals` コマンドラインバイナリ。                                                                                                                                                                                                                                                                                                                                 |
+| [`jals-progress`](jals-progress)     | 実行中の作業を「データ」として表す語彙。portable な crate はここを通して事実だけを報告し、`--timings` はその台帳を自己完結した HTML ページとして描画する。描画そのものは持たない——事実がどう見えるかはホストが決める。 |
+| [`jals-cli`](jals-cli)               | `jals` コマンドラインバイナリ。端末はここが所有する: 出力は単一の `Shell` を必ず通り、cargo 風の表示がイベント列をステータス行とプログレスバーに変える。                                                                                                                                                                                                                                                                                                                                 |
 | [`jals-playground`](jals-playground) | [Yew](https://yew.rs) 製・[Trunk](https://trunkrs.dev) でビルドするブラウザ向け playground。`wasm32` にコンパイルし、構文/format/解析/Rhai build-script の各層をブラウザ上だけで動かします。                                                                                                                                                                    |
 
 残り 2 つのワークスペースメンバーは開発専用のツールで、製品には含まれません:
@@ -90,6 +91,7 @@ jals/
 ├── jals-classpath/   # classpath + 依存関係の解決      (no_std + wasm 対応コア)
 ├── jals-config/      # jals.toml/jalsfmt.toml/jalslint.toml モデル (no_std, wasm 対応)
 ├── jals-exec/        # current-thread 実行 + worker fan-out (no_std, wasm 対応)
+├── jals-progress/    # 実行中の作業をデータ化 + --timings        (no_std, wasm 対応)
 ├── jals-storage/     # revision付きproject storage      (no_std, wasm 対応)
 ├── jals-project/     # transitive source-project graph   (no_std + wasm 対応コア)
 ├── jals-build/       # Cargo 風の javac/java ビルドプランナ (no_std + wasm 対応コア)
@@ -194,6 +196,39 @@ Linux・macOS・Windows の `x64` / `arm64` ランナーに対応しています
 
 `jals` はサブコマンド方式で、`fmt`（ソース整形）・`lint`（ソース lint）・`lsp`（language server）
 に加え、Cargo 風のビルドフロントエンド（`init` / `build` / `run` / `clean`）があります。
+
+### グローバルオプション
+
+すべてのサブコマンドが共有します。Cargo と同じく、サブコマンドのどちら側に書いても構いません
+（`jals --quiet build` と `jals build --quiet` は同じ実行です）。
+
+| オプション | 説明 |
+| --- | --- |
+| `-q, --quiet` | 警告とエラーだけ。ステータス行もプログレス表示も出しません。 |
+| `-v, --verbose` | より多く出します——メモヒット（`Fresh`）、個々のダウンロード、実行前の `javac`/`java` コマンド行。 |
+| `--color <auto\|always\|never>` | ANSI カラーを使うかどうか。`auto` では `NO_COLOR` / `CLICOLOR_FORCE` / `TERM=dumb` を尊重します。 |
+| `--message-format <human\|json>` | `json` は stdout に 1 行 1 JSON オブジェクトを書きます——表示が描いているのと同じイベント列です。 |
+| `--progress <auto\|always\|never>` | ライブのプログレス表示を描くかどうか。`auto` は stderr が端末のときに描きます。 |
+| `--timings[=html,json]` | 実行時間の内訳レポートを `target/jals/timings/` に書き出します。 |
+
+出力の規則はひとつです。**人間向けは stderr、スクリプト向けは stdout。** 実行は cargo と同じ体裁で
+自身を語り（`Downloading` / `Remapping` / `Decompiling` / `Compiling` / `Fresh` / `Finished`）、
+stderr が端末なら作業単位ごとにプログレスバーが出ます:
+
+```console
+$ jals build
+    Preparing minecraft v1.21.8
+  Downloaded 61 files (52.3 MiB) in 12.4s
+    Remapping minecraft v1.21.8   [00:00:41] [====>          ] 8213/29184
+   Decompiling minecraft v1.21.8
+    Publishing game
+    Compiling my-mod v0.1.0
+    Packaging build/libs/my-mod.jar
+     Finished `java21` profile in 184.02s
+```
+
+`--timings` は自己完結した HTML ページ——作業単位ごとのバー、並列度のプロット、アクティビティ別の
+内訳——と、その隣に上書きされる `jals-timings.html` を書きます。`cargo build --timings` と同じ運用です。
 
 ### ファイルをその場でフォーマット
 

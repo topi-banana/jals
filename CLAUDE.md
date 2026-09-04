@@ -242,6 +242,25 @@ filesystem reads into portable interfaces.
     `ProjectInputOptions` on the second); the steps between them exist once.
 - `jals-exec`: the execution context — `Exec`, fan-out, yields, runtime adapters (see *Execution*
   above). Only its `tokio`-feature module may name tokio; the portable core is `no_std`.
+- `jals-progress`: what a run is doing, as data. `Activity` / `Outcome` / `Unit` / `Event` are
+  **facts about work** — `Fetch`, never "Downloading"; `Fresh`, never a colour — and the verbs,
+  colours, bars and templates belong to the consumer, exactly as `jals-hir` states a fact and the
+  `jals-lint` rule that reports it owns the wording. Three properties are load-bearing.
+  - **`Progress` is a value, not something hung off `Exec`.** `Exec` is `!Send`, so it cannot reach
+    the fan-out workers this is most worth reporting from; and CPU crates here deliberately take no
+    execution parameter at all, so tying reporting to `Exec` would deny it to the crates most likely
+    to want it next. It rides an existing options struct where there is one — `TaskRuntime`,
+    `GraphPreprocess`, `BackendRequest` — and is a parameter where there is not.
+  - **A unit ends exactly once.** `Task` is RAII: `finish` states the outcome, `fresh` lets a step
+    deep inside the work end its *caller's* unit from a memo hit, and `Drop` reports `Abandoned` for
+    the error path that returned without saying anything. `Abandoned` means the emitter has a hole
+    in it, not that the build failed, so an error path calls `finish(Failed)` explicitly.
+    `Ticker` is the counting half a `fan_out` worker can hold — `Send + Sync`, cannot start or end
+    a unit — and it exists because `JarRemap` remaps tens of thousands of classes across workers.
+  - **No clock.** Portable code cannot read one, so a host stamps each event and hands the number to
+    `Timeline::record`; `cargo --timings` records host-side for the same reason. `Timeline` renders
+    itself as a self-contained HTML page or as JSON — a *document*, the way `jals_fmt::generate`
+    renders a `jalsfmt.toml`, which is why it is here and not in a host.
 - `jals-editor`: protocol-neutral workspace and query facade over `ProjectStorage`; file identity is
   `FileKey`, and source/config invalidation follows storage revisions. All three hosts index
   through `Workspace`, so `FileId`'s three-space partition (`workspace/file_id.rs`), `#[cfg]`
@@ -410,7 +429,14 @@ filesystem reads into portable interfaces.
   for a missing main class and `0` for a body that called `System.exit(0)`; `--no-capture` gives up
   that reading along with the capture, and says so.
 - `jals-cli`: the host boundary from clap `PathBuf` values to `NativeStorage` and typed keys. It
-  also owns native-formatter-config **detection** (`migrate.rs`): portable crates cannot look at a
+  owns the terminal: `shell::Shell` is the **only** thing in the crate that writes to a stream, and
+  `no-raw-print.yml` keeps that structural rather than intended. Three rules live there and nowhere
+  else — human output to stderr and machine output to stdout, `--color` answered once per stream,
+  and a line written under a live bar suspending it — and `ui::Display` is where a
+  `jals_progress::Activity` becomes a verb. `Session` wires one run's shell, sinks and `--timings`
+  ledger together, so which sinks exist and what happens to them at the end is written once instead
+  of once per command. It also owns native-formatter-config **detection** (`migrate.rs`): portable
+  crates cannot look at a
   filesystem, so the host decides which config file is there and reads its bytes through a
   `ProjectView`, then hands the text to `jals_fmt::import` and the result to `jals_fmt::generate`.
   What it keeps of project assembly is only what a host path forces: `NativeScope` selection,
@@ -458,8 +484,10 @@ filesystem reads into portable interfaces.
 
 ## Code conventions
 
-Four ast-grep rules under `.ast-grep/rules/` are `severity: error` and gate CI workspace-wide;
-read the rule's own `note:` before working around one.
+Five ast-grep rules under `.ast-grep/rules/` are `severity: error` and gate CI workspace-wide —
+the four below plus `no-ungated-fetch`, described under *Crate boundaries*. Four more are scoped to
+one crate by a `files:` key: `no-raw-print` below, and `jals-javac`'s three. Read the rule's own
+`note:` before working around one.
 
 - **`no-portable-host-path`** enforces the host boundary: `std::path`, `std::fs`, and `PathBuf` are
   allowed only in native, host, test, and tool adapters. The `ignores:` list in
@@ -473,6 +501,11 @@ read the rule's own `note:` before working around one.
 - **`no-extern-crate-alloc`** / **`no-extern-crate-core`**: `extern crate alloc;` is declared
   exactly once per portable crate, in its `lib.rs`; every other module writes `use alloc::...`.
   `extern crate core;` is never declared — write `use core::...`.
+- **`no-raw-print`** (scoped to `jals-cli/src/**`): a print macro is `shell.rs`'s alone. Everything
+  else goes through `Shell`, which is what makes the stream split, the colour decision and the
+  bar-suspension answerable in one place. The failures a raw `println!` causes — a bar redrawn over
+  a diagnostic, an escape in a redirected file — are exactly the ones a test that captures both
+  streams into strings cannot see.
 
 `jals-javac` additionally carries `facts-names-no-instruction`, `no-wasm-into-jvm-lowering`, and
 `no-jvm-into-wasm-lowering`; see that crate's entry above.
@@ -504,8 +537,9 @@ Portable crates use `core + alloc`.
   portable too, and CI builds it for `wasm32`. `native` is the host half (JDK discovery, `javac`
   spawning, `native.rs`).
 - `jals-frontend`, `jals-javac`, `jals-hir`, `jals-lint`, `jals-config`, `jals-syntax`,
-  `jals-classfile`, `jals-decompile`, and `jals-editor` have no features at all, so a plain
-  `cargo check` *is* the portability check — do not add one without a reason that survives review.
+  `jals-classfile`, `jals-decompile`, `jals-editor`, and `jals-progress` have no features at all, so
+  a plain `cargo check` *is* the portability check — do not add one without a reason that survives
+  review.
 - `jals-fmt`'s `std` feature adds only `quick-xml` for the two XML-backed config importers.
   `jals-cli` enables it; the wasm playground resolves separately and never sees it.
 - rayon is workspace-banned except in `jals-tests`' host-only harness; product fan-out goes
@@ -563,11 +597,13 @@ cargo check -p jals-classpath --no-default-features
 cargo check -p jals-build --no-default-features
 cargo check -p jals-project --no-default-features
 cargo check -p jals-frontend
+cargo check -p jals-progress
 cargo check -p jals-project --all-features
 cargo check -p jals-build --no-default-features --features rhai --target wasm32-unknown-unknown
 cargo check -p jals-classpath --no-default-features --target wasm32-unknown-unknown
 cargo check -p jals-project --no-default-features --target wasm32-unknown-unknown
 cargo check -p jals-frontend --target wasm32-unknown-unknown
+cargo check -p jals-progress --target wasm32-unknown-unknown
 cargo build -p jals-playground --target wasm32-unknown-unknown
 cargo tree -e features -p jals-classpath --no-default-features
 cargo tree -e features -p jals-build --no-default-features

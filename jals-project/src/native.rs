@@ -18,6 +18,7 @@ use jals_classpath::{
 };
 use jals_config::{DependencyScope, GitDependency, Manifest, PathDependency};
 use jals_exec::Exec;
+use jals_progress::Progress;
 use jals_storage::{
     CacheKey, Diagnostic, DirKey, FileKey, MemoryCache, Name, NativeSource, NativeStorage,
     ProjectStorage, ProjectView, RelativePath,
@@ -214,6 +215,7 @@ impl ProjectScript {
         // — exactly as `resolve_memory` does. Rebuilding one here instead is what used to fetch
         // under `--offline`.
         let fetcher = preprocess.fetcher;
+        let progress = preprocess.progress;
         let graph =
             NativeProjectGraph::discover(manifest, scope, root, preprocess.exec, fetcher.network())
                 .await
@@ -224,7 +226,7 @@ impl ProjectScript {
             .await
             .map_err(|error| GraphResolveError::reporting(error, discovered))?;
         Ok(self
-            .project_native(&graph, manifest, root, storage, fetcher, options)
+            .project_native(&graph, manifest, root, storage, fetcher, options, progress)
             .await)
     }
 
@@ -255,6 +257,8 @@ impl ProjectScript {
     /// preprocessed graph under more than one [`ProjectInputOptions`] without rediscovering it.
     /// A host has no such need and reaches it through
     /// [`resolve_native`](Self::resolve_native), which owns the order of the phases before it.
+    // As `project`, which this is the native half of: every parameter is a distinct input.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn project_native<F: Fetcher>(
         &self,
         graph: &PreprocessedProjectGraph,
@@ -263,6 +267,7 @@ impl ProjectScript {
         storage: &mut NativeStorage,
         fetcher: &F,
         mode: ProjectInputOptions,
+        progress: &Progress,
     ) -> NativeProjectAssembly {
         let graph_assembly = graph.assemble(storage.artifacts_mut()).await;
         let (inputs, source_roots) = NativeProjectPlan::assemble_native(
@@ -276,6 +281,7 @@ impl ProjectScript {
             storage,
             fetcher,
             mode,
+            progress,
         )
         .await;
         let projected = self
@@ -289,6 +295,7 @@ impl ProjectScript {
                 fetcher,
                 storage,
                 mode,
+                progress,
             )
             .await;
         NativeProjectAssembly {
@@ -932,6 +939,7 @@ mod tests {
         fn fetch_admitted(
             &self,
             locator: &str,
+            _: &jals_progress::Task,
         ) -> impl Future<Output = Result<Vec<u8>, jals_classpath::FetchError>> {
             ready(Self::refuse(locator))
         }
@@ -989,6 +997,7 @@ mod tests {
             .preprocess(
                 storage.artifacts_mut(),
                 crate::graph::GraphPreprocess {
+                    progress: &jals_progress::Progress::SILENT,
                     exec: &exec,
                     fetcher: &UnreachableFetcher,
                     environment: &BuildScriptEnvironment::new(),
@@ -1049,6 +1058,7 @@ mod tests {
             .preprocess(
                 storage.artifacts_mut(),
                 crate::graph::GraphPreprocess {
+                    progress: &jals_progress::Progress::SILENT,
                     exec: &exec,
                     fetcher: &UnreachableFetcher,
                     // A root selection the dependency must not inherit.

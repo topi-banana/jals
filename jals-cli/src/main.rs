@@ -692,7 +692,7 @@ impl LintArgs {
         let anchor = named
             .first()
             .map_or_else(|| PathBuf::from("."), |file| file.config_dir.clone());
-        let mut project = LintProject::open(&anchor, exec, &self.features, session.shell()).await?;
+        let mut project = LintProject::open(&anchor, exec, &self.features, session).await?;
 
         // Reported ⊆ indexed. The workspace indexes the source-root walk ∪ `project_sources`,
         // because diagnostics assembly reports every type name that resolves to nothing and a
@@ -894,7 +894,16 @@ impl BuildArgs {
         .await?;
         // `[build] backend` picks *what* compiles the lowered tree, and the selection owns that
         // decision — this host can spawn a process, so every backend kind is available to it.
-        let plan = CompilePlan::prepare(&manifest, &root, &sources, tree, &inputs, exec).await?;
+        let plan = CompilePlan::prepare(
+            &manifest,
+            &root,
+            &sources,
+            tree,
+            &inputs,
+            exec,
+            session.for_package(App::package_ref(&manifest)),
+        )
+        .await?;
         let request = plan.request();
 
         // The command a backend is about to run is machine output when it is *all* the run
@@ -908,23 +917,17 @@ impl BuildArgs {
             format_args!("`{}`", plan.backend.describe(&request)),
         );
 
+        // The backend opens the compile's unit, whichever backend it is, so there is exactly one
+        // `Compiling` line and it says the same thing for `javac` and for the in-process compiler.
         let package = session.for_package(App::package_ref(&manifest));
-        let compiling = package.begin(jals_progress::Activity::Compile, "");
-        let outcome = match plan.backend.compile(&request).await {
-            Ok(outcome) => {
-                compiling.finish(jals_progress::Outcome::Completed);
-                outcome
-            }
-            Err(error) => {
-                // Said explicitly rather than left to the drop: "abandoned" tells a reader the
-                // emitter has a hole in it, and "failed" tells them the build does.
-                compiling.finish(jals_progress::Outcome::Failed);
-                return Err(anyhow!("{error}"));
-            }
-        };
+        let outcome = plan
+            .backend
+            .compile(&request)
+            .await
+            .map_err(|error| anyhow!("{error}"))?;
         App::finish_compile(&manifest, &root, &outcome, session.shell())?;
         if let Some(jar) = App::finish_package(
-            &manifest, &root, exec, &features, &fetcher, &outcome, &inputs,
+            &manifest, &root, exec, &features, &fetcher, &outcome, &inputs, &package,
         )
         .await?
         {
@@ -1003,7 +1006,16 @@ impl RunArgs {
         // manifest asking for the in-process compiler gets it here too. The run step is selected
         // independently from `[toolchain] runtime`: `"builtin"` is the in-process dummy, anything
         // else spawns `java` (env override → discovered JDK → `$JAVA_HOME` → `PATH`).
-        let plan = CompilePlan::prepare(&manifest, &root, &sources, tree, &inputs, exec).await?;
+        let plan = CompilePlan::prepare(
+            &manifest,
+            &root,
+            &sources,
+            tree,
+            &inputs,
+            exec,
+            session.for_package(App::package_ref(&manifest)),
+        )
+        .await?;
         let runtime = <dyn Runtime>::select(&manifest, exec).await;
         let compile_request = plan.request();
 
@@ -1025,17 +1037,11 @@ impl RunArgs {
         // Compile first; only run when compilation succeeds. `finish_compile` also persists whatever
         // an in-process backend produced, so the classes are on disk before `java` looks for them.
         let package = session.for_package(App::package_ref(&manifest));
-        let compiling = package.begin(jals_progress::Activity::Compile, "");
-        let outcome = match plan.backend.compile(&compile_request).await {
-            Ok(outcome) => {
-                compiling.finish(jals_progress::Outcome::Completed);
-                outcome
-            }
-            Err(error) => {
-                compiling.finish(jals_progress::Outcome::Failed);
-                return Err(anyhow!("{error}"));
-            }
-        };
+        let outcome = plan
+            .backend
+            .compile(&compile_request)
+            .await
+            .map_err(|error| anyhow!("{error}"))?;
         App::finish_compile(&manifest, &root, &outcome, session.shell())?;
         if !outcome.success() {
             return Ok(App::outcome_exit_code(outcome.code()));
@@ -1095,7 +1101,16 @@ impl TestArgs {
             session,
         )
         .await?;
-        let plan = CompilePlan::prepare(&manifest, &root, &sources, tree, &inputs, exec).await?;
+        let plan = CompilePlan::prepare(
+            &manifest,
+            &root,
+            &sources,
+            tree,
+            &inputs,
+            exec,
+            session.for_package(App::package_ref(&manifest)),
+        )
+        .await?;
         let request = plan.request();
         // `verbose_status` writes to stderr like every other status line; this command's stdout is
         // a machine contract (`--list` and `--message-format json`), and a compile command line
@@ -1104,19 +1119,11 @@ impl TestArgs {
             Verb::Running,
             format_args!("`{}`", plan.backend.describe(&request)),
         );
-        let compiling = session
-            .for_package(App::package_ref(&manifest))
-            .begin(jals_progress::Activity::Compile, "");
-        let outcome = match plan.backend.compile(&request).await {
-            Ok(outcome) => {
-                compiling.finish(jals_progress::Outcome::Completed);
-                outcome
-            }
-            Err(error) => {
-                compiling.finish(jals_progress::Outcome::Failed);
-                return Err(anyhow!("{error}"));
-            }
-        };
+        let outcome = plan
+            .backend
+            .compile(&request)
+            .await
+            .map_err(|error| anyhow!("{error}"))?;
         App::finish_compile(&manifest, &root, &outcome, session.shell())?;
         if !outcome.success() {
             return Ok(App::outcome_exit_code(outcome.code()));
@@ -1521,8 +1528,9 @@ impl LintProject {
         start_dir: &Path,
         exec: &Exec,
         selection: &FeatureArgs,
-        shell: &Shell,
+        session: &Session,
     ) -> Result<Self> {
+        let shell = session.shell();
         let Some(manifest_path) = Manifest::discover_path(start_dir).await else {
             return Self::detached(start_dir, exec).await;
         };
@@ -1597,7 +1605,7 @@ impl LintProject {
                 // Nothing to retry: the refusal comes before an attempt is made.
                 jals_classpath::RetrySchedule::none(),
             ),
-            shell,
+            session,
         )
         .await
         {
@@ -1876,6 +1884,9 @@ struct CompilePlan {
     backend: Box<dyn jals_build::Backend>,
     tree: Vec<jals_build::BackendSource>,
     options: jals_build::BackendOptions,
+    /// Attributed to the package being compiled, so an in-process backend's per-file counting lands
+    /// under the same name the `Compiling` line carries.
+    progress: jals_progress::Progress,
 }
 
 impl CompilePlan {
@@ -1890,6 +1901,7 @@ impl CompilePlan {
         tree: Vec<jals_build::BackendSource>,
         inputs: &HostProjectInputs,
         exec: &Exec,
+        progress: jals_progress::Progress,
     ) -> Result<Self> {
         let selection = jals_build::BackendSelection::for_host(
             manifest,
@@ -1911,6 +1923,7 @@ impl CompilePlan {
                 backend,
                 tree,
                 options: jals_build::BackendOptions::from_manifest(manifest),
+                progress,
             }),
             jals_build::BackendSelection::Absent { id, reason } => {
                 bail!("`[build] backend` selects `{id}`, but {reason}")
@@ -1921,6 +1934,7 @@ impl CompilePlan {
     /// What the selected backend compiles.
     fn request(&self) -> jals_build::BackendRequest<'_> {
         jals_build::BackendRequest {
+            progress: &self.progress,
             tree: &self.tree,
             // The in-process compiler reads its library signatures from the embedded stubs rather
             // than from the classpath; wiring dependency classes in is what would let it compile
@@ -2026,10 +2040,14 @@ impl App {
         script: RootScript,
         scripts: &RootScriptInputs<'_>,
         fetcher: &jals_classpath::ReqwestFetcher,
-        shell: &Shell,
+        session: &Session,
     ) -> Result<HostProjectInputs> {
+        let shell = session.shell();
         let mut result = HostProjectInputs::from(script.host);
         let exec = storage.exec().clone();
+        // The graph's own work is attributed per node, inside the graph: a dependency's script and
+        // task plan belong to that dependency, not to whoever is building it.
+        let progress = session.progress().clone();
         let assembly = script
             .assembled
             .resolve_native(
@@ -2037,6 +2055,7 @@ impl App {
                 root,
                 storage,
                 jals_project::GraphPreprocess {
+                    progress: &progress,
                     exec: &exec,
                     // The caller's capability, which is the root's: a dependency's build tasks and
                     // its jars resolve under the same policy, from the same project cache —
@@ -2187,7 +2206,7 @@ impl App {
             &environment,
             fetcher,
             publications,
-            session.shell(),
+            session,
         )
         .await?;
         let sources = Self::discover_sources(
@@ -2216,7 +2235,7 @@ impl App {
                 features,
             },
             fetcher,
-            session.shell(),
+            session,
         )
         .await?;
         inputs.deduplicate(manifest, root, &sources);
@@ -2287,8 +2306,11 @@ impl App {
         environment: &BuildScriptEnvironment,
         fetcher: &jals_classpath::ReqwestFetcher,
         publications: jals_project::SourcePublication,
-        shell: &Shell,
+        session: &Session,
     ) -> Result<RootScript> {
+        let shell = session.shell();
+        // The root's own script and task plan are the root package's work.
+        let progress = session.for_package(Self::package_ref(manifest));
         let mut storage = NativeStorage::for_project_scoped(
             root,
             [NativeScope::all(RelativePath::ROOT)],
@@ -2335,6 +2357,7 @@ impl App {
             &mut storage,
             &mut session,
             jals_project::RootBuildScriptOptions {
+                progress: &progress,
                 manifest,
                 environment,
                 limits: &BuildScriptLimits::default(),
@@ -2599,6 +2622,9 @@ impl App {
     /// does not. This host never matches on `[build] remap` itself: it asks
     /// [`RemapSelection`](jals_project::RemapSelection) once and does what comes back. What is left
     /// here is only what a host path forces — collecting the class bytes, and writing the jar.
+    // `exec` is the session's, but this is a static helper on a namespace rather than a method on
+    // it, so it arrives alongside everything else. Every parameter is a distinct input.
+    #[allow(clippy::too_many_arguments)]
     async fn finish_package(
         manifest: &Manifest,
         root: &Path,
@@ -2607,6 +2633,7 @@ impl App {
         fetcher: &jals_classpath::ReqwestFetcher,
         outcome: &jals_build::BackendOutcome,
         inputs: &HostProjectInputs,
+        progress: &jals_progress::Progress,
     ) -> Result<Option<String>> {
         if !outcome.success() {
             return Ok(None);
@@ -2650,6 +2677,7 @@ impl App {
                 &classes,
                 &inputs.remap_hierarchy,
                 main_class,
+                progress,
             )
             .await
             .map_err(|error| anyhow!("`[build] remap` failed: {error}"))?;

@@ -54,5 +54,5 @@ mod timeline;
 mod tests;
 
 pub use event::{Activity, Event, Outcome, PackageRef, Unit, UnitId};
-pub use handle::{Progress, Sink, Task};
-pub use timeline::{ReportMeta, Span, Timeline};
+pub use handle::{Progress, Sink, Task, Ticker};
+pub use timeline::{ReportMeta, Timeline};

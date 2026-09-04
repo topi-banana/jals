@@ -23,6 +23,7 @@ jals-classfile.workspace = true
 jals-config.workspace = true
 jals-decompile.workspace = true
 jals-exec.workspace = true
+jals-progress.workspace = true
 jals-storage.workspace = true
 sha1.workspace = true
 miniz_oxide = { workspace = true, optional = true }

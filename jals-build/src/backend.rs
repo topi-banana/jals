@@ -28,6 +28,7 @@ use core::future::Future;
 use core::pin::Pin;
 
 use jals_config::{BackendKind, Manifest};
+use jals_progress::Progress;
 use jals_storage::{CacheKey, ContentDigest, RelativePath};
 
 /// The compile knobs a backend honours, drawn from `[build]`.
@@ -111,6 +112,12 @@ pub struct BackendRequest<'a> {
     /// Resolved classpath artifacts, in manifest order.
     pub classpath: &'a [CacheKey],
     pub options: &'a BackendOptions,
+    /// Where the compile reports what it is doing.
+    ///
+    /// An in-process backend can say which file it is on; `javac` is one process and cannot, so it
+    /// passes this nowhere. Carried on the request rather than beside it, so a backend that gains
+    /// the ability to report does not also change the seam it is reached through.
+    pub progress: &'a Progress,
 }
 
 /// The result of a compile.
@@ -404,6 +411,7 @@ mod tests {
         // configurations rather than one shared cache identity.
         let options = BackendOptions::default();
         let request = BackendRequest {
+            progress: &jals_progress::Progress::SILENT,
             tree: &[],
             classpath: &[],
             options: &options,

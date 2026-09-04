@@ -100,6 +100,7 @@ fn task_source_tree_strips_the_prefix_and_rejects_the_whole_unsafe_archive() {
                 max_file_bytes: 1024,
                 max_total_bytes: 4096,
             },
+            &jals_progress::Task::silent(),
         )
         .await
         .unwrap();
@@ -120,6 +121,7 @@ fn task_source_tree_strips_the_prefix_and_rejects_the_whole_unsafe_archive() {
                 max_file_bytes: 1024,
                 max_total_bytes: 4096,
             },
+            &jals_progress::Task::silent(),
         )
         .await
         .unwrap_err();
@@ -137,6 +139,7 @@ fn task_source_tree_strips_the_prefix_and_rejects_the_whole_unsafe_archive() {
                 max_file_bytes: 1024,
                 max_total_bytes: 4096,
             },
+            &jals_progress::Task::silent(),
         )
         .await
         .unwrap_err();

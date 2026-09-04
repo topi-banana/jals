@@ -48,7 +48,6 @@ impl Sink for Recorder {
 #[test]
 fn a_silent_handle_builds_no_event_and_no_subject() {
     let progress = Progress::SILENT;
-    assert!(!progress.is_live());
     let task = progress.begin(Activity::Fetch, "client.jar");
     assert!(task.id().is_none());
     task.advance(10);
@@ -402,6 +401,53 @@ fn an_event_serializes_under_a_tag_a_reader_can_switch_on() {
     assert!(json.contains("\"event\":\"started\""), "{json}");
     assert!(json.contains("\"activity\":\"decompile\""), "{json}");
     assert_eq!(event.id(), UnitId::new(3));
+}
+
+#[test]
+fn a_unit_ends_exactly_once_however_many_endings_it_is_given() {
+    let (progress, recorder) = Recorder::wired();
+    let task = progress.begin(Activity::Remap, "server.jar");
+    // A step deep inside the work answers from a memo; the caller that started the unit still
+    // finishes it, and the drop behind that would say something a third time.
+    task.fresh();
+    task.finish(Outcome::Completed);
+
+    let endings: Vec<Outcome> = recorder
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            Event::Finished { outcome, .. } => Some(*outcome),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(endings, [Outcome::Fresh], "the first ending is the one");
+}
+
+#[test]
+fn a_ticker_counts_into_the_unit_that_handed_it_out() {
+    let (progress, recorder) = Recorder::wired();
+    let task = progress.begin_bounded(Activity::Remap, "server.jar", 3);
+    let ticker = task.ticker();
+    let cloned = ticker.clone();
+    ticker.tick();
+    // A clone counts into the same place: that is what a fan-out worker holds.
+    cloned.tick();
+    task.advance(1);
+    task.finish(Outcome::Completed);
+
+    let counts: Vec<u64> = recorder
+        .events()
+        .iter()
+        .filter_map(|event| match event {
+            Event::Advanced { done, .. } => Some(*done),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        counts,
+        [1, 2, 3],
+        "a ticker and its task count into one place"
+    );
 }
 
 #[test]

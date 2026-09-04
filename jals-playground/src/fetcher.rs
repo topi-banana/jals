@@ -75,7 +75,11 @@ impl Fetcher for BrowserFetcher {
         TimeoutFuture::new(millis).await;
     }
 
-    async fn fetch_admitted(&self, url: &str) -> Result<Vec<u8>, FetchError> {
+    async fn fetch_admitted(
+        &self,
+        url: &str,
+        _: &jals_progress::Task,
+    ) -> Result<Vec<u8>, FetchError> {
         let target = self.target(url);
         let response = Request::get(&target)
             .send()
@@ -94,6 +98,7 @@ impl Fetcher for BrowserFetcher {
         &self,
         url: &str,
         max_bytes: usize,
+        _: &jals_progress::Task,
     ) -> Result<Vec<u8>, FetchError> {
         let target = self.target(url);
         let response = Request::get(&target)

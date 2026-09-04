@@ -56,7 +56,11 @@ impl Fetcher for MockFetcher {
         ready(())
     }
 
-    fn fetch_admitted(&self, _locator: &str) -> impl Future<Output = Result<Vec<u8>, FetchError>> {
+    fn fetch_admitted(
+        &self,
+        _locator: &str,
+        _: &jals_progress::Task,
+    ) -> impl Future<Output = Result<Vec<u8>, FetchError>> {
         self.calls.fetch_add(1, Ordering::Relaxed);
         ready(Ok(self.bytes.clone()))
     }
@@ -75,16 +79,26 @@ fn external_artifacts_verify_sha1_and_reuse_the_sha256_cache_offline() {
             namespace: CacheNamespace::BuildTaskArtifact,
         };
         let online = MockFetcher::online(bytes);
-        let key = ExternalArtifactResolver::resolve(&online, storage.artifacts_mut(), &spec)
-            .await
-            .unwrap();
+        let key = ExternalArtifactResolver::resolve(
+            &online,
+            storage.artifacts_mut(),
+            &spec,
+            &jals_progress::Progress::SILENT,
+        )
+        .await
+        .unwrap();
         assert_eq!(online.calls(), 1);
         assert_eq!(key.content(), ContentDigest::of(bytes));
 
         let offline = MockFetcher::offline(b"wrong");
-        let cached = ExternalArtifactResolver::resolve(&offline, storage.artifacts_mut(), &spec)
-            .await
-            .unwrap();
+        let cached = ExternalArtifactResolver::resolve(
+            &offline,
+            storage.artifacts_mut(),
+            &spec,
+            &jals_progress::Progress::SILENT,
+        )
+        .await
+        .unwrap();
         assert_eq!(cached, key);
         assert_eq!(offline.calls(), 0);
     });
@@ -102,9 +116,14 @@ fn external_artifacts_reject_oversize_and_digest_mismatch_without_indexing() {
             namespace: CacheNamespace::BuildTaskArtifact,
         };
         let fetcher = MockFetcher::online(b"oversized");
-        let error = ExternalArtifactResolver::resolve(&fetcher, storage.artifacts_mut(), &spec)
-            .await
-            .unwrap_err();
+        let error = ExternalArtifactResolver::resolve(
+            &fetcher,
+            storage.artifacts_mut(),
+            &spec,
+            &jals_progress::Progress::SILENT,
+        )
+        .await
+        .unwrap_err();
         assert!(error.contains("exceeding the limit"), "{error}");
         assert_eq!(fetcher.calls(), 1);
 
@@ -112,18 +131,28 @@ fn external_artifacts_reject_oversize_and_digest_mismatch_without_indexing() {
             max_bytes: 1024,
             ..spec
         };
-        let error = ExternalArtifactResolver::resolve(&fetcher, storage.artifacts_mut(), &mismatch)
-            .await
-            .unwrap_err();
+        let error = ExternalArtifactResolver::resolve(
+            &fetcher,
+            storage.artifacts_mut(),
+            &mismatch,
+            &jals_progress::Progress::SILENT,
+        )
+        .await
+        .unwrap_err();
         assert!(error.contains("digest mismatch"), "{error}");
 
         // The whole message, not a substring: this is the one diagnostic that has to say the cache
         // was already tried, and it reaches a destination (`BuildTaskRunError::Node`) that renders
         // it with no origin beside it, so it names its own locator.
         let offline = MockFetcher::offline(b"oversized");
-        let error = ExternalArtifactResolver::resolve(&offline, storage.artifacts_mut(), &mismatch)
-            .await
-            .unwrap_err();
+        let error = ExternalArtifactResolver::resolve(
+            &offline,
+            storage.artifacts_mut(),
+            &mismatch,
+            &jals_progress::Progress::SILENT,
+        )
+        .await
+        .unwrap_err();
         assert_eq!(
             error,
             "external artifact `https://example.invalid/artifact.jar` is not available in the \
@@ -154,6 +183,7 @@ fn project_dependency_is_read_from_the_captured_revision() {
             &storage.view(),
             storage.artifacts_mut(),
             &[spec],
+            &jals_progress::Progress::SILENT,
         )
         .await;
         assert_eq!(resolved.jars.len(), 1);
@@ -191,6 +221,7 @@ fn artifact_dependency_is_verified_without_fetching_or_republishing() {
                 recursive: false,
                 remap: None,
             }],
+            &jals_progress::Progress::SILENT,
         )
         .await;
 
@@ -219,6 +250,7 @@ fn expected_digest_enables_verified_external_cache_hits() {
             &storage.view(),
             storage.artifacts_mut(),
             std::slice::from_ref(&spec),
+            &jals_progress::Progress::SILENT,
         )
         .await;
         assert_eq!(fetcher.calls(), 1);
@@ -227,6 +259,7 @@ fn expected_digest_enables_verified_external_cache_hits() {
             &storage.view(),
             storage.artifacts_mut(),
             &[spec],
+            &jals_progress::Progress::SILENT,
         )
         .await;
         assert_eq!(fetcher.calls(), 1, "second resolution must hit cache");
@@ -254,7 +287,11 @@ impl Fetcher for OfflineFetcher {
         ready(())
     }
 
-    fn fetch_admitted(&self, locator: &str) -> impl Future<Output = Result<Vec<u8>, FetchError>> {
+    fn fetch_admitted(
+        &self,
+        locator: &str,
+        _: &jals_progress::Task,
+    ) -> impl Future<Output = Result<Vec<u8>, FetchError>> {
         ready(Self::refuse(locator))
     }
 }
@@ -285,6 +322,7 @@ fn digest_less_external_dependency_resolves_from_cache_offline() {
             &storage.view(),
             storage.artifacts_mut(),
             std::slice::from_ref(&spec),
+            &jals_progress::Progress::SILENT,
         )
         .await;
         assert_eq!(fetcher.calls(), 1);
@@ -296,6 +334,7 @@ fn digest_less_external_dependency_resolves_from_cache_offline() {
             &storage.view(),
             storage.artifacts_mut(),
             &[spec],
+            &jals_progress::Progress::SILENT,
         )
         .await;
         assert!(second.warnings.is_empty(), "{:?}", second.warnings);
@@ -331,6 +370,7 @@ fn digest_mismatch_is_a_warning_and_is_not_published() {
             &storage.view(),
             storage.artifacts_mut(),
             &[spec],
+            &jals_progress::Progress::SILENT,
         )
         .await;
         assert!(resolved.jars.is_empty());
@@ -360,6 +400,7 @@ fn duplicate_locators_fetch_once_and_resolve_in_spec_order() {
             &storage.view(),
             storage.artifacts_mut(),
             &[spec("first"), spec("second")],
+            &jals_progress::Progress::SILENT,
         )
         .await;
         assert_eq!(fetcher.calls(), 1);
@@ -395,6 +436,7 @@ fn offline_does_not_fetch_an_uncached_external_dependency_jar() {
                 recursive: false,
                 remap: None,
             }],
+            &jals_progress::Progress::SILENT,
         )
         .await;
 
@@ -439,6 +481,7 @@ fn offline_still_reads_a_non_network_external_locator() {
                 spec("relative", "../libs/local.jar"),
                 spec("file-url", "file:///opt/local.jar"),
             ],
+            &jals_progress::Progress::SILENT,
         )
         .await;
 
@@ -467,10 +510,15 @@ fn offline_does_not_fetch_an_external_mapping_text() {
         assert!(warnings.is_empty(), "{warnings:?}");
 
         let fetcher = MockFetcher::offline(b"must not be served");
-        let warning =
-            MappingResolver::text(&fetcher, &storage.view(), storage.artifacts_mut(), &spec)
-                .await
-                .unwrap_err();
+        let warning = MappingResolver::text(
+            &fetcher,
+            &storage.view(),
+            storage.artifacts_mut(),
+            &spec,
+            &jals_progress::Progress::SILENT,
+        )
+        .await
+        .unwrap_err();
 
         assert_eq!(fetcher.calls(), 0);
         assert!(warning.message.contains("not available"), "{warning}");

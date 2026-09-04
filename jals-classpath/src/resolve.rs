@@ -7,6 +7,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::fmt;
 
+use jals_progress::{Activity, Outcome, Progress, Task};
 use jals_storage::{
     ArtifactCache, CacheBackend, CacheKey, CacheNamespace, ContentDigest, FileKey, Name,
     ProjectView, ProvenanceFold,
@@ -290,6 +291,7 @@ impl MappingResolver {
         view: &ProjectView,
         cache: &mut ArtifactCache<C>,
         spec: &MappingSpec,
+        progress: &Progress,
     ) -> Result<String, Warning> {
         let bytes = match &spec.location {
             MappingLocation::Project(key) => view
@@ -315,6 +317,7 @@ impl MappingResolver {
                         max_bytes: *max_bytes,
                         namespace: CacheNamespace::Mappings,
                     },
+                    progress,
                 )
                 .await
                 .map_err(|error| {
@@ -430,10 +433,15 @@ pub struct ExternalArtifactSpec {
 pub struct ExternalArtifactResolver;
 
 impl ExternalArtifactResolver {
+    /// `progress` is where this reports; the subject is the locator, because that is the only
+    /// name an artifact resolved from outside the project has. A cache hit is reported as
+    /// [`Outcome::Fresh`] rather than not reported at all — "this build did not have to fetch"
+    /// is the answer a slow first run makes a reader want.
     pub async fn resolve<F: Fetcher, C: CacheBackend>(
         fetcher: &F,
         cache: &mut ArtifactCache<C>,
         spec: &ExternalArtifactSpec,
+        progress: &Progress,
     ) -> Result<CacheKey, String> {
         if spec.max_bytes == 0 {
             return Err("external artifact has a zero byte limit".to_owned());
@@ -453,6 +461,7 @@ impl ExternalArtifactResolver {
             && let Ok(Some(bytes)) = cache.lookup_bounded(&key, spec.max_bytes).await
             && spec.expected.matches(&bytes)
         {
+            progress.record(Activity::Fetch, Self::subject(spec), Outcome::Fresh);
             return Ok(key);
         }
         // Not redundant with the gate inside `Fetch`: this is the *message*. Only here is it known
@@ -466,13 +475,22 @@ impl ExternalArtifactResolver {
                 spec.locator.as_str()
             ));
         }
-        let bytes = Fetch::bounded(fetcher, &spec.locator, spec.max_bytes).await?;
+        let report = progress.begin(Activity::Fetch, Self::subject(spec));
+        let bytes = match Fetch::bounded(fetcher, &spec.locator, spec.max_bytes, &report).await {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                report.finish(Outcome::Failed);
+                return Err(error);
+            }
+        };
         if !spec.expected.matches(&bytes) {
+            report.finish(Outcome::Failed);
             return Err(format!(
                 "external artifact `{}` digest mismatch",
                 spec.locator.as_str()
             ));
         }
+        report.finish(Outcome::Completed);
         let key = CacheKey::new(spec.namespace, provenance, ContentDigest::of(&bytes));
         cache
             .publish(&key, &bytes)
@@ -483,6 +501,19 @@ impl ExternalArtifactResolver {
             .await
             .map_err(|error| format!("external artifact index update failed: {error:?}"))?;
         Ok(key)
+    }
+
+    /// What a person recognizes this artifact by: the last path segment of its locator, or the
+    /// whole locator when it has no segments to speak of.
+    ///
+    /// A URL is often 100 characters of CDN path ending in the one word that identifies it, and a
+    /// status line has about twelve before it stops being readable.
+    fn subject(spec: &ExternalArtifactSpec) -> &str {
+        let locator = spec.locator.as_str();
+        locator
+            .rsplit('/')
+            .find(|segment| !segment.is_empty())
+            .unwrap_or(locator)
     }
 
     /// The provenance shared by a fetched artifact's published key and its locator-index
@@ -509,6 +540,7 @@ impl DependencyResolver {
         view: &ProjectView,
         cache: &mut ArtifactCache<C>,
         specs: &[DependencySpec],
+        progress: &Progress,
     ) -> ResolvedDependencies {
         // Pass 1: classify serially, collecting the deduplicated locators still needing bytes.
         let mut classified = Vec::with_capacity(specs.len());
@@ -535,12 +567,41 @@ impl DependencyResolver {
 
         // Pass 2: overlap the network waits. Single-thread concurrency is the right shape here —
         // the work is waiting, not CPU.
+        //
+        // One unit per locator, started before the futures are joined so a display shows every
+        // download that is in flight rather than one line for the batch. The subject is the
+        // dependency's own name where the deduplication kept one, because that is what the caller
+        // wrote in `[dependencies]`.
+        let reports: Vec<Task> = locators
+            .iter()
+            .map(|locator| {
+                let named = specs
+                    .iter()
+                    .find(|spec| {
+                        matches!(&spec.location, DependencyLocation::External { locator: spec, .. }
+                            if spec == *locator)
+                    })
+                    .map(|spec| spec.name.to_string());
+                progress.begin(
+                    Activity::Fetch,
+                    named.unwrap_or_else(|| locator.as_str().to_owned()),
+                )
+            })
+            .collect();
         let fetched = jals_exec::join_ordered(
             locators
                 .iter()
-                .map(|locator| Fetch::bytes(fetcher, locator)),
+                .zip(&reports)
+                .map(|(locator, report)| Fetch::bytes(fetcher, locator, report)),
         )
         .await;
+        for (report, outcome) in reports.into_iter().zip(&fetched) {
+            report.finish(if outcome.is_ok() {
+                Outcome::Completed
+            } else {
+                Outcome::Failed
+            });
+        }
 
         // Pass 3: serial, in spec order — verify, publish, record, emit.
         let mut out = ResolvedDependencies::default();

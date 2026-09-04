@@ -46,6 +46,18 @@ pub struct Progress {
     package: Option<Arc<PackageRef>>,
 }
 
+impl core::fmt::Debug for Progress {
+    /// Says whether anything is listening and what the work is attributed to — never who is
+    /// listening. A sink is a consumer's live terminal or its ledger, and printing one into the
+    /// `{:?}` of some options struct would be neither meaningful nor bounded.
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Progress")
+            .field("live", &self.is_live())
+            .field("package", &self.package.as_deref())
+            .finish_non_exhaustive()
+    }
+}
+
 impl Progress {
     /// A handle nobody is watching. Every method is a branch and no event is built.
     pub const SILENT: Self = Self {
@@ -83,10 +95,9 @@ impl Progress {
 
     /// Whether anything is listening.
     ///
-    /// Ask before building a subject a silent run would throw away — a loop that formats one
-    /// string per archive member, say.
-    #[must_use]
-    pub const fn is_live(&self) -> bool {
+    /// Crate-internal until an emitter has a loop hot enough to want it: the guard is for skipping
+    /// a subject a silent run would throw away, and nothing formats one per archive member yet.
+    const fn is_live(&self) -> bool {
         self.core.is_some()
     }
 
@@ -122,8 +133,9 @@ impl Progress {
                 id,
                 core: Arc::clone(core),
             }),
-            done: Cell::new(0),
+            done: Arc::new(AtomicUsize::new(0)),
             total: Cell::new(total),
+            ended: Cell::new(false),
         }
     }
 
@@ -137,6 +149,7 @@ impl Progress {
 }
 
 /// The half of a live [`Task`] that has somewhere to report to.
+#[derive(Clone)]
 struct TaskHandle {
     id: UnitId,
     core: Arc<Core>,
@@ -151,31 +164,66 @@ struct TaskHandle {
 #[must_use = "a task that is never finished reports as abandoned"]
 pub struct Task {
     handle: Option<TaskHandle>,
-    done: Cell<u64>,
+    /// Shared with every [`Ticker`] this task hands out, which is what lets a fan-out worker count
+    /// into the same unit the main task started. `usize` rather than `u64` because
+    /// `AtomicUsize` is the one width every target this workspace builds for has — including
+    /// `wasm32`, where it is 32 bits and a count above 4 GiB saturates.
+    done: Arc<AtomicUsize>,
     total: Cell<Option<u64>>,
+    /// Whether this unit has already reported how it ended.
+    ///
+    /// A unit ends exactly once. The flag is what lets a step deep inside the work end its
+    /// caller's unit as [`fresh`](Self::fresh) without the caller's own `finish` — or the `Drop`
+    /// behind it — saying it again, differently.
+    ended: Cell<bool>,
 }
 
 impl Task {
-    /// A task nobody is watching.
-    const fn silent() -> Self {
+    /// A unit nobody is watching.
+    ///
+    /// For a caller that has to hand *some* task to a step that reports into one, where the work
+    /// itself is not worth a line of its own — which is cheaper to say than to thread an
+    /// `Option<&Task>` through every layer beneath it.
+    pub fn silent() -> Self {
         Self {
             handle: None,
-            done: Cell::new(0),
+            done: Arc::new(AtomicUsize::new(0)),
             total: Cell::new(None),
+            ended: Cell::new(false),
         }
     }
 
     /// Add `amount` to what this unit has done.
     pub fn advance(&self, amount: u64) {
-        let done = self.done.get().saturating_add(amount);
-        self.done.set(done);
-        self.emit_progress(done);
+        let done =
+            self.done.fetch_add(Self::narrow(amount), Ordering::Relaxed) + Self::narrow(amount);
+        self.emit_progress(done as u64);
     }
 
     /// Set what this unit has done, for a producer that counts absolutely rather than by delta.
     pub fn set_done(&self, done: u64) {
-        self.done.set(done);
+        self.done.store(Self::narrow(done), Ordering::Relaxed);
         self.emit_progress(done);
+    }
+
+    /// A counter into this unit that a fan-out worker can hold.
+    ///
+    /// [`Exec::fan_out`] requires `Send + Sync + 'static`, which a `Task` is not and must not be:
+    /// it ends exactly once, from the place that started it. A ticker only *counts*, shares this
+    /// task's counter, and is as cheap to clone as the handle it carries — so a CPU pass that
+    /// remaps ten thousand classes on worker threads fills the same bar the main task opened.
+    #[must_use]
+    pub fn ticker(&self) -> Ticker {
+        Ticker {
+            handle: self.handle.clone(),
+            done: Arc::clone(&self.done),
+            total: self.total.get(),
+        }
+    }
+
+    /// A `u64` count as the shared counter's width, saturating rather than wrapping.
+    fn narrow(value: u64) -> usize {
+        usize::try_from(value).unwrap_or(usize::MAX)
     }
 
     /// Declare the total this unit counts up to, once it becomes known.
@@ -184,12 +232,31 @@ impl Task {
     /// started as a spinner becomes a bar here.
     pub fn set_total(&self, total: u64) {
         self.total.set(Some(total));
-        self.emit_progress(self.done.get());
+        self.emit_progress(self.done.load(Ordering::Relaxed) as u64);
+    }
+
+    /// End this unit as a memo hit, having done none of the work it names.
+    ///
+    /// Named rather than left to `finish(Outcome::Fresh)` at each call site because a cache hit is
+    /// reported from *inside* the step that would have done the work, where the caller who started
+    /// the unit is not looking — and it is the one outcome a step decides for its own caller.
+    pub fn fresh(&self) {
+        self.end(Outcome::Fresh);
     }
 
     /// End this unit.
-    pub fn finish(mut self, outcome: Outcome) {
-        if let Some(handle) = self.handle.take() {
+    ///
+    /// A second ending is ignored, which is what makes [`fresh`](Self::fresh) usable from inside a
+    /// step whose caller will also finish the unit it started.
+    pub fn finish(self, outcome: Outcome) {
+        self.end(outcome);
+    }
+
+    fn end(&self, outcome: Outcome) {
+        if self.ended.replace(true) {
+            return;
+        }
+        if let Some(handle) = &self.handle {
             handle.core.sink.emit(&Event::Finished {
                 id: handle.id,
                 outcome,
@@ -197,9 +264,9 @@ impl Task {
         }
     }
 
-    /// The unit's id, for an emitter that has to correlate something with it.
-    #[must_use]
-    pub fn id(&self) -> Option<UnitId> {
+    /// The unit's id.
+    #[cfg(test)]
+    pub(crate) fn id(&self) -> Option<UnitId> {
         self.handle.as_ref().map(|handle| handle.id)
     }
 
@@ -214,13 +281,43 @@ impl Task {
     }
 }
 
-impl Drop for Task {
-    fn drop(&mut self) {
-        if let Some(handle) = self.handle.take() {
-            handle.core.sink.emit(&Event::Finished {
+/// A counter into a unit somebody else started and will finish.
+///
+/// The half of a [`Task`] that crosses `Exec::fan_out`. It cannot start or end a unit — that stays
+/// with the one place that owns it — and it holds no `Cell`, so it is `Send + Sync` like everything
+/// else a fan-out closure captures.
+#[derive(Clone)]
+pub struct Ticker {
+    handle: Option<TaskHandle>,
+    done: Arc<AtomicUsize>,
+    total: Option<u64>,
+}
+
+impl Ticker {
+    /// Count one more item done.
+    pub fn tick(&self) {
+        self.advance(1);
+    }
+
+    /// Count `amount` more items done.
+    fn advance(&self, amount: u64) {
+        let amount = usize::try_from(amount).unwrap_or(usize::MAX);
+        let done = self
+            .done
+            .fetch_add(amount, Ordering::Relaxed)
+            .saturating_add(amount);
+        if let Some(handle) = &self.handle {
+            handle.core.sink.emit(&Event::Advanced {
                 id: handle.id,
-                outcome: Outcome::Abandoned,
+                done: done as u64,
+                total: self.total,
             });
         }
+    }
+}
+
+impl Drop for Task {
+    fn drop(&mut self) {
+        self.end(Outcome::Abandoned);
     }
 }

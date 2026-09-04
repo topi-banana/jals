@@ -85,8 +85,7 @@ impl Activity {
     /// The activity's name, for a row in a written report.
     ///
     /// Not a status verb — see the type's own documentation.
-    #[must_use]
-    pub const fn label(self) -> &'static str {
+    pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Script => "script",
             Self::Resolve => "resolve",
@@ -133,8 +132,7 @@ impl Outcome {
     ///
     /// A display that counts "how much did this build do" asks here, so `Fresh` is not scored as
     /// work and a failure is.
-    #[must_use]
-    pub const fn ran(self) -> bool {
+    pub(crate) const fn ran(self) -> bool {
         matches!(self, Self::Completed | Self::Failed)
     }
 }
@@ -145,8 +143,8 @@ impl Outcome {
 /// manifest at all — a plain-source or binary dependency — still has a name worth showing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PackageRef {
-    pub name: String,
-    pub version: Option<String>,
+    name: String,
+    version: Option<String>,
 }
 
 impl PackageRef {
@@ -181,12 +179,13 @@ impl core::fmt::Display for PackageRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Unit {
     /// The package this work is for, when the emitter knows one. The root project's own work
-    /// carries the root package; a fetch nobody has attributed carries `None`.
-    pub package: Option<PackageRef>,
+    /// carries the root package; a fetch nobody has attributed carries `None`. Read through
+    /// [`describe`](Self::describe), which is the one rule for how the two are spelled together.
+    pub(crate) package: Option<PackageRef>,
     /// What kind of work it is.
     pub activity: Activity,
     /// What the work is on, already in one human-readable line: a URL, a jar name, a file count.
-    pub subject: String,
+    pub(crate) subject: String,
     /// The total this unit counts up to, when it is known before the work starts.
     ///
     /// Bytes for a download that announced a length, entries for an archive, files for a format
@@ -239,8 +238,8 @@ pub enum Event {
 
 impl Event {
     /// The unit this event is about.
-    #[must_use]
-    pub const fn id(&self) -> UnitId {
+    #[cfg(test)]
+    pub(crate) const fn id(&self) -> UnitId {
         match self {
             Self::Started { id, .. } | Self::Advanced { id, .. } | Self::Finished { id, .. } => *id,
         }

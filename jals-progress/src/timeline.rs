@@ -16,20 +16,22 @@ use crate::{
 
 /// One unit of work, from the moment it started to the moment it ended.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Span {
-    pub unit: Unit,
+pub(crate) struct Span {
+    pub(crate) unit: Unit,
     /// Microseconds since the run's own origin, not since any epoch.
-    pub start_micros: u64,
-    pub end_micros: u64,
-    pub outcome: Outcome,
+    pub(crate) start_micros: u64,
+    pub(crate) end_micros: u64,
+    pub(crate) outcome: Outcome,
     /// The last count the unit reported, which is what it actually got through.
-    pub done: u64,
+    ///
+    /// Serialized into the JSON report and read back by nothing, which is the point: a report says
+    /// how far a unit got, and this crate has no reason to ask.
+    done: u64,
 }
 
 impl Span {
     /// How long the unit took.
-    #[must_use]
-    pub const fn duration_micros(&self) -> u64 {
+    pub(crate) const fn duration_micros(&self) -> u64 {
         self.end_micros.saturating_sub(self.start_micros)
     }
 }
@@ -114,8 +116,7 @@ impl Timeline {
     }
 
     /// Every span recorded, in the order the units started.
-    #[must_use]
-    pub fn spans(&self) -> &[Span] {
+    pub(crate) fn spans(&self) -> &[Span] {
         &self.spans
     }
 
@@ -123,8 +124,7 @@ impl Timeline {
     ///
     /// Overlapping units are counted once each, so on a concurrent run these add up to more than
     /// the wall clock. That is the point: it is where the time went, not how long it took.
-    #[must_use]
-    pub fn by_activity(&self) -> Vec<(Activity, u64, usize)> {
+    pub(crate) fn by_activity(&self) -> Vec<(Activity, u64, usize)> {
         let mut totals: Vec<(Activity, u64, usize)> = Vec::new();
         for span in &self.spans {
             let activity = span.unit.activity;
@@ -140,8 +140,7 @@ impl Timeline {
     }
 
     /// The number of units running at once, sampled `samples` times across the run.
-    #[must_use]
-    pub fn concurrency(&self, total_micros: u64, samples: usize) -> Vec<usize> {
+    pub(crate) fn concurrency(&self, total_micros: u64, samples: usize) -> Vec<usize> {
         (0..samples)
             .map(|sample| {
                 let at = total_micros.saturating_mul(sample as u64) / samples.max(1) as u64;

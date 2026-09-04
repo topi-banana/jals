@@ -15,6 +15,7 @@ use jals_classpath::{
 };
 use jals_config::{AmbiguousMapping, BackendKind, Manifest, ResolvedBuildFeatures};
 use jals_exec::Exec;
+use jals_progress::{Activity, Outcome, Progress};
 use jals_storage::{
     CacheBackend, CacheKey, CacheNamespace, ContentDigest, ProjectStorage, ProvenanceFold,
     RelativePath, SourceBackend,
@@ -156,6 +157,10 @@ impl RemapPlan {
     ///
     /// # Errors
     /// A message naming what could not be resolved, packaged, or remapped.
+    // Every parameter is a distinct input to the packaging step: how to execute, what may fetch
+    // the mappings, what to read and write through, the classes to package, the jars whose
+    // hierarchy the remap needs, the manifest entry point, and where to report.
+    #[allow(clippy::too_many_arguments)]
     pub async fn run<F, S, C>(
         &self,
         exec: &Exec,
@@ -164,6 +169,7 @@ impl RemapPlan {
         classes: &[(RelativePath, Vec<u8>)],
         hierarchy: &[CacheKey],
         main_class: Option<&str>,
+        progress: &Progress,
     ) -> Result<Vec<u8>, String>
     where
         F: Fetcher,
@@ -192,9 +198,10 @@ impl RemapPlan {
             return Ok(staged);
         };
 
-        let mappings = MappingResolver::text(fetcher, &view, storage.artifacts_mut(), mapping)
-            .await
-            .map_err(|warning| warning.to_string())?;
+        let mappings =
+            MappingResolver::text(fetcher, &view, storage.artifacts_mut(), mapping, progress)
+                .await
+                .map_err(|warning| warning.to_string())?;
 
         let key = Self::stage_key(&staged);
         storage
@@ -203,6 +210,9 @@ impl RemapPlan {
             .await
             .map_err(|error| format!("staging the compiled classes failed: {error:?}"))?;
 
+        // Reobfuscating the project's own output is the last thing a `jals build` does and the
+        // one step that walks every class it just compiled.
+        let report = progress.begin(Activity::Remap, self.jar.clone());
         let remapped = JarRemap::remap(
             exec,
             storage.artifacts_mut(),
@@ -213,8 +223,10 @@ impl RemapPlan {
                 direction: RemapDirection::Reobfuscate,
                 hierarchy,
             },
+            &report,
         )
         .await?;
+        report.finish(Outcome::Completed);
         storage
             .artifacts_mut()
             .lookup(&remapped)

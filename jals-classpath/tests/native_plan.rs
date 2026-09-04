@@ -41,6 +41,7 @@ impl Fetcher for NoFetch {
     fn fetch_admitted(
         &self,
         _: &str,
+        _: &jals_progress::Task,
     ) -> impl Future<Output = Result<Vec<u8>, jals_classpath::FetchError>> {
         ready(Self::refuse())
     }
@@ -229,6 +230,7 @@ fn sibling_path_dependency_is_scanned_and_published() {
             &mut storage,
             &plan.plan,
             ProjectInputOptions::Compile,
+            &jals_progress::Progress::SILENT,
         )
         .await;
         let [SourceFile::Artifact(source)] = inputs.source_dep_sources.as_slice() else {
@@ -363,6 +365,7 @@ classpath = ["../sibling-classes", "{absolute_class}"]
                 &mut storage,
                 &NoFetch,
                 options,
+                &jals_progress::Progress::SILENT,
             )
             .await
         })

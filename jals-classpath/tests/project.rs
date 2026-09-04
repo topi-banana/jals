@@ -33,6 +33,7 @@ impl Fetcher for NoFetch {
     fn fetch_admitted(
         &self,
         _: &str,
+        _: &jals_progress::Task,
     ) -> impl Future<Output = Result<Vec<u8>, jals_classpath::FetchError>> {
         ready(Self::refuse())
     }
@@ -79,6 +80,7 @@ fn analysis_resolves_and_loads_from_one_storage_revision() {
         &mut storage,
         &plan,
         ProjectInputOptions::Analysis,
+        &jals_progress::Progress::SILENT,
     ));
     assert_eq!(inputs.dependency_jars.len(), 1);
     assert_eq!(inputs.classpath_classes.len(), 1);
@@ -94,6 +96,7 @@ fn compile_resolves_without_parsing_classfiles() {
         &mut storage,
         &plan,
         ProjectInputOptions::Compile,
+        &jals_progress::Progress::SILENT,
     ));
     assert_eq!(inputs.dependency_jars.len(), 1);
     assert!(inputs.classpath_classes.is_empty());
@@ -123,6 +126,7 @@ fn a_published_navigation_source_wins_over_the_skeleton_for_the_same_type() {
         &mut storage,
         &plan,
         ProjectInputOptions::Editor,
+        &jals_progress::Progress::SILENT,
     ));
     let boxes: Vec<_> = inputs
         .library_sources
@@ -155,6 +159,7 @@ fn navigation_sources_never_reach_a_compile() {
         &mut storage,
         &plan,
         ProjectInputOptions::Compile,
+        &jals_progress::Progress::SILENT,
     ));
     assert!(inputs.library_sources.is_empty());
     assert!(inputs.source_dep_sources.is_empty());

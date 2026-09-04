@@ -9,6 +9,7 @@ use alloc::string::{String, ToString};
 
 use jals_classfile::ClassFile;
 use jals_config::{Dependency, DependencyScope, FeatureSet, Manifest, ResolvedBuildFeatures};
+use jals_progress::{Activity, Outcome, Progress};
 use jals_storage::{
     CacheBackend, CacheKey, DirKey, EntryRef, FileKey, Name, ProjectStorage, ProjectView,
     RelativePath, SourceBackend,
@@ -172,6 +173,7 @@ impl ProjectInputs {
         storage: &mut ProjectStorage<S, C>,
         plan: &ProjectInputPlan,
         options: ProjectInputOptions,
+        progress: &Progress,
     ) -> Self
     where
         F: Fetcher,
@@ -197,6 +199,7 @@ impl ProjectInputs {
             &view,
             storage.artifacts_mut(),
             &plan.dependencies,
+            progress,
         )
         .await;
         let mut warnings = resolved.warnings;
@@ -222,14 +225,21 @@ impl ProjectInputs {
                 resolved_jars.push(jar);
                 continue;
             };
-            let text =
-                match MappingResolver::text(fetcher, &view, storage.artifacts_mut(), spec).await {
-                    Ok(text) => text,
-                    Err(warning) => {
-                        warnings.push(warning);
-                        continue;
-                    }
-                };
+            let text = match MappingResolver::text(
+                fetcher,
+                &view,
+                storage.artifacts_mut(),
+                spec,
+                progress,
+            )
+            .await
+            {
+                Ok(text) => text,
+                Err(warning) => {
+                    warnings.push(warning);
+                    continue;
+                }
+            };
             let request = RemapRequest {
                 mappings: &text,
                 format: spec.format.clone(),
@@ -239,8 +249,11 @@ impl ProjectInputs {
                 // classpath, and that is a different caller.
                 hierarchy: &[],
             };
-            match JarRemap::remap(&exec, storage.artifacts_mut(), &jar.key, &request).await {
+            let report = progress.begin(Activity::Remap, jar.name.to_string());
+            match JarRemap::remap(&exec, storage.artifacts_mut(), &jar.key, &request, &report).await
+            {
                 Ok(key) => {
+                    report.finish(Outcome::Completed);
                     jar.key = key;
                     resolved_jars.push(jar);
                 }
@@ -267,6 +280,7 @@ impl ProjectInputs {
                 &view,
                 storage.artifacts_mut(),
                 &plan.source_archives,
+                progress,
             )
             .await;
             warnings.extend(source_jars.warnings);
@@ -318,7 +332,8 @@ impl ProjectInputs {
                     .cloned()
                     .map(ClasspathEntry::Artifact),
             );
-            let load = ClasspathLoad::load(&exec, &view, storage.artifacts(), &entries).await;
+            let load =
+                ClasspathLoad::load(&exec, &view, storage.artifacts(), &entries, progress).await;
             warnings.extend(load.warnings);
             load.classes
         } else {
@@ -388,6 +403,7 @@ impl MemoryProjectPlan {
         storage: &mut ProjectStorage<S, C>,
         fetcher: &F,
         options: ProjectInputOptions,
+        progress: &Progress,
     ) -> (ProjectInputs, Vec<DirKey>)
     where
         F: Fetcher,
@@ -395,7 +411,8 @@ impl MemoryProjectPlan {
         C: CacheBackend,
     {
         let mut lowered = Self::from_manifest(manifest, &storage.view());
-        let mut inputs = ProjectInputs::assemble(fetcher, storage, &lowered.plan, options).await;
+        let mut inputs =
+            ProjectInputs::assemble(fetcher, storage, &lowered.plan, options, progress).await;
         lowered.warnings.append(&mut inputs.warnings);
         inputs.warnings = lowered.warnings;
         (inputs, lowered.source_roots)

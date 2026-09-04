@@ -22,6 +22,7 @@ use alloc::vec::Vec;
 
 use jals_classfile::{ClassFile, ConstantPool, ConstantPoolEntry};
 use jals_exec::Exec;
+use jals_progress::Task;
 use jals_storage::{
     ArtifactCache, CacheBackend, CacheKey, CacheNamespace, ContentDigest, ProvenanceFold,
 };
@@ -267,11 +268,37 @@ impl JarRemap {
     /// `[dependencies]` entry resolved on every editor reload — have no plan-level memo above them.
     /// A stale index entry costs a miss, never wrong bytes, because the artifact still comes back
     /// through a verified read.
+    /// One class remapped, named by what it became.
+    ///
+    /// Split out of the fan-out closure so the closure is the two lines that matter — the work, and
+    /// the tick that says it happened.
+    fn remap_one(
+        position: usize,
+        cf: &mut ClassFile,
+        mappings: &Mappings,
+        index: &ClassIndex,
+    ) -> Result<(usize, String, Vec<u8>), (usize, String)> {
+        helpers::remap_class(cf, mappings, index)
+            .map(|()| {
+                let this = cf.constant_pool.class_name(cf.this_class).map_or_else(
+                    || format!("unknown{position}"),
+                    alloc::borrow::Cow::into_owned,
+                );
+                let member_name = format!("{this}.class");
+                (position, member_name, cf.write())
+            })
+            .map_err(|error| (position, error))
+    }
+
+    /// `report` is the caller's unit of work. A remap of a whole game jar is tens of thousands of
+    /// classes over three passes, and the fan-out in the middle counts through a
+    /// [`Ticker`](jals_progress::Ticker) — which is the whole reason that type exists.
     pub async fn remap<C: CacheBackend>(
         exec: &Exec,
         cache: &mut ArtifactCache<C>,
         jar: &CacheKey,
         request: &RemapRequest<'_>,
+        report: &Task,
     ) -> Result<CacheKey, String> {
         let provenance = request.provenance(jar);
         if let Some(key) = cache
@@ -284,6 +311,9 @@ impl JarRemap {
                 .map_err(|error| format!("remapped jar is invalid: {error:?}"))?
                 .is_some()
         {
+            // The memo answered, so nothing below runs. Reported through the caller's unit, which
+            // is what turns a silent instant into a `Fresh` line.
+            report.fresh();
             return Ok(key);
         }
 
@@ -322,18 +352,16 @@ impl JarRemap {
             .into_iter()
             .map(|(position, cf)| (position, cf, Arc::clone(&mappings), Arc::clone(&index)))
             .collect();
+        report.set_total(inputs.len() as u64);
+        let ticker = report.ticker();
         let outcomes = exec
-            .fan_out(inputs, |(position, mut cf, mappings, index)| async move {
-                helpers::remap_class(&mut cf, &mappings, &index)
-                    .map(|()| {
-                        let this = cf.constant_pool.class_name(cf.this_class).map_or_else(
-                            || format!("unknown{position}"),
-                            alloc::borrow::Cow::into_owned,
-                        );
-                        let member_name = format!("{this}.class");
-                        (position, member_name, cf.write())
-                    })
-                    .map_err(|error| (position, error))
+            .fan_out(inputs, move |(position, mut cf, mappings, index)| {
+                let ticker = ticker.clone();
+                async move {
+                    let outcome = Self::remap_one(position, &mut cf, &mappings, &index);
+                    ticker.tick();
+                    outcome
+                }
             })
             .await;
 
@@ -538,11 +566,13 @@ impl JarMerge {
     /// input carrying two manifests of its own is two members here as it was there, since
     /// deduplicating *within* a side would be this function inventing a conflict its inputs did not
     /// have.
+    /// `report` is the caller's unit of work; the two member loops count into it.
     pub async fn merge<C: CacheBackend>(
         exec: &Exec,
         cache: &mut ArtifactCache<C>,
         base: &CacheKey,
         overlay: &CacheKey,
+        report: &Task,
     ) -> Result<CacheKey, String> {
         let base_reader = cache
             .open_verified(base)
@@ -556,6 +586,7 @@ impl JarMerge {
             .ok_or_else(|| "merge overlay jar is not cached".to_owned())?;
         let base_members = Archive::decode_all_bounded(exec, base_reader, JAR_LIMITS).await?;
         let overlay_members = Archive::decode_all_bounded(exec, overlay_reader, JAR_LIMITS).await?;
+        report.set_total((base_members.len() + overlay_members.len()) as u64);
 
         // Whether either input is a multi-release archive. Only one manifest survives a merge —
         // the overlay's, like every other conflict — but `Multi-Release` is not a claim about the
@@ -575,6 +606,7 @@ impl JarMerge {
         // base's winning, which is the documented conflict rule backwards.
         let mut overlay_manifest: Option<String> = None;
         for (name, outcome) in overlay_members {
+            report.advance(1);
             if MetaInf::is_signature(&name) {
                 continue;
             }
@@ -594,6 +626,7 @@ impl JarMerge {
         // `overlay_map` afterwards is exactly the overlay-only set.
         let mut out_members = Vec::new();
         for (name, outcome) in base_members {
+            report.advance(1);
             if MetaInf::is_signature(&name) {
                 continue;
             }
