@@ -403,3 +403,181 @@ public class J {
     "]]
     .assert_eq(&body_of(&module, "use"));
 }
+
+// --- conversions and casts erasure leaves behind -----------------------------------------------
+
+/// A widening primitive conversion (JLS §5.1.2) is silent in Java and an instruction in wasm.
+///
+/// `static long take(long x)` called as `take(1)` puts an `i32` where the signature says `i64`.
+/// Nothing on this side said so and the validator refused the module — which is exactly the failure
+/// an engine-free assertion catches on the platform this backend targets, where no validator runs.
+/// `value_as` routes a *declaration* through the numeric path and so got `long a = 1;` right all
+/// along, which is what made one source spell one conversion two ways.
+#[test]
+fn an_int_argument_widens_to_a_long_parameter() {
+    let module = module_of(&[r"
+public class Widen {
+    static long take(long x) { return x + 1; }
+    public static long run() { return take(1); }
+}
+"]);
+    expect![[r"
+        locals: []
+        I32Const(1)
+        I64ExtendI32S
+        Call(0)
+        Return
+        Unreachable
+    "]]
+    .assert_eq(&body_of(&module, "run"));
+}
+
+/// The fall-through of a dispatch chain casts nothing, so an erased receiver arrives at it as
+/// `anyref` — and the function it calls is declared over a concrete struct.
+///
+/// `<T extends C> int g(T t) { return t.m(); }` is the everyday shape. Each `ref.test` arm above
+/// casts the receiver to the type it just tested for; the fall-through tested nothing, and pushed
+/// the spilled local as it stood.
+#[test]
+fn a_dispatch_fall_through_casts_its_receiver() {
+    let module = module_of(&[r"
+public class Fall {
+    static class C { int m() { return 3; } }
+    static class D extends C { int m() { return 4; } }
+    static <T extends C> int g(T t) { return t.m(); }
+    public static int run() { return g(new D()); }
+}
+"]);
+    let body = body_of(&module, "g");
+    assert!(
+        body.contains("RefCast"),
+        "the fall-through arm must narrow the receiver it spilled:\n{body}"
+    );
+    // Two casts per arm would mean the fall-through is still pushing an `anyref`: one for the arm
+    // that tested `D`, and one for the fall-through to `C`.
+    assert_eq!(
+        body.matches("RefCast").count(),
+        2,
+        "one cast per tested arm and one for the fall-through:\n{body}"
+    );
+}
+
+/// A store into a field or an array element declared at a concrete type is a place the validator
+/// checks exactly, and erasure puts an `anyref` on the stack in front of it.
+///
+/// The premise the old code rested on — "a reference target is already the right type or the
+/// analysis would not have typed the assignment" — held only while every reference this backend
+/// produced was concrete. `b.held = id(c);` was a module `wasm-tools` refuses.
+#[test]
+fn a_store_of_an_erased_value_casts_to_what_the_place_holds() {
+    let module = module_of(&[r"
+public class Store {
+    static class Cell { int v; }
+    static class Box { Cell held; }
+    static <T> T id(T t) { return t; }
+    public static int run() {
+        Cell c = new Cell();
+        Box b = new Box();
+        b.held = id(c);
+        Cell[] a = new Cell[1];
+        a[0] = id(c);
+        return b.held.v + a[0].v;
+    }
+}
+"]);
+    let body = body_of(&module, "run");
+    // One for the field store, one for the array element store, and one for each of the two reads
+    // back through `held` / `a[0]`, which are erased the same way.
+    assert!(
+        body.matches("RefCast").count() >= 2,
+        "both the field store and the array-element store narrow what they store:\n{body}"
+    );
+}
+
+/// A method whose implementation is inherited rather than declared still has one.
+///
+/// `class C extends Base implements I {}` declares nothing at all, and its implementation of `I.f`
+/// is `Base.f`. `Base` is no subtype of `I`, so asking whether `Base.f` *overrides* `I.f` correctly
+/// answers no — and answers the wrong question. Reading that no as "nothing in this module
+/// implements it" emitted `unreachable` against a receiver whose body was one function away: a
+/// module that validated, instantiated, and trapped, where the merge base refused by name.
+#[test]
+fn an_inherited_implementation_is_dispatched_to() {
+    let module = module_of(&[r"
+public class Inherit {
+    interface I { int f(); }
+    static class Base { public int f() { return 7; } }
+    static class C extends Base implements I {}
+    public static int run() { I i = new C(); return i.f(); }
+}
+"]);
+    let body = body_of(&module, "run");
+    assert!(
+        !body.contains("Unreachable\n        Return"),
+        "the call must dispatch, not trap:\n{body}"
+    );
+    assert!(
+        body.contains("RefTest") && body.contains("Call("),
+        "an inherited implementation is reached through the dispatch chain:\n{body}"
+    );
+}
+
+/// A lambda the index could give no single abstract method is refused, not laid out.
+///
+/// A lambda is typed by its *target*, and in argument position that target is the parameter of an
+/// overload chosen after the index is built — so `use(() -> 5)` reached the layout with no method
+/// member. Skipping it left the struct declared with no body behind it: the creation emitted
+/// `struct.new_default`, the object implemented nothing, and the call through the interface found
+/// no override and became `unreachable`.
+#[test]
+fn a_lambda_with_no_abstract_method_is_refused() {
+    let source = r"
+public class Arg {
+    interface I { int f(); }
+    static int use(I i) { return i.f(); }
+    public static int run() { return use(() -> 5); }
+}
+";
+    let root = jals_exec::block_on_inline(jals_syntax::Parse::parse(source)).syntax();
+    let index = jals_exec::block_on_inline(
+        ProjectIndex::builder(&[(FileId(0), root.clone())])
+            .with_stdlib()
+            .build(),
+    );
+    let analysis = jals_exec::block_on_inline(FileAnalysis::of(&root));
+    let semantics = analysis.in_project(&index, FileId(0));
+    let typed = jals_exec::block_on_inline(semantics.typed());
+    let error = CompileWasm::module(&[typed], &index).expect_err("a refusal, not a trap");
+    assert_eq!(
+        error.to_string(),
+        "a lambda or method reference with no single abstract method is not compiled to wasm yet"
+    );
+}
+
+/// A `static` call with no body in the module is a missing implementation, not an unreachable
+/// dispatch: there is no receiver for "no object of this type can exist" to be about.
+#[test]
+fn a_native_call_is_reported_rather_than_trapped() {
+    let source = r"
+public class Native {
+    static class N { static native int f(); }
+    public static int run() { return N.f(); }
+}
+";
+    let root = jals_exec::block_on_inline(jals_syntax::Parse::parse(source)).syntax();
+    let index = jals_exec::block_on_inline(
+        ProjectIndex::builder(&[(FileId(0), root.clone())])
+            .with_stdlib()
+            .build(),
+    );
+    let analysis = jals_exec::block_on_inline(FileAnalysis::of(&root));
+    let semantics = analysis.in_project(&index, FileId(0));
+    let typed = jals_exec::block_on_inline(semantics.typed());
+    let error = CompileWasm::module(&[typed], &index).expect_err("a refusal, not a trap");
+    assert!(
+        error
+            .to_string()
+            .contains("no body for it is compiled into the module"),
+        "the report names the missing implementation: {error}"
+    );
+}

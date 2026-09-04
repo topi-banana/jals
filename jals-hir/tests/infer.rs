@@ -42,6 +42,24 @@ impl Fixture {
         }
     }
 
+    /// [`new`](Self::new) with the embedded standard-library stubs folded in, so a `java.lang` type
+    /// is an *indexed* item rather than an external name — which is what makes a member of one
+    /// resolvable at all.
+    fn with_stdlib(src: &str) -> Self {
+        let node = parse(src);
+        let analysis = jals_exec::block_on_inline(FileAnalysis::of(&node));
+        let index = jals_exec::block_on_inline(
+            ProjectIndex::builder(&[(FileId(0), node.clone())])
+                .with_stdlib()
+                .build(),
+        );
+        Self {
+            node,
+            analysis,
+            index,
+        }
+    }
+
     /// This file bound to its project. The caller keeps the binding: the type witness borrows its
     /// memo cell, so the binding has to outlive it.
     const fn semantics(&self) -> FileSemantics<'_> {
@@ -81,6 +99,44 @@ fn expr_ty(src: &str, text: &str) -> String {
         .find(|e| e.syntax().text().to_string().trim() == text)
         .unwrap_or_else(|| panic!("no expression `{text}`"));
     type_at(typed, expr.syntax()).unwrap().to_string()
+}
+
+/// [`expr_ty`] against an index that holds the standard-library stubs.
+fn expr_ty_with_stdlib(src: &str, text: &str) -> String {
+    let fixture = Fixture::with_stdlib(src);
+    let semantics = fixture.semantics();
+    let typed = jals_exec::block_on_inline(semantics.typed());
+    let expr = fixture
+        .node
+        .descendants()
+        .filter_map(ast::Expr::cast)
+        .find(|e| e.syntax().text().to_string().trim() == text)
+        .unwrap_or_else(|| panic!("no expression `{text}`"));
+    type_at(typed, expr.syntax()).unwrap().to_string()
+}
+
+/// A string literal is a `java.lang.String` (JLS §3.10.5) — the *indexed* one, and never a type the
+/// file happens to reach by that spelling.
+///
+/// Two claims in one, because they have one cause. The type has to be the indexed item, or it has
+/// no members and `"x".length()` resolves to nothing; and it has to be found by **fully qualified
+/// name**, because what a literal denotes is fixed by the language rather than written by the
+/// source, so a nested / same-package / imported `String` must not capture it. Resolving the simple
+/// name through the file's scope got both halves wrong at once, and also put a walk that ends in a
+/// scan of the whole item table on every literal in every file.
+#[test]
+fn a_string_literal_is_java_lang_string_whatever_else_the_file_calls_string() {
+    let plain = "public class P { void m() { int n = \"x\".length(); } }";
+    assert_eq!(expr_ty_with_stdlib(plain, "\"x\".length()"), "int");
+
+    // A nested `String` is in scope by simple name and wins every ordinary lookup — and must still
+    // not be what a literal denotes.
+    let shadowed = "public class S { static class String { int weird; } \
+                    void m() { int n = \"x\".length(); } }";
+    assert_eq!(expr_ty_with_stdlib(shadowed, "\"x\".length()"), "int");
+
+    // The type itself, not only that a member of it resolved.
+    assert_eq!(expr_ty_with_stdlib(shadowed, "\"x\""), "String");
 }
 
 /// The inferred types of every switch *expression* in `src`, in source (pre-order) order — the
@@ -692,4 +748,164 @@ fn a_calls_type_is_the_selected_overloads() {
                }";
     assert_eq!(expr_ty(src, "call(3, x -> x * 2)"), "int");
     assert_eq!(expr_ty(src, "call(\"a\")"), "String");
+}
+
+// --- Enclosing instances and enum constants ---------------------------------------------------
+
+/// `Outer.this` and `Outer.super` name an enclosing instance, not a member.
+///
+/// The access carries the keyword where a field name would be, so there is no identifier for a
+/// member lookup to use and the ordinary path answered `Unknown` — leaving everything the value was
+/// then used for untyped with it. `super` resolves to the *superclass* of the named type, by the
+/// same rule the bare `super` follows: answering with the named type would bind an overridden member
+/// to the override.
+#[test]
+fn a_qualified_this_names_the_enclosing_instance() {
+    let src = "class Base { int v; }
+               class Outer extends Base {
+                   int field;
+                   class Inner {
+                       int read() { return Outer.this.field; }
+                       Object self() { return Outer.this; }
+                       int inherited() { return Outer.super.v; }
+                   }
+               }";
+    assert_eq!(expr_ty(src, "Outer.this"), "Outer");
+    assert_eq!(expr_ty(src, "Outer.super"), "Base");
+    assert_eq!(expr_ty(src, "Outer.this.field"), "int");
+    assert_eq!(expr_ty(src, "Outer.super.v"), "int");
+}
+
+/// An `enum` constant writes no type and *is* an instance of the enum that declares it (JLS §8.9.3).
+///
+/// Nothing else can supply one: a constant is not a `FIELD_DECL` and has no `Type` node beside its
+/// name. Without it a bare constant inside its own enum had no type at all — so `red.name()`
+/// resolved to nothing, and a call taking one had no argument type to select an overload against.
+#[test]
+fn an_enum_constant_is_typed_as_its_enum() {
+    // `label()` is declared on the enum itself rather than inherited from `java.lang.Enum`, so the
+    // claim is about the constant's own type and not about whether the stubs are in reach.
+    let src =
+        "enum Colour { RED, GREEN; int label() { return 1; } int read() { return RED.label(); } }";
+    assert_eq!(def_ty(src, "RED"), "Colour");
+    assert_eq!(expr_ty(src, "RED"), "Colour");
+    assert_eq!(expr_ty(src, "RED.label()"), "int");
+}
+
+/// A **nested** type is spelled with a dot, so a name qualified by one is a field access.
+///
+/// `Outer.Inner.CONSTANT` reads `Outer.Inner` as a receiver whose own type is unknown — it is not a
+/// value at all — and the qualifier lookup read only the simple form. That left every constant of a
+/// nested `enum` untyped, which is the ordinary way one is named.
+#[test]
+fn a_nested_type_qualifies_a_member() {
+    let src = "class Outer { enum Kind { ERROR, WARNING } }
+               class Use { Object read() { return Outer.Kind.ERROR; } }";
+    assert_eq!(expr_ty(src, "Outer.Kind.ERROR"), "Kind");
+}
+
+/// A class that declares no constructor still has one: the default (JLS §8.8.9).
+///
+/// Nothing in the source writes it, so nothing in the walk produced it — and a `super()` naming a
+/// superclass that declared none resolved to nothing, as did `new Base()`. A `record` is excluded
+/// because its canonical constructor is the one it gets instead.
+#[test]
+fn a_class_with_no_constructor_still_has_the_default_one() {
+    let src = "class Base { int v; }
+               class Sub extends Base { Sub() { super(); } }
+               class Use { Base make() { return new Base(); } }";
+    let fixture = Fixture::new(src);
+    let semantics = fixture.semantics();
+    let typed = jals_exec::block_on_inline(semantics.typed());
+    // Both the delegation and the creation resolve to it, which is the whole of what it is for.
+    for text in ["super()", "new Base()"] {
+        let call = fixture
+            .node
+            .descendants()
+            .find(|n| n.text().to_string().trim() == text)
+            .unwrap_or_else(|| panic!("no `{text}`"));
+        let range = call.text_range();
+        assert!(
+            typed
+                .call_target_of(usize::from(range.start())..usize::from(range.end()))
+                .is_some(),
+            "`{text}` resolves to the default constructor"
+        );
+    }
+}
+
+/// A multi-catch parameter is the *lub* of its arms, not the first of them (JLS §14.20).
+///
+/// Its erasure — what a local's descriptor says, and what a verifier computes by merging the
+/// handler's two entry states — is the arms' nearest common superclass. Typing it as one arm made a
+/// call on it an `invokevirtual` naming that arm, against a value that may be the other.
+#[test]
+fn a_multi_catch_parameter_is_the_lub_of_its_arms() {
+    let src = "class Parent extends RuntimeException {}
+               class Son extends Parent {}
+               class Daughter extends Parent {}
+               class Use {
+                   void run() {
+                       try { throw new Son(); }
+                       catch (Son | Daughter e) { e.hashCode(); }
+                   }
+                   void one() {
+                       try { throw new Son(); }
+                       catch (Son e) { e.hashCode(); }
+                   }
+               }";
+    let fixture = Fixture::new(src);
+    let semantics = fixture.semantics();
+    let typed = jals_exec::block_on_inline(semantics.typed());
+    let types: Vec<String> = typed
+        .analysis()
+        .defs()
+        .iter()
+        .filter(|d| d.name == "e")
+        .map(|d| typed.type_of_def(d.id).to_string())
+        .collect();
+    // The multi-catch binding is the common superclass; a single-arm one keeps what it wrote.
+    assert_eq!(types, ["Parent", "Son"]);
+}
+
+/// A stub's *superclass* chain is faithful; an omitted **interface** is not a negative answer.
+///
+/// Overload selection reads the subtype relation as though a `false` were a fact, so a missing
+/// `Integer implements Comparable` dropped the correct candidate as inapplicable and the call
+/// silently picked `f(Object)`: javac and a real JVM answer with the `Comparable` overload, this
+/// answered with the other one. The mirror symptom is a call with no applicable candidate at all,
+/// which reaches `jals lint` and the LSP as a `NoOverload` against a correct program.
+///
+/// Each overload returns a different type, so the *selected* one is what the call expression's type
+/// says — which is the thing a wrong selection changes and an arity check would not notice.
+#[test]
+fn a_wrapper_is_comparable_so_that_overload_stays_applicable() {
+    let source = r"
+        public class Wrap {
+            static String viaComparable(Comparable c) { return null; }
+            static int viaComparable(Object o) { return 0; }
+            static void integer(Integer n) { viaComparable(n); }
+            static void character(Character c) { viaComparable(c); }
+            static void flag(Boolean b) { viaComparable(b); }
+            static void real(Double d) { viaComparable(d); }
+            static void small(Byte s) { viaComparable(s); }
+            static void plain(Object o) { viaComparable(o); }
+        }
+    ";
+    for (call, selected) in [
+        ("viaComparable(n)", "String"),
+        ("viaComparable(c)", "String"),
+        ("viaComparable(b)", "String"),
+        ("viaComparable(d)", "String"),
+        ("viaComparable(s)", "String"),
+        // A plain `Object` is *not* `Comparable`, and nothing here made the relation lenient: the
+        // negative about a class stays a fact, which is what keeps selection able to discriminate.
+        ("viaComparable(o)", "int"),
+    ] {
+        assert_eq!(
+            expr_ty_with_stdlib(source, call),
+            selected,
+            "`{call}` selects the overload javac selects"
+        );
+    }
 }

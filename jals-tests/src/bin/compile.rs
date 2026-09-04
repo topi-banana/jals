@@ -38,6 +38,13 @@ struct Cli {
     #[arg(long, value_name = "N", default_value_t = 20)]
     limit: usize,
 
+    /// Also list every gap case by name, with its message unelided.
+    ///
+    /// The bucket list says what the remaining work looks like; this says which file to open to
+    /// do it. Off by default because it is one line per case, which is most of the corpus.
+    #[arg(long)]
+    list_gaps: bool,
+
     /// Number of parallel worker threads (defaults to the number of logical CPUs).
     #[arg(short = 'j', long, value_name = "N")]
     jobs: Option<usize>,
@@ -278,6 +285,7 @@ impl Cli {
 
         self.print_descriptor_findings(report);
         self.print_counts("what stopped the rest:", &report.buckets());
+        self.print_gaps(report);
         self.print_counts(
             "why javac declined the out-of-scope files:",
             &report.skip_reasons(),
@@ -300,6 +308,30 @@ impl Cli {
             findings.len()
         );
         for result in findings.iter().take(self.limit) {
+            println!(
+                "    {:<20} {}  {}",
+                result.outcome.label(),
+                result.rel.display(),
+                result.outcome.detail().unwrap_or_default(),
+            );
+        }
+    }
+
+    /// Every gap case by name, with its message unelided — `--list-gaps` only.
+    ///
+    /// Deliberately unbounded by `--limit`: `--limit` bounds a *listing chosen for a summary*, and
+    /// this listing is asked for by name to be worked through. Bounding it would hand back a
+    /// truncated worklist under a flag whose whole purpose is the full one.
+    fn print_gaps(&self, report: &CompileReport) {
+        if !self.list_gaps {
+            return;
+        }
+        let gaps = report.gaps();
+        if gaps.is_empty() {
+            return;
+        }
+        println!("  {} gap case(s), worst rung first:", gaps.len());
+        for result in gaps {
             println!(
                 "    {:<20} {}  {}",
                 result.outcome.label(),

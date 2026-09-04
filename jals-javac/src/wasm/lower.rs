@@ -69,6 +69,15 @@ pub enum WasmError {
     Unresolved(String),
     /// A type with no wasm representation — every library type, by design.
     NoRepresentation(String),
+    /// A method this module declares but supplies no body for, called somewhere a body is needed.
+    ///
+    /// Distinct from [`NoRepresentation`](Self::NoRepresentation), which is about a type this
+    /// backend cannot spell at all: the owner here *is* a project type, and what is missing is the
+    /// implementation — a `native` method, or an interface method whose only implementation in the
+    /// source is a lambda or a method reference this backend does not lower into a struct. Reported
+    /// under its own name because reporting it as the other one sends a reader looking for a library
+    /// dependency in a file that has none.
+    NoImplementation(String),
     /// A length or an index outgrew the `u32` the binary format spells it with. Not reachable from
     /// a project that fits in memory, and reported rather than truncated because a wrong length is
     /// bytes an engine reads as something else.
@@ -84,6 +93,11 @@ impl core::fmt::Display for WasmError {
                 f,
                 "`{ty}` has no wasm representation: this backend compiles primitives and \
                  project-declared classes, and a wasm host has no `java.base` to supply the rest"
+            ),
+            Self::NoImplementation(what) => write!(
+                f,
+                "`{what}` is declared in this project but no body for it is compiled into the \
+                 module, so a call to it has nothing to reach"
             ),
             Self::TooLarge => f.write_str("the module exceeded a WebAssembly format limit"),
         }
@@ -132,9 +146,14 @@ struct Method {
     /// The interface method this body implements, when the "method" is a lambda expression rather than a
     /// declaration. A lambda's captures are *fields*, not parameters, so only its own parameters are bound.
     lambda: Option<MemberId>,
-    /// Whether the function's signature has a result, which decides whether its body needs a trailing
-    /// `unreachable`.
-    has_result: bool,
+    /// The type the function's signature results in, which is what a `return` narrows its value to —
+    /// and whose presence is what decides whether the body needs a trailing `unreachable`.
+    ///
+    /// One field rather than a `bool` beside it: the two were always set together from the same
+    /// `results` vector, so a site that set one and forgot the other would emit either a trailing
+    /// `unreachable` on a `void` function or none on a value-returning one — a module the validator
+    /// rejects for a reason the pair hid.
+    result: Option<ValType>,
 }
 
 /// Compiles a whole project to one WebAssembly module.
@@ -158,9 +177,37 @@ impl CompileWasm {
     /// encoding is what lets a caller ask what was emitted — the same footing
     /// [`Assembler`](crate::jvm::Assembler) gives the other backend, and the only way to assert a
     /// lowering without an engine to run it.
+    /// How many locals a function may declare beyond its parameters.
+    ///
+    /// The format itself allows far more, and every engine caps it — 50 000 is what `wasmparser`
+    /// (and so `wasm-tools` and `wasmtime`) enforces. A body over the cap is refused for the same
+    /// reason a method over the JVM's 64 KiB code limit is: the target says no, and saying so here
+    /// is the difference between a gap and a module that will not load.
+    const MAX_LOCALS: usize = 50_000;
+
+    /// Push one function, refusing a body whose locals walk past what an engine will load.
+    ///
+    /// One function rather than a check beside each `push`, because the bodies that reach a module
+    /// are not one loop: a method's, a synthesised one's, and a class initialiser's. The last is the
+    /// *most* likely to be over the cap — it gathers every `static {}` block and every computed
+    /// `static` field initialiser of a class into a single function — and it was the one a check
+    /// living inside the methods loop did not cover, so a `static` initialiser with 50 000 locals
+    /// was written out as a module `wasm-tools` refuses to validate while the identical body in an
+    /// ordinary method was correctly reported as [`WasmError::TooLarge`].
+    fn push_func(module: &mut Module, func: Func) -> Result<()> {
+        if func.locals.len() > Self::MAX_LOCALS {
+            return Err(WasmError::TooLarge);
+        }
+        module.funcs.push(func);
+        Ok(())
+    }
+
     pub fn module(inputs: &[TypedFile<'_>], index: &ProjectIndex) -> Result<Module> {
         let mut module = Module::new();
-        let mut layout = Layout::default();
+        let mut layout = Layout {
+            object: index.item_by_fqn("java.lang.Object"),
+            ..Layout::default()
+        };
 
         // Pass 1: every class *reserves* a struct type index, in an order where a supertype comes
         // first so its field prefix is known when the subtype is laid out. Only the index is fixed
@@ -181,16 +228,6 @@ impl CompileWasm {
         }
         for (item, captured) in captured_items {
             layout.captures.insert(item, captured);
-        }
-        // A subclass's own fields start after its supertype's, and an inner class's synthetic field sits
-        // after *its* own — so a subclass would place its first field on top of it. Reported rather than
-        // laid out wrong.
-        for &item in &classes {
-            if let Some(parent) = Hierarchy::of(index).superclass(item)
-                && layout.inner.contains_key(&parent)
-            {
-                return Err(WasmError::Unsupported("a subclass of an inner class"));
-            }
         }
         // An interface has no struct type, so it is registered before any class is laid out: a field or
         // a parameter of interface type has to resolve to *something* while the structs are built.
@@ -294,22 +331,35 @@ impl CompileWasm {
         for method in &methods {
             let input = &inputs[method.input];
             let body = Body::lower(method, input, index, &layout)?;
-            module.funcs.push(Func {
-                type_index: method.signature,
-                locals: body.locals,
-                body: body.code,
-            });
-            if let Some(name) = &method.export {
+            // Every engine caps a function's locals, and a body that walks past the cap is a module
+            // no engine loads. Said here rather than left to the validator: a generated source with
+            // thousands of locals is a *refusal* like any other format limit, and emitting the bytes
+            // anyway reports it as a compiler defect.
+            Self::push_func(
+                &mut module,
+                Func {
+                    type_index: method.signature,
+                    locals: body.locals,
+                    body: body.code,
+                },
+            )?;
+            // A wasm export carries a bare name and no owner, so two `static` methods of one name —
+            // an overload pair, or one method per class — name the same export. A module with two
+            // is not a module at all, so the second is dropped: the name is ambiguous, and an
+            // ambiguous export cannot be paired with a javac method either.
+            if let Some(name) = &method.export
+                && !module.exports.iter().any(|(exported, ..)| exported == name)
+            {
                 module
                     .exports
                     .push((name.clone(), ExportKind::Func, method.index));
             }
         }
         for func in synthesised {
-            module.funcs.push(func);
+            Self::push_func(&mut module, func)?;
         }
         for func in &inits {
-            module.funcs.push(func.clone());
+            Self::push_func(&mut module, func.clone())?;
         }
         // Every class's initialisation, called in source order. A class whose initialisers read
         // another's have already run it by then — each one guards itself, so calling it again is free.
@@ -509,8 +559,16 @@ impl CompileWasm {
                 let owner = Layout::owner_of(&node, input, index)?;
                 let struct_type = layout.structs[&owner];
                 let this = layout.class_ref(owner)?;
-                let components: Vec<MemberId> =
-                    layout.fields.get(&owner).cloned().unwrap_or_default();
+                let components: Vec<MemberId> = layout
+                    .fields
+                    .get(&owner)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|slot| match slot {
+                        Slot::Declared(member) => Some(*member),
+                        Slot::Enclosing(_) | Slot::Capture(_) => None,
+                    })
+                    .collect();
 
                 // The canonical constructor, unless the body wrote one: `this` then one parameter per
                 // component, each stored into its own slot.
@@ -639,16 +697,15 @@ impl CompileWasm {
         let mut declared = Vec::new();
         for input in inputs {
             for node in Self::type_declarations(input.root()) {
-                // A type this backend does not lay out at all. Dropping one is what the class walk used
-                // to do to *every* nested declaration: the type never exists, and the first use of it
-                // reports an unresolved name that points at nothing a reader can act on.
-                if let Some(what) = Self::unrepresentable_kind(node.kind()) {
-                    return Err(WasmError::Unsupported(what));
-                }
                 let Some(item) = Self::item_of(&node, input, index)? else {
                     continue;
                 };
-                if node.kind() == INTERFACE_DECL {
+                // An `@interface` **is** an interface (JLS §9.6) and is laid out as one: its
+                // elements are abstract methods, so nothing declares a function for them, and its
+                // uses are metadata a wasm host has no reflection to read. Refusing the declaration
+                // instead stopped every file that merely *declared* one — a sixth of this backend's
+                // own corpus — over a type nothing in the module ever calls.
+                if matches!(node.kind(), INTERFACE_DECL | ANNOTATION_TYPE_DECL) {
                     interfaces.push(item);
                     continue;
                 }
@@ -686,19 +743,6 @@ impl CompileWasm {
             Self::push_with_supertypes(item, index, &declared, &mut ordered);
         }
         Ok(ordered)
-    }
-
-    /// The declaration kinds this backend lays out no type for, each naming itself.
-    ///
-    /// An interface needs a dispatch mechanism (a function table or a per-type vtable struct), and an
-    /// `enum` and a `record` need the synthesised members the JVM backend builds. None is laid out yet,
-    /// and every one of them would otherwise vanish without a word.
-    const fn unrepresentable_kind(kind: jals_syntax::SyntaxKind) -> Option<&'static str> {
-        use jals_syntax::SyntaxKind::ANNOTATION_TYPE_DECL;
-        match kind {
-            ANNOTATION_TYPE_DECL => Some("an `@interface` declaration"),
-            _ => None,
-        }
     }
 
     /// Every type declaration in `root`, nested ones included.
@@ -783,13 +827,23 @@ impl CompileWasm {
             // A lambda has no body *node* of members: it declares exactly one method, the interface's, and
             // the lambda expression itself is that method's body.
             if Self::is_functional(&class) {
+                // A lambda whose item declares no method is one the index could not give a single
+                // abstract method to — it is typed by its *target*, and in argument position that
+                // target is the parameter of an overload chosen after the index is built. Skipping
+                // it left the struct laid out below with no body behind it: the creation emitted
+                // `struct.new_default`, the object implemented nothing, and the call through the
+                // interface found no override and became `unreachable` — a module that validated,
+                // instantiated, and trapped. Refused instead, which is what naming the construct is
+                // for.
                 let Some(member) = index
                     .own_members(item)
                     .iter()
                     .copied()
                     .find(|&id| index.member(id).kind == DefKind::Method)
                 else {
-                    continue;
+                    return Err(WasmError::Unsupported(
+                        "a lambda or method reference with no single abstract method",
+                    ));
                 };
                 let mut params = alloc::vec![layout.class_ref(item)?];
                 for ty in index.resolved_param_tys(member) {
@@ -799,7 +853,7 @@ impl CompileWasm {
                     Ty::Void => Vec::new(),
                     ty => alloc::vec![layout.val_type(&ty)?],
                 };
-                let has_result = !results.is_empty();
+                let result = results.first().copied();
                 let signature = module.add_type(SubType::plain(CompType::Func { params, results }));
                 let function = Module::func_index(out.len());
                 layout.functions.insert(member, function);
@@ -811,7 +865,7 @@ impl CompileWasm {
                     index: function,
                     export: None,
                     is_constructor: false,
-                    has_result,
+                    result,
                     encloses: None,
                     captures: 0,
                     initialises: None,
@@ -856,7 +910,7 @@ impl CompileWasm {
                     index: function,
                     export: None,
                     is_constructor: false,
-                    has_result: false,
+                    result: None,
                     encloses: None,
                     captures: 0,
                     initialises: Some(item),
@@ -911,7 +965,7 @@ impl CompileWasm {
                     }
                 };
 
-                let has_result = !results.is_empty();
+                let result = results.first().copied();
                 let signature = module.add_type(SubType::plain(CompType::Func { params, results }));
                 let function = Module::func_index(out.len());
                 layout.functions.insert(member, function);
@@ -923,7 +977,7 @@ impl CompileWasm {
                     index: function,
                     // A `public static` method is the module's surface: a wasm host has no `main`
                     // convention, so every one of them is exported by name.
-                    has_result,
+                    result,
                     encloses,
                     captures: captured.len(),
                     initialises: None,
@@ -957,7 +1011,7 @@ struct Layout {
     /// Each class's struct type index.
     structs: BTreeMap<ItemId, u32>,
     /// Each class's instance fields, in slot order, including those inherited.
-    fields: BTreeMap<ItemId, Vec<MemberId>>,
+    fields: BTreeMap<ItemId, Vec<Slot>>,
     /// Each method's function index.
     functions: BTreeMap<MemberId, u32>,
     /// A non-`static` nested class and the class that encloses it. Its instance holds the enclosing one
@@ -982,6 +1036,13 @@ struct Layout {
     /// subtyping is single-inheritance, so it could not be a supertype of two unrelated classes — so a
     /// value of interface type is held at the top of the reference hierarchy and narrowed at each use.
     interfaces: BTreeSet<ItemId>,
+    /// `java.lang.Object`, when the index holds it.
+    ///
+    /// The one library type this backend needs no `java.base` to represent: it is the root of Java's
+    /// reference hierarchy and `anyref` is wasm's, so a value of it is held exactly where an
+    /// interface-typed one is. Refusing it instead put every file that so much as declares an
+    /// `Object` field outside the subset, over a type whose representation the target already has.
+    object: Option<ItemId>,
     /// Each `static` field's global index. A Java `static` field is module state, which is what a
     /// wasm global is; an instance field is a struct slot instead.
     statics: BTreeMap<MemberId, u32>,
@@ -997,7 +1058,65 @@ struct Layout {
     arrays: Vec<(ValType, u32)>,
 }
 
+/// One value a call site pushes.
+enum Arg<'e> {
+    /// An argument, at the type its parameter declares.
+    Value(&'e ast::Expr, ValType),
+    /// An argument past the last declared parameter, which only a malformed call has: pushed at
+    /// whatever type it has, so the validator names the mismatch rather than this layer guessing.
+    Untyped(&'e ast::Expr),
+    /// The array a variable-arity call builds out of its trailing arguments.
+    Packed {
+        values: &'e [ast::Expr],
+        /// The element type each value is converted to.
+        element: Ty,
+        /// The array type index the values are gathered into.
+        array: u32,
+    },
+}
+
+/// One field of a class's wasm struct, in the order the struct declares them.
+///
+/// The synthetic ones are *in* the list rather than appended when the struct is written, because
+/// wasm's declared subtyping requires a subtype's fields to extend its supertype's as a prefix. A
+/// list holding only the declared fields put a subclass's first field on top of its superclass's
+/// enclosing instance — which is why a subclass of an inner class had to be refused outright.
+#[derive(Clone)]
+enum Slot {
+    /// A field the source declared.
+    Declared(MemberId),
+    /// The enclosing instance an inner class holds, and the type of it.
+    Enclosing(ItemId),
+    /// One local a local or anonymous class captured, with the type it was captured at — read from
+    /// the declaring file, which is the only place it is known.
+    Capture(Ty),
+}
+
 impl Layout {
+    /// The constructors of `item` this module actually lowered a function for.
+    ///
+    /// Not every indexed constructor is one. The index gives a class that writes none the **default**
+    /// constructor JLS §8.8.9 says it has, and nothing lowers a body for that: whatever it would run
+    /// — the field initialisers — is in [`default_constructors`](Self::default_constructors)
+    /// instead. So "does this class have a constructor" and "is there a function to call" are two
+    /// questions, and asking the first where the second was meant found a member with no function
+    /// and stopped there: a `new` that skipped every initialiser above it, in a module that
+    /// validates.
+    fn constructors<'a>(
+        &'a self,
+        index: &'a ProjectIndex,
+        item: ItemId,
+    ) -> impl Iterator<Item = MemberId> + 'a {
+        index
+            .own_members(item)
+            .iter()
+            .copied()
+            .filter(move |&member| {
+                index.member(member).kind == DefKind::Constructor
+                    && self.functions.contains_key(&member)
+            })
+    }
+
     /// Reserve `item`'s struct type index and work out which fields it holds.
     ///
     /// Reserving rather than declaring is what makes an array-typed field work: the field's *type*
@@ -1015,62 +1134,59 @@ impl Layout {
         let parent = Hierarchy::of(index)
             .superclass(item)
             .filter(|id| self.structs.contains_key(id));
-        let mut members: Vec<MemberId> = parent
+        // The supertype's *whole* list, synthetic fields included: a subtype's fields extend its
+        // supertype's as a prefix, so anything the supertype holds occupies a slot here too.
+        let mut slots: Vec<Slot> = parent
             .and_then(|id| self.fields.get(&id))
             .cloned()
             .unwrap_or_default();
         for &member in index.own_members(item) {
             let info = index.member(member);
             if info.kind == DefKind::Field && !info.modifiers.is_static {
-                members.push(member);
+                slots.push(Slot::Declared(member));
+            }
+        }
+        // Then this class's own synthetic fields, after every field it declares.
+        if let Some(&enclosing) = self.inner.get(&item) {
+            self.outer
+                .insert(item, u32::try_from(slots.len()).unwrap_or(u32::MAX));
+            slots.push(Slot::Enclosing(enclosing));
+        }
+        let captured = self.captures.get(&item).cloned().unwrap_or_default();
+        if !captured.is_empty() {
+            self.capture_slot
+                .insert(item, u32::try_from(slots.len()).unwrap_or(u32::MAX));
+            for (_, ty) in &captured {
+                slots.push(Slot::Capture(ty.clone()));
             }
         }
         self.structs.insert(item, module.reserve_type());
-        self.fields.insert(item, members);
+        self.fields.insert(item, slots);
     }
 
     /// Write `item`'s struct body: its supertype's fields followed by its own, at their wasm types.
-    fn fill_class(
-        &mut self,
-        item: ItemId,
-        index: &ProjectIndex,
-        module: &mut Module,
-    ) -> Result<()> {
+    ///
+    /// The order and the synthetic entries were settled by
+    /// [`reserve_class`](Self::reserve_class) — which is what makes a subtype's fields a real prefix
+    /// extension of its supertype's — so this only resolves each slot to a wasm type.
+    fn fill_class(&self, item: ItemId, index: &ProjectIndex, module: &mut Module) -> Result<()> {
         let Some(&type_index) = self.structs.get(&item) else {
             return Ok(());
         };
-        let members = self.fields.get(&item).cloned().unwrap_or_default();
-        let mut fields = Vec::with_capacity(members.len());
-        for &member in &members {
+        let slots = self.fields.get(&item).cloned().unwrap_or_default();
+        let mut fields = Vec::with_capacity(slots.len());
+        for slot in &slots {
+            let ty = match slot {
+                Slot::Declared(member) => self.val_type(&index.resolved_member_ty(*member))?,
+                Slot::Enclosing(enclosing) => self.class_ref(*enclosing)?,
+                Slot::Capture(ty) => self.val_type(ty)?,
+            };
             fields.push(FieldType {
-                storage: StorageType::Val(self.val_type(&index.resolved_member_ty(member))?),
+                storage: StorageType::Val(ty),
                 // Every Java field is assignable unless `final`, and even a `final` one is written
                 // once by a constructor — after `struct.new_default` has already made it.
                 mutable: true,
             });
-        }
-        // The enclosing instance goes last, so every real field keeps the slot `field_slot` computes.
-        let outer = self.inner.get(&item).copied();
-        if let Some(enclosing) = outer {
-            let slot = u32::try_from(fields.len()).map_err(|_| WasmError::TooLarge)?;
-            fields.push(FieldType {
-                storage: StorageType::Val(self.class_ref(enclosing)?),
-                mutable: true,
-            });
-            self.outer.insert(item, slot);
-        }
-        // One field per captured local, after the enclosing instance: the class outlives the frame the
-        // local lived in, so the value has to be copied into it.
-        let captured = self.captures.get(&item).cloned().unwrap_or_default();
-        if !captured.is_empty() {
-            let first = u32::try_from(fields.len()).map_err(|_| WasmError::TooLarge)?;
-            self.capture_slot.insert(item, first);
-            for (_, ty) in &captured {
-                fields.push(FieldType {
-                    storage: StorageType::Val(self.val_type(ty)?),
-                    mutable: true,
-                });
-            }
         }
         let parent = Hierarchy::of(index)
             .superclass(item)
@@ -1322,9 +1438,21 @@ impl Layout {
             .map(|(_, index)| *index)
     }
 
+    /// Whether `index` names one of this module's array types.
+    ///
+    /// The one place a Java type relation has no wasm counterpart: arrays are *covariant* in Java
+    /// (`String[]` is an `Object[]`) and **invariant** here, because a wasm array is mutable and
+    /// declared subtyping over it would let a write of the wrong element type through. So a
+    /// covariant array assignment is refused rather than emitted.
+    fn is_array(&self, index: u32) -> bool {
+        self.arrays.iter().any(|&(_, candidate)| candidate == index)
+    }
+
     /// A nullable reference to `item`'s struct type — how every Java reference is represented.
     fn class_ref(&self, item: ItemId) -> Result<ValType> {
-        if self.interfaces.contains(&item) {
+        // `java.lang.Object` sits where an interface does, and for the same reason: both are
+        // satisfied by a value of *any* reference type, and wasm's `anyref` is exactly that.
+        if self.interfaces.contains(&item) || self.object == Some(item) {
             return Ok(ValType::Ref(RefType::nullable(HeapType::Any)));
         }
         let index = self
@@ -1351,7 +1479,11 @@ impl Layout {
             Ty::Class(_) => {
                 let item = ty
                     .project_id()
-                    .filter(|id| self.structs.contains_key(id) || self.interfaces.contains(id))
+                    .filter(|id| {
+                        self.structs.contains_key(id)
+                            || self.interfaces.contains(id)
+                            || self.object == Some(*id)
+                    })
                     .ok_or_else(|| WasmError::NoRepresentation(ty.to_string()))?;
                 self.class_ref(item)?
             }
@@ -1362,12 +1494,25 @@ impl Layout {
                     .ok_or_else(|| WasmError::NoRepresentation(ty.to_string()))?;
                 ValType::Ref(RefType::nullable(HeapType::Concrete(array)))
             }
+            // A type variable erases to its bound, and to `Object` with none (JLS §4.6) — so its
+            // representation is the top of the reference hierarchy, exactly where an `Object` and an
+            // interface-typed value sit. Every use at a concrete type comes back down with a
+            // `ref.cast`, which is what erasure costs on this target as it does on the JVM.
+            //
+            // Not the bound's own struct type even when the bound is a class this module lays out:
+            // a field of type `T` is one field whatever a use instantiates it at, and typing it at
+            // the bound would make two instantiations two different structs.
+            Ty::TypeVar { .. } => ValType::Ref(RefType::nullable(HeapType::Any)),
             other => return Err(WasmError::NoRepresentation(other.to_string())),
         })
     }
 
     fn field_slot(&self, owner: ItemId, member: MemberId) -> Option<u32> {
-        let slot = self.fields.get(&owner)?.iter().position(|&f| f == member)?;
+        let slot = self
+            .fields
+            .get(&owner)?
+            .iter()
+            .position(|slot| matches!(slot, Slot::Declared(id) if *id == member))?;
         u32::try_from(slot).ok()
     }
 }
@@ -1417,6 +1562,7 @@ impl Body {
             pending_label: None,
             cleanups: Vec::new(),
             yields: Vec::new(),
+            result: method.result,
         };
         // `this` is parameter 0 of an instance method or a constructor.
         if method.owner.is_some() || method.is_constructor {
@@ -1441,9 +1587,14 @@ impl Body {
             let under_enum = Hierarchy::of(index)
                 .superclass(owner)
                 .is_some_and(|parent| index.item(parent).kind == DefKind::Enum);
-            if let Some(function) = Self::super_constructor(owner, index, layout)
+            if let Some((declaring, function)) = Self::super_constructor(owner, index, layout)
                 && !under_enum
             {
+                if layout.inner.contains_key(&declaring) {
+                    return Err(WasmError::Unsupported(
+                        "an implicit `super()` to an inner class's constructor",
+                    ));
+                }
                 insn.local_get(0).call(function);
             }
             lowering.initializers(owner, &method.node, 0, &mut insn)?;
@@ -1465,10 +1616,12 @@ impl Body {
                 let struct_type = layout.structs[&created];
                 insn.struct_new_default(struct_type);
                 let arity = index.member(member).params.len();
-                let constructor = index.own_members(created).iter().copied().find(|&id| {
-                    let info = index.member(id);
-                    info.kind == DefKind::Constructor && info.params.len() == arity
-                });
+                // Only one with a *body*: the index also holds the default constructor every class
+                // without a written one has (JLS §8.8.9), which nothing lowered a function for —
+                // and which is the arm below, not a constructor this can call.
+                let constructor = layout
+                    .constructors(index, created)
+                    .find(|&id| index.member(id).params.len() == arity);
                 if let Some(constructor) = constructor {
                     let function =
                         *layout
@@ -1490,11 +1643,8 @@ impl Body {
                     return Err(WasmError::Unsupported(
                         "a constructor reference with no matching constructor",
                     ));
-                } else if let Some(initialise) = layout
-                    .default_constructors
-                    .get(&created)
-                    .copied()
-                    .or_else(|| Self::super_constructor(created, index, layout))
+                } else if let Some(initialise) =
+                    Self::inherited_initialiser(created, index, layout)?
                 {
                     // Declaring no constructor does not mean there is nothing to run: the synthesised one
                     // runs the field initialisers, and it is the same function a plain `new` calls.
@@ -1515,7 +1665,7 @@ impl Body {
             let target = reference.target.ok_or(WasmError::Unsupported(
                 "a method reference to a constructor",
             ))?;
-            let bound = matches!(reference.receiver, crate::facts::RefReceiver::Bound(_));
+            let bound = reference.receiver == crate::facts::RefReceiver::Bound;
             let function = *layout.functions.get(&target).ok_or(WasmError::Unsupported(
                 "a method reference to a method outside this module",
             ))?;
@@ -1584,7 +1734,7 @@ impl Body {
                 // is, and is there so the validator need not infer Java's definite-return rule.
                 (None, Some(block)) => {
                     lowering.block(&block, &mut insn)?;
-                    if method.has_result {
+                    if method.result.is_some() {
                         insn.unreachable();
                     }
                 }
@@ -1642,9 +1792,22 @@ impl Body {
             // default in a module that validates.
             if let Some(owner) = method.owner
                 && !block.as_ref().is_some_and(Self::delegates_to_super)
-                && let Some(function) = Self::super_constructor(owner, index, layout)
+                && let Some((declaring, function)) = Self::super_constructor(owner, index, layout)
             {
-                insn.local_get(0).call(function);
+                insn.local_get(0);
+                // The superclass may itself be an inner class, whose constructor takes the
+                // enclosing instance right after `this`. It is *this* constructor's own — the
+                // parameter at slot 1, already written into the synthetic field above — because a
+                // subclass of an inner class is enclosed by the same type its superclass is.
+                if layout.inner.contains_key(&declaring) {
+                    if method.encloses.is_none() {
+                        return Err(WasmError::Unsupported(
+                            "a subclass of an inner class with no enclosing instance of its own",
+                        ));
+                    }
+                    insn.local_get(1);
+                }
+                insn.call(function);
             }
             // The constructor's parent *is* the class body, which is where the initialisers are and
             // the reason they need no search: they are this declaration's siblings, in order.
@@ -1659,7 +1822,7 @@ impl Body {
         // unreachable code does not make its target reachable, so the validator sees control reach the
         // end of the function with nothing on the stack. Java's definite-return rule is what makes this
         // dead code; the instruction is here so the validator does not have to infer that.
-        if method.has_result {
+        if method.result.is_some() {
             insn.unreachable();
         }
         Ok(Self {
@@ -1689,22 +1852,44 @@ impl Body {
     ///
     /// `None` at a class whose declared constructors all take arguments: Java requires an explicit
     /// `super(…)` there, so there is nothing implicit to call, and the source wrote what to run.
-    fn super_constructor(owner: ItemId, index: &ProjectIndex, layout: &Layout) -> Option<u32> {
+    /// The function that runs `owner`'s inherited initialisers when nothing else will: its own
+    /// synthesised one, or the nearest ancestor's.
+    ///
+    /// Every caller has only the receiver to pass, so a constructor that takes an enclosing instance
+    /// too is reported rather than called one argument short — and rather than skipped, which would
+    /// leave the inherited fields at their defaults in a module that validates.
+    fn inherited_initialiser(
+        owner: ItemId,
+        index: &ProjectIndex,
+        layout: &Layout,
+    ) -> Result<Option<u32>> {
+        if let Some(&function) = layout.default_constructors.get(&owner) {
+            return Ok(Some(function));
+        }
+        match Self::super_constructor(owner, index, layout) {
+            Some((declaring, _)) if layout.inner.contains_key(&declaring) => Err(
+                WasmError::Unsupported("an inherited initialiser on an inner class"),
+            ),
+            found => Ok(found.map(|(_, function)| function)),
+        }
+    }
+
+    fn super_constructor(
+        owner: ItemId,
+        index: &ProjectIndex,
+        layout: &Layout,
+    ) -> Option<(ItemId, u32)> {
         let mut candidate = Hierarchy::of(index).superclass(owner);
         while let Some(item) = candidate {
-            let mut declared = index
-                .own_members(item)
-                .iter()
-                .copied()
-                .filter(|&member| index.member(member).kind == DefKind::Constructor)
-                .peekable();
+            let mut declared = layout.constructors(index, item).peekable();
             if declared.peek().is_some() {
                 return declared
                     .find(|&member| index.member(member).params.is_empty())
-                    .and_then(|member| layout.functions.get(&member).copied());
+                    .and_then(|member| layout.functions.get(&member).copied())
+                    .map(|function| (item, function));
             }
             if let Some(&function) = layout.default_constructors.get(&item) {
-                return Some(function);
+                return Some((item, function));
             }
             candidate = Hierarchy::of(index).superclass(item);
         }
@@ -1733,6 +1918,12 @@ struct Lowering<'a> {
     /// Enclosing `switch` *expressions*, innermost last: where a `yield` branches to, and the type the
     /// value it carries must have.
     yields: Vec<(u32, ValType)>,
+    /// The function's declared result, which is what a `return` narrows its value to.
+    ///
+    /// The same erasure that puts an argument at the top of the reference hierarchy puts a returned
+    /// value there: a method declared to return a concrete type may compute one through an
+    /// interface, an `Object`, or a type variable, and the signature wants the struct.
+    result: Option<ValType>,
 }
 
 /// One arm of a lowered `switch`: which keys reach it, in the order the arms are written.
@@ -1793,6 +1984,8 @@ impl Lowering<'_> {
             pending_label: None,
             cleanups: Vec::new(),
             yields: Vec::new(),
+            // A class initialiser returns nothing, so there is no `return` value to narrow.
+            result: None,
         }
     }
 
@@ -1832,14 +2025,9 @@ impl Lowering<'_> {
             owner
         };
         let mut matching = self
-            .index
-            .own_members(owner)
-            .iter()
-            .copied()
-            .filter(|&member| {
-                let info = self.index.member(member);
-                info.kind == DefKind::Constructor && info.params.len() == arguments.len()
-            });
+            .layout
+            .constructors(self.index, owner)
+            .filter(|&member| self.index.member(member).params.len() == arguments.len());
         let selected = matching.next();
         if selected.is_some() && matching.next().is_some() {
             return Err(WasmError::Unsupported(
@@ -1871,8 +2059,13 @@ impl Lowering<'_> {
         };
         if let Some(function) = enum_constructor {
             insn.local_get(slot);
-            for argument in &arguments {
-                self.expr(argument, insn)?;
+            match selected {
+                Some(member) => self.push_arguments(member, &arguments, insn)?,
+                None => {
+                    for argument in &arguments {
+                        self.expr(argument, insn)?;
+                    }
+                }
             }
             insn.call(function);
         }
@@ -2025,7 +2218,12 @@ impl Lowering<'_> {
                 // leaves — which is the order §14.20.2 gives and the reason a cleanup can observe the
                 // value's side effects but not change what is returned.
                 if let Some(value) = statement.expr() {
-                    self.expr(&value, insn)?;
+                    match self.result {
+                        Some(target) => self.expr_as(&value, target, insn)?,
+                        None => {
+                            self.expr(&value, insn)?;
+                        }
+                    }
                 }
                 // A `return` leaves the frame, so it leaves *every* open cleanup behind.
                 self.run_cleanups(0, insn)?;
@@ -3487,9 +3685,12 @@ impl Lowering<'_> {
         {
             return self.operand(value, target, insn);
         }
-        self.expr(value, insn)?
+        let produced = self
+            .expr(value, insn)?
             .ok_or(WasmError::Unsupported("a value that produced nothing"))?;
-        Ok(())
+        // The declaration is what says which type is wanted, so erasure's top-of-hierarchy value
+        // comes back down here — the same `ref.cast` an argument and a `return` get.
+        self.narrow(produced, declared_ty, insn)
     }
 
     /// `array[index]`.
@@ -3543,7 +3744,9 @@ impl Lowering<'_> {
         let receiver = access
             .receiver()
             .ok_or(WasmError::Unsupported("a field access with no receiver"))?;
-        self.expr(&receiver, insn)?;
+        // At the owner's type, for the reason a call's receiver is: `struct.get` names one struct.
+        let receiver_ty = self.layout.class_ref(owner)?;
+        self.expr_as(&receiver, receiver_ty, insn)?;
         let slot = self
             .layout
             .field_slot(owner, member)
@@ -3640,6 +3843,20 @@ impl Lowering<'_> {
             let target = self.num_of(cast.syntax())?;
             self.operand(&operand, target, insn)?;
             return Ok(target.val());
+        }
+        // A cast to a **type variable** erases to its bound (JLS §5.5), and the bound is `Object`
+        // unless declared — the top of the reference hierarchy, which every reference already is.
+        // So it is a cast to nothing: the erasure this backend gives `T` *is* `anyref`, and a
+        // `ref.cast` to the top would say nothing the validator does not already know. Resolving the
+        // written name instead reported `T` as an unresolved type, which is a report about a type
+        // the source declared.
+        if matches!(
+            self.input.type_of_expr(Facts::span(cast.syntax())),
+            Some(Ty::TypeVar { .. })
+        ) {
+            self.expr(&operand, insn)?
+                .ok_or(WasmError::Unsupported("a cast of nothing"))?;
+            return Ok(ValType::Ref(RefType::nullable(HeapType::Any)));
         }
         let heap = self.named_type(&ty)?;
         self.expr(&operand, insn)?
@@ -3986,16 +4203,26 @@ impl Lowering<'_> {
         if assignment.is_simple() {
             place.address(insn);
             let source = self.num_of(value.syntax()).ok();
-            self.expr(&value, insn)?
+            let produced = self
+                .expr(&value, insn)?
                 .ok_or(WasmError::Unsupported("an assignment of no value"))?;
             // Assignment conversion (JLS §5.2): `long n = 1` stores a `long`, and the literal is an
-            // `int` until something widens it. Only a numeric target needs it; a reference one is
-            // already the right type or the analysis would not have typed the assignment.
-            if let (Some(source), Ok(declared)) = (source, self.num_of(target.syntax()))
-                && source != declared
-            {
-                insn.convert(source, declared)
-                    .ok_or(WasmError::Unsupported("this assignment conversion"))?;
+            // `int` until something widens it. A *numeric* target is converted here, at the source's
+            // own width, because `byte` / `short` / `char` need the sign extension or the mask that
+            // a wasm value type — where all four are `i32` — cannot ask for.
+            //
+            // A reference target is not "already the right type": that held only while every
+            // reference the backend produced was concrete. Erasure puts an `anyref` on the stack
+            // wherever a type variable is involved, and a field or an array element declared at a
+            // concrete type is a place the validator checks exactly. `b.held = id(c);` was a module
+            // `wasm-tools` refuses, emitted with nothing said on this side.
+            if let (Some(source), Ok(declared)) = (source, self.num_of(target.syntax())) {
+                if source != declared {
+                    insn.convert(source, declared)
+                        .ok_or(WasmError::Unsupported("this assignment conversion"))?;
+                }
+            } else {
+                self.narrow(produced, place.ty(), insn)?;
             }
             place.store(insn, keep);
         } else {
@@ -4216,9 +4443,10 @@ impl Lowering<'_> {
                 let receiver = access.receiver().ok_or(WasmError::Unsupported(
                     "a field assignment with no receiver",
                 ))?;
-                let receiver_ty = self
-                    .expr(&receiver, insn)?
-                    .ok_or(WasmError::Unsupported("a field of something with no value"))?;
+                // At the *owner's* type: a receiver read through an interface, an `Object`, or a
+                // type variable is `anyref`, and `struct.set` names one struct in particular.
+                let receiver_ty = self.layout.class_ref(owner)?;
+                self.expr_as(&receiver, receiver_ty, insn)?;
                 let receiver_slot = self.scratch(receiver_ty);
                 insn.local_set(receiver_slot);
                 Ok(Place::Field {
@@ -4374,8 +4602,18 @@ impl Lowering<'_> {
         let ty = self.ty_of(new.syntax())?;
         // `new T[n]`: one instruction, and every element starts at its type's default — which is
         // exactly Java's rule for a fresh array.
-        if let Some(Ty::Array(element)) = self.input.type_of_expr(Facts::span(new.syntax())) {
-            let element = self.layout.val_type(element)?;
+        if let Some(Ty::Array(element)) =
+            self.input.type_of_expr(Facts::span(new.syntax())).cloned()
+        {
+            // `new T[] { … }` writes its elements out, and the initialiser *is* the array — one
+            // `array.new_fixed` with the values on the stack. Reading its node as the length instead
+            // built the array twice: `array.new_fixed` and then `array.new_default` consuming it as
+            // a count, which is a reference where an `i32` belongs.
+            if let Some(init) = new.syntax().children().find_map(ast::ArrayInit::cast) {
+                let written = Ty::Array(element);
+                return self.array_initializer(&init, Some(&written), insn);
+            }
+            let element = self.layout.val_type(&element)?;
             let array_type = self
                 .layout
                 .array_type(element)
@@ -4437,12 +4675,15 @@ impl Lowering<'_> {
         // Which constructor, read from the index rather than re-picked here. Matching on argument
         // *count* alone took the first of any same-arity pair, and a second selection free to
         // disagree with the analysis is the drift `call_target_of` exists to prevent.
-        let constructor = self.input.call_target_of(Facts::span(new.syntax()));
-        let declares_constructor = self
-            .index
-            .own_members(item)
-            .iter()
-            .any(|&member| self.index.member(member).kind == DefKind::Constructor);
+        // Only a constructor with a *body* counts on either side. The index also holds the default
+        // constructor every class without a written one has (JLS §8.8.9), which nothing lowered a
+        // function for — and resolving to that one is the same case as resolving to none, which is
+        // the second arm below.
+        let constructor = self
+            .input
+            .call_target_of(Facts::span(new.syntax()))
+            .filter(|target| self.layout.functions.contains_key(target));
+        let declares_constructor = self.layout.constructors(self.index, item).next().is_some();
 
         insn.struct_new_default(struct_type);
         match constructor {
@@ -4459,15 +4700,28 @@ impl Lowering<'_> {
                 // that only surfaced once a `new` sat inside a `block`.
                 let slot = self.scratch(ty);
                 insn.local_set(slot).local_get(slot);
-                // The enclosing instance is the constructor's first declared argument.
-                if let Some(encloses) = encloses {
-                    self.enclosing_instance(qualifier.as_ref(), encloses, insn)?;
+                // An **anonymous** class declares no constructor, so the one resolved here is its
+                // *superclass's* and everything about the call is that class's: its enclosing
+                // instance, its parameters, and — since it stores nothing of this class — none of
+                // this class's captures. Passing this class's enclosing instance to a constructor
+                // that does not take one is a call one argument long, which the validator refuses.
+                let declaring = self.index.member(constructor).owner;
+                if let Some(&needed) = self.layout.inner.get(&declaring) {
+                    self.enclosing_instance(qualifier.as_ref(), needed, insn)?;
                 }
-                for argument in &arguments {
-                    self.expr(argument, insn)?;
+                self.push_arguments(constructor, &arguments, insn)?;
+                // The captures the *callee* declares, which for an anonymous class's `new` are its
+                // superclass's rather than its own: the function being called is that class's, and
+                // its trailing parameters are the locals *it* captured.
+                self.push_captures(declaring, insn)?;
+                insn.call(function);
+                insn.local_get(slot);
+                // What that constructor did not write because it belongs to another class: this
+                // class's own enclosing instance and captures. Its own constructor wrote both from
+                // its parameters, so there is nothing left over there.
+                if declaring != item {
+                    self.fill_synthetic_fields(item, struct_type, ty, qualifier.as_ref(), insn)?;
                 }
-                self.push_captures(item, insn)?;
-                insn.call(function).local_get(slot);
             }
             // No declared constructor: the implicit default one initialises nothing, so the
             // allocation is already the finished object — except for an inner class, whose synthetic
@@ -4477,58 +4731,67 @@ impl Lowering<'_> {
                 // `class Box { int value = 9; }` read back as 0 — a wrong value in a module that validates.
                 // Its own synthesised constructor, or — when it has no initialisers of its own — the
                 // nearest ancestor's, whose initialisers still have to run.
-                if let Some(initialise) = self
-                    .layout
-                    .default_constructors
-                    .get(&item)
-                    .copied()
-                    .or_else(|| Body::super_constructor(item, self.index, self.layout))
+                if let Some(initialise) =
+                    Body::inherited_initialiser(item, self.index, self.layout)?
                 {
                     let slot = self.scratch(ty);
                     insn.local_set(slot).local_get(slot).call(initialise);
                     insn.local_get(slot);
                 }
-                // No constructor function to fill the capture fields either, so the `new` fills them — the
-                // same way it fills an inner class's single enclosing instance. An anonymous class is always
-                // this case: it never declares a constructor.
-                let captured = self.layout.captures.get(&item).cloned().unwrap_or_default();
-                if !captured.is_empty() {
-                    let slot = self.scratch(ty);
-                    let first = *self
-                        .layout
-                        .capture_slot
-                        .get(&item)
-                        .ok_or(WasmError::Unsupported("a capture with no field"))?;
-                    insn.local_set(slot);
-                    for (offset, (id, _)) in captured.iter().enumerate() {
-                        insn.local_get(slot);
-                        self.push_capture(*id, insn)?;
-                        let field =
-                            first + u32::try_from(offset).map_err(|_| WasmError::TooLarge)?;
-                        insn.struct_set(struct_type, field);
-                    }
-                    insn.local_get(slot);
-                }
-                if encloses.is_some() {
-                    let slot = self.scratch(ty);
-                    let field = self
-                        .layout
-                        .outer
-                        .get(&item)
-                        .copied()
-                        .ok_or(WasmError::Unsupported("an inner class with no outer field"))?;
-                    insn.local_set(slot);
-                    insn.local_get(slot);
-                    let encloses = encloses
-                        .ok_or(WasmError::Unsupported("an inner class with no outer field"))?;
-                    self.enclosing_instance(qualifier.as_ref(), encloses, insn)?;
-                    insn.struct_set(struct_type, field);
-                    insn.local_get(slot);
-                }
+                self.fill_synthetic_fields(item, struct_type, ty, qualifier.as_ref(), insn)?;
             }
             None => return Err(WasmError::Unresolved("a matching constructor".into())),
         }
         Ok(ty)
+    }
+
+    /// Write the synthetic fields no constructor function wrote, onto the value on top of the stack,
+    /// and leave it there.
+    ///
+    /// Two cases reach here and they are the same case: a class with no constructor at all, and a
+    /// class whose `new` ran *another* class's constructor. An anonymous class is the second — it
+    /// declares none, so the constructor a `new` of it calls is its superclass's, and that function
+    /// stores nothing about the class actually being built.
+    fn fill_synthetic_fields(
+        &mut self,
+        item: ItemId,
+        struct_type: u32,
+        ty: ValType,
+        qualifier: Option<&ast::Expr>,
+        insn: &mut Insn,
+    ) -> Result<()> {
+        let captured = self.layout.captures.get(&item).cloned().unwrap_or_default();
+        if !captured.is_empty() {
+            let slot = self.scratch(ty);
+            let first = *self
+                .layout
+                .capture_slot
+                .get(&item)
+                .ok_or(WasmError::Unsupported("a capture with no field"))?;
+            insn.local_set(slot);
+            for (offset, (id, _)) in captured.iter().enumerate() {
+                insn.local_get(slot);
+                self.push_capture(*id, insn)?;
+                let field = first + u32::try_from(offset).map_err(|_| WasmError::TooLarge)?;
+                insn.struct_set(struct_type, field);
+            }
+            insn.local_get(slot);
+        }
+        if let Some(&encloses) = self.layout.inner.get(&item) {
+            let slot = self.scratch(ty);
+            let field = self
+                .layout
+                .outer
+                .get(&item)
+                .copied()
+                .ok_or(WasmError::Unsupported("an inner class with no outer field"))?;
+            insn.local_set(slot);
+            insn.local_get(slot);
+            self.enclosing_instance(qualifier, encloses, insn)?;
+            insn.struct_set(struct_type, field);
+            insn.local_get(slot);
+        }
+        Ok(())
     }
 
     /// Every class in this module that overrides `member`, most-derived first.
@@ -4556,12 +4819,21 @@ impl Lowering<'_> {
             // while a false negative leaves the direct `call` a non-overridden method would have
             // had anyway. That is the opposite collapse from the bridge emission's, and it is why
             // the shared fact has three answers rather than two.
-            let over = self
-                .index
-                .own_members(item)
-                .iter()
-                .copied()
-                .find(|&id| Hierarchy::of(self.index).overrides(id, member) == Overrides::Yes);
+            //
+            // **Inherited, not just declared.** `interface I { int f(); }` with
+            // `class Base { public int f() { … } }` and `class C extends Base implements I {}` is a
+            // `C` whose implementation of `I.f` is written in `Base`, and `C` declares nothing at
+            // all. Scanning only `own_members` found no override, the call fell through to the
+            // no-function arm below, and that arm — which reads "nothing implements this, so no such
+            // object exists" — emitted `unreachable` against a receiver whose implementation is one
+            // function away in the same module. Nearest-first, so a subclass's own override still
+            // wins over the one it inherits, and only a body this module actually lowered counts:
+            // dispatching to a member with no function index is a call to nothing.
+            let over = self.index.members_of(item).into_iter().find(|&id| {
+                id != member
+                    && self.layout.functions.contains_key(&id)
+                    && Hierarchy::of(self.index).implements_for(item, id, member) == Overrides::Yes
+            });
             if let Some(over) = over {
                 found.push((item, over));
             }
@@ -4613,14 +4885,19 @@ impl Lowering<'_> {
 
         // Lowered untargeted, exactly as the direct-call path does: an argument's own inferred type is
         // what both use, so a virtual call converts no differently from a static one.
-        let mut slots = Vec::with_capacity(arguments.len());
-        for argument in arguments {
-            let value = self
-                .expr(argument, insn)?
-                .ok_or(WasmError::Unsupported("an argument with no value"))?;
+        // Each into a local of its own before the dispatch block opens: every branch calls a
+        // function declared over the *parameters*, so a value erasure left at the top comes down
+        // here rather than once per branch, and a variable-arity call builds its array once.
+        let planned = self.plan_arguments(member, arguments)?;
+        // The slot *and* what it holds: a slot index counts from the first parameter while the
+        // local vector counts from the first declared local, so the type has to travel with it
+        // rather than be looked up by index.
+        let mut slots: Vec<(u32, ValType)> = Vec::with_capacity(planned.len());
+        for arg in &planned {
+            let value = self.push_argument(arg, insn)?;
             let slot = self.scratch(value);
             insn.local_set(slot);
-            slots.push(slot);
+            slots.push((slot, value));
         }
 
         match ty {
@@ -4638,8 +4915,18 @@ impl Lowering<'_> {
             insn.if_();
             insn.local_get(receiver);
             insn.ref_cast(HeapType::Concrete(struct_type), false);
-            for &slot in &slots {
+            // The slots hold what the *statically selected* member's parameters wanted, and an
+            // override is free to declare narrower ones — `int f(T t)` overridden as `int f(Cell c)`
+            // is one function taking `anyref` and one taking a concrete struct. Each arm therefore
+            // narrows again, to its own function's parameters, rather than trusting the plan the
+            // selection made.
+            let over_tys = self.index.resolved_param_tys(over);
+            for (position, &(slot, held)) in slots.iter().enumerate() {
                 insn.local_get(slot);
+                if let Some(ty) = over_tys.get(position) {
+                    let want = self.layout.val_type(ty)?;
+                    self.narrow(held, want, insn)?;
+                }
             }
             insn.call(function);
             insn.br(insn.depth() - leave);
@@ -4652,7 +4939,14 @@ impl Lowering<'_> {
         match self.layout.functions.get(&member) {
             Some(&function) => {
                 insn.local_get(receiver);
-                for &slot in &slots {
+                // The arms above each `ref.cast` the receiver to the type they tested for; this one
+                // tested nothing, so the value is still whatever the expression produced — `anyref`
+                // wherever erasure put it there. `<T extends C> int g(T t) { return t.m(); }` is the
+                // everyday shape, and the module it produced was refused by the validator with
+                // nothing said on this side.
+                let owner = self.layout.class_ref(self.index.member(member).owner)?;
+                self.narrow(receiver_ty, owner, insn)?;
+                for &(slot, _) in &slots {
                     insn.local_get(slot);
                 }
                 insn.call(function);
@@ -4750,6 +5044,222 @@ impl Lowering<'_> {
         Ok(())
     }
 
+    /// One value a call site pushes: an argument at its parameter's type, or the array a **varargs**
+    /// call builds out of its trailing arguments.
+    ///
+    /// Planned before anything is emitted because the two call paths push at different moments — the
+    /// direct one straight onto the stack, the virtual one into a local apiece before the dispatch
+    /// block opens — and both have to pass the same values.
+    fn plan_arguments<'e>(
+        &self,
+        member: MemberId,
+        arguments: &'e [ast::Expr],
+    ) -> Result<Vec<Arg<'e>>> {
+        let params = self.index.resolved_param_tys(member);
+        let varargs = self.index.member(member).varargs;
+        // The JVM has no variable arity and neither has wasm: `f(int...)` takes an `int[]` and the
+        // call site builds it (JLS §15.12.4.2). One argument that is already an array of the right
+        // type passes straight through instead — packing it would build an `int[][]`.
+        let packs = varargs
+            && !params.is_empty()
+            && !(arguments.len() == params.len()
+                && arguments.last().is_some_and(|last| {
+                    matches!(
+                        self.input.type_of_expr(Facts::span(last.syntax())),
+                        Some(Ty::Array(_))
+                    )
+                }));
+        let fixed = if packs {
+            params.len() - 1
+        } else {
+            params.len()
+        };
+        let mut out = Vec::with_capacity(arguments.len());
+        for (position, argument) in arguments.iter().take(fixed).enumerate() {
+            match params.get(position) {
+                Some(declared) => out.push(Arg::Value(argument, self.layout.val_type(declared)?)),
+                None => out.push(Arg::Untyped(argument)),
+            }
+        }
+        if packs {
+            let Some(Ty::Array(element)) = params.last().cloned() else {
+                return Err(WasmError::Unsupported(
+                    "a variable-arity parameter that is no array",
+                ));
+            };
+            let element_ty = self.layout.val_type(&element)?;
+            let array = self
+                .layout
+                .array_type(element_ty)
+                .ok_or_else(|| WasmError::NoRepresentation("an array".to_owned()))?;
+            out.push(Arg::Packed {
+                values: &arguments[fixed.min(arguments.len())..],
+                element: *element,
+                array,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Push one planned argument, and say what type it left on the stack.
+    fn push_argument(&mut self, arg: &Arg<'_>, insn: &mut Insn) -> Result<ValType> {
+        match arg {
+            Arg::Value(expr, target) => {
+                self.expr_as(expr, *target, insn)?;
+                Ok(*target)
+            }
+            Arg::Untyped(expr) => self
+                .expr(expr, insn)?
+                .ok_or(WasmError::Unsupported("an argument with no value")),
+            Arg::Packed {
+                values,
+                element,
+                array,
+            } => {
+                for value in *values {
+                    self.value_as(value, element, insn)?;
+                }
+                let count = u32::try_from(values.len()).map_err(|_| WasmError::TooLarge)?;
+                insn.array_new_fixed(*array, count);
+                Ok(ValType::Ref(RefType::nullable(HeapType::Concrete(*array))))
+            }
+        }
+    }
+
+    /// Push every planned argument in order.
+    fn push_arguments(
+        &mut self,
+        member: MemberId,
+        arguments: &[ast::Expr],
+        insn: &mut Insn,
+    ) -> Result<()> {
+        for arg in self.plan_arguments(member, arguments)? {
+            self.push_argument(&arg, insn)?;
+        }
+        Ok(())
+    }
+
+    /// Push `expr` and narrow the value to `target` when erasure left it at the top of the
+    /// reference hierarchy.
+    ///
+    /// An `Object`, an interface, and a type variable are all `anyref` here, and every use at a
+    /// *concrete* type — a parameter, a field, a return — wants that struct in particular. The JVM
+    /// backend emits a `checkcast` at exactly these places and for exactly this reason; the
+    /// validator is stricter than the verifier only in that it will not let one through unchecked.
+    ///
+    /// Nullable, because Java's `null` is assignable everywhere: a non-null cast would trap on a
+    /// value the source is entitled to pass.
+    fn expr_as(&mut self, expr: &ast::Expr, target: ValType, insn: &mut Insn) -> Result<()> {
+        let produced = self
+            .expr(expr, insn)?
+            .ok_or(WasmError::Unsupported("an argument with no value"))?;
+        self.narrow(produced, target, insn)
+    }
+
+    /// Emit the `ref.cast` that takes a top-of-hierarchy value down to `target`, if one is needed —
+    /// or, between two primitives, the widening conversion Java performs silently.
+    fn narrow(&self, produced: ValType, target: ValType, insn: &mut Insn) -> Result<()> {
+        if produced == target {
+            return Ok(());
+        }
+        let (ValType::Ref(from), ValType::Ref(to)) = (produced, target) else {
+            // Two primitives that differ are a **widening primitive conversion** (JLS §5.1.2), which
+            // the language performs with no cast written and which wasm has no implicit form of.
+            // `static long take(long x)` called as `take(1)` put an `i32` where the signature says
+            // `i64` and the module was refused by the validator with nothing said on this side —
+            // `value_as` routes a numeric target through `operand` and so gets `long a = 1;` right,
+            // which is what made the pair disagree about one conversion.
+            if let (Some(from), Some(to)) = (Self::numeric(produced), Self::numeric(target)) {
+                return Self::widen(from, to, insn);
+            }
+            return Self::boxed(produced, target);
+        };
+        if from.heap == to.heap {
+            return Ok(());
+        }
+        // `HeapType::None` is the *bottom* and already fits everywhere, so only the top needs one.
+        if matches!(to.heap, HeapType::Concrete(_)) && from.heap == HeapType::Any {
+            insn.ref_cast(to.heap, true);
+            return Ok(());
+        }
+        // Java's arrays are covariant and wasm's are invariant, so `Object[] o = new String[1]` has
+        // no representation here at all: the two array types are unrelated, and no cast relates
+        // them. Said out loud rather than emitted, because the bytes would be a module no engine
+        // loads.
+        if let (HeapType::Concrete(from), HeapType::Concrete(to)) = (from.heap, to.heap)
+            && (self.layout.is_array(from) || self.layout.is_array(to))
+        {
+            return Err(WasmError::Unsupported(
+                "an array where an array of another type is wanted",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The Java primitive a wasm value type stands for, at the granularity wasm keeps.
+    ///
+    /// `byte`, `short` and `char` are all `i32` here and the conversions between them are no-ops, so
+    /// nothing is lost by answering `Int` for all four: what this is used for is the *widening* a
+    /// value needs to reach a wider slot, and every such widening is visible at this granularity.
+    const fn numeric(ty: ValType) -> Option<Numeric> {
+        match ty {
+            ValType::I32 => Some(Numeric::Int),
+            ValType::I64 => Some(Numeric::Long),
+            ValType::F32 => Some(Numeric::Float),
+            ValType::F64 => Some(Numeric::Double),
+            ValType::Ref(_) => None,
+        }
+    }
+
+    /// Emit the widening conversion from `from` to `to`, refusing anything that is not one.
+    ///
+    /// Only widening: JLS §5.3 admits a widening primitive conversion at an invocation and nothing
+    /// else, so a *narrowing* here is not a conversion the source omitted but a mismatch this
+    /// backend arrived at, and emitting a truncation for it would answer with a different number.
+    fn widen(from: Numeric, to: Numeric, insn: &mut Insn) -> Result<()> {
+        const fn rank(ty: Numeric) -> u8 {
+            match ty {
+                Numeric::Byte | Numeric::Short | Numeric::Char | Numeric::Int => 0,
+                Numeric::Long => 1,
+                Numeric::Float => 2,
+                Numeric::Double => 3,
+            }
+        }
+        if rank(from) >= rank(to) {
+            return Err(WasmError::Unsupported(
+                "a narrowing primitive conversion the source did not write",
+            ));
+        }
+        insn.convert(from, to).ok_or(WasmError::Unsupported(
+            "a numeric conversion with no encoding",
+        ))?;
+        Ok(())
+    }
+
+    /// Whether a value of type `produced` fits a position wanting `target`, reporting the *library*
+    /// type a conversion between them would need.
+    ///
+    /// A primitive where a reference is wanted is a boxing conversion (JLS §5.1.7) and a reference
+    /// where a primitive is wanted an unboxing one, and both go through a **wrapper** — a
+    /// `java.lang` type a wasm host has no `java.base` to supply. Erasure is what makes the pair
+    /// common rather than exotic: a type variable is `anyref` here, so `List<Integer>.add(1)` puts
+    /// an `i32` where a reference belongs. Reported as the library type it needs, which is the same
+    /// answer every other unrepresentable type gets, rather than as a compiler gap it is not.
+    fn boxed(produced: ValType, target: ValType) -> Result<()> {
+        let wrapper = |ty: ValType| match ty {
+            ValType::I32 => Some("java.lang.Integer"),
+            ValType::I64 => Some("java.lang.Long"),
+            ValType::F32 => Some("java.lang.Float"),
+            ValType::F64 => Some("java.lang.Double"),
+            ValType::Ref(_) => None,
+        };
+        match (wrapper(produced), wrapper(target)) {
+            (Some(from), None) => Err(WasmError::NoRepresentation(from.to_owned())),
+            (None, Some(needed)) => Err(WasmError::NoRepresentation(needed.to_owned())),
+            _ => Ok(()),
+        }
+    }
+
     /// A fresh unnamed local of type `ty`, for values that must outlive the stack.
     fn scratch(&mut self, ty: ValType) -> u32 {
         let slot = self.next;
@@ -4787,20 +5297,84 @@ impl Lowering<'_> {
         // Only now: a method with no function index is abstract, and an abstract one is only ever
         // reached through the chain above. Looking it up first reported "outside this module" for every
         // interface call, which named the wrong problem.
-        let function = *self
-            .layout
-            .functions
-            .get(&member)
-            .ok_or(WasmError::Unsupported(
-                "a call to a method outside this module",
-            ))?;
+        let function = match self.layout.functions.get(&member).copied() {
+            Some(function) => function,
+            // No function, the call is a *dispatch*, and the owner is a class this module lays
+            // out: the method has no body anywhere in the module and nothing above overrides it, so
+            // no object carrying an implementation can exist here and the call is dynamically
+            // unreachable — which `unreachable` says exactly. An abstract class calling its own
+            // abstract method is ordinary Java, and refusing it stopped the whole file.
+            //
+            // Both extra conditions are load-bearing, and each was a module that validated,
+            // instantiated, and trapped where the merge base refused by name:
+            //
+            // - **A `static` call is not a dispatch.** `static native int f()` has no body and no
+            //   receiver, so "no object can exist" says nothing about it; the module simply lacks
+            //   the body, which is a refusal.
+            //
+            // An *interface* owner stays in, and soundly: a value of interface type comes either
+            // from a laid-out struct — which the override scan above covers, lambdas and method
+            // references included, since the index gives each of those an item of its own — or from
+            // one this backend could not lay out, and that one is refused at the expression that
+            // creates it rather than here.
+            None if !is_static
+                && !super_qualified
+                && (self
+                    .layout
+                    .structs
+                    .contains_key(&self.index.member(member).owner)
+                    || self
+                        .layout
+                        .interfaces
+                        .contains(&self.index.member(member).owner)) =>
+            {
+                insn.unreachable();
+                return Ok(match self.index.resolved_member_ty(member) {
+                    Ty::Void => None,
+                    ty => Some(self.layout.val_type(&ty)?),
+                });
+            }
+            // The owner is not a type this module lays out at all, so it is a *library* type — and
+            // needing one is what puts a case outside this backend's subset, not a gap in it.
+            // `System.out.println` is the everyday shape: nothing in such a file declares a library
+            // type, so the case reached this far before naming the one it needs.
+            // A project type whose body this module does not hold: `native`, or an interface
+            // method implemented only by a lambda or a method reference. Its own report, because
+            // the library-type one would send a reader looking for a dependency that is not there.
+            None if self
+                .layout
+                .structs
+                .contains_key(&self.index.member(member).owner)
+                || self
+                    .layout
+                    .interfaces
+                    .contains(&self.index.member(member).owner) =>
+            {
+                let owner = self.index.item(self.index.member(member).owner).fqn.clone();
+                return Err(WasmError::NoImplementation(alloc::format!(
+                    "{owner}.{}",
+                    self.index.member(member).name
+                )));
+            }
+            None => {
+                return Err(WasmError::NoRepresentation(
+                    self.index
+                        .item(self.index.member(member).owner)
+                        .fqn
+                        .to_string(),
+                ));
+            }
+        };
         if !is_static {
             match call.callee() {
                 Some(ast::Expr::FieldAccess(access)) => {
                     let receiver = access
                         .receiver()
                         .ok_or(WasmError::Unsupported("a call with no receiver"))?;
-                    self.expr(&receiver, insn)?;
+                    // At the *owner's* type: a receiver read through an interface, an `Object`, or a
+                    // type variable is `anyref`, and the function being called takes the struct.
+                    let target = self.layout.class_ref(self.index.member(member).owner)?;
+                    self.expr_as(&receiver, target, insn)?;
                 }
                 // A bare call in an instance method is an implicit `this` — but not necessarily
                 // *this* `this`. From a class that holds an enclosing instance the method may be an
@@ -4811,8 +5385,21 @@ impl Lowering<'_> {
                 }
             }
         }
-        for argument in &arguments {
-            self.expr(argument, insn)?;
+        // A constructor of an inner class takes the enclosing instance right after `this`, before
+        // every declared argument — which is exactly where a `new` puts it. A `super(…)` or
+        // `this(…)` reaching one is a call to that constructor and passes it too; leaving it out is
+        // a call one argument short, which the validator refuses.
+        if info.kind == DefKind::Constructor
+            && let Some(&encloses) = self.layout.inner.get(&info.owner)
+        {
+            self.enclosing_instance(None, encloses, insn)?;
+        }
+        self.push_arguments(member, &arguments, insn)?;
+        // A local or anonymous class's constructor takes its captures as *trailing* parameters, and
+        // a `this(…)` reaching one has to pass them like every other argument. They are read from
+        // the synthetic fields, which this constructor's prologue filled before its body ran.
+        if info.kind == DefKind::Constructor {
+            self.push_captures(info.owner, insn)?;
         }
         insn.call(function);
 

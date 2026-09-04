@@ -1261,29 +1261,35 @@ public class Outer {
     assert_invoke(&[source], "through_a_nested_subclass", &["5"], "12");
 }
 
-/// A type declaration this backend lays out nothing for reports *itself*.
+/// An `@interface` is laid out as the interface it is (JLS §9.6).
 ///
-/// Dropping one is what the class walk used to do to every nested declaration: the type never exists,
-/// and the first use of it reports an unresolved name pointing at nothing a reader can act on. An
-/// interface needs a dispatch mechanism (a function table or a per-type vtable struct); an `enum` and a
-/// `record` need the synthesised members the JVM backend builds. Saying which is missing is the
-/// difference between a compiler with a gap and one that looks broken.
+/// Refusing the declaration stopped every file that merely *contained* one — a sixth of this
+/// backend's own corpus — over a type nothing in the module ever calls. Its elements are abstract
+/// methods, so nothing declares a function for them, and an annotation's *use* is metadata a wasm
+/// host has no reflection to read.
 #[test]
-fn each_unrepresentable_type_declaration_names_itself() {
-    for (source, expected) in [
-        ("@interface M {}", "an `@interface` declaration"),
-        // Nested, which is where the silent drop used to happen.
-        (
-            "public class O { @interface M {} }",
-            "an `@interface` declaration",
-        ),
+fn an_annotation_type_is_laid_out_as_the_interface_it_is() {
+    // JLS §9.6: an `@interface` *is* an interface. Its elements are abstract methods, so nothing
+    // declares a function for them, and its uses are metadata a wasm host has no reflection to
+    // read — but refusing the declaration stopped every file that merely contained one.
+    for source in [
+        "@interface M {}",
+        "public class O { @interface M {} }",
+        "@interface M { int value() default 1; String name() default \"x\"; }",
     ] {
-        let error = compile(&[source]).expect_err("this declaration is not laid out yet");
-        assert!(
-            matches!(error, WasmError::Unsupported(what) if what == expected),
-            "`{source}` should report {expected:?}, got {error}"
-        );
+        compile(&[source]).unwrap_or_else(|error| panic!("`{source}`: {error}"));
     }
+
+    // And a program that carries one still runs.
+    let annotated = r"
+@interface Marked { int value() default 3; }
+
+public class Uses {
+    @Marked(7)
+    public static int run(int n) { return n + 1; }
+}
+";
+    assert_invoke(&[annotated], "run", &["4"], "5");
 }
 
 /// `{1, 2, 3}`, whose elements are written rather than defaulted.
@@ -1871,17 +1877,41 @@ public class Outer {
         ),
         "got {error}"
     );
+}
 
-    // A subclass of an inner class would place its first field on top of the synthetic one.
-    let extended = "public class O { int f; class I { int g; } class J extends I {} }";
-    let error = compile(&[extended]).expect_err("a subclass of an inner class is not laid out");
-    assert!(
-        matches!(
-            error,
-            WasmError::Unsupported("a subclass of an inner class")
-        ),
-        "got {error}"
-    );
+/// A subclass of an inner class: the synthetic enclosing instance is a field like any other.
+///
+/// wasm's declared subtyping wants a subtype's fields to extend its supertype's as a *prefix*, and a
+/// field list holding only the *declared* fields put a subclass's first field on top of its
+/// superclass's `this$0`. Recording the synthetic ones in the same list is what makes the extension
+/// a real prefix — and what turns a refusal into a module an engine runs.
+#[test]
+fn a_subclass_of_an_inner_class_extends_its_fields() {
+    let source = r"
+public class Host {
+    int base;
+
+    Host(int base) { this.base = base; }
+
+    class Inner {
+        int own;
+        Inner(int own) { this.own = own; }
+        int total() { return base + own; }
+    }
+
+    class Deeper extends Inner {
+        int extra;
+        Deeper(int own, int extra) { super(own); this.extra = extra; }
+        int all() { return total() + extra; }
+    }
+
+    public static int run(int n) {
+        Host host = new Host(100);
+        return host.new Deeper(n, 7).all();
+    }
+}
+";
+    assert_invoke(&[source], "run", &["3"], "110");
 }
 
 /// A local class — one declared inside a method body.
@@ -3045,6 +3075,304 @@ fn an_assignment_to_an_arrays_length_says_what_is_wrong() {
             error,
             WasmError::Unsupported("an assignment to an array's length")
         ),
+        "got {error}"
+    );
+}
+
+/// A call to a method nothing in the module implements is a trap, not a refusal.
+///
+/// An abstract class calling its own abstract method is ordinary Java, and so is an interface method
+/// no class in the file implements. The dispatch chain finds nothing to call — which is the point:
+/// no object carrying an implementation can exist in a module that is the whole program, so the call
+/// is dynamically unreachable and `unreachable` says exactly that. Refusing it stopped the file.
+#[test]
+fn a_call_nothing_implements_traps_rather_than_refusing() {
+    let source = r"
+interface Sink {
+    void take(int n);
+}
+
+abstract class Partial implements Sink {
+    void forward(int n) {
+        take(n);
+    }
+
+    abstract int missing();
+
+    int ask() { return missing(); }
+}
+
+public class Reachable {
+    public static int run(int n) { return n * 2; }
+}
+";
+    // It compiles and validates; the unreachable bodies are never entered.
+    assert_invoke(&[source], "run", &["21"], "42");
+
+    // And the arm is only sound while `overriders` is complete, so the discriminating case is a
+    // *reachable* call whose implementation is in another compilation unit: if the subtype relation
+    // missed the edge, this would trap where it must answer.
+    let declared = "
+public interface Answer {
+    int give(int n);
+}
+";
+    let implemented = "
+public class Doubling implements Answer {
+    public int give(int n) { return n * 2; }
+}
+
+public class Through {
+    public static int run(int n) {
+        Answer answer = new Doubling();
+        return answer.give(n);
+    }
+}
+";
+    assert_invoke(&[declared, implemented], "run", &["21"], "42");
+}
+
+/// `java.lang.Object` is represented, and it is the one library type that needs no `java.base`.
+///
+/// It is the root of Java's reference hierarchy and `anyref` is wasm's, so a value of it sits
+/// exactly where an interface-typed one does. Refusing it put every file that so much as declares an
+/// `Object` field outside the subset — over a type whose representation the target already has —
+/// and a value coming back down to a concrete type gets the `ref.cast` the JVM backend spells
+/// `checkcast`.
+#[test]
+fn an_object_is_the_top_of_the_reference_hierarchy() {
+    let source = r"
+public class Boxes {
+    static class Cell {
+        int value;
+        Cell(int value) { this.value = value; }
+    }
+
+    Object held;
+
+    static int unwrap(Object o) {
+        Cell cell = (Cell) o;
+        return cell.value;
+    }
+
+    static int through(Cell cell) {
+        Boxes box = new Boxes();
+        box.held = cell;
+        return unwrap(box.held);
+    }
+
+    public static int run(int n) {
+        return through(new Cell(n)) + 1;
+    }
+}
+";
+    assert_invoke(&[source], "run", &["41"], "42");
+}
+
+/// A variable-arity call builds the array the callee actually takes.
+///
+/// wasm has no variable arity and neither has the JVM: `f(int...)`'s parameter is an `int[]` and
+/// the call site builds it (JLS §15.12.4.2). Pushing the trailing arguments raw handed the callee
+/// two values where one array belongs, which the validator refuses — and one argument that is
+/// already an array of the right type passes straight through, since packing it would build an
+/// `int[][]`.
+#[test]
+fn a_variable_arity_call_packs_its_trailing_arguments() {
+    let source = r"
+public class Packing {
+    static int total(int first, int... rest) {
+        int sum = first;
+        for (int n : rest) {
+            sum = sum + n;
+        }
+        return sum;
+    }
+
+    static int none() { return total(1); }
+
+    static int several() { return total(1, 2, 3, 4); }
+
+    static int passthrough() {
+        int[] already = {5, 6};
+        return total(1, already);
+    }
+
+    public static int run(int n) { return none() + several() + passthrough() + n; }
+}
+";
+    assert_invoke(&[source], "run", &["0"], "23");
+}
+
+/// `new T[] { … }` is one array, not two.
+///
+/// The initialiser *is* the array — one `array.new_fixed` with the values on the stack — and
+/// reading its node as the creation's length built it twice: an `array.new_fixed` followed by an
+/// `array.new_default` consuming the result as a count, which is a reference where an `i32` belongs.
+#[test]
+fn an_array_creation_with_an_initialiser_builds_one_array() {
+    let source = r"
+public class Written {
+    static boolean[] flags;
+
+    static {
+        boolean x = false, y = true;
+        flags = new boolean[] {!x, y};
+    }
+
+    public static int run(int n) {
+        int[][] grid = new int[][] {{1, 2}, {3, 4}};
+        return (flags[0] ? 1 : 0) + (flags[1] ? 2 : 0) + grid[1][0] + n;
+    }
+}
+";
+    assert_invoke(&[source], "run", &["10"], "16");
+}
+
+/// An anonymous class whose superclass constructor takes arguments — and captures.
+///
+/// The `new` of one calls the *superclass's* constructor, so everything about that call is the
+/// superclass's: its enclosing instance, its parameters, and its captures. What the anonymous class
+/// itself holds — its own enclosing instance and its own captures — no constructor function writes,
+/// because it has none, so the `new` writes them afterwards.
+#[test]
+fn an_anonymous_class_passes_what_its_superclass_constructor_takes() {
+    let source = r"
+public class Host {
+    int base = 100;
+
+    int build(int seed) {
+        int captured = 7;
+
+        class Local {
+            int held;
+            Local(int start) { held = start + captured + base; }
+            int read() { return held; }
+        }
+
+        Local made = new Local(seed) { };
+        return made.read();
+    }
+
+    public static int run(int n) { return new Host().build(n); }
+}
+";
+    assert_invoke(&[source], "run", &["3"], "110");
+}
+
+/// Java's arrays are covariant and wasm's are invariant, so one is not the other.
+///
+/// A wasm array is mutable, and declared subtyping over it would let a write of the wrong element
+/// type through — so `(array anyref)` and `(array (ref null $x))` are unrelated and no cast relates
+/// them. Said out loud rather than emitted, because the bytes are a module no engine loads.
+#[test]
+fn a_covariant_array_assignment_is_refused() {
+    let source = r"
+public class Covariant {
+    static class Cell {}
+    static void take(Object[] any) { }
+    static void run() { take(new Cell[] { null }); }
+}
+";
+    let error = compile(&[source]).expect_err("wasm arrays are invariant");
+    assert!(
+        matches!(
+            error,
+            WasmError::Unsupported("an array where an array of another type is wanted")
+        ),
+        "got {error}"
+    );
+}
+
+/// A type variable erases to the top of the reference hierarchy, and every use comes back down.
+///
+/// JLS §4.6 erases it to its bound and to `Object` with none, and a field of type `T` is one field
+/// whatever a use instantiates it at — so `anyref` is the representation, exactly as it is for an
+/// `Object` and for an interface. What that costs is a `ref.cast` at each use, which is what the
+/// JVM backend spells `checkcast`: a receiver, an argument, a `return`, and a store all narrow.
+#[test]
+fn a_type_variable_is_erased_and_cast_back() {
+    let source = r"
+class Cell {
+    int value;
+    Cell(int value) { this.value = value; }
+    int read() { return value; }
+}
+
+class Holder<T extends Cell> {
+    T held;
+
+    void put(T value) { held = value; }
+
+    T get() { return held; }
+
+    int through(T value) { return value.read(); }
+}
+
+public class Generic {
+    public static int run(int n) {
+        Holder<Cell> holder = new Holder<Cell>();
+        holder.put(new Cell(n));
+        Cell back = holder.get();
+        return back.read() + holder.through(new Cell(1));
+    }
+}
+";
+    assert_invoke(&[source], "run", &["41"], "42");
+}
+
+/// A cast to a type variable erases to nothing here.
+///
+/// JLS §5.5 erases it to the variable's bound, and the bound is `Object` unless declared — the top
+/// of the reference hierarchy, which every reference already is. Resolving the written name instead
+/// reported `T` as an unresolved *type*, which is a report about a type the source declared.
+#[test]
+fn a_cast_to_a_type_variable_erases() {
+    let source = r"
+class Cell {
+    int value;
+    Cell(int value) { this.value = value; }
+}
+
+class Unchecked<T extends Cell> {
+    int through(Object o) {
+        T narrowed = (T) o;
+        return narrowed.value;
+    }
+}
+
+public class Erased {
+    public static int run(int n) {
+        return new Unchecked<Cell>().through(new Cell(n));
+    }
+}
+";
+    assert_invoke(&[source], "run", &["42"], "42");
+}
+
+/// A primitive where a reference is wanted needs a *wrapper*, which is a library type.
+///
+/// Erasure is what makes it common rather than exotic: a type variable is `anyref` here, so
+/// `Holder<Integer>.put(1)` puts an `i32` where a reference belongs. It is reported as the
+/// `java.lang` type it needs — the same answer every other unrepresentable type gets — rather than
+/// as a gap in this backend, because a boxing conversion is not one.
+#[test]
+fn a_boxing_conversion_names_the_wrapper_it_needs() {
+    let source = r"
+class Holder<T> {
+    T held;
+    void put(T value) { held = value; }
+}
+
+public class Boxing {
+    public static void run() {
+        Holder<Integer> holder = new Holder<Integer>();
+        holder.put(1);
+    }
+}
+";
+    let error = compile(&[source]).expect_err("a wasm host has no `java.lang.Integer`");
+    assert!(
+        matches!(error, WasmError::NoRepresentation(ref what) if what == "java.lang.Integer"),
         "got {error}"
     );
 }

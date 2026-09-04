@@ -27,8 +27,8 @@ use alloc::vec::Vec;
 use core::ops::Range;
 
 use jals_syntax::SyntaxKind::{
-    CALL_EXPR, CONSTRUCTOR_DECL, INITIALIZER, LAMBDA_EXPR, METHOD_DECL, NEW_EXPR, THROW_STMT,
-    TRY_STMT,
+    CALL_EXPR, CLASS_BODY, CONSTRUCTOR_DECL, INITIALIZER, LAMBDA_EXPR, METHOD_DECL, NEW_EXPR,
+    THROW_STMT, TRY_STMT,
 };
 use jals_syntax::SyntaxNode;
 use jals_syntax::ast::{self, AstNode};
@@ -163,6 +163,18 @@ impl Cx<'_> {
         }
     }
 
+    /// How many precise-rethrow narrowings may nest before the answer falls back to the written
+    /// arms.
+    ///
+    /// **One**, which is not a compromise but the whole rule: §11.2.2 narrows a rethrow to what its
+    /// *own* `try` block raises, and a rethrow met while walking that block is answered with the
+    /// arms **its** clause wrote — a sound upper bound, and the same answer the walk already falls
+    /// back to when it learns nothing. Recursing instead re-walks the inner block once per outer
+    /// node, and the cost compounds: twelve nested `try { … } catch (E e) { throw e; }` answered in
+    /// 0.1 s, twenty-two took 42, and a bound of eight still took 7. Every runtime here is
+    /// current-thread, so that is the editor wedged rather than one slow request.
+    const RETHROW_DEPTH: usize = 1;
+
     /// The indexed types named in `decl`'s `throws` clause (unresolvable names dropped).
     fn declared_throws(&self, decl: &SyntaxNode) -> Vec<ItemId> {
         ProjectIndex::throws_clause_types(decl)
@@ -174,12 +186,30 @@ impl Cx<'_> {
     /// of the `throws` of a call / `new`'s bindable overloads. Empty when the node is not a source or
     /// nothing is provably raised.
     fn raised_at(&self, node: &SyntaxNode) -> Vec<ItemId> {
+        self.raised_within(node, Self::RETHROW_DEPTH)
+    }
+
+    /// [`raised_at`](Self::raised_at), carrying how many precise-rethrow narrowings are already on
+    /// the stack.
+    ///
+    /// The narrowing walks its `try` block and asks this about every node in it, and a nested
+    /// rethrow asks again about the block inside — so `n` nested `try { … } catch (E e) { throw e; }`
+    /// re-walk each other exponentially. Measured, not feared: twelve levels answered in 0.1 s and
+    /// twenty-two took 42, on one current-thread runtime, which is the editor wedged rather than one
+    /// slow request. Bounded like [`Hierarchy::inherited_field`]'s walk, and past the bound the
+    /// answer is the arms the source wrote — the same upper bound a walk that learns nothing already
+    /// falls back to, so the shape of the answer does not change with the depth, only its precision.
+    fn raised_within(&self, node: &SyntaxNode, depth: usize) -> Vec<ItemId> {
         match node.kind() {
-            THROW_STMT => ast::ThrowStmt::cast(node.clone())
-                .and_then(|t| t.expr())
-                .and_then(|e| self.expr_item(e.syntax()))
-                .into_iter()
-                .collect(),
+            THROW_STMT => {
+                let Some(thrown) = ast::ThrowStmt::cast(node.clone()).and_then(|t| t.expr()) else {
+                    return Vec::new();
+                };
+                // Precise rethrow first (JLS §11.2.2), because the parameter's own type is the
+                // wrong answer for it.
+                self.rethrown_arms(&thrown, depth)
+                    .unwrap_or_else(|| self.expr_item(thrown.syntax()).into_iter().collect())
+            }
             CALL_EXPR => ast::CallExpr::cast(node.clone())
                 .map(|call| self.call_throws(&call))
                 .unwrap_or_default(),
@@ -301,6 +331,148 @@ impl Cx<'_> {
     /// The indexed item an expression's inferred type denotes, if it is a project/stub/classpath type.
     fn expr_item(&self, expr: &SyntaxNode) -> Option<ItemId> {
         self.ti.type_of_expr(Collect::node_span(expr))?.project_id()
+    }
+
+    /// The exception types a `throw e;` propagates when `e` is the `catch` parameter of an enclosing
+    /// clause — its **arms**, not its own type (JLS §11.2.2's precise rethrow). `None` when the
+    /// statement is not that shape, in which case the thrown expression's type is the answer.
+    ///
+    /// It matters most for a **multi-catch**, whose parameter's type is the *lub* of its arms:
+    /// `catch (RuntimeException | Error e) { throw e; }` rethrows two unchecked exceptions and the
+    /// lub of them is `Throwable`, which is checked. Reading the parameter's type there asks a
+    /// method to declare `throws Throwable` for a rethrow that can raise neither — the diagnostic
+    /// this rule was added to Java 7 to prevent, alongside multi-catch itself.
+    ///
+    /// The parameter must be **effectively final**: an assignment to it takes the rule away, because
+    /// what it then holds is anything of its declared type. That is the whole of §11.2.2's
+    /// precondition, and it is checked here rather than assumed.
+    ///
+    /// Matched by name against the enclosing clause rather than through the resolver — JLS §14.20
+    /// forbids shadowing a `catch` parameter inside its own block — but **only up to the enclosing
+    /// declaration space**. That rule governs locals and parameters of the same method; a *class*
+    /// written inside the catch block is a new declaration space and may legally declare a field, a
+    /// parameter, or a local of the name. `catch (IOException e) { … new R() { RuntimeException e =
+    /// …; public void run() { throw e; } } … }` is a program javac compiles, and reading the outer
+    /// clause's arms for it reported an `IOException` nothing can raise. A `CLASS_BODY` is where the
+    /// walk stops, because a class body is what every one of those shapes needs.
+    fn rethrown_arms(&self, thrown: &ast::Expr, depth: usize) -> Option<Vec<ItemId>> {
+        let ast::Expr::NameRef(name) = thrown else {
+            return None;
+        };
+        let name = Collect::first_ident_token(name.syntax())?;
+        let name = jals_syntax::decoded_ident(&name);
+        let clause = thrown
+            .syntax()
+            .ancestors()
+            .take_while(|ancestor| ancestor.kind() != CLASS_BODY)
+            .find_map(|ancestor| {
+                let clause = ast::CatchClause::cast(ancestor)?;
+                let binding = clause.binding()?;
+                (jals_syntax::decoded_ident(&binding) == name).then_some(clause)
+            })?;
+        if Self::reassigns(&clause, &name) {
+            return None;
+        }
+        let arms: Vec<ItemId> = clause
+            .syntax()
+            .children()
+            .filter_map(ast::Type::cast)
+            .filter_map(|ty| self.resolve_type(&ty))
+            .collect();
+        Some(self.narrowed_to_the_block(&clause, &arms, depth))
+    }
+
+    /// §11.2.2's actual answer: not the written arms, but **what the `try` block can raise** that
+    /// this clause is the one to catch.
+    ///
+    /// The arms are an upper bound the source wrote, and the rule exists precisely to improve on it.
+    /// `class MyEx extends IOException {}` with `try { throw new MyEx(); } catch (IOException e) {
+    /// throw e; }` needs `throws MyEx` and no more — javac compiles it — while the written arm says
+    /// `IOException` and reported a method that declared exactly what it raises. An exception a
+    /// *preceding* clause already catches is not this one's either.
+    ///
+    /// **A walk that finds nothing falls back to the arms**, and that is not the conservative
+    /// direction it looks like. `raised_at` answers nothing for a call it cannot resolve, and in the
+    /// stub configuration — which is what `jals lint` and the LSP run in — most library calls do not
+    /// resolve: `try { in.read(); } catch (IOException e) { throw e; }` would report nothing at all,
+    /// and a call is the *primary* rethrow shape. So an empty walk is read as "the analysis saw
+    /// nothing", which on valid input is the only thing it can mean — JLS §11.2.3 makes a `catch` of
+    /// a checked type the block cannot throw a compile error, so a clause that exists has something
+    /// to catch.
+    ///
+    /// Falling back to the arms does not undo what this rule was added for: the multi-catch defect
+    /// was the parameter's **lub** (`RuntimeException | Error` is `Throwable`, which is checked),
+    /// never the arms, and a fallback to those two arms still reports neither. What it does keep is
+    /// the pre-existing over-report on `catch (Exception e) { throw e; }` over a block whose raise
+    /// the analysis could not see — the same answer that shape got before this rule existed.
+    fn narrowed_to_the_block(
+        &self,
+        clause: &ast::CatchClause,
+        arms: &[ItemId],
+        depth: usize,
+    ) -> Vec<ItemId> {
+        if depth == 0 {
+            return arms.to_vec();
+        }
+        let Some(try_stmt) = clause.syntax().parent().and_then(ast::TryStmt::cast) else {
+            return arms.to_vec();
+        };
+        // The clauses written before this one, whose catches are not this one's to rethrow.
+        let preceding: Vec<ItemId> = try_stmt
+            .catches()
+            .take_while(|earlier| earlier.syntax() != clause.syntax())
+            .flat_map(|earlier| earlier.types().collect::<Vec<_>>())
+            .filter_map(|ty| self.resolve_type(&ty))
+            .collect();
+        let mut out = Vec::new();
+        for source in try_stmt.syntax().descendants() {
+            if !Self::guards(&try_stmt, &source) {
+                continue; // in a `catch` or `finally`, not the protected region.
+            }
+            for raised in self.raised_within(&source, depth - 1) {
+                if !arms.iter().any(|&arm| self.index.is_subtype(raised, arm)) {
+                    continue; // this clause does not catch it.
+                }
+                if preceding
+                    .iter()
+                    .any(|&earlier| self.index.is_subtype(raised, earlier))
+                {
+                    continue; // an earlier clause does.
+                }
+                // An inner `try` inside the block may already handle it, and a raise inside a
+                // lambda or a local class's method belongs to that boundary rather than to this one.
+                if self.handled_by_catch(&source, try_stmt.syntax(), raised) {
+                    continue;
+                }
+                if Self::nearest_throws_boundary(&source)
+                    .is_some_and(|boundary| try_stmt.syntax().descendants().any(|n| n == boundary))
+                {
+                    continue;
+                }
+                if !out.contains(&raised) {
+                    out.push(raised);
+                }
+            }
+        }
+        if out.is_empty() {
+            return arms.to_vec();
+        }
+        out
+    }
+
+    /// Whether anything in `clause` assigns to `name`, which is what takes a `catch` parameter out of
+    /// being effectively final.
+    fn reassigns(clause: &ast::CatchClause, name: &str) -> bool {
+        clause
+            .syntax()
+            .descendants()
+            .filter_map(ast::AssignmentExpr::cast)
+            .filter_map(|assignment| assignment.syntax().children().find_map(ast::Expr::cast))
+            .filter_map(|target| match target {
+                ast::Expr::NameRef(target) => Collect::first_ident_token(target.syntax()),
+                _ => None,
+            })
+            .any(|token| jals_syntax::decoded_ident(&token) == name)
     }
 
     /// Resolve an AST type reference (a `throws` / `catch` type) to an indexed item, honouring whether

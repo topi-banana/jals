@@ -43,8 +43,38 @@ fn compile(source: &str) -> Result<Vec<CompiledClass>, LowerError> {
     Compile::file(typed, MAJOR_JAVA_25)
 }
 
+/// Compile the *last* of `sources` as part of a project holding all of them.
+///
+/// A file declares one package, so a rule about crossing a package boundary needs two — and this is
+/// the smallest thing that gives one: the other files are indexed and only the last is lowered,
+/// exactly as a project build compiles one file at a time against the whole index.
+fn compile_across(sources: &[&str]) -> Result<Vec<CompiledClass>, LowerError> {
+    let roots: Vec<(FileId, jals_syntax::SyntaxNode)> = sources
+        .iter()
+        .enumerate()
+        .map(|(index, text)| {
+            (
+                FileId(u32::try_from(index).expect("file id")),
+                jals_exec::block_on_inline(jals_syntax::Parse::parse(text)).syntax(),
+            )
+        })
+        .collect();
+    let index = jals_exec::block_on_inline(ProjectIndex::builder(&roots).with_stdlib().build());
+    let last = FileId(u32::try_from(sources.len() - 1).expect("file id"));
+    let analysis = jals_exec::block_on_inline(FileAnalysis::of(&roots[sources.len() - 1].1));
+    let semantics = analysis.in_project(&index, last);
+    let typed = jals_exec::block_on_inline(semantics.typed());
+    Compile::file(typed, MAJOR_JAVA_25)
+}
+
 /// Compile `source`, run its `main` class on a real JVM, and return stdout.
 fn run(source: &str, main_class: &str) -> String {
+    run_with(source, main_class, &[])
+}
+
+/// [`run`] with extra JVM options — `-ea` for a fixture whose subject is an `assert`, which is
+/// otherwise never evaluated and so never builds the `AssertionError` the test is about.
+fn run_with(source: &str, main_class: &str, options: &[&str]) -> String {
     let classes = compile(source).unwrap_or_else(|error| panic!("compile: {error}"));
     let directory = tempfile::tempdir().expect("temp dir");
     for class in &classes {
@@ -62,6 +92,7 @@ fn run(source: &str, main_class: &str) -> String {
         // fixed path per process id — a recycled one makes the second JVM print a warning onto the
         // stdout a test is comparing.
         .arg("-XX:-UsePerfData")
+        .args(options)
         .arg("-cp")
         .arg(directory.path())
         .arg(main_class)
@@ -692,8 +723,10 @@ public class Outer {
         listed,
         [
             ("Counter".to_owned(), 0x0008),
-            // An interface entry keeps `ACC_INTERFACE | ACC_ABSTRACT` and gains no `ACC_SUPER`.
-            ("Named".to_owned(), 0x0200 | 0x0400),
+            // An interface entry keeps `ACC_INTERFACE | ACC_ABSTRACT`, gains no `ACC_SUPER`, and is
+            // `ACC_STATIC` without writing the word: a member interface is implicitly `static`
+            // (JLS §9.5), and this entry is the only place that can be recorded.
+            ("Named".to_owned(), 0x0200 | 0x0400 | 0x0008),
             ("Person".to_owned(), 0x0008),
         ]
     );
@@ -6024,4 +6057,1060 @@ fn an_assignment_to_an_arrays_length_says_what_is_wrong() {
         ),
         "got {error}"
     );
+}
+
+/// A loop whose condition is the constant `true` has no test and no forward branch.
+///
+/// JLS §14.21 makes the statement after `while (true)` unreachable, so javac emits no conditional
+/// at all and the method simply ends with the back edge. Emitting the test anyway left a branch to
+/// an offset past the last instruction — which the verifier reports as *control flow falls through
+/// code end*, or, once a frame is required there, as a `StackMapTable` offset on no instruction.
+/// All three loop forms spell the same loop and all three are checked, because each emits its own
+/// branch.
+#[test]
+fn a_constant_loop_condition_emits_no_exit_branch() {
+    let source = r#"
+public class Forever {
+    static String whileTrue() {
+        int n = 0;
+        while (true) {
+            n++;
+            if (n > 2) return "while " + n;
+        }
+    }
+
+    static String doTrue() {
+        int n = 0;
+        do {
+            n++;
+            if (n > 3) return "do " + n;
+        } while (true);
+    }
+
+    static String forTrue() {
+        int n = 0;
+        for (; true; n++) {
+            if (n > 4) return "for " + n;
+        }
+    }
+
+    static String broken() {
+        while (true) {
+            break;
+        }
+        return "broke";
+    }
+
+    public static void main(String[] args) {
+        System.out.println(whileTrue());
+        System.out.println(doTrue());
+        System.out.println(forTrue());
+        System.out.println(broken());
+    }
+}
+"#;
+    let classes = compile(source).expect("compile");
+    let class =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(classes[0].bytes.as_slice()))
+            .expect("reparse");
+    // A loop with no `break` has no exit at all, so the last instruction is the back edge and
+    // nothing can fall out past it. The forward branch this used to emit landed *at* the code
+    // length, which is where the two verifier reports come from.
+    let last = |name: &str| {
+        let method = class
+            .methods
+            .iter()
+            .find(|method| {
+                class
+                    .constant_pool
+                    .utf8(method.name_index)
+                    .is_some_and(|written| written == name)
+            })
+            .unwrap_or_else(|| panic!("no method {name}"));
+        method
+            .attributes
+            .iter()
+            .find_map(|attribute| match &attribute.body {
+                jals_classfile::AttributeBody::Code(code) => code.code.last().cloned(),
+                _ => None,
+            })
+            .expect("a body")
+    };
+    for name in ["whileTrue", "doTrue", "forTrue"] {
+        assert!(
+            matches!(
+                last(name),
+                jals_classfile::Instruction::Goto(_) | jals_classfile::Instruction::GotoW(_)
+            ),
+            "`{name}` ends with its back edge, not with a branch past the code end: {:?}",
+            last(name)
+        );
+    }
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Forever"), "while 3\ndo 4\nfor 5\nbroke\n");
+}
+
+/// A member type of an interface is implicitly `static`, and so is a member interface, `enum`, or
+/// `record` anywhere (JLS §8.5.1, §9.5).
+///
+/// Two records have to say so and they are derived once: the type's own access flags, and the
+/// `InnerClasses` entry that is the *only* place `ACC_STATIC` can live for a nested type. Reading
+/// the `static` keyword alone gave `interface I { class C {} }` an enclosing instance, so `C`'s
+/// constructor took an `I` that `new I.C()` in a `static` method had nothing to pass.
+#[test]
+fn a_member_type_of_an_interface_is_implicitly_static() {
+    let source = r#"
+interface Holder {
+    class Boxed {
+        int value;
+        Boxed(int value) { this.value = value; }
+        int doubled() { return value * 2; }
+    }
+
+    Object ANON = new Object() {
+        public String toString() { return "anon"; }
+    };
+}
+
+public class Implicit {
+    public static void main(String[] args) {
+        System.out.println(new Holder.Boxed(21).doubled());
+        System.out.println(Holder.ANON.toString());
+    }
+}
+"#;
+    let classes = compile(source).expect("compile");
+    let boxed = classes
+        .iter()
+        .find(|class| class.internal_name == "Holder$Boxed")
+        .expect("the member class");
+    let class = jals_exec::block_on_inline(jals_classfile::ClassFile::read(boxed.bytes.as_slice()))
+        .expect("reparse");
+    // No enclosing instance means no synthetic field and a constructor of exactly the declared
+    // parameters.
+    assert!(
+        class.fields.iter().all(|field| {
+            class
+                .constant_pool
+                .utf8(field.name_index)
+                .is_some_and(|name| name != "this$0")
+        }),
+        "a member class of an interface holds no enclosing instance"
+    );
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Implicit"), "42\nanon\n");
+}
+
+/// A constructor may run statements *before* its explicit `super(…)` — JEP 447, final in Java 25.
+///
+/// The delegation used to be the body's first statement or nowhere, so a body that put anything
+/// ahead of it was read as having none: the implicit `super()` prologue was emitted **as well as**
+/// the explicit call the body still contained, and `Object.<init>` ran twice on one object. What the
+/// prologue may not do is touch `this`, which is `uninitializedThis` across all of it — so a local
+/// class declared there holds no enclosing instance, exactly as one declared in a `static` method
+/// does.
+#[test]
+fn a_constructor_may_run_statements_before_its_delegation() {
+    let source = r#"
+public class Early {
+    static StringBuilder log = new StringBuilder();
+
+    static class Base {
+        Base(int n) { log.append("base").append(n); }
+    }
+
+    static class Derived extends Base {
+        final int kept;
+
+        Derived(int n) {
+            log.append("pre");
+            int doubled = n * 2;
+            super(doubled);
+            this.kept = doubled;
+            log.append("post").append(kept);
+        }
+    }
+
+    public static void main(String[] args) {
+        Derived d = new Derived(3);
+        System.out.println(log + " " + d.kept);
+    }
+}
+"#;
+    let classes = compile(source).expect("compile");
+    let derived = classes
+        .iter()
+        .find(|class| class.internal_name == "Early$Derived")
+        .expect("the subclass");
+    let class =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(derived.bytes.as_slice()))
+            .expect("reparse");
+    let constructor = class
+        .methods
+        .iter()
+        .find(|method| {
+            class
+                .constant_pool
+                .utf8(method.name_index)
+                .is_some_and(|name| name == "<init>")
+        })
+        .expect("the constructor");
+    // Exactly one `<init>` call: the delegation the source wrote. A second is the implicit prologue
+    // the body already replaced.
+    let initialisations = constructor
+        .attributes
+        .iter()
+        .filter_map(|attribute| match &attribute.body {
+            jals_classfile::AttributeBody::Code(code) => Some(&code.code),
+            _ => None,
+        })
+        .flatten()
+        .filter(|instruction| matches!(instruction, jals_classfile::Instruction::InvokeSpecial(_)))
+        .count();
+    assert_eq!(initialisations, 1, "one `<init>` call, not two");
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Early"), "prebase6post6 6\n");
+}
+
+/// A lambda that reads the enclosing instance becomes a `private` **instance** method, and the call
+/// site passes `this` as the first captured argument.
+///
+/// `LambdaMetafactory` takes the receiver of an instance-method handle as the leading captured
+/// argument, so a lambda captures `this` exactly the way it captures a local. Emitting every body
+/// as a `static` method instead is what made an unqualified field read or an instance call inside
+/// one report `` `this` in a `static` method ``.
+#[test]
+fn a_lambda_captures_the_enclosing_instance_it_reads() {
+    let source = "
+public class Capture {
+    interface Sink { int get(); }
+
+    int field = 10;
+
+    int scaled() { return field * 2; }
+
+    Sink instanceLambda() {
+        int local = 5;
+        return () -> scaled() + field + local;
+    }
+
+    static Sink staticLambda() {
+        int local = 7;
+        return () -> local * 3;
+    }
+
+    public static void main(String[] args) {
+        System.out.println(new Capture().instanceLambda().get());
+        System.out.println(staticLambda().get());
+    }
+}
+";
+    let classes = compile(source).expect("compile");
+    let class =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(classes[0].bytes.as_slice()))
+            .expect("reparse");
+    let statics: Vec<bool> = class
+        .methods
+        .iter()
+        .filter(|method| {
+            class
+                .constant_pool
+                .utf8(method.name_index)
+                .is_some_and(|name| name.starts_with("lambda$"))
+        })
+        .map(|method| method.access_flags.is_static())
+        .collect();
+    assert_eq!(statics.len(), 2, "one synthetic method per lambda");
+    // The one that reads `this` is an instance method; the one that reads only a local stays static.
+    assert_eq!(statics, [false, true]);
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Capture"), "35\n21\n");
+}
+
+/// A bound method reference's qualifier is any expression, not only a local.
+///
+/// JLS §15.13.3 evaluates it once, when the method reference expression is evaluated — which is the
+/// call site, so it is lowered there. Reading it as a local instead reported `this::m`,
+/// `System.err::println`, and `supplier.get()::m` alike as *a qualifier that is no local*, which
+/// was the single largest gap in the corpus.
+#[test]
+fn a_bound_method_reference_takes_any_qualifier() {
+    let source = r#"
+public class Bound {
+    interface Sink { String get(); }
+
+    static class Box {
+        final String held;
+        Box(String held) { this.held = held; }
+        String held() { return held; }
+        Box self() { return this; }
+    }
+
+    String name = "own";
+
+    String own() { return name; }
+
+    Sink viaThis() { return this::own; }
+
+    static Sink viaCall(Box box) { return box.self()::held; }
+
+    static Sink viaNew() { return new Box("fresh")::held; }
+
+    public static void main(String[] args) {
+        System.out.println(new Bound().viaThis().get());
+        System.out.println(viaCall(new Box("called")).get());
+        System.out.println(viaNew().get());
+    }
+}
+"#;
+    if !java_available() {
+        compile(source).expect("compile");
+        return;
+    }
+    assert_eq!(run(source, "Bound"), "own\ncalled\nfresh\n");
+}
+
+/// `Outer.this` reaches a lexically enclosing instance, and `Outer.super` reads the field it hides.
+///
+/// Neither is a member access — the access carries the keyword where a field name would be — so the
+/// member path reported an *empty* name for both. The walk out through `this$0` is the one an
+/// unqualified member of that class already takes; what is different is that the target is written
+/// in the source rather than derived from where a member resolved.
+#[test]
+fn a_qualified_this_reaches_the_enclosing_instance() {
+    let source = "
+public class Qualified {
+    int value = 1;
+
+    class Inner {
+        int value = 2;
+
+        class Deeper {
+            int value = 3;
+
+            String all() {
+                return value + \" \" + Inner.this.value + \" \" + Qualified.this.value;
+            }
+        }
+    }
+
+    public static void main(String[] args) {
+        Qualified outer = new Qualified();
+        Inner middle = outer.new Inner();
+        System.out.println(middle.new Deeper().all());
+    }
+}
+";
+    if !java_available() {
+        compile(source).expect("compile");
+        return;
+    }
+    assert_eq!(run(source, "Qualified"), "3 2 1\n");
+}
+
+/// A qualified `super` **call** is refused rather than compiled as a virtual one.
+///
+/// `Outer.super.m()` names one body in particular and is not dispatched, and no `invokespecial`
+/// reaches it: JVMS §6.5 lets that name only the direct superclass or a direct superinterface, and
+/// `Outer`'s superclass is neither of the compiled class's. Emitting the enclosing instance and an
+/// `invokevirtual` is the same bytes calling the override the source wrote `super` to avoid — a
+/// program that runs and answers wrongly, which is the one outcome a refusal is better than.
+#[test]
+fn a_qualified_super_call_is_refused() {
+    let source = "
+class Base { String who() { return \"base\"; } }
+public class Outer extends Base {
+    public String who() { return \"outer\"; }
+    class Inner {
+        String ask() { return Outer.super.who(); }
+    }
+}
+";
+    let error = compile(source).expect_err("a qualified `super` call has no handle");
+    assert!(
+        matches!(error, LowerError::Unsupported("a qualified `super` call")),
+        "got {error}"
+    );
+}
+
+/// A lambda inside a lambda: every call site is planned before any body is lowered.
+///
+/// `s.submit(() -> run(() -> {}))` is the ordinary shape, and lowering the outer body as soon as it
+/// was planned reached the inner lambda before its `invokedynamic` existed — reported as *a lambda
+/// outside a class body*, which is a sentence about a lambda that is very much inside one.
+#[test]
+fn a_lambda_may_contain_another() {
+    let source = "
+public class Nested {
+    interface Run { void go(); }
+    static String log = \"\";
+
+    static void take(Run run) { run.go(); }
+
+    static void twice(Run run) {
+        // The inner lambda is written inside the outer one's body, so its call site has to exist
+        // before that body is lowered.
+        take(() -> {
+            run.go();
+            take(() -> log = log + \"!\");
+        });
+    }
+
+    public static void main(String[] args) {
+        String tag = \"t\";
+        twice(() -> log = log + tag);
+        System.out.println(log);
+    }
+}
+";
+    if !java_available() {
+        compile(source).expect("compile");
+        return;
+    }
+    assert_eq!(run(source, "Nested"), "t!\n");
+}
+
+/// An `enum` constant is a value of its own enum, wherever it is named.
+///
+/// The constant writes no type and is not a field declaration, so nothing else could supply one:
+/// a bare constant inside its own enum had no type at all, and a call taking one had no argument
+/// type to select an overload against. The nested-enum spelling — `Outer.Kind.ERROR`, whose
+/// qualifier is a field access rather than a name — is the same claim from the other side, and is
+/// pinned in `jals-hir`'s own inference tests where a nested type needs no classpath to exist.
+#[test]
+fn an_enum_constant_is_a_value_of_its_enum() {
+    let source = "
+enum Colour {
+    RED { public String toString() { return \"crimson\"; } },
+    GREEN;
+
+    String pretty() { return toString(); }
+}
+
+public class Constants {
+    public static void main(String[] args) {
+        System.out.println(Colour.RED.pretty());
+        System.out.println(Colour.GREEN.pretty());
+    }
+}
+";
+    if !java_available() {
+        compile(source).expect("compile");
+        return;
+    }
+    assert_eq!(run(source, "Constants"), "crimson\nGREEN\n");
+}
+
+/// A `String` literal has the *indexed* `java.lang.String` type, not a name.
+///
+/// An external type is assignable to every project type by design — it might be an unindexed
+/// project type — so typing the literal by name alone made every one-argument overload applicable
+/// to `f("")` and left declaration order to pick the winner. `PrintStream(OutputStream)` is
+/// declared before `PrintStream(String)`, and `super("")` compiled to the first of them: a class
+/// file whose `invokespecial` the verifier refuses.
+///
+/// Checked here rather than only in `jals-hir` because the claim is about a *classpath* type, and
+/// this is the crate whose tests have one.
+#[test]
+fn a_string_literal_selects_the_string_overload() {
+    let source = r#"
+public class Choosing {
+    static String pick(Object o) { return "object"; }
+    static String pick(String s) { return "string"; }
+    static String pick(StringBuilder b) { return "builder"; }
+
+    public static void main(String[] args) {
+        System.out.println(pick("x"));
+        System.out.println(pick("a" + "b"));
+        System.out.println(pick(new StringBuilder()));
+    }
+}
+"#;
+    if !java_available() {
+        compile(source).expect("compile");
+        return;
+    }
+    assert_eq!(run(source, "Choosing"), "string\nstring\nbuilder\n");
+}
+
+/// An array's `clone()` names the array as its owner and casts the covariant return back.
+///
+/// JLS §10.7 gives every array a `public T[] clone()` that no declaration anywhere holds, so the
+/// index resolves the name to `Object.clone()` — whose descriptor returns `Object`. javac names the
+/// *array* type as the `CONSTANT_Class` owner, keeps `Object`'s descriptor (that is the method the
+/// JVM resolves), and puts the array type back with a `checkcast`. Emitting `Object.clone()` alone
+/// left an `Object` in a local the verifier had already typed as the array.
+#[test]
+fn an_array_clone_keeps_the_array_type() {
+    let source = "
+public class Cloning {
+    public static void main(String[] args) {
+        int[] numbers = {1, 2, 3};
+        int[] copy = numbers.clone();
+        copy[0] = 9;
+        String[] names = {\"a\", \"b\"};
+        String[] also = names.clone();
+        System.out.println(numbers[0] + \" \" + copy[0] + \" \" + also[1] + \" \" + also.length);
+    }
+}
+";
+    if !java_available() {
+        compile(source).expect("compile");
+        return;
+    }
+    assert_eq!(run(source, "Cloning"), "1 9 b 2\n");
+}
+
+/// A nest: one top-level type and everything declared inside it, which is how `private` is reached.
+///
+/// JVMS §5.4.4 grants a nestmate access to another's `private` members and grants it to nobody
+/// else, so without the `NestHost` / `NestMembers` attributes a nested class calling its outer
+/// class's `private` method is an `IllegalAccessError` at run time — a class file that loads,
+/// verifies, and then refuses the call. javac has emitted them for every nested type since Java 11.
+///
+/// The call itself is `invokevirtual`, not `invokespecial`: that one may name only the current
+/// class, a superclass, or a direct superinterface (JVMS §6.5), so a nestmate's body is reached by
+/// resolution rather than by naming.
+#[test]
+fn a_nest_reaches_its_members_private_declarations() {
+    let source = r#"
+public class Nest {
+    private int seed = 7;
+
+    private static String label() { return "outer"; }
+
+    private int doubled() { return seed * 2; }
+
+    static class Inner {
+        String read(Nest host) { return label() + " " + host.seed + " " + host.doubled(); }
+    }
+
+    interface Job { String run(); }
+
+    String anonymous() {
+        Job job = new Job() {
+            public String run() { return label() + "/" + doubled(); }
+        };
+        return job.run();
+    }
+
+    public static void main(String[] args) {
+        Nest host = new Nest();
+        System.out.println(new Inner().read(host));
+        System.out.println(host.anonymous());
+    }
+}
+"#;
+    let classes = compile(source).expect("compile");
+    let host =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(classes[0].bytes.as_slice()))
+            .expect("reparse");
+    let members = host
+        .attributes
+        .iter()
+        .find_map(|attribute| match &attribute.body {
+            jals_classfile::AttributeBody::NestMembers { classes } => Some(classes.len()),
+            _ => None,
+        })
+        .expect("the host lists its members");
+    // `Inner`, `Job`, and the anonymous body — the nest is lexical, so all three are in it.
+    assert_eq!(members, 3);
+    let nested = jals_exec::block_on_inline(jals_classfile::ClassFile::read(
+        classes
+            .iter()
+            .find(|class| class.internal_name == "Nest$Inner")
+            .expect("the nested class")
+            .bytes
+            .as_slice(),
+    ))
+    .expect("reparse");
+    assert!(
+        nested.attributes.iter().any(|attribute| matches!(
+            attribute.body,
+            jals_classfile::AttributeBody::NestHost { .. }
+        )),
+        "a member points back at its host"
+    );
+
+    if !java_available() {
+        return;
+    }
+    assert_eq!(run(source, "Nest"), "outer 7 14\nouter/14\n");
+}
+
+/// `this` inside an anonymous class body is that class, not the one the `new` was written in.
+///
+/// An anonymous body is a type of its own, and reading past it typed `this` as the outer class —
+/// so `test(this)` against `test(Outer)` / `test(Base)` selected the first, which is a call the
+/// verifier refuses and, where it does not, the wrong method outright. What travels with it is the
+/// lexical lookup a bare call needs: the method a bare name binds to is the innermost enclosing
+/// type's *of which it is a member* (JLS §15.12.1), which need not be the innermost type at all.
+#[test]
+fn this_in_an_anonymous_body_is_the_anonymous_class() {
+    let source = r#"
+public class Which {
+    interface Base { String run(); }
+
+    private static String test(Which w) { return "outer"; }
+
+    private static String test(Base b) { return "base"; }
+
+    private static String helper() { return "helper"; }
+
+    String pick() {
+        Base b = new Base() {
+            public String run() { return test(this) + " " + helper(); }
+        };
+        return b.run();
+    }
+
+    public static void main(String[] args) {
+        System.out.println(new Which().pick());
+    }
+}
+"#;
+    if !java_available() {
+        compile(source).expect("compile");
+        return;
+    }
+    assert_eq!(run(source, "Which"), "base helper\n");
+}
+
+/// `assert cond : detail` picks the `AssertionError` constructor the detail's *type* names.
+///
+/// JLS §14.10 selects among the eight, and passing every message to the `(Object)` one handed the
+/// constructor an `int` where a reference belongs — refused by the assembler, and had it been
+/// emitted, a class file no JVM loads. A `byte` and a `short` are already `int` on the operand
+/// stack and take the `int` constructor; `char` has one of its own.
+#[test]
+fn an_assert_message_selects_its_constructor() {
+    let source = "
+public class Detail {
+    static int count;
+
+    static void check(int mode) {
+        int n = 3;
+        long l = 4L;
+        char c = 'x';
+        Object o = \"text\";
+        assert mode != 0 : n;
+        assert mode != 1 : l;
+        assert mode != 2 : c;
+        assert mode != 3 : o;
+        assert mode != 4 : mode > 0;
+    }
+
+    public static void main(String[] args) {
+        for (int mode = 0; mode < 5; mode++) {
+            try {
+                check(mode);
+            } catch (AssertionError e) {
+                count++;
+                System.out.println(e.getMessage());
+            }
+        }
+        System.out.println(count);
+    }
+}
+";
+    // Run under `-ea`, which is the whole point: without it no `assert` is evaluated, no
+    // `AssertionError` is ever constructed, and the test passes whichever constructor was named —
+    // `(Z)V`, `(C)V` and `(I)V` are indistinguishable to the assembler, since all three take an
+    // `Integer` off the operand stack. The *messages* are what tell them apart: `(C)V` renders `x`
+    // where `(I)V` would render `120`, and `(Z)V` renders `true` where `(I)V` would render `1`.
+    compile(source).expect("compile");
+    if !java_available() {
+        return;
+    }
+    assert_eq!(
+        run_with(source, "Detail", &["-ea"]),
+        "3\n4\nx\ntext\ntrue\n5\n"
+    );
+}
+
+/// A `protected` member of a superclass in another package, reached through another instance.
+///
+/// JVMS §4.10.1.8 is stricter than JLS §6.6.1: the language permits the access anywhere in the
+/// top-level class, and the *verifier* permits it only through a reference of the accessing class's
+/// own type. So `Outer.this.finalize()` written inside `Outer`'s anonymous class is legal Java and
+/// a class file no JVM loads — javac reaches it through a synthetic `access$N` emitted in the class
+/// that may make the call. This backend synthesises no such method and says so, because a report is
+/// recoverable and a rejected class file is not.
+///
+/// What must *not* trip it is every ordinary shape: `super.clone()`, `this.clone()`, and a receiver
+/// whose type is a type variable bounded by the accessing class — the erasure is that class.
+#[test]
+fn a_protected_member_through_another_instance_is_refused() {
+    let base = "
+package base;
+
+public class Base {
+    public Base() {}
+
+    protected int secret() { return 1; }
+}
+";
+    let refused = "
+package app;
+
+import base.Base;
+
+public class Reaching extends Base {
+    int through() {
+        // The anonymous class *is* a subclass of `Base`, in another package — so the verifier
+        // admits a call to `secret()` through nothing but its own type, and the receiver here is a
+        // `Reaching`.
+        Base inner = new Base() {
+            int reach() { return Reaching.this.secret(); }
+        };
+        return 0;
+    }
+}
+";
+    let error = compile_across(&[base, refused]).expect_err("the verifier admits no such call");
+    assert!(
+        matches!(
+            error,
+            LowerError::Unsupported("a `protected` member reached through another type")
+        ),
+        "got {error}"
+    );
+
+    let allowed = "
+package app;
+
+import base.Base;
+
+public class Allowed extends Base {
+    interface Marker {}
+
+    int own() { return this.secret() + super.secret(); }
+
+    <T extends Allowed & Marker> int through(T other) { return other.secret(); }
+}
+";
+    compile_across(&[base, allowed]).expect("every ordinary shape still compiles");
+}
+
+/// A `new` expression holds two regions that belong to different types, and a lambda in the wrong
+/// one is claimed by a class whose member walk never reaches it.
+///
+/// `new Holder(() -> …) { … }` evaluates its arguments before the instance exists (JLS §15.9.4), so
+/// the lambda among them captures the *enclosing* `this` and is the enclosing class's — but asking
+/// whether a `NEW_EXPR` carries a class body answers "anonymous" from anywhere inside it, arguments
+/// included. Claimed by the anonymous class, collected by nobody, and the whole file refused. The
+/// `enum` constant is the mirror: correctly claimed by the enum, and the enum's member walk stops
+/// after the `;`.
+#[test]
+fn a_lambda_beside_an_anonymous_body_belongs_to_the_enclosing_class() {
+    let source = r#"
+        public class Beside {
+            interface Run { String go(); }
+            static abstract class Holder {
+                final Run run;
+                Holder(Run run) { this.run = run; }
+                abstract String extra();
+            }
+            String tag = "outer";
+            String build() {
+                Holder held = new Holder(() -> tag) { String extra() { return "body"; } };
+                return held.run.go() + held.extra();
+            }
+            public static void main(String[] args) {
+                System.out.println(new Beside().build());
+            }
+        }
+    "#;
+    assert!(
+        compile(source).is_ok(),
+        "a lambda in a creation's argument list belongs to the enclosing class"
+    );
+    if java_available() {
+        assert_eq!(run(source, "Beside"), "outerbody\n");
+    }
+}
+
+/// The same boundary from the other side: an `enum` constant's *arguments* are the enum's own.
+///
+/// JLS §8.9.2 evaluates them in the enum's `<clinit>`, so the lambda is the enum's — and the enum's
+/// member walk is what follows the `;`, which is not where a constant is written.
+#[test]
+fn a_lambda_in_an_enum_constant_argument_belongs_to_the_enum() {
+    let source = r#"
+        public class Constants {
+            interface Run { String go(); }
+            enum E {
+                A(() -> "a"),
+                B(() -> "b");
+                final Run run;
+                E(Run run) { this.run = run; }
+            }
+            public static void main(String[] args) {
+                System.out.println(E.A.run.go() + E.B.run.go());
+            }
+        }
+    "#;
+    let compiled = compile(source);
+    assert!(
+        compiled.is_ok(),
+        "a lambda in an `enum` constant's arguments belongs to the enum: {:?}",
+        compiled.err()
+    );
+    if java_available() {
+        assert_eq!(run(source, "Constants"), "ab\n");
+    }
+}
+
+/// An explicit `super(…)` replaces the superclass call and nothing else.
+///
+/// JLS §8.8.7.1 lets a constructor write its own delegation instead of the implicit `super()`, and
+/// that says nothing about the fields *this* class synthesised — no superclass has heard of them.
+/// Emitting only the field initialisers after such a delegation left `this$0` null and `val$x` zero:
+/// the first is a `NullPointerException` at the first unqualified outer-field read, the second is
+/// silently the wrong number.
+#[test]
+fn an_explicit_super_still_stores_the_enclosing_instance() {
+    let source = r"
+        public class Enclosing {
+            int f = 7;
+            static class Base { int b; Base(int b) { this.b = b; } }
+            class Inner extends Base {
+                Inner(int x) { super(x); }
+                int get() { return f + b; }
+            }
+            public static void main(String[] args) {
+                System.out.println(new Enclosing().new Inner(5).get());
+            }
+        }
+    ";
+    assert!(compile(source).is_ok(), "an inner class writing `super(…)`");
+    if java_available() {
+        assert_eq!(run(source, "Enclosing"), "12\n");
+    }
+}
+
+/// The capture half of the same rule, which fails without a sound: `val$n` stays zero and the
+/// program answers with it.
+#[test]
+fn an_explicit_super_still_stores_a_capture() {
+    let source = r"
+        public class Captured {
+            static class Base { int b; Base(int b) { this.b = b; } }
+            static int build(int n) {
+                class Local extends Base {
+                    Local(int x) { super(x); }
+                    int get() { return n + b; }
+                }
+                return new Local(5).get();
+            }
+            public static void main(String[] args) {
+                System.out.println(build(7));
+            }
+        }
+    ";
+    assert!(
+        compile(source).is_ok(),
+        "a capturing local class writing `super(…)`"
+    );
+    if java_available() {
+        assert_eq!(run(source, "Captured"), "12\n");
+    }
+}
+
+/// A `this(…)` in a class whose constructors carry synthetic parameters is reported, because the
+/// call would be emitted against the descriptor the *index* holds — the declaration's, which is
+/// missing them.
+///
+/// `NoSuchMethodError` for an inner class, and `StackOverflowError` for a capturing local one, whose
+/// captures are appended so `this(1)` resolves to the constructor doing the calling. A verifier
+/// catches neither, so both loaded and ran. The `enum` shape has been reported all along; these are
+/// the rest of the same rule.
+#[test]
+fn a_this_delegation_past_synthetic_parameters_is_refused() {
+    let inner = r"
+        public class Deleg {
+            int f = 7;
+            class Inner {
+                int v;
+                Inner() { this(1); }
+                Inner(int x) { v = x; }
+            }
+        }
+    ";
+    assert!(matches!(
+        compile(inner),
+        Err(LowerError::Unsupported(
+            "a `this(…)` delegation in a class with synthetic constructor parameters"
+        ))
+    ));
+    let capturing = r"
+        public class DelegLocal {
+            static int build(int n) {
+                class Local {
+                    int v;
+                    Local() { this(1); }
+                    Local(int x) { v = x + n; }
+                }
+                return new Local().v;
+            }
+        }
+    ";
+    assert!(matches!(
+        compile(capturing),
+        Err(LowerError::Unsupported(
+            "a `this(…)` delegation in a class with synthetic constructor parameters"
+        ))
+    ));
+    // A class with no synthetic parameters is unaffected: the index descriptor is the emitted one.
+    let plain = r"
+        public class Plain {
+            int v;
+            Plain() { this(1); }
+            Plain(int x) { v = x; }
+            public static void main(String[] args) { System.out.println(new Plain().v); }
+        }
+    ";
+    assert!(compile(plain).is_ok());
+    if java_available() {
+        assert_eq!(run(plain, "Plain"), "1\n");
+    }
+}
+
+/// A nested type's own `access_flags` and its `InnerClasses` entry answer *different* questions, and
+/// both were being answered with the entry's.
+///
+/// JVMS §4.1 gives a class file one access bit. javac sets it for `public` **and for `protected`**,
+/// because the JVM has no protected class access and a `protected` member type has to be loadable
+/// by a subclass in another package; what the source wrote is recorded in `InnerClasses` instead.
+/// The interface member is the shape that broke: JLS §9.5 makes it implicitly `public`, the entry
+/// said so, and the class file stayed package-private — so a cross-package use *compiled* (javac
+/// reads the entry) and threw `IllegalAccessError` at run time. Every expectation here was read off
+/// javac's own output for the same source.
+#[test]
+fn a_nested_types_class_file_and_its_entry_record_access_differently() {
+    const PUBLIC_SUPER: u16 = 0x0001 | 0x0020;
+    const SUPER: u16 = 0x0020;
+    const PUBLIC_INTERFACE: u16 = 0x0001 | 0x0200 | 0x0400;
+
+    let source = r"
+        package p;
+        public class Api {
+            public interface Iface { class Member {} }
+            protected static class Prot {}
+            static class Pkg {}
+            private static class Priv {}
+            public static class Pub {}
+        }
+    ";
+    let classes = compile(source).expect("compile");
+    let own: Vec<(String, u16)> = classes
+        .iter()
+        .map(|class| {
+            let file =
+                jals_exec::block_on_inline(jals_classfile::ClassFile::read(class.bytes.as_slice()))
+                    .expect("reparse");
+            (class.internal_name.clone(), file.access_flags.0)
+        })
+        .collect();
+    assert_eq!(
+        own,
+        [
+            ("p/Api".to_owned(), PUBLIC_SUPER),
+            ("p/Api$Iface".to_owned(), PUBLIC_INTERFACE),
+            // Implicitly `public` because an interface declares it, and the class file has to say so
+            // itself — the entry saying it is not something the JVM reads for access.
+            ("p/Api$Iface$Member".to_owned(), PUBLIC_SUPER),
+            // `protected` has no class-file spelling, so javac writes `ACC_PUBLIC` here and
+            // `ACC_PROTECTED` in the entry below.
+            ("p/Api$Prot".to_owned(), PUBLIC_SUPER),
+            ("p/Api$Pkg".to_owned(), SUPER),
+            ("p/Api$Priv".to_owned(), SUPER),
+            ("p/Api$Pub".to_owned(), PUBLIC_SUPER),
+        ]
+    );
+
+    // The entry keeps what the source wrote, which is where the two records part company.
+    let outer =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(classes[0].bytes.as_slice()))
+            .expect("reparse");
+    let entries = outer
+        .attributes
+        .iter()
+        .find_map(|attribute| match &attribute.body {
+            jals_classfile::AttributeBody::InnerClasses(entries) => Some(entries),
+            _ => None,
+        })
+        .expect("an InnerClasses attribute");
+    let listed: Vec<(String, u16)> = entries
+        .iter()
+        .map(|entry| {
+            (
+                outer
+                    .constant_pool
+                    .utf8(entry.inner_name_index)
+                    .expect("utf8")
+                    .into_owned(),
+                entry.inner_class_access_flags(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            ("Iface".to_owned(), 0x0001 | 0x0200 | 0x0400 | 0x0008),
+            ("Prot".to_owned(), 0x0004 | 0x0008),
+            ("Pkg".to_owned(), 0x0008),
+            ("Priv".to_owned(), 0x0002 | 0x0008),
+            ("Pub".to_owned(), 0x0001 | 0x0008),
+        ]
+    );
+}
+
+/// Two local classes of one name in one class are one binary name, and the second class file
+/// silently replaced the first.
+///
+/// javac numbers them `D$1Helper` / `D$2Helper` and prints 3; this wrote a single `D$Helper` and
+/// printed 4. Until this branch's `NestMembers` the program at least died loudly — a local class
+/// reading its enclosing class's `private` field with no nest attribute is an `IllegalAccessError` —
+/// so granting the access that was right is what turned a crash into a wrong answer.
+#[test]
+fn two_local_classes_of_one_name_are_refused() {
+    let source = r"
+        public class Dup {
+            private static int s = 1;
+            static int one() { class Helper { int f() { return s; } } return new Helper().f(); }
+            static int two() { class Helper { int f() { return s + 1; } } return new Helper().f(); }
+        }
+    ";
+    assert!(matches!(
+        compile(source),
+        Err(LowerError::Unsupported(
+            "two type declarations with one binary name"
+        ))
+    ));
+    // One of each name still compiles: the check is about the collision, not about local classes.
+    let distinct = r"
+        public class Distinct {
+            private static int s = 1;
+            static int one() { class First { int f() { return s; } } return new First().f(); }
+            static int two() { class Second { int f() { return s + 1; } } return new Second().f(); }
+            public static void main(String[] args) { System.out.println(one() + two()); }
+        }
+    ";
+    assert!(compile(distinct).is_ok());
+    if java_available() {
+        assert_eq!(run(distinct, "Distinct"), "3\n");
+    }
 }

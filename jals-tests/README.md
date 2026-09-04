@@ -234,6 +234,36 @@ exists to bundle failures of one shape, and these have none in common: each name
 of a different class, so eliding the names leaves one row saying `a descriptor javac spells
 differently` forty-seven times over. `--limit` bounds the listing the way it bounds the gaps.
 
+### Working a bucket: `--list-gaps`
+
+A bucket says what the remaining work *is*; it does not say which file to open. `--list-gaps` prints
+every gap case by name with its message unelided, so a bucket of 55 becomes 55 paths. It is
+deliberately not bounded by `--limit` — that flag bounds a listing chosen for a summary, and this one
+is asked for by name to be worked through. Both `jals-compile` and `jals-wasm` take it; on the wasm
+side it lists the *in-subset* gaps only, since a case outside the subset is the denominator rather
+than the rate.
+
+```sh
+cargo run --release -p jals-tests --bin jals-compile -- langtools --limit 0 --list-gaps
+```
+
+### Working a case: the `emit` example
+
+A gap listing names a file; `emit` turns that file into the bytes. It hands the same source to the
+same front end and writes the class files or the WebAssembly module, so `javap -c`,
+`wasm-tools print`, and a real JVM or engine can be pointed at what the compiler actually produced.
+It resolves against the host JDK's `ct.sym` like `jals-compile` does — which is what makes a corpus
+case reproduce — and `--stdlib` switches to the embedded stubs, which is what `jals-javac`'s own
+tests resolve against.
+
+```sh
+cargo run --release -p jals-tests --example emit -- <File.java> <out-dir>
+cargo run --release -p jals-tests --example emit -- --wasm <File.java> <out.wasm>
+```
+
+An example rather than a fifth binary: it answers no question and reports no rate, so it is not one
+of the four this README's table is about.
+
 ```sh
 git submodule update --init --depth 1 jals-tests/sources/openjdk
 jals-tests/scripts/gen-javac-corpus.sh 0          # or a COUNT, for a quick local sample
@@ -289,19 +319,31 @@ CI leaves `--strict` off: known defects are still open, so the report is a measu
 gate. Turning it on is what would make it one, and that is a decision to take once the list is
 empty. What is open, by family:
 
-- **statements before `super()`** (JEP 447). A constructor that runs code before its delegation
-  leaves `this` as `uninitializedThis` across it, and the frame at the `invokespecial` says the
-  class is already initialised. Reading a *parameter* while `this` is uninitialized is handled; the
-  frame across an intervening statement is not.
-- **an overload selected against a classpath type**, where the candidates differ only in a
-  parameter this analysis cannot order — `PrintStream(String)` against `PrintStream(OutputStream)`,
-  `StringBuffer` against `String`. The wrong choice is a wrong `invokespecial` argument rather than
-  a diagnostic.
 - **an inferred type the analysis does not compute**: a `return` whose value comes from an
-  inference this crate does not run (`generics/inference`), and a multi-catch parameter, whose type
-  is the *lub* of its arms rather than the first of them.
-- **the assembler's own frames**: a `StackMapTable` offset that does not land on an instruction, and
-  one method whose control flow runs off the end.
+  inference this crate does not run (`generics/inference`), where the emitted `areturn` carries a
+  type the method's own descriptor does not admit.
+- **an operand whose type the analysis got wrong** at a call — the same cause seen from the call
+  site rather than from the `return`.
+
+Every open defect is now that one thing. Four constructs are *reported* rather than emitted, each
+because the alternative is a class file that loads and then answers wrong or fails at link time —
+which is the failure mode this ladder is structurally blind to, since its top rung is "a real JVM
+linked it":
+
+- **`protected` access across packages** (JVMS §4.10.1.8). javac reaches such a member through a
+  synthetic `access$N` in the class that may make the call, and this backend synthesises none.
+- **a `this(…)` delegation in a class with synthetic constructor parameters** (11 cases). The call
+  would be emitted against the descriptor the *index* holds, which is the declaration's and so
+  missing the enclosing instance or the captures — `NoSuchMethodError` for an inner class, and
+  `StackOverflowError` for a capturing local one, whose captures are appended so the call resolves
+  to the constructor making it. Forwarding them needs the emitted constructor descriptor
+  single-sourced first.
+- **two type declarations with one binary name** (9 cases). A local class's binary name is its
+  simple name under the type that holds it, so two of one name in one class are one name and the
+  second class file replaced the first. javac numbers them `D$1Helper` / `D$2Helper`; a binary name
+  is read from the index in a dozen places, and a numbering only half of them agree on is a class
+  file naming a type nothing emits.
+- **a lambda outside a class body**, now only for the shapes ownership genuinely cannot place.
 
 The parser is no longer among them: every file in the corpus parses, so `parsed` is 100% and a
 syntax error there would now be a regression rather than a known gap.
@@ -365,8 +407,21 @@ and compute the wrong number — and it is the wasm counterpart of `descriptor-e
 `String` is **outside what this backend compiles**, by design, exactly as a file javac declines
 alone is outside `jals-compile`'s corpus. Those cases are reported as *out of subset* and excluded
 from the rate that measures the compiler; the corpus total is printed beside it so the scoped rate
-can never read as coverage of Java. On the current corpus that is 1272 of 2188 cases, 615 of them
-for `String` alone.
+can never read as coverage of Java. On the current corpus that is 1286 of 2188 cases, `String`
+alone accounting for the largest share of them.
+
+Three types the backend *does* represent are not in that count, and each is a rule rather than a
+stub: `java.lang.Object` is the root of Java's reference hierarchy and `anyref` is wasm's, a **type
+variable** erases to its bound and to `Object` with none (JLS §4.6), and an `@interface` is an
+interface (§9.6). What still needs `java.base` after that is what a **value** of a library type
+needs — a `String`, a wrapper for a boxing conversion, a `PrintStream` for a call.
+
+`WasmError::NoImplementation` is the neighbouring outcome and is deliberately *not* out of
+subset. Its owner is a project type — a `native` method, or an interface method whose only
+implementation in the source is a lambda the index could give no single abstract method to — so the
+case is squarely inside the subset and this is a gap in the backend. Scoring it as out-of-subset
+would shrink the denominator by exactly the cases the backend cannot do, which is the one direction
+a rate must never move on its own.
 
 The classification is **post hoc and order-dependent**: lowering reports the first thing it cannot
 do, so a file that both names `String` *and* declares an `@interface` lands in whichever the
@@ -404,8 +459,15 @@ The two comparison counts are reported separately, because they are different cl
 value that matches is *"computed the same answer"*, while a `void` method that completes on both
 sides is only *"neither side failed"*.
 
-**What the numbers mean today.** On the current corpus the rung judges 18 cases — 5 value
-comparisons and 19 completions — because a Java entry point takes `String[]` and a file naming
+**Read the denominator with the count.** This backend's subset moves as the compiler does, and it
+has moved *down*: a case that used to stop at an `@interface` or a type variable now gets far
+enough to name the library type it really needs, so it leaves the rate and joins the denominator.
+The scoped percentage and the absolute count therefore tell different halves of one story, and only
+the second is monotone — a four-point jump in the rate is not four points' worth of new
+compilation, and a drop in the subset is not a loss of scope.
+
+**What the numbers mean today.** On the current corpus the rung judges 22 cases — 5 value
+comparisons and 24 completions — because a Java entry point takes `String[]` and a file naming
 `String` never reaches this rung at all. That is a fact about the corpus, not a claim about the
 compiler, which is why `jals-wasm` **lists the judged cases by name** rather than only counting
 them: a reader has to be able to tell a rate of 2% that means "2% of the compiler is checked" from
@@ -428,21 +490,16 @@ validator refuses, a compiled program that answers something else than javac's, 
 syntax error on a file that is valid Java by construction. `--strict` exits non-zero on those.
 
 CI leaves `--strict` off, as it does for `jals-compile`: known defects are still open, so the
-report is a measurement rather than a gate. What is open today is **eight modules `wasm-tools`
-refuses**, and they are two families, not one:
+report is a measurement rather than a gate. **No module the validator refuses is open today**, and
+neither is a disagreement, a trap or a panic — the ladder's four defect outcomes are all at zero.
 
-- **seven ill-typed function bodies** — `expected (ref null $type), found (ref $type)`, `expected
-  i32, found (ref $type)`, `values remaining on stack at end of block`, `expected … but nothing on
-  stack`. Four of them print the *same* type on both sides of the mismatch, which means two
-  distinct types in the recursive group print identically — most likely one class laid out twice
-  (the anonymous, inner and lambda shapes are where the cases cluster).
-- **one format limit reached without being reported** — `JsrRet.java`, `too many locals: locals
-  exceed maximum`. `WasmError::TooLarge` exists precisely so a limit is refused rather than
-  emitted, and this one got past it.
-
-Everything else is a gap rather than a defect, and the report buckets it. The largest are an
-`@interface` declaration (157 cases), a subclass of an inner class (71), and a call to a method
-outside this module (45).
+Everything else is a gap rather than a defect, and the report buckets it. The largest by a wide
+margin is **a lambda or method reference with no single abstract method** (53 cases), which is one
+shape: a lambda is typed by its *target*, and in argument position that target is the parameter of
+an overload chosen after the index is built — so `use(() -> 5)` reaches the layout with no method
+member to lower. It is refused rather than skipped, because a skipped one left a struct declared
+with no body behind it and the call through the interface became a trap. After it come names that
+did not resolve (18) and an unqualified member with no enclosing instance in scope (4).
 
 Two things the ladder does **not** yet report, because on this corpus they never happened: a start
 function that trapped, and a disagreement. Both have their own listing, so the day one appears it

@@ -115,6 +115,30 @@ impl<'a> Hierarchy<'a> {
 
     /// Whether `own` overrides `inherited`.
     pub(crate) fn overrides(self, own: MemberId, inherited: MemberId) -> Overrides {
+        self.implements_for(self.index.member(own).owner, own, inherited)
+    }
+
+    /// Whether `own`, reached from `item`, is the implementation `item` supplies for `inherited`.
+    ///
+    /// [`overrides`](Self::overrides) asks this about `own`'s own declaring type, which is the usual
+    /// question and the wrong one whenever the two halves meet at a *third* type. JLS §8.4.8.1: a
+    /// method `C` inherits from a superclass implements an interface method `C` also inherits, and
+    /// neither declaring type knows about the other —
+    /// `interface I { int f(); }`, `class Base { public int f() { … } }`,
+    /// `class C extends Base implements I {}`. `Base` is no subtype of `I`, so asking about `Base`
+    /// answers `No` correctly and answers the wrong question: the implementation `C` has for `I.f`
+    /// is `Base.f`. The wasm backend read the `No` as "nothing in this module implements it" and
+    /// emitted `unreachable` against a receiver whose body was one function away.
+    ///
+    /// So the subtype edge and the type-argument substitution are both taken from `item`. With
+    /// `item` set to `own`'s own owner the two questions coincide, which is what
+    /// [`overrides`](Self::overrides) is.
+    pub(crate) fn implements_for(
+        self,
+        item: ItemId,
+        own: MemberId,
+        inherited: MemberId,
+    ) -> Overrides {
         let (a, b) = (self.index.member(own), self.index.member(inherited));
         // Shape first. A `static` method *hides* rather than overrides, and a `private` one is not
         // inherited at all (JLS §8.4.8.1) even though the member walk still lists it. Two members of
@@ -128,12 +152,13 @@ impl<'a> Hierarchy<'a> {
             || b.modifiers.is_static
             || b.modifiers.is_private
             || a.owner == b.owner
-            || !self.index.is_subtype(a.owner, b.owner)
+            || !self.index.is_subtype(item, b.owner)
+            || !self.index.is_subtype(item, a.owner)
         {
             return Overrides::No;
         }
 
-        let Some(env) = self.substitution(a.owner, b.owner) else {
+        let Some(env) = self.substitution(item, b.owner) else {
             // `is_subtype` said yes and the declared supertypes disagree; nothing is decidable.
             return Overrides::Unknown;
         };

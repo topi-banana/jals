@@ -18,7 +18,7 @@
 use alloc::string::{String, ToString as _};
 use alloc::vec::Vec;
 
-use jals_hir::Ty;
+use jals_hir::{Primitive, Ty};
 use jals_syntax::ast::{self, AstNode as _};
 use jals_syntax::{SyntaxNode, SyntaxToken};
 
@@ -565,16 +565,27 @@ impl Stmt {
         emit.asm.new_object(ASSERTION_ERROR)?;
         emit.asm.dup()?;
         match &message {
-            // The one-argument form takes an `Object`, which is why a `String` message needs no
-            // conversion and an `int` one would need boxing.
+            // `AssertionError` declares one constructor per primitive beside the `Object` one, and
+            // JLS §14.10 selects among them by the detail expression's *type*. Passing every message
+            // to `(Object)` handed the constructor an `int` where a reference belongs — an
+            // assembler refusal, and had it been emitted, a class file no JVM loads. A `byte`, a
+            // `short`, and a `char` are already `int` on the operand stack; only `char` has a
+            // constructor of its own, so the other two take the `int` one, exactly as javac does.
             Some(message) => {
                 Expr::lower(message, context, emit)?;
-                emit.asm.invoke_special(
-                    ASSERTION_ERROR,
-                    "<init>",
-                    "(Ljava/lang/Object;)V",
-                    false,
-                )?;
+                let descriptor = match Expr::type_of(message.syntax(), context) {
+                    Ok(Ty::Primitive(Primitive::Boolean)) => "(Z)V",
+                    Ok(Ty::Primitive(Primitive::Char)) => "(C)V",
+                    Ok(Ty::Primitive(Primitive::Byte | Primitive::Short | Primitive::Int)) => {
+                        "(I)V"
+                    }
+                    Ok(Ty::Primitive(Primitive::Long)) => "(J)V",
+                    Ok(Ty::Primitive(Primitive::Float)) => "(F)V",
+                    Ok(Ty::Primitive(Primitive::Double)) => "(D)V",
+                    _ => "(Ljava/lang/Object;)V",
+                };
+                emit.asm
+                    .invoke_special(ASSERTION_ERROR, "<init>", descriptor, false)?;
             }
             None => emit
                 .asm
@@ -828,8 +839,14 @@ impl Stmt {
         let done = emit.asm.label();
 
         emit.asm.bind(test)?;
-        Expr::lower(&condition, context, emit)?;
-        emit.asm.branch(Branch::IntZero(Compare::Eq), done)?;
+        // `while (true)` has no test and no exit but a `break` (JLS §14.21): the statement after it
+        // is unreachable, so emitting the branch anyway leaves a conditional jump to an offset past
+        // the last instruction — which is a `StackMapTable` frame on no instruction and a verifier
+        // saying the control flow falls through the code end.
+        if context.facts().constant_condition(&condition) != Some(true) {
+            Expr::lower(&condition, context, emit)?;
+            emit.asm.branch(Branch::IntZero(Compare::Eq), done)?;
+        }
         // A `while`'s condition is also where a `continue` goes, which is the one loop shape where
         // the two labels coincide.
         Self::in_scope(labels, done, Some(test), emit, |emit| {
@@ -864,8 +881,15 @@ impl Stmt {
         })?;
         if emit.asm.reachable() || emit.asm.is_targeted(test)? {
             emit.asm.bind(test)?;
-            Expr::lower(&condition, context, emit)?;
-            emit.asm.branch(Branch::IntZero(Compare::Ne), top)?;
+            // The back edge of a `do … while (true)` is unconditional, for the same reason a
+            // `while (true)` has no forward one. The label is still bound: a `continue` in the body
+            // jumps to the condition, and here that is the `goto` itself.
+            if context.facts().constant_condition(&condition) == Some(true) {
+                emit.asm.branch(Branch::Always, top)?;
+            } else {
+                Expr::lower(&condition, context, emit)?;
+                emit.asm.branch(Branch::IntZero(Compare::Ne), top)?;
+            }
         }
         Self::join(done, emit)
     }
@@ -888,8 +912,13 @@ impl Stmt {
         let next = emit.asm.label();
         let done = emit.asm.label();
         emit.asm.bind(test)?;
-        // `for (;;)` has no condition, which means no exit but a `break`.
-        if let Some(condition) = statement.condition() {
+        // `for (;;)` has no condition, which means no exit but a `break` — and `for (; true;)` is
+        // the same loop written out, so a constantly-true condition takes the same arm rather than
+        // emitting a branch past the end of the method.
+        if let Some(condition) = statement
+            .condition()
+            .filter(|condition| context.facts().constant_condition(condition) != Some(true))
+        {
             Expr::lower(&condition, context, emit)?;
             emit.asm.branch(Branch::IntZero(Compare::Eq), done)?;
         }

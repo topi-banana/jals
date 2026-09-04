@@ -35,12 +35,12 @@ use jals_exec::Yielder;
 use jals_syntax::SyntaxKind::{
     AMP, AMP_AMP, ARG_LIST, ASSIGNMENT_EXPR, BANG, BANG_EQ, BOOLEAN_KW, BYTE_KW, CALL_EXPR, CARET,
     CAST_EXPR, CATCH_CLAUSE, CHAR_KW, CHAR_LITERAL, COMMA, CONSTRUCTOR_DECL, DOT, DOUBLE_KW,
-    ELLIPSIS, EQ, EQ_EQ, FALSE_KW, FIELD_ACCESS, FIELD_DECL, FLOAT_KW, FLOAT_LITERAL,
-    FOR_EACH_STMT, GT, IDENT, INSTANCEOF_KW, INT_KW, INT_LITERAL, LAMBDA_EXPR, LBRACK,
-    LOCAL_VAR_DECL, LONG_KW, LSHIFT, LT, LT_EQ, METHOD_DECL, MINUS, NEW_EXPR, NULL_KW, PARAM,
-    PERCENT, PIPE, PIPE_PIPE, PLUS, RECORD_COMPONENT, RESOURCE, RETURN_STMT, SHORT_KW, SLASH, STAR,
-    STRING_LITERAL, SUPER_KW, TERNARY_EXPR, TEXT_BLOCK, THIS_KW, TILDE, TRUE_KW, TYPE_PATTERN,
-    VAR_KW, VOID_KW,
+    ELLIPSIS, ENUM_CONSTANT, EQ, EQ_EQ, FALSE_KW, FIELD_ACCESS, FIELD_DECL, FLOAT_KW,
+    FLOAT_LITERAL, FOR_EACH_STMT, GT, IDENT, INSTANCEOF_KW, INT_KW, INT_LITERAL, LAMBDA_EXPR,
+    LBRACK, LOCAL_VAR_DECL, LONG_KW, LSHIFT, LT, LT_EQ, METHOD_DECL, MINUS, NEW_EXPR, NULL_KW,
+    PARAM, PERCENT, PIPE, PIPE_PIPE, PLUS, RECORD_COMPONENT, RESOURCE, RETURN_STMT, SHORT_KW,
+    SLASH, STAR, STRING_LITERAL, SUPER_KW, TERNARY_EXPR, TEXT_BLOCK, THIS_KW, TILDE, TRUE_KW,
+    TYPE_PATTERN, VAR_KW, VOID_KW,
 };
 use jals_syntax::ast::{self, AstNode};
 use jals_syntax::{SyntaxElement, SyntaxKind, SyntaxNode, SyntaxToken};
@@ -581,8 +581,9 @@ impl TypeInference {
             .copied()
             .filter(|&id| {
                 let member = index.member(id);
+                // Precise, not the diagnostic relation: see [`Ty::is_applicable_to`].
                 let fits = |arg_ty: Option<&Ty>, target: &Ty| {
-                    arg_ty.is_none_or(|ty| ty.is_assignable_to(target, Some(index)))
+                    arg_ty.is_none_or(|ty| ty.is_applicable_to(target, index))
                 };
                 let declared = |param: &crate::Param| {
                     index.member_type_to_ty(member.file, member.owner, Some(id), &param.ty)
@@ -748,9 +749,9 @@ impl TypeInference {
             left.params.iter().zip(&right.params).all(|(from, to)| {
                 index
                     .member_type_to_ty(left.file, left.owner, Some(left_id), &from.ty)
-                    .is_assignable_to(
+                    .is_applicable_to(
                         &index.member_type_to_ty(right.file, right.owner, Some(right_id), &to.ty),
-                        Some(index),
+                        index,
                     )
             })
         };
@@ -784,18 +785,23 @@ impl TypeInference {
             ast::Expr::NameRef(n) => {
                 let name = jals_syntax::decoded_ident(&Collect::first_ident_token(n.syntax())?)
                     .into_owned();
-                // A bare call is an implicit `this` first (JLS §15.12.1); a `static` import is what
-                // answers when the enclosing type has no such method. Falling back to the enclosing
-                // type when *neither* has it keeps the report about the call the source wrote.
-                let enclosing = index.enclosing_item(file, call.syntax());
-                let owner = enclosing
-                    .filter(|&item| {
+                // A bare call names the *innermost enclosing type of which the method is a member*
+                // (JLS §15.12.1), which need not be the innermost type at all: a nested, local, or
+                // anonymous class calling its outer class's method is ordinary Java, and reading
+                // only the nearest one found nothing there. A `static` import answers when no
+                // enclosing type has it. Falling back to the innermost when *nothing* has it keeps
+                // the report about the call the source wrote.
+                let lexical = index.enclosing_items(file, call.syntax());
+                let owner = lexical
+                    .iter()
+                    .copied()
+                    .find(|&item| {
                         index
                             .resolve_member(item, &name, Namespace::Method)
                             .is_some()
                     })
                     .or_else(|| index.static_import_owner(file, &name, Namespace::Method))
-                    .or(enclosing)?;
+                    .or_else(|| lexical.first().copied())?;
                 Some((owner, name))
             }
             _ => None,
@@ -959,6 +965,30 @@ impl<'a> Inferer<'a> {
         let mut yielder = Yielder::new();
         for node in root.descendants() {
             yielder.tick().await;
+            // An `enum` constant writes no type and *is* an instance of the enum that declares it
+            // (JLS §8.9.3), so this is the only place its binding can be typed. Without it a bare
+            // constant name inside its own enum had no type at all: `red.name()` resolved to
+            // nothing, and `println(red)` had no argument type to select an overload against.
+            if node.kind() == ENUM_CONSTANT
+                && let Some(name) = Collect::first_ident_token(&node)
+                && let Some(item) = self.enclosing_item(&node)
+            {
+                let ty = self.item_ty(item);
+                self.set_def_type(Collect::token_start(&name), ty);
+            }
+            // A **multi-catch** parameter's type is the *lub* of its arms (JLS §14.20), not the
+            // first of them. Its erasure — what the local's descriptor says, and what the verifier
+            // computes by merging the handler's two entry states — is their nearest common
+            // superclass, and typing it as one arm emitted an `invokevirtual` on that arm against a
+            // value the verifier knows only as the common supertype.
+            if node.kind() == CATCH_CLAUSE
+                && let Some(common) = self.multi_catch_ty(&node)
+            {
+                for (token, _) in ast::Declarators::dims_of(&node) {
+                    self.set_def_type(Collect::token_start(&token), common.clone());
+                }
+                continue;
+            }
             if Self::declares_typed_bindings(node.kind()) {
                 let ty = node.children().find_map(ast::Type::cast);
                 if !ty.as_ref().is_some_and(Cst::is_var_type) {
@@ -1116,6 +1146,60 @@ impl<'a> Inferer<'a> {
         }
     }
 
+    /// The type a `catch (A | B e)` binding has: the nearest class every arm is a subtype of.
+    ///
+    /// `None` for a single-arm `catch`, which the ordinary declared-type path already handles, and
+    /// for one whose arms this index cannot relate — where staying with the written type is the
+    /// lenient answer this module prefers to a guess.
+    fn multi_catch_ty(&self, node: &SyntaxNode) -> Option<Ty> {
+        let (index, file) = self.project?;
+        // The arm *count* decides whether there is a question at all, and counting is free — a
+        // single-arm `catch` is the overwhelmingly common shape and the ordinary declared-type path
+        // resolves the same name for the same node anyway, so resolving here first would be a
+        // second project-wide lookup thrown away.
+        let written: Vec<ast::Type> = node.children().filter_map(ast::Type::cast).collect();
+        if written.len() < 2 {
+            return None;
+        }
+        let arms: Vec<ItemId> = written
+            .into_iter()
+            .map(|written| {
+                let name = written.simple_name()?;
+                let qualified = written
+                    .is_qualified()
+                    .then(|| written.qualified_text())
+                    .flatten();
+                index
+                    .resolve_type_name(file, &name, qualified.as_deref())
+                    .project_id()
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let [first, rest @ ..] = arms.as_slice() else {
+            return None;
+        };
+        // Up the first arm's class chain, nearest first, to the first ancestor every other arm also
+        // has. Only the *class* chain: the lub's interfaces are part of it too, and no descriptor
+        // records them — a class file writes the erasure, which is the class.
+        //
+        // Guarded against a cycle for the same reason [`ProjectIndex::walk_supertypes_stateful`] is:
+        // `class A extends B {}` with `class B extends A {}` parses and indexes, and an unguarded
+        // walk oscillates between the two forever. Every runtime here is current-thread, so a hang
+        // is the editor wedged rather than one slow request.
+        // A membership test only — never iterated, so no order of it reaches an answer.
+        let mut seen = HashSet::new();
+        let mut candidate = Some(*first);
+        while let Some(item) = candidate {
+            if !seen.insert(item) {
+                break;
+            }
+            if rest.iter().all(|&arm| index.is_subtype(arm, item)) {
+                return Some(self.item_ty(item));
+            }
+            candidate = index.superclass_of(item);
+        }
+        None
+    }
+
     fn set_def_type(&mut self, name_start: usize, ty: Ty) {
         if let Some(&id) = self.def_by_name_start.get(&name_start) {
             self.inference.def_types[id.0 as usize] = ty;
@@ -1176,7 +1260,7 @@ impl<'a> Inferer<'a> {
     /// Computes an expression's type from its (already-typed) children.
     fn compute_expr_ty(&self, expr: &ast::Expr) -> Ty {
         match expr {
-            ast::Expr::Literal(l) => Self::literal_ty(l),
+            ast::Expr::Literal(l) => self.literal_ty(l),
             ast::Expr::NameRef(n) => self.nameref_ty(n.syntax()),
             ast::Expr::Paren(p) => self.child_ty(p.expr()),
             ast::Expr::Unary(u) => self.unary_ty(u),
@@ -1302,6 +1386,18 @@ impl<'a> Inferer<'a> {
                     .unwrap_or_default();
                 self.inference.resolve_constructor(owner, &args, index)
             }),
+            // An `enum` constant's arguments are a constructor invocation too (JLS §8.9.2) — the
+            // enum's own, which is the type the constant is written inside. It reaches here rather
+            // than through `NEW_EXPR` because a constant names no type to construct: the grammar has
+            // an identifier and an argument list, and the enum around it is the owner. Without the
+            // arm `enum E { A(() -> "a"); }` gave the lambda no target type at all.
+            ENUM_CONSTANT => {
+                let args: Vec<ast::Expr> = list.children().filter_map(ast::Expr::cast).collect();
+                call.ancestors()
+                    .find(|ancestor| ancestor.kind() == SyntaxKind::ENUM_DECL)
+                    .and_then(|decl| index.declared_item(file, &decl))
+                    .and_then(|owner| self.inference.resolve_constructor(owner, &args, index))
+            }
             _ => None,
         };
         let Some(selected) = selected else {
@@ -1388,28 +1484,33 @@ impl<'a> Inferer<'a> {
             })
     }
 
-    /// The indexed type `name` resolves to from this file, or an external one by that name.
+    /// The indexed `java.lang.<name>`, or an external one by that name.
     ///
     /// A `.class` literal's type is `java.lang.Class`, and reaching *its* members — `getName()` — needs
     /// the indexed stub. An external type by that name has no members at all, so the access resolved
     /// to nothing and the call after it with it.
+    ///
+    /// Looked up by **fully qualified name**, never resolved as a simple name from this file. What a
+    /// string literal or a `.class` literal denotes is fixed by the language (§3.10.5, §15.8.2) and
+    /// is not a name the source wrote, so a type the file *could* reach by that spelling — a nested
+    /// `class String`, a same-package one, a single-type import — must not shadow it. Resolving the
+    /// simple name did both halves wrong: `"x"` in a file declaring its own `String` was typed as
+    /// that type, and every literal in every other file paid a scope walk that ends in a scan of the
+    /// whole item table to answer a question with one constant answer.
     fn java_lang_ty(&self, name: &str) -> Ty {
-        let Some((index, file)) = self.project else {
-            return Ty::Class(ClassTy::external(name));
+        let external = || Ty::Class(ClassTy::external(name));
+        let Some((index, _)) = self.project else {
+            return external();
         };
-        index
-            .resolve_type_name(file, name, None)
-            .project_id()
-            .map_or_else(
-                || Ty::Class(ClassTy::external(name)),
-                |id| {
-                    Ty::Class(ClassTy::Project {
-                        id,
-                        name: name.to_owned(),
-                        args: Vec::new(),
-                    })
-                },
-            )
+        let mut fqn = String::from("java.lang.");
+        fqn.push_str(name);
+        index.item_by_fqn(&fqn).map_or_else(external, |id| {
+            Ty::Class(ClassTy::Project {
+                id,
+                name: name.to_owned(),
+                args: Vec::new(),
+            })
+        })
     }
 
     /// The type `this` has where `node` appears: the enclosing type declaration, raw.
@@ -1417,7 +1518,14 @@ impl<'a> Inferer<'a> {
     /// Raw — no type arguments — because inside a generic type's own body its parameters stand for
     /// themselves, and a member read through `this` substitutes them by name.
     fn self_ty(&self, node: &SyntaxNode) -> Ty {
-        let (Some(item), Some((index, _))) = (self.enclosing_item(node), self.project) else {
+        self.enclosing_item(node)
+            .map_or(Ty::Unknown, |item| self.item_ty(item))
+    }
+
+    /// An indexed type as a raw class type — no type arguments, for the reason
+    /// [`self_ty`](Self::self_ty) gives.
+    fn item_ty(&self, item: ItemId) -> Ty {
+        let Some((index, _)) = self.project else {
             return Ty::Unknown;
         };
         let fqn = index.item(item).fqn.as_str();
@@ -1455,7 +1563,7 @@ impl<'a> Inferer<'a> {
             // `+` is string concatenation when either side is a `String`, else arithmetic.
             [PLUS] => {
                 if lhs.is_string() || rhs.is_string() {
-                    Ty::string()
+                    self.java_lang_ty("String")
                 } else {
                     lhs.binary_numeric(&rhs)
                 }
@@ -1657,7 +1765,41 @@ impl<'a> Inferer<'a> {
     /// when the receiver is an indexed project type; an external receiver (a JDK type) stays
     /// [`Ty::Unknown`], since its members are not indexed.
     fn field_access_ty(&self, fa: &ast::FieldAccess) -> Ty {
+        // `Outer.this` and `Outer.super` name an *enclosing instance*, not a member (JLS §15.8.4,
+        // §15.11.2). There is no identifier after the dot for a member lookup to use, so the
+        // ordinary path answers `Unknown` — and everything the value is then used for goes untyped
+        // with it, which is what left `Outer.this.field` and `x != Outer.this` with no type at all.
+        if let Some(ty) = self.qualified_instance_ty(fa) {
+            return ty;
+        }
         self.field_access_member_ty(fa, Namespace::Value)
+    }
+
+    /// The type `Outer.this` / `Outer.super` denotes, and `None` for an access that names a member.
+    ///
+    /// The keyword is the whole test: an access carrying one has no identifier after the dot. What
+    /// it denotes is the *named* type for `this` and that type's superclass for `super`, by the same
+    /// rule the bare `super` follows — answering `super` with the named type itself would bind an
+    /// overridden member to the override.
+    fn qualified_instance_ty(&self, fa: &ast::FieldAccess) -> Option<Ty> {
+        let keyword = fa
+            .syntax()
+            .children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .find(|token| matches!(token.kind(), THIS_KW | SUPER_KW))?;
+        let (index, file) = self.project?;
+        let named = Cst::type_qualifier(&fa.receiver()?, index, file)?;
+        let item = if keyword.kind() == SUPER_KW {
+            index.superclass_of(named)?
+        } else {
+            named
+        };
+        let fqn = index.item(item).fqn.as_str();
+        Some(Ty::Class(ClassTy::Project {
+            id: item,
+            name: fqn.rsplit('.').next().unwrap_or(fqn).to_owned(),
+            args: Vec::new(),
+        }))
     }
 
     /// `receiver.member` resolved in `namespace`: the member's type on the receiver's project type.
@@ -2125,11 +2267,57 @@ impl ProjectIndex {
     /// The nearest ancestor type declaration of `node` that is an indexed project item, in `file`.
     /// Shared by the [`Inferer`] (bare-call resolution) and argument checking.
     fn enclosing_item(&self, file: FileId, node: &SyntaxNode) -> Option<ItemId> {
-        let decl = node
-            .ancestors()
-            .find(|a| Collect::type_decl_kind(a.kind()).is_some())?;
-        let name = Collect::first_ident_token(&decl)?;
-        self.item_by_decl(file, Collect::token_start(&name))
+        // The *nearest* one, so the walk stops at it. Reading it off
+        // [`enclosing_items`](Self::enclosing_items) instead walks every remaining ancestor up to
+        // the `SourceFile` and heap-allocates the whole chain to answer with its head — and this is
+        // on the per-`this` and per-bare-call paths, so it runs many times in one file.
+        node.ancestors()
+            .find_map(|ancestor| self.declared_item(file, &ancestor))
+    }
+
+    /// Every type declaration lexically around `node`, innermost first.
+    ///
+    /// A bare name is looked up on the innermost enclosing type *of which it is a member* (JLS
+    /// §6.5.6.1, §15.12.1), which is not the same as the innermost enclosing type: a nested, local,
+    /// or anonymous class calling its outer class's method is ordinary Java. The whole chain is
+    /// returned rather than searched here, because the search differs by name space and only the
+    /// caller knows which.
+    fn enclosing_items(&self, file: FileId, node: &SyntaxNode) -> Vec<ItemId> {
+        let mut out = Vec::new();
+        for ancestor in node.ancestors() {
+            if let Some(item) = self.declared_item(file, &ancestor) {
+                out.push(item);
+            }
+        }
+        out
+    }
+
+    /// The item `node` *is* the declaration of, when it is one.
+    ///
+    /// An **anonymous** class body is one, which is why this is not simply a named-declaration test:
+    /// it is a type of its own, so `this` inside one is *it* rather than the class the `new` was
+    /// written in. Reading past it typed `this` as the outer class, and `test(this)` in
+    /// `new Base() { void run() { test(this); } }` selected `test(Outer)` over `test(Base)` — a
+    /// wrong overload rather than a missing one.
+    ///
+    /// The *body* is what counts and not the whole `new`: a `new Foo(arg) { … }`'s arguments are
+    /// evaluated where the `new` is written, so a node in one belongs to the enclosing class. The
+    /// body is keyed by the creation's own position, which is how the index recorded it.
+    fn declared_item(&self, file: FileId, node: &SyntaxNode) -> Option<ItemId> {
+        if Collect::type_decl_kind(node.kind()).is_some() {
+            let name = Collect::first_ident_token(node)?;
+            return self.item_by_decl(file, Collect::token_start(&name));
+        }
+        let creation = node
+            .parent()
+            .filter(|_| node.kind() == SyntaxKind::CLASS_BODY)
+            .filter(|creation| {
+                matches!(
+                    creation.kind(),
+                    SyntaxKind::NEW_EXPR | SyntaxKind::ENUM_CONSTANT
+                )
+            })?;
+        self.item_by_decl(file, usize::from(creation.text_range().start()))
     }
 }
 
@@ -2183,7 +2371,7 @@ impl Inferer<'_> {
     }
 
     /// The type of a literal, by its token kind (and suffix, for numbers).
-    fn literal_ty(l: &ast::Literal) -> Ty {
+    fn literal_ty(&self, l: &ast::Literal) -> Ty {
         fn ends_with_ignore_case(text: &str, suffix: char) -> bool {
             text.chars()
                 .next_back()
@@ -2210,7 +2398,13 @@ impl Inferer<'_> {
                 }
             }
             CHAR_LITERAL => Ty::Primitive(Primitive::Char),
-            STRING_LITERAL | TEXT_BLOCK => Ty::string(),
+            // The *indexed* `java.lang.String` wherever the index holds one. Typing a literal by
+            // name alone made it `External`, and an external type is assignable to every project
+            // type by design (it might be an unindexed project type) — so every one-argument
+            // overload was applicable to `f("")` and the winner was declaration order.
+            // `PrintStream(OutputStream)` is declared before `PrintStream(String)`, and `super("")`
+            // compiled to the first of them.
+            STRING_LITERAL | TEXT_BLOCK => self.java_lang_ty("String"),
             TRUE_KW | FALSE_KW => Ty::Primitive(Primitive::Boolean),
             NULL_KW => Ty::Null,
             _ => Ty::Unknown,
@@ -2239,13 +2433,52 @@ impl Cst {
     /// Only a simple name is handled. A fully-qualified qualifier (`java.io.PrintStream.out`) is a
     /// nested field access, not a name reference, and is not modelled.
     fn type_qualifier(receiver: &ast::Expr, index: &ProjectIndex, file: FileId) -> Option<ItemId> {
-        let ast::Expr::NameRef(name) = receiver else {
-            return None;
-        };
-        let token = Collect::first_ident_token(name.syntax())?;
-        index
-            .resolve_type_name(file, &jals_syntax::decoded_ident(&token), None)
-            .project_id()
+        match receiver {
+            ast::Expr::NameRef(name) => {
+                let token = Collect::first_ident_token(name.syntax())?;
+                index
+                    .resolve_type_name(file, &jals_syntax::decoded_ident(&token), None)
+                    .project_id()
+            }
+            // A **nested** type is spelled with a dot, so its qualifier is a field access rather
+            // than a name — `Diagnostic.Kind.ERROR` reads `Diagnostic.Kind` as a receiver whose own
+            // type is unknown, because it is not a value at all. Reading only the simple form left
+            // every constant of a nested `enum` untyped, which is the ordinary way one is named.
+            ast::Expr::FieldAccess(_) => {
+                let dotted = Self::dotted_name(receiver.syntax())?;
+                let simple = dotted.rsplit('.').next()?;
+                index
+                    .resolve_type_name(file, simple, Some(&dotted))
+                    .project_id()
+            }
+            _ => None,
+        }
+    }
+
+    /// The dotted text of an expression that is nothing but identifiers and dots, and `None` for
+    /// one holding anything else — a call, an index, a literal.
+    ///
+    /// What separates `Outer.Inner` from `outer.field` is not the shape but what the segments
+    /// resolve to, so this hands back the spelling and lets the index decide.
+    fn dotted_name(node: &SyntaxNode) -> Option<String> {
+        let mut out = String::new();
+        for element in node.descendants_with_tokens() {
+            let Some(token) = element.into_token() else {
+                continue;
+            };
+            match token.kind() {
+                IDENT => {
+                    if !out.is_empty() {
+                        out.push('.');
+                    }
+                    out.push_str(&jals_syntax::decoded_ident(&token));
+                }
+                DOT => {}
+                kind if kind.is_trivia() => {}
+                _ => return None,
+            }
+        }
+        (!out.is_empty()).then_some(out)
     }
 
     /// Whether a receiver is the bare `super`.

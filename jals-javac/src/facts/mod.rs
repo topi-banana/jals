@@ -96,7 +96,7 @@ pub(crate) use switch::ArmLabels;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use jals_hir::{DefId, DefKind, FileId, MemberId, ProjectIndex, Ty, TypedFile};
+use jals_hir::{DefId, DefKind, FileId, ItemId, MemberId, ProjectIndex, Ty, TypedFile};
 use jals_syntax::ast::{self, AstNode as _};
 use jals_syntax::{SyntaxKind, SyntaxNode, SyntaxToken};
 
@@ -217,6 +217,43 @@ impl<'a> Facts<'a> {
         Self::has_keyword(node, SyntaxKind::SUPER_KW)
     }
 
+    /// The type whose enclosing instance a *qualified* `this` or `super` names — `Outer` in both
+    /// `Outer.this` and `Outer.super.f` (JLS §15.8.4, §15.11.2).
+    ///
+    /// Neither is a member access: the access carries the keyword where a field name would be, so
+    /// there is no identifier for a member lookup to use and the ordinary path reports an *empty*
+    /// name. Both push the same value — `Outer.super.f` is `Outer.this` with the field looked up one
+    /// level higher, and a field is bound by where it is declared rather than by dispatch. What they
+    /// do not share is a *call*: `Outer.super.m()` is not dispatched at all, which is why
+    /// [`is_qualified_super_call`](Self::is_qualified_super_call) exists beside this.
+    pub(crate) fn qualified_enclosing(self, access: &ast::FieldAccess) -> Option<ItemId> {
+        access
+            .syntax()
+            .children_with_tokens()
+            .filter_map(jals_syntax::SyntaxElement::into_token)
+            .find(|token| matches!(token.kind(), SyntaxKind::THIS_KW | SyntaxKind::SUPER_KW))?;
+        let receiver = access.receiver()?;
+        self.ty_of_name(receiver.syntax()).ok()?.project_id()
+    }
+
+    /// Whether a call's receiver is a *qualified* `super` — `Outer.super.m()` (JLS §15.11.2) or
+    /// `Iface.super.m()` (§15.12.1).
+    ///
+    /// Both name one body in particular and are not dispatched, and neither is reachable by the
+    /// `invokespecial` the bare `super.` uses: JVMS §6.5 lets that name only the direct superclass
+    /// or a direct superinterface, and `Outer`'s superclass is neither of the compiled class's.
+    /// Reported rather than emitted as a virtual call on the enclosing instance, which is the same
+    /// bytes calling the override the source wrote `super` to avoid.
+    pub(crate) fn is_qualified_super_call(call: &ast::CallExpr) -> bool {
+        let Some(ast::Expr::FieldAccess(callee)) = call.callee() else {
+            return false;
+        };
+        let Some(ast::Expr::FieldAccess(receiver)) = callee.receiver() else {
+            return false;
+        };
+        Self::has_keyword(receiver.syntax(), SyntaxKind::SUPER_KW)
+    }
+
     /// Whether a call is `super.`-qualified: its callee is a field access whose receiver is the
     /// bare `super`.
     ///
@@ -295,13 +332,53 @@ impl<'a> Facts<'a> {
             .is_some_and(|parent| parent.kind() == SyntaxKind::CLASS_BODY)
     }
 
+    /// Whether a member declaration sits directly in an interface's or `@interface`'s body.
+    ///
+    /// Two of Java's implicit-`static` rules hang off this one shape, and both are invisible in the
+    /// modifiers: JLS §9.3 makes an interface's field `public static final` however it was written,
+    /// and JLS §9.5 makes *every* member type of an interface `static` — a member **class**
+    /// included, which is the one case the `static` keyword otherwise decides on its own.
+    pub(crate) fn is_interface_member(node: &SyntaxNode) -> bool {
+        node.parent().is_some_and(|body| {
+            body.kind() == SyntaxKind::CLASS_BODY
+                && body.parent().is_some_and(|owner| {
+                    matches!(
+                        owner.kind(),
+                        SyntaxKind::INTERFACE_DECL | SyntaxKind::ANNOTATION_TYPE_DECL
+                    )
+                })
+        })
+    }
+
+    /// Whether a member type declaration is `static` — written, or implied by what declares it.
+    ///
+    /// Three sources, and only the first is a modifier a reader can see:
+    ///
+    /// 1. the `static` keyword on the declaration;
+    /// 2. its *kind* — a member interface, `@interface`, `enum`, or `record` is implicitly `static`
+    ///    (JLS §8.5.1, §9.5, §8.9, §8.10), so only a member **class** is ever in question;
+    /// 3. its *owner* — every member type of an interface is `static`, class included.
+    ///
+    /// Two things read the answer and both are wrong without it. An `InnerClasses` entry is the
+    /// only place `ACC_STATIC` can be recorded for a nested type (JVMS §4.7.6), so a reader of the
+    /// class file is told what the source said only through this; and a class that is *not* static
+    /// holds an enclosing instance, so answering `interface I { class C {} }` from the modifier
+    /// alone gives `C` a constructor parameter every `new I.C()` in a `static` method has nothing
+    /// to pass.
+    pub(crate) fn is_static_member_type(node: &SyntaxNode) -> bool {
+        node.kind() != SyntaxKind::CLASS_DECL
+            || Self::has_modifier(node, SyntaxKind::STATIC_KW)
+            || Self::is_interface_member(node)
+    }
+
     /// Whether a class declaration is a non-`static` nested one — an *inner* class.
     ///
     /// A nested interface, `@interface`, `enum`, and `record` are implicitly `static` and hold no
-    /// enclosing instance, so only a nested *class* can be one. An inner class holds its enclosing
-    /// instance in a synthetic field and every constructor takes it as an extra first parameter, so
-    /// a backend that answers this differently from the other emits constructors one parameter
-    /// short — a `NoSuchMethodError` at the first `new`, not a missing convenience.
+    /// enclosing instance, so only a nested *class* can be one — and not even every one of those,
+    /// since a member class of an interface is implicitly `static` too. An inner class holds its
+    /// enclosing instance in a synthetic field and every constructor takes it as an extra first
+    /// parameter, so a backend that answers this differently from the other emits constructors one
+    /// parameter short — a `NoSuchMethodError` at the first `new`, not a missing convenience.
     ///
     /// Arm one of three. It is private because it is no longer the whole question anyone asks:
     /// [`holds_enclosing_instance`](Self::holds_enclosing_instance) composes it with the local- and
@@ -310,7 +387,7 @@ impl<'a> Facts<'a> {
     fn is_inner_class(node: &SyntaxNode) -> bool {
         node.kind() == SyntaxKind::CLASS_DECL
             && Self::is_nested(node)
-            && !Self::has_modifier(node, SyntaxKind::STATIC_KW)
+            && !Self::is_static_member_type(node)
     }
 
     /// Whether `node` sits where there is no `this` — a `static` method, a `static` initialiser, or
@@ -327,26 +404,61 @@ impl<'a> Facts<'a> {
     /// malformed tree produces; a walk that runs out of ancestors is at the file's top level, where
     /// there is likewise no instance.
     ///
-    /// The arguments of an explicit constructor invocation count as such a place even though a
-    /// constructor is otherwise the most instance-bound context there is: they are evaluated before
-    /// `super()` returns, so `this` does not exist yet (JLS §8.8.7.1). javac skips the enclosing
-    /// instance for an anonymous class created there for exactly this reason (JDK-8166108), and a
-    /// backend that passes one emits `super(this)` from a frame whose `this` is `UninitializedThis`.
-    fn in_static_context(node: &SyntaxNode) -> bool {
+    /// A constructor's **early construction context** counts as such a place even though a
+    /// constructor is otherwise the most instance-bound context there is: everything up to and
+    /// including its explicit `this(…)` / `super(…)` invocation runs before that invocation
+    /// returns, so `this` does not exist yet (JLS §8.8.7.1, widened from the invocation's own
+    /// arguments to the whole prologue by JEP 447). javac skips the enclosing instance for an
+    /// anonymous class created there for exactly this reason (JDK-8166108), and a backend that
+    /// passes one emits `super(this)` from a frame whose `this` is `UninitializedThis`.
+    pub(crate) fn in_static_context(node: &SyntaxNode) -> bool {
         for ancestor in node.ancestors() {
             if Self::is_explicit_constructor_invocation(&ancestor) {
                 return true;
             }
             match ancestor.kind() {
-                SyntaxKind::METHOD_DECL | SyntaxKind::FIELD_DECL | SyntaxKind::INITIALIZER => {
+                // An interface's field is `static` however it was written (JLS §9.3), so its
+                // initialiser runs in `<clinit>` and has no `this` — which is the whole of what
+                // makes `interface I { Object o = new Object() {}; }` an anonymous class with no
+                // enclosing instance rather than one whose `new` pushes an instance that does not
+                // exist.
+                SyntaxKind::FIELD_DECL => {
+                    return Self::has_modifier(&ancestor, SyntaxKind::STATIC_KW)
+                        || Self::is_interface_member(&ancestor);
+                }
+                SyntaxKind::METHOD_DECL | SyntaxKind::INITIALIZER => {
                     return Self::has_modifier(&ancestor, SyntaxKind::STATIC_KW);
                 }
-                // A constructor is an instance context by definition — there is no `static` one.
-                SyntaxKind::CONSTRUCTOR_DECL => return false,
+                // A constructor is an instance context by definition — there is no `static` one —
+                // but only from its delegation onward.
+                SyntaxKind::CONSTRUCTOR_DECL => return Self::before_delegation(node, &ancestor),
                 _ => {}
             }
         }
         true
+    }
+
+    /// Whether `node` sits in `constructor`'s prologue — before its explicit `this(…)` / `super(…)`
+    /// invocation, which is the half of an early construction context that is not the invocation
+    /// itself.
+    ///
+    /// JEP 447 is what makes this a range rather than a point. Before it, an explicit invocation was
+    /// the body's first statement and the only code that could precede `this` existing was the
+    /// invocation's own arguments; now a constructor may run a whole prologue first, and every
+    /// statement of it sees an object the verifier will not let anything read.
+    fn before_delegation(node: &SyntaxNode, constructor: &SyntaxNode) -> bool {
+        let Some(body) = constructor.children().find_map(ast::Block::cast) else {
+            return false;
+        };
+        let Some((at, _)) = Self::explicit_constructor_invocation(&body) else {
+            return false;
+        };
+        body.stmts().take(at).any(|statement| {
+            statement
+                .syntax()
+                .text_range()
+                .contains_range(node.text_range())
+        })
     }
 
     /// Whether `node` is a bare `this(…)` or `super(…)` call.
@@ -365,24 +477,37 @@ impl<'a> Facts<'a> {
                 })
     }
 
-    /// A body's explicit constructor invocation — a bare `this(…)` or `super(…)`.
+    /// A body's explicit constructor invocation — a bare `this(…)` or `super(…)` — and **which**
+    /// top-level statement it is.
     ///
-    /// JLS §8.8.7 puts it first or nowhere, so only the first statement is examined. Only the bare
-    /// forms count: `this.method()` and `super.method()` are qualified calls whose callee is a
-    /// field access rather than a name reference.
-    pub(crate) fn explicit_constructor_invocation(body: &ast::Block) -> Option<ast::CallExpr> {
-        let ast::Stmt::Expr(first) = body.stmts().next()? else {
-            return None;
-        };
-        let ast::Expr::Call(call) = first.expr()? else {
-            return None;
-        };
-        let ast::Expr::NameRef(name) = call.callee()? else {
-            return None;
-        };
-        (Self::has_keyword(name.syntax(), SyntaxKind::THIS_KW)
-            || Self::has_keyword(name.syntax(), SyntaxKind::SUPER_KW))
-        .then_some(call)
+    /// It used to be the first statement or nowhere, and the position was therefore implicit. JEP
+    /// 447 (JLS §8.8.7 as of Java 25) admits a *prologue* of statements before it, so the position
+    /// is now part of the answer: everything before it runs while `this` is still
+    /// `uninitializedThis`, and everything after it runs on a fully constructed object. A reader
+    /// that looked only at the first statement did not merely miss the delegation — it emitted the
+    /// implicit `super()` prologue **as well as** the explicit call the body still contains, so
+    /// `Object.<init>` ran twice on one object.
+    ///
+    /// Only the bare forms count: `this.method()` and `super.method()` are qualified calls whose
+    /// callee is a field access rather than a name reference. Only the *top level* of the body is
+    /// scanned, since an invocation nested inside a block or a branch is not a Java program.
+    pub(crate) fn explicit_constructor_invocation(
+        body: &ast::Block,
+    ) -> Option<(usize, ast::CallExpr)> {
+        body.stmts().enumerate().find_map(|(at, statement)| {
+            let ast::Stmt::Expr(statement) = statement else {
+                return None;
+            };
+            let ast::Expr::Call(call) = statement.expr()? else {
+                return None;
+            };
+            let ast::Expr::NameRef(name) = call.callee()? else {
+                return None;
+            };
+            (Self::has_keyword(name.syntax(), SyntaxKind::THIS_KW)
+                || Self::has_keyword(name.syntax(), SyntaxKind::SUPER_KW))
+            .then_some((at, call))
+        })
     }
 
     /// Whether an explicit constructor invocation names `keyword` — `THIS_KW` for the `this(…)`
@@ -392,10 +517,10 @@ impl<'a> Facts<'a> {
             if Self::has_keyword(name.syntax(), keyword))
     }
 
-    /// Whether a constructor body begins with an explicit invocation naming `keyword`.
+    /// Whether a constructor body carries an explicit invocation naming `keyword`.
     pub(crate) fn body_delegates_to(body: &ast::Block, keyword: SyntaxKind) -> bool {
         Self::explicit_constructor_invocation(body)
-            .is_some_and(|call| Self::delegates_to(&call, keyword))
+            .is_some_and(|(_, call)| Self::delegates_to(&call, keyword))
     }
 
     /// The primitive a `TYPE` node's keyword names.
@@ -658,6 +783,31 @@ impl<'a> Facts<'a> {
                 Some(Ty::Array(_))
             )
         })
+    }
+
+    /// The array type whose `clone()` a call names, and `None` for every other call.
+    ///
+    /// JLS §10.7 gives every array two members and neither is declared anywhere: `length`, which
+    /// [`is_array_length`](Self::is_array_length) answers, and `clone()`. The second *is* a call, so
+    /// it is not simply refused — what is special is only its owner and its return, both of which
+    /// are the array's own type rather than `Object`'s. The index resolves the name to
+    /// `Object.clone()`, whose descriptor returns `java/lang/Object`, and emitting that leaves an
+    /// `Object` on the stack where the next use is verified against the array.
+    pub(crate) fn array_clone(self, call: &ast::CallExpr) -> Option<Ty> {
+        let ast::Expr::FieldAccess(access) = call.callee()? else {
+            return None;
+        };
+        if jals_syntax::decoded_ident(&Self::field_token(&access)?) != "clone" {
+            return None;
+        }
+        if call.args().is_some_and(|list| list.args().next().is_some()) {
+            return None;
+        }
+        let receiver = access.receiver()?;
+        match self.typed.type_of_expr(Self::span(receiver.syntax())) {
+            Some(ty @ Ty::Array(_)) => Some(ty.clone()),
+            _ => None,
+        }
     }
 
     /// The indexed member a file-local definition declares.

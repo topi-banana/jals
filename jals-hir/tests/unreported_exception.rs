@@ -241,3 +241,181 @@ fn catching_the_reflective_supertype_admits_a_subclass() {
     let src = "class C { void f() { try { throw new ClassNotFoundException(); } catch (ReflectiveOperationException e) {} } }";
     assert!(reported(src).is_empty(), "{:?}", reported(src));
 }
+
+/// A rethrown `catch` parameter throws the clause's **arms**, not the parameter's own type
+/// (JLS §11.2.2's precise rethrow).
+///
+/// A multi-catch parameter's type is the *lub* of its arms, so
+/// `catch (RuntimeException | Error e) { throw e; }` holds a `Throwable` — which is checked, while
+/// neither arm is. Reading the parameter's type there asks a method to declare `throws Throwable`
+/// for a rethrow that can raise neither, which is the diagnostic Java 7 added this rule to prevent
+/// alongside multi-catch itself.
+#[test]
+fn a_rethrown_catch_parameter_throws_its_arms() {
+    let unchecked = "class C {
+        void f() {
+            try { g(); }
+            catch (RuntimeException | Error e) { throw e; }
+        }
+        void g() {}
+    }";
+    assert!(
+        reported(unchecked).is_empty(),
+        "neither arm is checked, so the rethrow declares nothing"
+    );
+
+    // The rule keeps its teeth: a *checked* arm is still reported, and by the arm's own name rather
+    // than by the lub's.
+    let checked = "class MyEx extends Exception {}
+    class C {
+        void f() {
+            try { g(); }
+            catch (MyEx | RuntimeException e) { throw e; }
+        }
+        void g() throws MyEx {}
+    }";
+    assert_eq!(reported(checked), ["MyEx"]);
+}
+
+/// Assigning to the parameter takes the precise rethrow away, which is §11.2.2's own precondition:
+/// what it then holds is anything of its declared type.
+#[test]
+fn a_reassigned_catch_parameter_falls_back_to_its_type() {
+    let src = "class C {
+        void f() {
+            try { g(); }
+            catch (RuntimeException | Error e) { e = new RuntimeException(); throw e; }
+        }
+        void g() {}
+    }";
+    assert_eq!(reported(src), ["Throwable"]);
+}
+
+/// The precise-rethrow rule stops at a **declaration space**, which the catch block is not the only
+/// one of.
+///
+/// JLS §14.20 forbids shadowing a `catch` parameter inside its own block — for locals and parameters
+/// of the same method. A *class* written inside that block is a new declaration space and may
+/// declare a field or a parameter of the name, and javac compiles every shape below. Matching the
+/// clause by name alone read the outer arms for an unrelated `e` and reported an `IOException`
+/// nothing there can raise.
+#[test]
+fn a_shadowed_name_is_not_the_catch_parameter() {
+    let source = r#"
+        package p;
+        import java.io.IOException;
+        public class Shadow {
+            interface R { void run(); }
+            void field() {
+                try { throw new IOException("x"); } catch (IOException e) {
+                    R r = new R() {
+                        RuntimeException e = new RuntimeException();
+                        public void run() { throw e; }
+                    };
+                    r.run();
+                }
+            }
+            void parameter() {
+                try { throw new IOException("x"); } catch (IOException e) {
+                    class Inner { void go(RuntimeException e) { throw e; } }
+                    new Inner().go(new RuntimeException());
+                }
+            }
+        }
+    "#;
+    assert_eq!(reported(source), Vec::<String>::new());
+}
+
+/// §11.2.2's answer is what the `try` block can raise, not the arm the source wrote.
+///
+/// `class MyEx extends IOException {}` with `try { throw new MyEx(); } catch (IOException e) { throw
+/// e; }` needs `throws MyEx` and no more — javac compiles it — while reading the written arm
+/// reported a method that declares exactly what it raises.
+#[test]
+fn a_rethrow_is_narrowed_to_what_the_block_raises() {
+    let precise = r"
+        package p;
+        import java.io.IOException;
+        public class Precise {
+            static class MyEx extends IOException {}
+            void m() throws MyEx {
+                try { throw new MyEx(); } catch (IOException e) { throw e; }
+            }
+        }
+    ";
+    assert_eq!(reported(precise), Vec::<String>::new());
+
+    // Declaring only the *arm* is not enough when the block raises something the arm does not
+    // cover — the rule narrows, it does not excuse.
+    let missing = r"
+        package p;
+        import java.io.IOException;
+        public class Missing {
+            static class MyEx extends IOException {}
+            void m() {
+                try { throw new MyEx(); } catch (IOException e) { throw e; }
+            }
+        }
+    ";
+    assert_eq!(reported(missing), ["MyEx"]);
+}
+
+/// The everyday rethrow is **call-sourced**, and that is the shape the narrowing can go blind on.
+///
+/// `raised_at` answers nothing for a call it cannot resolve, and in the stub configuration — which is
+/// what `jals lint` and the LSP run in — most library calls do not resolve. Narrowing to a walk that
+/// saw nothing would make the primary rethrow shape report nothing at all, which is a wider silence
+/// than the lambda and initializer ones this module already accepts.
+#[test]
+fn a_call_sourced_rethrow_is_still_reported() {
+    let source = r"
+        package p;
+        import java.io.IOException;
+        public class Called {
+            static class Port { void read() throws IOException {} }
+            void m(Port port) {
+                try { port.read(); } catch (IOException e) { throw e; }
+            }
+        }
+    ";
+    assert_eq!(reported(source), ["IOException"]);
+
+    // And the shape the narrowing goes blind on: a library call the stub index cannot resolve, so
+    // the walk finds nothing and the *arms* are the honest answer. javac reports exactly this.
+    let unresolved = r"
+        package p;
+        import java.io.IOException;
+        import java.io.InputStream;
+        public class Blind {
+            void m(InputStream in) {
+                try { in.read(); } catch (IOException e) { throw e; }
+            }
+        }
+    ";
+    assert_eq!(reported(unresolved), ["IOException"]);
+
+    // The fallback does not undo the rule it was added beside: a multi-catch of two *unchecked*
+    // arms reports neither, which is what reading the parameter's lub (`Throwable`) got wrong.
+    let multi = r"
+        package p;
+        public class Multi {
+            void m(java.io.InputStream in) {
+                try { in.read(); } catch (RuntimeException | Error e) { throw e; }
+            }
+        }
+    ";
+    assert_eq!(reported(multi), Vec::<String>::new());
+
+    // Declared, so nothing to report — the same call, the same clause.
+    let declared = r"
+        package p;
+        import java.io.IOException;
+        public class Declared {
+            static class Port { void read() throws IOException {} }
+            void m(Port port) throws IOException {
+                try { port.read(); } catch (IOException e) { throw e; }
+            }
+        }
+    ";
+    assert_eq!(reported(declared), Vec::<String>::new());
+}

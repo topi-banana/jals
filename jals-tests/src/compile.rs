@@ -652,6 +652,22 @@ impl CompileReport {
             .collect()
     }
 
+    /// The gap cases one per line, worst rung first, with their messages unelided.
+    ///
+    /// The counterpart of [`buckets`](Self::buckets) rather than a replacement: a bucket says what
+    /// the shape of the remaining work is, and this says which file to open to work on it. Elision
+    /// is what makes a bucket a bucket, so the two cannot be one listing — `` `x.y()` did not
+    /// resolve `` is the same *gap* as `` `names.stream()` did not resolve `` and a different
+    /// *case*.
+    pub fn gaps(&self) -> Vec<&CaseResult> {
+        self.results
+            .iter()
+            .filter(|result| {
+                !result.outcome.is_invariant_violation() && result.outcome.detail().is_some()
+            })
+            .collect()
+    }
+
     /// The failure messages, most frequent first, with source snippets elided.
     pub fn buckets(&self) -> Vec<(String, usize)> {
         Self::tally(

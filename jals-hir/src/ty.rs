@@ -14,6 +14,19 @@ use core::fmt;
 
 use crate::project::{ItemId, ItemOrigin, MemberId, ProjectIndex};
 
+/// Whether a standard-library stub keeps its own hierarchy in an assignability question.
+///
+/// The two answers exist because the same relation is read for opposite purposes: a diagnostic must
+/// never accuse a correct program, and an overload selection must never pick a body the program did
+/// not mean. See [`Ty::is_applicable_to`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Demotion {
+    /// A stub is demoted to its name, so its partial hierarchy produces no false mismatch.
+    Lenient,
+    /// A stub keeps its hierarchy, so its partial member set produces no false *match*.
+    Precise,
+}
+
 /// An inferred Java type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ty {
@@ -302,10 +315,33 @@ impl Ty {
     /// `index` supplies the project class hierarchy for reference subtyping; without it (the
     /// [`FileAnalysis`](crate::FileAnalysis) path, which has no [`ProjectIndex`]) subtyping between two
     /// distinct project types is unknowable, so it too stays conservatively `true`.
+    pub fn is_assignable_to(&self, target: &Self, index: Option<&ProjectIndex>) -> bool {
+        self.assignable(target, index, Demotion::Lenient)
+    }
+
+    /// Assignability for **overload selection**, which is stricter than the diagnostic one.
+    ///
+    /// [`is_assignable_to`](Self::is_assignable_to) demotes a standard-library *stub* to its name so
+    /// a partial hierarchy can never produce a false mismatch — a diagnostic must not accuse a
+    /// correct program. Selection reads the same relation for the opposite purpose, and there a
+    /// false *match* costs more than a false mismatch: it does not produce a spurious report, it
+    /// picks the **wrong overload**, and the wrong overload is a call the verifier refuses or a
+    /// method the program never meant to call. `pick("x")` against `pick(Object)` / `pick(String)`
+    /// is the everyday case — with the demotion in play every candidate is applicable to every
+    /// argument and no candidate is more specific than any other, so the winner is whichever the
+    /// index listed first.
+    ///
+    /// So a stub keeps its own hierarchy here, which is the one thing it does record accurately.
+    /// What it may still cost is an overload *dropped* because the stub omits a supertype, and that
+    /// is a resolution that reports rather than one that runs the wrong body.
+    pub(crate) fn is_applicable_to(&self, target: &Self, index: &ProjectIndex) -> bool {
+        self.assignable(target, Some(index), Demotion::Precise)
+    }
+
     // Each arm names one JLS conversion case; keeping them separate (rather than merging equal
     // bodies) is what documents which conversions are/aren't modelled.
     #[allow(clippy::match_same_arms)]
-    pub fn is_assignable_to(&self, target: &Self, index: Option<&ProjectIndex>) -> bool {
+    fn assignable(&self, target: &Self, index: Option<&ProjectIndex>, demote: Demotion) -> bool {
         use ClassTy::{External, Project};
         use Ty::{Array, Class, Null, Primitive, TypeVar, Unknown, Void};
 
@@ -337,7 +373,10 @@ impl Ty {
         // (`Integer n = 1;`). Demote a stub-origin project type to its external (by-name, lenient)
         // form for assignment conversion; inference and hover still use the precise stub. Without an
         // index there are no stub project types, so this is a no-op (the `infer_node` path unchanged).
-        let (lhs, rhs) = (self.demote_stdlib(index), target.demote_stdlib(index));
+        let (lhs, rhs) = match demote {
+            Demotion::Lenient => (self.demote_stdlib(index), target.demote_stdlib(index)),
+            Demotion::Precise => (self.clone(), target.clone()),
+        };
         // Identity covers equal primitives, the same project item, an equally-spelled external
         // type, and `void` to `void`; the structural `PartialEq` handles each.
         if lhs == rhs {
@@ -386,9 +425,17 @@ impl Ty {
             | (Class(External { .. }), Class(External { .. })) => true,
 
             // Arrays: invariant for primitive elements, covariant for reference elements.
+            //
+            // The recursion carries `demote` rather than re-entering through
+            // [`is_assignable_to`](Self::is_assignable_to), which would pin it to `Lenient`: an
+            // array is not a place the question changes, so a selection asking the strict relation
+            // about `String[]` has to get the strict relation about `String`. Hard-wiring the
+            // lenient one made every reference array applicable to every other, so `f(Object[])`
+            // and `f(String[])` were both applicable to a `String[]` argument, `most_specific`
+            // found no dominator, and selection fell back to declaration order.
             (Array(s), Array(t)) => match (s.as_ref(), t.as_ref()) {
                 (Primitive(a), Primitive(b)) => a == b,
-                _ => s.is_assignable_to(t, index),
+                _ => s.assignable(t, index, demote),
             },
             // An array is a reference type: it widens to `Object` / `Cloneable` / `Serializable`,
             // but never to a user class. The two arms exist for the same reason the boxing pair
@@ -537,11 +584,6 @@ impl Ty {
         (0..dims).fold(self, |acc, _| Self::Array(Box::new(acc)))
     }
 
-    /// The `java.lang.String` type as the MVP models it.
-    pub(crate) fn string() -> Self {
-        Self::Class(ClassTy::external("String"))
-    }
-
     /// Unary numeric promotion (JLS §5.6.1): `byte` / `short` / `char` widen to `int`; other numeric
     /// types are unchanged; a non-numeric operand yields [`Ty::Unknown`].
     pub(crate) fn unary_promote(&self) -> Self {
@@ -600,6 +642,15 @@ impl fmt::Display for Ty {
 
 #[cfg(test)]
 mod tests {
+    /// `java.lang.String` by name, which is what a test with no index has to work with.
+    ///
+    /// Inference itself resolves the literal's type against the index now (`java.lang.String` is
+    /// an ordinary classpath type), so this shape survives only where there is no index to resolve
+    /// against — which is every test in this module.
+    fn string() -> Ty {
+        Ty::Class(ClassTy::external("String"))
+    }
+
     use super::*;
 
     #[test]
@@ -607,7 +658,7 @@ mod tests {
         assert_eq!(Ty::Primitive(Primitive::Int).to_string(), "int");
         assert_eq!(Ty::Void.to_string(), "void");
         assert_eq!(Ty::Null.to_string(), "null");
-        assert_eq!(Ty::string().to_string(), "String");
+        assert_eq!(string().to_string(), "String");
         assert_eq!(
             Ty::Array(Box::new(Ty::Primitive(Primitive::Long))).to_string(),
             "long[]"
@@ -630,13 +681,13 @@ mod tests {
         // A single type argument: `List<String>`.
         let list_of_string = Ty::Class(ClassTy::External {
             name: "List".to_owned(),
-            args: vec![Ty::string()],
+            args: vec![string()],
         });
         assert_eq!(list_of_string.to_string(), "List<String>");
         // Several arguments, comma-separated, and nesting: `Map<String, List<int>>`.
         let map = Ty::Class(ClassTy::External {
             name: "Map".to_owned(),
-            args: vec![Ty::string(), list_of_string],
+            args: vec![string(), list_of_string],
         });
         assert_eq!(map.to_string(), "Map<String, List<String>>");
     }
@@ -760,7 +811,7 @@ mod tests {
         let int_arr = Ty::Array(Box::new(Ty::Primitive(Primitive::Int)));
         let long_arr = Ty::Array(Box::new(Ty::Primitive(Primitive::Long)));
         let obj = Ty::Class(ClassTy::external("Object"));
-        let str_arr = Ty::Array(Box::new(Ty::string()));
+        let str_arr = Ty::Array(Box::new(string()));
         let cs_arr = Ty::Array(Box::new(Ty::Class(ClassTy::external("CharSequence"))));
 
         // Primitive element arrays are invariant.

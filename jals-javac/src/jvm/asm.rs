@@ -62,7 +62,11 @@ pub enum AsmError {
     /// An instruction wanted more operands than the stack held.
     StackUnderflow,
     /// An instruction was given an operand of the wrong kind (an `int` where a reference was due).
-    TypeMismatch,
+    ///
+    /// Names *which* instruction refused. Seventeen places raise this and they are not one gap: a
+    /// report that says only "an operand of the wrong kind" sends a reader to the whole assembler,
+    /// and the corpus bucketed every one of them under one row.
+    TypeMismatch(&'static str),
     /// A local slot was read before anything wrote it.
     UnwrittenLocal,
     /// A label was jumped to but never bound.
@@ -81,11 +85,16 @@ pub enum AsmError {
 
 impl core::fmt::Display for AsmError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(match self {
+        // The one variant that carries a subject writes its own sentence; the rest are fixed text.
+        // Written as a match with an early `write!` rather than as a second match, so a new variant
+        // has exactly one place to be added.
+        let fixed = match self {
+            Self::TypeMismatch(what) => {
+                return write!(f, "{what} was given an operand of the wrong kind");
+            }
             Self::PoolFull => "the constant pool is full",
             Self::BadDescriptor => "a descriptor did not parse",
             Self::StackUnderflow => "the operand stack was too shallow for an instruction",
-            Self::TypeMismatch => "an instruction was given an operand of the wrong kind",
             Self::UnwrittenLocal => "a local slot was read before it was written",
             Self::UnboundLabel => "a label was jumped to but never bound",
             Self::UnreachableLabel => "a label was bound where control cannot arrive",
@@ -93,7 +102,8 @@ impl core::fmt::Display for AsmError {
             Self::Unreachable => "code was emitted after an unconditional transfer",
             Self::DuplicateCase => "two `switch` arms claimed the same key",
             Self::TooLarge => "the method body exceeded a class-file limit",
-        })
+        };
+        f.write_str(fixed)
     }
 }
 
@@ -581,7 +591,7 @@ impl<'pool> Assembler<'pool> {
             if let Some(expected) = &expected
                 && !Self::compatible(expected, &popped)
             {
-                return Err(AsmError::TypeMismatch);
+                return Err(AsmError::TypeMismatch("a branch"));
             }
         }
 
@@ -635,11 +645,11 @@ impl<'pool> Assembler<'pool> {
                 let same = match compare {
                     Compare::Eq => true,
                     Compare::Ne => false,
-                    _ => return Err(AsmError::TypeMismatch),
+                    _ => return Err(AsmError::TypeMismatch("a comparison branch")),
                 };
                 return self.branch(Branch::RefSame(same), target);
             }
-            _ => return Err(AsmError::TypeMismatch),
+            _ => return Err(AsmError::TypeMismatch("a comparison branch")),
         };
         match reduce {
             None => self.branch(Branch::IntCmp(compare), target),
@@ -669,7 +679,7 @@ impl<'pool> Assembler<'pool> {
         self.require_reachable()?;
         let key = self.state.pop().ok_or(AsmError::StackUnderflow)?;
         if key != VerificationType::Integer {
-            return Err(AsmError::TypeMismatch);
+            return Err(AsmError::TypeMismatch("a `switch` selector"));
         }
 
         let mut cases = cases.to_vec();
@@ -842,7 +852,7 @@ impl<'pool> Assembler<'pool> {
                 3 => Instruction::Aload3,
                 _ => Self::wide_or_narrow(index, Instruction::Aload, WideInstruction::Aload),
             },
-            _ => return Err(AsmError::TypeMismatch),
+            _ => return Err(AsmError::TypeMismatch("a local load")),
         };
         self.emit(instruction, &[], Some(ty))
     }
@@ -878,7 +888,7 @@ impl<'pool> Assembler<'pool> {
         // behind — an unboxed reference where an `int` is due, and the reverse.
         let actual = self.state.peek().ok_or(AsmError::StackUnderflow)?;
         if !Self::compatible(&declared, actual) {
-            return Err(AsmError::TypeMismatch);
+            return Err(AsmError::TypeMismatch("a local store"));
         }
         self.store_slot(index, declared)
     }
@@ -922,7 +932,7 @@ impl<'pool> Assembler<'pool> {
                 3 => Instruction::Astore3,
                 _ => Self::wide_or_narrow(index, Instruction::Astore, WideInstruction::Astore),
             },
-            _ => return Err(AsmError::TypeMismatch),
+            _ => return Err(AsmError::TypeMismatch("a local store")),
         };
         self.require_reachable()?;
         self.state.pop();
@@ -939,7 +949,7 @@ impl<'pool> Assembler<'pool> {
         self.require_reachable()?;
         match self.state.local(index) {
             Some(VerificationType::Integer) => {}
-            Some(_) => return Err(AsmError::TypeMismatch),
+            Some(_) => return Err(AsmError::TypeMismatch("an `iinc`")),
             None => return Err(AsmError::UnwrittenLocal),
         }
         let instruction = match (u8::try_from(index), i8::try_from(delta)) {
@@ -981,7 +991,7 @@ impl<'pool> Assembler<'pool> {
                 (Double, Float) => Instruction::D2f,
                 // Unreachable while the two stack types differ; kept because the compiler cannot
                 // see that from the guard.
-                _ => return Err(AsmError::TypeMismatch),
+                _ => return Err(AsmError::TypeMismatch("a numeric conversion")),
             };
             self.emit(instruction, &[from.stack()], Some(to.stack()))?;
         }
@@ -1012,7 +1022,7 @@ impl<'pool> Assembler<'pool> {
             VerificationType::Long => Instruction::Lneg,
             VerificationType::Float => Instruction::Fneg,
             VerificationType::Double => Instruction::Dneg,
-            _ => return Err(AsmError::TypeMismatch),
+            _ => return Err(AsmError::TypeMismatch("a negation")),
         };
         self.emit(instruction, core::slice::from_ref(ty), Some(ty.clone()))
     }
@@ -1304,7 +1314,7 @@ impl<'pool> Assembler<'pool> {
             (1, 2) => Instruction::Dup2X1,
             (2, 1) => Instruction::DupX2,
             (2, 2) => Instruction::Dup2X2,
-            _ => return Err(AsmError::TypeMismatch),
+            _ => return Err(AsmError::TypeMismatch("a `dup`")),
         };
 
         // Re-seat the copy: take the value off, then everything it goes under, then put the copy,
@@ -1316,7 +1326,7 @@ impl<'pool> Assembler<'pool> {
             let value = self.state.pop().ok_or(AsmError::StackUnderflow)?;
             remaining = remaining
                 .checked_sub(State::words(&value))
-                .ok_or(AsmError::TypeMismatch)?;
+                .ok_or(AsmError::TypeMismatch("a `dup`"))?;
             skipped.push(value);
         }
         self.state.push(ty.clone());
@@ -1342,7 +1352,7 @@ impl<'pool> Assembler<'pool> {
             .ok_or(AsmError::StackUnderflow)?
             .clone();
         if State::words(&first) != 1 || State::words(&second) != 1 {
-            return Err(AsmError::TypeMismatch);
+            return Err(AsmError::TypeMismatch("a `dup2`"));
         }
         self.state.push(second);
         self.state.push(first);
@@ -1361,7 +1371,7 @@ impl<'pool> Assembler<'pool> {
             .ok_or(AsmError::StackUnderflow)?
             .clone();
         if State::words(&first) != 1 || State::words(&second) != 1 {
-            return Err(AsmError::TypeMismatch);
+            return Err(AsmError::TypeMismatch("a `swap`"));
         }
         self.state.pop();
         self.state.pop();
@@ -1422,7 +1432,7 @@ impl<'pool> Assembler<'pool> {
             (BinOp::Shr, VerificationType::Long) => Instruction::Lshr,
             (BinOp::Ushr, VerificationType::Integer) => Instruction::Iushr,
             (BinOp::Ushr, VerificationType::Long) => Instruction::Lushr,
-            _ => return Err(AsmError::TypeMismatch),
+            _ => return Err(AsmError::TypeMismatch("an arithmetic operation")),
         };
         let right = if op.is_shift() {
             VerificationType::Integer
@@ -1451,7 +1461,7 @@ impl<'pool> Assembler<'pool> {
             Some(other) if Self::is_reference(other) => {
                 (Instruction::Areturn, alloc::vec![other.clone()])
             }
-            Some(_) => return Err(AsmError::TypeMismatch),
+            Some(_) => return Err(AsmError::TypeMismatch("a `return`")),
         };
         self.emit(instruction, &popped, None)?;
         self.reachable = false;
@@ -1528,7 +1538,7 @@ impl<'pool> Assembler<'pool> {
         for expected in popped.iter().rev() {
             let actual = self.state.pop().ok_or(AsmError::StackUnderflow)?;
             if !Self::compatible(expected, &actual) {
-                return Err(AsmError::TypeMismatch);
+                return Err(AsmError::TypeMismatch("an instruction"));
             }
         }
         if let Some(pushed) = pushed {
