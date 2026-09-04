@@ -195,6 +195,9 @@ impl Fetcher for ReqwestFetcher {
 }
 
 impl ReqwestFetcher {
+    /// The most this reserves up front for a response that stated no ceiling of its own.
+    const RESERVE_CAP: usize = 8 * 1024 * 1024;
+
     /// Read a response chunk by chunk, reporting as it goes and refusing at `max_bytes`.
     ///
     /// One reader for both entry points: the bounded one differs only in having a ceiling, and two
@@ -211,12 +214,16 @@ impl ReqwestFetcher {
         if let Some(length) = response.content_length() {
             report.set_total(length);
         }
+        // `Content-Length` is the server's claim, not a fact, and the unbounded entry point has no
+        // ceiling of its own — so the reservation is capped rather than trusted. A `Vec` that grows
+        // past the cap costs an amortized copy next to a network wait; one sized from a header
+        // reading `8589934592` is an allocation failure before the first byte arrives.
         let mut bytes = Vec::with_capacity(
             response
                 .content_length()
                 .and_then(|length| usize::try_from(length).ok())
                 .unwrap_or_default()
-                .min(max_bytes.unwrap_or(usize::MAX)),
+                .min(max_bytes.unwrap_or(Self::RESERVE_CAP)),
         );
         while let Some(chunk) = response
             .chunk()
