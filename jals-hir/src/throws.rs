@@ -175,11 +175,15 @@ impl Cx<'_> {
     /// nothing is provably raised.
     fn raised_at(&self, node: &SyntaxNode) -> Vec<ItemId> {
         match node.kind() {
-            THROW_STMT => ast::ThrowStmt::cast(node.clone())
-                .and_then(|t| t.expr())
-                .and_then(|e| self.expr_item(e.syntax()))
-                .into_iter()
-                .collect(),
+            THROW_STMT => {
+                let Some(thrown) = ast::ThrowStmt::cast(node.clone()).and_then(|t| t.expr()) else {
+                    return Vec::new();
+                };
+                // Precise rethrow first (JLS §11.2.2), because the parameter's own type is the
+                // wrong answer for it.
+                self.rethrown_arms(&thrown)
+                    .unwrap_or_else(|| self.expr_item(thrown.syntax()).into_iter().collect())
+            }
             CALL_EXPR => ast::CallExpr::cast(node.clone())
                 .map(|call| self.call_throws(&call))
                 .unwrap_or_default(),
@@ -301,6 +305,62 @@ impl Cx<'_> {
     /// The indexed item an expression's inferred type denotes, if it is a project/stub/classpath type.
     fn expr_item(&self, expr: &SyntaxNode) -> Option<ItemId> {
         self.ti.type_of_expr(Collect::node_span(expr))?.project_id()
+    }
+
+    /// The exception types a `throw e;` propagates when `e` is the `catch` parameter of an enclosing
+    /// clause — its **arms**, not its own type (JLS §11.2.2's precise rethrow). `None` when the
+    /// statement is not that shape, in which case the thrown expression's type is the answer.
+    ///
+    /// It matters most for a **multi-catch**, whose parameter's type is the *lub* of its arms:
+    /// `catch (RuntimeException | Error e) { throw e; }` rethrows two unchecked exceptions and the
+    /// lub of them is `Throwable`, which is checked. Reading the parameter's type there asks a
+    /// method to declare `throws Throwable` for a rethrow that can raise neither — the diagnostic
+    /// this rule was added to Java 7 to prevent, alongside multi-catch itself.
+    ///
+    /// The parameter must be **effectively final**: an assignment to it takes the rule away, because
+    /// what it then holds is anything of its declared type. That is the whole of §11.2.2's
+    /// precondition, and it is checked here rather than assumed.
+    ///
+    /// Matched by name against the enclosing clause rather than through the resolver: JLS §14.20
+    /// forbids shadowing a `catch` parameter inside its own block, so a name that matches one is
+    /// that one.
+    fn rethrown_arms(&self, thrown: &ast::Expr) -> Option<Vec<ItemId>> {
+        let ast::Expr::NameRef(name) = thrown else {
+            return None;
+        };
+        let name = Collect::first_ident_token(name.syntax())?;
+        let name = jals_syntax::decoded_ident(&name);
+        let clause = thrown.syntax().ancestors().find_map(|ancestor| {
+            let clause = ast::CatchClause::cast(ancestor)?;
+            let binding = clause.binding()?;
+            (jals_syntax::decoded_ident(&binding) == name).then_some(clause)
+        })?;
+        if Self::reassigns(&clause, &name) {
+            return None;
+        }
+        Some(
+            clause
+                .syntax()
+                .children()
+                .filter_map(ast::Type::cast)
+                .filter_map(|ty| self.resolve_type(&ty))
+                .collect(),
+        )
+    }
+
+    /// Whether anything in `clause` assigns to `name`, which is what takes a `catch` parameter out of
+    /// being effectively final.
+    fn reassigns(clause: &ast::CatchClause, name: &str) -> bool {
+        clause
+            .syntax()
+            .descendants()
+            .filter_map(ast::AssignmentExpr::cast)
+            .filter_map(|assignment| assignment.syntax().children().find_map(ast::Expr::cast))
+            .filter_map(|target| match target {
+                ast::Expr::NameRef(target) => Collect::first_ident_token(target.syntax()),
+                _ => None,
+            })
+            .any(|token| jals_syntax::decoded_ident(&token) == name)
     }
 
     /// Resolve an AST type reference (a `throws` / `catch` type) to an indexed item, honouring whether

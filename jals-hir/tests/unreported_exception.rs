@@ -241,3 +241,52 @@ fn catching_the_reflective_supertype_admits_a_subclass() {
     let src = "class C { void f() { try { throw new ClassNotFoundException(); } catch (ReflectiveOperationException e) {} } }";
     assert!(reported(src).is_empty(), "{:?}", reported(src));
 }
+
+/// A rethrown `catch` parameter throws the clause's **arms**, not the parameter's own type
+/// (JLS §11.2.2's precise rethrow).
+///
+/// A multi-catch parameter's type is the *lub* of its arms, so
+/// `catch (RuntimeException | Error e) { throw e; }` holds a `Throwable` — which is checked, while
+/// neither arm is. Reading the parameter's type there asks a method to declare `throws Throwable`
+/// for a rethrow that can raise neither, which is the diagnostic Java 7 added this rule to prevent
+/// alongside multi-catch itself.
+#[test]
+fn a_rethrown_catch_parameter_throws_its_arms() {
+    let unchecked = "class C {
+        void f() {
+            try { g(); }
+            catch (RuntimeException | Error e) { throw e; }
+        }
+        void g() {}
+    }";
+    assert!(
+        reported(unchecked).is_empty(),
+        "neither arm is checked, so the rethrow declares nothing"
+    );
+
+    // The rule keeps its teeth: a *checked* arm is still reported, and by the arm's own name rather
+    // than by the lub's.
+    let checked = "class MyEx extends Exception {}
+    class C {
+        void f() {
+            try { g(); }
+            catch (MyEx | RuntimeException e) { throw e; }
+        }
+        void g() throws MyEx {}
+    }";
+    assert_eq!(reported(checked), ["MyEx"]);
+}
+
+/// Assigning to the parameter takes the precise rethrow away, which is §11.2.2's own precondition:
+/// what it then holds is anything of its declared type.
+#[test]
+fn a_reassigned_catch_parameter_falls_back_to_its_type() {
+    let src = "class C {
+        void f() {
+            try { g(); }
+            catch (RuntimeException | Error e) { e = new RuntimeException(); throw e; }
+        }
+        void g() {}
+    }";
+    assert_eq!(reported(src), ["Throwable"]);
+}
