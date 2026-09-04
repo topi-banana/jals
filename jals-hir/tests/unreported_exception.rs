@@ -290,3 +290,72 @@ fn a_reassigned_catch_parameter_falls_back_to_its_type() {
     }";
     assert_eq!(reported(src), ["Throwable"]);
 }
+
+/// The precise-rethrow rule stops at a **declaration space**, which the catch block is not the only
+/// one of.
+///
+/// JLS §14.20 forbids shadowing a `catch` parameter inside its own block — for locals and parameters
+/// of the same method. A *class* written inside that block is a new declaration space and may
+/// declare a field or a parameter of the name, and javac compiles every shape below. Matching the
+/// clause by name alone read the outer arms for an unrelated `e` and reported an `IOException`
+/// nothing there can raise.
+#[test]
+fn a_shadowed_name_is_not_the_catch_parameter() {
+    let source = r#"
+        package p;
+        import java.io.IOException;
+        public class Shadow {
+            interface R { void run(); }
+            void field() {
+                try { throw new IOException("x"); } catch (IOException e) {
+                    R r = new R() {
+                        RuntimeException e = new RuntimeException();
+                        public void run() { throw e; }
+                    };
+                    r.run();
+                }
+            }
+            void parameter() {
+                try { throw new IOException("x"); } catch (IOException e) {
+                    class Inner { void go(RuntimeException e) { throw e; } }
+                    new Inner().go(new RuntimeException());
+                }
+            }
+        }
+    "#;
+    assert_eq!(reported(source), Vec::<String>::new());
+}
+
+/// §11.2.2's answer is what the `try` block can raise, not the arm the source wrote.
+///
+/// `class MyEx extends IOException {}` with `try { throw new MyEx(); } catch (IOException e) { throw
+/// e; }` needs `throws MyEx` and no more — javac compiles it — while reading the written arm
+/// reported a method that declares exactly what it raises.
+#[test]
+fn a_rethrow_is_narrowed_to_what_the_block_raises() {
+    let precise = r#"
+        package p;
+        import java.io.IOException;
+        public class Precise {
+            static class MyEx extends IOException {}
+            void m() throws MyEx {
+                try { throw new MyEx(); } catch (IOException e) { throw e; }
+            }
+        }
+    "#;
+    assert_eq!(reported(precise), Vec::<String>::new());
+
+    // Declaring only the *arm* is not enough when the block raises something the arm does not
+    // cover — the rule narrows, it does not excuse.
+    let missing = r#"
+        package p;
+        import java.io.IOException;
+        public class Missing {
+            static class MyEx extends IOException {}
+            void m() {
+                try { throw new MyEx(); } catch (IOException e) { throw e; }
+            }
+        }
+    "#;
+    assert_eq!(reported(missing), ["MyEx"]);
+}

@@ -1386,6 +1386,18 @@ impl<'a> Inferer<'a> {
                     .unwrap_or_default();
                 self.inference.resolve_constructor(owner, &args, index)
             }),
+            // An `enum` constant's arguments are a constructor invocation too (JLS §8.9.2) — the
+            // enum's own, which is the type the constant is written inside. It reaches here rather
+            // than through `NEW_EXPR` because a constant names no type to construct: the grammar has
+            // an identifier and an argument list, and the enum around it is the owner. Without the
+            // arm `enum E { A(() -> "a"); }` gave the lambda no target type at all.
+            ENUM_CONSTANT => {
+                let args: Vec<ast::Expr> = list.children().filter_map(ast::Expr::cast).collect();
+                call.ancestors()
+                    .find(|ancestor| ancestor.kind() == SyntaxKind::ENUM_DECL)
+                    .and_then(|decl| index.declared_item(file, &decl))
+                    .and_then(|owner| self.inference.resolve_constructor(owner, &args, index))
+            }
             _ => None,
         };
         let Some(selected) = selected else {

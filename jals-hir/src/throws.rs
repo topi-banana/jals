@@ -27,8 +27,8 @@ use alloc::vec::Vec;
 use core::ops::Range;
 
 use jals_syntax::SyntaxKind::{
-    CALL_EXPR, CONSTRUCTOR_DECL, INITIALIZER, LAMBDA_EXPR, METHOD_DECL, NEW_EXPR, THROW_STMT,
-    TRY_STMT,
+    CALL_EXPR, CLASS_BODY, CONSTRUCTOR_DECL, INITIALIZER, LAMBDA_EXPR, METHOD_DECL, NEW_EXPR,
+    THROW_STMT, TRY_STMT,
 };
 use jals_syntax::SyntaxNode;
 use jals_syntax::ast::{self, AstNode};
@@ -321,31 +321,100 @@ impl Cx<'_> {
     /// what it then holds is anything of its declared type. That is the whole of §11.2.2's
     /// precondition, and it is checked here rather than assumed.
     ///
-    /// Matched by name against the enclosing clause rather than through the resolver: JLS §14.20
-    /// forbids shadowing a `catch` parameter inside its own block, so a name that matches one is
-    /// that one.
+    /// Matched by name against the enclosing clause rather than through the resolver — JLS §14.20
+    /// forbids shadowing a `catch` parameter inside its own block — but **only up to the enclosing
+    /// declaration space**. That rule governs locals and parameters of the same method; a *class*
+    /// written inside the catch block is a new declaration space and may legally declare a field, a
+    /// parameter, or a local of the name. `catch (IOException e) { … new R() { RuntimeException e =
+    /// …; public void run() { throw e; } } … }` is a program javac compiles, and reading the outer
+    /// clause's arms for it reported an `IOException` nothing can raise. A `CLASS_BODY` is where the
+    /// walk stops, because a class body is what every one of those shapes needs.
     fn rethrown_arms(&self, thrown: &ast::Expr) -> Option<Vec<ItemId>> {
         let ast::Expr::NameRef(name) = thrown else {
             return None;
         };
         let name = Collect::first_ident_token(name.syntax())?;
         let name = jals_syntax::decoded_ident(&name);
-        let clause = thrown.syntax().ancestors().find_map(|ancestor| {
-            let clause = ast::CatchClause::cast(ancestor)?;
-            let binding = clause.binding()?;
-            (jals_syntax::decoded_ident(&binding) == name).then_some(clause)
-        })?;
+        let clause = thrown
+            .syntax()
+            .ancestors()
+            .take_while(|ancestor| ancestor.kind() != CLASS_BODY)
+            .find_map(|ancestor| {
+                let clause = ast::CatchClause::cast(ancestor)?;
+                let binding = clause.binding()?;
+                (jals_syntax::decoded_ident(&binding) == name).then_some(clause)
+            })?;
         if Self::reassigns(&clause, &name) {
             return None;
         }
-        Some(
-            clause
-                .syntax()
-                .children()
-                .filter_map(ast::Type::cast)
-                .filter_map(|ty| self.resolve_type(&ty))
-                .collect(),
-        )
+        let arms: Vec<ItemId> = clause
+            .syntax()
+            .children()
+            .filter_map(ast::Type::cast)
+            .filter_map(|ty| self.resolve_type(&ty))
+            .collect();
+        Some(self.narrowed_to_the_block(&clause, &arms))
+    }
+
+    /// §11.2.2's actual answer: not the written arms, but **what the `try` block can raise** that
+    /// this clause is the one to catch.
+    ///
+    /// The arms are an upper bound the source wrote, and the rule exists precisely to improve on it.
+    /// `class MyEx extends IOException {}` with `try { throw new MyEx(); } catch (IOException e) {
+    /// throw e; }` needs `throws MyEx` and no more — javac compiles it — while the written arm says
+    /// `IOException` and reported a method that declared exactly what it raises. An exception a
+    /// *preceding* clause already catches is not this one's either.
+    ///
+    /// A raise the analysis cannot see contributes nothing, so a block it learns nothing about makes
+    /// the rethrow raise nothing. That is the direction this module already errs in — a lambda's and
+    /// an initializer's raises are "conservatively left unreported" for the same reason — and it is
+    /// the safe one: a missed diagnostic, rather than one against a program that is correct.
+    fn narrowed_to_the_block(&self, clause: &ast::CatchClause, arms: &[ItemId]) -> Vec<ItemId> {
+        let Some(try_stmt) = clause
+            .syntax()
+            .parent()
+            .and_then(|parent| ast::TryStmt::cast(parent))
+        else {
+            return arms.to_vec();
+        };
+        // The clauses written before this one, whose catches are not this one's to rethrow.
+        let preceding: Vec<ItemId> = try_stmt
+            .catches()
+            .take_while(|earlier| earlier.syntax() != clause.syntax())
+            .flat_map(|earlier| earlier.types().collect::<Vec<_>>())
+            .filter_map(|ty| self.resolve_type(&ty))
+            .collect();
+        let mut out = Vec::new();
+        for source in try_stmt.syntax().descendants() {
+            if !Self::guards(&try_stmt, &source) {
+                continue; // in a `catch` or `finally`, not the protected region.
+            }
+            for raised in self.raised_at(&source) {
+                if !arms.iter().any(|&arm| self.index.is_subtype(raised, arm)) {
+                    continue; // this clause does not catch it.
+                }
+                if preceding
+                    .iter()
+                    .any(|&earlier| self.index.is_subtype(raised, earlier))
+                {
+                    continue; // an earlier clause does.
+                }
+                // An inner `try` inside the block may already handle it, and a raise inside a
+                // lambda or a local class's method belongs to that boundary rather than to this one.
+                if self.handled_by_catch(&source, try_stmt.syntax(), raised) {
+                    continue;
+                }
+                if Self::nearest_throws_boundary(&source)
+                    .is_some_and(|boundary| try_stmt.syntax().descendants().any(|n| n == boundary))
+                {
+                    continue;
+                }
+                if !out.contains(&raised) {
+                    out.push(raised);
+                }
+            }
+        }
+        out
     }
 
     /// Whether anything in `clause` assigns to `name`, which is what takes a `catch` parameter out of

@@ -6803,3 +6803,313 @@ public class Allowed extends Base {
 ";
     compile_across(&[base, allowed]).expect("every ordinary shape still compiles");
 }
+
+/// A `new` expression holds two regions that belong to different types, and a lambda in the wrong
+/// one is claimed by a class whose member walk never reaches it.
+///
+/// `new Holder(() -> …) { … }` evaluates its arguments before the instance exists (JLS §15.9.4), so
+/// the lambda among them captures the *enclosing* `this` and is the enclosing class's — but asking
+/// whether a `NEW_EXPR` carries a class body answers "anonymous" from anywhere inside it, arguments
+/// included. Claimed by the anonymous class, collected by nobody, and the whole file refused. The
+/// `enum` constant is the mirror: correctly claimed by the enum, and the enum's member walk stops
+/// after the `;`.
+#[test]
+fn a_lambda_beside_an_anonymous_body_belongs_to_the_enclosing_class() {
+    let source = r#"
+        public class Beside {
+            interface Run { String go(); }
+            static abstract class Holder {
+                final Run run;
+                Holder(Run run) { this.run = run; }
+                abstract String extra();
+            }
+            String tag = "outer";
+            String build() {
+                Holder held = new Holder(() -> tag) { String extra() { return "body"; } };
+                return held.run.go() + held.extra();
+            }
+            public static void main(String[] args) {
+                System.out.println(new Beside().build());
+            }
+        }
+    "#;
+    assert!(
+        compile(source).is_ok(),
+        "a lambda in a creation's argument list belongs to the enclosing class"
+    );
+    if java_available() {
+        assert_eq!(run(source, "Beside"), "outerbody\n");
+    }
+}
+
+/// The same boundary from the other side: an `enum` constant's *arguments* are the enum's own.
+///
+/// JLS §8.9.2 evaluates them in the enum's `<clinit>`, so the lambda is the enum's — and the enum's
+/// member walk is what follows the `;`, which is not where a constant is written.
+#[test]
+fn a_lambda_in_an_enum_constant_argument_belongs_to_the_enum() {
+    let source = r#"
+        public class Constants {
+            interface Run { String go(); }
+            enum E {
+                A(() -> "a"),
+                B(() -> "b");
+                final Run run;
+                E(Run run) { this.run = run; }
+            }
+            public static void main(String[] args) {
+                System.out.println(E.A.run.go() + E.B.run.go());
+            }
+        }
+    "#;
+    let compiled = compile(source);
+    assert!(
+        compiled.is_ok(),
+        "a lambda in an `enum` constant's arguments belongs to the enum: {:?}",
+        compiled.err()
+    );
+    if java_available() {
+        assert_eq!(run(source, "Constants"), "ab\n");
+    }
+}
+
+/// An explicit `super(…)` replaces the superclass call and nothing else.
+///
+/// JLS §8.8.7.1 lets a constructor write its own delegation instead of the implicit `super()`, and
+/// that says nothing about the fields *this* class synthesised — no superclass has heard of them.
+/// Emitting only the field initialisers after such a delegation left `this$0` null and `val$x` zero:
+/// the first is a `NullPointerException` at the first unqualified outer-field read, the second is
+/// silently the wrong number.
+#[test]
+fn an_explicit_super_still_stores_the_enclosing_instance() {
+    let source = r#"
+        public class Enclosing {
+            int f = 7;
+            static class Base { int b; Base(int b) { this.b = b; } }
+            class Inner extends Base {
+                Inner(int x) { super(x); }
+                int get() { return f + b; }
+            }
+            public static void main(String[] args) {
+                System.out.println(new Enclosing().new Inner(5).get());
+            }
+        }
+    "#;
+    assert!(compile(source).is_ok(), "an inner class writing `super(…)`");
+    if java_available() {
+        assert_eq!(run(source, "Enclosing"), "12\n");
+    }
+}
+
+/// The capture half of the same rule, which fails without a sound: `val$n` stays zero and the
+/// program answers with it.
+#[test]
+fn an_explicit_super_still_stores_a_capture() {
+    let source = r#"
+        public class Captured {
+            static class Base { int b; Base(int b) { this.b = b; } }
+            static int build(int n) {
+                class Local extends Base {
+                    Local(int x) { super(x); }
+                    int get() { return n + b; }
+                }
+                return new Local(5).get();
+            }
+            public static void main(String[] args) {
+                System.out.println(build(7));
+            }
+        }
+    "#;
+    assert!(
+        compile(source).is_ok(),
+        "a capturing local class writing `super(…)`"
+    );
+    if java_available() {
+        assert_eq!(run(source, "Captured"), "12\n");
+    }
+}
+
+/// A `this(…)` in a class whose constructors carry synthetic parameters is reported, because the
+/// call would be emitted against the descriptor the *index* holds — the declaration's, which is
+/// missing them.
+///
+/// `NoSuchMethodError` for an inner class, and `StackOverflowError` for a capturing local one, whose
+/// captures are appended so `this(1)` resolves to the constructor doing the calling. A verifier
+/// catches neither, so both loaded and ran. The `enum` shape has been reported all along; these are
+/// the rest of the same rule.
+#[test]
+fn a_this_delegation_past_synthetic_parameters_is_refused() {
+    let inner = r#"
+        public class Deleg {
+            int f = 7;
+            class Inner {
+                int v;
+                Inner() { this(1); }
+                Inner(int x) { v = x; }
+            }
+        }
+    "#;
+    assert!(matches!(
+        compile(inner),
+        Err(LowerError::Unsupported(
+            "a `this(…)` delegation in a class with synthetic constructor parameters"
+        ))
+    ));
+    let capturing = r#"
+        public class DelegLocal {
+            static int build(int n) {
+                class Local {
+                    int v;
+                    Local() { this(1); }
+                    Local(int x) { v = x + n; }
+                }
+                return new Local().v;
+            }
+        }
+    "#;
+    assert!(matches!(
+        compile(capturing),
+        Err(LowerError::Unsupported(
+            "a `this(…)` delegation in a class with synthetic constructor parameters"
+        ))
+    ));
+    // A class with no synthetic parameters is unaffected: the index descriptor is the emitted one.
+    let plain = r#"
+        public class Plain {
+            int v;
+            Plain() { this(1); }
+            Plain(int x) { v = x; }
+            public static void main(String[] args) { System.out.println(new Plain().v); }
+        }
+    "#;
+    assert!(compile(plain).is_ok());
+    if java_available() {
+        assert_eq!(run(plain, "Plain"), "1\n");
+    }
+}
+
+/// A nested type's own `access_flags` and its `InnerClasses` entry answer *different* questions, and
+/// both were being answered with the entry's.
+///
+/// JVMS §4.1 gives a class file one access bit. javac sets it for `public` **and for `protected`**,
+/// because the JVM has no protected class access and a `protected` member type has to be loadable
+/// by a subclass in another package; what the source wrote is recorded in `InnerClasses` instead.
+/// The interface member is the shape that broke: JLS §9.5 makes it implicitly `public`, the entry
+/// said so, and the class file stayed package-private — so a cross-package use *compiled* (javac
+/// reads the entry) and threw `IllegalAccessError` at run time. Every expectation here was read off
+/// javac's own output for the same source.
+#[test]
+fn a_nested_types_class_file_and_its_entry_record_access_differently() {
+    let source = r"
+        package p;
+        public class Api {
+            public interface Iface { class Member {} }
+            protected static class Prot {}
+            static class Pkg {}
+            private static class Priv {}
+            public static class Pub {}
+        }
+    ";
+    let classes = compile(source).expect("compile");
+    let own: Vec<(String, u16)> = classes
+        .iter()
+        .map(|class| {
+            let file =
+                jals_exec::block_on_inline(jals_classfile::ClassFile::read(class.bytes.as_slice()))
+                    .expect("reparse");
+            (class.internal_name.clone(), file.access_flags.0)
+        })
+        .collect();
+    const PUBLIC_SUPER: u16 = 0x0001 | 0x0020;
+    const SUPER: u16 = 0x0020;
+    const PUBLIC_INTERFACE: u16 = 0x0001 | 0x0200 | 0x0400;
+    assert_eq!(
+        own,
+        [
+            ("p/Api".to_owned(), PUBLIC_SUPER),
+            ("p/Api$Iface".to_owned(), PUBLIC_INTERFACE),
+            // Implicitly `public` because an interface declares it, and the class file has to say so
+            // itself — the entry saying it is not something the JVM reads for access.
+            ("p/Api$Iface$Member".to_owned(), PUBLIC_SUPER),
+            // `protected` has no class-file spelling, so javac writes `ACC_PUBLIC` here and
+            // `ACC_PROTECTED` in the entry below.
+            ("p/Api$Prot".to_owned(), PUBLIC_SUPER),
+            ("p/Api$Pkg".to_owned(), SUPER),
+            ("p/Api$Priv".to_owned(), SUPER),
+            ("p/Api$Pub".to_owned(), PUBLIC_SUPER),
+        ]
+    );
+
+    // The entry keeps what the source wrote, which is where the two records part company.
+    let outer =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(classes[0].bytes.as_slice()))
+            .expect("reparse");
+    let entries = outer
+        .attributes
+        .iter()
+        .find_map(|attribute| match &attribute.body {
+            jals_classfile::AttributeBody::InnerClasses(entries) => Some(entries),
+            _ => None,
+        })
+        .expect("an InnerClasses attribute");
+    let listed: Vec<(String, u16)> = entries
+        .iter()
+        .map(|entry| {
+            (
+                outer
+                    .constant_pool
+                    .utf8(entry.inner_name_index)
+                    .expect("utf8")
+                    .into_owned(),
+                entry.inner_class_access_flags(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            ("Iface".to_owned(), 0x0001 | 0x0200 | 0x0400 | 0x0008),
+            ("Prot".to_owned(), 0x0004 | 0x0008),
+            ("Pkg".to_owned(), 0x0008),
+            ("Priv".to_owned(), 0x0002 | 0x0008),
+            ("Pub".to_owned(), 0x0001 | 0x0008),
+        ]
+    );
+}
+
+/// Two local classes of one name in one class are one binary name, and the second class file
+/// silently replaced the first.
+///
+/// javac numbers them `D$1Helper` / `D$2Helper` and prints 3; this wrote a single `D$Helper` and
+/// printed 4. Until this branch's `NestMembers` the program at least died loudly — a local class
+/// reading its enclosing class's `private` field with no nest attribute is an `IllegalAccessError` —
+/// so granting the access that was right is what turned a crash into a wrong answer.
+#[test]
+fn two_local_classes_of_one_name_are_refused() {
+    let source = r"
+        public class Dup {
+            private static int s = 1;
+            static int one() { class Helper { int f() { return s; } } return new Helper().f(); }
+            static int two() { class Helper { int f() { return s + 1; } } return new Helper().f(); }
+        }
+    ";
+    assert!(matches!(
+        compile(source),
+        Err(LowerError::Unsupported(
+            "two type declarations with one binary name"
+        ))
+    ));
+    // One of each name still compiles: the check is about the collision, not about local classes.
+    let distinct = r"
+        public class Distinct {
+            private static int s = 1;
+            static int one() { class First { int f() { return s; } } return new First().f(); }
+            static int two() { class Second { int f() { return s + 1; } } return new Second().f(); }
+            public static void main(String[] args) { System.out.println(one() + two()); }
+        }
+    ";
+    assert!(compile(distinct).is_ok());
+    if java_available() {
+        assert_eq!(run(distinct, "Distinct"), "3\n");
+    }
+}

@@ -364,7 +364,37 @@ impl Compile {
                 .ok_or_else(|| LowerError::Unresolved(name.text().into()))?;
             out.push(Self::class(&node, item, typed, class_version)?);
         }
+        Self::no_colliding_names(&out)?;
         Ok(out)
+    }
+
+    /// Refuse a file whose type declarations do not all get distinct binary names.
+    ///
+    /// A binary name comes from the item's fully qualified name, and a *local* class's is its simple
+    /// name under the type that holds it — so two local classes of one name in one class are one
+    /// name, and the second class file silently replaced the first. `static int one() { class Helper
+    /// { … } … } static int two() { class Helper { … } … }` compiled, loaded, and answered with
+    /// whichever body was written last.
+    ///
+    /// Until this branch's `NestMembers` it at least failed loudly: without the nest attributes a
+    /// local class reading its enclosing class's `private` field was an `IllegalAccessError`, so the
+    /// program died rather than lying. Granting the access that was right is what turned it into a
+    /// wrong answer, which is why the check lands with it.
+    ///
+    /// javac numbers them — `D$1Helper`, `D$2Helper`, per outermost class in declaration order — and
+    /// so should this. Reported rather than numbered here because a binary name is read from the
+    /// index in a dozen places (the constant pool, `InnerClasses`, `NestMembers`, the file name), and
+    /// a numbering only half of them agree on is a class file that names a type nothing emits.
+    fn no_colliding_names(classes: &[CompiledClass]) -> Result<()> {
+        let mut seen = alloc::collections::BTreeSet::new();
+        for class in classes {
+            if !seen.insert(class.internal_name.as_str()) {
+                return Err(LowerError::Unsupported(
+                    "two type declarations with one binary name",
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Compile one type declaration.
@@ -451,7 +481,7 @@ impl Compile {
         let mut methods = Vec::new();
         // Worked out before any body is lowered, because a body cannot add a method to the class it is in.
         let (context, lambda_methods, bootstraps) =
-            Self::synthesise_lambdas(context, node, &members, &mut pool)?;
+            Self::synthesise_lambdas(context, node, &Self::lambda_roots(node), &mut pool)?;
         methods.extend(lambda_methods);
 
         let mut saw_constructor = false;
@@ -674,10 +704,10 @@ impl Compile {
         }
 
         let mut class = ClassFile::new(class_version, 0, pool);
-        class.access_flags = ClassAccessFlags(Self::declared_type_flags(
-            node,
-            context.index.item(item).kind,
-        ));
+        class.access_flags = ClassAccessFlags(
+            Self::class_file_access(node)
+                | Self::declared_type_flags(node, context.index.item(item).kind),
+        );
         class.this_class = this_class;
         class.super_class = super_class;
         class.interfaces = interfaces;
@@ -837,16 +867,11 @@ impl Compile {
             // semantics for the class file that holds the code, and this entry holds none.
             let kind = context.index.item(item).kind;
             let mut flags = Self::declared_type_flags(declaration, kind) & !ClassAccessFlags::SUPER;
-            // A member of an interface is implicitly `public` (JLS §9.5), exactly as its fields and
-            // methods are — and here that level is the only record of it.
-            flags |= if Facts::is_interface_member(declaration) {
-                match Self::access_level(declaration) {
-                    0 => ClassAccessFlags::PUBLIC,
-                    level => level,
-                }
-            } else {
-                Self::access_level(declaration)
-            };
+            // The level the source wrote, `public` filled in for a member of an interface (JLS
+            // §9.5). Verbatim, and *not* the class file's own bit: a `protected` member type is
+            // `ACC_PUBLIC` there and `ACC_PROTECTED` here, and this entry is the only record of
+            // which of the two the source actually said.
+            flags |= Self::type_access_level(declaration);
             if Facts::is_static_member_type(declaration) {
                 // `ClassAccessFlags` has no `STATIC`, because a *class* file cannot be static — only
                 // an `InnerClasses` entry records it (JVMS §4.7.6, `ACC_STATIC` = 0x0008). The
@@ -946,6 +971,27 @@ impl Compile {
             .unwrap_or_default()
     }
 
+    /// Everything inside a type declaration a lambda may be written in.
+    ///
+    /// [`body_members`](Self::body_members) is the *declarations*, and an `enum`'s constants are not
+    /// among them — `EnumBody::members()` is what follows the `;`. But `enum E { A(() -> "a"); }` is
+    /// a lambda of `E`: JLS §8.9.2 evaluates a constant's arguments in `E`'s own `<clinit>`, so
+    /// [`lexically_owned_by`](Self::lexically_owned_by) rightly claims it for `E` and nothing here
+    /// collected it — planned by nobody, and the file refused as *a lambda outside a class body*.
+    /// The two halves have to answer about the same region, so the region is named once.
+    ///
+    /// A constant *with* a body is still scanned whole: what is inside that body belongs to the
+    /// constant's own anonymous subclass, and the ownership filter is what separates the two.
+    fn lambda_roots(node: &SyntaxNode) -> Vec<SyntaxNode> {
+        let mut roots = Self::body_members(node);
+        roots.extend(
+            Self::declared_constants(node)
+                .iter()
+                .map(|constant| constant.syntax().clone()),
+        );
+        roots
+    }
+
     /// The constants an `enum` declaration lists, and nothing for any other declaration.
     fn declared_constants(node: &SyntaxNode) -> Vec<ast::EnumConstant> {
         node.children()
@@ -954,10 +1000,45 @@ impl Compile {
             .unwrap_or_default()
     }
 
+    /// The access level a type declaration has, with what the language implies filled in.
+    ///
+    /// JLS §9.5: a member type of an interface is implicitly `public`, exactly as its fields and
+    /// methods are, and the source writes no modifier for it. One answer, read by both records that
+    /// have to agree about it.
+    fn type_access_level(node: &SyntaxNode) -> u16 {
+        match Self::access_level(node) {
+            0 if Facts::is_interface_member(node) => MethodAccessFlags::PUBLIC,
+            level => level,
+        }
+    }
+
+    /// The one access bit a *class file* has for itself (JVMS §4.1), which is not the level the
+    /// source wrote.
+    ///
+    /// `ACC_PUBLIC` is set for `public` **and for `protected`**, because the JVM has no protected
+    /// class access: a `protected` member type is reachable from a subclass in another package, and
+    /// the only way a class file can permit that is to be public. What the source actually wrote is
+    /// recorded in the `InnerClasses` entry instead, which is why that entry carries
+    /// [`type_access_level`](Self::type_access_level) verbatim and this does not.
+    ///
+    /// The two have to agree about *reachability* or they disagree at run time rather than at
+    /// compile time: `public interface Iface { class Member {} }` whose entry said `public` while its
+    /// own flags said package-private compiled a cross-package `new p.Api.Iface.Member()` fine —
+    /// javac reads the entry — and threw `IllegalAccessError` at the first one.
+    fn class_file_access(node: &SyntaxNode) -> u16 {
+        if Self::type_access_level(node)
+            & (MethodAccessFlags::PUBLIC | MethodAccessFlags::PROTECTED)
+            == 0
+        {
+            return 0;
+        }
+        ClassAccessFlags::PUBLIC
+    }
+
+    /// The flags a type declaration carries that say what *kind* of type it is, with no access level:
+    /// the two records that read this disagree about the level on purpose, so each adds its own.
     fn class_flags(node: &SyntaxNode, is_interface: bool, is_annotation: bool) -> u16 {
-        // Only `public` is expressible on a top-level type. `private` / `protected` are nested-type
-        // modifiers, and a nested type is reported rather than emitted.
-        let mut flags = Self::access_level(node) & ClassAccessFlags::PUBLIC;
+        let mut flags = 0;
         if is_interface {
             // An interface is implicitly abstract and never has the `super`-call semantics bit.
             flags |= ClassAccessFlags::INTERFACE | ClassAccessFlags::ABSTRACT;
@@ -1029,16 +1110,41 @@ impl Compile {
     /// "Nearest" counts an anonymous class body and an `enum` constant's body, since each is a type
     /// of its own — and does *not* count an `enum` constant without one, whose arguments are
     /// evaluated by the enum's own `<clinit>`.
+    ///
+    /// **A creation expression is not its own body.** `new Holder(() -> f()) { void extra() {} }`
+    /// is one `NEW_EXPR` holding two things that belong to different types: the class body is the
+    /// anonymous class, and the *argument list* is evaluated in the enclosing one — JLS §15.9.4
+    /// evaluates the arguments before the instance exists, so a lambda among them captures the
+    /// enclosing `this` and javac compiles it into the enclosing class. Asking
+    /// [`Facts::is_anonymous_body`] about the `NEW_EXPR` answers "anonymous" from *anywhere* inside
+    /// it, arguments included, so such a lambda was claimed by a type whose member walk — the class
+    /// body — never reaches it: planned by nobody, and the whole file refused as *a lambda outside a
+    /// class body*. The boundary is therefore the `CLASS_BODY`, and the node it stands for is the
+    /// creation that owns it. An `enum` constant's body is the same shape and the same rule.
     fn lexically_owned_by(node: &SyntaxNode, owner: &SyntaxNode) -> bool {
         node.ancestors()
             .skip(1)
-            .find(|ancestor| {
-                matches!(
-                    ancestor.kind(),
-                    CLASS_DECL | INTERFACE_DECL | ENUM_DECL | ANNOTATION_TYPE_DECL | RECORD_DECL
-                ) || Facts::is_anonymous_body(ancestor)
-            })
+            .find_map(|ancestor| Self::type_body_boundary(&ancestor))
             .is_some_and(|ancestor| &ancestor == owner)
+    }
+
+    /// The type declaration `ancestor` delimits, when it delimits one.
+    ///
+    /// A named declaration stands for itself. A `CLASS_BODY` written at a creation site stands for
+    /// the creation — [`Self::declared_item`] and [`Self::body_members`] both key an anonymous class
+    /// on the `NEW_EXPR` or `ENUM_CONSTANT`, so that is the node a caller compares against — and
+    /// every other node delimits nothing.
+    fn type_body_boundary(ancestor: &SyntaxNode) -> Option<SyntaxNode> {
+        if matches!(
+            ancestor.kind(),
+            CLASS_DECL | INTERFACE_DECL | ENUM_DECL | ANNOTATION_TYPE_DECL | RECORD_DECL
+        ) {
+            return Some(ancestor.clone());
+        }
+        if ancestor.kind() != jals_syntax::SyntaxKind::CLASS_BODY {
+            return None;
+        }
+        ancestor.parent().filter(Facts::is_anonymous_body)
     }
 
     /// The synthetic field name a captured local gets, as javac names it.
@@ -2157,14 +2263,37 @@ impl Compile {
         let delegation = body
             .as_ref()
             .and_then(Facts::explicit_constructor_invocation);
-        // A `this(…)` between two `enum` constructors would be lowered from the descriptor the index
-        // computed, which is two parameters short of the one emitted here — a `NoSuchMethodError` in
-        // `<clinit>` rather than anything a verifier catches. (`super(…)` is not a Java program in an
-        // `enum` at all: only `Enum` may call `Enum`'s constructor.)
-        if context.in_enum && delegation.is_some() {
-            return Err(LowerError::Unsupported(
-                "an explicit constructor invocation in an `enum`",
-            ));
+        // An explicit `this(…)` names a constructor of *this* class, and this class's constructors
+        // are not the ones the index describes: the leading synthetic parameters inserted above and
+        // the captures appended after them are what a class with an enclosing instance, an `enum`'s
+        // name and ordinal, or a captured local actually declares. The call is lowered through the
+        // ordinary path, which builds its descriptor from the index — so
+        // `class Outer { int f; class Inner { Inner() { this(1); } Inner(int x) {} } }` emitted
+        // `invokespecial Inner."<init>":(I)V` against a constructor really declared `(LOuter;I)V`,
+        // and the first `new` threw `NoSuchMethodError`. A capturing local class is worse: captures
+        // are *appended*, so `this(1)` resolves to the constructor doing the calling and the program
+        // dies of `StackOverflowError`. Neither is anything a verifier catches, so both loaded.
+        //
+        // Refused rather than compiled, because getting it right means forwarding this constructor's
+        // own synthetic parameters into the call, and a forwarding that is wrong is a second silent
+        // miscompile where this is a report.
+        //
+        // `super(…)` is a different question and only the `enum` half of it is here: an `enum` may
+        // not write one at all — only `Enum` may call `Enum`'s constructor — while an ordinary
+        // `super(…)` names the *superclass*'s constructor, whose synthetics are its own and whose
+        // descriptor the index therefore gets right.
+        if let Some((_, call)) = &delegation {
+            let delegates_to_this = Facts::delegates_to(call, jals_syntax::SyntaxKind::THIS_KW);
+            if context.in_enum {
+                return Err(LowerError::Unsupported(
+                    "an explicit constructor invocation in an `enum`",
+                ));
+            }
+            if delegates_to_this && (synthetic > 0 || !context.captured_here().is_empty()) {
+                return Err(LowerError::Unsupported(
+                    "a `this(…)` delegation in a class with synthetic constructor parameters",
+                ));
+            }
         }
 
         let params = node.children().find_map(ast::ParamList::cast);
@@ -2192,7 +2321,11 @@ impl Compile {
                     }
                     expr::Expr::lower(&ast::Expr::Call(call.clone()), context, emit)
                 })?;
+                // `super(…)` replaces the superclass call and nothing else, so the synthetic
+                // fields and the field initialisers still follow it. `this(…)` replaces all of it:
+                // the constructor it delegates to has already stored both.
                 if !Facts::delegates_to(call, jals_syntax::SyntaxKind::THIS_KW) {
+                    Self::synthetic_stores(context, &mut emit)?;
                     Self::initializers(context, &mut emit, members, false)?;
                 }
             }
@@ -3623,9 +3756,27 @@ impl Compile {
             emit.asm
                 .invoke_special(super_name, "<init>", "()V", false)?;
         }
-        // The enclosing instance is stored after `super()` — before it, `this` is still
-        // `UninitializedThis` and a `putfield` on it is not something the verifier accepts here. Before
-        // the field initialisers, so one of them can already read it.
+        Self::synthetic_stores(context, emit)?;
+        Self::initializers(context, emit, members, false)
+    }
+
+    /// Store the enclosing instance and every captured local into the synthetic fields that hold
+    /// them, and nothing else.
+    ///
+    /// Split out of [`prologue`](Self::prologue) because it is **not** part of the superclass call
+    /// an explicit `super(…)` replaces. JLS §8.8.7.1 lets a constructor write its own delegation
+    /// instead of the implicit `super()`, and that changes which superclass constructor runs — it
+    /// says nothing about the fields this class synthesised, which no superclass has ever heard of.
+    /// Emitting only [`initializers`](Self::initializers) after such a delegation built an inner
+    /// class whose `this$0` stayed null (`NullPointerException` at the first unqualified use of an
+    /// outer field) and a capturing local class whose `val$x` stayed zero — that one silently, with
+    /// the wrong number as the answer. The wasm backend reads the same
+    /// [`Facts::holds_enclosing_instance`] and does store it, so one source compiled two ways.
+    ///
+    /// After the superclass constructor, always: before it `this` is `uninitializedThis`, and a
+    /// `putfield` on that is not something the verifier accepts. Before the field initialisers, so
+    /// one of them can already read what was stored.
+    fn synthetic_stores(context: &Context<'_>, emit: &mut Emit<'_, '_>) -> Result<()> {
         if let Some(enclosing) = &context.encloses {
             emit.asm.load(0)?;
             emit.asm.load(1)?;
@@ -3645,7 +3796,7 @@ impl Compile {
             emit.asm
                 .put_field(&context.this_class, &name, &descriptor)?;
         }
-        Self::initializers(context, emit, members, false)
+        Ok(())
     }
 }
 
