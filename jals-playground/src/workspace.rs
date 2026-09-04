@@ -265,6 +265,7 @@ impl Workspace {
                     storage,
                     &mut self.build_script_session,
                     RootBuildScriptOptions {
+                        progress: &jals_progress::Progress::SILENT,
                         manifest,
                         environment: &environment,
                         limits: &BuildScriptLimits::default(),
@@ -1103,6 +1104,7 @@ mod tests {
                 &storage.view(),
                 storage.artifacts(),
                 &[jals_classpath::ClasspathEntry::ProjectFile(key)],
+                &jals_progress::Progress::SILENT,
             )
             .await;
             assert!(load.warnings.is_empty(), "{:?}", load.warnings);

@@ -17,6 +17,7 @@ members = [
   "jals-lint",
   "jals-lsp",
   "jals-playground",
+  "jals-progress",
   "jals-project",
   "jals-syntax",
   "jals-tests",
@@ -43,8 +44,8 @@ clap = { version = "4.6.1", features = ["derive"] }
 crc32fast = { version = "1", default-features = false }
 futures = { version = "0.3" }
 hashbrown = { version = "0.17" }
-# Host-only progress rendering for `jals test`, the one command whose work is long enough to want
-# a live display. Confined to `jals-cli`: the portable crates render nothing.
+# Host-only progress rendering. Confined to `jals-cli`: portable crates report *what* they are
+# doing through `jals-progress` and draw no terminal UI at all.
 indicatif = { version = "0.18" }
 # `default-features = false`: `jals-build`'s host half (`SubprocessToolchain`) is behind its
 # `native` feature. Consumers that spawn `javac`/`java` (jals-cli) opt in with
@@ -66,6 +67,7 @@ jals-hir = { path = "jals-hir" }
 jals-javac = { path = "jals-javac" }
 jals-lint = { path = "jals-lint" }
 jals-lsp = { path = "jals-lsp" }
+jals-progress = { path = "jals-progress" }
 jals-project = { path = "jals-project", default-features = false }
 jals-syntax = { path = "jals-syntax" }
 miniz_oxide = { version = "0.9", default-features = false, features = [

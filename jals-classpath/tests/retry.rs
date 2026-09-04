@@ -98,7 +98,11 @@ impl Fetcher for FlakyFetcher {
         ready(())
     }
 
-    fn fetch_admitted(&self, locator: &str) -> impl Future<Output = Result<Vec<u8>, FetchError>> {
+    fn fetch_admitted(
+        &self,
+        locator: &str,
+        _: &jals_progress::Task,
+    ) -> impl Future<Output = Result<Vec<u8>, FetchError>> {
         let attempt = self.calls.get() + 1;
         self.calls.set(attempt);
         ready(self.answer(attempt, locator))
@@ -119,9 +123,14 @@ fn a_transient_failure_is_retried_until_it_succeeds() {
     block_on_inline(async {
         let mut storage = MemoryStorage::memory(CodeTree::default());
         let fetcher = FlakyFetcher::transient(2, RetrySchedule::DEFAULT_RETRIES);
-        let key = ExternalArtifactResolver::resolve(&fetcher, storage.artifacts_mut(), &spec())
-            .await
-            .expect("the third attempt serves the bytes");
+        let key = ExternalArtifactResolver::resolve(
+            &fetcher,
+            storage.artifacts_mut(),
+            &spec(),
+            &jals_progress::Progress::SILENT,
+        )
+        .await
+        .expect("the third attempt serves the bytes");
 
         assert_eq!(key.content(), ContentDigest::of(BYTES));
         assert_eq!(fetcher.calls(), 3, "two failures then one success");
@@ -140,9 +149,14 @@ fn a_permanent_failure_is_attempted_once_and_reads_unchanged() {
     block_on_inline(async {
         let mut storage = MemoryStorage::memory(CodeTree::default());
         let fetcher = FlakyFetcher::permanent(RetrySchedule::DEFAULT_RETRIES);
-        let error = ExternalArtifactResolver::resolve(&fetcher, storage.artifacts_mut(), &spec())
-            .await
-            .unwrap_err();
+        let error = ExternalArtifactResolver::resolve(
+            &fetcher,
+            storage.artifacts_mut(),
+            &spec(),
+            &jals_progress::Progress::SILENT,
+        )
+        .await
+        .unwrap_err();
 
         assert_eq!(fetcher.calls(), 1, "a permanent failure is not retried");
         assert!(fetcher.waits().is_empty(), "nothing to wait for");
@@ -159,9 +173,14 @@ fn an_offline_refusal_is_never_attempted() {
     block_on_inline(async {
         let mut storage = MemoryStorage::memory(CodeTree::default());
         let fetcher = FlakyFetcher::offline(RetrySchedule::DEFAULT_RETRIES);
-        let error = ExternalArtifactResolver::resolve(&fetcher, storage.artifacts_mut(), &spec())
-            .await
-            .unwrap_err();
+        let error = ExternalArtifactResolver::resolve(
+            &fetcher,
+            storage.artifacts_mut(),
+            &spec(),
+            &jals_progress::Progress::SILENT,
+        )
+        .await
+        .unwrap_err();
 
         // The gate is outside the loop, so the refusal is not a failure the loop can classify.
         assert_eq!(fetcher.calls(), 0);
@@ -178,9 +197,14 @@ fn an_exhausted_schedule_says_how_many_attempts_it_cost() {
     block_on_inline(async {
         let mut storage = MemoryStorage::memory(CodeTree::default());
         let fetcher = FlakyFetcher::transient(usize::MAX, 2);
-        let error = ExternalArtifactResolver::resolve(&fetcher, storage.artifacts_mut(), &spec())
-            .await
-            .unwrap_err();
+        let error = ExternalArtifactResolver::resolve(
+            &fetcher,
+            storage.artifacts_mut(),
+            &spec(),
+            &jals_progress::Progress::SILENT,
+        )
+        .await
+        .unwrap_err();
 
         assert_eq!(fetcher.calls(), 3, "the first attempt plus two retries");
         assert_eq!(fetcher.waits().len(), 2);
@@ -196,9 +220,14 @@ fn a_schedule_without_retries_attempts_once_however_transient_the_failure() {
     block_on_inline(async {
         let mut storage = MemoryStorage::memory(CodeTree::default());
         let fetcher = FlakyFetcher::transient(usize::MAX, 0);
-        let error = ExternalArtifactResolver::resolve(&fetcher, storage.artifacts_mut(), &spec())
-            .await
-            .unwrap_err();
+        let error = ExternalArtifactResolver::resolve(
+            &fetcher,
+            storage.artifacts_mut(),
+            &spec(),
+            &jals_progress::Progress::SILENT,
+        )
+        .await
+        .unwrap_err();
 
         assert_eq!(fetcher.calls(), 1);
         assert!(fetcher.waits().is_empty());
@@ -226,6 +255,7 @@ fn a_dependency_jar_is_retried_inside_the_concurrent_fan_out() {
                 recursive: false,
                 remap: None,
             }],
+            &jals_progress::Progress::SILENT,
         )
         .await;
 

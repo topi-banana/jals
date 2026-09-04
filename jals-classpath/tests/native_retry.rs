@@ -101,10 +101,14 @@ fn a_503_is_retried_and_the_next_response_is_served() {
             NetworkPolicy::Online,
             RetrySchedule::new(1),
         );
-        let key =
-            ExternalArtifactResolver::resolve(&fetcher, storage.artifacts_mut(), &server.spec())
-                .await
-                .expect("the second attempt serves the body");
+        let key = ExternalArtifactResolver::resolve(
+            &fetcher,
+            storage.artifacts_mut(),
+            &server.spec(),
+            &jals_progress::Progress::SILENT,
+        )
+        .await
+        .expect("the second attempt serves the body");
         assert_eq!(key.content(), ContentDigest::of(BODY));
     })
     .expect("the native runtime bootstraps");
@@ -122,9 +126,14 @@ fn a_404_is_not_retried() {
             NetworkPolicy::Online,
             RetrySchedule::new(3),
         );
-        ExternalArtifactResolver::resolve(&fetcher, storage.artifacts_mut(), &server.spec())
-            .await
-            .expect_err("a 404 is not something another attempt fixes")
+        ExternalArtifactResolver::resolve(
+            &fetcher,
+            storage.artifacts_mut(),
+            &server.spec(),
+            &jals_progress::Progress::SILENT,
+        )
+        .await
+        .expect_err("a 404 is not something another attempt fixes")
     })
     .expect("the native runtime bootstraps");
 

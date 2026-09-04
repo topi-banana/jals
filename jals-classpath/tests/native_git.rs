@@ -38,6 +38,7 @@ impl Fetcher for NoFetch {
     fn fetch_admitted(
         &self,
         _: &str,
+        _: &jals_progress::Task,
     ) -> impl Future<Output = Result<Vec<u8>, jals_classpath::FetchError>> {
         ready(Self::refuse())
     }
@@ -70,6 +71,7 @@ impl Fetcher for OfflineFetch {
     fn fetch_admitted(
         &self,
         _: &str,
+        _: &jals_progress::Task,
     ) -> impl Future<Output = Result<Vec<u8>, jals_classpath::FetchError>> {
         ready(Self::refuse())
     }
@@ -258,6 +260,7 @@ fixture = {{ git = "{locator}" }}
             &mut storage,
             &plan.plan,
             ProjectInputOptions::Compile,
+            &jals_progress::Progress::SILENT,
         )
         .await;
         let [SourceFile::Artifact(source)] = inputs.source_dep_sources.as_slice() else {

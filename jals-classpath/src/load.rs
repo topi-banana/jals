@@ -24,6 +24,7 @@ use core::ops::Range;
 use jals_classfile::ClassFile;
 use jals_decompile::ClassHierarchy;
 use jals_exec::{Exec, LocalBoxFuture};
+use jals_progress::{Activity, Outcome, Progress, Task};
 use jals_storage::io::{self as sio, Buffered, IoError, SeekFrom};
 use jals_storage::{
     ArtifactCache, CacheBackend, CacheKey, CacheNamespace, ContentDigest, DirKey, FileKey, Name,
@@ -127,17 +128,48 @@ impl ClasspathLoad {
         view: &ProjectView,
         cache: &ArtifactCache<C>,
         entries: &[ClasspathEntry],
+        progress: &Progress,
     ) -> Self {
         let mut tasks: Vec<DecodeTask<C::Reader>> = Vec::new();
         for entry in entries {
             Self::plan_entry(view, cache, entry, &mut tasks).await;
         }
-        let outcomes = exec.fan_out(tasks, Archive::decode_task).await;
+        if tasks.is_empty() {
+            // A project with nothing on its classpath indexes nothing, and a line saying so is a
+            // line about work that did not happen.
+            return Self::default();
+        }
+        // The subject is the entry count rather than the bare word `classpath` because a run can
+        // index twice — once for the root's own `[build] classpath` and its task jars, once for the
+        // resolved dependency graph — and a project with both would otherwise print the same line
+        // twice, which reads as the tool repeating itself. The count tells them apart, and is worth
+        // saying on its own.
+        //
+        // The *bar* counts decode tasks instead: one jar is many chunks, and a bar that moves once
+        // per jar sits still through the only entry that takes any time.
+        let subject = if entries.len() == 1 {
+            String::from("1 classpath entry")
+        } else {
+            format!("{} classpath entries", entries.len())
+        };
+        let report = progress.begin_bounded(Activity::Index, subject, tasks.len() as u64);
+        let ticker = report.ticker();
+        let outcomes = exec
+            .fan_out(tasks, move |task| {
+                let ticker = ticker.clone();
+                async move {
+                    let outcome = Archive::decode_task(task).await;
+                    ticker.tick();
+                    outcome
+                }
+            })
+            .await;
         let mut load = Self::default();
         for (classes, warnings) in outcomes {
             load.classes.extend(classes);
             load.warnings.extend(warnings);
         }
+        report.finish(Outcome::Completed);
         load
     }
 
@@ -501,12 +533,14 @@ pub struct SourceTreeExtraction;
 impl SourceTreeExtraction {
     /// Extract every `.java` member below `prefix`, stripping that prefix from result paths.
     /// Any unsafe, duplicate, corrupt, or unpublishable matching member fails the whole operation.
+    /// `report` is the caller's unit of work; the member loop counts into it.
     pub async fn java<C: CacheBackend>(
         exec: &Exec,
         cache: &mut ArtifactCache<C>,
         jar: &CacheKey,
         prefix: &RelativePath,
         limits: SourceTreeLimits,
+        report: &Task,
     ) -> Result<SourceTree, String> {
         let reader = cache
             .open_verified(jar)
@@ -514,9 +548,13 @@ impl SourceTreeExtraction {
             .map_err(|error| format!("source jar is invalid: {error:?}"))?
             .ok_or_else(|| "source jar is not cached".to_owned())?;
         let members = Archive::decode_matching_bounded(exec, reader, "java", limits).await?;
+        report.set_total(members.len() as u64);
         let prefix_len = prefix.segments().len();
         let mut files = BTreeMap::new();
-        for (name, outcome) in members {
+        for (extracted, (name, outcome)) in members.into_iter().enumerate() {
+            // The count is of members *done*, so it is one-based: reporting the loop index would
+            // leave a finished extraction sitting at `len - 1` in the bar and in the ledger.
+            report.set_done(extracted as u64 + 1);
             let member = Archive::safe_relative(&name)
                 .ok_or_else(|| format!("unsafe Java archive member `{name}`"))?;
             if !member.starts_with(prefix) {
@@ -548,12 +586,15 @@ impl SourceTreeExtraction {
     /// Decompile every `.class` member of `jar` whose internal binary name sits under `prefix`
     /// into compile-safe skeleton `.java` sources, stripping that prefix from result paths.
     /// Any render/parse/publish failure fails the whole operation.
+    /// `report` is the caller's unit of work: a jar of ten thousand classes takes minutes, and the
+    /// group loop below is the only place that knows how many there are.
     pub async fn decompile<C: CacheBackend>(
         exec: &Exec,
         cache: &mut ArtifactCache<C>,
         jar: &CacheKey,
         prefix: &RelativePath,
         limits: SourceTreeLimits,
+        report: &Task,
     ) -> Result<SourceTree, String> {
         let reader = cache
             .open_verified(jar)
@@ -586,8 +627,11 @@ impl SourceTreeExtraction {
         let mut files = BTreeMap::new();
         let hierarchy = ClassHierarchy::new(&classes);
         let mut yielder = jals_exec::Yielder::every(1);
-        for group in SkeletonGroup::groups(&classes, SkeletonMode::Compile) {
+        let groups = SkeletonGroup::groups(&classes, SkeletonMode::Compile);
+        report.set_total(groups.len() as u64);
+        for (rendered, group) in groups.into_iter().enumerate() {
             yielder.tick().await;
+            report.set_done(rendered as u64 + 1);
             let rel = group.rel_path();
             let full = RelativePath::parse(&rel)
                 .map_err(|_| format!("generated source path is not portable: {rel}"))?;

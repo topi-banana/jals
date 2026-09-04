@@ -17,6 +17,7 @@ use jals_classpath::{
 };
 use jals_config::{AmbiguousMapping, Dependency, Manifest, ResolvedBuildFeatures};
 use jals_exec::Exec;
+use jals_progress::{Activity, Outcome, PackageRef, Progress};
 use jals_storage::{
     ArtifactCache, CacheBackend, CacheKey, CacheNamespace, ContentDigest, DirKey, FileKey,
     ProjectView, ProvenanceFold, RelativePath,
@@ -706,6 +707,17 @@ impl ResolvedNode {
         Self::location_of(nodes, Some(id)).unwrap_or_else(|| id.to_string())
     }
 
+    /// How this node is named wherever a run mentions it.
+    ///
+    /// Its manifest's `[package]` when it declares one, and otherwise the location the host used
+    /// to acquire it — a node without a name is still a node a reader is waiting on.
+    fn package_ref(&self, manifest: &Manifest) -> PackageRef {
+        manifest.package.name.as_ref().map_or_else(
+            || PackageRef::unversioned(self.location.clone()),
+            |name| PackageRef::new(name.clone(), manifest.package.version.clone()),
+        )
+    }
+
     pub(crate) const fn source(&self) -> Option<&SourceNode> {
         match &self.body {
             NodeBody::PlainSource(source) | NodeBody::JalsSource { source, .. } => Some(source),
@@ -728,8 +740,12 @@ impl ResolvedNode {
         let NodeBody::JalsSource { source, manifest } = &self.body else {
             return Ok(NodeExports::default());
         };
+        // Attribution is set once, here, and every unit this node starts inherits it — the script
+        // phase, and every node of the task plan it declares.
+        let progress = options.progress.for_package(self.package_ref(manifest));
         let environment = options.environment.for_project(manifest, features.clone());
-        let prepared = prepare_build_script(
+        let script = progress.begin(Activity::Script, "");
+        let prepared = match prepare_build_script(
             &source.view,
             cache,
             BuildScriptCacheScope::new(self.id.digest()),
@@ -738,7 +754,22 @@ impl ResolvedNode {
             options.limits,
         )
         .await
-        .map_err(|error| self.script_error(error.to_string()))?;
+        {
+            Ok(prepared) => {
+                script.finish(if prepared.is_some() {
+                    Outcome::Completed
+                } else {
+                    // A node with no `[build] script` at all: nothing ran, and saying so is how a
+                    // `--timings` report shows which nodes actually cost something.
+                    Outcome::Skipped
+                });
+                prepared
+            }
+            Err(error) => {
+                script.finish(Outcome::Failed);
+                return Err(self.script_error(error.to_string()));
+            }
+        };
         let Some(prepared) = prepared else {
             return Ok(NodeExports::default());
         };
@@ -772,7 +803,14 @@ impl ResolvedNode {
         }
         if !output.task_plan.is_empty() {
             let execution = self
-                .run_task_plan(cache, &output.task_plan, &features, options, &source.view)
+                .run_task_plan(
+                    cache,
+                    &output.task_plan,
+                    &features,
+                    options,
+                    &source.view,
+                    &progress,
+                )
                 .await?;
             exports.task_classpath = execution.classpath;
             self.publication_exports(manifest, &execution.publications, &mut exports)?;
@@ -823,6 +861,7 @@ impl ResolvedNode {
         features: &BTreeSet<String>,
         options: &GraphPreprocess<'_, F>,
         view: &ProjectView,
+        progress: &Progress,
     ) -> Result<BuildTaskExecution, GraphError> {
         BuildTaskExecutor::execute_snapshot(
             options.exec,
@@ -835,6 +874,7 @@ impl ResolvedNode {
                 features,
                 runtime: TaskRuntime {
                     max_fetch_bytes: options.limits.max_fetch_bytes,
+                    progress: progress.clone(),
                 },
             },
         )
@@ -1269,6 +1309,10 @@ pub struct GraphPreprocess<'a, F: Fetcher> {
     pub environment: &'a BuildScriptEnvironment,
     pub root_features: &'a ResolvedBuildFeatures,
     pub limits: &'a BuildScriptLimits,
+    /// Where each node reports what it is doing. A node's work is attributed to the node's own
+    /// package here rather than at every emission below it, which is what keeps "which package is
+    /// this for" answered once.
+    pub progress: &'a Progress,
 }
 
 /// A direct `[dependencies] features` name that its target's `[features]` table does not declare.

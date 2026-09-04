@@ -53,7 +53,9 @@ jals-exec = { workspace = true, features = ["tokio"] }
 jals-fmt = { workspace = true, features = ["std"] }
 jals-frontend.workspace = true
 jals-storage = { workspace = true, features = ["std"] }
+serde_json.workspace = true
 jals-lsp.workspace = true
+jals-progress.workspace = true
 jals-project = { workspace = true, features = ["native"] }
 similar.workspace = true
 

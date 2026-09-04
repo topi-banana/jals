@@ -1037,6 +1037,7 @@ impl App {
                 &manifest,
                 &mut storage,
                 jals_project::GraphPreprocess {
+                    progress: &jals_progress::Progress::SILENT,
                     exec: &exec,
                     // A dependency's build-task fetches go through the same CORS proxy as
                     // dependency resolution; nothing else in the browser can reach a host.

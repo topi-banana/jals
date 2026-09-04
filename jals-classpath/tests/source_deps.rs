@@ -22,6 +22,7 @@ impl Fetcher for NoFetch {
     fn fetch_admitted(
         &self,
         _: &str,
+        _: &jals_progress::Task,
     ) -> impl Future<Output = Result<Vec<u8>, jals_classpath::FetchError>> {
         ready(Self::refuse())
     }
@@ -61,6 +62,7 @@ fn typed_source_dependency_roots_collect_only_java_in_stable_order() {
         &mut storage,
         &plan,
         ProjectInputOptions::Compile,
+        &jals_progress::Progress::SILENT,
     ));
     let files: Vec<_> = inputs
         .source_dep_sources
@@ -86,6 +88,7 @@ fn missing_source_root_is_diagnostic_not_missing_data() {
         &mut storage,
         &plan,
         ProjectInputOptions::Compile,
+        &jals_progress::Progress::SILENT,
     ));
     assert!(inputs.source_dep_sources.is_empty());
     assert_eq!(inputs.warnings.len(), 1);

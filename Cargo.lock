@@ -1129,6 +1129,7 @@ dependencies = [
  "jals-exec",
  "jals-hir",
  "jals-javac",
+ "jals-progress",
  "jals-storage",
  "jals-syntax",
  "rhai",
@@ -1160,6 +1161,7 @@ dependencies = [
  "jals-config",
  "jals-decompile",
  "jals-exec",
+ "jals-progress",
  "jals-storage",
  "jals-syntax",
  "miniz_oxide 0.9.1",
@@ -1186,8 +1188,10 @@ dependencies = [
  "jals-fmt",
  "jals-frontend",
  "jals-lsp",
+ "jals-progress",
  "jals-project",
  "jals-storage",
+ "serde_json",
  "similar",
  "tempfile",
  "zip",
@@ -1314,6 +1318,7 @@ dependencies = [
  "jals-exec",
  "jals-fmt",
  "jals-hir",
+ "jals-progress",
  "jals-project",
  "jals-storage",
  "serde_json",
@@ -1338,6 +1343,7 @@ dependencies = [
  "jals-fmt",
  "jals-frontend",
  "jals-hir",
+ "jals-progress",
  "jals-project",
  "jals-storage",
  "jals-syntax",
@@ -1350,6 +1356,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "jals-progress"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "jals-project"
 version = "0.1.0"
 dependencies = [
@@ -1358,6 +1372,7 @@ dependencies = [
  "jals-config",
  "jals-exec",
  "jals-frontend",
+ "jals-progress",
  "jals-storage",
  "serde",
  "serde_json",

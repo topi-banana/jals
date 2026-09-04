@@ -19,6 +19,7 @@ use jals_config::{
     ResolvedBuildFeatures,
 };
 use jals_exec::tokio_rt::{on_blocking_pool, sleep_millis};
+use jals_progress::{Progress, Task};
 use jals_storage::{
     CacheKey, CacheNamespace, ContentDigest, DirKey, EntryRef, FileKey, MemoryCache, Name,
     NativeScope, NativeSource, NativeStorage, ProjectStorage, ProjectView, ProvenanceFold,
@@ -128,7 +129,7 @@ impl Fetcher for ReqwestFetcher {
         sleep_millis(millis).await;
     }
 
-    async fn fetch_admitted(&self, locator: &str) -> Result<Vec<u8>, FetchError> {
+    async fn fetch_admitted(&self, locator: &str, report: &Task) -> Result<Vec<u8>, FetchError> {
         if let Some(path) = locator.strip_prefix("file://") {
             let path = path.to_owned();
             return on_blocking_pool(move || {
@@ -146,6 +147,9 @@ impl Fetcher for ReqwestFetcher {
             })
             .await;
         }
+        // Streamed rather than buffered whole by `Response::bytes`, for the same reason its bounded
+        // sibling is: a jar is tens of megabytes over a link that may be slow, and a transfer
+        // nobody can watch is exactly the wait this crate is asked about.
         let response = self
             .client
             .get(locator)
@@ -154,17 +158,14 @@ impl Fetcher for ReqwestFetcher {
             .map_err(|error| Self::classify(&error))?
             .error_for_status()
             .map_err(|error| Self::classify(&error))?;
-        response
-            .bytes()
-            .await
-            .map(|bytes| bytes.to_vec())
-            .map_err(|error| FetchError::permanent(format!("reading response: {error}")))
+        Self::stream(response, None, report).await
     }
 
     async fn fetch_bounded_admitted(
         &self,
         locator: &str,
         max_bytes: usize,
+        report: &Task,
     ) -> Result<Vec<u8>, FetchError> {
         if let Some(path) = locator.strip_prefix("file://") {
             return Self::read_file_bounded(PathBuf::from(path), max_bytes).await;
@@ -173,7 +174,7 @@ impl Fetcher for ReqwestFetcher {
             let path = self.project_root.join(locator);
             return Self::read_file_bounded(path, max_bytes).await;
         }
-        let mut response = self
+        let response = self
             .client
             .get(locator)
             .send()
@@ -189,34 +190,62 @@ impl Fetcher for ReqwestFetcher {
                 "response exceeds the limit of {max_bytes} bytes"
             )));
         }
+        Self::stream(response, Some(max_bytes), report).await
+    }
+}
+
+impl ReqwestFetcher {
+    /// The most this reserves up front for a response that stated no ceiling of its own.
+    const RESERVE_CAP: usize = 8 * 1024 * 1024;
+
+    /// Read a response chunk by chunk, reporting as it goes and refusing at `max_bytes`.
+    ///
+    /// One reader for both entry points: the bounded one differs only in having a ceiling, and two
+    /// copies of a loop that both counts bytes and enforces a limit is two places to get the limit
+    /// wrong.
+    async fn stream(
+        mut response: reqwest::Response,
+        max_bytes: Option<usize>,
+        report: &Task,
+    ) -> Result<Vec<u8>, FetchError> {
+        // A length the server stated is what turns a spinner into a bar. A response without one
+        // stays a spinner rather than being given a guessed total, because a bar that reaches 100%
+        // and keeps going is worse than no bar.
+        if let Some(length) = response.content_length() {
+            report.set_total(length);
+        }
+        // `Content-Length` is the server's claim, not a fact, and the unbounded entry point has no
+        // ceiling of its own — so the reservation is capped rather than trusted. A `Vec` that grows
+        // past the cap costs an amortized copy next to a network wait; one sized from a header
+        // reading `8589934592` is an allocation failure before the first byte arrives.
         let mut bytes = Vec::with_capacity(
             response
                 .content_length()
                 .and_then(|length| usize::try_from(length).ok())
                 .unwrap_or_default()
-                .min(max_bytes),
+                .min(max_bytes.unwrap_or(Self::RESERVE_CAP)),
         );
         while let Some(chunk) = response
             .chunk()
             .await
             .map_err(|error| FetchError::permanent(format!("reading response: {error}")))?
         {
-            if bytes
-                .len()
-                .checked_add(chunk.len())
-                .is_none_or(|length| length > max_bytes)
+            if let Some(max_bytes) = max_bytes
+                && bytes
+                    .len()
+                    .checked_add(chunk.len())
+                    .is_none_or(|length| length > max_bytes)
             {
                 return Err(FetchError::permanent(format!(
                     "response exceeds the limit of {max_bytes} bytes"
                 )));
             }
             bytes.extend_from_slice(&chunk);
+            report.set_done(bytes.len() as u64);
         }
         Ok(bytes)
     }
-}
 
-impl ReqwestFetcher {
     async fn read_file_bounded(path: PathBuf, max_bytes: usize) -> Result<Vec<u8>, FetchError> {
         on_blocking_pool(move || {
             let file = fs::File::open(&path).map_err(|error| {
@@ -264,6 +293,12 @@ impl NativeProjectPlan {
     /// `fetcher` is the caller's, never one built here: it carries the [`NetworkPolicy`] the host
     /// chose, and constructing a replacement is how this function used to fetch under `--offline`.
     /// The parameter sits where the portable sibling `MemoryProjectPlan::assemble` puts it.
+    // Eight parameters, and every one of them is a distinct input this lowering cannot derive: the
+    // manifest, which of its two dependency tables to read, the features that select within it,
+    // where the project is, what to read and write through, what may fetch, what the inputs are
+    // for, and where to report. Bundling any of them would be a struct whose only purpose is to be
+    // unpacked one line later.
+    #[allow(clippy::too_many_arguments)]
     pub async fn assemble_native<F: Fetcher>(
         manifest: &Manifest,
         scope: DependencyScope,
@@ -272,6 +307,7 @@ impl NativeProjectPlan {
         storage: &mut NativeStorage,
         fetcher: &F,
         options: ProjectInputOptions,
+        progress: &Progress,
     ) -> (ProjectInputs, Vec<DirKey>) {
         let mut native =
             Self::from_manifest(manifest, scope, features, project_root, &storage.view());
@@ -283,7 +319,8 @@ impl NativeProjectPlan {
             .materialize_git_sources(project_root, storage, fetcher)
             .await;
         native.materialize_path_sources(project_root, storage).await;
-        let mut inputs = ProjectInputs::assemble(fetcher, storage, &native.plan, options).await;
+        let mut inputs =
+            ProjectInputs::assemble(fetcher, storage, &native.plan, options, progress).await;
         native.warnings.append(&mut inputs.warnings);
         inputs.warnings = native.warnings;
         (inputs, native.source_roots)

@@ -54,6 +54,7 @@ fn recursively_extracts_and_loads_nested_jars() {
             &storage.view(),
             &cache,
             &[ClasspathEntry::Artifact(leaf.key.clone())],
+            &jals_progress::Progress::SILENT,
         )
         .await;
         assert_eq!(load.classes.len(), 1);

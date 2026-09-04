@@ -1,7 +1,11 @@
-//! Terminal-facing rendering for the `jals` CLI: rustfmt-style unified diffs on
-//! stdout, and `ariadne`-rendered diagnostics on stderr.
+//! Diagnostic rendering for the `jals` CLI: rustfmt-style unified diffs, and `ariadne`-rendered
+//! reports for anything that points at a source span.
+//!
+//! Every byte written here leaves through [`Shell`] — including `ariadne`'s, which writes to stderr
+//! itself and is therefore wrapped in [`Shell::suspend`] so a live progress bar is out of its way.
+//! Colour is the shell's answer too: this module used to keep a second ANSI palette and a second
+//! TTY test, which is exactly how a `--color` flag ends up being honoured in one half of a run.
 
-use std::io::{IsTerminal, Write};
 use std::ops::Range;
 
 use ariadne::{Color, Config, IndexType, Label, Report, ReportKind, Source};
@@ -10,56 +14,40 @@ use jals_fmt::FormatOutput;
 use jals_project::{ProjectAnchor, ProjectDiagnostic};
 use similar::{ChangeTag, TextDiff};
 
-const RESET: &str = "\x1b[0m";
-const BOLD: &str = "\x1b[1m";
-const RED: &str = "\x1b[31m";
-const GREEN: &str = "\x1b[32m";
+use crate::shell::{Shell, Style};
 
-/// Terminal rendering for the CLI: rustfmt-style diffs on stdout and `ariadne`
-/// diagnostics on stderr. A stateless namespace over the free-standing renderers.
+/// Diagnostic rendering for the CLI. A stateless namespace over the free-standing renderers.
 pub(crate) struct Reporter;
 
 impl Reporter {
-    /// Whether ANSI color should be emitted to `stream` (a TTY with `NO_COLOR` unset).
-    fn color_for(stream_is_tty: bool) -> bool {
-        stream_is_tty && std::env::var_os("NO_COLOR").is_none()
-    }
-
-    fn paint(text: &str, code: &str, color: bool) -> String {
-        if color {
-            format!("{code}{text}{RESET}")
-        } else {
-            text.to_owned()
-        }
-    }
-
     /// Print a rustfmt-style hunked diff of `original` → `formatted` to stdout, labelled
     /// with `label` (a file path or `<stdin>`). Does nothing if the two are identical.
-    pub(crate) fn print_diff(label: &str, original: &str, formatted: &str) {
+    ///
+    /// Stdout, because a diff is what `--diff` was asked to produce — the one human-shaped thing in
+    /// this crate that is also the command's output.
+    pub(crate) fn print_diff(shell: &Shell, label: &str, original: &str, formatted: &str) {
         if original == formatted {
             return;
         }
-        let color = Self::color_for(std::io::stdout().is_terminal());
         let diff = TextDiff::from_lines(original, formatted);
-        let mut out = std::io::stdout().lock();
         for group in diff.grouped_ops(3) {
             // 1-based line in the original where this hunk starts, à la rustfmt.
             let start = group.first().map_or(0, |op| op.old_range().start) + 1;
             let header = format!("Diff in {label} at line {start}:");
-            let _ = writeln!(out, "{}", Self::paint(&header, BOLD, color));
+            shell.machine(shell.paint_machine(&header, Style::Plain));
             for op in &group {
                 for change in diff.iter_changes(op) {
                     let value = change.value();
                     let line = value.strip_suffix('\n').unwrap_or(value);
-                    let _ = match change.tag() {
+                    match change.tag() {
                         ChangeTag::Delete => {
-                            writeln!(out, "{}", Self::paint(&format!("-{line}"), RED, color))
+                            shell.machine(shell.paint_machine(&format!("-{line}"), Style::Bad));
                         }
                         ChangeTag::Insert => {
-                            writeln!(out, "{}", Self::paint(&format!("+{line}"), GREEN, color))
+                            shell.machine(shell.paint_machine(&format!("+{line}"), Style::Good));
                         }
-                        ChangeTag::Equal => writeln!(out, " {line}"),
-                    };
+                        ChangeTag::Equal => shell.machine(format_args!(" {line}")),
+                    }
                 }
             }
         }
@@ -71,11 +59,16 @@ impl Reporter {
     /// it. A warning without one is about the *configuration* — a rule that reads input
     /// whitespace being rounded to the single engine's canonical value — so it has nothing to
     /// point at and follows the CLI's plain `warning:` convention instead.
-    pub(crate) fn report_format_warnings(label: &str, src: &str, out: &FormatOutput) {
-        let mut doc = Doc::new(label, src);
+    pub(crate) fn report_format_warnings(
+        shell: &Shell,
+        label: &str,
+        src: &str,
+        out: &FormatOutput,
+    ) {
+        let mut doc = Doc::new(shell, label, src);
         for w in &out.warnings {
             let Some(range) = &w.range else {
-                eprintln!("warning: {}", w.message);
+                shell.warn(&w.message);
                 continue;
             };
             doc.emit(DiagnosticSeverity::Warning, None, &w.message, range);
@@ -92,12 +85,12 @@ impl Reporter {
     /// Worth saying out loud rather than leaving to the exit code, because the symptom is *absence*:
     /// the file comes back byte-identical, so without this line the run looks like a run that found
     /// nothing to do.
-    pub(crate) fn report_format_fallback(label: &str, out: &FormatOutput) {
+    pub(crate) fn report_format_fallback(shell: &Shell, label: &str, out: &FormatOutput) {
         if out.fell_back() {
-            eprintln!(
-                "warning: {label}: the formatter could not vouch for its output, so the file was \
-                 left unchanged (this is a bug in jals-fmt, not in the source)",
-            );
+            shell.warn(format_args!(
+                "{label}: the formatter could not vouch for its output, so the file was left \
+                 unchanged (this is a bug in jals-fmt, not in the source)",
+            ));
         }
     }
 
@@ -111,9 +104,9 @@ impl Reporter {
     ///
     /// Deliberately not a finding: it does not set the exit code, because the file being linted is
     /// not the file with the problem.
-    pub(crate) fn report_unknown_lint_keys(label: &str, keys: &[String]) {
+    pub(crate) fn report_unknown_lint_keys(shell: &Shell, label: &str, keys: &[String]) {
         for key in keys {
-            eprintln!("warning: {label}: unknown lint key `{key}`");
+            shell.warn(format_args!("{label}: unknown lint key `{key}`"));
         }
     }
 
@@ -121,14 +114,14 @@ impl Reporter {
     ///
     /// Not an `ariadne` report: these have no source span to point at, and they belong to the run
     /// rather than to a file. They follow the CLI's plain `note:` / `warning:` convention.
-    pub(crate) fn report_migration(migration: &crate::migrate::Migration) {
+    pub(crate) fn report_migration(shell: &Shell, migration: &crate::migrate::Migration) {
         let provenance = &migration.provenance;
-        eprintln!(
-            "note: migrating formatter settings from {} ({})",
+        shell.note(format_args!(
+            "migrating formatter settings from {} ({})",
             provenance.source, provenance.tool
-        );
+        ));
         for warning in &migration.warnings {
-            eprintln!("warning: {warning}");
+            shell.warn(warning);
         }
     }
 
@@ -139,8 +132,13 @@ impl Reporter {
     /// [`Hint`](DiagnosticSeverity::Hint). A hint is supplementary by definition (a `cfg`-disabled
     /// region, the dead branch of a constant condition); it is worth printing as `ariadne`
     /// *advice*, and it is not worth failing a run over.
-    pub(crate) fn report_lint(label: &str, src: &str, diagnostics: &[FileDiagnostic]) -> bool {
-        let mut doc = Doc::new(label, src);
+    pub(crate) fn report_lint(
+        shell: &Shell,
+        label: &str,
+        src: &str,
+        diagnostics: &[FileDiagnostic],
+    ) -> bool {
+        let mut doc = Doc::new(shell, label, src);
         for d in diagnostics {
             doc.emit(d.severity, d.code, &d.message, &d.range);
         }
@@ -161,8 +159,12 @@ impl Reporter {
     /// This host reads [`ProjectDiagnostic::span`] rather than `placement_in`: a terminal line can
     /// say "no location", so a diagnostic that has none gets none. Pointing `ariadne` at the head
     /// of `jals.toml` instead would draw a caret at a place a dependency failure is not.
-    pub(crate) fn report_project(diagnostics: &[ProjectDiagnostic], script: Option<(&str, &str)>) {
-        let mut doc = script.map(|(label, src)| Doc::new(label, src));
+    pub(crate) fn report_project(
+        shell: &Shell,
+        diagnostics: &[ProjectDiagnostic],
+        script: Option<(&str, &str)>,
+    ) {
+        let mut doc = script.map(|(label, src)| Doc::new(shell, label, src));
         for diagnostic in diagnostics {
             // The assembly owns how one of these presents; this channel draws a `Hint` as
             // `ariadne` advice, and the plain lead below spells the same thing `note:`.
@@ -184,11 +186,18 @@ impl Reporter {
                     // but not which part of the procedure produced it, and `warning: no toolchain`
                     // does not say whether the build script or the dependency graph said so. This
                     // is the same code `ariadne` prints for the arm above.
-                    eprintln!("{lead}[{}]: {}", diagnostic.code, diagnostic.message);
+                    //
+                    // The lead is the assembly's, so this is `plain` rather than `warn`/`error`:
+                    // re-deriving a severity the diagnostic already states is how a warning starts
+                    // reading as an error.
+                    shell.plain(format_args!(
+                        "{lead}[{}]: {}",
+                        diagnostic.code, diagnostic.message
+                    ));
                     // A `note:` line under the diagnostic is this channel's shape for a follow-on,
                     // the same one a migration note takes.
                     if let Some(remedy) = diagnostic.code.remedy() {
-                        eprintln!("note: {remedy}");
+                        shell.note(remedy);
                     }
                 }
             }
@@ -204,14 +213,14 @@ impl Reporter {
 struct Doc<'a> {
     /// `ariadne`'s `Cache`: the label a span is resolved against, and the parsed source.
     cache: (&'a str, Source<&'a str>),
-    use_color: bool,
+    shell: &'a Shell,
 }
 
 impl<'a> Doc<'a> {
-    fn new(label: &'a str, src: &'a str) -> Self {
+    fn new(shell: &'a Shell, label: &'a str, src: &'a str) -> Self {
         Self {
             cache: (label, Source::from(src)),
-            use_color: Reporter::color_for(std::io::stderr().is_terminal()),
+            shell,
         }
     }
 
@@ -262,7 +271,7 @@ impl<'a> Doc<'a> {
         let span = self.display_range(range);
         let label = self.cache.0;
         let config = Config::new()
-            .with_color(self.use_color)
+            .with_color(self.shell.stderr_color())
             .with_index_type(IndexType::Byte);
         let mut builder = Report::build(kind, (label, span.clone()))
             .with_config(config)
@@ -275,6 +284,10 @@ impl<'a> Doc<'a> {
         if let Some(code) = code {
             builder = builder.with_code(code);
         }
-        let _ = builder.finish().eprint(&mut self.cache);
+        // `ariadne` writes to stderr itself, so the bar has to be out of the way around it.
+        let report = builder.finish();
+        self.shell.suspend(|| {
+            let _ = report.eprint(&mut self.cache);
+        });
     }
 }

@@ -16,7 +16,7 @@ env:
   # LSP, the corpus harness) do not build for wasm32 at all — a whole-workspace wasm build is not a
   # thing that exists. So the wasm cells select packages, and the sets are defined once here rather
   # than per job: clippy, build, and build-release must judge *the same* package set as each other,
-  # and a per-job copy of a nine-package list is exactly what drifts. The matrices reference them as
+  # and a per-job copy of a ten-package list is exactly what drifts. The matrices reference them as
   # shell variables, which is also why every cargo step below is `shell: bash` — one command string
   # then means the same thing on all three hosts.
   #
@@ -25,7 +25,7 @@ env:
   WASM_PACKAGES: >-
     --package jals-editor --package jals-syntax --package jals-classfile --package jals-hir
     --package jals-decompile --package jals-fmt --package jals-lint --package jals-storage
-    --package jals-config
+    --package jals-config --package jals-progress
   # jals-classpath's HTTP/archive adapters are behind features; `--no-default-features` builds its
   # `no_std + alloc` storage-driven core. jals-build's host half (`SubprocessToolchain`, JDK
   # discovery + spawning) is likewise behind its `native` feature, so its no-`native` core is built
@@ -38,11 +38,12 @@ env:
   # (tokio refuses to compile its `net` feature for wasm) or a `tempfile` scratch directory
   # (`std::env::temp_dir` is unimplemented on wasi). Including them would not fail a test, it would
   # fail the build, so the set is the portable computation crates: lexer/parser, HIR, lint, fmt,
-  # config, decompile, editor, frontend, javac, classfile.
+  # config, decompile, editor, frontend, javac, classfile — and jals-progress, whose ledger and
+  # HTML report are pure string building and need neither a terminal nor a clock.
   WASM_TEST_PACKAGES: >-
     --package jals-syntax --package jals-hir --package jals-lint --package jals-fmt
     --package jals-config --package jals-decompile --package jals-editor --package jals-frontend
-    --package jals-javac --package jals-classfile
+    --package jals-javac --package jals-classfile --package jals-progress
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

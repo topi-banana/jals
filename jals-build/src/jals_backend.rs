@@ -20,6 +20,7 @@ use alloc::vec::Vec;
 use jals_hir::{FileAnalysis, FileId, FileSemantics, ProjectIndex, TypedFile};
 use jals_javac::lower::Compile;
 use jals_javac::wasm::CompileWasm;
+use jals_progress::{Activity, Outcome};
 use jals_storage::{ContentDigest, ProvenanceFold, RelativePath};
 use jals_syntax::{Parse, SyntaxNode};
 
@@ -83,6 +84,13 @@ impl JalsBackend {
     /// inside this future would swallow every one of those yields — the host's current-thread
     /// runtime would sit on one compile for its whole duration.
     async fn compile_all(&self, request: &BackendRequest<'_>) -> BackendOutcome {
+        // One unit for the whole compile, counted in files. A per-file *line* would be the wrong
+        // shape — cargo says `Compiling <package>` once, not once per module — but the bar under it
+        // is what makes a hundred-file project look like progress instead of a hang.
+        let report =
+            request
+                .progress
+                .begin_bounded(Activity::Compile, "", request.tree.len() as u64);
         let mut roots: Vec<(FileId, SyntaxNode)> = Vec::with_capacity(request.tree.len());
         let mut messages = Vec::new();
         for (index, source) in request.tree.iter().enumerate() {
@@ -94,6 +102,7 @@ impl JalsBackend {
             roots.push((file, Parse::parse(text).await.syntax()));
         }
         if !messages.is_empty() {
+            report.finish(Outcome::Failed);
             return BackendOutcome::failed(messages);
         }
 
@@ -125,18 +134,28 @@ impl JalsBackend {
             // wasm has no dynamic loading and no classpath, so the whole project is one module
             // rather than one artifact per declared type.
             Target::Wasm => {
-                return match CompileWasm::project(&typed_files, &index) {
+                // The whole project is one module, so this arm *is* the wasm compile — and it
+                // returns past the `finish` below. Ending the unit here is what keeps a green
+                // wasm build from reporting `Abandoned`, which says the emitter has a hole in it.
+                let outcome = match CompileWasm::project(&typed_files, &index) {
                     Ok(module) => match RelativePath::parse("project.wasm") {
                         Ok(path) => BackendOutcome::compiled(alloc::vec![(path, module)]),
                         Err(error) => BackendOutcome::failed(alloc::vec![format!("{error:?}")]),
                     },
                     Err(error) => BackendOutcome::failed(alloc::vec![format!("{error}")]),
                 };
+                report.finish(if outcome.success() {
+                    Outcome::Completed
+                } else {
+                    Outcome::Failed
+                });
+                return outcome;
             }
         };
 
         let mut classes = Vec::new();
         for (source, typed) in request.tree.iter().zip(&typed_files) {
+            report.advance(1);
             match Compile::file(*typed, class_version) {
                 Ok(compiled) => {
                     for class in compiled {
@@ -154,8 +173,10 @@ impl JalsBackend {
             }
         }
         if messages.is_empty() {
+            report.finish(Outcome::Completed);
             BackendOutcome::compiled(classes)
         } else {
+            report.finish(Outcome::Failed);
             BackendOutcome::failed(messages)
         }
     }
@@ -243,6 +264,7 @@ mod tests {
         ];
         let options = BackendOptions::default();
         let request = BackendRequest {
+            progress: &jals_progress::Progress::SILENT,
             tree: &tree,
             classpath: &[],
             options: &options,
@@ -277,6 +299,7 @@ mod tests {
         )];
         let options = BackendOptions::default();
         let request = BackendRequest {
+            progress: &jals_progress::Progress::SILENT,
             tree: &tree,
             classpath: &[],
             options: &options,
@@ -316,6 +339,7 @@ mod tests {
         let tree = [source("Main.java", "public class Main {}")];
         let options = BackendOptions::default();
         let request = BackendRequest {
+            progress: &jals_progress::Progress::SILENT,
             tree: &tree,
             classpath: &[],
             options: &options,

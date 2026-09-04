@@ -149,6 +149,7 @@ impl Compile {
         let sources = Self::lower(manifest, files).await?;
         let options = BackendOptions::from_manifest(manifest);
         let request = BackendRequest {
+            progress: &jals_progress::Progress::SILENT,
             tree: &sources,
             // The in-process compiler reads library signatures from the embedded stubs rather than
             // from the classpath, so resolved dependency jars do not participate — the same `&[]`

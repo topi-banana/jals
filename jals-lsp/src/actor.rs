@@ -1753,6 +1753,7 @@ impl AssembledWorkspace {
             &mut storage,
             &mut BuildScriptSession::new(),
             RootBuildScriptOptions {
+                progress: &jals_progress::Progress::SILENT,
                 manifest,
                 environment: &environment,
                 limits: &limits,
@@ -1915,6 +1916,7 @@ impl AssembledWorkspace {
                 root,
                 storage,
                 jals_project::GraphPreprocess {
+                    progress: &jals_progress::Progress::SILENT,
                     exec: &exec,
                     // Offline, and now that the policy rides the capability, that holds for the
                     // input resolution this phase ends in as well — not just for discovery and the

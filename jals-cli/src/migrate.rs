@@ -32,6 +32,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use jals_config::fmt::Config;
+
+use crate::shell::Shell;
 use jals_exec::Exec;
 use jals_fmt::generate::{MigrationWarning, Provenance};
 use jals_fmt::import::{
@@ -87,7 +89,12 @@ impl Migration {
     ///
     /// `Ok(None)` is A.1 row 8 — nothing to migrate. The caller keeps `Config::default()` and writes
     /// nothing.
-    pub(crate) async fn detect(start: &Path, walk: Walk, exec: &Exec) -> Result<Option<Self>> {
+    pub(crate) async fn detect(
+        start: &Path,
+        walk: Walk,
+        exec: &Exec,
+        shell: &Shell,
+    ) -> Result<Option<Self>> {
         let start = crate::App::canonical_path(start);
 
         // Row 1. Checked against *every* ancestor, not just the ones the walk below visits: an
@@ -103,7 +110,7 @@ impl Migration {
         }
 
         for dir in Self::candidates(&start, walk) {
-            if let Some(migration) = Self::detect_in(&dir, exec).await? {
+            if let Some(migration) = Self::detect_in(&dir, exec, shell).await? {
                 return Ok(Some(migration));
             }
         }
@@ -167,7 +174,7 @@ impl Migration {
     }
 
     /// Apply rows 2–6 to one directory.
-    async fn detect_in(dir: &Path, exec: &Exec) -> Result<Option<Self>> {
+    async fn detect_in(dir: &Path, exec: &Exec, shell: &Shell) -> Result<Option<Self>> {
         let top_xml = Self::xml_files(dir, "");
         let style_xml = Self::xml_files(dir, IDEA_CODE_STYLES);
         let editorconfig = FileKey::parse(EDITORCONFIG).expect("static key is valid");
@@ -192,7 +199,8 @@ impl Migration {
         // the IntelliJ model does carry. Nothing recognized ⇒ fall through rather than write an
         // empty config.
         if let Some(source) = text(&editorconfig)
-            && let Some(config) = Self::import(IntellijEditorConfig::import(source), EDITORCONFIG)
+            && let Some(config) =
+                Self::import(IntellijEditorConfig::import(source), EDITORCONFIG, shell)
             && config != Config::default()
         {
             return Ok(Some(Self::assemble(
@@ -213,7 +221,7 @@ impl Migration {
         {
             let Some(source) = text(&key) else { continue };
             let name = key.to_string();
-            if let Some(config) = Self::import(IntellijXmlScheme::import(source), &name) {
+            if let Some(config) = Self::import(IntellijXmlScheme::import(source), &name, shell) {
                 let version = Self::attribute(source, "<code_scheme", "version");
                 return Ok(Some(Self::assemble(
                     dir, config, &name, "intellij", version, extra,
@@ -237,7 +245,7 @@ impl Migration {
                     format!("the file declares {profiles} profiles and their settings were merged"),
                 ));
             }
-            if let Some(config) = Self::import(EclipseXmlProfile::import(source), &name) {
+            if let Some(config) = Self::import(EclipseXmlProfile::import(source), &name, shell) {
                 let version = Self::attribute(source, "<profile ", "version");
                 return Ok(Some(Self::assemble(
                     dir, config, &name, "eclipse", version, extra,
@@ -248,7 +256,7 @@ impl Migration {
         // Row 6 — the Eclipse preference store.
         if let Some(source) = text(&prefs)
             && source.contains(ECLIPSE_FORMATTER_PREFIX)
-            && let Some(config) = Self::import(EclipsePrefs::import(source), ECLIPSE_PREFS)
+            && let Some(config) = Self::import(EclipsePrefs::import(source), ECLIPSE_PREFS, shell)
         {
             return Ok(Some(Self::assemble(
                 dir,
@@ -318,11 +326,12 @@ impl Migration {
     fn import(
         result: Result<Config, jals_fmt::import::ImportError>,
         source: &str,
+        shell: &Shell,
     ) -> Option<Config> {
         match result {
             Ok(config) => Some(config),
             Err(error) => {
-                eprintln!("warning: ignoring {source}: {error}");
+                shell.warn(format_args!("ignoring {source}: {error}"));
                 None
             }
         }

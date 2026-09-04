@@ -50,6 +50,7 @@ fn loads_typed_project_directory_and_file_entries() {
             ClasspathEntry::ProjectDirectory(DirKey::parse("classes").unwrap()),
             ClasspathEntry::ProjectFile(FileKey::parse("dep.jar").unwrap()),
         ],
+        &jals_progress::Progress::SILENT,
     ));
     assert_eq!(load.classes.len(), 2);
     assert_eq!(load.warnings.len(), 1);
@@ -91,6 +92,7 @@ fn jar_members_load_in_archive_order() {
         &[ClasspathEntry::ProjectFile(
             FileKey::parse("dep.jar").unwrap(),
         )],
+        &jals_progress::Progress::SILENT,
     ));
     let minors: Vec<_> = load
         .classes
@@ -125,6 +127,7 @@ fn loads_verified_cached_jar_and_warns_on_missing_artifact() {
                 ClasspathEntry::Artifact(key),
                 ClasspathEntry::Artifact(missing),
             ],
+            &jals_progress::Progress::SILENT,
         )
         .await;
         assert_eq!(load.classes.len(), 1);
@@ -174,11 +177,19 @@ fn load_is_deterministic_across_inline_and_multi_worker_executors() {
         &storage.view(),
         storage.artifacts(),
         &classpath,
+        &jals_progress::Progress::SILENT,
     ));
 
     let parallel_load = jals_exec::tokio_rt::run(|exec| async move {
         let storage = MemoryStorage::memory(tree);
-        ClasspathLoad::load(&exec, &storage.view(), storage.artifacts(), &classpath).await
+        ClasspathLoad::load(
+            &exec,
+            &storage.view(),
+            storage.artifacts(),
+            &classpath,
+            &jals_progress::Progress::SILENT,
+        )
+        .await
     })
     .expect("test runtime bootstraps");
 
@@ -225,6 +236,7 @@ fn native_cached_jar_streams_and_matches_the_memory_path() {
             &native.view(),
             native.artifacts(),
             &[ClasspathEntry::Artifact(key.clone())],
+            &jals_progress::Progress::SILENT,
         )
         .await;
 
@@ -235,6 +247,7 @@ fn native_cached_jar_streams_and_matches_the_memory_path() {
             &memory.view(),
             memory.artifacts(),
             &[ClasspathEntry::Artifact(key)],
+            &jals_progress::Progress::SILENT,
         )
         .await;
         (native_load, memory_load)
@@ -285,6 +298,7 @@ fn native_cached_jar_tampered_on_disk_is_a_warning() {
             &native.view(),
             native.artifacts(),
             &[ClasspathEntry::Artifact(key)],
+            &jals_progress::Progress::SILENT,
         )
         .await
     })

@@ -2326,10 +2326,12 @@ fn fmt_writes_one_config_for_two_group_roots() {
     let (stdout, stderr, code) = run_full(&["fmt", a.to_str().unwrap(), b.to_str().unwrap()]);
 
     assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    // The `Created` line is narration, so it is on stderr with every other status line; stdout
+    // carries only what a command was asked to produce.
     assert_eq!(
-        stdout.matches("jalsfmt.toml").count(),
+        stderr.matches("jalsfmt.toml").count(),
         1,
-        "one project, one generated config: {stdout}"
+        "one project, one generated config: {stderr}"
     );
     assert!(!dir.path().join("src/jalsfmt.toml").exists());
     assert!(!dir.path().join("other/jalsfmt.toml").exists());
@@ -3327,4 +3329,237 @@ fn test_filters_select_and_partition_covers_every_test() {
     let mut expected = all;
     expected.sort();
     assert_eq!(sharded, expected);
+}
+
+/// A project whose build produces a `Compiling` line, without needing a JDK: the in-process backend
+/// compiles the same source `javac` would.
+fn in_process_project() -> tempfile::TempDir {
+    project(
+        "[package]\nname = \"hello\"\nversion = \"0.1.0\"\n\n[build]\nbackend = { type = \"jals\" }\n",
+    )
+}
+
+#[test]
+fn narration_goes_to_stderr_and_stdout_carries_only_machine_output() {
+    let dir = in_process_project();
+    let manifest = dir.path().join("jals.toml").display().to_string();
+    let (stdout, stderr, code) = run_full(&["build", "--manifest-path", &manifest]);
+
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("Compiling") && stderr.contains("hello v0.1.0"),
+        "the compile announces itself with the package cargo would name: {stderr}"
+    );
+    assert!(
+        stderr.contains("Finished"),
+        "a run says when it is done: {stderr}"
+    );
+    assert!(
+        stdout.is_empty(),
+        "`jals build` was not asked to produce anything on stdout: {stdout}"
+    );
+}
+
+#[test]
+fn quiet_says_nothing_a_run_did_not_have_to_say() {
+    let dir = in_process_project();
+    let manifest = dir.path().join("jals.toml").display().to_string();
+    let (stdout, stderr, code) = run_full(&["--quiet", "build", "--manifest-path", &manifest]);
+
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.is_empty() && stdout.is_empty(),
+        "a quiet run that succeeds is silent: stdout {stdout:?}, stderr {stderr:?}"
+    );
+}
+
+#[test]
+fn a_global_flag_may_be_written_on_either_side_of_the_subcommand() {
+    let dir = in_process_project();
+    let manifest = dir.path().join("jals.toml").display().to_string();
+    let before = run_full(&["--quiet", "build", "--manifest-path", &manifest]);
+    let after = run_full(&["build", "--quiet", "--manifest-path", &manifest]);
+    assert_eq!(
+        (before.1, before.2),
+        (after.1, after.2),
+        "`jals --quiet build` and `jals build --quiet` are the same run"
+    );
+}
+
+#[test]
+fn a_captured_run_carries_no_escapes_and_color_always_forces_them() {
+    let dir = in_process_project();
+    let manifest = dir.path().join("jals.toml").display().to_string();
+
+    // Captured output is not a terminal, so `auto` paints nothing.
+    let (_, plain, _) = run_full(&["build", "--manifest-path", &manifest]);
+    assert!(
+        !plain.contains('\u{1b}'),
+        "a redirected run must produce the same bytes every time: {plain:?}"
+    );
+    let (_, painted, _) = run_full(&["build", "--color", "always", "--manifest-path", &manifest]);
+    assert!(
+        painted.contains('\u{1b}'),
+        "`--color always` is above the TTY test: {painted:?}"
+    );
+    let (_, never, _) = run_full(&["build", "--color", "never", "--manifest-path", &manifest]);
+    assert!(!never.contains('\u{1b}'), "{never:?}");
+}
+
+#[test]
+fn message_format_json_puts_the_event_stream_on_stdout() {
+    let dir = in_process_project();
+    let manifest = dir.path().join("jals.toml").display().to_string();
+    let (stdout, stderr, code) = run_full(&[
+        "build",
+        "--message-format",
+        "json",
+        "--manifest-path",
+        &manifest,
+    ]);
+
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(!lines.is_empty(), "the stream is not empty");
+    for line in &lines {
+        assert!(
+            line.starts_with('{') && line.ends_with('}'),
+            "every line is one JSON object: {line}"
+        );
+    }
+    assert!(
+        stdout.contains("\"event\":\"started\"") && stdout.contains("\"activity\":\"compile\""),
+        "the compile reaches the stream as the fact it is: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"event\":\"finished\""),
+        "and so does how it ended: {stdout}"
+    );
+}
+
+/// stdout has one holder. `--message-format json` claims it for the event stream, and the flags
+/// whose whole product is also stdout — `--dry-run`'s command line, `--diff`'s patch, a piped
+/// format's formatted source — are refused rather than interleaved into it.
+///
+/// This is the case the plain `build` test above cannot reach: there, nothing else wanted stdout.
+#[test]
+fn a_flag_that_owns_stdout_will_not_share_it_with_the_event_stream() {
+    let dir = in_process_project();
+    let manifest = dir.path().join("jals.toml").display().to_string();
+
+    // Both commands that can print a command line instead of running one.
+    for command in ["build", "run"] {
+        let (stdout, stderr, code) = run_full(&[
+            command,
+            "--dry-run",
+            "--message-format",
+            "json",
+            "--manifest-path",
+            &manifest,
+        ]);
+        assert_ne!(
+            code, 0,
+            "`{command} --dry-run` cannot share stdout: {stdout}"
+        );
+        assert!(
+            stderr.contains("already using") && stderr.contains("`--dry-run`"),
+            "the refusal names the flag that asked: {stderr}"
+        );
+        assert!(stdout.is_empty(), "and writes neither product: {stdout}");
+    }
+
+    let source = dir.path().join("src/main/java/com/example/Main.java");
+    let source = source.display().to_string();
+    let (stdout, stderr, code) = run_full(&["fmt", "--diff", "--message-format", "json", &source]);
+    assert_ne!(code, 0, "a diff cannot share stdout either: {stdout}");
+    assert!(stderr.contains("`--diff`"), "{stderr}");
+    assert!(stdout.is_empty(), "{stdout}");
+}
+
+/// `jals test`'s stdout was JSON before there was an event stream, and that older meaning wins:
+/// the command takes the stream back so a script parsing its results never meets a second schema.
+#[test]
+fn jals_test_keeps_stdout_for_its_own_json() {
+    // `test_project`, not `in_process_project`: the latter declares no `attributes` feature, so the
+    // command refuses before `--list` is reached and the assertion below would hold with
+    // `Session::owns_stdout` deleted.
+    let dir = test_project();
+    let manifest = manifest_of(&dir);
+    let (stdout, stderr, code) = run_full(&[
+        "test",
+        "--list",
+        "--message-format",
+        "json",
+        "--manifest-path",
+        &manifest,
+    ]);
+
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("com.example.Calc#adds"),
+        "the list is what stdout carries: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        !stdout.contains("\"event\":"),
+        "no progress event reaches the stream the test list owns: {stdout}\nstderr: {stderr}"
+    );
+}
+
+#[test]
+fn timings_writes_a_self_contained_report() {
+    let dir = in_process_project();
+    let manifest = dir.path().join("jals.toml").display().to_string();
+    let (stdout, stderr, code) =
+        run_full(&["build", "--timings=html,json", "--manifest-path", &manifest]);
+
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("Timing") && stderr.contains("report saved to"),
+        "the report names itself: {stderr}"
+    );
+    let timings = dir.path().join("target/jals/timings");
+    // The stable copy a bookmark keeps working against; the timestamped one sits beside it.
+    let html = std::fs::read_to_string(timings.join("jals-timings.html")).unwrap();
+    assert!(html.starts_with("<!doctype html>"));
+    assert!(
+        !html.contains("http://") && !html.contains("https://") && !html.contains("<script"),
+        "a build report has to open offline"
+    );
+    assert!(html.contains("compile"), "the compile is a row: {html}");
+    let json = std::fs::read_to_string(timings.join("jals-timings.json")).unwrap();
+    assert!(json.contains("\"spans\":["), "{json}");
+    assert!(json.contains("\"activity\":\"compile\""), "{json}");
+
+    let stamped: Vec<_> = std::fs::read_dir(&timings)
+        .unwrap()
+        .filter_map(|entry| Some(entry.ok()?.file_name().to_string_lossy().into_owned()))
+        .filter(|name| name.starts_with("jals-timings-"))
+        .collect();
+    assert_eq!(
+        stamped.len(),
+        2,
+        "one timestamped report per format, so a run never overwrites the last one: {stamped:?}"
+    );
+}
+
+#[test]
+fn timings_covers_a_command_that_never_finds_a_project() {
+    let dir = marked_project();
+    // Run *from* the project so the report lands under it: a command with no manifest writes under
+    // the directory its user is standing in, and a test that let that be the crate directory would
+    // leave a `target/` behind in the checkout.
+    let (stdout, stderr, code) = fmt_in(
+        dir.path(),
+        dir.path(),
+        &["--check", "--timings", "--no-migrate"],
+    );
+
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("report saved to"),
+        "`--timings` answers for every command, not only the ones with a manifest: {stderr}"
+    );
+    let html = std::fs::read_to_string(dir.path().join("target/jals/timings/jals-timings.html"))
+        .expect("the report is written under the directory the command ran in");
+    assert!(html.contains("format"), "the sweep is a row: {html}");
 }
