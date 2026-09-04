@@ -139,9 +139,19 @@ impl ClasspathLoad {
             // line about work that did not happen.
             return Self::default();
         }
-        // Counted in decode tasks rather than in classpath entries: one jar is many chunks, and a
-        // bar that moves once per jar sits still through the only entry that takes any time.
-        let report = progress.begin_bounded(Activity::Index, "classpath", tasks.len() as u64);
+        // The subject is the entry count rather than the bare word `classpath` because a run
+        // indexes twice — once for the root's own `[build] classpath` and its task jars, once for
+        // the resolved dependency graph — and two identical lines read as the tool repeating
+        // itself. The count is what tells them apart, and it is worth saying on its own.
+        //
+        // The *bar* counts decode tasks instead: one jar is many chunks, and a bar that moves once
+        // per jar sits still through the only entry that takes any time.
+        let subject = if entries.len() == 1 {
+            String::from("1 classpath entry")
+        } else {
+            format!("{} classpath entries", entries.len())
+        };
+        let report = progress.begin_bounded(Activity::Index, subject, tasks.len() as u64);
         let ticker = report.ticker();
         let outcomes = exec
             .fan_out(tasks, move |task| {

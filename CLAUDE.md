@@ -435,7 +435,14 @@ filesystem reads into portable interfaces.
   and a line written under a live bar suspending it — and `ui::Display` is where a
   `jals_progress::Activity` becomes a verb. `Session` wires one run's shell, sinks and `--timings`
   ledger together, so which sinks exist and what happens to them at the end is written once instead
-  of once per command. It also owns native-formatter-config **detection** (`migrate.rs`): portable
+  of once per command — including the two answers to **stdout having exactly one holder**.
+  `Session::owns_stdout` is the command whose own machine output is the older contract there
+  (`jals test`'s result objects, which a script parses) taking the event stream back;
+  `Session::stdout_is_free` refuses the flags whose whole product is also stdout — `--dry-run`'s
+  command line, `--diff`'s patch, a piped `jals fmt`'s formatted source. Both exist because a
+  reader of stdout must never have to guess which of two schemas a line is, and dropping a product
+  the user explicitly asked for is worse than saying the two do not go together. It also owns
+  native-formatter-config **detection** (`migrate.rs`): portable
   crates cannot look at a
   filesystem, so the host decides which config file is there and reads its bytes through a
   `ProjectView`, then hands the text to `jals_fmt::import` and the result to `jals_fmt::generate`.

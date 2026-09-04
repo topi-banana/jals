@@ -413,6 +413,7 @@ fn main() -> ExitCode {
             Commands::Clean(args) => args.run(&session).await,
             Commands::Init(args) => args.run(&session).await,
         };
+        session.finish_display();
         session.shell().clear_progress();
         // One call for every command, including the ones that ended early: `--timings` asked for a
         // report of the run, and a run that failed is exactly the one worth a report.
@@ -441,6 +442,13 @@ impl FmtArgs {
         // `--check` and `--diff` both render a diff and write nothing; `--check` additionally
         // fails the run. With neither, stdin is echoed to stdout and files are rewritten in place.
         let show_diff = self.check || self.diff;
+        // Both of those stdout products are the whole point of the flag that asked for them, so
+        // neither may share the stream with the event JSON.
+        if show_diff {
+            session.stdout_is_free(if self.diff { "`--diff`" } else { "`--check`" })?;
+        } else if self.paths.is_empty() {
+            session.stdout_is_free("formatting stdin")?;
+        }
 
         let mut discovery = HostConfigs::new(explicit_config);
         let mut features = HostFeatures::default();
@@ -861,6 +869,10 @@ impl BuildArgs {
     /// either prints it (`--dry-run`) or spawns `javac` and maps its exit code.
     async fn run(&self, session: &Session) -> Result<ExitCode> {
         let exec = session.exec();
+        // `--dry-run`'s whole product is a command line on stdout, to be read or copied.
+        if self.dry_run {
+            session.stdout_is_free("`--dry-run`")?;
+        }
         let (mut manifest, root) = App::resolve_manifest(self.manifest_path.as_deref()).await?;
         session.note_project(&root, manifest.package.name.as_deref());
         let features = self.features.resolve(&manifest)?;
@@ -949,6 +961,9 @@ impl RunArgs {
     /// run; `--dry-run` prints both commands without executing either.
     async fn run(&self, session: &Session) -> Result<ExitCode> {
         let exec = session.exec();
+        if self.dry_run {
+            session.stdout_is_free("`--dry-run`")?;
+        }
         let (mut manifest, root) = App::resolve_manifest(self.manifest_path.as_deref()).await?;
         session.note_project(&root, manifest.package.name.as_deref());
         // `jals run` is `java`, and a WebAssembly module is not something `java` can be handed. The
@@ -1079,6 +1094,10 @@ impl TestArgs {
     /// nowhere else.
     async fn run(&self, session: &Session) -> Result<ExitCode> {
         let exec = session.exec();
+        // Everything this command puts on stdout is its own: the test-case ids of `--list`, and
+        // the result objects `--message-format json` has always named. The event stream stands
+        // down rather than interleaving a second schema into the same lines.
+        session.owns_stdout();
         let (mut manifest, root) = App::resolve_manifest(self.manifest_path.as_deref()).await?;
         session.note_project(&root, manifest.package.name.as_deref());
         Self::refuse_unsupported(&manifest)?;

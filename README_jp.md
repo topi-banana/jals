@@ -211,8 +211,12 @@ Linux・macOS・Windows の `x64` / `arm64` ランナーに対応しています
 | `--progress <auto\|always\|never>` | ライブのプログレス表示を描くかどうか。`auto` は stderr が端末のときに描きます。 |
 | `--timings[=html,json]` | 実行時間の内訳レポートを `target/jals/timings/` に書き出します。 |
 
-出力の規則はひとつです。**人間向けは stderr、スクリプト向けは stdout。** 実行は cargo と同じ体裁で
-自身を語り（`Downloading` / `Remapping` / `Decompiling` / `Compiling` / `Fresh` / `Finished`）、
+出力の規則はひとつです。**人間向けは stderr、スクリプト向けは stdout。** そして stdout の持ち主は
+つねに一つです。`jals test` は自身の結果オブジェクトのために stdout を保ちます——そこで
+`--message-format json` が指してきたのは元々それです——一方 `--dry-run` / `--diff` / パイプ入力の
+`jals fmt` は `json` と併用できず、同じ行に二つ目のスキーマを混ぜる代わりに拒否されます。
+
+実行は cargo と同じ体裁で自身を語り（`Downloading` / `Remapping` / `Decompiling` / `Compiling` / `Fresh` / `Finished`）、
 stderr が端末なら作業単位ごとにプログレスバーが出ます:
 
 ```console

@@ -211,7 +211,11 @@ Every subcommand shares these, and — as in Cargo — they may be written on ei
 | `--timings[=html,json]` | Write a report of where the run's time went to `target/jals/timings/`. |
 
 Output follows one rule: **anything for a person goes to stderr, anything for a script goes to
-stdout.** A run narrates itself the way `cargo` does — `Downloading`, `Remapping`, `Decompiling`,
+stdout** — and stdout has one holder. `jals test` keeps it for its own result objects, which is
+what `--message-format json` has always named there; `--dry-run`, `--diff` and a piped `jals fmt`
+are refused alongside `json` rather than interleaving a second schema into the same lines.
+
+A run narrates itself the way `cargo` does — `Downloading`, `Remapping`, `Decompiling`,
 `Compiling`, `Fresh`, `Finished` — with a progress bar per unit of work when stderr is a terminal:
 
 ```console

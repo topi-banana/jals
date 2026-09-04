@@ -3437,6 +3437,66 @@ fn message_format_json_puts_the_event_stream_on_stdout() {
     );
 }
 
+/// stdout has one holder. `--message-format json` claims it for the event stream, and the flags
+/// whose whole product is also stdout — `--dry-run`'s command line, `--diff`'s patch, a piped
+/// format's formatted source — are refused rather than interleaved into it.
+///
+/// This is the case the plain `build` test above cannot reach: there, nothing else wanted stdout.
+#[test]
+fn a_flag_that_owns_stdout_will_not_share_it_with_the_event_stream() {
+    let dir = in_process_project();
+    let manifest = dir.path().join("jals.toml").display().to_string();
+
+    // Both commands that can print a command line instead of running one.
+    for command in ["build", "run"] {
+        let (stdout, stderr, code) = run_full(&[
+            command,
+            "--dry-run",
+            "--message-format",
+            "json",
+            "--manifest-path",
+            &manifest,
+        ]);
+        assert_ne!(
+            code, 0,
+            "`{command} --dry-run` cannot share stdout: {stdout}"
+        );
+        assert!(
+            stderr.contains("already using") && stderr.contains("`--dry-run`"),
+            "the refusal names the flag that asked: {stderr}"
+        );
+        assert!(stdout.is_empty(), "and writes neither product: {stdout}");
+    }
+
+    let source = dir.path().join("src/main/java/com/example/Main.java");
+    let source = source.display().to_string();
+    let (stdout, stderr, code) = run_full(&["fmt", "--diff", "--message-format", "json", &source]);
+    assert_ne!(code, 0, "a diff cannot share stdout either: {stdout}");
+    assert!(stderr.contains("`--diff`"), "{stderr}");
+    assert!(stdout.is_empty(), "{stdout}");
+}
+
+/// `jals test`'s stdout was JSON before there was an event stream, and that older meaning wins:
+/// the command takes the stream back so a script parsing its results never meets a second schema.
+#[test]
+fn jals_test_keeps_stdout_for_its_own_json() {
+    let dir = in_process_project();
+    let manifest = dir.path().join("jals.toml").display().to_string();
+    let (stdout, stderr, _) = run_full(&[
+        "test",
+        "--list",
+        "--message-format",
+        "json",
+        "--manifest-path",
+        &manifest,
+    ]);
+
+    assert!(
+        !stdout.contains("\"event\":"),
+        "no progress event reaches the stream the test list owns: {stdout}\nstderr: {stderr}"
+    );
+}
+
 #[test]
 fn timings_writes_a_self_contained_report() {
     let dir = in_process_project();

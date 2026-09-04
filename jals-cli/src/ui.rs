@@ -9,7 +9,10 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Instant,
 };
 
@@ -130,6 +133,13 @@ impl Display {
     }
 
     fn started(&self, id: UnitId, unit: &Unit) {
+        // Another phase beginning is what closes a batch of downloads, so the summary lands above
+        // the line that follows it. Draining on `active == 0` alone would not do it: the task plan
+        // walks its nodes serially, so every `tasks.fetch_jar` is a batch of one, and a Minecraft
+        // build would print sixty `Downloaded 1 file` lines instead of the one it promises.
+        if unit.activity != Activity::Fetch {
+            self.drain_downloads();
+        }
         let bar = self.bar(unit);
         if Self::announces(unit.activity) {
             self.shell
@@ -192,17 +202,28 @@ impl Display {
                 state.fetches.bytes = state.fetches.bytes.saturating_add(tracked.done);
             }
         }
-        let batch = (state.fetches.active == 0 && state.fetches.finished > 0)
-            .then(|| core::mem::take(&mut state.fetches));
         drop(state);
 
         if outcome == Outcome::Fresh {
             self.shell
                 .verbose_status(Verb::Fresh, tracked.unit.describe());
         }
-        if let Some(batch) = batch {
-            self.summarize(&batch);
+    }
+
+    /// Summarize the downloads that have finished, if a batch of them is waiting to be summarized.
+    ///
+    /// Called when another phase begins and once more when the run ends, which between them cover
+    /// both shapes a batch takes: the dependency resolver's concurrent fan of fetches, and the task
+    /// plan's one-at-a-time walk.
+    pub(crate) fn drain_downloads(&self) {
+        let mut state = self.lock();
+        if state.fetches.active > 0 || state.fetches.finished == 0 {
+            drop(state);
+            return;
         }
+        let batch = core::mem::take(&mut state.fetches);
+        drop(state);
+        self.summarize(&batch);
     }
 
     /// The one line a drained batch of downloads leaves behind.
@@ -276,18 +297,35 @@ impl Sink for Display {
 }
 
 /// Every event as one JSON object per line on stdout, for `--message-format json`.
+///
+/// It can be switched off part-way through a run, because stdout is a contract with one holder: a
+/// command whose *own* machine output is what `--message-format json` has always meant — `jals
+/// test`'s result objects — takes the stream back before it starts, and the events stop rather than
+/// interleaving a second schema into the same lines.
 pub(crate) struct JsonStream {
     shell: Arc<Shell>,
+    live: AtomicBool,
 }
 
 impl JsonStream {
     pub(crate) const fn new(shell: Arc<Shell>) -> Self {
-        Self { shell }
+        Self {
+            shell,
+            live: AtomicBool::new(true),
+        }
+    }
+
+    /// Stop writing: somebody else owns stdout now.
+    pub(crate) fn silence(&self) {
+        self.live.store(false, Ordering::Relaxed);
     }
 }
 
 impl Sink for JsonStream {
     fn emit(&self, event: &Event) {
+        if !self.live.load(Ordering::Relaxed) {
+            return;
+        }
         if let Ok(line) = serde_json::to_string(event) {
             self.shell.machine(line);
         }
