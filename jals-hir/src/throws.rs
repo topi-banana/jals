@@ -163,6 +163,18 @@ impl Cx<'_> {
         }
     }
 
+    /// How many precise-rethrow narrowings may nest before the answer falls back to the written
+    /// arms.
+    ///
+    /// **One**, which is not a compromise but the whole rule: §11.2.2 narrows a rethrow to what its
+    /// *own* `try` block raises, and a rethrow met while walking that block is answered with the
+    /// arms **its** clause wrote — a sound upper bound, and the same answer the walk already falls
+    /// back to when it learns nothing. Recursing instead re-walks the inner block once per outer
+    /// node, and the cost compounds: twelve nested `try { … } catch (E e) { throw e; }` answered in
+    /// 0.1 s, twenty-two took 42, and a bound of eight still took 7. Every runtime here is
+    /// current-thread, so that is the editor wedged rather than one slow request.
+    const RETHROW_DEPTH: usize = 1;
+
     /// The indexed types named in `decl`'s `throws` clause (unresolvable names dropped).
     fn declared_throws(&self, decl: &SyntaxNode) -> Vec<ItemId> {
         ProjectIndex::throws_clause_types(decl)
@@ -174,6 +186,20 @@ impl Cx<'_> {
     /// of the `throws` of a call / `new`'s bindable overloads. Empty when the node is not a source or
     /// nothing is provably raised.
     fn raised_at(&self, node: &SyntaxNode) -> Vec<ItemId> {
+        self.raised_within(node, Self::RETHROW_DEPTH)
+    }
+
+    /// [`raised_at`](Self::raised_at), carrying how many precise-rethrow narrowings are already on
+    /// the stack.
+    ///
+    /// The narrowing walks its `try` block and asks this about every node in it, and a nested
+    /// rethrow asks again about the block inside — so `n` nested `try { … } catch (E e) { throw e; }`
+    /// re-walk each other exponentially. Measured, not feared: twelve levels answered in 0.1 s and
+    /// twenty-two took 42, on one current-thread runtime, which is the editor wedged rather than one
+    /// slow request. Bounded like [`Hierarchy::inherited_field`]'s walk, and past the bound the
+    /// answer is the arms the source wrote — the same upper bound a walk that learns nothing already
+    /// falls back to, so the shape of the answer does not change with the depth, only its precision.
+    fn raised_within(&self, node: &SyntaxNode, depth: usize) -> Vec<ItemId> {
         match node.kind() {
             THROW_STMT => {
                 let Some(thrown) = ast::ThrowStmt::cast(node.clone()).and_then(|t| t.expr()) else {
@@ -181,7 +207,7 @@ impl Cx<'_> {
                 };
                 // Precise rethrow first (JLS §11.2.2), because the parameter's own type is the
                 // wrong answer for it.
-                self.rethrown_arms(&thrown)
+                self.rethrown_arms(&thrown, depth)
                     .unwrap_or_else(|| self.expr_item(thrown.syntax()).into_iter().collect())
             }
             CALL_EXPR => ast::CallExpr::cast(node.clone())
@@ -329,7 +355,7 @@ impl Cx<'_> {
     /// …; public void run() { throw e; } } … }` is a program javac compiles, and reading the outer
     /// clause's arms for it reported an `IOException` nothing can raise. A `CLASS_BODY` is where the
     /// walk stops, because a class body is what every one of those shapes needs.
-    fn rethrown_arms(&self, thrown: &ast::Expr) -> Option<Vec<ItemId>> {
+    fn rethrown_arms(&self, thrown: &ast::Expr, depth: usize) -> Option<Vec<ItemId>> {
         let ast::Expr::NameRef(name) = thrown else {
             return None;
         };
@@ -353,7 +379,7 @@ impl Cx<'_> {
             .filter_map(ast::Type::cast)
             .filter_map(|ty| self.resolve_type(&ty))
             .collect();
-        Some(self.narrowed_to_the_block(&clause, &arms))
+        Some(self.narrowed_to_the_block(&clause, &arms, depth))
     }
 
     /// §11.2.2's actual answer: not the written arms, but **what the `try` block can raise** that
@@ -379,7 +405,15 @@ impl Cx<'_> {
     /// never the arms, and a fallback to those two arms still reports neither. What it does keep is
     /// the pre-existing over-report on `catch (Exception e) { throw e; }` over a block whose raise
     /// the analysis could not see — the same answer that shape got before this rule existed.
-    fn narrowed_to_the_block(&self, clause: &ast::CatchClause, arms: &[ItemId]) -> Vec<ItemId> {
+    fn narrowed_to_the_block(
+        &self,
+        clause: &ast::CatchClause,
+        arms: &[ItemId],
+        depth: usize,
+    ) -> Vec<ItemId> {
+        if depth == 0 {
+            return arms.to_vec();
+        }
         let Some(try_stmt) = clause.syntax().parent().and_then(ast::TryStmt::cast) else {
             return arms.to_vec();
         };
@@ -395,7 +429,7 @@ impl Cx<'_> {
             if !Self::guards(&try_stmt, &source) {
                 continue; // in a `catch` or `finally`, not the protected region.
             }
-            for raised in self.raised_at(&source) {
+            for raised in self.raised_within(&source, depth - 1) {
                 if !arms.iter().any(|&arm| self.index.is_subtype(raised, arm)) {
                     continue; // this clause does not catch it.
                 }
