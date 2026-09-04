@@ -370,11 +370,7 @@ impl Cx<'_> {
     /// an initializer's raises are "conservatively left unreported" for the same reason — and it is
     /// the safe one: a missed diagnostic, rather than one against a program that is correct.
     fn narrowed_to_the_block(&self, clause: &ast::CatchClause, arms: &[ItemId]) -> Vec<ItemId> {
-        let Some(try_stmt) = clause
-            .syntax()
-            .parent()
-            .and_then(|parent| ast::TryStmt::cast(parent))
-        else {
+        let Some(try_stmt) = clause.syntax().parent().and_then(ast::TryStmt::cast) else {
             return arms.to_vec();
         };
         // The clauses written before this one, whose catches are not this one's to rethrow.

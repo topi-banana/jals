@@ -333,7 +333,7 @@ fn a_shadowed_name_is_not_the_catch_parameter() {
 /// reported a method that declares exactly what it raises.
 #[test]
 fn a_rethrow_is_narrowed_to_what_the_block_raises() {
-    let precise = r#"
+    let precise = r"
         package p;
         import java.io.IOException;
         public class Precise {
@@ -342,12 +342,12 @@ fn a_rethrow_is_narrowed_to_what_the_block_raises() {
                 try { throw new MyEx(); } catch (IOException e) { throw e; }
             }
         }
-    "#;
+    ";
     assert_eq!(reported(precise), Vec::<String>::new());
 
     // Declaring only the *arm* is not enough when the block raises something the arm does not
     // cover — the rule narrows, it does not excuse.
-    let missing = r#"
+    let missing = r"
         package p;
         import java.io.IOException;
         public class Missing {
@@ -356,6 +356,6 @@ fn a_rethrow_is_narrowed_to_what_the_block_raises() {
                 try { throw new MyEx(); } catch (IOException e) { throw e; }
             }
         }
-    "#;
+    ";
     assert_eq!(reported(missing), ["MyEx"]);
 }

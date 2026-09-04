@@ -867,3 +867,45 @@ fn a_multi_catch_parameter_is_the_lub_of_its_arms() {
     // The multi-catch binding is the common superclass; a single-arm one keeps what it wrote.
     assert_eq!(types, ["Parent", "Son"]);
 }
+
+/// A stub's *superclass* chain is faithful; an omitted **interface** is not a negative answer.
+///
+/// Overload selection reads the subtype relation as though a `false` were a fact, so a missing
+/// `Integer implements Comparable` dropped the correct candidate as inapplicable and the call
+/// silently picked `f(Object)`: javac and a real JVM answer with the `Comparable` overload, this
+/// answered with the other one. The mirror symptom is a call with no applicable candidate at all,
+/// which reaches `jals lint` and the LSP as a `NoOverload` against a correct program.
+///
+/// Each overload returns a different type, so the *selected* one is what the call expression's type
+/// says — which is the thing a wrong selection changes and an arity check would not notice.
+#[test]
+fn a_wrapper_is_comparable_so_that_overload_stays_applicable() {
+    let source = r"
+        public class Wrap {
+            static String viaComparable(Comparable c) { return null; }
+            static int viaComparable(Object o) { return 0; }
+            static void integer(Integer n) { viaComparable(n); }
+            static void character(Character c) { viaComparable(c); }
+            static void flag(Boolean b) { viaComparable(b); }
+            static void real(Double d) { viaComparable(d); }
+            static void small(Byte s) { viaComparable(s); }
+            static void plain(Object o) { viaComparable(o); }
+        }
+    ";
+    for (call, selected) in [
+        ("viaComparable(n)", "String"),
+        ("viaComparable(c)", "String"),
+        ("viaComparable(b)", "String"),
+        ("viaComparable(d)", "String"),
+        ("viaComparable(s)", "String"),
+        // A plain `Object` is *not* `Comparable`, and nothing here made the relation lenient: the
+        // negative about a class stays a fact, which is what keeps selection able to discriminate.
+        ("viaComparable(o)", "int"),
+    ] {
+        assert_eq!(
+            expr_ty_with_stdlib(source, call),
+            selected,
+            "`{call}` selects the overload javac selects"
+        );
+    }
+}

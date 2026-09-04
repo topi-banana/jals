@@ -6882,7 +6882,7 @@ fn a_lambda_in_an_enum_constant_argument_belongs_to_the_enum() {
 /// silently the wrong number.
 #[test]
 fn an_explicit_super_still_stores_the_enclosing_instance() {
-    let source = r#"
+    let source = r"
         public class Enclosing {
             int f = 7;
             static class Base { int b; Base(int b) { this.b = b; } }
@@ -6894,7 +6894,7 @@ fn an_explicit_super_still_stores_the_enclosing_instance() {
                 System.out.println(new Enclosing().new Inner(5).get());
             }
         }
-    "#;
+    ";
     assert!(compile(source).is_ok(), "an inner class writing `super(…)`");
     if java_available() {
         assert_eq!(run(source, "Enclosing"), "12\n");
@@ -6905,7 +6905,7 @@ fn an_explicit_super_still_stores_the_enclosing_instance() {
 /// program answers with it.
 #[test]
 fn an_explicit_super_still_stores_a_capture() {
-    let source = r#"
+    let source = r"
         public class Captured {
             static class Base { int b; Base(int b) { this.b = b; } }
             static int build(int n) {
@@ -6919,7 +6919,7 @@ fn an_explicit_super_still_stores_a_capture() {
                 System.out.println(build(7));
             }
         }
-    "#;
+    ";
     assert!(
         compile(source).is_ok(),
         "a capturing local class writing `super(…)`"
@@ -6939,7 +6939,7 @@ fn an_explicit_super_still_stores_a_capture() {
 /// the rest of the same rule.
 #[test]
 fn a_this_delegation_past_synthetic_parameters_is_refused() {
-    let inner = r#"
+    let inner = r"
         public class Deleg {
             int f = 7;
             class Inner {
@@ -6948,14 +6948,14 @@ fn a_this_delegation_past_synthetic_parameters_is_refused() {
                 Inner(int x) { v = x; }
             }
         }
-    "#;
+    ";
     assert!(matches!(
         compile(inner),
         Err(LowerError::Unsupported(
             "a `this(…)` delegation in a class with synthetic constructor parameters"
         ))
     ));
-    let capturing = r#"
+    let capturing = r"
         public class DelegLocal {
             static int build(int n) {
                 class Local {
@@ -6966,7 +6966,7 @@ fn a_this_delegation_past_synthetic_parameters_is_refused() {
                 return new Local().v;
             }
         }
-    "#;
+    ";
     assert!(matches!(
         compile(capturing),
         Err(LowerError::Unsupported(
@@ -6974,14 +6974,14 @@ fn a_this_delegation_past_synthetic_parameters_is_refused() {
         ))
     ));
     // A class with no synthetic parameters is unaffected: the index descriptor is the emitted one.
-    let plain = r#"
+    let plain = r"
         public class Plain {
             int v;
             Plain() { this(1); }
             Plain(int x) { v = x; }
             public static void main(String[] args) { System.out.println(new Plain().v); }
         }
-    "#;
+    ";
     assert!(compile(plain).is_ok());
     if java_available() {
         assert_eq!(run(plain, "Plain"), "1\n");
@@ -7000,6 +7000,10 @@ fn a_this_delegation_past_synthetic_parameters_is_refused() {
 /// javac's own output for the same source.
 #[test]
 fn a_nested_types_class_file_and_its_entry_record_access_differently() {
+    const PUBLIC_SUPER: u16 = 0x0001 | 0x0020;
+    const SUPER: u16 = 0x0020;
+    const PUBLIC_INTERFACE: u16 = 0x0001 | 0x0200 | 0x0400;
+
     let source = r"
         package p;
         public class Api {
@@ -7020,9 +7024,6 @@ fn a_nested_types_class_file_and_its_entry_record_access_differently() {
             (class.internal_name.clone(), file.access_flags.0)
         })
         .collect();
-    const PUBLIC_SUPER: u16 = 0x0001 | 0x0020;
-    const SUPER: u16 = 0x0020;
-    const PUBLIC_INTERFACE: u16 = 0x0001 | 0x0200 | 0x0400;
     assert_eq!(
         own,
         [

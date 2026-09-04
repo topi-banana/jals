@@ -392,7 +392,7 @@ and compute the wrong number — and it is the wasm counterpart of `descriptor-e
 `String` is **outside what this backend compiles**, by design, exactly as a file javac declines
 alone is outside `jals-compile`'s corpus. Those cases are reported as *out of subset* and excluded
 from the rate that measures the compiler; the corpus total is printed beside it so the scoped rate
-can never read as coverage of Java. On the current corpus that is 1316 of 2188 cases, `String`
+can never read as coverage of Java. On the current corpus that is 1286 of 2188 cases, `String`
 alone accounting for the largest share of them.
 
 Three types the backend *does* represent are not in that count, and each is a rule rather than a
@@ -400,6 +400,13 @@ stub: `java.lang.Object` is the root of Java's reference hierarchy and `anyref` 
 variable** erases to its bound and to `Object` with none (JLS §4.6), and an `@interface` is an
 interface (§9.6). What still needs `java.base` after that is what a **value** of a library type
 needs — a `String`, a wrapper for a boxing conversion, a `PrintStream` for a call.
+
+`WasmError::NoImplementation` is the neighbouring outcome and is deliberately *not* out of
+subset. Its owner is a project type — a `native` method, or an interface method whose only
+implementation in the source is a lambda the index could give no single abstract method to — so the
+case is squarely inside the subset and this is a gap in the backend. Scoring it as out-of-subset
+would shrink the denominator by exactly the cases the backend cannot do, which is the one direction
+a rate must never move on its own.
 
 The classification is **post hoc and order-dependent**: lowering reports the first thing it cannot
 do, so a file that both names `String` *and* declares an `@interface` lands in whichever the

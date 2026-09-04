@@ -83,6 +83,11 @@ public class StringBuilder extends Object implements CharSequence {
     public String toString();
 }
 
+// Every wrapper below is `Comparable`, and saying so is not decoration. A stub's *superclass* chain
+// is written out faithfully, so a negative answer about one is trustworthy; an omitted **interface**
+// is not a negative answer at all, and overload selection reads the relation as though it were.
+// `f(Comparable)` against `f(Object)` for an `Integer` argument is the everyday shape: with the edge
+// missing, the correct candidate is dropped as inapplicable and the call silently picks the other.
 public class Number extends Object {
     public int intValue();
     public long longValue();
@@ -90,7 +95,7 @@ public class Number extends Object {
     public double doubleValue();
 }
 
-public class Integer extends Number {
+public class Integer extends Number implements Comparable {
     // `int.class` is a `getstatic` of this field, not an `ldc` — a primitive has no `Class` entry.
     public static Class TYPE;
     public static Integer valueOf(int i);
@@ -98,14 +103,14 @@ public class Integer extends Number {
     public int intValue();
 }
 
-public class Long extends Number {
+public class Long extends Number implements Comparable {
     public static Class TYPE;
     public static Long valueOf(long l);
     public static long parseLong(String s);
     public long longValue();
 }
 
-public class Double extends Number {
+public class Double extends Number implements Comparable {
     public static Class TYPE;
     public static Double valueOf(double d);
     public static double parseDouble(String s);
@@ -116,7 +121,7 @@ public class Double extends Number {
     public static long doubleToLongBits(double value);
 }
 
-public class Float extends Number {
+public class Float extends Number implements Comparable {
     public static Class TYPE;
     public static Float valueOf(float f);
     public float floatValue();
@@ -128,25 +133,25 @@ public class Void extends Object {
     public static Class TYPE;
 }
 
-public class Short extends Number {
+public class Short extends Number implements Comparable {
     public static Class TYPE;
     public static Short valueOf(short s);
     public short shortValue();
 }
 
-public class Byte extends Number {
+public class Byte extends Number implements Comparable {
     public static Class TYPE;
     public static Byte valueOf(byte b);
     public byte byteValue();
 }
 
-public class Character extends Object {
+public class Character extends Object implements Comparable {
     public static Class TYPE;
     public static Character valueOf(char c);
     public char charValue();
 }
 
-public class Boolean extends Object {
+public class Boolean extends Object implements Comparable {
     public static Class TYPE;
     public static Boolean valueOf(boolean b);
     public boolean booleanValue();

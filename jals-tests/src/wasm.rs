@@ -135,6 +135,15 @@ pub enum Outcome {
     /// Lowering refused the file because a name did not resolve. The message quotes the corpus's
     /// own identifier, which is elided so equivalent failures bucket together.
     Unresolved(String),
+    /// Lowering refused the file because a method it *declares* has no body in the module — a
+    /// `native` one, or an interface method whose only implementation in the source is a lambda or a
+    /// method reference this backend does not lower into a struct.
+    ///
+    /// Kept apart from [`OutOfSubset`](Self::OutOfSubset), which is the library-type refusal: the
+    /// owner here is a project type, so the case is squarely *inside* the subset and this is a gap
+    /// in the backend. Scoring it as out-of-subset would shrink the denominator by exactly the cases
+    /// the backend cannot do, which is the one direction a rate must never move on its own.
+    NoImplementation(String),
     /// The parser reported syntax errors on a file javac compiled — a parser gap, since every file
     /// in the corpus is valid Java by construction.
     ParseError(usize),
@@ -159,6 +168,7 @@ impl Outcome {
             Self::TooLarge => "too-large",
             Self::Unsupported(_) => "unsupported",
             Self::Unresolved(_) => "unresolved",
+            Self::NoImplementation(_) => "no-implementation",
             Self::ParseError(_) => "parse-error",
             Self::Panicked => "panicked",
             Self::ReadError => "read-error",
@@ -172,6 +182,7 @@ impl Outcome {
             | Self::Trapped(message)
             | Self::Rejected(message)
             | Self::Unresolved(message)
+            | Self::NoImplementation(message)
             | Self::OutOfSubset(message) => Some(message),
             Self::Unsupported(what) => Some(what),
             Self::Unjudged(reason) => Some(reason.detail()),
@@ -197,7 +208,11 @@ impl Outcome {
         self.parsed()
             && !matches!(
                 self,
-                Self::Unsupported(_) | Self::Unresolved(_) | Self::TooLarge | Self::OutOfSubset(_)
+                Self::Unsupported(_)
+                    | Self::Unresolved(_)
+                    | Self::NoImplementation(_)
+                    | Self::TooLarge
+                    | Self::OutOfSubset(_)
             )
     }
 
@@ -236,7 +251,7 @@ impl Outcome {
             Self::Disagreed(_) => 2,
             Self::ParseError(_) => 3,
             Self::TooLarge => 4,
-            Self::Unsupported(_) | Self::Unresolved(_) => 5,
+            Self::Unsupported(_) | Self::Unresolved(_) | Self::NoImplementation(_) => 5,
             Self::Trapped(_) => 6,
             Self::Unvalidated => 7,
             Self::NotRun => 8,
@@ -891,6 +906,9 @@ impl CaseResult {
                 }
                 Err(error @ WasmError::Unresolved(_)) => {
                     return Lowered::stopped(Outcome::Unresolved(format!("{error}")));
+                }
+                Err(WasmError::NoImplementation(what)) => {
+                    return Lowered::stopped(Outcome::NoImplementation(what));
                 }
             };
             let exports: Vec<String> = module

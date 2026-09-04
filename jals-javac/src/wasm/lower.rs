@@ -69,6 +69,15 @@ pub enum WasmError {
     Unresolved(String),
     /// A type with no wasm representation — every library type, by design.
     NoRepresentation(String),
+    /// A method this module declares but supplies no body for, called somewhere a body is needed.
+    ///
+    /// Distinct from [`NoRepresentation`](Self::NoRepresentation), which is about a type this
+    /// backend cannot spell at all: the owner here *is* a project type, and what is missing is the
+    /// implementation — a `native` method, or an interface method whose only implementation in the
+    /// source is a lambda or a method reference this backend does not lower into a struct. Reported
+    /// under its own name because reporting it as the other one sends a reader looking for a library
+    /// dependency in a file that has none.
+    NoImplementation(String),
     /// A length or an index outgrew the `u32` the binary format spells it with. Not reachable from
     /// a project that fits in memory, and reported rather than truncated because a wrong length is
     /// bytes an engine reads as something else.
@@ -84,6 +93,11 @@ impl core::fmt::Display for WasmError {
                 f,
                 "`{ty}` has no wasm representation: this backend compiles primitives and \
                  project-declared classes, and a wasm host has no `java.base` to supply the rest"
+            ),
+            Self::NoImplementation(what) => write!(
+                f,
+                "`{what}` is declared in this project but no body for it is compiled into the \
+                 module, so a call to it has nothing to reach"
             ),
             Self::TooLarge => f.write_str("the module exceeded a WebAssembly format limit"),
         }
@@ -813,13 +827,23 @@ impl CompileWasm {
             // A lambda has no body *node* of members: it declares exactly one method, the interface's, and
             // the lambda expression itself is that method's body.
             if Self::is_functional(&class) {
+                // A lambda whose item declares no method is one the index could not give a single
+                // abstract method to — it is typed by its *target*, and in argument position that
+                // target is the parameter of an overload chosen after the index is built. Skipping
+                // it left the struct laid out below with no body behind it: the creation emitted
+                // `struct.new_default`, the object implemented nothing, and the call through the
+                // interface found no override and became `unreachable` — a module that validated,
+                // instantiated, and trapped. Refused instead, which is what naming the construct is
+                // for.
                 let Some(member) = index
                     .own_members(item)
                     .iter()
                     .copied()
                     .find(|&id| index.member(id).kind == DefKind::Method)
                 else {
-                    continue;
+                    return Err(WasmError::Unsupported(
+                        "a lambda or method reference with no single abstract method",
+                    ));
                 };
                 let mut params = alloc::vec![layout.class_ref(item)?];
                 for ty in index.resolved_param_tys(member) {
@@ -4179,16 +4203,26 @@ impl Lowering<'_> {
         if assignment.is_simple() {
             place.address(insn);
             let source = self.num_of(value.syntax()).ok();
-            self.expr(&value, insn)?
+            let produced = self
+                .expr(&value, insn)?
                 .ok_or(WasmError::Unsupported("an assignment of no value"))?;
             // Assignment conversion (JLS §5.2): `long n = 1` stores a `long`, and the literal is an
-            // `int` until something widens it. Only a numeric target needs it; a reference one is
-            // already the right type or the analysis would not have typed the assignment.
-            if let (Some(source), Ok(declared)) = (source, self.num_of(target.syntax()))
-                && source != declared
-            {
-                insn.convert(source, declared)
-                    .ok_or(WasmError::Unsupported("this assignment conversion"))?;
+            // `int` until something widens it. A *numeric* target is converted here, at the source's
+            // own width, because `byte` / `short` / `char` need the sign extension or the mask that
+            // a wasm value type — where all four are `i32` — cannot ask for.
+            //
+            // A reference target is not "already the right type": that held only while every
+            // reference the backend produced was concrete. Erasure puts an `anyref` on the stack
+            // wherever a type variable is involved, and a field or an array element declared at a
+            // concrete type is a place the validator checks exactly. `b.held = id(c);` was a module
+            // `wasm-tools` refuses, emitted with nothing said on this side.
+            if let (Some(source), Ok(declared)) = (source, self.num_of(target.syntax())) {
+                if source != declared {
+                    insn.convert(source, declared)
+                        .ok_or(WasmError::Unsupported("this assignment conversion"))?;
+                }
+            } else {
+                self.narrow(produced, place.ty(), insn)?;
             }
             place.store(insn, keep);
         } else {
@@ -4785,12 +4819,21 @@ impl Lowering<'_> {
             // while a false negative leaves the direct `call` a non-overridden method would have
             // had anyway. That is the opposite collapse from the bridge emission's, and it is why
             // the shared fact has three answers rather than two.
-            let over = self
-                .index
-                .own_members(item)
-                .iter()
-                .copied()
-                .find(|&id| Hierarchy::of(self.index).overrides(id, member) == Overrides::Yes);
+            //
+            // **Inherited, not just declared.** `interface I { int f(); }` with
+            // `class Base { public int f() { … } }` and `class C extends Base implements I {}` is a
+            // `C` whose implementation of `I.f` is written in `Base`, and `C` declares nothing at
+            // all. Scanning only `own_members` found no override, the call fell through to the
+            // no-function arm below, and that arm — which reads "nothing implements this, so no such
+            // object exists" — emitted `unreachable` against a receiver whose implementation is one
+            // function away in the same module. Nearest-first, so a subclass's own override still
+            // wins over the one it inherits, and only a body this module actually lowered counts:
+            // dispatching to a member with no function index is a call to nothing.
+            let over = self.index.members_of(item).into_iter().find(|&id| {
+                id != member
+                    && self.layout.functions.contains_key(&id)
+                    && Hierarchy::of(self.index).implements_for(item, id, member) == Overrides::Yes
+            });
             if let Some(over) = over {
                 found.push((item, over));
             }
@@ -4846,12 +4889,15 @@ impl Lowering<'_> {
         // function declared over the *parameters*, so a value erasure left at the top comes down
         // here rather than once per branch, and a variable-arity call builds its array once.
         let planned = self.plan_arguments(member, arguments)?;
-        let mut slots = Vec::with_capacity(planned.len());
+        // The slot *and* what it holds: a slot index counts from the first parameter while the
+        // local vector counts from the first declared local, so the type has to travel with it
+        // rather than be looked up by index.
+        let mut slots: Vec<(u32, ValType)> = Vec::with_capacity(planned.len());
         for arg in &planned {
             let value = self.push_argument(arg, insn)?;
             let slot = self.scratch(value);
             insn.local_set(slot);
-            slots.push(slot);
+            slots.push((slot, value));
         }
 
         match ty {
@@ -4869,8 +4915,18 @@ impl Lowering<'_> {
             insn.if_();
             insn.local_get(receiver);
             insn.ref_cast(HeapType::Concrete(struct_type), false);
-            for &slot in &slots {
+            // The slots hold what the *statically selected* member's parameters wanted, and an
+            // override is free to declare narrower ones — `int f(T t)` overridden as `int f(Cell c)`
+            // is one function taking `anyref` and one taking a concrete struct. Each arm therefore
+            // narrows again, to its own function's parameters, rather than trusting the plan the
+            // selection made.
+            let over_tys = self.index.resolved_param_tys(over);
+            for (position, &(slot, held)) in slots.iter().enumerate() {
                 insn.local_get(slot);
+                if let Some(ty) = over_tys.get(position) {
+                    let want = self.layout.val_type(ty)?;
+                    self.narrow(held, want, insn)?;
+                }
             }
             insn.call(function);
             insn.br(insn.depth() - leave);
@@ -4883,7 +4939,14 @@ impl Lowering<'_> {
         match self.layout.functions.get(&member) {
             Some(&function) => {
                 insn.local_get(receiver);
-                for &slot in &slots {
+                // The arms above each `ref.cast` the receiver to the type they tested for; this one
+                // tested nothing, so the value is still whatever the expression produced — `anyref`
+                // wherever erasure put it there. `<T extends C> int g(T t) { return t.m(); }` is the
+                // everyday shape, and the module it produced was refused by the validator with
+                // nothing said on this side.
+                let owner = self.layout.class_ref(self.index.member(member).owner)?;
+                self.narrow(receiver_ty, owner, insn)?;
+                for &(slot, _) in &slots {
                     insn.local_get(slot);
                 }
                 insn.call(function);
@@ -5093,9 +5156,22 @@ impl Lowering<'_> {
         self.narrow(produced, target, insn)
     }
 
-    /// Emit the `ref.cast` that takes a top-of-hierarchy value down to `target`, if one is needed.
+    /// Emit the `ref.cast` that takes a top-of-hierarchy value down to `target`, if one is needed —
+    /// or, between two primitives, the widening conversion Java performs silently.
     fn narrow(&self, produced: ValType, target: ValType, insn: &mut Insn) -> Result<()> {
+        if produced == target {
+            return Ok(());
+        }
         let (ValType::Ref(from), ValType::Ref(to)) = (produced, target) else {
+            // Two primitives that differ are a **widening primitive conversion** (JLS §5.1.2), which
+            // the language performs with no cast written and which wasm has no implicit form of.
+            // `static long take(long x)` called as `take(1)` put an `i32` where the signature says
+            // `i64` and the module was refused by the validator with nothing said on this side —
+            // `value_as` routes a numeric target through `operand` and so gets `long a = 1;` right,
+            // which is what made the pair disagree about one conversion.
+            if let (Some(from), Some(to)) = (Self::numeric(produced), Self::numeric(target)) {
+                return Self::widen(from, to, insn);
+            }
             return Self::boxed(produced, target);
         };
         if from.heap == to.heap {
@@ -5117,6 +5193,46 @@ impl Lowering<'_> {
                 "an array where an array of another type is wanted",
             ));
         }
+        Ok(())
+    }
+
+    /// The Java primitive a wasm value type stands for, at the granularity wasm keeps.
+    ///
+    /// `byte`, `short` and `char` are all `i32` here and the conversions between them are no-ops, so
+    /// nothing is lost by answering `Int` for all four: what this is used for is the *widening* a
+    /// value needs to reach a wider slot, and every such widening is visible at this granularity.
+    const fn numeric(ty: ValType) -> Option<Numeric> {
+        match ty {
+            ValType::I32 => Some(Numeric::Int),
+            ValType::I64 => Some(Numeric::Long),
+            ValType::F32 => Some(Numeric::Float),
+            ValType::F64 => Some(Numeric::Double),
+            ValType::Ref(_) => None,
+        }
+    }
+
+    /// Emit the widening conversion from `from` to `to`, refusing anything that is not one.
+    ///
+    /// Only widening: JLS §5.3 admits a widening primitive conversion at an invocation and nothing
+    /// else, so a *narrowing* here is not a conversion the source omitted but a mismatch this
+    /// backend arrived at, and emitting a truncation for it would answer with a different number.
+    fn widen(from: Numeric, to: Numeric, insn: &mut Insn) -> Result<()> {
+        const fn rank(ty: Numeric) -> u8 {
+            match ty {
+                Numeric::Byte | Numeric::Short | Numeric::Char | Numeric::Int => 0,
+                Numeric::Long => 1,
+                Numeric::Float => 2,
+                Numeric::Double => 3,
+            }
+        }
+        if rank(from) >= rank(to) {
+            return Err(WasmError::Unsupported(
+                "a narrowing primitive conversion the source did not write",
+            ));
+        }
+        insn.convert(from, to).ok_or(WasmError::Unsupported(
+            "a numeric conversion with no encoding",
+        ))?;
         Ok(())
     }
 
@@ -5183,19 +5299,34 @@ impl Lowering<'_> {
         // interface call, which named the wrong problem.
         let function = match self.layout.functions.get(&member).copied() {
             Some(function) => function,
-            // No function, and the owner is a type this module *does* lay out: the method has no
-            // body anywhere in the module, and the chain above found nothing that overrides it. So
-            // no object carrying an implementation of it can exist here, and the call is
-            // dynamically unreachable — which `unreachable` says exactly. An abstract class calling
-            // its own abstract method is ordinary Java, and refusing it stopped the whole file.
-            None if self
-                .layout
-                .structs
-                .contains_key(&self.index.member(member).owner)
-                || self
+            // No function, the call is a *dispatch*, and the owner is a class this module lays
+            // out: the method has no body anywhere in the module and nothing above overrides it, so
+            // no object carrying an implementation can exist here and the call is dynamically
+            // unreachable — which `unreachable` says exactly. An abstract class calling its own
+            // abstract method is ordinary Java, and refusing it stopped the whole file.
+            //
+            // Both extra conditions are load-bearing, and each was a module that validated,
+            // instantiated, and trapped where the merge base refused by name:
+            //
+            // - **A `static` call is not a dispatch.** `static native int f()` has no body and no
+            //   receiver, so "no object can exist" says nothing about it; the module simply lacks
+            //   the body, which is a refusal.
+            //
+            // An *interface* owner stays in, and soundly: a value of interface type comes either
+            // from a laid-out struct — which the override scan above covers, lambdas and method
+            // references included, since the index gives each of those an item of its own — or from
+            // one this backend could not lay out, and that one is refused at the expression that
+            // creates it rather than here.
+            None if !is_static
+                && !super_qualified
+                && (self
                     .layout
-                    .interfaces
-                    .contains(&self.index.member(member).owner) =>
+                    .structs
+                    .contains_key(&self.index.member(member).owner)
+                    || self
+                        .layout
+                        .interfaces
+                        .contains(&self.index.member(member).owner)) =>
             {
                 insn.unreachable();
                 return Ok(match self.index.resolved_member_ty(member) {
@@ -5207,6 +5338,24 @@ impl Lowering<'_> {
             // needing one is what puts a case outside this backend's subset, not a gap in it.
             // `System.out.println` is the everyday shape: nothing in such a file declares a library
             // type, so the case reached this far before naming the one it needs.
+            // A project type whose body this module does not hold: `native`, or an interface
+            // method implemented only by a lambda or a method reference. Its own report, because
+            // the library-type one would send a reader looking for a dependency that is not there.
+            None if self
+                .layout
+                .structs
+                .contains_key(&self.index.member(member).owner)
+                || self
+                    .layout
+                    .interfaces
+                    .contains(&self.index.member(member).owner) =>
+            {
+                let owner = self.index.item(self.index.member(member).owner).fqn.clone();
+                return Err(WasmError::NoImplementation(alloc::format!(
+                    "{owner}.{}",
+                    self.index.member(member).name
+                )));
+            }
             None => {
                 return Err(WasmError::NoRepresentation(
                     self.index
