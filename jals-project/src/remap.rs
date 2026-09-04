@@ -211,8 +211,17 @@ impl RemapPlan {
             .map_err(|error| format!("staging the compiled classes failed: {error:?}"))?;
 
         // Reobfuscating the project's own output is the last thing a `jals build` does and the
-        // one step that walks every class it just compiled.
-        let report = progress.begin(Activity::Remap, self.jar.clone());
+        // one step that walks every class it just compiled — which is what it says, because the jar
+        // it ends up in is what the *packaging* step that follows is named after, and two lines
+        // with the same subject read as one step reported twice.
+        let report = progress.begin(
+            Activity::Remap,
+            if classes.len() == 1 {
+                String::from("1 class")
+            } else {
+                format!("{} classes", classes.len())
+            },
+        );
         let remapped = JarRemap::remap(
             exec,
             storage.artifacts_mut(),

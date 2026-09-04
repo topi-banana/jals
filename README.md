@@ -212,22 +212,30 @@ Every subcommand shares these, and — as in Cargo — they may be written on ei
 
 Output follows one rule: **anything for a person goes to stderr, anything for a script goes to
 stdout** — and stdout has one holder. `jals test` keeps it for its own result objects, which is
-what `--message-format json` has always named there; `--dry-run`, `--diff` and a piped `jals fmt`
-are refused alongside `json` rather than interleaving a second schema into the same lines.
+what `--message-format json` has always named there; `--dry-run`, `--check`, `--diff` and a piped
+`jals fmt` all write a product of their own there, so they are refused alongside `json` rather than
+interleaving a second schema into the same lines.
 
-A run narrates itself the way `cargo` does — `Downloading`, `Remapping`, `Decompiling`,
-`Compiling`, `Fresh`, `Finished` — with a progress bar per unit of work when stderr is a terminal:
+A run narrates itself the way `cargo` does — `Preparing`, `Resolving`, `Downloaded`, `Extracting`,
+`Remapping`, `Decompiling`, `Indexing`, `Compiling`, `Packaging`, `Fresh`, `Finished` — attributing
+each line to the package it is about, with a progress bar per unit of work when stderr is a
+terminal. Downloads are aggregated into one line per phase rather than announced individually,
+which `-v` turns back into a line each:
 
 ```console
-$ jals build
-    Preparing minecraft v1.21.8
-  Downloaded 61 files (52.3 MiB) in 12.4s
-    Remapping minecraft v1.21.8   [00:00:41] [====>          ] 8213/29184
-   Decompiling minecraft v1.21.8
-    Publishing game
-    Compiling my-mod v0.1.0
-    Packaging build/libs/my-mod.jar
-     Finished `java21` profile in 184.02s
+$ jals build --features 1.21.6
+   Preparing hellomod v0.1.0
+   Preparing minecraft v0.1.0
+  Downloaded 2 files (58.1 MiB) in 2.5s
+  Extracting minecraft v0.1.0 (META-INF/versions/26.2/server-26.2.jar)
+     Merging minecraft v0.1.0
+ Decompiling [00:00:41] [=========>          ] 8213/29184 minecraft v0.1.0 (net/minecraft)
+  Publishing minecraft v0.1.0 (minecraft-26.2)
+    Indexing 116 classpath entries
+   Compiling hellomod v0.1.0
+   Remapping hellomod v0.1.0 (1 class)
+   Packaging hellomod v0.1.0 (target/jals/remap/hellomod-0.1.0.jar)
+    Finished `default` profile in 184.02s
 ```
 
 `--timings` writes a self-contained HTML page — one bar per unit of work, a concurrency plot, and

@@ -942,13 +942,10 @@ impl BuildArgs {
             .await
             .map_err(|error| anyhow!("{error}"))?;
         App::finish_compile(&manifest, &root, &outcome, session.shell())?;
-        if let Some(jar) = App::finish_package(
+        App::finish_package(
             &manifest, &root, exec, &features, &fetcher, &outcome, &inputs, &package,
         )
-        .await?
-        {
-            session.shell().status(Verb::Packaging, jar);
-        }
+        .await?;
         if outcome.success() {
             session.finished(&format!("`{}` profile", App::profile_label(&manifest)));
         }
@@ -1310,6 +1307,7 @@ impl TestArgs {
     fn reporter(&self, total: u64, session: &Session) -> testrun::TestReporter {
         testrun::TestReporter::new(
             std::sync::Arc::clone(session.shell()),
+            session.progress().clone(),
             testrun::ReporterConfig {
                 total,
                 // The shell already answers `--progress` and whether stderr is a terminal; what is
@@ -2657,12 +2655,12 @@ impl App {
         outcome: &jals_build::BackendOutcome,
         inputs: &HostProjectInputs,
         progress: &jals_progress::Progress,
-    ) -> Result<Option<String>> {
+    ) -> Result<()> {
         if !outcome.success() {
-            return Ok(None);
+            return Ok(());
         }
         let plan = match jals_project::RemapSelection::for_manifest(manifest, features) {
-            jals_project::RemapSelection::NotRequested => return Ok(None),
+            jals_project::RemapSelection::NotRequested => return Ok(()),
             jals_project::RemapSelection::Ambiguous(ambiguous) => {
                 bail!("`[build] remap` cannot be resolved: {ambiguous}");
             }
@@ -2705,13 +2703,23 @@ impl App {
             .await
             .map_err(|error| anyhow!("`[build] remap` failed: {error}"))?;
 
+        // The jar named in `[build] remap` is the run's deliverable, so it gets its own line —
+        // `RemapPlan::run` reported the reobfuscation, which is a different piece of work from
+        // writing the archive somebody asked for by name.
+        let report = progress.begin(jals_progress::Activity::Package, plan.jar.clone());
         let target = root.join(&plan.jar);
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
-        std::fs::write(&target, &bytes).with_context(|| format!("writing {}", target.display()))?;
-        Ok(Some(plan.jar))
+        if let Err(error) =
+            std::fs::write(&target, &bytes).with_context(|| format!("writing {}", target.display()))
+        {
+            report.finish(jals_progress::Outcome::Failed);
+            return Err(error);
+        }
+        report.finish(jals_progress::Outcome::Completed);
+        Ok(())
     }
 
     /// Every `.class` file below `dir`, addressed relative to it.

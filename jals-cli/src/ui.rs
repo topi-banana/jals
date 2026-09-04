@@ -140,6 +140,13 @@ impl Display {
         if unit.activity != Activity::Fetch {
             self.drain_downloads();
         }
+        if unit.activity == Activity::Test {
+            // `jals test` draws this phase itself, in the `cargo nextest` shape the command is
+            // modelled on. Not tracking the unit is the whole stand-down: its later events find
+            // nothing here and return, and the ledger — which is what the unit is for — still
+            // gets its span.
+            return;
+        }
         let bar = self.bar(unit);
         if Self::announces(unit.activity) {
             self.shell

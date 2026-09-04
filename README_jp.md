@@ -213,22 +213,30 @@ Linux・macOS・Windows の `x64` / `arm64` ランナーに対応しています
 
 出力の規則はひとつです。**人間向けは stderr、スクリプト向けは stdout。** そして stdout の持ち主は
 つねに一つです。`jals test` は自身の結果オブジェクトのために stdout を保ちます——そこで
-`--message-format json` が指してきたのは元々それです——一方 `--dry-run` / `--diff` / パイプ入力の
-`jals fmt` は `json` と併用できず、同じ行に二つ目のスキーマを混ぜる代わりに拒否されます。
+`--message-format json` が指してきたのは元々それです——一方 `--dry-run` / `--check` / `--diff` /
+パイプ入力の `jals fmt` はいずれも stdout に自前の成果物を書きます。同じ行に二つ目のスキーマを
+混ぜる代わりに、`json` との併用は拒否されます。
 
-実行は cargo と同じ体裁で自身を語り（`Downloading` / `Remapping` / `Decompiling` / `Compiling` / `Fresh` / `Finished`）、
-stderr が端末なら作業単位ごとにプログレスバーが出ます:
+実行は cargo と同じ体裁で自身を語り（`Preparing` / `Resolving` / `Downloaded` / `Extracting` /
+`Remapping` / `Decompiling` / `Indexing` / `Compiling` / `Packaging` / `Fresh` / `Finished`）、
+各行はそれがどのパッケージについてかを示します。stderr が端末なら作業単位ごとにプログレスバーが
+出ます。ダウンロードは個別に告げるのではなくフェーズごとに 1 行へ集約され、`-v` で 1 件ずつに
+戻ります:
 
 ```console
-$ jals build
-    Preparing minecraft v1.21.8
-  Downloaded 61 files (52.3 MiB) in 12.4s
-    Remapping minecraft v1.21.8   [00:00:41] [====>          ] 8213/29184
-   Decompiling minecraft v1.21.8
-    Publishing game
-    Compiling my-mod v0.1.0
-    Packaging build/libs/my-mod.jar
-     Finished `java21` profile in 184.02s
+$ jals build --features 1.21.6
+   Preparing hellomod v0.1.0
+   Preparing minecraft v0.1.0
+  Downloaded 2 files (58.1 MiB) in 2.5s
+  Extracting minecraft v0.1.0 (META-INF/versions/26.2/server-26.2.jar)
+     Merging minecraft v0.1.0
+ Decompiling [00:00:41] [=========>          ] 8213/29184 minecraft v0.1.0 (net/minecraft)
+  Publishing minecraft v0.1.0 (minecraft-26.2)
+    Indexing 116 classpath entries
+   Compiling hellomod v0.1.0
+   Remapping hellomod v0.1.0 (1 class)
+   Packaging hellomod v0.1.0 (target/jals/remap/hellomod-0.1.0.jar)
+    Finished `default` profile in 184.02s
 ```
 
 `--timings` は自己完結した HTML ページ——作業単位ごとのバー、並列度のプロット、アクティビティ別の

@@ -139,10 +139,11 @@ impl ClasspathLoad {
             // line about work that did not happen.
             return Self::default();
         }
-        // The subject is the entry count rather than the bare word `classpath` because a run
-        // indexes twice — once for the root's own `[build] classpath` and its task jars, once for
-        // the resolved dependency graph — and two identical lines read as the tool repeating
-        // itself. The count is what tells them apart, and it is worth saying on its own.
+        // The subject is the entry count rather than the bare word `classpath` because a run can
+        // index twice — once for the root's own `[build] classpath` and its task jars, once for the
+        // resolved dependency graph — and a project with both would otherwise print the same line
+        // twice, which reads as the tool repeating itself. The count tells them apart, and is worth
+        // saying on its own.
         //
         // The *bar* counts decode tasks instead: one jar is many chunks, and a bar that moves once
         // per jar sits still through the only entry that takes any time.

@@ -10,14 +10,16 @@
 //! to [`Shell`], which every command in the crate shares; what stays here is this command's own
 //! vocabulary, because `cargo nextest` is what it is modelled on.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use clap::ValueEnum;
 use indicatif::{ProgressBar, ProgressStyle};
 
 use jals_build::{TestCase, TestOutcome, TestVerdict};
+use jals_progress::{Activity, Outcome, Progress, Task};
 
 use crate::shell::{MessageFormat, Shell, Style};
 
@@ -124,6 +126,14 @@ pub(crate) struct TestReporter {
     success_output: OutputWhen,
     slow_timeout: Option<Duration>,
     bar: Option<ProgressBar>,
+    progress: Progress,
+    /// The unit each running test holds open, keyed by test id.
+    ///
+    /// Keyed rather than sequential because the launcher runs tests over `Exec::fan_out`: several
+    /// are open at once and they finish in completion order. Nobody *draws* these — this reporter
+    /// owns how the phase looks, and `ui::Display` stands down for `Activity::Test` — they exist so
+    /// `--timings` gets a span per test rather than one block called "the tests".
+    units: Mutex<HashMap<String, Task>>,
 }
 
 impl TestReporter {
@@ -132,7 +142,7 @@ impl TestReporter {
     /// There is none when the caller asked for none, when output is not captured (the tests write
     /// straight to this terminal and would fight the bar for it), or when the shell draws none at
     /// all — a redirected run must produce the same bytes every time.
-    pub(crate) fn new(shell: Arc<Shell>, config: ReporterConfig) -> Self {
+    pub(crate) fn new(shell: Arc<Shell>, progress: Progress, config: ReporterConfig) -> Self {
         let bar = shell
             .bars()
             .filter(|_| config.show_bar && config.total > 0)
@@ -152,7 +162,14 @@ impl TestReporter {
             success_output: config.success_output,
             slow_timeout: config.slow_timeout,
             bar,
+            progress,
+            units: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The open units. A poisoned lock still holds the map a later test has to be removed from.
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Task>> {
+        self.units.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Write one line to stderr. The shell suspends the live display around it.
@@ -184,10 +201,20 @@ impl TestReporter {
         if let Some(bar) = &self.bar {
             bar.set_message(id.to_owned());
         }
+        let unit = self.progress.begin(Activity::Test, id.to_owned());
+        self.lock().insert(id.to_owned(), unit);
     }
 
     /// A test finished.
     pub(crate) fn finished(&self, outcome: &TestOutcome) {
+        let unit = self.lock().remove(&outcome.id);
+        if let Some(unit) = unit {
+            unit.finish(if outcome.verdict.is_failure() {
+                Outcome::Failed
+            } else {
+                Outcome::Completed
+            });
+        }
         if let Some(bar) = &self.bar {
             bar.inc(1);
         }

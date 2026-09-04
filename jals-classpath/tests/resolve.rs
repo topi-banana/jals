@@ -524,3 +524,98 @@ fn offline_does_not_fetch_an_external_mapping_text() {
         assert!(warning.message.contains("not available"), "{warning}");
     });
 }
+
+/// A recording sink: what a resolution said it was doing, in the order it said it.
+///
+/// `Sink` is `Send + Sync` because a fan-out worker may emit through one; a `Mutex` is what that
+/// costs here and the whole implementation.
+#[derive(Default)]
+struct Recorder {
+    events: std::sync::Mutex<Vec<String>>,
+}
+
+impl Recorder {
+    /// Every `Started` unit, rendered as `<activity> <subject>`.
+    fn started(&self) -> Vec<String> {
+        self.events.lock().unwrap().clone()
+    }
+}
+
+impl jals_progress::Sink for Recorder {
+    fn emit(&self, event: &jals_progress::Event) {
+        if let jals_progress::Event::Started { unit, .. } = event {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("{:?} {}", unit.activity, unit.describe()));
+        }
+    }
+}
+
+/// A resolution reports itself, and the downloads it owns report inside it.
+///
+/// The pass is one unit rather than none because a run that says nothing until the first byte
+/// arrives looks hung on a slow link; and it is one unit rather than one *per spec* because the
+/// per-locator `Fetch` units already say that, deduplicated the way the fetch itself is.
+#[test]
+fn a_resolution_reports_the_pass_and_the_downloads_inside_it() {
+    block_on_inline(async {
+        let mut storage = MemoryStorage::memory(CodeTree::default());
+        let fetcher = MockFetcher::online(b"remote jar");
+        let recorder = std::sync::Arc::new(Recorder::default());
+        let progress = jals_progress::Progress::to(std::sync::Arc::clone(&recorder) as _);
+        let spec = DependencySpec {
+            name: Name::new("remote").unwrap(),
+            location: DependencyLocation::External {
+                locator: ExternalLocator::new("https://example.invalid/dep.jar"),
+                expected: Some(ContentDigest::of(b"remote jar")),
+            },
+            recursive: false,
+            remap: None,
+        };
+
+        let resolved = DependencyResolver::resolve(
+            &fetcher,
+            &storage.view(),
+            storage.artifacts_mut(),
+            core::slice::from_ref(&spec),
+            &progress,
+        )
+        .await;
+        assert!(resolved.warnings.is_empty(), "{:?}", resolved.warnings);
+
+        assert_eq!(
+            recorder.started(),
+            vec![
+                String::from("Resolve 1 dependency"),
+                // The subject is what the caller wrote in `[dependencies]`, not the URL: a locator
+                // is how the bytes are reached and the name is what a person asked for.
+                String::from("Fetch remote"),
+            ]
+        );
+    });
+}
+
+/// Nothing declared is nothing to report — a `Resolving` line above a project with no
+/// `[dependencies]` would be a line about work that did not happen.
+#[test]
+fn a_resolution_with_nothing_to_resolve_reports_nothing() {
+    block_on_inline(async {
+        let mut storage = MemoryStorage::memory(CodeTree::default());
+        let fetcher = MockFetcher::online(b"");
+        let recorder = std::sync::Arc::new(Recorder::default());
+        let progress = jals_progress::Progress::to(std::sync::Arc::clone(&recorder) as _);
+
+        let resolved = DependencyResolver::resolve(
+            &fetcher,
+            &storage.view(),
+            storage.artifacts_mut(),
+            &[],
+            &progress,
+        )
+        .await;
+
+        assert!(resolved.jars.is_empty() && resolved.warnings.is_empty());
+        assert!(recorder.started().is_empty(), "{:?}", recorder.started());
+    });
+}

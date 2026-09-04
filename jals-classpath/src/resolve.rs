@@ -542,6 +542,17 @@ impl DependencyResolver {
         specs: &[DependencySpec],
         progress: &Progress,
     ) -> ResolvedDependencies {
+        // The whole pass as one unit: a run says it is resolving before the first download starts,
+        // and `--timings` gets a span covering the fetches nested inside it. A node with nothing
+        // declared resolves nothing, and a line saying so is a line about work that did not happen.
+        let pass = if specs.is_empty() {
+            Task::silent()
+        } else if specs.len() == 1 {
+            progress.begin(Activity::Resolve, "1 dependency")
+        } else {
+            progress.begin(Activity::Resolve, format!("{} dependencies", specs.len()))
+        };
+
         // Pass 1: classify serially, collecting the deduplicated locators still needing bytes.
         let mut classified = Vec::with_capacity(specs.len());
         let mut locators: Vec<&ExternalLocator> = Vec::new();
@@ -621,6 +632,8 @@ impl DependencyResolver {
                 Err(warning) => out.warnings.push(warning),
             }
         }
+        // A warning is a dependency that did not resolve, not a pass that did not run.
+        pass.finish(Outcome::Completed);
         out
     }
 
