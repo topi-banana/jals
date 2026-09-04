@@ -1153,9 +1153,16 @@ impl<'a> Inferer<'a> {
     /// lenient answer this module prefers to a guess.
     fn multi_catch_ty(&self, node: &SyntaxNode) -> Option<Ty> {
         let (index, file) = self.project?;
-        let arms: Vec<ItemId> = node
-            .children()
-            .filter_map(ast::Type::cast)
+        // The arm *count* decides whether there is a question at all, and counting is free — a
+        // single-arm `catch` is the overwhelmingly common shape and the ordinary declared-type path
+        // resolves the same name for the same node anyway, so resolving here first would be a
+        // second project-wide lookup thrown away.
+        let written: Vec<ast::Type> = node.children().filter_map(ast::Type::cast).collect();
+        if written.len() < 2 {
+            return None;
+        }
+        let arms: Vec<ItemId> = written
+            .into_iter()
             .map(|written| {
                 let name = written.simple_name()?;
                 let qualified = written
@@ -1170,14 +1177,21 @@ impl<'a> Inferer<'a> {
         let [first, rest @ ..] = arms.as_slice() else {
             return None;
         };
-        if rest.is_empty() {
-            return None;
-        }
         // Up the first arm's class chain, nearest first, to the first ancestor every other arm also
         // has. Only the *class* chain: the lub's interfaces are part of it too, and no descriptor
         // records them — a class file writes the erasure, which is the class.
+        //
+        // Guarded against a cycle for the same reason [`ProjectIndex::walk_supertypes_stateful`] is:
+        // `class A extends B {}` with `class B extends A {}` parses and indexes, and an unguarded
+        // walk oscillates between the two forever. Every runtime here is current-thread, so a hang
+        // is the editor wedged rather than one slow request.
+        // A membership test only — never iterated, so no order of it reaches an answer.
+        let mut seen = HashSet::new();
         let mut candidate = Some(*first);
         while let Some(item) = candidate {
+            if !seen.insert(item) {
+                break;
+            }
             if rest.iter().all(|&arm| index.is_subtype(arm, item)) {
                 return Some(self.item_ty(item));
             }
@@ -1458,28 +1472,33 @@ impl<'a> Inferer<'a> {
             })
     }
 
-    /// The indexed type `name` resolves to from this file, or an external one by that name.
+    /// The indexed `java.lang.<name>`, or an external one by that name.
     ///
     /// A `.class` literal's type is `java.lang.Class`, and reaching *its* members — `getName()` — needs
     /// the indexed stub. An external type by that name has no members at all, so the access resolved
     /// to nothing and the call after it with it.
+    ///
+    /// Looked up by **fully qualified name**, never resolved as a simple name from this file. What a
+    /// string literal or a `.class` literal denotes is fixed by the language (§3.10.5, §15.8.2) and
+    /// is not a name the source wrote, so a type the file *could* reach by that spelling — a nested
+    /// `class String`, a same-package one, a single-type import — must not shadow it. Resolving the
+    /// simple name did both halves wrong: `"x"` in a file declaring its own `String` was typed as
+    /// that type, and every literal in every other file paid a scope walk that ends in a scan of the
+    /// whole item table to answer a question with one constant answer.
     fn java_lang_ty(&self, name: &str) -> Ty {
-        let Some((index, file)) = self.project else {
-            return Ty::Class(ClassTy::external(name));
+        let external = || Ty::Class(ClassTy::external(name));
+        let Some((index, _)) = self.project else {
+            return external();
         };
-        index
-            .resolve_type_name(file, name, None)
-            .project_id()
-            .map_or_else(
-                || Ty::Class(ClassTy::external(name)),
-                |id| {
-                    Ty::Class(ClassTy::Project {
-                        id,
-                        name: name.to_owned(),
-                        args: Vec::new(),
-                    })
-                },
-            )
+        let mut fqn = String::from("java.lang.");
+        fqn.push_str(name);
+        index.item_by_fqn(&fqn).map_or_else(external, |id| {
+            Ty::Class(ClassTy::Project {
+                id,
+                name: name.to_owned(),
+                args: Vec::new(),
+            })
+        })
     }
 
     /// The type `this` has where `node` appears: the enclosing type declaration, raw.
@@ -2236,7 +2255,12 @@ impl ProjectIndex {
     /// The nearest ancestor type declaration of `node` that is an indexed project item, in `file`.
     /// Shared by the [`Inferer`] (bare-call resolution) and argument checking.
     fn enclosing_item(&self, file: FileId, node: &SyntaxNode) -> Option<ItemId> {
-        self.enclosing_items(file, node).first().copied()
+        // The *nearest* one, so the walk stops at it. Reading it off
+        // [`enclosing_items`](Self::enclosing_items) instead walks every remaining ancestor up to
+        // the `SourceFile` and heap-allocates the whole chain to answer with its head — and this is
+        // on the per-`this` and per-bare-call paths, so it runs many times in one file.
+        node.ancestors()
+            .find_map(|ancestor| self.declared_item(file, &ancestor))
     }
 
     /// Every type declaration lexically around `node`, innermost first.

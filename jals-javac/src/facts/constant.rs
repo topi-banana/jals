@@ -730,23 +730,46 @@ impl Facts<'_> {
     /// and `is_private`: `final` changes no instruction, so nothing upstream keeps it. A field
     /// declared directly in an interface is implicitly `public static final` (§9.3), which is what
     /// makes `interface Flags { int A = 1; }` a constant without a modifier token.
+    ///
+    /// **§9.3's implicit modifiers reach a field and reach it only in the interface's own body.** A
+    /// local in a `default` or `static` interface method is not a field at all, and a field of a
+    /// class nested inside an interface is an ordinary field — so the question is what the *nearest*
+    /// enclosing declaration is, never whether an interface is somewhere overhead. Answering it with
+    /// `ancestors().any(…)` made every local in an interface method a constant, and
+    /// [`constant_condition`](Self::constant_condition) then read `while (go)` over such a local as
+    /// `while (true)`: no test, no forward branch, and a method that either loops forever or is
+    /// refused for emitting code after an unconditional transfer.
     fn is_constant_declaration(decl: &jals_syntax::SyntaxNode) -> bool {
-        use jals_syntax::SyntaxKind::{
-            ANNOTATION_TYPE_DECL, FIELD_DECL, FINAL_KW, INTERFACE_DECL, STATIC_KW,
-        };
+        use jals_syntax::SyntaxKind::{FIELD_DECL, FINAL_KW, STATIC_KW};
         let modifiers: Vec<_> = decl
             .children()
             .flat_map(|child| child.children_with_tokens())
             .filter_map(jals_syntax::SyntaxElement::into_token)
             .map(|token| token.kind())
             .collect();
-        let in_interface = decl
-            .ancestors()
-            .any(|ancestor| matches!(ancestor.kind(), INTERFACE_DECL | ANNOTATION_TYPE_DECL));
-        if decl.kind() == FIELD_DECL && !in_interface {
-            return modifiers.contains(&FINAL_KW) && modifiers.contains(&STATIC_KW);
+        if decl.kind() != FIELD_DECL {
+            return modifiers.contains(&FINAL_KW);
         }
-        in_interface || modifiers.contains(&FINAL_KW)
+        Self::declared_directly_in_interface(decl)
+            || (modifiers.contains(&FINAL_KW) && modifiers.contains(&STATIC_KW))
+    }
+
+    /// Whether `decl`'s nearest enclosing type body is an interface's own (§9.3).
+    ///
+    /// An anonymous class body stops the walk exactly as a named declaration does: its members are
+    /// an anonymous *class*'s, whatever the expression creating it is written inside.
+    fn declared_directly_in_interface(decl: &jals_syntax::SyntaxNode) -> bool {
+        use jals_syntax::SyntaxKind::{
+            ANNOTATION_TYPE_DECL, CLASS_DECL, ENUM_CONSTANT, ENUM_DECL, INTERFACE_DECL, NEW_EXPR,
+            RECORD_DECL,
+        };
+        decl.ancestors()
+            .find_map(|ancestor| match ancestor.kind() {
+                INTERFACE_DECL | ANNOTATION_TYPE_DECL => Some(true),
+                CLASS_DECL | ENUM_DECL | RECORD_DECL | NEW_EXPR | ENUM_CONSTANT => Some(false),
+                _ => None,
+            })
+            .unwrap_or(false)
     }
 }
 
@@ -917,6 +940,111 @@ mod tests {
             [Err(FactError::Unsupported(
                 "a constant that refers to itself"
             ))]
+        );
+    }
+
+    /// Every `while` condition in `source`, answered by [`Facts::constant_condition`], in source
+    /// order. The chain is spelled out for the same reason [`keys`] spells it out.
+    fn while_conditions(source: &str) -> Vec<Option<bool>> {
+        let root = block_on_inline(jals_syntax::Parse::parse(source)).syntax();
+        let analysis = block_on_inline(FileAnalysis::of(&root));
+        let index = block_on_inline(
+            ProjectIndex::builder(&[(FileId(0), root.clone())])
+                .with_stdlib()
+                .build(),
+        );
+        let semantics = analysis.in_project(&index, FileId(0));
+        let facts = Facts::of(block_on_inline(semantics.typed()));
+        root.descendants()
+            .filter_map(ast::WhileStmt::cast)
+            .filter_map(|stmt| stmt.condition())
+            .map(|condition| facts.constant_condition(&condition))
+            .collect()
+    }
+
+    /// §14.21 is a fact about the **condition**, and it is read off the *declaration* a name binds
+    /// to, so what counts as a constant variable (§4.12.4) has to be exact in both directions.
+    ///
+    /// A literal `true` and a `static final` field fix the value; an ordinary local does not, and a
+    /// `final` one whose initialiser is itself constant does. There is no end-to-end guard here
+    /// worth relying on: a wrong `Some(true)` emits no test and no forward branch, so the method
+    /// either loops forever — which no test can time out on — or is refused for emitting code after
+    /// an unconditional transfer, and both of those need a JVM the wasm cell never has.
+    #[test]
+    fn only_a_constant_condition_is_constant() {
+        let source = program(
+            "static final boolean YES = true; static final boolean NO = 1 > 2;",
+            "boolean go = true; final boolean fixed = true; \
+             while (true) { break; } \
+             while (YES) { break; } \
+             while (NO) { break; } \
+             while (fixed) { break; } \
+             while (go) { go = args.length > 0; } \
+             while (args.length > 0) { break; }",
+        );
+        assert_eq!(
+            while_conditions(&source),
+            [
+                Some(true),  // the literal
+                Some(true),  // `static final` initialised by a literal
+                Some(false), // `static final` initialised by a constant expression
+                Some(true),  // a `final` local, whose initialiser is constant
+                None,        // an ordinary local: not `final`, so not a constant variable
+                None,        // no constant at all
+            ]
+        );
+    }
+
+    /// §9.3's implicit `public static final` reaches a **field of the interface itself**, and
+    /// nothing else that happens to sit under the `interface` keyword.
+    ///
+    /// Asking whether an interface is anywhere overhead, rather than whether it is the nearest
+    /// enclosing declaration, made every local in a `default` or `static` method a constant
+    /// variable — so `while (go)` over a plain `boolean go = true;` became `while (true)`. A class
+    /// nested in an interface is the same mistake seen from the other side: its fields are ordinary
+    /// fields, and `interface I { class C { int k = 1; } }` does not make `C.k` a `case` label.
+    #[test]
+    fn an_interface_makes_its_own_fields_constant_and_nothing_else() {
+        // The local in a `default` method: an interface overhead, and no constant.
+        assert_eq!(
+            while_conditions(
+                "public interface I { boolean step(int i); \
+                 default int run() { boolean go = true; int i = 0; \
+                 while (go) { go = step(i); i++; } return i; } }"
+            ),
+            [None]
+        );
+        // The same body in a class, which is what it has to agree with.
+        assert_eq!(
+            while_conditions(&program(
+                "boolean step(int i) { return i < 3; }",
+                "boolean go = true; int i = 0; while (go) { go = args.length > i; i++; }",
+            )),
+            [None]
+        );
+        // The interface's own field, which §9.3 *does* make constant with no modifier written.
+        assert_eq!(
+            while_conditions(
+                "public interface F { boolean ON = true; \
+                 default void run() { while (ON) { break; } } }"
+            ),
+            [Some(true)]
+        );
+        // A field of a class nested in an interface is an ordinary field: `final` and `static` or
+        // nothing.
+        assert_eq!(
+            keys(
+                "public interface N { class C { int k = 1; \
+                 static void run(int n) { switch (n) { case C.k: break; } } } }"
+            ),
+            [Err(FactError::Unsupported("a non-literal `case`"))]
+        );
+        assert_eq!(
+            keys(
+                "public interface N { class C { static final int K = 1; \
+                 static void run(int n) { switch (n) { case C.K: break; } } } }"
+            ),
+            [Ok(CaseKey::Int(1))]
         );
     }
 }

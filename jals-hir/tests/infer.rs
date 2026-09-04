@@ -42,6 +42,24 @@ impl Fixture {
         }
     }
 
+    /// [`new`](Self::new) with the embedded standard-library stubs folded in, so a `java.lang` type
+    /// is an *indexed* item rather than an external name — which is what makes a member of one
+    /// resolvable at all.
+    fn with_stdlib(src: &str) -> Self {
+        let node = parse(src);
+        let analysis = jals_exec::block_on_inline(FileAnalysis::of(&node));
+        let index = jals_exec::block_on_inline(
+            ProjectIndex::builder(&[(FileId(0), node.clone())])
+                .with_stdlib()
+                .build(),
+        );
+        Self {
+            node,
+            analysis,
+            index,
+        }
+    }
+
     /// This file bound to its project. The caller keeps the binding: the type witness borrows its
     /// memo cell, so the binding has to outlive it.
     const fn semantics(&self) -> FileSemantics<'_> {
@@ -81,6 +99,44 @@ fn expr_ty(src: &str, text: &str) -> String {
         .find(|e| e.syntax().text().to_string().trim() == text)
         .unwrap_or_else(|| panic!("no expression `{text}`"));
     type_at(typed, expr.syntax()).unwrap().to_string()
+}
+
+/// [`expr_ty`] against an index that holds the standard-library stubs.
+fn expr_ty_with_stdlib(src: &str, text: &str) -> String {
+    let fixture = Fixture::with_stdlib(src);
+    let semantics = fixture.semantics();
+    let typed = jals_exec::block_on_inline(semantics.typed());
+    let expr = fixture
+        .node
+        .descendants()
+        .filter_map(ast::Expr::cast)
+        .find(|e| e.syntax().text().to_string().trim() == text)
+        .unwrap_or_else(|| panic!("no expression `{text}`"));
+    type_at(typed, expr.syntax()).unwrap().to_string()
+}
+
+/// A string literal is a `java.lang.String` (JLS §3.10.5) — the *indexed* one, and never a type the
+/// file happens to reach by that spelling.
+///
+/// Two claims in one, because they have one cause. The type has to be the indexed item, or it has
+/// no members and `"x".length()` resolves to nothing; and it has to be found by **fully qualified
+/// name**, because what a literal denotes is fixed by the language rather than written by the
+/// source, so a nested / same-package / imported `String` must not capture it. Resolving the simple
+/// name through the file's scope got both halves wrong at once, and also put a walk that ends in a
+/// scan of the whole item table on every literal in every file.
+#[test]
+fn a_string_literal_is_java_lang_string_whatever_else_the_file_calls_string() {
+    let plain = "public class P { void m() { int n = \"x\".length(); } }";
+    assert_eq!(expr_ty_with_stdlib(plain, "\"x\".length()"), "int");
+
+    // A nested `String` is in scope by simple name and wins every ordinary lookup — and must still
+    // not be what a literal denotes.
+    let shadowed = "public class S { static class String { int weird; } \
+                    void m() { int n = \"x\".length(); } }";
+    assert_eq!(expr_ty_with_stdlib(shadowed, "\"x\".length()"), "int");
+
+    // The type itself, not only that a member of it resolved.
+    assert_eq!(expr_ty_with_stdlib(shadowed, "\"x\""), "String");
 }
 
 /// The inferred types of every switch *expression* in `src`, in source (pre-order) order — the

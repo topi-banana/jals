@@ -3728,8 +3728,14 @@ impl Context<'_> {
         let Some((&first, rest)) = ids.split_first() else {
             return throwable();
         };
+        // Guarded against a cycle for the same reason [`Hierarchy::inherited_field`] is bounded and
+        // `ProjectIndex::walk_supertypes_stateful` keeps a visited set: `class A extends B {}` with
+        // `class B extends A {}` parses and indexes, and an unguarded walk oscillates between the
+        // two forever. `Throwable` is the answer a chain that runs out already gives, and a chain
+        // that closes on itself has run out in the only sense that matters here.
+        let mut seen = alloc::collections::BTreeSet::new();
         let mut candidate = first;
-        loop {
+        while seen.insert(candidate) {
             if rest
                 .iter()
                 .all(|&other| self.index.is_subtype(other, candidate))
@@ -3746,6 +3752,7 @@ impl Context<'_> {
             };
             candidate = next;
         }
+        throwable()
     }
 
     /// The type a *name* names, when the grammar parsed it as an expression.

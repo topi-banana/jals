@@ -425,9 +425,17 @@ impl Ty {
             | (Class(External { .. }), Class(External { .. })) => true,
 
             // Arrays: invariant for primitive elements, covariant for reference elements.
+            //
+            // The recursion carries `demote` rather than re-entering through
+            // [`is_assignable_to`](Self::is_assignable_to), which would pin it to `Lenient`: an
+            // array is not a place the question changes, so a selection asking the strict relation
+            // about `String[]` has to get the strict relation about `String`. Hard-wiring the
+            // lenient one made every reference array applicable to every other, so `f(Object[])`
+            // and `f(String[])` were both applicable to a `String[]` argument, `most_specific`
+            // found no dominator, and selection fell back to declaration order.
             (Array(s), Array(t)) => match (s.as_ref(), t.as_ref()) {
                 (Primitive(a), Primitive(b)) => a == b,
-                _ => s.is_assignable_to(t, index),
+                _ => s.assignable(t, index, demote),
             },
             // An array is a reference type: it widens to `Object` / `Cloneable` / `Serializable`,
             // but never to a user class. The two arms exist for the same reason the boxing pair

@@ -69,6 +69,12 @@ fn compile_across(sources: &[&str]) -> Result<Vec<CompiledClass>, LowerError> {
 
 /// Compile `source`, run its `main` class on a real JVM, and return stdout.
 fn run(source: &str, main_class: &str) -> String {
+    run_with(source, main_class, &[])
+}
+
+/// [`run`] with extra JVM options — `-ea` for a fixture whose subject is an `assert`, which is
+/// otherwise never evaluated and so never builds the `AssertionError` the test is about.
+fn run_with(source: &str, main_class: &str, options: &[&str]) -> String {
     let classes = compile(source).unwrap_or_else(|error| panic!("compile: {error}"));
     let directory = tempfile::tempdir().expect("temp dir");
     for class in &classes {
@@ -86,6 +92,7 @@ fn run(source: &str, main_class: &str) -> String {
         // fixed path per process id — a recycled one makes the second JVM print a warning onto the
         // stdout a test is comparing.
         .arg("-XX:-UsePerfData")
+        .args(options)
         .arg("-cp")
         .arg(directory.path())
         .arg(main_class)
@@ -6718,13 +6725,19 @@ public class Detail {
     }
 }
 ";
-    // Without `-ea` nothing fires, so the run below asserts only the shape it compiled to; the
-    // constructor choice is what the assembler was refusing.
+    // Run under `-ea`, which is the whole point: without it no `assert` is evaluated, no
+    // `AssertionError` is ever constructed, and the test passes whichever constructor was named —
+    // `(Z)V`, `(C)V` and `(I)V` are indistinguishable to the assembler, since all three take an
+    // `Integer` off the operand stack. The *messages* are what tell them apart: `(C)V` renders `x`
+    // where `(I)V` would render `120`, and `(Z)V` renders `true` where `(I)V` would render `1`.
     compile(source).expect("compile");
     if !java_available() {
         return;
     }
-    assert_eq!(run(source, "Detail"), "0\n");
+    assert_eq!(
+        run_with(source, "Detail", &["-ea"]),
+        "3\n4\nx\ntext\ntrue\n5\n"
+    );
 }
 
 /// A `protected` member of a superclass in another package, reached through another instance.

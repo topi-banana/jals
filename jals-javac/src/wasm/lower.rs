@@ -132,10 +132,13 @@ struct Method {
     /// The interface method this body implements, when the "method" is a lambda expression rather than a
     /// declaration. A lambda's captures are *fields*, not parameters, so only its own parameters are bound.
     lambda: Option<MemberId>,
-    /// Whether the function's signature has a result, which decides whether its body needs a trailing
-    /// `unreachable`.
-    has_result: bool,
-    /// The type that result has, which is what a `return` narrows its value to.
+    /// The type the function's signature results in, which is what a `return` narrows its value to —
+    /// and whose presence is what decides whether the body needs a trailing `unreachable`.
+    ///
+    /// One field rather than a `bool` beside it: the two were always set together from the same
+    /// `results` vector, so a site that set one and forgot the other would emit either a trailing
+    /// `unreachable` on a `void` function or none on a value-returning one — a module the validator
+    /// rejects for a reason the pair hid.
     result: Option<ValType>,
 }
 
@@ -167,6 +170,23 @@ impl CompileWasm {
     /// reason a method over the JVM's 64 KiB code limit is: the target says no, and saying so here
     /// is the difference between a gap and a module that will not load.
     const MAX_LOCALS: usize = 50_000;
+
+    /// Push one function, refusing a body whose locals walk past what an engine will load.
+    ///
+    /// One function rather than a check beside each `push`, because the bodies that reach a module
+    /// are not one loop: a method's, a synthesised one's, and a class initialiser's. The last is the
+    /// *most* likely to be over the cap — it gathers every `static {}` block and every computed
+    /// `static` field initialiser of a class into a single function — and it was the one a check
+    /// living inside the methods loop did not cover, so a `static` initialiser with 50 000 locals
+    /// was written out as a module `wasm-tools` refuses to validate while the identical body in an
+    /// ordinary method was correctly reported as [`WasmError::TooLarge`].
+    fn push_func(module: &mut Module, func: Func) -> Result<()> {
+        if func.locals.len() > Self::MAX_LOCALS {
+            return Err(WasmError::TooLarge);
+        }
+        module.funcs.push(func);
+        Ok(())
+    }
 
     pub fn module(inputs: &[TypedFile<'_>], index: &ProjectIndex) -> Result<Module> {
         let mut module = Module::new();
@@ -301,14 +321,14 @@ impl CompileWasm {
             // no engine loads. Said here rather than left to the validator: a generated source with
             // thousands of locals is a *refusal* like any other format limit, and emitting the bytes
             // anyway reports it as a compiler defect.
-            if body.locals.len() > Self::MAX_LOCALS {
-                return Err(WasmError::TooLarge);
-            }
-            module.funcs.push(Func {
-                type_index: method.signature,
-                locals: body.locals,
-                body: body.code,
-            });
+            Self::push_func(
+                &mut module,
+                Func {
+                    type_index: method.signature,
+                    locals: body.locals,
+                    body: body.code,
+                },
+            )?;
             // A wasm export carries a bare name and no owner, so two `static` methods of one name —
             // an overload pair, or one method per class — name the same export. A module with two
             // is not a module at all, so the second is dropped: the name is ambiguous, and an
@@ -322,10 +342,10 @@ impl CompileWasm {
             }
         }
         for func in synthesised {
-            module.funcs.push(func);
+            Self::push_func(&mut module, func)?;
         }
         for func in &inits {
-            module.funcs.push(func.clone());
+            Self::push_func(&mut module, func.clone())?;
         }
         // Every class's initialisation, called in source order. A class whose initialisers read
         // another's have already run it by then — each one guards itself, so calling it again is free.
@@ -809,7 +829,6 @@ impl CompileWasm {
                     Ty::Void => Vec::new(),
                     ty => alloc::vec![layout.val_type(&ty)?],
                 };
-                let has_result = !results.is_empty();
                 let result = results.first().copied();
                 let signature = module.add_type(SubType::plain(CompType::Func { params, results }));
                 let function = Module::func_index(out.len());
@@ -822,7 +841,6 @@ impl CompileWasm {
                     index: function,
                     export: None,
                     is_constructor: false,
-                    has_result,
                     result,
                     encloses: None,
                     captures: 0,
@@ -868,7 +886,6 @@ impl CompileWasm {
                     index: function,
                     export: None,
                     is_constructor: false,
-                    has_result: false,
                     result: None,
                     encloses: None,
                     captures: 0,
@@ -924,7 +941,6 @@ impl CompileWasm {
                     }
                 };
 
-                let has_result = !results.is_empty();
                 let result = results.first().copied();
                 let signature = module.add_type(SubType::plain(CompType::Func { params, results }));
                 let function = Module::func_index(out.len());
@@ -937,7 +953,6 @@ impl CompileWasm {
                     index: function,
                     // A `public static` method is the module's surface: a wasm host has no `main`
                     // convention, so every one of them is exported by name.
-                    has_result,
                     result,
                     encloses,
                     captures: captured.len(),
@@ -1695,7 +1710,7 @@ impl Body {
                 // is, and is there so the validator need not infer Java's definite-return rule.
                 (None, Some(block)) => {
                     lowering.block(&block, &mut insn)?;
-                    if method.has_result {
+                    if method.result.is_some() {
                         insn.unreachable();
                     }
                 }
@@ -1783,7 +1798,7 @@ impl Body {
         // unreachable code does not make its target reachable, so the validator sees control reach the
         // end of the function with nothing on the stack. Java's definite-return rule is what makes this
         // dead code; the instruction is here so the validator does not have to infer that.
-        if method.has_result {
+        if method.result.is_some() {
             insn.unreachable();
         }
         Ok(Self {
