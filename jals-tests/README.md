@@ -325,10 +325,25 @@ empty. What is open, by family:
 - **an operand whose type the analysis got wrong** at a call — the same cause seen from the call
   site rather than from the `return`.
 
-Every open defect is now that one thing. `protected` access across packages (JVMS §4.10.1.8) is
-*reported* rather than emitted: javac reaches such a member through a synthetic `access$N` in the
-class that may make the call, and this backend synthesises none, so it says so instead of writing a
-class file no JVM loads.
+Every open defect is now that one thing. Four constructs are *reported* rather than emitted, each
+because the alternative is a class file that loads and then answers wrong or fails at link time —
+which is the failure mode this ladder is structurally blind to, since its top rung is "a real JVM
+linked it":
+
+- **`protected` access across packages** (JVMS §4.10.1.8). javac reaches such a member through a
+  synthetic `access$N` in the class that may make the call, and this backend synthesises none.
+- **a `this(…)` delegation in a class with synthetic constructor parameters** (11 cases). The call
+  would be emitted against the descriptor the *index* holds, which is the declaration's and so
+  missing the enclosing instance or the captures — `NoSuchMethodError` for an inner class, and
+  `StackOverflowError` for a capturing local one, whose captures are appended so the call resolves
+  to the constructor making it. Forwarding them needs the emitted constructor descriptor
+  single-sourced first.
+- **two type declarations with one binary name** (9 cases). A local class's binary name is its
+  simple name under the type that holds it, so two of one name in one class are one name and the
+  second class file replaced the first. javac numbers them `D$1Helper` / `D$2Helper`; a binary name
+  is read from the index in a dozen places, and a numbering only half of them agree on is a class
+  file naming a type nothing emits.
+- **a lambda outside a class body**, now only for the shapes ownership genuinely cannot place.
 
 The parser is no longer among them: every file in the corpus parses, so `parsed` is 100% and a
 syntax error there would now be a regression rather than a known gap.
@@ -451,8 +466,8 @@ The scoped percentage and the absolute count therefore tell different halves of 
 the second is monotone — a four-point jump in the rate is not four points' worth of new
 compilation, and a drop in the subset is not a loss of scope.
 
-**What the numbers mean today.** On the current corpus the rung judges 23 cases — 5 value
-comparisons and 26 completions — because a Java entry point takes `String[]` and a file naming
+**What the numbers mean today.** On the current corpus the rung judges 22 cases — 5 value
+comparisons and 24 completions — because a Java entry point takes `String[]` and a file naming
 `String` never reaches this rung at all. That is a fact about the corpus, not a claim about the
 compiler, which is why `jals-wasm` **lists the judged cases by name** rather than only counting
 them: a reader has to be able to tell a rate of 2% that means "2% of the compiler is checked" from
@@ -475,21 +490,16 @@ validator refuses, a compiled program that answers something else than javac's, 
 syntax error on a file that is valid Java by construction. `--strict` exits non-zero on those.
 
 CI leaves `--strict` off, as it does for `jals-compile`: known defects are still open, so the
-report is a measurement rather than a gate. What is open today is **eight modules `wasm-tools`
-refuses**, and they are two families, not one:
+report is a measurement rather than a gate. **No module the validator refuses is open today**, and
+neither is a disagreement, a trap or a panic — the ladder's four defect outcomes are all at zero.
 
-- **seven ill-typed function bodies** — `expected (ref null $type), found (ref $type)`, `expected
-  i32, found (ref $type)`, `values remaining on stack at end of block`, `expected … but nothing on
-  stack`. Four of them print the *same* type on both sides of the mismatch, which means two
-  distinct types in the recursive group print identically — most likely one class laid out twice
-  (the anonymous, inner and lambda shapes are where the cases cluster).
-- **one format limit reached without being reported** — `JsrRet.java`, `too many locals: locals
-  exceed maximum`. `WasmError::TooLarge` exists precisely so a limit is refused rather than
-  emitted, and this one got past it.
-
-Everything else is a gap rather than a defect, and the report buckets it. The largest are an
-`@interface` declaration (157 cases), a subclass of an inner class (71), and a call to a method
-outside this module (45).
+Everything else is a gap rather than a defect, and the report buckets it. The largest by a wide
+margin is **a lambda or method reference with no single abstract method** (53 cases), which is one
+shape: a lambda is typed by its *target*, and in argument position that target is the parameter of
+an overload chosen after the index is built — so `use(() -> 5)` reaches the layout with no method
+member to lower. It is refused rather than skipped, because a skipped one left a struct declared
+with no body behind it and the call through the interface became a trap. After it come names that
+did not resolve (18) and an unqualified member with no enclosing instance in scope (4).
 
 Two things the ladder does **not** yet report, because on this corpus they never happened: a start
 function that trapped, and a disagreement. Both have their own listing, so the day one appears it

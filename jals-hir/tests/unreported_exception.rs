@@ -359,3 +359,63 @@ fn a_rethrow_is_narrowed_to_what_the_block_raises() {
     ";
     assert_eq!(reported(missing), ["MyEx"]);
 }
+
+/// The everyday rethrow is **call-sourced**, and that is the shape the narrowing can go blind on.
+///
+/// `raised_at` answers nothing for a call it cannot resolve, and in the stub configuration — which is
+/// what `jals lint` and the LSP run in — most library calls do not resolve. Narrowing to a walk that
+/// saw nothing would make the primary rethrow shape report nothing at all, which is a wider silence
+/// than the lambda and initializer ones this module already accepts.
+#[test]
+fn a_call_sourced_rethrow_is_still_reported() {
+    let source = r"
+        package p;
+        import java.io.IOException;
+        public class Called {
+            static class Port { void read() throws IOException {} }
+            void m(Port port) {
+                try { port.read(); } catch (IOException e) { throw e; }
+            }
+        }
+    ";
+    assert_eq!(reported(source), ["IOException"]);
+
+    // And the shape the narrowing goes blind on: a library call the stub index cannot resolve, so
+    // the walk finds nothing and the *arms* are the honest answer. javac reports exactly this.
+    let unresolved = r"
+        package p;
+        import java.io.IOException;
+        import java.io.InputStream;
+        public class Blind {
+            void m(InputStream in) {
+                try { in.read(); } catch (IOException e) { throw e; }
+            }
+        }
+    ";
+    assert_eq!(reported(unresolved), ["IOException"]);
+
+    // The fallback does not undo the rule it was added beside: a multi-catch of two *unchecked*
+    // arms reports neither, which is what reading the parameter's lub (`Throwable`) got wrong.
+    let multi = r"
+        package p;
+        public class Multi {
+            void m(java.io.InputStream in) {
+                try { in.read(); } catch (RuntimeException | Error e) { throw e; }
+            }
+        }
+    ";
+    assert_eq!(reported(multi), Vec::<String>::new());
+
+    // Declared, so nothing to report — the same call, the same clause.
+    let declared = r"
+        package p;
+        import java.io.IOException;
+        public class Declared {
+            static class Port { void read() throws IOException {} }
+            void m(Port port) throws IOException {
+                try { port.read(); } catch (IOException e) { throw e; }
+            }
+        }
+    ";
+    assert_eq!(reported(declared), Vec::<String>::new());
+}

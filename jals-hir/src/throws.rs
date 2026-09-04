@@ -365,10 +365,20 @@ impl Cx<'_> {
     /// `IOException` and reported a method that declared exactly what it raises. An exception a
     /// *preceding* clause already catches is not this one's either.
     ///
-    /// A raise the analysis cannot see contributes nothing, so a block it learns nothing about makes
-    /// the rethrow raise nothing. That is the direction this module already errs in — a lambda's and
-    /// an initializer's raises are "conservatively left unreported" for the same reason — and it is
-    /// the safe one: a missed diagnostic, rather than one against a program that is correct.
+    /// **A walk that finds nothing falls back to the arms**, and that is not the conservative
+    /// direction it looks like. `raised_at` answers nothing for a call it cannot resolve, and in the
+    /// stub configuration — which is what `jals lint` and the LSP run in — most library calls do not
+    /// resolve: `try { in.read(); } catch (IOException e) { throw e; }` would report nothing at all,
+    /// and a call is the *primary* rethrow shape. So an empty walk is read as "the analysis saw
+    /// nothing", which on valid input is the only thing it can mean — JLS §11.2.3 makes a `catch` of
+    /// a checked type the block cannot throw a compile error, so a clause that exists has something
+    /// to catch.
+    ///
+    /// Falling back to the arms does not undo what this rule was added for: the multi-catch defect
+    /// was the parameter's **lub** (`RuntimeException | Error` is `Throwable`, which is checked),
+    /// never the arms, and a fallback to those two arms still reports neither. What it does keep is
+    /// the pre-existing over-report on `catch (Exception e) { throw e; }` over a block whose raise
+    /// the analysis could not see — the same answer that shape got before this rule existed.
     fn narrowed_to_the_block(&self, clause: &ast::CatchClause, arms: &[ItemId]) -> Vec<ItemId> {
         let Some(try_stmt) = clause.syntax().parent().and_then(ast::TryStmt::cast) else {
             return arms.to_vec();
@@ -409,6 +419,9 @@ impl Cx<'_> {
                     out.push(raised);
                 }
             }
+        }
+        if out.is_empty() {
+            return arms.to_vec();
         }
         out
     }
