@@ -26,3 +26,8 @@ invalid:
         eprint!("warning: ");
     - |
         bar.suspend(|| eprintln!("{text}"));
+    # A path-qualified spelling is the same write with a longer name.
+    - |
+        std::println!("qualified");
+    - |
+        ::std::eprintln!("root-qualified");

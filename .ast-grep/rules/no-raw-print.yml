@@ -23,7 +23,10 @@ rule:
   kind: macro_invocation
   has:
     field: macro
-    regex: '^(print|println|eprint|eprintln)$'
+    # Anchored on the tail so a path-qualified `std::println!` — whose `macro` field is a
+    # `scoped_identifier` reading `std::println` — is caught too, rather than being the one
+    # spelling that walks past the gate.
+    regex: '(^|::)(print|println|eprint|eprintln)$'
 
 ignores:
   # The funnel itself: this is where the two streams are finally written to.
