@@ -2665,6 +2665,12 @@ impl ProjectIndex {
                 params: Vec::new(),
                 varargs: false,
                 throws: Vec::new(),
+                // Nothing declares it, so there is no declaration to have written an annotation on.
+                // This is the one shape where an empty list really does mean *the author wrote
+                // none* rather than *nobody looked* — the default constructor exists precisely
+                // because the source is silent, and a `@Nullable` nobody could write is a contract
+                // no consumer can be missing.
+                annotations: Vec::new(),
                 source_location: None,
             });
         }
