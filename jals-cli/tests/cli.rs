@@ -3473,3 +3473,25 @@ fn timings_writes_a_self_contained_report() {
         "one timestamped report per format, so a run never overwrites the last one: {stamped:?}"
     );
 }
+
+#[test]
+fn timings_covers_a_command_that_never_finds_a_project() {
+    let dir = marked_project();
+    // Run *from* the project so the report lands under it: a command with no manifest writes under
+    // the directory its user is standing in, and a test that let that be the crate directory would
+    // leave a `target/` behind in the checkout.
+    let (stdout, stderr, code) = fmt_in(
+        dir.path(),
+        dir.path(),
+        &["--check", "--timings", "--no-migrate"],
+    );
+
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stderr.contains("report saved to"),
+        "`--timings` answers for every command, not only the ones with a manifest: {stderr}"
+    );
+    let html = std::fs::read_to_string(dir.path().join("target/jals/timings/jals-timings.html"))
+        .expect("the report is written under the directory the command ran in");
+    assert!(html.contains("format"), "the sweep is a row: {html}");
+}

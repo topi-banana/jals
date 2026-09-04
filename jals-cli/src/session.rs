@@ -4,7 +4,12 @@
 //! Every subcommand takes one. It exists so the wiring — which sinks a run has, in what order, and
 //! what happens to them at the end — is written once instead of once per command.
 
-use std::{path::Path, sync::Arc, time::Instant};
+use std::{
+    cell::RefCell,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Instant,
+};
 
 use jals_exec::Exec;
 use jals_progress::{PackageRef, Progress, ReportMeta, Sink};
@@ -25,6 +30,11 @@ pub(crate) struct Session {
     timings: Vec<TimingsFormat>,
     command: String,
     started: Instant,
+    /// Where the report goes and what it is about, once a command has discovered a project.
+    ///
+    /// A command that never finds one — `jals fmt` over loose files, a failed run — still gets a
+    /// report, written under the directory its user is standing in.
+    project: RefCell<Option<(PathBuf, Option<String>)>>,
 }
 
 impl Session {
@@ -52,6 +62,7 @@ impl Session {
             timings: options.timings.clone().unwrap_or_default(),
             command: Self::command_line(),
             started: Instant::now(),
+            project: RefCell::new(None),
         }
     }
 
@@ -93,24 +104,38 @@ impl Session {
         );
     }
 
+    /// Name the project this run turned out to be about.
+    ///
+    /// Called where a manifest is discovered rather than passed to
+    /// [`write_timings`](Self::write_timings), so that one call at the end of `main` covers every
+    /// command — including the ones that end early, and the ones that never find a project at all.
+    pub(crate) fn note_project(&self, root: &Path, name: Option<&str>) {
+        *self.project.borrow_mut() = Some((root.to_path_buf(), name.map(ToOwned::to_owned)));
+    }
+
     /// Write whatever `--timings` asked for.
     ///
     /// Reported rather than propagated: a build that succeeded did not fail because its report
     /// could not be written, and a report nobody could write is exactly the thing a person needs
     /// told rather than swallowed.
-    pub(crate) fn write_timings(&self, root: &Path, project: Option<&str>) {
+    pub(crate) fn write_timings(&self) {
         let Some(ledger) = &self.ledger else {
             return;
         };
         if self.timings.is_empty() {
             return;
         }
+        let noted = self.project.borrow();
+        let (root, project) = noted.as_ref().map_or_else(
+            || (PathBuf::from("."), None),
+            |(root, name)| (root.clone(), name.clone()),
+        );
         let meta = ReportMeta {
             command: self.command.clone(),
-            project: project.map(ToOwned::to_owned),
+            project,
             total_micros: u64::try_from(self.elapsed().as_micros()).unwrap_or(u64::MAX),
         };
-        match ledger.write(root, &self.timings, &meta) {
+        match ledger.write(&root, &self.timings, &meta) {
             Ok(reports) => {
                 for path in reports {
                     self.shell.status(

@@ -414,6 +414,9 @@ fn main() -> ExitCode {
             Commands::Init(args) => args.run(&session).await,
         };
         session.shell().clear_progress();
+        // One call for every command, including the ones that ended early: `--timings` asked for a
+        // report of the run, and a run that failed is exactly the one worth a report.
+        session.write_timings();
         outcome
     });
     match result {
@@ -859,6 +862,7 @@ impl BuildArgs {
     async fn run(&self, session: &Session) -> Result<ExitCode> {
         let exec = session.exec();
         let (mut manifest, root) = App::resolve_manifest(self.manifest_path.as_deref()).await?;
+        session.note_project(&root, manifest.package.name.as_deref());
         let features = self.features.resolve(&manifest)?;
         if let Some(out) = &self.out_dir {
             manifest.build.classes_dir = out.to_string_lossy().into_owned();
@@ -936,7 +940,6 @@ impl BuildArgs {
         if outcome.success() {
             session.finished(&format!("`{}` profile", App::profile_label(&manifest)));
         }
-        session.write_timings(&root, manifest.package.name.as_deref());
         Ok(App::outcome_exit_code(outcome.code()))
     }
 }
@@ -947,6 +950,7 @@ impl RunArgs {
     async fn run(&self, session: &Session) -> Result<ExitCode> {
         let exec = session.exec();
         let (mut manifest, root) = App::resolve_manifest(self.manifest_path.as_deref()).await?;
+        session.note_project(&root, manifest.package.name.as_deref());
         // `jals run` is `java`, and a WebAssembly module is not something `java` can be handed. The
         // check is here rather than at the launch because the failure would otherwise surface as a
         // missing main class in a `classes-dir` that holds a `.wasm` — true, and useless.
@@ -1061,7 +1065,6 @@ impl RunArgs {
                 return Err(anyhow!("{error}"));
             }
         };
-        session.write_timings(&root, manifest.package.name.as_deref());
         Ok(App::outcome_exit_code(run_outcome.code))
     }
 }
@@ -1077,6 +1080,7 @@ impl TestArgs {
     async fn run(&self, session: &Session) -> Result<ExitCode> {
         let exec = session.exec();
         let (mut manifest, root) = App::resolve_manifest(self.manifest_path.as_deref()).await?;
+        session.note_project(&root, manifest.package.name.as_deref());
         Self::refuse_unsupported(&manifest)?;
         let features = self.features.resolve(&manifest)?;
         // The classes a test run produces hold the test methods and the generated harness, so

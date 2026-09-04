@@ -316,3 +316,23 @@ impl Sink for Tee {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Display;
+
+    #[test]
+    fn a_byte_count_reads_the_way_a_person_would_say_it() {
+        // Integer arithmetic throughout: a download is measured in bytes, and a mantissa that
+        // cannot hold them exactly is the wrong tool for a number read back off a screen.
+        assert_eq!(Display::bytes(0), "0 B");
+        assert_eq!(Display::bytes(999), "999 B");
+        assert_eq!(Display::bytes(1024), "1.0 KiB");
+        assert_eq!(Display::bytes(1536), "1.5 KiB");
+        assert_eq!(Display::bytes(54_857_400), "52.3 MiB");
+        assert_eq!(Display::bytes(3 * 1024 * 1024 * 1024), "3.0 GiB");
+        // The largest unit does not run out: a terabyte is still counted in GiB rather than
+        // rendered as a number nobody can read.
+        assert_eq!(Display::bytes(1024 * 1024 * 1024 * 1024), "1024.0 GiB");
+    }
+}
