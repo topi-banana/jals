@@ -102,6 +102,7 @@ impl JalsBackend {
             roots.push((file, Parse::parse(text).await.syntax()));
         }
         if !messages.is_empty() {
+            report.finish(Outcome::Failed);
             return BackendOutcome::failed(messages);
         }
 
@@ -111,7 +112,6 @@ impl JalsBackend {
         for (_, root) in &roots {
             analyses.push(FileAnalysis::of(root).await);
         }
-        report.set_done(0);
 
         // The stdlib stubs stand in for `java.base`: the JVM supplies the implementations at run
         // time, so a compile only ever needs the signatures.
@@ -134,13 +134,22 @@ impl JalsBackend {
             // wasm has no dynamic loading and no classpath, so the whole project is one module
             // rather than one artifact per declared type.
             Target::Wasm => {
-                return match CompileWasm::project(&typed_files, &index) {
+                // The whole project is one module, so this arm *is* the wasm compile — and it
+                // returns past the `finish` below. Ending the unit here is what keeps a green
+                // wasm build from reporting `Abandoned`, which says the emitter has a hole in it.
+                let outcome = match CompileWasm::project(&typed_files, &index) {
                     Ok(module) => match RelativePath::parse("project.wasm") {
                         Ok(path) => BackendOutcome::compiled(alloc::vec![(path, module)]),
                         Err(error) => BackendOutcome::failed(alloc::vec![format!("{error:?}")]),
                     },
                     Err(error) => BackendOutcome::failed(alloc::vec![format!("{error}")]),
                 };
+                report.finish(if outcome.success() {
+                    Outcome::Completed
+                } else {
+                    Outcome::Failed
+                });
+                return outcome;
             }
         };
 

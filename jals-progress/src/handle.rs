@@ -195,13 +195,25 @@ impl Task {
 
     /// Add `amount` to what this unit has done.
     pub fn advance(&self, amount: u64) {
-        let done =
-            self.done.fetch_add(Self::narrow(amount), Ordering::Relaxed) + Self::narrow(amount);
+        if self.handle.is_none() {
+            return;
+        }
+        let amount = Self::narrow(amount);
+        // `saturating_add`, as [`Ticker::advance`] does on the same counter: `fetch_add` wraps, so
+        // a plain `+` here is a debug-build panic and a release-build wrap on the one target where
+        // the counter is narrow enough to reach — `wasm32`, where `usize` is 32 bits.
+        let done = self
+            .done
+            .fetch_add(amount, Ordering::Relaxed)
+            .saturating_add(amount);
         self.emit_progress(done as u64);
     }
 
     /// Set what this unit has done, for a producer that counts absolutely rather than by delta.
     pub fn set_done(&self, done: u64) {
+        if self.handle.is_none() {
+            return;
+        }
         self.done.store(Self::narrow(done), Ordering::Relaxed);
         self.emit_progress(done);
     }
@@ -301,18 +313,21 @@ impl Ticker {
 
     /// Count `amount` more items done.
     fn advance(&self, amount: u64) {
+        // Nothing is listening, so nothing counts: a silent ticker crossing `Exec::fan_out` would
+        // otherwise do one contended read-modify-write per item on a counter nobody can read.
+        let Some(handle) = &self.handle else {
+            return;
+        };
         let amount = usize::try_from(amount).unwrap_or(usize::MAX);
         let done = self
             .done
             .fetch_add(amount, Ordering::Relaxed)
             .saturating_add(amount);
-        if let Some(handle) = &self.handle {
-            handle.core.sink.emit(&Event::Advanced {
-                id: handle.id,
-                done: done as u64,
-                total: self.total,
-            });
-        }
+        handle.core.sink.emit(&Event::Advanced {
+            id: handle.id,
+            done: done as u64,
+            total: self.total,
+        });
     }
 }
 

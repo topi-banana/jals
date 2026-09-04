@@ -234,8 +234,19 @@ impl RemapPlan {
             },
             &report,
         )
-        .await?;
-        report.finish(Outcome::Completed);
+        .await;
+        // Ended on both branches rather than propagated past `report`: a `?` here would let `Drop`
+        // report `Abandoned`, which says the emitter has a hole in it and not that the remap failed.
+        let remapped = match remapped {
+            Ok(remapped) => {
+                report.finish(Outcome::Completed);
+                remapped
+            }
+            Err(error) => {
+                report.finish(Outcome::Failed);
+                return Err(error);
+            }
+        };
         storage
             .artifacts_mut()
             .lookup(&remapped)

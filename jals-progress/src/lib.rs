@@ -12,7 +12,8 @@
 //! - **Facts, not presentation.** [`Activity`] is `Fetch`, never "Downloading"; [`Outcome`] is
 //!   `Fresh`, never a colour. The terminal's verbs live in `jals-cli`, exactly as `jals-hir` states
 //!   a fact and the `jals-lint` rule that reports it owns the wording. The one concession is
-//!   [`Activity::label`], because a written report has to put some word on a row.
+//!   `Activity::label` — crate-internal, and there only because a written report has to put some
+//!   word on a row.
 //! - **Silent by default and free when silent.** [`Progress::SILENT`] allocates nothing, and every
 //!   method on it is one branch. That is what makes it threadable through code a test, the browser,
 //!   or the language server drives with nobody watching.

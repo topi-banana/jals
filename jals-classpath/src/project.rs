@@ -257,10 +257,15 @@ impl ProjectInputs {
                     jar.key = key;
                     resolved_jars.push(jar);
                 }
-                Err(error) => warnings.push(Warning::new(
-                    WarningOrigin::Artifact(jar.key.clone()),
-                    format!("dependency `{}` could not be remapped: {error}", jar.name),
-                )),
+                Err(error) => {
+                    // Stated rather than left to `Drop`: `Abandoned` says the emitter has a hole in
+                    // it, and this is the run failing, not the reporting.
+                    report.finish(Outcome::Failed);
+                    warnings.push(Warning::new(
+                        WarningOrigin::Artifact(jar.key.clone()),
+                        format!("dependency `{}` could not be remapped: {error}", jar.name),
+                    ));
+                }
             }
         }
 

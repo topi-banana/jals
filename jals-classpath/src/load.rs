@@ -552,7 +552,9 @@ impl SourceTreeExtraction {
         let prefix_len = prefix.segments().len();
         let mut files = BTreeMap::new();
         for (extracted, (name, outcome)) in members.into_iter().enumerate() {
-            report.set_done(extracted as u64);
+            // The count is of members *done*, so it is one-based: reporting the loop index would
+            // leave a finished extraction sitting at `len - 1` in the bar and in the ledger.
+            report.set_done(extracted as u64 + 1);
             let member = Archive::safe_relative(&name)
                 .ok_or_else(|| format!("unsafe Java archive member `{name}`"))?;
             if !member.starts_with(prefix) {
@@ -629,7 +631,7 @@ impl SourceTreeExtraction {
         report.set_total(groups.len() as u64);
         for (rendered, group) in groups.into_iter().enumerate() {
             yielder.tick().await;
-            report.set_done(rendered as u64);
+            report.set_done(rendered as u64 + 1);
             let rel = group.rel_path();
             let full = RelativePath::parse(&rel)
                 .map_err(|_| format!("generated source path is not portable: {rel}"))?;

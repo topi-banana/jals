@@ -800,26 +800,41 @@ impl BuildTaskExecutor {
                     ..
                 } => {
                     let report = runtime.progress.begin(Activity::Publish, owner.clone());
-                    let tree = Self::source_tree(&values, *tree)
-                        .map_err(BuildTaskRunError::Terminal)?
-                        .clone();
-                    report.finish(Outcome::Completed);
-                    if tree.files.is_empty() {
-                        return Err(BuildTaskRunError::Terminal(format!(
-                            "publication owner `{owner}` produced an empty source tree"
-                        )));
+                    // The unit spans the whole publication, and every way out of it says how it
+                    // ended: closing it after the `values` lookup would time a slice index rather
+                    // than the work the activity is named for, and leaving a failure to `Drop`
+                    // would report `Abandoned`, which means the emitter has a hole in it.
+                    let published = (|| {
+                        let tree = Self::source_tree(&values, *tree)
+                            .map_err(BuildTaskRunError::Terminal)?
+                            .clone();
+                        if tree.files.is_empty() {
+                            return Err(BuildTaskRunError::Terminal(format!(
+                                "publication owner `{owner}` produced an empty source tree"
+                            )));
+                        }
+                        let destination = DirKey::parse(destination).map_err(|error| {
+                            BuildTaskRunError::Terminal(format!(
+                                "publication owner `{owner}` has invalid destination: {error:?}"
+                            ))
+                        })?;
+                        Ok(BuildTaskPublication {
+                            owner: owner.clone(),
+                            destination,
+                            tree,
+                            intent: *intent,
+                        })
+                    })();
+                    match published {
+                        Ok(publication) => {
+                            output.publications.push(publication);
+                            report.finish(Outcome::Completed);
+                        }
+                        Err(error) => {
+                            report.finish(Outcome::Failed);
+                            return Err(error);
+                        }
                     }
-                    let destination = DirKey::parse(destination).map_err(|error| {
-                        BuildTaskRunError::Terminal(format!(
-                            "publication owner `{owner}` has invalid destination: {error:?}"
-                        ))
-                    })?;
-                    output.publications.push(BuildTaskPublication {
-                        owner: owner.clone(),
-                        destination,
-                        tree,
-                        intent: *intent,
-                    });
                 }
             }
         }

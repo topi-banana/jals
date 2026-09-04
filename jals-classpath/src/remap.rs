@@ -256,18 +256,6 @@ impl NestedJar {
 pub struct JarRemap;
 
 impl JarRemap {
-    /// Remap every `.class` member of `jar` per `request`, publishing the resulting jar under
-    /// `BuildTaskArtifact`.
-    ///
-    /// Provenance covers the source jar key, the mapping *digest* (not its text — the rule keys on
-    /// mapping identity), the direction, the format, and every hierarchy jar, so re-runs are
-    /// content-addressed and two directions of one file never collide.
-    ///
-    /// The whole thing is memoized through the cache's advisory locator index: the work here is
-    /// proportional to the size of a game jar, and the callers that are not the task graph — a
-    /// `[dependencies]` entry resolved on every editor reload — have no plan-level memo above them.
-    /// A stale index entry costs a miss, never wrong bytes, because the artifact still comes back
-    /// through a verified read.
     /// One class remapped, named by what it became.
     ///
     /// Split out of the fan-out closure so the closure is the two lines that matter — the work, and
@@ -290,6 +278,19 @@ impl JarRemap {
             .map_err(|error| (position, error))
     }
 
+    /// Remap every `.class` member of `jar` per `request`, publishing the resulting jar under
+    /// `BuildTaskArtifact`.
+    ///
+    /// Provenance covers the source jar key, the mapping *digest* (not its text — the rule keys on
+    /// mapping identity), the direction, the format, and every hierarchy jar, so re-runs are
+    /// content-addressed and two directions of one file never collide.
+    ///
+    /// The whole thing is memoized through the cache's advisory locator index: the work here is
+    /// proportional to the size of a game jar, and the callers that are not the task graph — a
+    /// `[dependencies]` entry resolved on every editor reload — have no plan-level memo above them.
+    /// A stale index entry costs a miss, never wrong bytes, because the artifact still comes back
+    /// through a verified read.
+    ///
     /// `report` is the caller's unit of work. A remap of a whole game jar is tens of thousands of
     /// classes over three passes, and the fan-out in the middle counts through a
     /// [`Ticker`](jals_progress::Ticker) — which is the whole reason that type exists.
