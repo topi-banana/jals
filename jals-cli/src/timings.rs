@@ -56,9 +56,12 @@ impl Ledger {
         let directory = root.join(DIRECTORY);
         std::fs::create_dir_all(&directory)
             .with_context(|| format!("creating {}", directory.display()))?;
+        // Milliseconds, not seconds: two runs of a warm build finish inside one second, and a
+        // stamp that collides silently replaces the report this function promises never to
+        // overwrite.
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_or(0, |since| since.as_secs());
+            .map_or(0, |since| since.as_millis());
         let rendered: Vec<(&str, String)> = {
             let timeline = self.timeline();
             formats

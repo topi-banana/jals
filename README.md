@@ -208,13 +208,14 @@ Every subcommand shares these, and — as in Cargo — they may be written on ei
 | `--color <auto\|always\|never>` | Whether to use ANSI colour. `NO_COLOR`, `CLICOLOR_FORCE` and `TERM=dumb` are honoured under `auto`. |
 | `--message-format <human\|json>` | `json` writes one JSON object per line on stdout — the same event stream the display draws. |
 | `--progress <auto\|always\|never>` | Whether to draw the live progress display. `auto` draws when stderr is a terminal. |
-| `--timings[=html,json]` | Write a report of where the run's time went to `target/jals/timings/`. |
+| `--timings[=html,json]` | Write a report of where the run's time went to `target/jals/timings/`. The value is attached with `=`, as cargo's is. |
 
 Output follows one rule: **anything for a person goes to stderr, anything for a script goes to
 stdout** — and stdout has one holder. `jals test` keeps it for its own result objects, which is
-what `--message-format json` has always named there; `--dry-run`, `--check`, `--diff` and a piped
-`jals fmt` all write a product of their own there, so they are refused alongside `json` rather than
-interleaving a second schema into the same lines.
+what `--message-format json` has always named there, and `jals run` keeps it for the program it
+starts; `--dry-run`, `--check`, `--diff` and a piped `jals fmt` all write a product of their own
+there, so they are refused alongside `json` rather than interleaving a second schema into the same
+lines.
 
 A run narrates itself the way `cargo` does — `Preparing`, `Resolving`, `Downloaded`, `Extracting`,
 `Remapping`, `Decompiling`, `Indexing`, `Compiling`, `Packaging`, `Fresh`, `Finished` — attributing
@@ -231,7 +232,6 @@ $ jals build --features 1.21.6
      Merging minecraft v0.1.0
  Decompiling [00:00:41] [=========>          ] 8213/29184 minecraft v0.1.0 (net/minecraft)
   Publishing minecraft v0.1.0 (minecraft-26.2)
-    Indexing 116 classpath entries
    Compiling hellomod v0.1.0
    Remapping hellomod v0.1.0 (1 class)
    Packaging hellomod v0.1.0 (target/jals/remap/hellomod-0.1.0.jar)

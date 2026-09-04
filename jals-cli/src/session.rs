@@ -135,6 +135,10 @@ impl Session {
 
     /// The closing `Finished` line, in cargo's shape.
     pub(crate) fn finished(&self, what: &str) {
+        // Whatever the last phase downloaded is news about the run, so it belongs above the line
+        // that closes the run rather than under it — and a run whose final phase was a fetch has no
+        // following phase to drain it.
+        self.display.drain_downloads();
         self.shell.status(
             Verb::Finished,
             format_args!("{what} in {:.2}s", self.elapsed().as_secs_f64()),

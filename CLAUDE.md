@@ -5,7 +5,8 @@ Guidance for agents working in this repository.
 `README.md` says what `jals` is and how it is used. This file is what a change has to respect: the
 seams, the prohibitions, and the gates. Deeper per-area detail lives in the area's own document —
 `jals-fmt/DESIGN.md`, `jals-lint/README.md`, `jals-build/README.md`, `jals-decompile/README.md`,
-`jals-lsp/README.md`, `jals-tests/README.md`, `jals-playground/DESIGN.md` — and the reasoning
+`jals-lsp/README.md`, `jals-tests/README.md`, `jals-progress/README.md`,
+`jals-playground/DESIGN.md` — and the reasoning
 behind an enforced rule lives in that rule's `note:` block under `.ast-grep/rules/`. Prefer
 following the pointer to restating it here.
 
@@ -437,9 +438,12 @@ filesystem reads into portable interfaces.
   ledger together, so which sinks exist and what happens to them at the end is written once instead
   of once per command — including the two answers to **stdout having exactly one holder**.
   `Session::owns_stdout` is the command whose own machine output is the older contract there
-  (`jals test`'s result objects, which a script parses) taking the event stream back;
-  `Session::stdout_is_free` refuses the flags whose whole product is also stdout — `--dry-run`'s
-  command line, `--diff`'s patch, a piped `jals fmt`'s formatted source. Both exist because a
+  (`jals test`'s result objects, which a script parses; `jals run`'s child, which inherits the
+  stream) taking the event stream back, and it is taken **before the command's first emission**
+  rather than at the step that produces the output — an event written once has already interleaved
+  a second schema. `Session::stdout_is_free` refuses the flags whose whole product is also
+  stdout — `--dry-run`'s command line (`build`, `run` and `clean` alike), `--diff`'s patch, a piped
+  `jals fmt`'s formatted source. Both exist because a
   reader of stdout must never have to guess which of two schemas a line is, and dropping a product
   the user explicitly asked for is worse than saying the two do not go together. It also owns
   native-formatter-config **detection** (`migrate.rs`): portable

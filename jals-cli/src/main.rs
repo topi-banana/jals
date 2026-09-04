@@ -526,63 +526,76 @@ impl FmtArgs {
                 format!("{total} file{}", if total == 1 { "" } else { "s" }),
                 total,
             );
-            for (root, mut paths) in groups {
-                paths.sort();
-                paths.dedup();
-                let keyed: Vec<_> = paths
-                    .into_iter()
-                    .map(|path| {
-                        let key = RelativePath::from_host_path(&root, &path)
-                            .and_then(|relative| FileKey::new(relative).ok())
-                            .ok_or_else(|| {
-                                anyhow!(
-                                    "source path is not addressable under {}: {}",
-                                    root.display(),
-                                    path.display()
-                                )
-                            })?;
-                        Ok::<_, anyhow::Error>((path, key))
-                    })
-                    .collect::<Result<_>>()?;
-                let scopes = keyed
-                    .iter()
-                    .map(|(_, key)| NativeScope::all(key.path().clone()));
-                let mut storage =
-                    NativeStorage::for_project_scoped(&root, scopes, exec.clone()).await?;
-                let mut edits = Vec::new();
-                for (path, key) in keyed {
-                    let src = storage
-                        .view()
-                        .file(&key)?
-                        .text()
-                        .map_err(|_| anyhow!("source is not valid UTF-8: {}", path.display()))?
-                        .to_owned();
-                    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-                    let cfg = discovery.for_dir(dir)?;
-                    let out = jals_fmt::FormatOutput::format_source(
-                        &src,
-                        &cfg,
-                        features.for_dir(dir).await,
-                    )
-                    .await;
-                    let changed = out.formatted != src;
-                    any_changed |= changed;
-                    any_warning |= out.has_warnings();
-                    any_fallback |= out.fell_back();
-                    let label = path.display().to_string();
-                    Reporter::report_format_warnings(session.shell(), &label, &src, &out);
-                    Reporter::report_format_fallback(session.shell(), &label, &out);
+            // Wrapped so every exit from the sweep — including the storage and encoding failures
+            // that leave through `?` — states an outcome. A `Task` dropped on the way out reports
+            // `Abandoned`, which says the emitter has a hole in it rather than that the run failed.
+            let swept: Result<()> = async {
+                for (root, mut paths) in groups {
+                    paths.sort();
+                    paths.dedup();
+                    let keyed: Vec<_> = paths
+                        .into_iter()
+                        .map(|path| {
+                            let key = RelativePath::from_host_path(&root, &path)
+                                .and_then(|relative| FileKey::new(relative).ok())
+                                .ok_or_else(|| {
+                                    anyhow!(
+                                        "source path is not addressable under {}: {}",
+                                        root.display(),
+                                        path.display()
+                                    )
+                                })?;
+                            Ok::<_, anyhow::Error>((path, key))
+                        })
+                        .collect::<Result<_>>()?;
+                    let scopes = keyed
+                        .iter()
+                        .map(|(_, key)| NativeScope::all(key.path().clone()));
+                    let mut storage =
+                        NativeStorage::for_project_scoped(&root, scopes, exec.clone()).await?;
+                    let mut edits = Vec::new();
+                    for (path, key) in keyed {
+                        let src = storage
+                            .view()
+                            .file(&key)?
+                            .text()
+                            .map_err(|_| anyhow!("source is not valid UTF-8: {}", path.display()))?
+                            .to_owned();
+                        let dir = path.parent().unwrap_or_else(|| Path::new("."));
+                        let cfg = discovery.for_dir(dir)?;
+                        let out = jals_fmt::FormatOutput::format_source(
+                            &src,
+                            &cfg,
+                            features.for_dir(dir).await,
+                        )
+                        .await;
+                        let changed = out.formatted != src;
+                        any_changed |= changed;
+                        any_warning |= out.has_warnings();
+                        any_fallback |= out.fell_back();
+                        let label = path.display().to_string();
+                        Reporter::report_format_warnings(session.shell(), &label, &src, &out);
+                        Reporter::report_format_fallback(session.shell(), &label, &out);
 
-                    if show_diff {
-                        Reporter::print_diff(session.shell(), &label, &src, &out.formatted);
-                    } else if changed {
-                        edits.push((key, out.formatted.into_bytes()));
+                        if show_diff {
+                            Reporter::print_diff(session.shell(), &label, &src, &out.formatted);
+                        } else if changed {
+                            edits.push((key, out.formatted.into_bytes()));
+                        }
+                        sweep.advance(1);
                     }
-                    sweep.advance(1);
+                    Self::commit_edits(&mut storage, edits).await?;
                 }
-                Self::commit_edits(&mut storage, edits).await?;
+                Ok(())
             }
-            sweep.finish(jals_progress::Outcome::Completed);
+            .await;
+            match swept {
+                Ok(()) => sweep.finish(jals_progress::Outcome::Completed),
+                Err(error) => {
+                    sweep.finish(jals_progress::Outcome::Failed);
+                    return Err(error);
+                }
+            }
             session.finished(if self.check {
                 "checking formatting"
             } else {
@@ -727,6 +740,7 @@ impl LintArgs {
             // silently skips a file it cannot read or decode, so this is where both failures
             // surface — otherwise an unreadable file would report nothing and read as clean.
             let Some(id) = workspace.file_id(&target.key) else {
+                sweep.finish(jals_progress::Outcome::Failed);
                 bail!("{}: could not be read for analysis", target.label);
             };
             let doc = workspace
@@ -735,7 +749,13 @@ impl LintArgs {
             // Looked up per file, so one run can span directories with different `jalslint.toml`.
             // The feature set is deliberately not set here: the workspace folds in the project's
             // own, exactly as it does for the language server and the playground.
-            let (config_path, config) = discovery.discover(&target.config_dir)?;
+            let (config_path, config) = match discovery.discover(&target.config_dir) {
+                Ok(discovered) => discovered,
+                Err(error) => {
+                    sweep.finish(jals_progress::Outcome::Failed);
+                    return Err(error);
+                }
+            };
             // Named against the file that wrote the key, not the file being linted, and once per
             // config rather than once per file it governs.
             if let Some(path) = config_path
@@ -960,6 +980,12 @@ impl RunArgs {
         let exec = session.exec();
         if self.dry_run {
             session.stdout_is_free("`--dry-run`")?;
+        } else {
+            // The program this run starts inherits stdio, so its stdout is the contract from here
+            // on — the same reading `jals test` takes for its result objects. Taken before anything
+            // can emit, since an event written even once has already interleaved a second schema
+            // into the lines a script parses.
+            session.owns_stdout();
         }
         let (mut manifest, root) = App::resolve_manifest(self.manifest_path.as_deref()).await?;
         session.note_project(&root, manifest.package.name.as_deref());
@@ -1382,7 +1408,11 @@ impl CleanArgs {
     /// project succeeds quietly). `--dry-run` prints the paths without deleting them.
     async fn run(&self, session: &Session) -> Result<ExitCode> {
         let exec = session.exec();
+        if self.dry_run {
+            session.stdout_is_free("`--dry-run`")?;
+        }
         let (manifest, root) = App::resolve_manifest(self.manifest_path.as_deref()).await?;
+        session.note_project(&root, manifest.package.name.as_deref());
         let storage = NativeStorage::for_project_scoped(
             &root,
             [NativeScope::all(RelativePath::ROOT)],
@@ -1416,9 +1446,10 @@ impl CleanArgs {
             // not require snapshotting the project's bytes first.
             let path = key.path().to_host_path(&root);
             if self.dry_run {
-                session
-                    .shell()
-                    .status(Verb::Removing, format_args!("{} (dry run)", path.display()));
+                // The whole product of `--dry-run` is this list, so it goes to stdout ungated —
+                // `build --dry-run` and `run --dry-run` already read that way, and a `status` line
+                // would be both unpipeable and silenced outright by `--quiet`.
+                session.shell().machine(path.display());
                 continue;
             }
             if !path.is_dir() {
@@ -1570,6 +1601,9 @@ impl LintProject {
             Some(parent) if !parent.as_os_str().is_empty() => parent,
             _ => Path::new("."),
         };
+        // This command did find a project, so `--timings` writes its report under that project
+        // rather than under whichever directory the user happened to be standing in.
+        session.note_project(root, manifest.package.name.as_deref());
         // `jals lint` takes the same `--features` flags as `build`/`run`; nothing selected
         // resolves the manifest's `default` list. An invalid selection (an unknown feature name)
         // warns and degrades to the default rather than dropping the whole project context.
@@ -1812,11 +1846,6 @@ impl LintProject {
 struct App;
 
 impl App {
-    /// How a project is named wherever this run mentions one: cargo's `name v0.1.0`.
-    ///
-    /// One rule, because the name a status line shows and the name a progress event is attributed
-    /// to have to be the same name — otherwise a `--timings` row and the line that announced it
-    /// disagree about which package they are about.
     /// The closing line's subject: which Java release this build targeted.
     ///
     /// Cargo names a profile here; `jals.toml` has none, and the thing that actually changes what
@@ -1828,6 +1857,11 @@ impl App {
             .map_or_else(|| "default".to_owned(), |release| format!("java{release}"))
     }
 
+    /// How a project is named wherever this run mentions one: cargo's `name v0.1.0`.
+    ///
+    /// One rule, because the name a status line shows and the name a progress event is attributed
+    /// to have to be the same name — otherwise a `--timings` row and the line that announced it
+    /// disagree about which package they are about.
     fn package_ref(manifest: &Manifest) -> jals_progress::PackageRef {
         jals_progress::PackageRef::new(
             manifest
@@ -2708,13 +2742,17 @@ impl App {
         // writing the archive somebody asked for by name.
         let report = progress.begin(jals_progress::Activity::Package, plan.jar.clone());
         let target = root.join(&plan.jar);
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("creating {}", parent.display()))?;
-        }
-        if let Err(error) =
-            std::fs::write(&target, &bytes).with_context(|| format!("writing {}", target.display()))
-        {
+        let written = target
+            .parent()
+            .map_or(Ok(()), |parent| {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("creating {}", parent.display()))
+            })
+            .and_then(|()| {
+                std::fs::write(&target, &bytes)
+                    .with_context(|| format!("writing {}", target.display()))
+            });
+        if let Err(error) = written {
             report.finish(jals_progress::Outcome::Failed);
             return Err(error);
         }

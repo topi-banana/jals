@@ -3480,9 +3480,12 @@ fn a_flag_that_owns_stdout_will_not_share_it_with_the_event_stream() {
 /// the command takes the stream back so a script parsing its results never meets a second schema.
 #[test]
 fn jals_test_keeps_stdout_for_its_own_json() {
-    let dir = in_process_project();
-    let manifest = dir.path().join("jals.toml").display().to_string();
-    let (stdout, stderr, _) = run_full(&[
+    // `test_project`, not `in_process_project`: the latter declares no `attributes` feature, so the
+    // command refuses before `--list` is reached and the assertion below would hold with
+    // `Session::owns_stdout` deleted.
+    let dir = test_project();
+    let manifest = manifest_of(&dir);
+    let (stdout, stderr, code) = run_full(&[
         "test",
         "--list",
         "--message-format",
@@ -3491,6 +3494,11 @@ fn jals_test_keeps_stdout_for_its_own_json() {
         &manifest,
     ]);
 
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(
+        stdout.contains("com.example.Calc#adds"),
+        "the list is what stdout carries: {stdout}\nstderr: {stderr}"
+    );
     assert!(
         !stdout.contains("\"event\":"),
         "no progress event reaches the stream the test list owns: {stdout}\nstderr: {stderr}"

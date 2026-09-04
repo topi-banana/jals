@@ -20,7 +20,7 @@ use std::{
 };
 
 use clap::{ArgAction, Args, ValueEnum};
-use indicatif::MultiProgress;
+use indicatif::{MultiProgress, ProgressDrawTarget};
 
 /// ANSI escapes. The workspace deliberately carries no styling crate; this is the whole palette.
 const RESET: &str = "\x1b[0m";
@@ -97,7 +97,9 @@ pub(crate) struct OutputArgs {
     /// Print warnings and errors only.
     #[arg(short, long, global = true, conflicts_with = "verbose")]
     pub(crate) quiet: bool,
-    /// Say more. Repeat for the whole event stream.
+    /// Say more: memo hits, individual downloads, and the command a backend is about to run.
+    // `Count` rather than `SetTrue` so an existing `-vv` still parses, but there is one verbose
+    // level and `Verbosity` says so: the whole event stream is `--message-format json`'s job.
     #[arg(short, long, global = true, action = ArgAction::Count)]
     pub(crate) verbose: u8,
     /// When to use ANSI colour.
@@ -113,11 +115,15 @@ pub(crate) struct OutputArgs {
     #[arg(long, global = true, hide = true)]
     pub(crate) hide_progress_bar: bool,
     /// Write a report of where the run's time went.
+    // `require_equals`, as cargo's own `--timings[=<FMTS>]` has it: an optional value that may be
+    // written with a space swallows whatever follows, so `jals --timings build` and `jals init
+    // --timings .` would both fail with "invalid value 'build'" instead of running.
     #[arg(
         long,
         global = true,
         value_name = "FORMAT",
         num_args = 0..=1,
+        require_equals = true,
         default_missing_value = "html",
         value_delimiter = ','
     )]
@@ -256,7 +262,10 @@ impl Shell {
         let verbosity = options.verbosity();
         let stderr_tty = std::io::stderr().is_terminal();
         let draw = match options.progress {
-            _ if options.hide_progress_bar => false,
+            // The deprecated alias answers only where `--progress` did not: a run that says
+            // `--progress always` this time should not lose to a compatibility flag a script has
+            // been carrying since before the global existed.
+            ProgressWhen::Auto if options.hide_progress_bar => false,
             ProgressWhen::Never => false,
             ProgressWhen::Always => true,
             // A redirected run must produce the same bytes every time, so a bar needs a terminal
@@ -322,6 +331,10 @@ impl Shell {
     pub(crate) fn clear_progress(&self) {
         if let Some(bars) = &self.bars {
             let _ = bars.clear();
+            // `clear` erases what is drawn and leaves the members registered, so a spinner with a
+            // steady tick paints itself straight back over the child that now owns the terminal.
+            // Disconnecting the draw target is what makes "for good" true.
+            bars.set_draw_target(ProgressDrawTarget::hidden());
         }
     }
 
@@ -375,13 +388,14 @@ impl Shell {
 
     /// One line of machine output to stdout.
     ///
-    /// Takes `&self` although it reads nothing from the shell: every write in this crate goes
-    /// through a shell, and an associated function would be the one output a caller could reach
-    /// without holding one.
-    #[allow(clippy::unused_self)] // See above: the receiver is the funnel, not a data dependency.
+    /// Suspended around the live display for the same reason every stderr line is: the two streams
+    /// are usually one terminal, so a bar redrawing on stderr shreds a patch or a JSON line on
+    /// stdout exactly as it would shred a diagnostic.
     pub(crate) fn machine(&self, line: impl Display) {
-        let mut out = std::io::stdout().lock();
-        let _ = writeln!(out, "{line}");
+        self.suspend(|| {
+            let mut out = std::io::stdout().lock();
+            let _ = writeln!(out, "{line}");
+        });
     }
 
     /// Bytes to stdout, unchanged.
@@ -389,10 +403,11 @@ impl Shell {
     /// `jals fmt` reading stdin writes the formatted source and nothing else, so this is the one
     /// output in the crate that is not line-oriented — and the one whose failure the caller has to
     /// see, because a truncated formatted file is not a formatted file.
-    #[allow(clippy::unused_self)] // As `machine`: the receiver is the funnel.
     pub(crate) fn machine_bytes(&self, bytes: &[u8]) -> std::io::Result<()> {
-        let mut out = std::io::stdout().lock();
-        out.write_all(bytes)
+        self.suspend(|| {
+            let mut out = std::io::stdout().lock();
+            out.write_all(bytes)
+        })
     }
 
     /// A label right-aligned in the verb column and painted.

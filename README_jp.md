@@ -209,11 +209,12 @@ Linux・macOS・Windows の `x64` / `arm64` ランナーに対応しています
 | `--color <auto\|always\|never>` | ANSI カラーを使うかどうか。`auto` では `NO_COLOR` / `CLICOLOR_FORCE` / `TERM=dumb` を尊重します。 |
 | `--message-format <human\|json>` | `json` は stdout に 1 行 1 JSON オブジェクトを書きます——表示が描いているのと同じイベント列です。 |
 | `--progress <auto\|always\|never>` | ライブのプログレス表示を描くかどうか。`auto` は stderr が端末のときに描きます。 |
-| `--timings[=html,json]` | 実行時間の内訳レポートを `target/jals/timings/` に書き出します。 |
+| `--timings[=html,json]` | 実行時間の内訳レポートを `target/jals/timings/` に書き出します。値は cargo と同じく `=` で繋ぎます。 |
 
 出力の規則はひとつです。**人間向けは stderr、スクリプト向けは stdout。** そして stdout の持ち主は
 つねに一つです。`jals test` は自身の結果オブジェクトのために stdout を保ちます——そこで
-`--message-format json` が指してきたのは元々それです——一方 `--dry-run` / `--check` / `--diff` /
+`--message-format json` が指してきたのは元々それです——`jals run` も起動したプログラムのために
+stdout を明け渡します。一方 `--dry-run` / `--check` / `--diff` /
 パイプ入力の `jals fmt` はいずれも stdout に自前の成果物を書きます。同じ行に二つ目のスキーマを
 混ぜる代わりに、`json` との併用は拒否されます。
 
@@ -232,7 +233,6 @@ $ jals build --features 1.21.6
      Merging minecraft v0.1.0
  Decompiling [00:00:41] [=========>          ] 8213/29184 minecraft v0.1.0 (net/minecraft)
   Publishing minecraft v0.1.0 (minecraft-26.2)
-    Indexing 116 classpath entries
    Compiling hellomod v0.1.0
    Remapping hellomod v0.1.0 (1 class)
    Packaging hellomod v0.1.0 (target/jals/remap/hellomod-0.1.0.jar)

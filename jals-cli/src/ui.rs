@@ -171,26 +171,34 @@ impl Display {
     }
 
     fn advanced(&self, id: UnitId, done: u64, total: Option<u64>) {
-        let mut state = self.lock();
-        let Some(tracked) = state.units.get_mut(&id.get()) else {
+        // The bar is `Arc`-backed, so it is cloned out and drawn to *outside* the lock. A remap
+        // ticks once per class from every fan-out worker, and holding the display's one mutex
+        // across an indicatif draw serializes the very parallelism the bar is reporting on.
+        let drawn = {
+            let mut state = self.lock();
+            let Some(tracked) = state.units.get_mut(&id.get()) else {
+                return;
+            };
+            tracked.done = done;
+            if let Some(total) = total {
+                tracked.unit.total = Some(total);
+            }
+            let drawn = tracked.bar.clone().map(|bar| (bar, tracked.unit.activity));
             drop(state);
+            drawn
+        };
+        let Some((bar, activity)) = drawn else {
             return;
         };
-        tracked.done = done;
-        if let Some(total) = total {
-            tracked.unit.total = Some(total);
+        // A download that learns its length from `Content-Length` becomes a bar here, having
+        // started as a spinner.
+        if let Some(total) = total
+            && bar.length() != Some(total)
+        {
+            bar.set_length(total);
+            Self::restyle(&bar, activity);
         }
-        if let Some(bar) = &tracked.bar {
-            if let Some(total) = total {
-                // A download that learns its length from `Content-Length` becomes a bar here,
-                // having started as a spinner.
-                if bar.length() != Some(total) {
-                    bar.set_length(total);
-                    Self::restyle(bar, tracked.unit.activity);
-                }
-            }
-            bar.set_position(done);
-        }
+        bar.set_position(done);
     }
 
     fn finished(&self, id: UnitId, outcome: Outcome) {
@@ -224,12 +232,19 @@ impl Display {
     /// plan's one-at-a-time walk.
     pub(crate) fn drain_downloads(&self) {
         let mut state = self.lock();
-        if state.fetches.active > 0 || state.fetches.finished == 0 {
+        if state.fetches.active > 0 {
             drop(state);
             return;
         }
+        // Taken whenever nothing is in flight, and only *summarized* when something completed. A
+        // batch of pure cache hits or failures has nothing to announce but has still stamped its
+        // clock, and leaving it in place would make the next real download's line read
+        // `in 48.9s` — the whole run rather than the transfer.
         let batch = core::mem::take(&mut state.fetches);
         drop(state);
+        if batch.finished == 0 {
+            return;
+        }
         self.summarize(&batch);
     }
 
