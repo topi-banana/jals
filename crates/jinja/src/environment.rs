@@ -16,8 +16,11 @@ use crate::value::Value;
 
 /// What happens to a value that is known and not set.
 ///
-/// The four rungs are minijinja's, and they are a ladder: each refuses everything the one before it
-/// refuses, and one thing more.
+/// The four are minijinja's. Three of them are a ladder — [`Self::Lenient`], [`Self::SemiStrict`],
+/// [`Self::Strict`], each refusing everything the one before it refuses and one thing more.
+/// [`Self::Chainable`] is a **step aside** rather than a rung: it is [`Self::Lenient`] with reading
+/// a field *from* an unset value allowed, which is the one thing [`Self::Lenient`] refuses. Do not
+/// read the declaration order as strictness order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UndefinedBehavior {
     /// Writing an undefined value produces the empty string; reading a field *from* one is an
@@ -25,7 +28,8 @@ pub enum UndefinedBehavior {
     #[default]
     Lenient,
     /// As [`Self::Lenient`], except that reading a field from an undefined value is undefined
-    /// again — so `{{ a.b.c }}` answers rather than failing halfway down.
+    /// again — so `{{ a.b.c }}` answers rather than failing halfway down. This is the one rung that
+    /// *loosens* rather than tightens; see the note on the enum itself.
     Chainable,
     /// Writing an undefined value is an error; `| default(…)` still answers for one.
     ///

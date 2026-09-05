@@ -127,7 +127,11 @@ fn an_unknown_name_is_an_error_that_says_what_the_known_ones_are() {
     let full = || context(Some("0.1.0"), &[]);
 
     let error = message("{{ package.licence }}", full());
-    assert_eq!(error, "line 1, column 1: `package` has no field `licence`");
+    // A field typo gets the same help a root typo gets: the names that are there.
+    assert_eq!(
+        error,
+        "line 1, column 1: `package` has no field `licence`; it has `name` and `version`"
+    );
 
     // The fix for a typo is a name, so the error hands the names over rather than only refusing.
     let error = render("a\nb\n  {{ nope }}\n", full()).expect_err("no such name");
@@ -613,5 +617,225 @@ fn a_global_is_read_by_every_template_and_listed_beside_the_context() {
             .expect_err("no such name")
             .to_string(),
         "line 1, column 1: unknown name `nope`; a template can read `here` and `tool`"
+    );
+}
+
+#[test]
+fn not_denies_the_comparison_rather_than_its_left_operand() {
+    // Jinja's precedence is `or` < `and` < `not` < comparison < filter. Binding `not` tighter than
+    // the comparison reads `(not a) == b`, which for a boolean and a string is `false` whatever
+    // either holds — the wrong arm, silently, on a template shape a build tool advertises.
+    let source = "{% if not package.version == \"1.0\" %}NOT{% else %}IS{% endif %}";
+    assert_eq!(
+        render(source, context(Some("1.0"), &[])).as_deref(),
+        Ok("IS")
+    );
+    assert_eq!(
+        render(source, context(Some("2.0"), &[])).as_deref(),
+        Ok("NOT")
+    );
+
+    // Filters still bind tighter than `not`, so this is `not (version | default(""))`.
+    assert_eq!(
+        render(
+            "{{ not package.version | default(\"\") }}",
+            context(None, &[])
+        )
+        .as_deref(),
+        Ok("true")
+    );
+    // …and `and` still binds looser, so this is `(not a) and b`.
+    assert_eq!(
+        render("{{ not features.a and features.b }}", context(None, &["b"])).as_deref(),
+        Ok("true")
+    );
+    assert_eq!(
+        render("{{ not not features.a }}", context(None, &["a"])).as_deref(),
+        Ok("true")
+    );
+}
+
+#[test]
+fn a_loop_variable_may_not_be_a_name_an_expression_already_spells() {
+    // Each of these binds every item and is then read as something else — the literal, or the
+    // namespace pushed after it — so the template renders successfully and renders the wrong
+    // bytes. Refused at parse time instead.
+    for reserved in ["none", "true", "false", "loop", "and", "or", "not"] {
+        let source = for_binding(reserved);
+        let error = render(&source, context(None, &["a", "b"])).expect_err("the binding is taken");
+        assert_eq!(error.kind(), ErrorKind::SyntaxError, "{reserved}");
+        assert_eq!(
+            error.detail(),
+            Some(
+                format!(
+                    "`{reserved}` already means something in an expression, so it cannot be a \
+                     loop variable"
+                )
+                .as_str()
+            ),
+            "{reserved}"
+        );
+    }
+    // A name that is not taken still binds.
+    assert_eq!(
+        render(
+            "{% for f in features %}{{ f }},{% endfor %}",
+            context(None, &["a", "b"])
+        )
+        .as_deref(),
+        Ok("a,b,")
+    );
+}
+
+fn for_binding(binding: &str) -> String {
+    format!("{{% for {binding} in features %}}{{{{ {binding} }}}},{{% endfor %}}")
+}
+
+#[test]
+fn a_field_name_may_begin_with_a_digit_but_a_literal_still_wins_everywhere_else() {
+    // `8` and `1_20` are the shape of a real feature name (a Minecraft-style project declares
+    // versions as features), and neither is a number the template meant to write.
+    let context = || context(None, &["8", "1_20"]);
+    assert_eq!(render("{{ features.8 }}", context()).as_deref(), Ok("true"));
+    assert_eq!(
+        render("{{ features.1_20 }}", context()).as_deref(),
+        Ok("true")
+    );
+    assert_eq!(
+        render("{% if features.2 %}Y{% else %}N{% endif %}", context()).as_deref(),
+        Ok("N")
+    );
+
+    // Outside field position a leading digit is still a literal.
+    assert_eq!(render("{{ 1.5 }}", context()).as_deref(), Ok("1.5"));
+    assert_eq!(
+        render("{{ items[0] }}", items_context()).as_deref(),
+        Ok("a")
+    );
+    // A number followed by a field access hands the `.` back rather than swallowing it, so the
+    // failure is the access it is rather than a stray trailing token.
+    assert_eq!(
+        message("{{ 1.name }}", context()),
+        "line 1, column 1: this value has no fields, so `name` cannot be read"
+    );
+}
+
+fn items_context() -> Value {
+    context! { items => Value::from(vec![Value::from("a"), Value::from("b")]) }
+}
+
+#[test]
+fn a_number_literal_that_does_not_fit_is_refused_whether_or_not_it_has_a_point() {
+    // `f64::from_str` answers `Ok(inf)` rather than failing, so without the finiteness check one
+    // of these two spellings would write `inf` into the rendered document and the other would not.
+    let huge = "9".repeat(400);
+    for source in [format!("{{{{ {huge} }}}}"), format!("{{{{ {huge}.0 }}}}")] {
+        assert_eq!(
+            message(&source, context(None, &[])),
+            "line 1, column 1: this number does not fit"
+        );
+    }
+}
+
+#[test]
+fn default_with_no_argument_leaves_the_value_unset_rather_than_emptying_it() {
+    // `| default` with nothing to fall back on is not a fallback, so a stricter rung still gets to
+    // refuse it — which is the whole reason a caller picks one.
+    for source in [
+        "{{ package.version | default }}",
+        "{{ package.version | default() }}",
+    ] {
+        let error = render(source, context(None, &[])).expect_err("nothing was given to use");
+        assert_eq!(error.kind(), ErrorKind::UndefinedError, "{source:?}");
+    }
+    // Lenient writes the empty string for an unset value anyway, so the Jinja spelling still reads
+    // the way Jinja reads it.
+    let mut lenient = Environment::new();
+    lenient.set_undefined_behavior(UndefinedBehavior::Lenient);
+    assert_eq!(
+        lenient
+            .render_str("[{{ nothing | default() }}]", context! {})
+            .as_deref(),
+        Ok("[]")
+    );
+}
+
+#[test]
+fn a_filter_names_itself_and_says_when_its_subject_is_merely_unset() {
+    // `count` is `length` under another name, and an error from it has to name the one that was
+    // written — the fix for `count(1)` is not to go and read about `length`.
+    let error = Environment::new()
+        .render_str("{{ \"x\" | count(1) }}", context! {})
+        .expect_err("count takes no arguments");
+    assert_eq!(error.kind(), ErrorKind::TooManyArguments);
+    assert_eq!(error.detail(), Some("`count` takes at most 0 argument(s)"));
+
+    // Whether a filter exists is settled before what its subject holds, or the strictest rung
+    // reports a misspelled name as an unset value and asserts a filter nobody registered.
+    let mut strictest = Environment::new();
+    strictest.set_undefined_behavior(UndefinedBehavior::Strict);
+    let error = strictest
+        .render_str("{{ nothing | dfault(\"z\") }}", context! {})
+        .expect_err("no such filter");
+    assert_eq!(error.kind(), ErrorKind::UnknownFilter);
+    assert_eq!(error.detail(), Some("unknown filter `dfault`"));
+
+    // *Unset* and *no text form* are the crate's two different mistakes, and only one of them has
+    // a `| default(…)` fix. A filter must not hand the other one's message to it.
+    let error = render("{{ package.version | upper }}", context(None, &[]))
+        .expect_err("the value is not set");
+    assert_eq!(error.kind(), ErrorKind::UndefinedError);
+    let error = render(
+        "{{ \"z\" | replace(package.version, \"b\") }}",
+        context(None, &[]),
+    )
+    .expect_err("the argument is not set");
+    assert_eq!(error.kind(), ErrorKind::UndefinedError);
+}
+
+#[test]
+fn an_integer_and_a_float_are_one_shape_and_every_equal_pair_is_ordered() {
+    let context = items_context;
+    // `ValueKind::Number` covers both, so refusing to compare them would report that a number
+    // cannot be compared with a number.
+    assert_eq!(render("{{ 1 == 1.0 }}", context()).as_deref(), Ok("true"));
+    assert_eq!(render("{{ 1 < 1.5 }}", context()).as_deref(), Ok("true"));
+    assert_eq!(render("{{ 2 >= 1.5 }}", context()).as_deref(), Ok("true"));
+    assert_eq!(
+        render(
+            "{% if items | length > 1.5 %}Y{% else %}N{% endif %}",
+            context()
+        )
+        .as_deref(),
+        Ok("Y")
+    );
+
+    // `a == b` has to imply `partial_cmp(a, b) == Some(Equal)`, or a consumer sorting a
+    // `Vec<Value>` gets nonsense for the shapes that carry no order of their own.
+    for (left, right) in [
+        (Value::UNDEFINED, Value::UNDEFINED),
+        (Value::NONE, Value::NONE),
+        (
+            Value::from(vec![Value::from("a")]),
+            Value::from(vec![Value::from("a")]),
+        ),
+        (Value::from(1i64), Value::from(1.0f64)),
+    ] {
+        assert!(left == right, "{left:?} == {right:?}");
+        assert_eq!(
+            left.partial_cmp(&right),
+            Some(std::cmp::Ordering::Equal),
+            "{left:?} vs {right:?}"
+        );
+    }
+
+    // The integer side is compared exactly, so a magnitude no `f64` can hold still orders.
+    assert_eq!(
+        Value::from(i64::MAX).partial_cmp(&Value::from(1e300f64)),
+        Some(std::cmp::Ordering::Less)
+    );
+    assert_eq!(
+        Value::from(-1i64).partial_cmp(&Value::from(-1.5f64)),
+        Some(std::cmp::Ordering::Greater)
     );
 }

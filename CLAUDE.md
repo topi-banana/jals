@@ -219,9 +219,11 @@ filesystem reads into portable interfaces.
   - `[build] resource-dirs` files reach the jar through `resource.rs`, which owns the `ResourcePlan`
     that answers which files are rendered and **how a build tool configures the engine** — but not
     the engine, which is `jinja`. Three settings are that configuration and each is a decision:
-    `set_trim_block_lines`, `UndefinedBehavior::SemiStrict`, and `set_strict_variables`; together
-    they are what `jals-build/README.md` documents as the three divergences from Jinja, so a change
-    here changes that section. The one rule that stays is the one that is about `[features]` rather
+    `set_trim_block_lines`, `UndefinedBehavior::SemiStrict`, and `set_strict_variables`. The first
+    two are two of the three divergences `jals-build/README.md` documents (its third, "a lone `{` is
+    never a delimiter", is the engine's lexer and not a setting); `set_strict_variables` is the
+    *unknown* half of the rule `SemiStrict` states the *unset* half of, and a change to any of the
+    three changes that section. The one rule that stays is the one that is about `[features]` rather
     than about templating: a feature set answers membership for **any** name, because features are
     additive, and it is a `jinja::Object` here rather than a shape the engine knows about. All of it
     is crate-internal because `RemapPlan` is its only consumer. Selection is by
@@ -496,12 +498,16 @@ filesystem reads into portable interfaces.
   google-java-format / Palantir / Spotless config onto that `Config` and render it back out as a
   `jalsfmt.toml`. All of it is pure and stays portable.
 - `crates/jinja`: a general-purpose Jinja2 engine with minijinja's API, no dependencies, and no
-  `jals` in it. It is the workspace's **only** crate that is not a `jals-*` crate, and the `crates/`
-  directory is what says so: nothing here may name a `jals` type, and a rule about *this* project's
-  templates belongs on the `jals-project` side of the seam, never here. `jals-project`'s
-  `resource.rs` is its only consumer today, and the crate's own `tests/render.rs` is what keeps the
-  surface honest — a closed world over four shipped binaries cannot, so `hawk.toml` excludes the
-  four modules that publish API and the tests take over the job. Two properties are load-bearing.
+  `jals` in it. It is the only **product** crate that is not a `jals-*` crate (`xtask` is the other
+  non-`jals-*` member, and is dev-only tooling), and the `crates/` directory is what says so:
+  nothing here may name a `jals` type, and a rule about *this* project's templates belongs on the
+  `jals-project` side of the seam, never here. `jals-project`'s `resource.rs` is its only consumer
+  today. A closed world over four shipped binaries cannot size this crate's surface, so CI runs
+  `cargo hawk check --exclude-crate jinja` — hawk's own name for a workspace library whose API is an
+  external boundary — and `hawk.toml` carries **no** stanza for it; the comment there says why.
+  That exclusion is unconditional, so the crate's own `tests/render.rs` is the only thing left
+  holding the surface honest: a published item lands with the test that drives it, or it lands
+  unreachable with nothing reporting it. Two properties are load-bearing.
   - **A lookup that finds nothing and a value that is not set are different answers**
     (`Value::get_attr` returns `None` for the first and `Some(Value::UNDEFINED)` for the second).
     That is what lets `set_strict_variables` refuse a *typo* while `| default(…)` still answers for

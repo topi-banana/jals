@@ -186,8 +186,14 @@ impl ResourcePlan {
 /// nothing else would still have to be assumed stale.
 ///
 /// Held as the manifest's own data rather than as a built [`Value`], so a `ResourcePlan` stays
-/// comparable — two plans are equal when the manifest and the selection are, which is what a
-/// memoized build task's identity rests on.
+/// comparable — two plans are equal when the manifest and the selection are.
+///
+/// Nothing memoizes a render: [`ResourcePlan::entries`] is reached only from `RemapPlan::run`,
+/// which runs on every root build, and its bytes reach the cache through `RemapPlan::stage_key` —
+/// a content digest over the staged jar. So a change to what the engine *writes* invalidates by
+/// construction, and no `TASK_EXECUTION_VERSION`-style constant covers this path. Do not key a
+/// future memo on this plan's equality without adding one: the plan names the manifest and the
+/// selection, and says nothing about the engine that renders them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TemplateContext {
     /// Each `[package]` key a template may read, and whether the manifest set it. `None` is *known
@@ -359,7 +365,10 @@ mod tests {
         );
         assert_eq!(
             render("{{ package.licence }}", &full),
-            Err("line 1, column 1: `package` has no field `licence`".to_owned())
+            Err(
+                "line 1, column 1: `package` has no field `licence`; it has `name` and `version`"
+                    .to_owned()
+            )
         );
     }
 

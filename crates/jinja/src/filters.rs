@@ -34,7 +34,9 @@ impl Arity {
 
     /// One argument as text, for the filters whose arguments are all strings.
     fn text(name: &str, args: &[Value], at: usize) -> Result<String, Error> {
-        args.get(at).and_then(Value::to_text).ok_or_else(|| {
+        let argument = args.get(at).unwrap_or(&Value::UNDEFINED);
+        Self::unset(name, argument)?;
+        argument.to_text().ok_or_else(|| {
             Error::new(
                 ErrorKind::InvalidOperation,
                 alloc::format!("`{name}` takes text arguments"),
@@ -44,12 +46,32 @@ impl Arity {
 
     /// The subject as text, for the filters that only make sense over one.
     fn subject(name: &str, value: &Value) -> Result<String, Error> {
+        Self::unset(name, value)?;
         value.to_text().ok_or_else(|| {
             Error::new(
                 ErrorKind::InvalidOperation,
                 alloc::format!("`{name}` needs a value with a text form"),
             )
         })
+    }
+
+    /// Refuse a value that is *not set* before it is read as one with *no text form*.
+    ///
+    /// [`Value::to_text`] answers [`None`] for both, and they are the crate's two different
+    /// mistakes with two different fixes: a shape that has no text form is a type error, while a
+    /// value the author knows may be missing is what `| default(…)` is written for. Folding them
+    /// together here is what would hand the type error's message to the one that has a fix.
+    fn unset(name: &str, value: &Value) -> Result<(), Error> {
+        if value.is_undefined() {
+            return Err(Error::new(
+                ErrorKind::UndefinedError,
+                alloc::format!(
+                    "this value is not set, so `{name}` has nothing to read; write \
+                     `| default(\"…\")` before it to say what to use instead"
+                ),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -67,7 +89,11 @@ impl Builtins {
     fn default(value: &Value, args: &[Value]) -> Result<Value, Error> {
         Arity::check("default", args, 0, 1)?;
         if value.is_undefined() {
-            return Ok(args.first().cloned().unwrap_or_else(|| Value::from("")));
+            // With no argument there is no fallback, so the value stays *unset* rather than
+            // becoming the empty string. That keeps the zero-argument spelling Jinja's under
+            // `Lenient` — where an unset value writes `""` anyway — while leaving a stricter
+            // `UndefinedBehavior` its say, which is the whole reason a caller chose one.
+            return Ok(args.first().cloned().unwrap_or(Value::UNDEFINED));
         }
         Ok(value.clone())
     }
@@ -99,6 +125,20 @@ impl Builtins {
     /// `{{ x | length }}` — characters, items, or keys.
     fn length(value: &Value, args: &[Value]) -> Result<Value, Error> {
         Arity::check("length", args, 0, 0)?;
+        Self::measure(value)
+    }
+
+    /// `{{ x | count }}` — [`Self::length`] under its other name.
+    ///
+    /// Written out rather than registered twice, because the arity check names the filter and a
+    /// shared body would tell somebody who wrote `count` to go and read about `length`.
+    fn count(value: &Value, args: &[Value]) -> Result<Value, Error> {
+        Arity::check("count", args, 0, 0)?;
+        Self::measure(value)
+    }
+
+    /// How many items a value holds, or a message saying this shape does not answer that.
+    fn measure(value: &Value) -> Result<Value, Error> {
         value.len().map(Value::from).ok_or_else(|| {
             Error::new(
                 ErrorKind::InvalidOperation,
@@ -115,15 +155,11 @@ impl Builtins {
         } else {
             Arity::text("join", args, 0)?
         };
-        let items = Self::sequence("join", value)?;
-        let mut out = String::new();
-        for (index, item) in items.iter().enumerate() {
-            if index > 0 {
-                out.push_str(&separator);
-            }
-            out.push_str(&Arity::subject("join", item)?);
-        }
-        Ok(Value::from(out))
+        let text = Self::sequence("join", value)?
+            .iter()
+            .map(|item| Arity::subject("join", item))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Value::from(text.join(&separator)))
     }
 
     /// `{{ x | replace("a", "b") }}`.
@@ -184,7 +220,7 @@ impl Builtins {
             ("trim", Self::trim),
             ("string", Self::string),
             ("length", Self::length),
-            ("count", Self::length),
+            ("count", Self::count),
             ("join", Self::join),
             ("replace", Self::replace),
             ("first", Self::first),

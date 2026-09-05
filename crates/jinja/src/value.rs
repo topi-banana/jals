@@ -21,6 +21,7 @@ use alloc::collections::BTreeMap;
 use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::cmp::Ordering;
 use core::fmt;
 
 /// What shape a [`Value`] has.
@@ -204,7 +205,12 @@ impl Value {
 
     /// Whether this holds nothing, for the shapes [`Self::len`] answers for.
     pub fn is_empty(&self) -> Option<bool> {
-        self.len().map(|length| length == 0)
+        // A string answers here without being walked: `Self::len` counts characters, which is a
+        // whole pass over the text to learn whether it has a first one.
+        match &self.0 {
+            Repr::Str(text) => Some(text.is_empty()),
+            _ => self.len().map(|length| length == 0),
+        }
     }
 
     /// Look one key up, by the name a `.` path or a `[…]` index spells.
@@ -310,14 +316,21 @@ impl PartialEq for Value {
     /// Equal within a shape, and never across two. Two objects are equal when they are the same
     /// object, since only the implementor knows what else could mean.
     ///
-    /// Floats compare by [`f64::total_cmp`], so `NaN` equals itself and `-0.0` does not equal
-    /// `0.0` — the ordering a sort would use, rather than IEEE's.
+    /// An integer and a float are one shape ([`ValueKind::Number`]), so `1 == 1.0`; two floats
+    /// compare by [`f64::total_cmp`], so `NaN` equals itself and `-0.0` does not equal `0.0` — the
+    /// ordering a sort would use, rather than IEEE's.
     fn eq(&self, other: &Self) -> bool {
         match (&self.0, &other.0) {
             (Repr::Undefined, Repr::Undefined) | (Repr::None, Repr::None) => true,
             (Repr::Bool(left), Repr::Bool(right)) => left == right,
             (Repr::Int(left), Repr::Int(right)) => left == right,
             (Repr::Float(left), Repr::Float(right)) => left.total_cmp(right).is_eq(),
+            (Repr::Int(left), Repr::Float(right)) => {
+                Self::int_cmp_float(*left, *right).is_some_and(Ordering::is_eq)
+            }
+            (Repr::Float(left), Repr::Int(right)) => {
+                Self::int_cmp_float(*right, *left).is_some_and(Ordering::is_eq)
+            }
             (Repr::Str(left), Repr::Str(right)) => left == right,
             (Repr::Seq(left), Repr::Seq(right)) => left == right,
             (Repr::Map(left), Repr::Map(right)) => left == right,
@@ -330,14 +343,62 @@ impl PartialEq for Value {
 impl PartialOrd for Value {
     /// Ordered within a shape, and incomparable across two — which is what makes `<` on a string
     /// and a number answer nothing rather than answer wrongly.
-    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+    ///
+    /// An integer and a float are **one** shape here, because [`ValueKind::Number`] says they are:
+    /// answering `None` for `1 < 1.5` would report that a number cannot be compared to a number.
+    /// The shapes that carry no order at all still answer [`Ordering::Equal`] for a pair
+    /// [`PartialEq`] calls equal, because `a == b` must imply `partial_cmp(a, b) == Some(Equal)`
+    /// and a consumer sorting a `Vec<Value>` is entitled to that.
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         match (&self.0, &other.0) {
             (Repr::Bool(left), Repr::Bool(right)) => Some(left.cmp(right)),
             (Repr::Int(left), Repr::Int(right)) => Some(left.cmp(right)),
             (Repr::Float(left), Repr::Float(right)) => Some(left.total_cmp(right)),
+            (Repr::Int(left), Repr::Float(right)) => Self::int_cmp_float(*left, *right),
+            (Repr::Float(left), Repr::Int(right)) => {
+                Self::int_cmp_float(*right, *left).map(Ordering::reverse)
+            }
             (Repr::Str(left), Repr::Str(right)) => Some(left.as_ref().cmp(right.as_ref())),
+            _ if self == other => Some(Ordering::Equal),
             _ => None,
         }
+    }
+}
+
+impl Value {
+    /// Order an integer against a float **exactly**, with no cast that could round either side into
+    /// agreeing with the other.
+    ///
+    /// `NaN` is the one float an integer has no order against, so it answers [`None`]; [`PartialEq`]
+    /// agrees, since no integer is equal to it either.
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        reason = "the bounds below make the first conversion exact, and the second round-trips it"
+    )]
+    fn int_cmp_float(left: i64, right: f64) -> Option<Ordering> {
+        /// `2^63`, exactly representable as an `f64`, and one past the largest `i64`.
+        const LIMIT: f64 = 9_223_372_036_854_775_808.0;
+
+        if right.is_nan() {
+            return None;
+        }
+        if right >= LIMIT {
+            return Some(Ordering::Less);
+        }
+        if right < -LIMIT {
+            return Some(Ordering::Greater);
+        }
+        // `right` is finite and inside the `i64` range, so `as` truncates it toward zero exactly.
+        let whole = right as i64;
+        Some(left.cmp(&whole).then_with(|| {
+            // Equal whole parts, so whatever `right` carries past the point decides. Converting
+            // `whole` back is exact: any float big enough for that conversion to round is already
+            // an integer, and then the two sides are the same number.
+            (whole as f64)
+                .partial_cmp(&right)
+                .unwrap_or(Ordering::Equal)
+        }))
     }
 }
 

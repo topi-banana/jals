@@ -412,6 +412,20 @@ impl Directive {
                     )
                     .at(at));
                 }
+                // A binding the expression grammar already spells something else can be written but
+                // never read: `{% for none in xs %}{{ none }}{% endfor %}` binds each item and then
+                // writes the literal, and `loop` is shadowed by the namespace the body reads. Both
+                // render successfully and both render the wrong bytes, so they are refused here.
+                if ExprParser::is_reserved(binding) {
+                    return Err(Error::new(
+                        ErrorKind::SyntaxError,
+                        format!(
+                            "`{binding}` already means something in an expression, so it cannot be \
+                             a loop variable"
+                        ),
+                    )
+                    .at(at));
+                }
                 Ok(Self::For {
                     binding: binding.to_owned(),
                     source: ExprParser::parse(source.trim(), at)?,
@@ -484,6 +498,18 @@ impl ExprParser {
         Ok(expr)
     }
 
+    /// The names an expression already spells for itself, which is what a loop binding may not be.
+    ///
+    /// `true`/`false`/`none` are literals and the three operators are operators, so a binding with
+    /// one of those names is shadowed at every use site; `loop` is the namespace a `{% for %}` body
+    /// reads, pushed after the binding and therefore found first.
+    const RESERVED: [&'static str; 7] = ["and", "or", "not", "true", "false", "none", "loop"];
+
+    /// Whether this name is one of [`Self::RESERVED`].
+    fn is_reserved(text: &str) -> bool {
+        Self::RESERVED.contains(&text)
+    }
+
     /// Whether this is a bare identifier, which is what a loop binding has to be.
     fn is_name(text: &str) -> bool {
         let mut chars = text.chars();
@@ -510,21 +536,17 @@ impl ExprParser {
                     tokens.push(Self::compare(ch, &mut chars, at)?);
                 }
                 '"' => tokens.push(Token::Str(Self::string(&mut chars, at)?)),
+                // A field name may begin with a digit — `features.8` and `features.1_20` are
+                // feature names, not numbers — so after a `.` a digit starts a name. Everywhere
+                // else it starts a literal, which is what keeps `1.5` and `items[0]` numbers.
+                ch if ch.is_ascii_digit() && tokens.last() == Some(&Token::Dot) => {
+                    tokens.push(Token::Name(Self::word(ch, &mut chars)));
+                }
                 ch if ch.is_ascii_digit() => {
-                    tokens.push(Self::number(ch, &mut chars, at)?);
+                    Self::number(&mut tokens, ch, &mut chars, at)?;
                 }
                 ch if ch.is_ascii_alphabetic() || ch == '_' => {
-                    let mut name = String::new();
-                    name.push(ch);
-                    while let Some(next) = chars.peek() {
-                        if next.is_ascii_alphanumeric() || *next == '_' {
-                            name.push(*next);
-                            chars.next();
-                        } else {
-                            break;
-                        }
-                    }
-                    tokens.push(Token::Name(name));
+                    tokens.push(Token::Name(Self::word(ch, &mut chars)));
                 }
                 _ => {
                     return Err(Error::new(
@@ -536,6 +558,21 @@ impl ExprParser {
             }
         }
         Ok(tokens)
+    }
+
+    /// One identifier, from its first character to the last one that can continue it.
+    fn word(first: char, chars: &mut core::iter::Peekable<core::str::Chars<'_>>) -> String {
+        let mut name = String::new();
+        name.push(first);
+        while let Some(next) = chars.peek() {
+            if next.is_ascii_alphanumeric() || *next == '_' {
+                name.push(*next);
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        name
     }
 
     /// A comparison operator. `=` and `!` exist only as the first half of one, so a lone one is
@@ -594,11 +631,14 @@ impl ExprParser {
         }
     }
 
+    /// One number literal, appended to `tokens` — plural, because a trailing `.` is handed back as
+    /// the `Dot` a field access needs rather than swallowed.
     fn number(
+        tokens: &mut Vec<Token>,
         first: char,
         chars: &mut core::iter::Peekable<core::str::Chars<'_>>,
         at: Position,
-    ) -> Result<Token, Error> {
+    ) -> Result<(), Error> {
         let mut text = String::new();
         text.push(first);
         let mut float = false;
@@ -613,18 +653,31 @@ impl ExprParser {
             }
             chars.next();
         }
-        // A trailing `.` is a field access on an integer, not part of the number, so it is handed
-        // back to the tokenizer rather than swallowed.
-        if float && text.ends_with('.') {
+        // A trailing `.` is a field access on an integer, not part of the number, so the digits
+        // stop here and the `.` is re-emitted as the `Dot` the accessor needs.
+        let trailing_dot = float && text.ends_with('.');
+        if trailing_dot {
             text.pop();
             float = false;
         }
+        // `f64::from_str` answers `Ok(inf)` for a magnitude it cannot hold, so a literal that does
+        // not fit has to be refused here — the integer path already refuses the same magnitude, and
+        // writing `inf` into a rendered document is the silent wrong answer.
         let parsed = if float {
-            text.parse::<f64>().ok().map(Token::Float)
+            text.parse::<f64>()
+                .ok()
+                .filter(|value| value.is_finite())
+                .map(Token::Float)
         } else {
             text.parse::<i64>().ok().map(Token::Int)
         };
-        parsed.ok_or_else(|| Error::new(ErrorKind::SyntaxError, "this number does not fit").at(at))
+        let token = parsed
+            .ok_or_else(|| Error::new(ErrorKind::SyntaxError, "this number does not fit").at(at))?;
+        tokens.push(token);
+        if trailing_dot {
+            tokens.push(Token::Dot);
+        }
+        Ok(())
     }
 
     fn any(&mut self) -> Result<Expr, Error> {
@@ -637,12 +690,25 @@ impl ExprParser {
     }
 
     fn all(&mut self) -> Result<Expr, Error> {
-        let mut left = self.compared()?;
+        let mut left = self.negated()?;
         while self.eat_name("and") {
-            let right = self.compared()?;
+            let right = self.negated()?;
             left = Expr::And(Box::new(left), Box::new(right));
         }
         Ok(left)
+    }
+
+    /// `not` is a level of its own, **above** the comparison rather than inside it.
+    ///
+    /// Jinja's precedence is `or` < `and` < `not` < comparison < filter, so `not a == b` denies the
+    /// comparison. Folding `not` into the operand level instead reads `(not a) == b`, which for two
+    /// values of different shapes is `false` whatever they hold — the wrong arm, silently, with no
+    /// error to notice it by.
+    fn negated(&mut self) -> Result<Expr, Error> {
+        if self.eat_name("not") {
+            return Ok(Expr::Not(Box::new(self.negated()?)));
+        }
+        self.compared()
     }
 
     /// Comparisons do not chain: `a < b < c` is a mistake far more often than it is a request, and
@@ -664,10 +730,9 @@ impl ExprParser {
         })
     }
 
+    /// One operand: a primary with its accesses, then every `|` filter folded onto it. Filters bind
+    /// tighter than everything above, which is why they are here and `not` is not.
     fn unary(&mut self) -> Result<Expr, Error> {
-        if self.eat_name("not") {
-            return Ok(Expr::Not(Box::new(self.unary()?)));
-        }
         let (mut value, _) = self.postfix()?;
         while self.eat(&Token::Pipe) {
             value = self.filter(value)?;

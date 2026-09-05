@@ -4,13 +4,16 @@ A small [Jinja2] template engine with [minijinja]'s API, no dependencies, and `n
 every configuration.
 
 ```rust
-use jinja::{Environment, context};
+use jinja::{Environment, Error, context};
 
-let mut env = Environment::new();
-env.add_template("greeting", "Hello, {{ name }}!")?;
+fn main() -> Result<(), Error> {
+    let mut env = Environment::new();
+    env.add_template("greeting", "Hello, {{ name }}!")?;
 
-let rendered = env.get_template("greeting")?.render(context! { name => "world" })?;
-assert_eq!(rendered, "Hello, world!");
+    let rendered = env.get_template("greeting")?.render(context! { name => "world" })?;
+    assert_eq!(rendered, "Hello, world!");
+    Ok(())
+}
 ```
 
 ## What it has
@@ -45,6 +48,8 @@ Leaving serde out is what lets the crate have no dependencies at all. A `Value` 
 | Whitespace control | one `set_trim_block_lines`; no `{%- -%}` | `trim_blocks` + `lstrip_blocks` + `{%- -%}` |
 | A filter's arguments | its subject and its arguments, nothing else | plus the render `State` |
 | A name nothing defines | `set_strict_variables` decides — error or undefined | undefined |
+| `a and b` / `a or b` | the answer as a boolean | the operand that decided |
+| `{{ 1.0 }}` | `1` — Rust's `Display`, never exponential | `1.0` |
 
 The first row is the load-bearing one. Keeping *there is no such key* apart from *this key holds
 nothing* is what lets `Environment::set_strict_variables` refuse a **typo** while `| default(…)`
@@ -58,6 +63,10 @@ rather than only for the names it holds, is a rule about the consumer's domain a
 consumer's crate:
 
 ```rust
+use std::collections::BTreeSet;
+
+use jinja::{Enumerator, Object, Value};
+
 #[derive(Debug)]
 struct Features(BTreeSet<String>);
 
@@ -75,7 +84,9 @@ impl Object for Features {
 
 ## Undefined behaviour
 
-Four rungs, each refusing everything the one before it refuses and one thing more:
+`Lenient`, `SemiStrict` and `Strict` are a ladder — each refuses everything the one before it
+refuses and one thing more. `Chainable` is a step aside rather than a rung: it is `Lenient` with the
+one thing `Lenient` refuses allowed. The table is the whole rule:
 
 | | `{{ unset }}` | `{{ unset.field }}` | `{{ unset \| default("x") }}` |
 | --- | --- | --- | --- |
@@ -86,6 +97,10 @@ Four rungs, each refusing everything the one before it refuses and one thing mor
 
 `SemiStrict` is the rung a tool that writes files wants: an unset value reaching the output is the
 silent wrong answer, and the author who meant it says so with a `default`.
+
+`| default` with **no** argument names no fallback, so it leaves the value unset rather than
+emptying it — `Lenient` still writes `""` for one, and a stricter rung still gets its say. Reaching
+for the empty string is `| default("")`, written out.
 
 [Jinja2]: https://jinja.palletsprojects.com
 [minijinja]: https://docs.rs/minijinja

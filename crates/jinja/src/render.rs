@@ -4,9 +4,11 @@
 //! what the enclosing loops bound. Everything else — filters, globals, how strict to be — is the
 //! [`Environment`]'s, read rather than carried.
 
+use alloc::borrow::Cow;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::fmt::Write as _;
 
 use crate::ast::{CompareOp, Expr, Node};
 use crate::environment::{Environment, UndefinedBehavior};
@@ -218,25 +220,23 @@ impl<'env> Renderer<'env> {
         names.sort_unstable();
         names.dedup();
         let mut message = format!("unknown name `{name}`");
+        Self::list_names(&names, &mut message, "; a template can read ");
+        message
+    }
+
+    /// Append `lead` and then every name, quoted, as `` `a`, `b` and `c` `` — or nothing at all
+    /// when there are no names, so a caller never has to check first.
+    fn list_names(names: &[&str], message: &mut String, lead: &str) {
         let Some((last, rest)) = names.split_last() else {
-            return message;
+            return;
         };
-        message.push_str("; a template can read ");
-        for (index, known) in rest.iter().enumerate() {
-            if index > 0 {
-                message.push_str(", ");
-            }
-            message.push('`');
-            message.push_str(known);
-            message.push('`');
-        }
+        message.push_str(lead);
+        let quoted: Vec<String> = rest.iter().map(|name| format!("`{name}`")).collect();
+        message.push_str(&quoted.join(", "));
         if !rest.is_empty() {
             message.push_str(" and ");
         }
-        message.push('`');
-        message.push_str(last);
-        message.push('`');
-        message
+        let _ = write!(message, "`{last}`");
     }
 
     /// `base.key` and `base[key]`, which are the same access.
@@ -249,13 +249,19 @@ impl<'env> Renderer<'env> {
     ) -> Result<Value, Error> {
         let subject = self.eval(base, at)?;
         let key = self.eval(key, at)?;
-        let key = key.to_text().ok_or_else(|| {
-            Error::new(
-                ErrorKind::InvalidOperation,
-                format!("{} cannot name a field", key.kind().phrase()),
-            )
-            .at(at)
-        })?;
+        // A `.field` and a `["field"]` both arrive as a string already, which is every key a
+        // template writes but the numeric index; only the rest are rendered into one.
+        let key = key
+            .as_str()
+            .map(Cow::Borrowed)
+            .or_else(|| key.to_text().map(Cow::Owned))
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidOperation,
+                    format!("{} cannot name a field", key.kind().phrase()),
+                )
+                .at(at)
+            })?;
         if subject.is_undefined() {
             return match self.env.undefined_behavior() {
                 UndefinedBehavior::Chainable => Ok(Value::UNDEFINED),
@@ -279,14 +285,17 @@ impl<'env> Renderer<'env> {
         if !self.env.strict_variables() {
             return Ok(Value::UNDEFINED);
         }
-        Err(Error::new(
-            ErrorKind::UnknownVariable,
-            path.map_or_else(
-                || format!("this value has no field `{key}`"),
-                |path| format!("`{path}` has no field `{key}`"),
-            ),
-        )
-        .at(at))
+        // A field typo is the commoner one, so it gets the same help a root typo gets: the names
+        // that *are* there. `Value::keys` answers for a map and for nothing else, which is exactly
+        // the case this arm is left holding.
+        let mut message = path.map_or_else(
+            || format!("this value has no field `{key}`"),
+            |path| format!("`{path}` has no field `{key}`"),
+        );
+        if let Some(known) = subject.keys() {
+            Self::list_names(&known, &mut message, "; it has ");
+        }
+        Err(Error::new(ErrorKind::UnknownVariable, message).at(at))
     }
 
     fn compare(
@@ -328,6 +337,12 @@ impl<'env> Renderer<'env> {
 
     fn apply(&self, name: &str, value: &Expr, args: &[Expr], at: Position) -> Result<Value, Error> {
         let subject = self.eval(value, at)?;
+        // Whether the filter exists is settled *before* what its subject holds, or a misspelled
+        // name under `Strict` is reported as an unset value and the message asserts a filter
+        // nobody registered — sending the author after a `| default(…)` they already wrote.
+        let filter = self.env.filter(name).ok_or_else(|| {
+            Error::new(ErrorKind::UnknownFilter, format!("unknown filter `{name}`")).at(at)
+        })?;
         if self.env.undefined_behavior() == UndefinedBehavior::Strict && subject.is_undefined() {
             return Err(Error::new(
                 ErrorKind::UndefinedError,
@@ -335,9 +350,6 @@ impl<'env> Renderer<'env> {
             )
             .at(at));
         }
-        let filter = self.env.filter(name).ok_or_else(|| {
-            Error::new(ErrorKind::UnknownFilter, format!("unknown filter `{name}`")).at(at)
-        })?;
         let args = args
             .iter()
             .map(|arg| self.eval(arg, at))
