@@ -43,8 +43,17 @@ pub struct ResultPaneProps {
     /// Whether the artifact is one this host can execute, which is what puts the run controls
     /// under the report. A WebAssembly module is; a jar is not, because running one needs a JVM.
     pub runnable: bool,
-    /// Emitted with the run box's text on every keystroke. The box is uncontrolled — the DOM holds
-    /// what was typed — so this is a push and never a round trip.
+    /// What the run box should hold. Rendered as the input's `value` so the node comes back with
+    /// the text after an unmount — a tab switch, or a compile whose artifact is not runnable —
+    /// rather than empty while [`App`] still holds a command the user can no longer see.
+    ///
+    /// [`App`]: crate::app::App
+    pub run_command: String,
+    /// Emitted with the run box's text on every keystroke. Typing does not round-trip through a
+    /// re-render: the DOM holds what was typed, and this only keeps [`App`]'s copy current for
+    /// the press that reads it.
+    ///
+    /// [`App`]: crate::app::App
     pub on_run_command: Callback<String>,
     /// Invoked when the *Run* button is pressed.
     pub on_run: Callback<()>,
@@ -183,6 +192,7 @@ impl ResultPane {
                     <input
                         class="h-9 flex-1 rounded-md border border-hairline bg-canvas px-2 font-mono text-sm text-ink outline-none"
                         type="text"
+                        value={props.run_command.clone()}
                         placeholder="exported static method and arguments, e.g. twice 21 (empty: instantiate only)"
                         oninput={on_input}
                     />

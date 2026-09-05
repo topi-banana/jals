@@ -164,9 +164,11 @@ impl Execute {
         };
         let outcome = WasmRunner::run(&request).map_err(|error| error.to_string())?;
         Ok(match outcome {
+            // Not "its static initialisers ran": the backend emits a start function only for a
+            // project with static state, so for most of them instantiating executes nothing.
             WasmRunOutcome::Instantiated => format!(
-                "instantiated {WASM_ARTIFACT}: its static initialisers ran. Name an exported \
-                 `static` method to call one."
+                "instantiated {WASM_ARTIFACT}: any static initialisers it declares have run. Name \
+                 an exported `static` method to call one."
             ),
             // Only an export can return, so `invoke` is the name here; the fallback keeps the arm
             // total rather than asserting that, since a wrong line beats a panicking pane.
@@ -242,9 +244,16 @@ impl Compile {
         // How the output is *packaged* is still this host's question: one module for the whole
         // project passes straight through, one class file per type goes into a jar.
         if matches!(manifest.build.backend, BackendKind::JalsWasm {}) {
-            let (_, bytes) = outcome.artifacts.into_iter().next().ok_or_else(|| {
-                CompileFailure::Backend("the wasm backend emitted no module".to_owned())
-            })?;
+            let (_, bytes) = outcome
+                .artifacts
+                .into_iter()
+                // By name and not by position: `jals run` looks the module up the same way, and
+                // taking whatever came first would silently offer — and execute — a second
+                // artifact the backend grew later while still calling it `WASM_ARTIFACT`.
+                .find(|(path, _)| path.to_string() == WASM_ARTIFACT)
+                .ok_or_else(|| {
+                    CompileFailure::Backend(format!("the wasm backend emitted no {WASM_ARTIFACT}"))
+                })?;
             return Ok(CompileArtifact {
                 name: WASM_ARTIFACT.to_owned(),
                 summary: format!(
@@ -489,7 +498,7 @@ mod tests {
         let manifest = manifest("[build]\nbackend = { type = \"jals-wasm\" }\n");
         let artifact = block_on_inline(Compile::workspace(&manifest, &subset_sources()))
             .expect("the subset compiles");
-        assert_eq!(artifact.name, "project.wasm");
+        assert_eq!(artifact.name, WASM_ARTIFACT);
         assert!(artifact.bytes.starts_with(b"\0asm"), "not a wasm module");
     }
 
@@ -517,7 +526,10 @@ mod tests {
         let Ok(report) = Execute::run(&artifact.bytes, "") else {
             panic!("instantiating is a run");
         };
-        assert!(report.starts_with("instantiated project.wasm"), "{report}");
+        assert!(
+            report.starts_with(&format!("instantiated {WASM_ARTIFACT}")),
+            "{report}"
+        );
         // And what the engine refuses comes back as the answer, not as a panic.
         let Err(error) = Execute::run(&artifact.bytes, "absent") else {
             panic!("there is no `absent` export");

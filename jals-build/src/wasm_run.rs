@@ -17,7 +17,9 @@
 //! position that caused it rather than mis-parsed.
 //!
 //! Naming no export at all is still a run: instantiating a module executes its start function,
-//! which is where this backend lowers a class's `static` initialisers.
+//! which is where this backend lowers a class's `static` initialisers. A project with no static
+//! state has no start function, so that run executes nothing — which is why
+//! [`WasmRunOutcome::Instantiated`] must not be rendered as a claim that it did.
 //!
 //! # One engine, no selection
 //!
@@ -78,8 +80,13 @@ impl fmt::Display for WasmValue {
         match self {
             Self::I32(value) => write!(f, "{value}"),
             Self::I64(value) => write!(f, "{value}"),
-            Self::F32(value) => write!(f, "{value}"),
-            Self::F64(value) => write!(f, "{value}"),
+            // `{:?}` and not `{}` for the two float arms. `Display` never uses exponent notation
+            // and drops a whole value's fractional part, so `Float.MAX_VALUE` came out as 39
+            // digits, `1e300` as 301 of them, and `42.0f` as `42` — indistinguishable from an
+            // `i32` on the stdout this crate's callers hand to a script. `Debug` is the
+            // round-trippable rendering: `3.4028235e38`, `1e300`, `42.0`, `-0.0`.
+            Self::F32(value) => write!(f, "{value:?}"),
+            Self::F64(value) => write!(f, "{value:?}"),
             Self::Reference => f.write_str("<reference>"),
             Self::Vector => f.write_str("<v128>"),
         }
@@ -91,6 +98,10 @@ impl fmt::Display for WasmValue {
 pub enum WasmRunOutcome {
     /// No export was named. The module was instantiated, which runs its start function — the
     /// lowering of every `static` initialiser the project declares.
+    ///
+    /// "Which runs its start function" is conditional on there being one: the backend emits a
+    /// start section only for a project with static state, so this is not a claim that any of the
+    /// project's code executed. Do not render it as one.
     Instantiated,
     /// An export was called and returned these values. Empty for a `void` method.
     Returned(Vec<WasmValue>),
@@ -101,8 +112,10 @@ pub enum WasmRunOutcome {
 pub enum WasmRunError {
     /// The bytes are not a module this engine accepts.
     Parse(String),
-    /// The module parsed but could not be instantiated — which includes a start function that
-    /// trapped, since instantiating runs it.
+    /// The module parsed but could not be instantiated: it is malformed, or a link failed, or a
+    /// segment trapped. A start function that trapped or threw is *not* here — that is the
+    /// project's own code running, and it comes back as [`Trap`](Self::Trap) or
+    /// [`Exception`](Self::Exception) like any other execution failure.
     Instantiate(String),
     /// Nothing is exported under that name.
     ///
@@ -139,6 +152,15 @@ pub enum WasmRunError {
     },
     /// The call trapped.
     Trap(String),
+    /// The code threw and nothing caught it.
+    ///
+    /// Its own answer rather than a [`Trap`](Self::Trap), because the two are different failures
+    /// and this is the one a Java program reaches on purpose: the backend lowers every `throw`
+    /// onto the module's tag, and an uncaught one leaves the engine as `Error::Exception`. What
+    /// the object *is* cannot be read from here — it belongs to the embedder's collector and the
+    /// store is gone by the time a caller sees this — so the message says that rather than
+    /// pretending a trap occurred.
+    Exception,
 }
 
 impl fmt::Display for WasmRunError {
@@ -155,9 +177,14 @@ impl fmt::Display for WasmRunError {
                 }
                 write!(f, "; it exports {}", available.join(", "))
             }
+            // `position + 1` in both messages below: the field is a zero-based index into the
+            // signature, but every other number here is a human count — `ArgumentCount` says
+            // "takes 2 argument(s)" — and one message counting from zero beside one counting from
+            // one sends a reader to edit the wrong argument.
             Self::UnsupportedParameter { name, position, ty } => write!(
                 f,
-                "`{name}` takes {ty} at position {position}, which cannot be written as an argument"
+                "`{name}` takes {ty} at argument {}, which cannot be written as an argument",
+                position + 1
             ),
             Self::ArgumentCount {
                 name,
@@ -171,9 +198,11 @@ impl fmt::Display for WasmRunError {
                 given,
             } => write!(
                 f,
-                "argument {position} of `{name}` is {expected}, and `{given}` is not one"
+                "argument {} of `{name}` is {expected}, and `{given}` is not one",
+                position + 1
             ),
             Self::Trap(message) => write!(f, "the call trapped: {message}"),
+            Self::Exception => f.write_str("the code threw an exception and nothing caught it"),
         }
     }
 }
@@ -210,10 +239,20 @@ impl WasmRunner {
     /// [`Backend::describe`](crate::Backend::describe) which takes its request: a `--dry-run`
     /// compiles nothing, so at the point this is asked there are no module bytes to put in one.
     pub fn describe(invoke: Option<&str>, args: &[String]) -> String {
+        // Every arm names the instantiate step, because every run performs it: an export is
+        // reached only after the module's start function has already executed, and that step is
+        // the one that can fail before the named export is ever looked up. Describing a run as
+        // only "invoke `f`" understated it.
         match invoke {
-            Some(name) if args.is_empty() => format!("tinywasm: invoke `{name}`"),
-            Some(name) => format!("tinywasm: invoke `{name}` with {}", args.join(" ")),
-            None => "tinywasm: instantiate the module, running its static initialisers".to_owned(),
+            Some(name) if args.is_empty() => {
+                format!("tinywasm: instantiate the module, then invoke `{name}`")
+            }
+            Some(name) => format!(
+                "tinywasm: instantiate the module, then invoke `{name}` with {}",
+                args.join(" ")
+            ),
+            None => "tinywasm: instantiate the module, running any static initialisers it has"
+                .to_owned(),
         }
     }
 
@@ -222,10 +261,17 @@ impl WasmRunner {
         let module = tinywasm::parse_bytes(request.module)
             .map_err(|error| WasmRunError::Parse(error.to_string()))?;
         let mut store = Store::default();
-        // Instantiating runs the start function, which is where a class's `static` initialisers
-        // are lowered — so this is already an execution, whether or not an export is named next.
-        let instance = ModuleInstance::instantiate(&mut store, &module, None)
+        // Instantiating in two halves rather than through `instantiate`, which is exactly these
+        // two calls. Only the first is *linking* — a malformed module, an unknown import, a
+        // segment that traps. The second runs the start function, which is where a class's
+        // `static` initialisers are lowered, so it is already the project's own code executing:
+        // folding its failure into `Instantiate` reported a divide-by-zero in a `static {}` block
+        // as "the module could not be instantiated", which sends the reader to the encoding.
+        let instance = ModuleInstance::instantiate_no_start(&mut store, &module, None)
             .map_err(|error| WasmRunError::Instantiate(error.to_string()))?;
+        instance
+            .start(&mut store)
+            .map_err(Self::execution_failure)?;
 
         let Some(name) = request.invoke else {
             return Ok(WasmRunOutcome::Instantiated);
@@ -241,6 +287,19 @@ impl WasmRunner {
             .map_err(|error| WasmRunError::Instantiate(error.to_string()))?;
         let params = signature.params().to_vec();
         let results = signature.results().len();
+        // Before the count, not after it. An export taking a reference cannot be called with any
+        // number of arguments, so reporting the arity first tells the caller to invent one for a
+        // parameter the next message exists to refuse — and the arity is the only thing they can
+        // act on, so they do.
+        for (position, ty) in params.iter().enumerate() {
+            if matches!(ty, WasmType::V128 | WasmType::Ref(_)) {
+                return Err(WasmRunError::UnsupportedParameter {
+                    name: name.to_owned(),
+                    position,
+                    ty: Self::type_name(*ty),
+                });
+            }
+        }
         if params.len() != request.args.len() {
             return Err(WasmRunError::ArgumentCount {
                 name: name.to_owned(),
@@ -257,10 +316,22 @@ impl WasmRunner {
         // `Default` — the placeholder is overwritten by every result the call produces.
         let mut returned = vec![tinywasm::WasmValue::I32(0); results];
         func.call(&mut store, &arguments, &mut returned)
-            .map_err(|error| WasmRunError::Trap(error.to_string()))?;
+            .map_err(Self::execution_failure)?;
         Ok(WasmRunOutcome::Returned(
             returned.iter().map(Self::value).collect(),
         ))
+    }
+
+    /// One failure of the project's own code, as this crate's vocabulary.
+    ///
+    /// A `throw` and a trap leave the engine as different variants and are different things to
+    /// tell a reader about, so they stay apart here. Everything else the engine can return at a
+    /// call is a trap as far as a caller is concerned.
+    fn execution_failure(error: tinywasm::Error) -> WasmRunError {
+        match error {
+            tinywasm::Error::Exception(_) => WasmRunError::Exception,
+            error => WasmRunError::Trap(error.to_string()),
+        }
     }
 
     /// The names of every function the module exports, in module order.
@@ -511,6 +582,17 @@ mod tests {
                 ty: "a reference",
             })
         );
+        // And with no argument at all, which is what a caller actually types first. The arity is
+        // the wrong thing to report here: no number of arguments makes this export callable, so
+        // an `ArgumentCount` would send them to supply one for a parameter this refuses.
+        assert_eq!(
+            run(&module, Some("read"), &[]),
+            Err(WasmRunError::UnsupportedParameter {
+                name: "read".to_owned(),
+                position: 0,
+                ty: "a reference",
+            })
+        );
     }
 
     /// A trap is the call failing inside the engine rather than the request being wrong, so it is
@@ -523,6 +605,63 @@ mod tests {
         let Err(WasmRunError::Trap(_)) = run(&module, Some("div"), &args) else {
             panic!("dividing by zero traps");
         };
+    }
+
+    /// A `static` initialiser that traps is the *project's* code failing, not a module that could
+    /// not be instantiated — the two send a reader to different places. This is the only test with
+    /// a start section at all: the backend emits one solely for a class with static state.
+    #[test]
+    fn a_trapping_static_initialiser_is_an_execution_failure() {
+        let module = module(
+            "public class Main {\n\
+             \x20   static int x;\n\
+             \x20   static { x = divide(1, 0); }\n\
+             \x20   static int divide(int a, int b) { return a / b; }\n\
+             \x20   public static int get() { return x; }\n\
+             }\n",
+        );
+        let Err(WasmRunError::Trap(_)) = run(&module, None, &[]) else {
+            panic!("a trapping start function is a trap, not a failure to instantiate");
+        };
+    }
+
+    /// A `throw` nothing catches is its own answer. It is the failure a Java program reaches on
+    /// purpose, and calling it a trap said the engine broke rather than the code threw.
+    #[test]
+    fn an_uncaught_throw_is_not_reported_as_a_trap() {
+        let module = module(
+            "public class Main {\n\
+             \x20   public static int parse(int n) {\n\
+             \x20       if (n < 0) { throw new Boom(); }\n\
+             \x20       return n;\n\
+             \x20   }\n\
+             }\n\
+             class Boom extends RuntimeException { }\n",
+        );
+        let args = ["-1".to_owned()];
+        assert_eq!(
+            run(&module, Some("parse"), &args),
+            Err(WasmRunError::Exception)
+        );
+    }
+
+    /// `describe` has no other caller in the workspace — `jals run --dry-run` is its one production
+    /// use — so this is what holds its three arms honest. Every arm names the instantiate step,
+    /// because every run performs it before it looks an export up.
+    #[test]
+    fn every_described_run_names_the_instantiate_step() {
+        let args = ["3".to_owned(), "4".to_owned()];
+        for described in [
+            WasmRunner::describe(None, &[]),
+            WasmRunner::describe(Some("add"), &[]),
+            WasmRunner::describe(Some("add"), &args),
+        ] {
+            assert!(
+                described.contains("instantiate"),
+                "an export is reached only after the module is instantiated: {described}"
+            );
+        }
+        assert!(WasmRunner::describe(Some("add"), &args).contains("3 4"));
     }
 
     #[test]

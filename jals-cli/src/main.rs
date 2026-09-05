@@ -1012,6 +1012,15 @@ impl RunArgs {
                  exported method instead: `--invoke <name>`."
             );
         }
+        if wasm && self.invoke.is_none() && !self.args.is_empty() {
+            bail!(
+                "`jals run` passed {} argument(s) after `--`, and `[build] backend` is \
+                 `jals-wasm`, which has no entry point to pass them to — a module is instantiated, \
+                 and only a named export takes arguments. Name it: `--invoke <name> -- {}`.",
+                self.args.len(),
+                self.args.join(" ")
+            );
+        }
         if let Some(invoke) = &self.invoke
             && !wasm
         {
@@ -1020,6 +1029,13 @@ impl RunArgs {
                  backend` is `{}`, which produces class files. Run those by their main class, or \
                  select `backend = {{ type = \"jals-wasm\" }}`.",
                 manifest.build.backend.tag_name()
+            );
+        }
+        if wasm && (manifest.run.main_class.is_some() || !manifest.bin.is_empty()) {
+            session.shell().warn(
+                "this project declares a main class, and `[build] backend` is `jals-wasm`, which \
+                 compiles to one WebAssembly module with no main class in it. The declaration is \
+                 ignored; the module's entry point is an exported method named with `--invoke`.",
             );
         }
         let features = self.features.resolve(&manifest)?;
@@ -1155,8 +1171,9 @@ impl RunArgs {
     ///
     /// Returning values on stdout is why `jals run` takes the stream — the same contract `jals
     /// test`'s result objects have. A run that named no export produced no value and writes
-    /// nothing there; it still ran the module's static initialisers, which is reported on stderr
-    /// like every other status line.
+    /// nothing there; what it did is a `-v` status line on stderr, and it is phrased as "any
+    /// static initialisers it has" rather than as a claim that some ran — the backend emits a
+    /// start function only for a project with static state.
     fn run_module(
         &self,
         session: &Session,
@@ -1183,7 +1200,7 @@ impl RunArgs {
         match jals_build::WasmRunner::run(&request).map_err(|error| anyhow!("{error}"))? {
             jals_build::WasmRunOutcome::Instantiated => session.shell().verbose_status(
                 Verb::Running,
-                "instantiated the module, running its static initialisers",
+                "instantiated the module, running any static initialisers it has",
             ),
             jals_build::WasmRunOutcome::Returned(values) => {
                 for value in values {

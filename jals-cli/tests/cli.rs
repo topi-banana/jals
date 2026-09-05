@@ -2498,24 +2498,7 @@ fn the_jals_backend_compiles_without_a_jdk() {
 /// module is the only statement about the encoding that cannot be argued with.
 #[test]
 fn the_wasm_backend_emits_one_module_for_the_project() {
-    let dir = tempdir().unwrap();
-    std::fs::write(
-        dir.path().join("jals.toml"),
-        "[package]\nname = \"demo\"\n\n[build]\nbackend = { type = \"jals-wasm\" }\n",
-    )
-    .unwrap();
-    let src = dir.path().join("src/main/java");
-    std::fs::create_dir_all(&src).unwrap();
-    std::fs::write(
-        src.join("Point.java"),
-        "public class Point {\n\
-         \x20   int x;\n\
-         \x20   Point(int x) { this.x = x; }\n\
-         \x20   int get() { return x; }\n\
-         \x20   public static int roundTrip(int n) { Point p = new Point(n); return p.get(); }\n\
-         }\n",
-    )
-    .unwrap();
+    let dir = wasm_run_project();
 
     let output = jals()
         .args(["build", "--manifest-path"])
@@ -2556,7 +2539,7 @@ fn the_wasm_backend_emits_one_module_for_the_project() {
     assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "7");
 }
 
-/// A `jals-wasm` project scaffolded for the run tests below: one class with two `static` methods
+/// A `jals-wasm` project scaffolded for the run tests below: one class with one `static` method
 /// and an object allocation, which is what makes the module use the GC types at all.
 fn wasm_run_project() -> tempfile::TempDir {
     let dir = tempdir().unwrap();
@@ -2663,6 +2646,59 @@ fn a_main_class_is_refused_for_a_wasm_backed_project() {
     assert!(
         stderr.contains("no main class") && stderr.contains("--invoke"),
         "expected the wasm entry-point explanation, got: {stderr}"
+    );
+}
+
+/// Arguments with no `--invoke` are the third entry-point contradiction, and the only one clap
+/// cannot see at all: a module has nothing to hand them to, so accepting them and instantiating
+/// anyway would succeed having done something nobody asked for.
+#[test]
+fn arguments_without_an_export_are_refused_for_a_wasm_backed_project() {
+    let dir = wasm_run_project();
+
+    let output = jals()
+        .args(["run", "--manifest-path"])
+        .arg(dir.path().join("jals.toml"))
+        .args(["--", "7"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no entry point to pass them to") && stderr.contains("--invoke"),
+        "expected the arguments to be refused rather than dropped, got: {stderr}"
+    );
+}
+
+/// A `[run] main-class` reaches the same contradiction as `--main-class` by a route the flag check
+/// cannot see. A warning and not a refusal — the key may be left over from the backend the project
+/// switched away from — but never silence, and never on the stdout `jals run` has taken.
+#[test]
+fn a_manifest_main_class_is_reported_for_a_wasm_backed_project() {
+    let dir = wasm_run_project();
+    std::fs::write(
+        dir.path().join("jals.toml"),
+        "[package]\nname = \"demo\"\n\n[run]\nmain-class = \"Point\"\n\n\
+         [build]\nbackend = { type = \"jals-wasm\" }\n",
+    )
+    .unwrap();
+
+    let output = jals()
+        .args(["run", "--manifest-path"])
+        .arg(dir.path().join("jals.toml"))
+        .args(["--invoke", "roundTrip", "--", "7"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "7");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("declares a main class") && stderr.contains("ignored"),
+        "expected the dead declaration to be reported, got: {stderr}"
     );
 }
 

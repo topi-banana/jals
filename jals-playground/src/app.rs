@@ -1606,8 +1606,12 @@ impl Component for App {
                 };
                 self.result_tab = PaneTab::Output;
                 // Dropped before the compile rather than after it fails, so a stale jar is never
-                // downloadable while a newer compile is in flight.
+                // downloadable while a newer compile is in flight. The Run box and the last run's
+                // report go with it: both describe these bytes, and leaving them up renders a
+                // button whose handler finds no artifact and does nothing at all.
                 self.compile_artifact = None;
+                self.compile_runnable = false;
+                self.run_output = None;
                 let manifest = match ConfigParseError::parse_manifest(&self.manifest_src) {
                     Ok(manifest) => manifest,
                     Err(error) => {
@@ -1694,8 +1698,11 @@ impl Component for App {
             }
             Msg::RunCommandChanged(command) => {
                 self.run_command = command;
-                // The box is uncontrolled, like the header's proxy input: the DOM already holds
-                // what was typed, so re-rendering would only fight the cursor.
+                // No re-render: the DOM already holds what was typed, so redrawing would only
+                // fight the cursor. The value still travels to the pane as a prop, because the
+                // node does not always survive — switching to the Syntax tab, or a compile whose
+                // artifact is not runnable, unmounts it — and a box that came back empty while
+                // this field kept the old text ran a command nobody could see.
                 false
             }
             Msg::RunModule => {
@@ -1779,6 +1786,7 @@ impl Component for App {
                             artifact={self.compile_artifact.as_ref().map(|(name, _)| name.clone())}
                             on_download={link.callback(|_| Msg::Download)}
                             runnable={self.compile_runnable}
+                            run_command={self.run_command.clone()}
                             on_run_command={link.callback(Msg::RunCommandChanged)}
                             on_run={link.callback(|_| Msg::RunModule)}
                             run_output={self.run_output.clone()}
