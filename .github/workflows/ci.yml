@@ -311,8 +311,14 @@ jobs:
       # cargo-hawk release to install, pinned like the workflow's other tools. Hawk uses
       # `rustc_private`, so it is bound to one exact rustc: `HAWK_RUSTC` is that compiler, and
       # bumping `HAWK_VERSION` means bumping it to whatever the new release pins.
-      HAWK_VERSION: "0.1.9"
-      HAWK_RUSTC: "1.97.1"
+      #
+      # 0.1.13 is the first release on rustc 1.98, and that is why this moved off 0.1.9/1.97.1:
+      # `jals-build`'s `wasm-run` feature pins tinywasm to a revision declaring `rust-version =
+      # "1.98"`, which cargo refuses under an older compiler before hawk's instrumented build even
+      # starts. The bump found nothing — 0 findings against the same hawk.toml — so it is a
+      # toolchain move and not a re-tuning.
+      HAWK_VERSION: "0.1.13"
+      HAWK_RUSTC: "1.98.0"
     steps:
       - parallel:
           - uses: actions/checkout@v7

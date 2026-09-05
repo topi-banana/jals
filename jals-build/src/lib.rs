@@ -72,6 +72,8 @@ pub mod task;
 mod test_plan;
 #[cfg(feature = "native")]
 mod toolchain;
+#[cfg(feature = "wasm-run")]
+mod wasm_run;
 
 #[cfg(feature = "native")]
 mod native;
@@ -103,6 +105,9 @@ pub use test_plan::{Partition, PartitionError, RunIgnored, Selection, TestCase, 
 pub(crate) use toolchain::Candidates;
 #[cfg(feature = "native")]
 pub use toolchain::{BuildOutcome, JdkInstall, Runtime, ToolchainError, ToolchainFuture};
+
+#[cfg(feature = "wasm-run")]
+pub use wasm_run::{WasmRunError, WasmRunOutcome, WasmRunRequest, WasmRunner, WasmValue};
 
 #[cfg(feature = "native")]
 pub use native::SubprocessToolchain;

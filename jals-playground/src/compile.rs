@@ -22,6 +22,7 @@ use std::fmt;
 
 use jals_build::{
     BackendAbsence, BackendOptions, BackendRequest, BackendSelection, BackendSource, RunTarget,
+    WasmRunOutcome, WasmRunRequest, WasmRunner,
 };
 use jals_classpath::JarPackage;
 use jals_config::{BackendKind, Manifest};
@@ -31,8 +32,12 @@ use jals_storage::{ArtifactCache, MemoryCache, RelativePath};
 /// The name a project with no usable `[package] name` is packaged under.
 const FALLBACK_JAR: &str = "project.jar";
 
-/// The whole-project WebAssembly module's name, matching what `jals build` writes to disk.
-const WASM_ARTIFACT: &str = "project.wasm";
+/// The whole-project WebAssembly module's name.
+///
+/// The backend's own constant rather than a literal that matches it: the same name is what `jals
+/// build` writes to disk and what `jals run` reads back, and three copies of it is two chances to
+/// disagree.
+const WASM_ARTIFACT: &str = jals_build::JalsBackend::WASM_MODULE;
 
 /// What one compile produced: a downloadable file plus a line describing it.
 pub struct CompileArtifact {
@@ -41,6 +46,13 @@ pub struct CompileArtifact {
     pub bytes: Vec<u8>,
     /// One human-readable line about what was produced, shown in the Build output pane.
     pub summary: String,
+    /// Whether this host can execute what it just produced, which decides whether the pane offers
+    /// to. A module can be: the engine is compiled into this binary. A jar cannot — running one
+    /// needs a JVM, and a browser tab has no process to start one in.
+    ///
+    /// A field rather than a test on [`name`](Self::name), so that what decides it is the backend
+    /// that produced the artifact and not a string comparison a second reader could get wrong.
+    pub runnable: bool,
 }
 
 /// Why a compile produced no artifact. The [`Display`](fmt::Display) is what the pane shows.
@@ -115,6 +127,68 @@ impl fmt::Display for CompileFailure {
     }
 }
 
+/// Running the module a `jals-wasm` compile produced, in the tab that compiled it.
+///
+/// The browser cannot spawn `java`, which is why the *Build* button offers a `.jar` as a download
+/// rather than running it. A WebAssembly module is the case where that changes: `jals-build`'s
+/// engine is an interpreter over `core + alloc` with no host in it, so it compiles to `wasm32` like
+/// everything else here and the module runs where it was built. What `jals run --invoke` reaches
+/// and what this reaches are the same code.
+///
+/// Beside [`Compile`] and free of the DOM for the same reason it is: a compile is `(path, text)` in
+/// and bytes out, and a run is bytes in and a line out — both host-testable, neither able to touch
+/// a browser API.
+pub struct Execute;
+
+impl Execute {
+    /// Instantiate `module`, and call an export when `command` names one.
+    ///
+    /// `command` is what the user typed: an export name followed by its arguments, or nothing at
+    /// all. Split here rather than in the view, so what the pane holds is a string and what decides
+    /// its meaning is testable without one.
+    ///
+    /// An empty command is still a run — instantiating executes the module's start function, which
+    /// is where the backend lowers every `static` initialiser the project declares.
+    ///
+    /// The answer is a line rather than a value because that is what the caller does with it: the
+    /// Build output pane is text, and nothing downstream computes with a returned `i32`.
+    pub fn run(module: &[u8], command: &str) -> Result<String, String> {
+        let mut parts = command.split_whitespace();
+        let invoke = parts.next();
+        let args: Vec<String> = parts.map(ToOwned::to_owned).collect();
+        let request = WasmRunRequest {
+            module,
+            invoke,
+            args: &args,
+            progress: &jals_progress::Progress::SILENT,
+        };
+        let outcome = WasmRunner::run(&request).map_err(|error| error.to_string())?;
+        Ok(match outcome {
+            WasmRunOutcome::Instantiated => format!(
+                "instantiated {WASM_ARTIFACT}: its static initialisers ran. Name an exported \
+                 `static` method to call one."
+            ),
+            // Only an export can return, so `invoke` is the name here; the fallback keeps the arm
+            // total rather than asserting that, since a wrong line beats a panicking pane.
+            WasmRunOutcome::Returned(values) if values.is_empty() => {
+                format!(
+                    "`{}` returned (it is void)",
+                    invoke.unwrap_or(WASM_ARTIFACT)
+                )
+            }
+            WasmRunOutcome::Returned(values) => format!(
+                "`{}` returned {}",
+                invoke.unwrap_or(WASM_ARTIFACT),
+                values
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ),
+        })
+    }
+}
+
 /// Namespace for compiling the in-browser workspace.
 pub struct Compile;
 
@@ -179,6 +253,7 @@ impl Compile {
                     bytes.len()
                 ),
                 bytes,
+                runnable: true,
             });
         }
 
@@ -202,6 +277,9 @@ impl Compile {
             name,
             bytes,
             summary,
+            // A jar is the download and nothing else here: the class files in it are for a JVM,
+            // and this host cannot start one.
+            runnable: false,
         })
     }
 
@@ -413,6 +491,49 @@ mod tests {
             .expect("the subset compiles");
         assert_eq!(artifact.name, "project.wasm");
         assert!(artifact.bytes.starts_with(b"\0asm"), "not a wasm module");
+    }
+
+    /// One module compiled here, and executed here: the browser tab that built it is also what
+    /// runs it, with no download and no engine on the other side.
+    #[test]
+    fn a_module_runs_in_the_host_that_compiled_it() {
+        let manifest = manifest("[build]\nbackend = { type = \"jals-wasm\" }\n");
+        let artifact = block_on_inline(Compile::workspace(&manifest, &subset_sources()))
+            .expect("the subset compiles");
+        assert!(artifact.runnable);
+
+        // A `static` method reached by name, with its argument read against the type the export
+        // declares.
+        assert_eq!(
+            Execute::run(&artifact.bytes, "twice 21"),
+            Ok("`twice` returned 42".to_owned())
+        );
+        // A cross-file call, which is what compiling every source as one unit is for.
+        assert_eq!(
+            Execute::run(&artifact.bytes, "run"),
+            Ok("`run` returned 6".to_owned())
+        );
+        // Naming nothing is still a run.
+        let Ok(report) = Execute::run(&artifact.bytes, "") else {
+            panic!("instantiating is a run");
+        };
+        assert!(report.starts_with("instantiated project.wasm"), "{report}");
+        // And what the engine refuses comes back as the answer, not as a panic.
+        let Err(error) = Execute::run(&artifact.bytes, "absent") else {
+            panic!("there is no `absent` export");
+        };
+        assert!(error.contains("no function named `absent`"), "{error}");
+    }
+
+    /// The jar is a download and nothing more: running the class files in it needs a JVM, which a
+    /// browser tab cannot start. That is a property of the artifact, so the pane reads it off the
+    /// compile rather than guessing from the file name.
+    #[test]
+    fn a_jar_is_not_something_this_host_can_run() {
+        let manifest = manifest("[build]\nbackend = { type = \"jals\" }\n");
+        let artifact = block_on_inline(Compile::workspace(&manifest, &subset_sources()))
+            .expect("the subset compiles");
+        assert!(!artifact.runnable);
     }
 
     /// The playground's seed project — `new`, string concatenation, arrays and all — compiles.

@@ -41,6 +41,15 @@ pub struct JalsBackend {
 }
 
 impl JalsBackend {
+    /// The project-relative path the whole-project WebAssembly module is published under.
+    ///
+    /// One name, because there is one module: wasm has no dynamic loading and no classpath, so the
+    /// unit is the project rather than the declared type. Published as a constant because three
+    /// places have to agree on it — this backend writes it, `jals run` reads it back to execute,
+    /// and the playground offers it as a download — and a literal repeated in each is three places
+    /// to edit and two chances to be wrong.
+    pub const WASM_MODULE: &'static str = "project.wasm";
+
     /// The class-file major version each `--release N` produces: 45 for Java 1.1, then one per
     /// release (JVMS §4.1 Table 4.1-A).
     ///
@@ -138,7 +147,7 @@ impl JalsBackend {
                 // returns past the `finish` below. Ending the unit here is what keeps a green
                 // wasm build from reporting `Abandoned`, which says the emitter has a hole in it.
                 let outcome = match CompileWasm::project(&typed_files, &index) {
-                    Ok(module) => match RelativePath::parse("project.wasm") {
+                    Ok(module) => match RelativePath::parse(Self::WASM_MODULE) {
                         Ok(path) => BackendOutcome::compiled(alloc::vec![(path, module)]),
                         Err(error) => BackendOutcome::failed(alloc::vec![format!("{error:?}")]),
                     },

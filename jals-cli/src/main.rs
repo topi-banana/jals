@@ -240,6 +240,11 @@ struct RunArgs {
     #[arg(long, value_name = "NAME", conflicts_with = "main_class")]
     bin: Option<String>,
 
+    /// Call this exported function of the WebAssembly module, for a `jals-wasm` project. Without
+    /// it the module is instantiated, which runs its static initialisers.
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["main_class", "bin"])]
+    invoke: Option<String>,
+
     /// Arguments passed to the program after `--`.
     #[arg(last = true)]
     args: Vec<String>,
@@ -989,29 +994,50 @@ impl RunArgs {
         }
         let (mut manifest, root) = App::resolve_manifest(self.manifest_path.as_deref()).await?;
         session.note_project(&root, manifest.package.name.as_deref());
-        // `jals run` is `java`, and a WebAssembly module is not something `java` can be handed. The
-        // check is here rather than at the launch because the failure would otherwise surface as a
-        // missing main class in a `classes-dir` that holds a `.wasm` — true, and useless.
-        if matches!(
+        // Which of the two run steps this project has. `[build] backend` decides it, because the
+        // two produce different things: class files a JVM loads by name, or one module an engine
+        // instantiates. Read once here rather than matched again at each step.
+        let wasm = matches!(
             manifest.build.backend,
             jals_config::BackendKind::JalsWasm {}
-        ) {
+        );
+        // clap can reject two flags that contradict each other, but not a flag that contradicts the
+        // *manifest* — so the entry-point selectors are checked against the backend here. Ignoring
+        // one silently is the worst of the three options: the run would succeed having done
+        // something the user did not ask for.
+        if wasm && (self.main_class.is_some() || self.bin.is_some()) {
             bail!(
-                "`jals run` runs a main class on a JVM, and `[build] backend` is `jals-wasm`, \
-                 which compiles the project to a WebAssembly module instead. Run the module with a \
-                 wasm engine (`wasmtime run --invoke <method> {}/project.wasm`), or switch the \
-                 backend to `jals` or `javac` to produce class files.",
-                manifest.build.classes_dir
+                "`[build] backend` is `jals-wasm`, which compiles the project to one WebAssembly \
+                 module with no main class in it — wasm has no entry-point convention. Name the \
+                 exported method instead: `--invoke <name>`."
+            );
+        }
+        if let Some(invoke) = &self.invoke
+            && !wasm
+        {
+            bail!(
+                "`--invoke {invoke}` names an export of a WebAssembly module, and `[build] \
+                 backend` is `{}`, which produces class files. Run those by their main class, or \
+                 select `backend = {{ type = \"jals-wasm\" }}`.",
+                manifest.build.backend.tag_name()
             );
         }
         let features = self.features.resolve(&manifest)?;
         // `--main-class` overrides all manifest-based selection; otherwise resolve the entry point
         // from `[[bin]]` / `[package] default-run` / `[run] main-class`.
-        let main_class: String = match &self.main_class {
-            Some(explicit) => explicit.clone(),
-            None => jals_build::RunTarget::resolve(&manifest, self.bin.as_deref())
-                .map_err(|e| anyhow!("{e}"))?
-                .to_owned(),
+        //
+        // Inside the JVM arm, because a wasm project declares no main class and must not be asked
+        // for one: its entry point is an export name, which is a different question with a
+        // different answer for the same manifest.
+        let main_class: Option<String> = if wasm {
+            None
+        } else {
+            Some(match &self.main_class {
+                Some(explicit) => explicit.clone(),
+                None => jals_build::RunTarget::resolve(&manifest, self.bin.as_deref())
+                    .map_err(|e| anyhow!("{e}"))?
+                    .to_owned(),
+            })
         };
         // Assemble the compile inputs once. Transitive sources compile into `classes-dir`, while every
         // verified graph classpath artifact is shared by the javac and java requests.
@@ -1035,15 +1061,19 @@ impl RunArgs {
             session,
         )
         .await?;
-        let run_request = jals_build::RunRequest {
-            manifest: &manifest,
-            project_root: &root,
-            jvm_args: &inputs.jvm_args,
-            main_class: &main_class,
-            program_args: &self.args,
-            extra_classpath: &inputs.extra_classpath,
-            run_env: &inputs.run_env,
-        };
+        // Built only for the JVM arm: every field of a `RunRequest` describes a `java` invocation —
+        // a main class, a classpath, JVM arguments — and a module run has none of them.
+        let run_request = main_class
+            .as_deref()
+            .map(|main_class| jals_build::RunRequest {
+                manifest: &manifest,
+                project_root: &root,
+                jvm_args: &inputs.jvm_args,
+                main_class,
+                program_args: &self.args,
+                extra_classpath: &inputs.extra_classpath,
+                run_env: &inputs.run_env,
+            });
         // The compile step goes through the same `[build] backend` selection `jals build` uses, so a
         // manifest asking for the in-process compiler gets it here too. The run step is selected
         // independently from `[toolchain] runtime`: `"builtin"` is the in-process dummy, anything
@@ -1058,23 +1088,28 @@ impl RunArgs {
             session.for_package(App::package_ref(&manifest)),
         )
         .await?;
-        let runtime = <dyn Runtime>::select(&manifest, exec).await;
+        // Which `java` to start is a question only the JVM arm has. A module is executed by the
+        // engine compiled into this binary, so there is nothing to select and nothing to discover.
+        let runtime = match &run_request {
+            Some(_) => Some(<dyn Runtime>::select(&manifest, exec).await),
+            None => None,
+        };
         let compile_request = plan.request();
 
         if self.dry_run {
             session
                 .shell()
                 .machine(plan.backend.describe(&compile_request));
-            session.shell().machine(runtime.describe_run(&run_request));
-        } else {
-            session.shell().verbose_status(
-                Verb::Running,
-                format_args!("`{}`", plan.backend.describe(&compile_request)),
-            );
-        }
-        if self.dry_run {
+            session.shell().machine(match (&runtime, &run_request) {
+                (Some(runtime), Some(run_request)) => runtime.describe_run(run_request),
+                _ => jals_build::WasmRunner::describe(self.invoke.as_deref(), &self.args),
+            });
             return Ok(ExitCode::SUCCESS);
         }
+        session.shell().verbose_status(
+            Verb::Running,
+            format_args!("`{}`", plan.backend.describe(&compile_request)),
+        );
 
         // Compile first; only run when compilation succeeds. `finish_compile` also persists whatever
         // an in-process backend produced, so the classes are on disk before `java` looks for them.
@@ -1089,11 +1124,17 @@ impl RunArgs {
             return Ok(App::outcome_exit_code(outcome.code()));
         }
         session.finished(&format!("`{}` profile", App::profile_label(&manifest)));
+
+        // The two are built together, so one without the other cannot happen; the module arm is
+        // what the `else` is.
+        let (Some(runtime), Some(run_request)) = (&runtime, &run_request) else {
+            return self.run_module(session, &outcome, &package);
+        };
         let running = package.begin(jals_progress::Activity::Run, run_request.main_class);
         // The child owns this terminal from here on and never gives it back, so the display comes
         // down rather than being suspended around it. The `Running` line is already out.
         session.shell().clear_progress();
-        let run_outcome = match runtime.run(&run_request).await {
+        let run_outcome = match runtime.run(run_request).await {
             Ok(run_outcome) => {
                 running.finish(jals_progress::Outcome::Completed);
                 run_outcome
@@ -1104,6 +1145,53 @@ impl RunArgs {
             }
         };
         Ok(App::outcome_exit_code(run_outcome.code))
+    }
+
+    /// Execute the module the wasm backend just produced, in this process.
+    ///
+    /// The bytes come from the backend's own outcome rather than from the file `finish_compile`
+    /// wrote beside it: what runs is then exactly what was compiled, and the path is read by one
+    /// place instead of two.
+    ///
+    /// Returning values on stdout is why `jals run` takes the stream — the same contract `jals
+    /// test`'s result objects have. A run that named no export produced no value and writes
+    /// nothing there; it still ran the module's static initialisers, which is reported on stderr
+    /// like every other status line.
+    fn run_module(
+        &self,
+        session: &Session,
+        outcome: &jals_build::BackendOutcome,
+        progress: &jals_progress::Progress,
+    ) -> Result<ExitCode> {
+        let module = outcome
+            .artifacts
+            .iter()
+            .find(|(path, _)| path.to_string() == jals_build::JalsBackend::WASM_MODULE)
+            .map(|(_, bytes)| bytes.as_slice())
+            .with_context(|| {
+                format!(
+                    "the compile produced no `{}`",
+                    jals_build::JalsBackend::WASM_MODULE
+                )
+            })?;
+        let request = jals_build::WasmRunRequest {
+            module,
+            invoke: self.invoke.as_deref(),
+            args: &self.args,
+            progress,
+        };
+        match jals_build::WasmRunner::run(&request).map_err(|error| anyhow!("{error}"))? {
+            jals_build::WasmRunOutcome::Instantiated => session.shell().verbose_status(
+                Verb::Running,
+                "instantiated the module, running its static initialisers",
+            ),
+            jals_build::WasmRunOutcome::Returned(values) => {
+                for value in values {
+                    session.shell().machine(value);
+                }
+            }
+        }
+        Ok(ExitCode::SUCCESS)
     }
 }
 

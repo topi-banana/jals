@@ -2556,16 +2556,125 @@ fn the_wasm_backend_emits_one_module_for_the_project() {
     assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "7");
 }
 
-/// `jals run` hands a main class to `java`, which cannot be given a WebAssembly module. Saying so
-/// beats the alternative: a `classes-dir` holding a `.wasm` and a "no main class" error that is
-/// true and useless.
+/// A `jals-wasm` project scaffolded for the run tests below: one class with two `static` methods
+/// and an object allocation, which is what makes the module use the GC types at all.
+fn wasm_run_project() -> tempfile::TempDir {
+    let dir = tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("jals.toml"),
+        "[package]\nname = \"demo\"\n\n[build]\nbackend = { type = \"jals-wasm\" }\n",
+    )
+    .unwrap();
+    let src = dir.path().join("src/main/java");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("Point.java"),
+        "public class Point {\n\
+         \x20   int x;\n\
+         \x20   Point(int x) { this.x = x; }\n\
+         \x20   int get() { return x; }\n\
+         \x20   public static int roundTrip(int n) { Point p = new Point(n); return p.get(); }\n\
+         }\n",
+    )
+    .unwrap();
+    dir
+}
+
+/// `jals run --invoke` compiles the project to a module and executes an export of it in this
+/// process, with no JVM and no wasm engine on the host.
+///
+/// The value lands on stdout, which is the contract `jals run` already takes the stream for: a
+/// script reads the answer there, and every status line stays on stderr.
 #[test]
-fn running_a_wasm_backed_project_explains_itself() {
+fn running_a_wasm_backed_project_invokes_an_export() {
+    let dir = wasm_run_project();
+
+    let output = jals()
+        .args(["run", "--manifest-path"])
+        .arg(dir.path().join("jals.toml"))
+        .args(["--invoke", "roundTrip", "--", "7"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "7");
+}
+
+/// Naming no export is still a run: instantiating executes the module's start function, which is
+/// where the backend lowers a class's `static` initialisers. Nothing is written to stdout, because
+/// nothing returned a value.
+#[test]
+fn running_a_wasm_backed_project_without_an_export_instantiates_it() {
+    let dir = wasm_run_project();
+
+    let output = jals()
+        .args(["run", "--manifest-path"])
+        .arg(dir.path().join("jals.toml"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+}
+
+/// An export that is not there reports the ones that are.
+///
+/// That list is the only evidence a caller gets for the one failure the module cannot describe
+/// itself: an export name carries no owner, so two `static` methods of one name collide and the
+/// second is dropped when the module is built.
+#[test]
+fn a_missing_export_reports_what_the_module_has() {
+    let dir = wasm_run_project();
+
+    let output = jals()
+        .args(["run", "--manifest-path"])
+        .arg(dir.path().join("jals.toml"))
+        .args(["--invoke", "absent"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no function named `absent`") && stderr.contains("roundTrip"),
+        "expected the available exports to be listed, got: {stderr}"
+    );
+}
+
+/// A wasm module has no main class, so asking for one is refused with the flag that does work.
+/// The manifest is what makes the two selectors contradict, and clap cannot see a manifest.
+#[test]
+fn a_main_class_is_refused_for_a_wasm_backed_project() {
+    let dir = wasm_run_project();
+
+    let output = jals()
+        .args(["run", "--manifest-path"])
+        .arg(dir.path().join("jals.toml"))
+        .args(["--main-class", "Point"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("no main class") && stderr.contains("--invoke"),
+        "expected the wasm entry-point explanation, got: {stderr}"
+    );
+}
+
+/// And the mirror: `--invoke` names an export, and a class-file backend produces none. Ignoring
+/// the flag would run something the user did not ask for.
+#[test]
+fn an_invoke_is_refused_for_a_class_file_backend() {
     let dir = tempdir().unwrap();
     std::fs::write(
         dir.path().join("jals.toml"),
         "[package]\nname = \"demo\"\n\n[run]\nmain-class = \"Main\"\n\n\
-         [build]\nbackend = { type = \"jals-wasm\" }\n",
+         [build]\nbackend = { type = \"jals\" }\n",
     )
     .unwrap();
     let src = dir.path().join("src/main/java");
@@ -2579,13 +2688,14 @@ fn running_a_wasm_backed_project_explains_itself() {
     let output = jals()
         .args(["run", "--manifest-path"])
         .arg(dir.path().join("jals.toml"))
+        .args(["--invoke", "one"])
         .output()
         .unwrap();
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("WebAssembly module") && stderr.contains("wasmtime"),
-        "expected an explanation of the wasm backend, got: {stderr}"
+        stderr.contains("--invoke one") && stderr.contains("class files"),
+        "expected the class-file backend explanation, got: {stderr}"
     );
 }
 
