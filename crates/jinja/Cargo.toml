@@ -1,0 +1,16 @@
+[package]
+name = "jinja"
+version.workspace = true
+edition.workspace = true
+description = "A small, dependency-free Jinja2 template engine with a minijinja-shaped API, `no_std + alloc` throughout"
+repository.workspace = true
+homepage.workspace = true
+license.workspace = true
+
+# Featureless by design: rendering a template is pure computation over `core + alloc`, so a plain
+# `cargo check` is this crate's portability check. It has no dependencies at all, which is what lets
+# it sit under a `no_std` consumer without dragging one in.
+[dependencies]
+
+[lints]
+workspace = true

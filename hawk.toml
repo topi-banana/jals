@@ -50,6 +50,17 @@ crate = "jals_syntax"
 module = "ast::generated"
 reason = "generated AST; uniform pub accessor surface emitted from java.ungram by xtask codegen"
 
+# `jinja` has no stanza here and is excluded on the command line instead
+# (`cargo hawk check --exclude-crate jinja`), which is hawk's own name for what it
+# is: a workspace library crate whose API is an external boundary. Its API is
+# minijinja's, so it is sized by what a *template engine* offers — `Environment::empty`,
+# `add_filter`, `add_global`, `Value::as_i64`, the `Object` seam — while the only
+# consumer in this workspace is `jals-project`, which walks one path: configure, build
+# a context, render a string. Narrowing the surface to what that one consumer calls is
+# how a reusable crate stops being reusable. A per-module `[[exclude]]` would need a new
+# stanza for every module the crate grows; the flag needs none, and `crates/jinja`'s own
+# `tests/render.rs` is what keeps the surface honest instead.
+
 # `jals_fmt::import` lowers native formatter configs (Eclipse / IntelliJ / GJF /
 # Palantir / Spotless) into a jals `Config`. `jals fmt` / `jals init` now reach the
 # file-backed importers through `jals-cli/src/migrate.rs`, but three things here

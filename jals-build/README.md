@@ -243,16 +243,20 @@ segment, `?` matches exactly one, and `**` is a whole segment matching **zero or
 nothing fails the build rather than shipping the file unrendered: unlike `resource-dirs`, whose
 default lands on every project, a pattern here was written on purpose.
 
-Two namespaces are readable, and nothing else. Environment variables are deliberately absent — a
-value read from the ambient environment is part of no cache identity here.
+The engine is the workspace's own [`jinja`](../crates/jinja/README.md) crate — a general-purpose
+Jinja2 subset with no `jals` in it — and what this section describes is the *configuration* a build
+tool gives it. Two namespaces are readable, and nothing else. Environment variables are deliberately
+absent — a value read from the ambient environment is part of no cache identity here.
 
 | Expression | Reads |
 | --- | --- |
 | `{{ package.name }}` / `{{ package.version }}` | `[package]` metadata |
 | `{% if features.server %}` | whether a build feature is active under this `--features` selection |
 | `{{ features["1.20.1"] }}` | the same, for a feature name no `a.b` path can spell |
-| `{% for f in features %}` | the active feature set, in sorted order; `loop.index`, `index0`, `first`, `last`, `length` |
+| `{% for f in features %}` | the active feature set, in sorted order; `loop.index`, `index0`, `revindex`, `revindex0`, `first`, `last`, `length` |
 | `{{ package.version \| default("0.0.0") }}` | a fallback for a `[package]` key that is not set |
+| `{{ package.name \| upper }}` | one of the engine's filters — `default`, `upper`, `lower`, `trim`, `string`, `length`/`count`, `join`, `replace`, `first`, `last`, `reverse` |
+| `{% if package.version == "1.0" %}` | a comparison; `not`, `and`, `or` and parentheses go with it |
 | `{# … #}` | a comment, which renders to nothing |
 
 The bracket spelling is not sugar: a Minecraft-style project declares features called `1.20.1` and

@@ -71,6 +71,7 @@ build front end (`jals build` / `run` / `test` / `clean` / `init`) wraps the JDK
 | [`jals-progress`](jals-progress)     | What a run is doing, as data: the event vocabulary portable crates report through, plus the timing ledger `--timings` renders as a self-contained HTML page. Draws nothing — a host decides what a fact looks like.                                                                                                                            |
 | [`jals-cli`](jals-cli)               | The `jals` command-line binary. Owns the terminal: one `Shell` writes every byte, and a cargo-shaped display turns the event stream into status lines and progress bars.                                                                                                                                                                                                                                                                                                                                                                                     |
 | [`jals-playground`](jals-playground) | A browser playground built with [Yew](https://yew.rs) and served by [Trunk](https://trunkrs.dev). It compiles to `wasm32` and runs the syntax/formatting/analysis layers entirely in the browser.                                                                                                                                                                                                                   |
+| [`jinja`](crates/jinja)              | A general-purpose Jinja2 template engine with [minijinja](https://docs.rs/minijinja)'s API, no dependencies, and no `jals` in it. `jals-project` renders `[build.resources] template` through it; the workspace's only crate that is not a `jals-*` crate, which is what `crates/` says.                                                                                                                             |
 
 Two more workspace members are development-only tooling, not part of the shipped product:
 [`jals-tests`](jals-tests) (corpus harnesses that check parser soundness and formatter
@@ -96,6 +97,7 @@ jals/
 ├── jals-lsp/         # LSP server (async-lsp, `jals lsp`)       (std, host-only)
 ├── jals-cli/         # `jals` binary                            (std)
 ├── jals-playground/  # browser playground (Yew + Trunk -> wasm)
+├── crates/jinja/     # Jinja2 engine, minijinja-shaped, jals-free (no_std, wasm-compatible)
 ├── jals-tests/       # corpus test harnesses (dev-only)
 └── xtask/            # codegen automation (dev-only)
 ```
