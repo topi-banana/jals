@@ -458,7 +458,7 @@ jobs:
             with:
               targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      # The fourteen checks below stay sequential, and deliberately so: they share one target
+      # The fifteen checks below stay sequential, and deliberately so: they share one target
       # directory, whose lock cargo holds for a whole build, and they select deliberately different
       # feature sets — so grouping them would trade a queue for a fingerprint fight and check the
       # same things more slowly.
@@ -471,6 +471,13 @@ jobs:
       - run: cargo check -p jals-frontend
       - run: cargo check -p jals-project --all-features
       - run: cargo check -p jals-build --no-default-features --features rhai --target wasm32-unknown-unknown
+      # The `wasm-run` half of the same statement, and the one the browser rests on: the engine
+      # `jals run --invoke` reaches and the one a playground tab reaches are the same code, which
+      # holds only while it is portable on its own — `no_std + alloc`, no `native`. The playground
+      # build below compiles it for wasm32 too, but with `rhai` beside it, which is a different
+      # claim; and the feature is pinned to an unpublished revision, so it is the one here most
+      # likely to stop being portable without anybody editing this repository.
+      - run: cargo check -p jals-build --no-default-features --features wasm-run --target wasm32-unknown-unknown
       - run: cargo check -p jals-classpath --no-default-features --target wasm32-unknown-unknown
       - run: cargo check -p jals-project --no-default-features --target wasm32-unknown-unknown
       - run: cargo check -p jals-frontend --target wasm32-unknown-unknown

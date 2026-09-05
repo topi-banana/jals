@@ -161,6 +161,16 @@ pub enum WasmRunError {
     /// store is gone by the time a caller sees this — so the message says that rather than
     /// pretending a trap occurred.
     Exception,
+    /// The export was found, and the engine then refused the handle it had just produced.
+    ///
+    /// Its own answer rather than folded into [`Instantiate`](Self::Instantiate), which means
+    /// *linking* failed, or into [`Trap`](Self::Trap), which means the project's own code did.
+    /// This is neither: reading an export's signature can fail only when the handle and the store
+    /// disagree, and one store is built per run and never leaves this crate — so a caller seeing
+    /// it has nothing to fix in their module or their source, and a message sending them to
+    /// either would be the wrong place. Kept rather than unwrapped because a panic in a library
+    /// is worse than an answer nobody expects to read.
+    Signature { name: String, message: String },
 }
 
 impl fmt::Display for WasmRunError {
@@ -203,6 +213,10 @@ impl fmt::Display for WasmRunError {
             ),
             Self::Trap(message) => write!(f, "the call trapped: {message}"),
             Self::Exception => f.write_str("the code threw an exception and nothing caught it"),
+            Self::Signature { name, message } => write!(
+                f,
+                "the engine exports `{name}` but would not describe it: {message}"
+            ),
         }
     }
 }
@@ -282,9 +296,13 @@ impl WasmRunner {
                 name: name.to_owned(),
                 available: Self::exported_functions(&instance),
             })?;
-        let signature = func
-            .ty(&store)
-            .map_err(|error| WasmRunError::Instantiate(error.to_string()))?;
+        // Not `Instantiate`: that variant says linking failed, and linking succeeded two lines
+        // ago. `Function::ty` fails only when the handle and the store disagree, which is a fact
+        // about this crate's own bookkeeping rather than about the module or the project.
+        let signature = func.ty(&store).map_err(|error| WasmRunError::Signature {
+            name: name.to_owned(),
+            message: error.to_string(),
+        })?;
         let params = signature.params().to_vec();
         let results = signature.results().len();
         // Before the count, not after it. An export taking a reference cannot be called with any

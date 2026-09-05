@@ -662,6 +662,7 @@ cargo check -p jals-progress
 cargo check -p jinja
 cargo check -p jals-project --all-features
 cargo check -p jals-build --no-default-features --features rhai --target wasm32-unknown-unknown
+cargo check -p jals-build --no-default-features --features wasm-run --target wasm32-unknown-unknown
 cargo check -p jals-classpath --no-default-features --target wasm32-unknown-unknown
 cargo check -p jals-project --no-default-features --target wasm32-unknown-unknown
 cargo check -p jals-frontend --target wasm32-unknown-unknown
@@ -682,10 +683,6 @@ cargo check -p jals-exec --features tokio
 cargo check -p jals-storage --no-default-features --features std-io
 cargo check -p jals-classpath --no-default-features --features archive --target wasm32-unknown-unknown
 cargo check -p jals-javac --target wasm32-unknown-unknown
-# `wasm-run` is off in every CI cell that names a feature set: the workspace jobs reach it through
-# `--all-features`, and the two wasm cells build `jals-build --no-default-features`. This is the
-# configuration that says the engine is portable on its own — `no_std + alloc`, no host.
-cargo check -p jals-build --no-default-features --features wasm-run --target wasm32-unknown-unknown
 ```
 
 Run `cargo run -p xtask -- codegen` after changing `jals-syntax/java.ungram`, and commit generated
