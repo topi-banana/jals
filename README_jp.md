@@ -353,6 +353,7 @@ jals build                  # javac でコンパイル
 jals build --dry-run        # コンパイルせず javac コマンドを表示
 jals run                    # コンパイルしてから [run] main-class を実行
 jals run -- arg1 arg2       # ...プログラムへ引数を渡す
+jals run --invoke f -- 7    # jals-wasm プロジェクトで export された static メソッドを呼ぶ
 jals test                   # `#[test]` メソッドを 1 テスト 1 JVM で実行
 jals test --list            # 実行せずにテスト一覧を表示
 jals clean                  # ビルド出力（target/classes・target/test-classes）を削除
@@ -585,6 +586,13 @@ WebAssembly module として出力します（manifest の既定値 `{ type = "j
 JDK stub に対して解決するので、解決済みの `[dependencies]` jar は editor の classpath には載っても
 コンパイラの classpath には載りません。まだ lowering のない構文は誤ったコードを吐かず、Build output
 タブに*報告*されます。
+
+module は、タブがそのまま**実行**もできる唯一の成果物です。背後のエンジンが `core + alloc` 上の
+interpreter であり、playground の他の部分と同じく `wasm32` にコンパイルされるためです。Build output
+タブに入力欄が現れ、そこに書いた export 済みの `static` メソッドが、続く引数とともに呼ばれます。空のまま
+でも実行は起こります — module を instantiate すると start function が走り、そこにクラスの `static`
+初期化子が lowering されています。`.jar` に *Run* はありません。その class file には JVM が必要で、
+ブラウザタブには JVM を起動するプロセスがないからです。
 
 ```sh
 # 初回のみ: wasm ターゲットと Trunk を用意

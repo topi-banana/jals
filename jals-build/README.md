@@ -52,7 +52,7 @@ Four subcommands are wired through `jals-cli`:
 | Command            | Backed by                                                                    | What it does                                                                                                                                                    | Flags                                                                                                       |
 | ------------------ | ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
 | `jals build`       | `execute_build_script` + `jals-project` + `Invocation::build`                | Run the root pre-build script, preprocess the transitive dependency graph, discover `.java` sources, build the `javac` command, and run it.                     | `--manifest-path <PATH>`, `--dry-run`, `-v`/`--verbose`, `--out-dir <DIR>`, `--bin <NAME>`                  |
-| `jals run`         | `execute_build_script` + `jals-project` + `RunTarget::resolve` + invocations | Run the root and dependency pre-build phases, compile the complete source graph, then run the resolved entry point with `java`. Compilation must succeed first. | `--manifest-path <PATH>`, `--dry-run`, `-v`/`--verbose`, `--main-class <FQCN>`, `--bin <NAME>`, `-- <args>` |
+| `jals run`         | `execute_build_script` + `jals-project` + `RunTarget::resolve` + invocations | Run the root and dependency pre-build phases, compile the complete source graph, then run the resolved entry point with `java`. Compilation must succeed first. | `--manifest-path <PATH>`, `--dry-run`, `-v`/`--verbose`, `--main-class <FQCN>`, `--bin <NAME>`, `--invoke <NAME>`, `-- <args>` |
 | `jals clean`       | `CleanTargets::keys`                                                         | Remove `classes-dir` and `target/jals/build`, including stale outputs after a script is removed. A never-built project succeeds quietly.                        | `--manifest-path <PATH>`, `--dry-run`                                                                       |
 | `jals init [PATH]` | `InitOptions::scaffold`                                                      | Scaffold a new project: `jals.toml`, a starter `Main.java`, and a `.gitignore`. Refuses to overwrite an existing `jals.toml`.                                   | `--name <NAME>`                                                                                             |
 
@@ -616,7 +616,7 @@ selection activates.
 
 | Key          | Type   | Default | Maps to                                                                                                                                                                                                                                            |
 | ------------ | ------ | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `main-class` | string | —       | the fully-qualified entry point passed to `java`, used **only when no `[[bin]]` is declared**. `jals run` errors if it is unset, no `[[bin]]` exists, and `--main-class` is not given. The run classpath is `classes-dir` followed by `classpath`. |
+| `main-class` | string | —       | the fully-qualified entry point passed to `java`, used **only when no `[[bin]]` is declared**. `jals run` errors if it is unset, no `[[bin]]` exists, and `--main-class` is not given. The run classpath is `classes-dir` followed by `classpath`. Not read at all under `[build] backend = { type = "jals-wasm" }`, which has no main class — see below. |
 
 ### `[toolchain]`
 
@@ -665,7 +665,8 @@ compilation unit (unlike Rust). It only selects which `main-class` `java` runs �
 what is compiled. `jals build --bin <name>` therefore only validates that the name exists; the
 compile command is unchanged.
 
-The run target for `jals run` is resolved in this order (`RunTarget::resolve`):
+The run target for `jals run` is resolved in this order (`RunTarget::resolve`) — for a backend
+that produces class files, which is every backend but `jals-wasm`:
 
 1. `--main-class <FQCN>` — runs that class directly, bypassing the manifest.
 2. `--bin <name>` — the `[[bin]]` with that name (error if none matches).
@@ -675,6 +676,15 @@ The run target for `jals run` is resolved in this order (`RunTarget::resolve`):
 
 Once any `[[bin]]` exists, `[run] main-class` is ignored for selection. Duplicate bin names and a
 `default-run` that names no bin are rejected at manifest load (`Manifest::validate`).
+
+`[build] backend = { type = "jals-wasm" }` has no entry in that list, because wasm has no
+entry-point convention and Java's `main` cannot be lowered — its `String[]` needs a `java.base` the
+module has no room for. `RunTarget::resolve` is not called for such a project: its entry point is an
+**exported name**, given as `jals run --invoke <name> -- <args>`, and naming none is still a run
+(instantiating executes the module's start function, which is where a class's `static` initialisers
+went — a project with no static state has none). `--main-class`/`--bin` against that backend, and
+`--invoke` against a class-file one, are refused rather than ignored; a `[run] main-class` left in
+the manifest is warned about.
 
 ### `[dependencies]`
 
@@ -796,6 +806,7 @@ jals run                    # compile, then run the resolved entry point
 jals run --bin server       # run the [[bin]] named "server"
 jals run -- arg1 arg2       # ...passing args to the program
 jals run --main-class com.example.Other
+jals run --invoke f -- 7    # for a `jals-wasm` project: call an exported static method
 jals clean                  # remove target/classes and target/jals/build
 ```
 

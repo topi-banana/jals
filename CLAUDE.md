@@ -308,6 +308,22 @@ filesystem reads into portable interfaces.
     seam, which `JavacBackend` drives once `StagedTree` has materialized the tree. `[toolchain]
     compiler` still chooses which tool runs, and `[toolchain] runtime` is selected independently
     for `jals run`'s run step.
+  - **What runs a `jals-wasm` module is `WasmRunner`, behind the `wasm-run` feature, and it is
+    deliberately not a second `Runtime`.** That seam hands a main class and a classpath to a `java`
+    process and every one of its types is built on `PathBuf`; a module has none of those, so this
+    takes bytes, an export name and unparsed arguments and no host path — which is what lets the
+    browser reach the same code `jals run --invoke` does. It is also **one concrete type and not a
+    trait**: `BackendSelection` earns its `Absent` arm because three backends implement one contract
+    and a browser tab genuinely lacks one of them, and here there is a single portable engine both
+    hosts enable, so a trait would publish a vocabulary with no second implementer. Two facts about
+    wasm decide the shape. There is no entry point — Java's `main` takes a `String[]` and a wasm
+    host has no `java.base` to supply `String` — so the target is an **exported name**, and naming
+    none is still a run, because instantiating executes the start function the backend lowers a
+    class's `static` initialisers into. And every `static` method that is not a constructor is
+    exported, visibility and parameter types alike, so an export can take a reference no command
+    line can write: that is refused with the position that caused it, and a name that is not there
+    reports the names that are — the only evidence a caller gets that two `static` methods of one
+    name collided into one export.
   - A `BuildScriptDiagnostic`'s fields are sealed and it renders as `<severity>: <message>` through
     its own `Display`; `BuildScriptError::ReportedErrors` renders every diagnostic it carries, in
     emission order. A `build.warning` and a `build.error` read identically once the severity is
@@ -572,7 +588,13 @@ Portable crates use `core + alloc`.
   and storage adapters.
 - `jals-build --no-default-features` must remain a genuine portable core; its `rhai` feature stays
   portable too, and CI builds it for `wasm32`. `native` is the host half (JDK discovery, `javac`
-  spawning, `native.rs`).
+  spawning, `native.rs`). `wasm-run` adds `WasmRunner` and is portable and independent of `native`
+  — `jals-cli` and the browser enable the same feature and reach the same interpreter — but it is
+  a feature rather than an unconditional dependency because it is the one thing here pinned to an
+  **unpublished** revision: the GC proposal the backend's output needs (`rec` groups,
+  `struct.new_default`, `ref.cast`) is implemented on tinywasm's `next` branch and in no crates.io
+  release, so a consumer of the portable core should not inherit that pin. Move to the published
+  crate once 0.11 ships; the `rev` in the root `Cargo.toml` says the same thing.
 - `jals-frontend`, `jals-javac`, `jals-hir`, `jals-lint`, `jals-config`, `jals-syntax`,
   `jals-classfile`, `jals-decompile`, `jals-editor`, `jals-progress`, and `jinja` have no features
   at all, so a plain `cargo check` *is* the portability check — do not add one without a reason that
@@ -640,6 +662,7 @@ cargo check -p jals-progress
 cargo check -p jinja
 cargo check -p jals-project --all-features
 cargo check -p jals-build --no-default-features --features rhai --target wasm32-unknown-unknown
+cargo check -p jals-build --no-default-features --features wasm-run --target wasm32-unknown-unknown
 cargo check -p jals-classpath --no-default-features --target wasm32-unknown-unknown
 cargo check -p jals-project --no-default-features --target wasm32-unknown-unknown
 cargo check -p jals-frontend --target wasm32-unknown-unknown
