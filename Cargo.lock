@@ -1374,6 +1374,7 @@ dependencies = [
  "jals-frontend",
  "jals-progress",
  "jals-storage",
+ "jinja",
  "serde",
  "serde_json",
  "tempfile",
@@ -1423,6 +1424,10 @@ dependencies = [
  "walkdir",
  "zip",
 ]
+
+[[package]]
+name = "jinja"
+version = "0.1.0"
 
 [[package]]
 name = "js-sys"

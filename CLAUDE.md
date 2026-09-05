@@ -216,11 +216,17 @@ filesystem reads into portable interfaces.
     classpath` is an input to one and not the other. Each task execution is memoized in
     `CacheNamespace::BuildTaskState` under the node identity, plan digest, and resolved features,
     and re-verified before reuse.
-  - `[build] resource-dirs` files reach the jar through `resource.rs`, which owns both halves of
-    resource templating: the `ResourcePlan` that answers which files are rendered, and the
-    Jinja-subset engine that renders them. Both are crate-internal because `RemapPlan` is their
-    only consumer, and the engine is in-house because every template crate on crates.io needs
-    `std` while this crate is `no_std + alloc`. Selection is by
+  - `[build] resource-dirs` files reach the jar through `resource.rs`, which owns the `ResourcePlan`
+    that answers which files are rendered and **how a build tool configures the engine** — but not
+    the engine, which is `jinja`. Three settings are that configuration and each is a decision:
+    `set_trim_block_lines`, `UndefinedBehavior::SemiStrict`, and `set_strict_variables`. The first
+    two are two of the three divergences `jals-build/README.md` documents (its third, "a lone `{` is
+    never a delimiter", is the engine's lexer and not a setting); `set_strict_variables` is the
+    *unknown* half of the rule `SemiStrict` states the *unset* half of, and a change to any of the
+    three changes that section. The one rule that stays is the one that is about `[features]` rather
+    than about templating: a feature set answers membership for **any** name, because features are
+    additive, and it is a `jinja::Object` here rather than a shape the engine knows about. All of it
+    is crate-internal because `RemapPlan` is its only consumer. Selection is by
     *declaration* and never by content, so a resource nobody named is never decoded — which is what
     keeps a PNG a PNG. The snapshot scope that captures them stays feature-independent
     (`jals-classpath`'s `snapshot_scopes`): capture is unconditional, rendering is where a feature
@@ -491,6 +497,26 @@ filesystem reads into portable interfaces.
   `fits`. Its `import` and `generate` modules lower a native Eclipse / IntelliJ /
   google-java-format / Palantir / Spotless config onto that `Config` and render it back out as a
   `jalsfmt.toml`. All of it is pure and stays portable.
+- `crates/jinja`: a general-purpose Jinja2 engine with minijinja's API, no dependencies, and no
+  `jals` in it. It is the only **product** crate that is not a `jals-*` crate (`xtask` is the other
+  non-`jals-*` member, and is dev-only tooling), and the `crates/` directory is what says so:
+  nothing here may name a `jals` type, and a rule about *this* project's templates belongs on the
+  `jals-project` side of the seam, never here. `jals-project`'s `resource.rs` is its only consumer
+  today. A closed world over four shipped binaries cannot size this crate's surface, so CI runs
+  `cargo hawk check --exclude-crate jinja` — hawk's own name for a workspace library whose API is an
+  external boundary — and `hawk.toml` carries **no** stanza for it; the comment there says why.
+  That exclusion is unconditional, so the crate's own `tests/render.rs` is the only thing left
+  holding the surface honest: a published item lands with the test that drives it, or it lands
+  unreachable with nothing reporting it. Two properties are load-bearing.
+  - **A lookup that finds nothing and a value that is not set are different answers**
+    (`Value::get_attr` returns `None` for the first and `Some(Value::UNDEFINED)` for the second).
+    That is what lets `set_strict_variables` refuse a *typo* while `| default(…)` still answers for
+    a value the author knows may be missing — two mistakes with two fixes. minijinja folds them
+    together, and a consumer that wants the distinction cannot get it back afterwards.
+  - **`Object` is the seam a domain rule lives behind**, and it is `!Send` with `&str` keys. A set
+    that answers membership for *any* name is a fact about `[features]`, so it is an `Object` in
+    `jals-project` rather than a variant here; a shape the engine knew about would be this crate
+    holding an opinion about a manifest it has never read.
 - Tests, `xtask`, and `editors/zed` may use host paths for fixtures and tooling.
 
 ## Code conventions
@@ -548,9 +574,9 @@ Portable crates use `core + alloc`.
   portable too, and CI builds it for `wasm32`. `native` is the host half (JDK discovery, `javac`
   spawning, `native.rs`).
 - `jals-frontend`, `jals-javac`, `jals-hir`, `jals-lint`, `jals-config`, `jals-syntax`,
-  `jals-classfile`, `jals-decompile`, `jals-editor`, and `jals-progress` have no features at all, so
-  a plain `cargo check` *is* the portability check — do not add one without a reason that survives
-  review.
+  `jals-classfile`, `jals-decompile`, `jals-editor`, `jals-progress`, and `jinja` have no features
+  at all, so a plain `cargo check` *is* the portability check — do not add one without a reason that
+  survives review.
 - `jals-fmt`'s `std` feature adds only `quick-xml` for the two XML-backed config importers.
   `jals-cli` enables it; the wasm playground resolves separately and never sees it.
 - rayon is workspace-banned except in `jals-tests`' host-only harness; product fan-out goes
@@ -596,7 +622,9 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo unused-allow --all-targets -- --workspace --all-features
 cargo nextest run --workspace --all-features --no-fail-fast
 cargo test --workspace --all-features --doc     # nextest does not run doctests
-cargo hawk check -D warnings             # closed-world visibility over hawk.toml's roots
+cargo hawk check --exclude-crate jinja -D warnings   # closed-world visibility over hawk.toml's
+                                                    # roots; `jinja`'s API is an external
+                                                    # boundary, and hawk.toml says why
 ```
 
 The portable-core and feature audit (CI's `portable core and feature audit` job) — run it whenever
@@ -609,12 +637,14 @@ cargo check -p jals-build --no-default-features
 cargo check -p jals-project --no-default-features
 cargo check -p jals-frontend
 cargo check -p jals-progress
+cargo check -p jinja
 cargo check -p jals-project --all-features
 cargo check -p jals-build --no-default-features --features rhai --target wasm32-unknown-unknown
 cargo check -p jals-classpath --no-default-features --target wasm32-unknown-unknown
 cargo check -p jals-project --no-default-features --target wasm32-unknown-unknown
 cargo check -p jals-frontend --target wasm32-unknown-unknown
 cargo check -p jals-progress --target wasm32-unknown-unknown
+cargo check -p jinja --target wasm32-unknown-unknown
 cargo build -p jals-playground --target wasm32-unknown-unknown
 cargo tree -e features -p jals-classpath --no-default-features
 cargo tree -e features -p jals-build --no-default-features

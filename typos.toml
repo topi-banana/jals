@@ -15,6 +15,10 @@ fo = "fo"
 # `nam` is a deliberately misspelled field name in a `deny_unknown_fields` test
 # (jals-config `Distribution`), asserting the typo is rejected; not our typo.
 nam = "nam"
+# `dfault` is a deliberately misspelled *filter* name in a `jinja` test,
+# asserting that the strictest rung reports an unknown filter rather than an
+# unset subject; not our typo.
+dfault = "dfault"
 # `ifle` is the JVM bytecode opcode "if less than or equal" (JVMS §6),
 # modelled as the `Ifle` instruction variant; not a misspelling of "file".
 ifle = "ifle"

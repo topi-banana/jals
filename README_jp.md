@@ -73,6 +73,7 @@ linter・language server（LSP）を提供しており、いずれも名前解�
 | [`jals-progress`](jals-progress)     | 実行中の作業を「データ」として表す語彙。portable な crate はここを通して事実だけを報告し、`--timings` はその台帳を自己完結した HTML ページとして描画する。描画そのものは持たない——事実がどう見えるかはホストが決める。 |
 | [`jals-cli`](jals-cli)               | `jals` コマンドラインバイナリ。端末はここが所有する: 出力は単一の `Shell` を必ず通り、cargo 風の表示がイベント列をステータス行とプログレスバーに変える。                                                                                                                                                                                                                                                                                                                                 |
 | [`jals-playground`](jals-playground) | [Yew](https://yew.rs) 製・[Trunk](https://trunkrs.dev) でビルドするブラウザ向け playground。`wasm32` にコンパイルし、構文/format/解析/Rhai build-script の各層をブラウザ上だけで動かします。                                                                                                                                                                    |
+| [`jinja`](crates/jinja)              | [minijinja](https://docs.rs/minijinja) と同形の API を持つ汎用 Jinja2 テンプレートエンジン。依存ゼロで `jals` の型を一切名指ししません。`jals-project` が `[build.resources] template` の描画に使います。プロダクト crate では唯一の非 `jals-*` crate であり、`crates/` という置き場所がそれを表しています。                                                          |
 
 残り 2 つのワークスペースメンバーは開発専用のツールで、製品には含まれません:
 [`jals-tests`](jals-tests)（実世界の Java に対して parser の健全性とフォーマッタの忠実度を
@@ -98,6 +99,7 @@ jals/
 ├── jals-lsp/         # LSP サーバ (async-lsp, `jals lsp`)  (std, ホスト専用)
 ├── jals-cli/         # `jals` バイナリ                     (std)
 ├── jals-playground/  # ブラウザ playground (Yew + Trunk -> wasm)
+├── crates/jinja/     # Jinja2 エンジン (minijinja 同形, jals 非依存) (no_std, wasm 対応)
 ├── jals-tests/       # コーパステストハーネス (開発専用)
 └── xtask/            # codegen 自動化 (開発専用)
 ```

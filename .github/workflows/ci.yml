@@ -25,7 +25,7 @@ env:
   WASM_PACKAGES: >-
     --package jals-editor --package jals-syntax --package jals-classfile --package jals-hir
     --package jals-decompile --package jals-fmt --package jals-lint --package jals-storage
-    --package jals-config --package jals-progress
+    --package jals-config --package jals-progress --package jinja
   # jals-classpath's HTTP/archive adapters are behind features; `--no-default-features` builds its
   # `no_std + alloc` storage-driven core. jals-build's host half (`SubprocessToolchain`, JDK
   # discovery + spawning) is likewise behind its `native` feature, so its no-`native` core is built
@@ -39,11 +39,12 @@ env:
   # (`std::env::temp_dir` is unimplemented on wasi). Including them would not fail a test, it would
   # fail the build, so the set is the portable computation crates: lexer/parser, HIR, lint, fmt,
   # config, decompile, editor, frontend, javac, classfile — and jals-progress, whose ledger and
-  # HTML report are pure string building and need neither a terminal nor a clock.
+  # HTML report are pure string building and need neither a terminal nor a clock, and jinja, which
+  # is string in, string out.
   WASM_TEST_PACKAGES: >-
     --package jals-syntax --package jals-hir --package jals-lint --package jals-fmt
     --package jals-config --package jals-decompile --package jals-editor --package jals-frontend
-    --package jals-javac --package jals-classfile --package jals-progress
+    --package jals-javac --package jals-classfile --package jals-progress --package jinja
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -344,9 +345,11 @@ jobs:
       # error. `rustup run $HAWK_RUSTC` pins the instrumented build to hawk's compiler, independent
       # of the repo's default toolchain or any future toolchain file. Default features / host target
       # only, so the analysis set matches what hawk.toml was tuned against (no `--all-features`).
+      # `--exclude-crate jinja` is hawk's own name for a workspace library whose API is an external
+      # boundary: that crate's surface is minijinja's, not one consumer's, and hawk.toml says why.
       - name: Run the closed-world visibility gate
         shell: bash
-        run: rustup run "$HAWK_RUSTC" cargo hawk check -D warnings
+        run: rustup run "$HAWK_RUSTC" cargo hawk check --exclude-crate jinja -D warnings
 
   typos:
     name: typos

@@ -1,32 +1,36 @@
-//! Which `[build] resource-dirs` files are rendered as templates, and the engine that renders them.
+//! Which `[build] resource-dirs` files are rendered as templates, and what a render sees.
 //!
 //! A resource is whatever the author put in the directory — a PNG, an `.nbt`, a font — so the
 //! default is still the byte-for-byte copy it always was. `[build.resources] template` names the
 //! ones that are rendered instead, and nothing else in the tree is decoded at all.
 //!
-//! The engine is a deliberately small Jinja subset, written here rather than taken from a crate:
-//! every engine on crates.io needs `std`, and this crate is `no_std + alloc` in its portable
-//! configuration. It is crate-internal because `ResourcePlan` is its only consumer.
+//! The engine itself is the [`jinja`] crate, which this module configures rather than implements.
+//! Three of its settings are what make a *build tool's* templates behave the way
+//! `jals-build/README.md` documents, and each is a decision rather than a default:
 //!
-//! Two divergences from Jinja are on purpose, and both are documented in `jals-build/README.md`:
+//! - [`Environment::set_trim_block_lines`] — a block tag alone on its line takes the whole line
+//!   with it. Resources are JSON and XML, where a stray blank line is a diff.
+//! - [`UndefinedBehavior::SemiStrict`] — emitting a value that is not set is an error. In a build
+//!   tool an unset value is a typo far more often than an intention, and a silently empty
+//!   `"version": ""` reaches the jar and fails at load time instead. `| default("…")` is how the
+//!   intentional case is spelled.
+//! - [`Environment::set_strict_variables`] — a name nothing defines is a typo, not an empty
+//!   string. It is the other half of the same rule: *unknown* is refused, *unset* has a `default`.
 //!
-//! - A block tag alone on its line takes the whole line with it (Jinja's `trim_blocks` plus
-//!   `lstrip_blocks`, always on). Resources are JSON and XML, where a stray blank line is a diff.
-//!   There is no `{%- -%}` spelling, so there is one rule rather than two.
-//! - Emitting a value that is not there is an error. In a build tool an undefined name is a typo
-//!   far more often than an intention, and a silently empty `"version": ""` reaches the jar and
-//!   fails at load time instead. `| default("…")` is how the intentional case is spelled.
+//! The one thing that is genuinely this crate's is [`Features`]: a build feature set answers
+//! membership for **any** name, because features are additive and "is X on" is a well-formed
+//! question whether or not X was ever declared. That is a fact about `[features]`, so it lives here
+//! as a [`jinja::Object`] rather than as a variant the engine would have to know about.
 
 use alloc::borrow::ToOwned;
-use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
-use core::fmt;
 
 use jals_config::{Manifest, ResolvedBuildFeatures, ResourcePattern};
 use jals_storage::{DirKey, ProjectView, RelativePath};
+use jinja::{Enumerator, Environment, Object, UndefinedBehavior, Value, context};
 
 /// The `[build] resource-dirs` to read, which of their files are rendered, and what the render
 /// sees.
@@ -92,6 +96,8 @@ impl ResourcePlan {
         &self,
         view: &ProjectView,
     ) -> Result<Vec<(RelativePath, Vec<u8>)>, String> {
+        let environment = TemplateContext::environment();
+        let context = self.context.value();
         let mut entries = Vec::new();
         let mut seen = BTreeSet::new();
         let mut present = 0usize;
@@ -126,8 +132,8 @@ impl ResourcePlan {
                          {error}"
                     )
                 })?;
-                let rendered = Template::parse(text)
-                    .and_then(|template| template.render(&self.context))
+                let rendered = environment
+                    .render_str(text, context.clone())
                     .map_err(|error| format!("`{path}`: {error}"))?;
                 entries.push((path, rendered.into_bytes()));
             }
@@ -178,9 +184,22 @@ impl ResourcePlan {
 /// Two namespaces and nothing else. Environment variables are deliberately absent: a value read
 /// from the ambient environment is not part of any cache identity here, so a build that changed
 /// nothing else would still have to be assumed stale.
+///
+/// Held as the manifest's own data rather than as a built [`Value`], so a `ResourcePlan` stays
+/// comparable — two plans are equal when the manifest and the selection are.
+///
+/// Nothing memoizes a render: [`ResourcePlan::entries`] is reached only from `RemapPlan::run`,
+/// which runs on every root build, and its bytes reach the cache through `RemapPlan::stage_key` —
+/// a content digest over the staged jar. So a change to what the engine *writes* invalidates by
+/// construction, and no `TASK_EXECUTION_VERSION`-style constant covers this path. Do not key a
+/// future memo on this plan's equality without adding one: the plan names the manifest and the
+/// selection, and says nothing about the engine that renders them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TemplateContext {
-    package: BTreeMap<String, Value>,
+    /// Each `[package]` key a template may read, and whether the manifest set it. `None` is *known
+    /// and absent*, which is what makes `| default("…")` meaningful — as opposed to a key that does
+    /// not exist, which is a typo.
+    package: BTreeMap<String, Option<String>>,
     features: BTreeSet<String>,
 }
 
@@ -188,1034 +207,65 @@ impl TemplateContext {
     /// The `[package]` metadata and the resolved build features, as one render sees them.
     fn new(manifest: &Manifest, features: &BTreeSet<String>) -> Self {
         let mut package = BTreeMap::new();
-        package.insert(
-            "name".to_owned(),
-            Self::optional(manifest.package.name.as_deref()),
-        );
-        package.insert(
-            "version".to_owned(),
-            Self::optional(manifest.package.version.as_deref()),
-        );
+        package.insert("name".to_owned(), manifest.package.name.clone());
+        package.insert("version".to_owned(), manifest.package.version.clone());
         Self {
             package,
             features: features.clone(),
         }
     }
 
-    /// A `[package]` key that is declared but unset is *known and absent*, which is what makes
-    /// `| default("…")` meaningful — as opposed to a key that does not exist, which is a typo.
-    fn optional(value: Option<&str>) -> Value {
-        value.map_or(Value::Undefined, |value| Value::Text(value.to_owned()))
+    /// The engine as a build tool configures it; see this module's own documentation for why each
+    /// of the three settings is what it is.
+    fn environment() -> Environment {
+        let mut environment = Environment::new();
+        environment.set_trim_block_lines(true);
+        environment.set_undefined_behavior(UndefinedBehavior::SemiStrict);
+        environment.set_strict_variables(true);
+        environment
     }
 
-    /// The root namespace a path starts from.
-    fn root(&self, name: &str) -> Option<Value> {
-        match name {
-            "package" => Some(Value::Map(self.package.clone())),
-            "features" => Some(Value::Set(self.features.clone())),
-            _ => None,
-        }
-    }
-
-    /// The roots a template may name, in a fixed order so an error reads the same every run.
-    const ROOTS: [&'static str; 2] = ["features", "package"];
-}
-
-/// A value during rendering.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Value {
-    Bool(bool),
-    Text(String),
-    /// The resolved build features. Indexing it asks membership, so it answers for *any* name.
-    Set(BTreeSet<String>),
-    Map(BTreeMap<String, Self>),
-    /// Known, and not there.
-    Undefined,
-}
-
-impl Value {
-    /// Read a field, by either spelling — `a.b` and `a["b"]` are the same access.
-    fn field(&self, name: &str, root: &str, at: Position) -> Result<Self, TemplateError> {
-        match self {
-            // A feature set answers membership for every name: features are additive, so "is X on"
-            // is well-formed whether or not X was ever declared. Checking it against the declared
-            // map instead would bind this engine to `[features]` to buy only typo detection.
-            Self::Set(set) => Ok(Self::Bool(set.contains(name))),
-            Self::Map(map) => map.get(name).cloned().ok_or_else(|| TemplateError {
-                at,
-                kind: TemplateErrorKind::UnknownField {
-                    root: root.to_owned(),
-                    field: name.to_owned(),
-                },
-            }),
-            _ => Err(TemplateError {
-                at,
-                kind: TemplateErrorKind::NotIndexable {
-                    field: name.to_owned(),
-                },
-            }),
-        }
-    }
-
-    /// Append this value's text form.
-    fn write(&self, out: &mut String, at: Position) -> Result<(), TemplateError> {
-        match self {
-            Self::Bool(value) => {
-                out.push_str(if *value { "true" } else { "false" });
-                Ok(())
-            }
-            Self::Text(text) => {
-                out.push_str(text);
-                Ok(())
-            }
-            Self::Undefined => Err(TemplateError {
-                at,
-                kind: TemplateErrorKind::UndefinedValue,
-            }),
-            Self::Set(_) | Self::Map(_) => Err(TemplateError {
-                at,
-                kind: TemplateErrorKind::NotAScalar,
-            }),
-        }
-    }
-
-    fn truth(&self) -> bool {
-        match self {
-            Self::Bool(value) => *value,
-            Self::Text(text) => !text.is_empty(),
-            Self::Set(set) => !set.is_empty(),
-            Self::Map(_) => true,
-            Self::Undefined => false,
+    /// The two namespaces, as the map a render is handed.
+    fn value(&self) -> Value {
+        let package: BTreeMap<String, Value> = self
+            .package
+            .iter()
+            .map(|(key, value)| {
+                (
+                    key.clone(),
+                    value.as_deref().map_or(Value::UNDEFINED, Value::from),
+                )
+            })
+            .collect();
+        context! {
+            package => Value::from(package),
+            features => Value::from_object(Features(self.features.clone())),
         }
     }
 }
 
-/// Where in the template something is, counted in characters from 1.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Position {
-    line: u32,
-    column: u32,
-}
+/// The resolved build features, as a template reads them.
+///
+/// Indexing it asks *membership*, so it answers for any name at all: features are additive, and "is
+/// X on" is a well-formed question whether or not X was ever declared. Checking against the
+/// declared set instead would bind a template to `[features]` to buy only typo detection — and it
+/// is exactly why this is an [`Object`] here rather than a shape the engine knows about.
+#[derive(Debug)]
+struct Features(BTreeSet<String>);
 
-impl Position {
-    const START: Self = Self { line: 1, column: 1 };
-
-    const fn advance(&mut self, ch: char) {
-        if ch == '\n' {
-            self.line = self.line.saturating_add(1);
-            self.column = 1;
-        } else {
-            self.column = self.column.saturating_add(1);
-        }
+impl Object for Features {
+    fn get_value(&self, key: &str) -> Option<Value> {
+        Some(Value::from(self.0.contains(key)))
     }
-}
 
-/// A template that failed to parse or to render.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TemplateError {
-    at: Position,
-    kind: TemplateErrorKind,
-}
-
-impl fmt::Display for TemplateError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "line {}, column {}: {}",
-            self.at.line, self.at.column, self.kind
+    fn enumerate(&self) -> Enumerator {
+        // A `BTreeSet`, so a `{% for %}` walks the same order on every host and every run.
+        Enumerator::Values(
+            self.0
+                .iter()
+                .map(|name| Value::from(name.as_str()))
+                .collect(),
         )
-    }
-}
-
-/// What was wrong. The file it was wrong in is the caller's to name.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum TemplateErrorKind {
-    Unclosed { opener: &'static str },
-    UnknownTag { tag: String },
-    UnexpectedTag { tag: String },
-    UnclosedBlock { tag: &'static str },
-    Malformed { reason: &'static str },
-    UnknownRoot { name: String },
-    UnknownField { root: String, field: String },
-    NotIndexable { field: String },
-    NotAScalar,
-    NotIterable,
-    UndefinedValue,
-    UnknownFilter { name: String },
-    TooDeep,
-}
-
-impl fmt::Display for TemplateErrorKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Unclosed { opener } => write!(f, "`{opener}` is never closed"),
-            Self::UnknownTag { tag } => write!(f, "unknown tag `{tag}`"),
-            Self::UnexpectedTag { tag } => write!(f, "`{tag}` has no block to close"),
-            Self::UnclosedBlock { tag } => write!(f, "`{tag}` is never closed"),
-            Self::Malformed { reason } => f.write_str(reason),
-            Self::UnknownRoot { name } => {
-                write!(f, "unknown name `{name}`; a template can read ")?;
-                for (index, root) in TemplateContext::ROOTS.iter().enumerate() {
-                    if index > 0 {
-                        f.write_str(" and ")?;
-                    }
-                    write!(f, "`{root}`")?;
-                }
-                Ok(())
-            }
-            Self::UnknownField { root, field } => write!(f, "`{root}` has no field `{field}`"),
-            Self::NotIndexable { field } => {
-                write!(f, "this value has no fields, so `{field}` cannot be read")
-            }
-            Self::NotAScalar => f.write_str("this is a namespace, not a value that can be written"),
-            Self::NotIterable => f.write_str("only `features` can be iterated"),
-            Self::UndefinedValue => f.write_str(
-                "this value is not set; write `| default(\"…\")` to say what to use instead",
-            ),
-            Self::UnknownFilter { name } => write!(f, "unknown filter `{name}`"),
-            Self::TooDeep => f.write_str("blocks are nested too deeply"),
-        }
-    }
-}
-
-/// A parsed resource template.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Template {
-    nodes: Vec<Node>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Node {
-    Text(String),
-    Emit {
-        expr: Expr,
-        at: Position,
-    },
-    If {
-        arms: Vec<Arm>,
-        otherwise: Vec<Self>,
-    },
-    For {
-        binding: String,
-        source: Expr,
-        at: Position,
-        body: Vec<Self>,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Arm {
-    condition: Expr,
-    at: Position,
-    body: Vec<Node>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Expr {
-    Path { root: String, accesses: Vec<String> },
-    Text(String),
-    Not(Box<Self>),
-    And(Box<Self>, Box<Self>),
-    Or(Box<Self>, Box<Self>),
-    Default(Box<Self>, String),
-}
-
-/// Which delimiter pair a tag is written with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TagKind {
-    /// `{{ … }}`, which never affects the whitespace around it.
-    Emit,
-    /// `{% … %}`.
-    Block,
-    /// `{# … #}`, dropped entirely.
-    Comment,
-}
-
-impl TagKind {
-    const fn opener(self) -> &'static str {
-        match self {
-            Self::Emit => "{{",
-            Self::Block => "{%",
-            Self::Comment => "{#",
-        }
-    }
-
-    const fn closer(self) -> [u8; 2] {
-        match self {
-            Self::Emit => *b"}}",
-            Self::Block => *b"%}",
-            Self::Comment => *b"#}",
-        }
-    }
-}
-
-/// One tag as it sits in the source, before the whitespace rule widens it.
-#[derive(Debug, Clone)]
-struct RawTag {
-    start: usize,
-    end: usize,
-    at: Position,
-    kind: TagKind,
-    body: String,
-}
-
-/// The flat sequence a template parses from: text and tags, comments already dropped.
-#[derive(Debug, Clone)]
-enum Item {
-    Text(String),
-    Emit { body: String, at: Position },
-    Block { body: String, at: Position },
-}
-
-impl Template {
-    /// How deeply blocks may nest before the parser refuses rather than recurses.
-    const MAX_DEPTH: u32 = 64;
-
-    /// Parse one resource template.
-    ///
-    /// # Errors
-    /// A [`TemplateError`] carrying the line and column the template broke at.
-    fn parse(source: &str) -> Result<Self, TemplateError> {
-        let tags = Self::scan(source)?;
-        let mut parser = Parser {
-            items: Self::items(source, &tags),
-            index: 0,
-        };
-        let (nodes, terminator) = parser.nodes(0)?;
-        if let Some((directive, at)) = terminator {
-            return Err(TemplateError {
-                at,
-                kind: TemplateErrorKind::UnexpectedTag {
-                    tag: directive.name().to_owned(),
-                },
-            });
-        }
-        Ok(Self { nodes })
-    }
-
-    /// Render against one context.
-    ///
-    /// # Errors
-    /// A [`TemplateError`] carrying the line and column of the expression that could not be
-    /// evaluated.
-    fn render(&self, context: &TemplateContext) -> Result<String, TemplateError> {
-        let mut out = String::new();
-        let mut scope = Vec::new();
-        Self::nodes_text(&self.nodes, context, &mut scope, &mut out)?;
-        Ok(out)
-    }
-
-    /// Every tag in the source, in order, with the position of its opening delimiter.
-    fn scan(source: &str) -> Result<Vec<RawTag>, TemplateError> {
-        let bytes = source.as_bytes();
-        let mut tags = Vec::new();
-        let mut at = Position::START;
-        let mut index = 0usize;
-        while index < bytes.len() {
-            let kind = if bytes[index] == b'{' {
-                match bytes.get(index + 1) {
-                    Some(b'{') => Some(TagKind::Emit),
-                    Some(b'%') => Some(TagKind::Block),
-                    Some(b'#') => Some(TagKind::Comment),
-                    _ => None,
-                }
-            } else {
-                None
-            };
-            let Some(kind) = kind else {
-                // A lone `{` is never a delimiter, which is what lets a JSON or XML resource be
-                // written exactly as it is read.
-                let Some(ch) = source[index..].chars().next() else {
-                    break;
-                };
-                at.advance(ch);
-                index += ch.len_utf8();
-                continue;
-            };
-            let body_end = Self::close(source, index + 2, kind).ok_or_else(|| TemplateError {
-                at,
-                kind: TemplateErrorKind::Unclosed {
-                    opener: kind.opener(),
-                },
-            })?;
-            let end = body_end + 2;
-            tags.push(RawTag {
-                start: index,
-                end,
-                at,
-                kind,
-                body: source[index + 2..body_end].trim().to_owned(),
-            });
-            for ch in source[index..end].chars() {
-                at.advance(ch);
-            }
-            index = end;
-        }
-        Ok(tags)
-    }
-
-    /// Where this tag's closing delimiter starts, skipping over string literals.
-    ///
-    /// The scan has to know about strings: `{{ "}}" }}` is how a template writes a literal `}}`,
-    /// and a plain search for the closer would end the tag in the middle of it.
-    fn close(source: &str, from: usize, kind: TagKind) -> Option<usize> {
-        let bytes = source.as_bytes();
-        let closer = kind.closer();
-        let mut index = from;
-        let mut in_string = false;
-        while index < bytes.len() {
-            if kind != TagKind::Comment && bytes[index] == b'"' {
-                in_string = !in_string;
-                index += 1;
-                continue;
-            }
-            if in_string {
-                index += if bytes[index] == b'\\' { 2 } else { 1 };
-                continue;
-            }
-            if bytes[index] == closer[0] && bytes.get(index + 1) == Some(&closer[1]) {
-                return Some(index);
-            }
-            index += 1;
-        }
-        None
-    }
-
-    /// Split the source into text and tags, applying the whole-line rule as it goes.
-    fn items(source: &str, tags: &[RawTag]) -> Vec<Item> {
-        let mut items = Vec::new();
-        let mut cursor = 0usize;
-        for tag in tags {
-            let (start, end) = Self::span(source, tag);
-            let start = start.max(cursor);
-            if start > cursor {
-                items.push(Item::Text(source[cursor..start].to_owned()));
-            }
-            cursor = end.max(cursor);
-            match tag.kind {
-                TagKind::Comment => {}
-                TagKind::Emit => items.push(Item::Emit {
-                    body: tag.body.clone(),
-                    at: tag.at,
-                }),
-                TagKind::Block => items.push(Item::Block {
-                    body: tag.body.clone(),
-                    at: tag.at,
-                }),
-            }
-        }
-        if cursor < source.len() {
-            items.push(Item::Text(source[cursor..].to_owned()));
-        }
-        items
-    }
-
-    /// A tag's effective span: widened over its own line when it is the only thing on it.
-    ///
-    /// Both sides have to be blank for the rule to apply, so two tags sharing a line keep every
-    /// byte between them.
-    fn span(source: &str, tag: &RawTag) -> (usize, usize) {
-        if tag.kind == TagKind::Emit {
-            return (tag.start, tag.end);
-        }
-        let bytes = source.as_bytes();
-        let mut start = tag.start;
-        while start > 0 && matches!(bytes[start - 1], b' ' | b'\t') {
-            start -= 1;
-        }
-        if start > 0 && bytes[start - 1] != b'\n' {
-            return (tag.start, tag.end);
-        }
-        let mut end = tag.end;
-        while end < bytes.len() && matches!(bytes[end], b' ' | b'\t') {
-            end += 1;
-        }
-        if end < bytes.len() {
-            if bytes[end] == b'\n' {
-                end += 1;
-            } else if bytes[end] == b'\r' && bytes.get(end + 1) == Some(&b'\n') {
-                end += 2;
-            } else {
-                return (tag.start, tag.end);
-            }
-        }
-        (start, end)
-    }
-
-    fn nodes_text(
-        nodes: &[Node],
-        context: &TemplateContext,
-        scope: &mut Vec<(String, Value)>,
-        out: &mut String,
-    ) -> Result<(), TemplateError> {
-        for node in nodes {
-            match node {
-                Node::Text(text) => out.push_str(text),
-                Node::Emit { expr, at } => {
-                    Self::value(expr, context, scope, *at)?.write(out, *at)?;
-                }
-                Node::If { arms, otherwise } => {
-                    let mut taken = false;
-                    for arm in arms {
-                        if Self::value(&arm.condition, context, scope, arm.at)?.truth() {
-                            Self::nodes_text(&arm.body, context, scope, out)?;
-                            taken = true;
-                            break;
-                        }
-                    }
-                    if !taken {
-                        Self::nodes_text(otherwise, context, scope, out)?;
-                    }
-                }
-                Node::For {
-                    binding,
-                    source,
-                    at,
-                    body,
-                } => Self::loop_text(binding, source, *at, body, context, scope, out)?,
-            }
-        }
-        Ok(())
-    }
-
-    fn loop_text(
-        binding: &str,
-        source: &Expr,
-        at: Position,
-        body: &[Node],
-        context: &TemplateContext,
-        scope: &mut Vec<(String, Value)>,
-        out: &mut String,
-    ) -> Result<(), TemplateError> {
-        // Only the feature set is iterable, and it is a `BTreeSet`, so the order is the same on
-        // every host and every run.
-        let Value::Set(items) = Self::value(source, context, scope, at)? else {
-            return Err(TemplateError {
-                at,
-                kind: TemplateErrorKind::NotIterable,
-            });
-        };
-        let length = items.len();
-        for (index, item) in items.iter().enumerate() {
-            scope.push((binding.to_owned(), Value::Text(item.clone())));
-            scope.push(("loop".to_owned(), Self::loop_value(index, length)));
-            let rendered = Self::nodes_text(body, context, scope, out);
-            scope.truncate(scope.len().saturating_sub(2));
-            rendered?;
-        }
-        Ok(())
-    }
-
-    fn loop_value(index: usize, length: usize) -> Value {
-        let mut map = BTreeMap::new();
-        map.insert("index".to_owned(), Value::Text((index + 1).to_string()));
-        map.insert("index0".to_owned(), Value::Text(index.to_string()));
-        map.insert("first".to_owned(), Value::Bool(index == 0));
-        map.insert("last".to_owned(), Value::Bool(index + 1 == length));
-        map.insert("length".to_owned(), Value::Text(length.to_string()));
-        Value::Map(map)
-    }
-
-    fn value(
-        expr: &Expr,
-        context: &TemplateContext,
-        scope: &[(String, Value)],
-        at: Position,
-    ) -> Result<Value, TemplateError> {
-        match expr {
-            Expr::Text(text) => Ok(Value::Text(text.clone())),
-            Expr::Not(inner) => Ok(Value::Bool(
-                !Self::value(inner, context, scope, at)?.truth(),
-            )),
-            Expr::And(left, right) => Ok(Value::Bool(
-                Self::value(left, context, scope, at)?.truth()
-                    && Self::value(right, context, scope, at)?.truth(),
-            )),
-            Expr::Or(left, right) => Ok(Value::Bool(
-                Self::value(left, context, scope, at)?.truth()
-                    || Self::value(right, context, scope, at)?.truth(),
-            )),
-            Expr::Default(inner, fallback) => {
-                let value = Self::value(inner, context, scope, at)?;
-                Ok(if value == Value::Undefined {
-                    Value::Text(fallback.clone())
-                } else {
-                    value
-                })
-            }
-            Expr::Path { root, accesses } => {
-                let mut value = scope
-                    .iter()
-                    .rev()
-                    .find(|(name, _)| name == root)
-                    .map(|(_, value)| value.clone())
-                    .or_else(|| context.root(root))
-                    .ok_or_else(|| TemplateError {
-                        at,
-                        kind: TemplateErrorKind::UnknownRoot { name: root.clone() },
-                    })?;
-                for access in accesses {
-                    value = value.field(access, root, at)?;
-                }
-                Ok(value)
-            }
-        }
-    }
-}
-
-/// The tree builder over the flat item sequence.
-struct Parser {
-    items: Vec<Item>,
-    index: usize,
-}
-
-impl Parser {
-    /// Nodes up to the first tag this level does not own, which is handed back to the caller.
-    fn nodes(
-        &mut self,
-        depth: u32,
-    ) -> Result<(Vec<Node>, Option<(Directive, Position)>), TemplateError> {
-        let mut nodes = Vec::new();
-        while let Some(item) = self.items.get(self.index).cloned() {
-            self.index += 1;
-            match item {
-                Item::Text(text) => nodes.push(Node::Text(text)),
-                Item::Emit { body, at } => nodes.push(Node::Emit {
-                    expr: Expr::parse(&body, at)?,
-                    at,
-                }),
-                Item::Block { body, at } => match Directive::parse(&body, at)? {
-                    Directive::If(condition) => nodes.push(self.if_node(condition, at, depth)?),
-                    Directive::For { binding, source } => {
-                        nodes.push(self.for_node(binding, source, at, depth)?);
-                    }
-                    other => return Ok((nodes, Some((other, at)))),
-                },
-            }
-        }
-        Ok((nodes, None))
-    }
-
-    fn if_node(
-        &mut self,
-        condition: Expr,
-        at: Position,
-        depth: u32,
-    ) -> Result<Node, TemplateError> {
-        if depth >= Template::MAX_DEPTH {
-            return Err(TemplateError {
-                at,
-                kind: TemplateErrorKind::TooDeep,
-            });
-        }
-        let mut arms = Vec::new();
-        let mut condition = condition;
-        let mut condition_at = at;
-        loop {
-            let (body, terminator) = self.nodes(depth + 1)?;
-            let Some((directive, tag_at)) = terminator else {
-                return Err(TemplateError {
-                    at,
-                    kind: TemplateErrorKind::UnclosedBlock { tag: "if" },
-                });
-            };
-            match directive {
-                Directive::Elif(next) => {
-                    arms.push(Arm {
-                        condition,
-                        at: condition_at,
-                        body,
-                    });
-                    condition = next;
-                    condition_at = tag_at;
-                }
-                Directive::Else => {
-                    arms.push(Arm {
-                        condition,
-                        at: condition_at,
-                        body,
-                    });
-                    let (otherwise, terminator) = self.nodes(depth + 1)?;
-                    let Some((directive, tag_at)) = terminator else {
-                        return Err(TemplateError {
-                            at,
-                            kind: TemplateErrorKind::UnclosedBlock { tag: "if" },
-                        });
-                    };
-                    if !matches!(directive, Directive::EndIf) {
-                        return Err(TemplateError {
-                            at: tag_at,
-                            kind: TemplateErrorKind::UnexpectedTag {
-                                tag: directive.name().to_owned(),
-                            },
-                        });
-                    }
-                    return Ok(Node::If { arms, otherwise });
-                }
-                Directive::EndIf => {
-                    arms.push(Arm {
-                        condition,
-                        at: condition_at,
-                        body,
-                    });
-                    return Ok(Node::If {
-                        arms,
-                        otherwise: Vec::new(),
-                    });
-                }
-                other => {
-                    return Err(TemplateError {
-                        at: tag_at,
-                        kind: TemplateErrorKind::UnexpectedTag {
-                            tag: other.name().to_owned(),
-                        },
-                    });
-                }
-            }
-        }
-    }
-
-    fn for_node(
-        &mut self,
-        binding: String,
-        source: Expr,
-        at: Position,
-        depth: u32,
-    ) -> Result<Node, TemplateError> {
-        if depth >= Template::MAX_DEPTH {
-            return Err(TemplateError {
-                at,
-                kind: TemplateErrorKind::TooDeep,
-            });
-        }
-        let (body, terminator) = self.nodes(depth + 1)?;
-        let Some((directive, tag_at)) = terminator else {
-            return Err(TemplateError {
-                at,
-                kind: TemplateErrorKind::UnclosedBlock { tag: "for" },
-            });
-        };
-        if !matches!(directive, Directive::EndFor) {
-            return Err(TemplateError {
-                at: tag_at,
-                kind: TemplateErrorKind::UnexpectedTag {
-                    tag: directive.name().to_owned(),
-                },
-            });
-        }
-        Ok(Node::For {
-            binding,
-            source,
-            at,
-            body,
-        })
-    }
-}
-
-/// What a `{% … %}` tag says.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Directive {
-    If(Expr),
-    Elif(Expr),
-    Else,
-    EndIf,
-    For { binding: String, source: Expr },
-    EndFor,
-}
-
-impl Directive {
-    fn parse(body: &str, at: Position) -> Result<Self, TemplateError> {
-        let (keyword, rest) = body.split_once(char::is_whitespace).unwrap_or((body, ""));
-        let rest = rest.trim();
-        match keyword {
-            "if" => Ok(Self::If(Expr::parse(rest, at)?)),
-            "elif" => Ok(Self::Elif(Expr::parse(rest, at)?)),
-            "for" => {
-                let (binding, source) = rest.split_once(" in ").ok_or(TemplateError {
-                    at,
-                    kind: TemplateErrorKind::Malformed {
-                        reason: "expected `for <name> in <expression>`",
-                    },
-                })?;
-                let binding = binding.trim();
-                if !Expr::is_name(binding) {
-                    return Err(TemplateError {
-                        at,
-                        kind: TemplateErrorKind::Malformed {
-                            reason: "the loop variable must be a plain name",
-                        },
-                    });
-                }
-                Ok(Self::For {
-                    binding: binding.to_owned(),
-                    source: Expr::parse(source.trim(), at)?,
-                })
-            }
-            "else" | "endif" | "endfor" if !rest.is_empty() => Err(TemplateError {
-                at,
-                kind: TemplateErrorKind::Malformed {
-                    reason: "this tag takes no expression",
-                },
-            }),
-            "else" => Ok(Self::Else),
-            "endif" => Ok(Self::EndIf),
-            "endfor" => Ok(Self::EndFor),
-            other => Err(TemplateError {
-                at,
-                kind: TemplateErrorKind::UnknownTag {
-                    tag: other.to_owned(),
-                },
-            }),
-        }
-    }
-
-    const fn name(&self) -> &'static str {
-        match self {
-            Self::If(_) => "if",
-            Self::Elif(_) => "elif",
-            Self::Else => "else",
-            Self::EndIf => "endif",
-            Self::For { .. } => "for",
-            Self::EndFor => "endfor",
-        }
-    }
-}
-
-/// One lexed piece of an expression.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Token {
-    Name(String),
-    Text(String),
-    Dot,
-    OpenBracket,
-    CloseBracket,
-    OpenParen,
-    CloseParen,
-    Pipe,
-}
-
-impl Expr {
-    fn parse(source: &str, at: Position) -> Result<Self, TemplateError> {
-        let mut parser = ExprParser {
-            tokens: Self::tokens(source, at)?,
-            index: 0,
-            at,
-        };
-        let expr = parser.any()?;
-        if parser.index != parser.tokens.len() {
-            return Err(parser.malformed("the expression has trailing tokens"));
-        }
-        Ok(expr)
-    }
-
-    fn is_name(text: &str) -> bool {
-        let mut chars = text.chars();
-        chars
-            .next()
-            .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
-            && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-    }
-
-    fn tokens(source: &str, at: Position) -> Result<Vec<Token>, TemplateError> {
-        let mut tokens = Vec::new();
-        let mut chars = source.chars().peekable();
-        while let Some(ch) = chars.next() {
-            match ch {
-                ch if ch.is_whitespace() => {}
-                '.' => tokens.push(Token::Dot),
-                '[' => tokens.push(Token::OpenBracket),
-                ']' => tokens.push(Token::CloseBracket),
-                '(' => tokens.push(Token::OpenParen),
-                ')' => tokens.push(Token::CloseParen),
-                '|' => tokens.push(Token::Pipe),
-                '"' => {
-                    let mut text = String::new();
-                    loop {
-                        let Some(ch) = chars.next() else {
-                            return Err(TemplateError {
-                                at,
-                                kind: TemplateErrorKind::Malformed {
-                                    reason: "a string literal is never closed",
-                                },
-                            });
-                        };
-                        match ch {
-                            '"' => break,
-                            '\\' => match chars.next() {
-                                Some(escaped @ ('"' | '\\')) => text.push(escaped),
-                                _ => {
-                                    return Err(TemplateError {
-                                        at,
-                                        kind: TemplateErrorKind::Malformed {
-                                            reason: "only `\\\"` and `\\\\` are escapes",
-                                        },
-                                    });
-                                }
-                            },
-                            ch => text.push(ch),
-                        }
-                    }
-                    tokens.push(Token::Text(text));
-                }
-                ch if ch.is_ascii_alphanumeric() || ch == '_' => {
-                    let mut name = String::new();
-                    name.push(ch);
-                    while let Some(next) = chars.peek() {
-                        if next.is_ascii_alphanumeric() || *next == '_' {
-                            name.push(*next);
-                            chars.next();
-                        } else {
-                            break;
-                        }
-                    }
-                    tokens.push(Token::Name(name));
-                }
-                _ => {
-                    return Err(TemplateError {
-                        at,
-                        kind: TemplateErrorKind::Malformed {
-                            reason: "unexpected character in the expression",
-                        },
-                    });
-                }
-            }
-        }
-        Ok(tokens)
-    }
-}
-
-struct ExprParser {
-    tokens: Vec<Token>,
-    index: usize,
-    at: Position,
-}
-
-impl ExprParser {
-    fn any(&mut self) -> Result<Expr, TemplateError> {
-        let mut left = self.all()?;
-        while self.eat_name("or") {
-            let right = self.all()?;
-            left = Expr::Or(Box::new(left), Box::new(right));
-        }
-        Ok(left)
-    }
-
-    fn all(&mut self) -> Result<Expr, TemplateError> {
-        let mut left = self.unary()?;
-        while self.eat_name("and") {
-            let right = self.unary()?;
-            left = Expr::And(Box::new(left), Box::new(right));
-        }
-        Ok(left)
-    }
-
-    fn unary(&mut self) -> Result<Expr, TemplateError> {
-        if self.eat_name("not") {
-            return Ok(Expr::Not(Box::new(self.unary()?)));
-        }
-        let mut value = self.primary()?;
-        while self.eat(&Token::Pipe) {
-            value = self.filter(value)?;
-        }
-        Ok(value)
-    }
-
-    /// Filters are a table of one. A second entry is a match arm, which is the point of keeping the
-    /// shape rather than special-casing `default` in `primary`.
-    fn filter(&mut self, value: Expr) -> Result<Expr, TemplateError> {
-        let Some(Token::Name(name)) = self.next() else {
-            return Err(self.malformed("expected a filter name after `|`"));
-        };
-        match name.as_str() {
-            "default" => {
-                if !self.eat(&Token::OpenParen) {
-                    return Err(self.malformed("`default` takes one string argument"));
-                }
-                let Some(Token::Text(fallback)) = self.next() else {
-                    return Err(self.malformed("`default` takes one string argument"));
-                };
-                if !self.eat(&Token::CloseParen) {
-                    return Err(self.malformed("`default` takes one string argument"));
-                }
-                Ok(Expr::Default(Box::new(value), fallback))
-            }
-            other => Err(TemplateError {
-                at: self.at,
-                kind: TemplateErrorKind::UnknownFilter {
-                    name: other.to_owned(),
-                },
-            }),
-        }
-    }
-
-    fn primary(&mut self) -> Result<Expr, TemplateError> {
-        match self.next() {
-            Some(Token::OpenParen) => {
-                let inner = self.any()?;
-                if !self.eat(&Token::CloseParen) {
-                    return Err(self.malformed("expected `)`"));
-                }
-                Ok(inner)
-            }
-            Some(Token::Text(text)) => Ok(Expr::Text(text)),
-            Some(Token::Name(root)) if !matches!(root.as_str(), "and" | "or" | "not") => {
-                let mut accesses = Vec::new();
-                loop {
-                    if self.eat(&Token::Dot) {
-                        let Some(Token::Name(field)) = self.next() else {
-                            return Err(self.malformed("expected a name after `.`"));
-                        };
-                        accesses.push(field);
-                    } else if self.eat(&Token::OpenBracket) {
-                        // The bracket spelling is not a convenience: a build feature may be named
-                        // `1.20.1` or `mixin-extras`, neither of which is a name `a.b` can carry.
-                        let Some(Token::Text(field)) = self.next() else {
-                            return Err(self.malformed("expected a string inside `[…]`"));
-                        };
-                        if !self.eat(&Token::CloseBracket) {
-                            return Err(self.malformed("expected `]`"));
-                        }
-                        accesses.push(field);
-                    } else {
-                        break;
-                    }
-                }
-                Ok(Expr::Path { root, accesses })
-            }
-            _ => Err(self.malformed("expected a value")),
-        }
-    }
-
-    fn next(&mut self) -> Option<Token> {
-        let token = self.tokens.get(self.index).cloned();
-        if token.is_some() {
-            self.index += 1;
-        }
-        token
-    }
-
-    fn eat(&mut self, token: &Token) -> bool {
-        let found = self.tokens.get(self.index) == Some(token);
-        if found {
-            self.index += 1;
-        }
-        found
-    }
-
-    fn eat_name(&mut self, name: &str) -> bool {
-        let found =
-            matches!(self.tokens.get(self.index), Some(Token::Name(found)) if found == name);
-        if found {
-            self.index += 1;
-        }
-        found
-    }
-
-    const fn malformed(&self, reason: &'static str) -> TemplateError {
-        TemplateError {
-            at: self.at,
-            kind: TemplateErrorKind::Malformed { reason },
-        }
     }
 }
 
@@ -1237,14 +287,10 @@ mod tests {
         TemplateContext::new(&manifest(package), &features(active))
     }
 
-    fn render(source: &str, context: &TemplateContext) -> Result<String, TemplateError> {
-        Template::parse(source).and_then(|template| template.render(context))
-    }
-
-    fn kind(source: &str, context: &TemplateContext) -> TemplateErrorKind {
-        render(source, context)
-            .expect_err("this template fails")
-            .kind
+    fn render(source: &str, context: &TemplateContext) -> Result<String, String> {
+        TemplateContext::environment()
+            .render_str(source, context.value())
+            .map_err(|error| error.to_string())
     }
 
     fn view(files: &[(&str, &[u8])]) -> ProjectView {
@@ -1271,28 +317,7 @@ mod tests {
     const PACKAGE: &str = "[package]\nname = \"hellomod\"\nversion = \"0.1.0\"\n";
 
     #[test]
-    fn text_with_no_tags_renders_to_itself() {
-        // The property the whole default rests on: a resource nobody declared is not merely copied
-        // by a different code path, it is text this engine leaves alone.
-        let context = context(PACKAGE, &[]);
-        for source in [
-            "{\n  \"a\": { \"b\": 1 }\n}\n",
-            "<?xml version=\"1.0\"?>\n<config><item/></config>\n",
-            "\u{feff}{ \"bom\": true }\n",
-            "a\r\nb\r\n",
-            "{ } { {  }",
-            "",
-        ] {
-            assert_eq!(
-                render(source, &context).as_deref(),
-                Ok(source),
-                "{source:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn package_metadata_renders_and_an_unset_key_needs_a_default() {
+    fn package_metadata_reaches_the_render_and_an_unset_key_needs_a_default() {
         let full = context(PACKAGE, &[]);
         assert_eq!(
             render("{{ package.name }}-{{ package.version }}", &full).as_deref(),
@@ -1308,8 +333,12 @@ mod tests {
         // error, testing it is false, and `default` is how the intentional case is written.
         let bare = context("[package]\n", &[]);
         assert_eq!(
-            kind("{{ package.version }}", &bare),
-            TemplateErrorKind::UndefinedValue
+            render("{{ package.version }}", &bare),
+            Err(
+                "line 1, column 1: this value is not set; write `| default(\"…\")` to say what to \
+                 use instead"
+                    .to_owned()
+            )
         );
         assert_eq!(
             render("{{ package.version | default(\"0.0.0\") }}", &bare).as_deref(),
@@ -1323,36 +352,23 @@ mod tests {
             .as_deref(),
             Ok("unset")
         );
-    }
 
-    #[test]
-    fn a_typo_is_an_error_and_names_where_it_is() {
-        let context = context(PACKAGE, &[]);
+        // A typo is refused, and the two namespaces are all a template may read: a value from the
+        // ambient environment is part of no cache identity here, so `env` is not one of them.
         assert_eq!(
-            kind("{{ package.licence }}", &context),
-            TemplateErrorKind::UnknownField {
-                root: "package".to_owned(),
-                field: "licence".to_owned(),
-            }
+            render("{{ env.HOME }}", &full),
+            Err(
+                "line 1, column 1: unknown name `env`; a template can read `features` and \
+                 `package`"
+                    .to_owned()
+            )
         );
-        // Environment variables are out of scope, so `env` is refused rather than empty.
         assert_eq!(
-            kind("{{ env.HOME }}", &context),
-            TemplateErrorKind::UnknownRoot {
-                name: "env".to_owned()
-            }
-        );
-        // A namespace has no text form.
-        assert_eq!(
-            kind("{{ package }}", &context),
-            TemplateErrorKind::NotAScalar
-        );
-
-        let error = render("a\nb\n  {{ nope }}\n", &context).expect_err("unknown root");
-        assert_eq!(error.at, Position { line: 3, column: 3 });
-        assert_eq!(
-            error.to_string(),
-            "line 3, column 3: unknown name `nope`; a template can read `features` and `package`"
+            render("{{ package.licence }}", &full),
+            Err(
+                "line 1, column 1: `package` has no field `licence`; it has `name` and `version`"
+                    .to_owned()
+            )
         );
     }
 
@@ -1379,53 +395,22 @@ mod tests {
             .as_deref(),
             Ok("true true")
         );
+        // And they iterate in sorted order, so a rendered resource is the same bytes every run.
         assert_eq!(
             render(
-                "{% if features[\"1.21\"] %}y{% else %}n{% endif %}",
+                "{% for f in features %}{{ f }}{% if not loop.last %},{% endif %}{% endfor %}",
                 &context
             )
             .as_deref(),
-            Ok("n")
-        );
-    }
-
-    #[test]
-    fn conditionals_take_exactly_one_arm() {
-        let source = "{% if features.a %}A{% elif features.b %}B{% else %}C{% endif %}";
-        assert_eq!(
-            render(source, &context(PACKAGE, &["b"])).as_deref(),
-            Ok("B")
-        );
-        assert_eq!(
-            render(source, &context(PACKAGE, &["a", "b"])).as_deref(),
-            Ok("A")
-        );
-        assert_eq!(render(source, &context(PACKAGE, &[])).as_deref(), Ok("C"));
-
-        // `not`, `and`, `or`, and parentheses.
-        let only_a = context(PACKAGE, &["a"]);
-        assert_eq!(
-            render(
-                "{% if not features.b and features.a %}y{% endif %}",
-                &only_a
-            )
-            .as_deref(),
-            Ok("y")
-        );
-        assert_eq!(
-            render(
-                "{% if (features.b or features.a) and not features.c %}y{% endif %}",
-                &only_a
-            )
-            .as_deref(),
-            Ok("y")
+            Ok("1.20.1,mixin-extras,server")
         );
     }
 
     #[test]
     fn a_block_tag_alone_on_its_line_takes_the_line_with_it() {
-        // Without this rule every `{% if %}` in a JSON resource leaves a blank line behind, so the
-        // rendered file differs from a hand-written one by whitespace nobody asked for.
+        // The setting this crate turns on, asserted where it is turned on: without it every
+        // `{% if %}` in a JSON resource leaves a blank line behind, so the rendered file differs
+        // from a hand-written one by whitespace nobody asked for.
         let source =
             "{\n{% if features.server %}\n  \"env\": \"server\",\n{% endif %}\n  \"x\": 1\n}\n";
         assert_eq!(
@@ -1437,124 +422,22 @@ mod tests {
             Ok("{\n  \"x\": 1\n}\n")
         );
 
-        // Sharing a line with anything at all switches the rule off, so text around a tag is never
-        // eaten by surprise.
-        assert_eq!(
-            render(
-                "a {% if features.server %}b{% endif %} c",
-                &context(PACKAGE, &["server"])
-            )
-            .as_deref(),
-            Ok("a b c")
-        );
-
-        // A comment is a block tag for this purpose, and disappears either way.
-        assert_eq!(
-            render("a\n{# gone #}\nb\n", &context(PACKAGE, &[])).as_deref(),
-            Ok("a\nb\n")
-        );
-        assert_eq!(
-            render("a {# gone #} b", &context(PACKAGE, &[])).as_deref(),
-            Ok("a  b")
-        );
-    }
-
-    #[test]
-    fn a_string_literal_is_how_a_delimiter_is_written() {
-        let context = context(PACKAGE, &[]);
-        assert_eq!(render("{{ \"{{\" }}", &context).as_deref(), Ok("{{"));
-        // The closing scan has to know about strings, or this tag ends inside the literal.
-        assert_eq!(render("{{ \"}}\" }}", &context).as_deref(), Ok("}}"));
-        assert_eq!(
-            render("{{ \"{%\" }}{{ \"%}\" }}", &context).as_deref(),
-            Ok("{%%}")
-        );
-        assert_eq!(
-            render("{{ \"a\\\"b\\\\c\" }}", &context).as_deref(),
-            Ok("a\"b\\c")
-        );
-    }
-
-    #[test]
-    fn a_loop_walks_the_feature_set_in_sorted_order() {
-        let context = context(PACKAGE, &["server", "a", "mixin"]);
-        assert_eq!(
-            render(
-                "{% for f in features %}{{ f }}{% if not loop.last %},{% endif %}{% endfor %}",
-                &context
-            )
-            .as_deref(),
-            Ok("a,mixin,server")
-        );
-        assert_eq!(
-            render(
-                "{% for f in features %}{{ loop.index }}/{{ loop.length }}{% endfor %}",
-                &context
-            )
-            .as_deref(),
-            Ok("1/32/33/3")
-        );
-        // Only the feature set is iterable; `package` is a namespace, not a sequence.
-        assert_eq!(
-            kind("{% for x in package %}{{ x }}{% endfor %}", &context),
-            TemplateErrorKind::NotIterable
-        );
-    }
-
-    #[test]
-    fn a_malformed_template_says_where_and_why() {
-        let context = context(PACKAGE, &[]);
-        assert_eq!(
-            kind("a {{ b", &context),
-            TemplateErrorKind::Unclosed { opener: "{{" }
-        );
-        assert_eq!(
-            kind("{% if features.a %}x", &context),
-            TemplateErrorKind::UnclosedBlock { tag: "if" }
-        );
-        assert_eq!(
-            kind("{% endif %}", &context),
-            TemplateErrorKind::UnexpectedTag {
-                tag: "endif".to_owned()
-            }
-        );
-        assert_eq!(
-            kind("{% while features.a %}{% endwhile %}", &context),
-            TemplateErrorKind::UnknownTag {
-                tag: "while".to_owned()
-            }
-        );
-        assert_eq!(
-            kind("{% if features.a %}x{% endfor %}", &context),
-            TemplateErrorKind::UnexpectedTag {
-                tag: "endfor".to_owned()
-            }
-        );
-        assert_eq!(
-            kind("{{ package.name | upper }}", &context),
-            TemplateErrorKind::UnknownFilter {
-                name: "upper".to_owned()
-            }
-        );
-
-        let error = render("ok\n{% if %}\n{% endif %}\n", &context).expect_err("no condition");
-        assert_eq!(error.at, Position { line: 2, column: 1 });
-    }
-
-    #[test]
-    fn deeply_nested_blocks_are_refused_rather_than_recursed() {
-        // Malformed input must never take the process down with it.
-        let mut source = String::new();
-        for _ in 0..80 {
-            source.push_str("{% if features.a %}");
+        // The shape the one shipped resource template actually has
+        // (`examples/minecraft_mod/src/main/resources/mixins.hellomod.json`): an `elif` chain over
+        // bracket-spelled feature names, inside JSON. Every arm has to render as valid JSON, which
+        // is the whole reason the line rule is on.
+        let chain = "{\n{% if features[\"since-1.20.5\"] %}\n  \"level\": 21,\n                     {% elif features[\"since-1.18\"] %}\n  \"level\": 17,\n                     {% else %}\n  \"level\": 8,\n{% endif %}\n  \"n\": \"{{ package.name }}\"\n}\n";
+        for (active, level) in [
+            (&["since-1.18", "since-1.20.5"][..], 21),
+            (&["since-1.18"][..], 17),
+            (&[][..], 8),
+        ] {
+            assert_eq!(
+                render(chain, &context(PACKAGE, active)).as_deref(),
+                Ok(format!("{{\n  \"level\": {level},\n  \"n\": \"hellomod\"\n}}\n").as_str()),
+                "{active:?}"
+            );
         }
-        for _ in 0..80 {
-            source.push_str("{% endif %}");
-        }
-        assert_eq!(
-            kind(&source, &context(PACKAGE, &[])),
-            TemplateErrorKind::TooDeep
-        );
     }
 
     const DECLARED: &str = "[package]\nname = \"hellomod\"\nversion = \"0.1.0\"\n\

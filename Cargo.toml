@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+  "crates/jinja",
   "jals-build",
   "jals-classfile",
   "jals-classpath",
@@ -70,6 +71,8 @@ jals-lsp = { path = "jals-lsp" }
 jals-progress = { path = "jals-progress" }
 jals-project = { path = "jals-project", default-features = false }
 jals-syntax = { path = "jals-syntax" }
+# Featureless by design: rendering a template is pure computation over `core + alloc`.
+jinja = { path = "crates/jinja" }
 miniz_oxide = { version = "0.9", default-features = false, features = [
   "with-alloc",
 ] }

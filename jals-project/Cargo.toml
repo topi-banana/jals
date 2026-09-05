@@ -24,6 +24,9 @@ jals-exec.workspace = true
 # step, so the frontend crate must build wherever `jals-project` does (including `wasm32`).
 jals-frontend.workspace = true
 jals-storage.workspace = true
+# The resource template engine. Featureless and `no_std + alloc`, so it builds wherever the
+# portable graph does; what stays here is the configuration and the `[features]` object.
+jinja.workspace = true
 serde_json.workspace = true
 serde.workspace = true
 tempfile = { version = "3", optional = true }
