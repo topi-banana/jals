@@ -438,7 +438,7 @@ impl Compile {
         let this_class = pool.class_index(&internal_name).ok_or(AsmError::PoolFull)?;
         // Only a project-internal supertype can be named here; anything else is `Object`, which is
         // also the right answer for a class with no `extends` clause at all.
-        let super_item = index.superclass_of(item);
+        let super_item = index.direct_superclass(item);
         // An `enum`'s supertype is `java.lang.Enum` and the source never writes it, so there is no
         // `extends` clause for the index to have recorded.
         let super_name = if is_enum {
@@ -455,13 +455,17 @@ impl Compile {
         // Every *interface* supertype, in the order the source listed them. Dropping them produced a
         // class the JVM loads and then refuses to dispatch through: an `invokeinterface` on a type whose
         // `interfaces` never mentioned it is `IncompatibleClassChangeError` at the first call.
+        //
+        // Asked of the index rather than filtered here. The filter this replaces was negative —
+        // `kind != DefKind::Interface` — so an `@interface` supertype, which is `AnnotationType`,
+        // was skipped as "not an interface" while `direct_superclass`'s positive filter did not
+        // claim it either: `@interface Marker {} class C implements Marker {}` is legal Java whose
+        // edge went missing from both halves of the class file. The wasm lowering had classified it
+        // positively all along (JLS §9.6), so the two backends answered one question differently.
         let mut interfaces = Vec::new();
         let mut interface_names = Vec::new();
-        for supertype in &index.item(item).supertypes {
-            if index.item(supertype.id).kind != DefKind::Interface {
-                continue;
-            }
-            let name = Descriptor::internal_name_of(supertype.id, index);
+        for id in index.direct_interfaces(item) {
+            let name = Descriptor::internal_name_of(id, index);
             interfaces.push(pool.class_index(&name).ok_or(AsmError::PoolFull)?);
             interface_names.push(name);
         }
@@ -3827,47 +3831,23 @@ impl Context<'_> {
 
     /// The nearest type every entry in `types` is assignable to.
     ///
-    /// What a multi-catch's binding has. Walked over the *class* chain only, because a common
-    /// interface would not be a `catch` type; a set with no common ancestor the index holds falls back
-    /// to `Throwable`, which every catchable type is one of.
+    /// What a multi-catch's binding has. The join is
+    /// [`ProjectIndex::common_superclass`](jals_hir::ProjectIndex::common_superclass), which walks
+    /// the *class* chain only because a common interface would not be a `catch` type. What is this
+    /// side's own is the **fallback**: a set with no common ancestor the index holds — or one whose
+    /// entries are not all indexed project types — becomes `Throwable`, which every catchable type
+    /// is one of. The inferer asks the same question and keeps the written type instead, which is
+    /// why the index states the join and neither of them states the default.
     fn common_supertype(&self, types: &[jals_hir::Ty]) -> jals_hir::Ty {
-        let throwable = || jals_hir::Ty::Class(jals_hir::ClassTy::external("java.lang.Throwable"));
-        let ids: Option<Vec<ItemId>> = types
+        types
             .iter()
-            .map(|ty| match ty {
-                jals_hir::Ty::Class(jals_hir::ClassTy::Project { id, .. }) => Some(*id),
-                _ => None,
-            })
-            .collect();
-        let Some(ids) = ids else { return throwable() };
-        let Some((&first, rest)) = ids.split_first() else {
-            return throwable();
-        };
-        // Guarded against a cycle for the same reason `ProjectIndex::inherited_field` is and
-        // `ProjectIndex::walk_supertypes_stateful` keeps a visited set: `class A extends B {}` with
-        // `class B extends A {}` parses and indexes, and an unguarded walk oscillates between the
-        // two forever. `Throwable` is the answer a chain that runs out already gives, and a chain
-        // that closes on itself has run out in the only sense that matters here.
-        let mut seen = alloc::collections::BTreeSet::new();
-        let mut candidate = first;
-        while seen.insert(candidate) {
-            if rest
-                .iter()
-                .all(|&other| self.index.is_subtype(other, candidate))
-            {
-                let fqn = self.index.item(candidate).fqn.as_str();
-                return jals_hir::Ty::Class(jals_hir::ClassTy::Project {
-                    id: candidate,
-                    name: fqn.rsplit('.').next().unwrap_or(fqn).to_owned(),
-                    args: Vec::new(),
-                });
-            }
-            let Some(next) = self.index.superclass_of(candidate) else {
-                return throwable();
-            };
-            candidate = next;
-        }
-        throwable()
+            .map(jals_hir::Ty::project_id)
+            .collect::<Option<Vec<ItemId>>>()
+            .and_then(|ids| self.index.common_superclass(&ids))
+            .map_or_else(
+                || jals_hir::Ty::Class(jals_hir::ClassTy::external("java.lang.Throwable")),
+                |id| self.index.item_ty(id),
+            )
     }
 
     /// The source facts of the file being lowered.

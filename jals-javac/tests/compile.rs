@@ -7170,3 +7170,73 @@ fn a_superclass_cycle_compiles_rather_than_recursing() {
         );
     }
 }
+
+/// An `@interface` supertype reaches the `interfaces` list too, and its `Signature` survives.
+///
+/// An annotation type *is* an interface (JLS §9.6). The filter this pins replaced a negative one —
+/// `kind != DefKind::Interface` — which classified `DefKind::AnnotationType` as "not an interface"
+/// and skipped it, while the positive superclass filter did not claim it either: the edge went
+/// missing from the class file entirely. No JVM needed to see it, which is why this asserts on the
+/// emitted bytes rather than through `run` — CI's wasm cell has no JDK, and that is where this
+/// backend is checked hardest.
+///
+/// The second half is the effect that hides behind the first. `class_signature` writes the declared
+/// generic supertypes only when its interface list has the length the edge walk produced; one short,
+/// and every written type argument silently demotes to an erased name.
+#[test]
+fn an_annotation_type_supertype_is_listed_as_an_interface() {
+    let source = "
+@interface Marker {}
+
+interface Holder<T> {
+    T get();
+}
+
+class Held<T> implements Holder<T>, Marker {
+    public T get() { return null; }
+}
+";
+    let classes = compile(source).expect("compile");
+    let held = classes
+        .iter()
+        .find(|class| class.internal_name == "Held")
+        .expect("the implementing class");
+    let class = jals_exec::block_on_inline(jals_classfile::ClassFile::read(held.bytes.as_slice()))
+        .expect("reparse");
+
+    let named: Vec<String> = class
+        .interfaces
+        .iter()
+        .map(|&index| {
+            class
+                .constant_pool
+                .class_name(index)
+                .expect("a Class entry")
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(
+        named,
+        ["Holder", "Marker"],
+        "both edges, in the order the source listed them"
+    );
+
+    let signature = class
+        .attributes
+        .iter()
+        .find_map(|attribute| match &attribute.body {
+            jals_classfile::AttributeBody::Signature { signature_index } => Some(
+                class
+                    .constant_pool
+                    .utf8(*signature_index)
+                    .expect("utf8")
+                    .into_owned(),
+            ),
+            _ => None,
+        })
+        .expect("a generic class carries a Signature");
+    assert!(
+        signature.contains("LHolder<TT;>;"),
+        "the written type argument survives rather than demoting to an erased name: {signature}"
+    );
+}

@@ -690,3 +690,40 @@ fn a_superclass_cycle_terminates_rather_than_recursing() {
         assert_eq!(module_of(&[source]).funcs.len(), functions, "{source}");
     }
 }
+
+/// The super-constructor search stops at the first ancestor that *declares* one, even when that
+/// ancestor has no constructor it can call.
+///
+/// `class P { P(int x) {} }` declares a constructor and no no-arg one, so `class C extends P {}`
+/// has no reachable `super()` — javac rejects the program, and this backend emits a constructor
+/// that calls nothing rather than inventing a call.
+///
+/// Pinned because the obvious way to write this walk over a published chain is `find_map`, which
+/// compiles, passes every cycle test, and is wrong: `find_map` skips the `None` that `P` produces
+/// and keeps climbing, so `C` would call a *grandparent's* constructor and leave `P`'s fields at
+/// their defaults — in a module that validates.
+#[test]
+fn the_super_constructor_search_stops_at_the_first_ancestor_declaring_one() {
+    // `G` is what a `find_map` would climb past `P` and reach: it has a synthesised default
+    // constructor, so the wrong walk has something to emit a call to.
+    let module = module_of(&[
+        "class G { G() {} } class P extends G { P(int x) {} } class C extends P { C() {} }",
+    ]);
+    let calls: usize = module
+        .funcs
+        .iter()
+        .map(|func| {
+            func.body
+                .iter()
+                .filter(|instruction| matches!(instruction, Instr::Call(_)))
+                .count()
+        })
+        .sum();
+    // One, and exactly one: `P(int)` calls `G()`, which is a real `super()` the source implies.
+    // `C()` adds none, because `P` declares a constructor and no no-arg one — the search stops
+    // there. Under a `find_map` this is two, the second being `C()` calling `G()` directly.
+    assert_eq!(
+        calls, 1,
+        "only `P(int)`'s own `super()` is emitted; `C()` reaches no super-constructor"
+    );
+}

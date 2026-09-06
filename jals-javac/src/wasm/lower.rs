@@ -830,8 +830,11 @@ impl CompileWasm {
     /// invisible to it, and `class A extends B {}` beside `class B extends A {}` recursed until the
     /// stack ran out. That is an abort rather than a panic: nothing catches it, and the input
     /// parses and indexes perfectly, so it arrived through an editor as readily as through a build.
-    /// The chain is collected here instead, ending at the first type outside `declared` **or**
-    /// already on it.
+    ///
+    /// The chain comes from [`ProjectIndex::superclasses`], which carries the cycle guard, and ends
+    /// at the first type outside `declared`. The cutoff has always applied to the *parent* and never
+    /// to `item` itself — leading with `item` is what makes that visible, where a `.filter()` on the
+    /// step hid it.
     fn push_with_supertypes(
         item: ItemId,
         index: &ProjectIndex,
@@ -841,14 +844,13 @@ impl CompileWasm {
         if ordered.contains(&item) {
             return;
         }
-        let mut chain = Vec::new();
-        let mut current = Some(item);
-        while let Some(id) = current.filter(|id| !chain.contains(id)) {
-            chain.push(id);
-            current = index
-                .superclass_of(id)
-                .filter(|parent| declared.contains(parent));
-        }
+        let chain: Vec<ItemId> = core::iter::once(item)
+            .chain(
+                index
+                    .superclasses(item)
+                    .take_while(|id| declared.contains(id)),
+            )
+            .collect();
         for &id in chain.iter().rev() {
             if !ordered.contains(&id) {
                 ordered.push(id);
@@ -1180,7 +1182,7 @@ impl Layout {
             return;
         }
         let parent = index
-            .superclass_of(item)
+            .direct_superclass(item)
             .filter(|id| self.structs.contains_key(id));
         // The supertype's *whole* list, synthetic fields included: a subtype's fields extend its
         // supertype's as a prefix, so anything the supertype holds occupies a slot here too.
@@ -1237,7 +1239,7 @@ impl Layout {
             });
         }
         let parent = index
-            .superclass_of(item)
+            .direct_superclass(item)
             .and_then(|id| self.structs.get(&id).copied());
         module.set_type(
             type_index,
@@ -1633,7 +1635,7 @@ impl Body {
             // the constant's arguments exist — calling it here too would run the enum's twice, and the
             // no-argument one at that, which is a different constructor from the one selected.
             let under_enum = index
-                .superclass_of(owner)
+                .direct_superclass(owner)
                 .is_some_and(|parent| index.item(parent).kind == DefKind::Enum);
             if let Some((declaring, function)) = Self::super_constructor(owner, index, layout)
                 && !under_enum
@@ -1927,13 +1929,17 @@ impl Body {
         index: &ProjectIndex,
         layout: &Layout,
     ) -> Option<(ItemId, u32)> {
-        // `class A extends B {}` with `class B extends A {}` parses and indexes, and an unguarded
-        // walk oscillates between the two forever — the same hazard `common_supertype` states on
-        // the JVM side. A chain that closes on itself has run out, which is what `None` already
-        // means here.
-        let mut seen = BTreeSet::new();
-        let mut candidate = index.superclass_of(owner);
-        while let Some(item) = candidate.filter(|&item| seen.insert(item)) {
+        // The chain, and its cycle guard, are [`ProjectIndex::superclasses`]'s: `class A extends B
+        // {}` with `class B extends A {}` parses and indexes, and an unguarded walk oscillates
+        // between the two forever. It starts above `owner` and excludes it, which is also stricter
+        // than the loop this replaces — that one left `owner` out of its own visited set, so a cycle
+        // could climb back around into `owner` and answer with its *own* constructor as its super.
+        //
+        // Not a `find_map`. The first ancestor declaring any constructor ends the search **even when
+        // it answers `None`** (the doc above says so): a `find_map` would skip that `None` and keep
+        // climbing, so `class P { P(int x) {} } class C extends P {}` would call a grandparent's
+        // constructor and leave `P`'s fields at their defaults — in a module that validates.
+        for item in index.superclasses(owner) {
             let mut declared = layout.constructors(index, item).peekable();
             if declared.peek().is_some() {
                 return declared
@@ -1944,7 +1950,6 @@ impl Body {
             if let Some(&function) = layout.default_constructors.get(&item) {
                 return Some((item, function));
             }
-            candidate = index.superclass_of(item);
         }
         None
     }

@@ -307,48 +307,6 @@ fn every_reference_type_is_a_subtype_of_object() {
     }
 }
 
-/// `Object` does not extend itself, and a written `extends Object` is not doubled.
-#[test]
-fn the_implicit_object_edge_is_added_exactly_once() {
-    let fixture = Fixture::new("class Written extends Object {}");
-    let index = &fixture.index;
-    let object = index
-        .item_by_fqn("java.lang.Object")
-        .expect("the stubs declare java.lang.Object");
-    assert!(
-        index.item(object).supertypes.is_empty(),
-        "Object must not be its own supertype"
-    );
-    let written = index.item_by_fqn("Written").expect("Written is indexed");
-    let to_object: Vec<bool> = index
-        .item(written)
-        .supertypes
-        .iter()
-        .filter(|sup| sup.id == object)
-        .map(|sup| sup.implicit)
-        .collect();
-    assert_eq!(
-        to_object,
-        [false],
-        "a written `extends Object` stays the one edge, and stays non-implicit"
-    );
-}
-
-/// With no stubs and no classpath there is no `java.lang.Object` to point at, and the absence must
-/// stay an absence: marking the type as having an *external* supertype instead would suppress every
-/// "no member" conclusion in the workspace.
-#[test]
-fn the_implicit_object_edge_is_absent_without_an_indexed_object() {
-    let node = jals_exec::block_on_inline(jals_syntax::Parse::parse("class Foo {}")).syntax();
-    let index = jals_exec::block_on_inline(ProjectIndex::builder(&[(FileId(0), node)]).build());
-    let foo = index.item_by_fqn("Foo").expect("Foo is indexed");
-    assert!(index.item(foo).supertypes.is_empty());
-    assert!(
-        index.method_set_complete(foo, "anything"),
-        "an unindexed Object is not an external supertype"
-    );
-}
-
 /// `super.f()` binds to the *overridden* member, not to the override.
 ///
 /// That is the whole reason `super` is not given the enclosing type as its receiver: the enclosing
