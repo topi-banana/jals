@@ -92,7 +92,7 @@ use jals_syntax::ast::{self, AstNode as _};
 use jals_syntax::{SyntaxNode, SyntaxToken};
 
 use crate::desc::{DescError, Descriptor};
-use crate::facts::{Facts, Hierarchy, Literal, Overrides};
+use crate::facts::{Facts, Literal};
 use crate::jvm::{AsmError, Assembler, BinOp, Branch, Compare, Numeric, Receiver};
 use crate::lower::slots::Slots;
 
@@ -438,7 +438,7 @@ impl Compile {
         let this_class = pool.class_index(&internal_name).ok_or(AsmError::PoolFull)?;
         // Only a project-internal supertype can be named here; anything else is `Object`, which is
         // also the right answer for a class with no `extends` clause at all.
-        let super_item = Hierarchy::of(index).superclass(item);
+        let super_item = index.superclass_of(item);
         // An `enum`'s supertype is `java.lang.Enum` and the source never writes it, so there is no
         // `extends` clause for the index to have recorded.
         let super_name = if is_enum {
@@ -1745,11 +1745,11 @@ impl Compile {
                 // Whether this *is* an override is the shared fact; whether it needs a bridge is
                 // the descriptor comparison below, which stays here because it is erasure.
                 //
-                // `Unknown` proceeds. Where the rule cannot decide, this keeps the leniency it had:
-                // a missing bridge is an `AbstractMethodError` at run time, a spurious one is dead
-                // code. What the fact removes is the same-arity overload it used to accept —
+                // The lenient collapse, by name: an undecided answer proceeds, because a missing
+                // bridge is an `AbstractMethodError` at run time and a spurious one is dead code.
+                // What the fact removes is the same-arity overload the old rule used to accept —
                 // `put(int)` against `Holder<T>.put(T)`, which took the bridge `put(String)` needed.
-                if Hierarchy::of(context.index).overrides(own, inherited) == Overrides::No {
+                if !context.index.overrides(own, inherited).is_possible() {
                     continue;
                 }
                 let Ok(descriptor) = Descriptor::method_descriptor(inherited, context.index, false)
@@ -3879,7 +3879,7 @@ impl Context<'_> {
         let Some((&first, rest)) = ids.split_first() else {
             return throwable();
         };
-        // Guarded against a cycle for the same reason [`Hierarchy::inherited_field`] is bounded and
+        // Guarded against a cycle for the same reason `ProjectIndex::inherited_field` is and
         // `ProjectIndex::walk_supertypes_stateful` keeps a visited set: `class A extends B {}` with
         // `class B extends A {}` parses and indexes, and an unguarded walk oscillates between the
         // two forever. `Throwable` is the answer a chain that runs out already gives, and a chain
@@ -3898,7 +3898,7 @@ impl Context<'_> {
                     args: Vec::new(),
                 });
             }
-            let Some(next) = Hierarchy::of(self.index).superclass(candidate) else {
+            let Some(next) = self.index.superclass_of(candidate) else {
                 return throwable();
             };
             candidate = next;

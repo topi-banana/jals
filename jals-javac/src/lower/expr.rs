@@ -29,7 +29,7 @@ use jals_syntax::SyntaxNode;
 use jals_syntax::ast::{self, AstNode as _};
 
 use crate::desc::{DescError, Descriptor};
-use crate::facts::{Facts, Hierarchy, Literal, Operator, Unary};
+use crate::facts::{Facts, Literal, Operator, Unary};
 use crate::jvm::{BinOp, Branch, Compare, Numeric, NumericStack as _};
 use crate::lower::place::Place;
 use crate::lower::{Context, Emit, LowerError, OUTER, Result};
@@ -573,7 +573,7 @@ impl Expr {
     /// So a name that resolved to nothing is looked up by name on the enclosing type and then up the
     /// superclass chain, nearest first, which is the order that makes a shadowing field win.
     pub(crate) fn inherited_field(name: &str, context: &Context<'_>) -> Option<MemberId> {
-        Hierarchy::of(context.index).inherited_field(context.this_item, name)
+        context.index.inherited_field(context.this_item, name)
     }
 
     /// `receiver.name`: a field read, `static` or instance.

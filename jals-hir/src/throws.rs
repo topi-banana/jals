@@ -196,9 +196,13 @@ impl Cx<'_> {
     /// rethrow asks again about the block inside — so `n` nested `try { … } catch (E e) { throw e; }`
     /// re-walk each other exponentially. Measured, not feared: twelve levels answered in 0.1 s and
     /// twenty-two took 42, on one current-thread runtime, which is the editor wedged rather than one
-    /// slow request. Bounded like [`Hierarchy::inherited_field`]'s walk, and past the bound the
-    /// answer is the arms the source wrote — the same upper bound a walk that learns nothing already
-    /// falls back to, so the shape of the answer does not change with the depth, only its precision.
+    /// slow request. So it is bounded by a *depth* — deliberately not by a visited set, which is what
+    /// [`ProjectIndex::inherited_field`](crate::ProjectIndex::inherited_field) and the supertype walk
+    /// terminate with: those guard against a hierarchy that closes on itself, and nothing here
+    /// revisits a node. What this bounds is the cost of re-walking, which no visited set makes
+    /// cheaper. Past the bound the answer is the arms the source wrote — the same upper bound a walk
+    /// that learns nothing already falls back to, so the shape of the answer does not change with the
+    /// depth, only its precision.
     fn raised_within(&self, node: &SyntaxNode, depth: usize) -> Vec<ItemId> {
         match node.kind() {
             THROW_STMT => {

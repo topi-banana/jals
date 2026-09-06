@@ -49,7 +49,7 @@ use crate::def::DefKind;
 use crate::reference::{Reference, Resolution};
 use crate::resolve::Resolved;
 use crate::resolve::collect::Collect;
-use crate::ty::Ty;
+use crate::ty::{ClassTy, Ty};
 
 /// Identifies a file within a [`ProjectIndex`]. The host maps it to a path / URL; the index only
 /// ever compares and stores it.
@@ -505,6 +505,58 @@ impl TypeResolution {
         match self {
             Self::Project(id) => Some(id),
             Self::External | Self::Unresolved => None,
+        }
+    }
+}
+
+/// Whether one method overrides another: the answer
+/// [`overrides`](ProjectIndex::overrides) and [`implements_for`](ProjectIndex::implements_for) give.
+///
+/// **Three answers, because the two consumers collapse them oppositely.** A `bool` would make one of
+/// them wrong, which is how both got wrong. A code generator emitting bridge methods wants leniency
+/// — a missing bridge is an `AbstractMethodError` at run time, a spurious one is dead code — while
+/// one emitting virtual dispatch wants strictness, because a false positive routes a call to the
+/// wrong method and no later verification catches it. Rather than leave each consumer to spell its
+/// own `!= No` / `== Yes`, the two policies are named: [`is_possible`](Self::is_possible) and
+/// [`is_certain`](Self::is_certain). Comparing against a variant instead is how a fourth answer
+/// added later would be silently reclassified at both call sites with nothing failing to compile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Overrides {
+    /// Same name and arity, and every parameter matched after substitution.
+    Yes,
+    /// A parameter provably differs, or the declaration shapes rule an override out.
+    No,
+    /// Everything checkable matched, and at least one position could not be decided.
+    Unknown,
+}
+
+impl Overrides {
+    /// Whether this is *definitely* an override — [`Yes`](Self::Yes) alone.
+    ///
+    /// The policy for a consumer a false positive would break: virtual dispatch routed to the wrong
+    /// method is output that loads, validates, and runs wrongly, while a false negative leaves the
+    /// direct call a non-overridden method would have had anyway.
+    ///
+    /// Written as an exhaustive `match` rather than a `matches!`, so a fourth answer added later is a
+    /// compile error at both policies instead of silently landing on one side of each.
+    #[must_use]
+    pub const fn is_certain(self) -> bool {
+        match self {
+            Self::Yes => true,
+            Self::No | Self::Unknown => false,
+        }
+    }
+
+    /// Whether this *may* be an override — anything but [`No`](Self::No).
+    ///
+    /// The policy for a consumer a false negative would break: a bridge method that should have been
+    /// written and was not is an `AbstractMethodError`, whereas one written needlessly is unreachable
+    /// code. [`Unknown`](Self::Unknown) therefore proceeds.
+    #[must_use]
+    pub const fn is_possible(self) -> bool {
+        match self {
+            Self::Yes | Self::Unknown => true,
+            Self::No => false,
         }
     }
 }
@@ -1859,6 +1911,42 @@ impl ProjectIndex {
         })
     }
 
+    /// The **field** `name` reaches from `from`, searched up the *superclass* chain, nearest first.
+    ///
+    /// Deliberately **not** [`resolve_member`](Self::resolve_member) with
+    /// [`Namespace::Value`](crate::Namespace::Value), and the three differences are each load-bearing
+    /// for the caller this exists for — a code generator laying out an object's storage:
+    ///
+    /// - **Superclasses only.** A struct holds its supertype's fields first, so the slot an
+    ///   inherited member lands in is the enclosing type's own. An interface's `static final`
+    ///   constant is reached on the interface and occupies no slot, so following interface edges
+    ///   would answer with a member that has no place in the layout.
+    /// - **Fields only**, where `Namespace::Value` also admits an enum constant.
+    /// - **No JLS §9.2 filtering**, which is a rule about what an *interface* inherits from `Object`
+    ///   and is meaningless on a chain that follows no interface.
+    ///
+    /// Nearest-first is what makes a shadowing field win. File-local resolution cannot answer this:
+    /// it binds a name to a declaration it can see, and a superclass's field may not even be in the
+    /// same file.
+    ///
+    /// Terminates on a malformed index by visiting each type once, so `class A extends B {} class B
+    /// extends A {}` — which parses and indexes — answers rather than hanging.
+    pub fn inherited_field(&self, from: ItemId, name: &str) -> Option<MemberId> {
+        let mut visited = HashSet::new();
+        let mut item = from;
+        while visited.insert(item) {
+            if let Some(member) = self.own_members(item).iter().copied().find(|&member| {
+                let info = self.member(member);
+                info.kind == DefKind::Field && info.name == name
+            }) {
+                return Some(member);
+            }
+            // No superclass left is the end of the search, not an error.
+            item = self.superclass_of(item)?;
+        }
+        None
+    }
+
     /// Whether members reached from `owner` have to be filtered by JLS §9.2 — i.e. whether `owner`
     /// is an interface.
     ///
@@ -2025,6 +2113,183 @@ impl ProjectIndex {
     pub fn is_subtype(&self, s: ItemId, t: ItemId) -> bool {
         self.walk_supertypes(s, |current| (current == t).then_some(()))
             .is_some()
+    }
+
+    /// Whether `own` overrides `inherited` (JLS §8.4.8.1).
+    ///
+    /// **A fact a code generator reads, not a diagnostic.** It decides whether a bridge method is
+    /// written and which function a virtual call reaches, so a wrong answer is emitted output that
+    /// loads and runs, not a message. Two consumers read it for opposite purposes and collapse
+    /// [`Overrides`]'s three answers oppositely; that is why there are three.
+    ///
+    /// Asked about `own`'s own declaring type, which is the usual question. When the two halves meet
+    /// at a *third* type it is the wrong one — see
+    /// [`implements_for`](Self::implements_for), which this is a projection of.
+    ///
+    /// Lived in `jals-javac` until it was found to be re-deriving this crate's own supertype walk,
+    /// generic substitution, and `MemberType` conversion — with a second cycle bound and a second
+    /// type converter, each a release behind. Two backends answered it locally before that, and both
+    /// answered it the same wrong way: **name plus argument count**, under which two same-arity
+    /// overloads are indistinguishable, so `class Box implements Holder<String>` declaring both
+    /// `put(String)` and `put(int)` had whichever the walk reached first treated as the override.
+    pub fn overrides(&self, own: MemberId, inherited: MemberId) -> Overrides {
+        self.implements_for(self.member(own).owner, own, inherited)
+    }
+
+    /// Whether `own`, reached from `item`, is the implementation `item` supplies for `inherited`.
+    ///
+    /// [`overrides`](Self::overrides) asks this about `own`'s own declaring type. That is the wrong
+    /// question whenever the two halves meet at a *third* type. JLS §8.4.8.1: a method a class
+    /// inherits from a superclass implements an interface method the same class also inherits, and
+    /// neither declaring type knows about the other —
+    /// `interface I { int f(); }`, `class Base { public int f() { … } }`,
+    /// `class C extends Base implements I {}`. `Base` is no subtype of `I`, so asking about `Base`
+    /// answers `No` correctly and answers the wrong question: the implementation `C` has for `I.f`
+    /// **is** `Base.f`. A backend read that `No` as "nothing in this module implements it" and
+    /// emitted a trap against a receiver whose body was one function away.
+    ///
+    /// So the subtype edge and the type-argument substitution are both taken from `item`.
+    ///
+    /// The parameter comparison is deliberately **asymmetric**: `inherited`'s parameters are
+    /// substituted through the path from `item`
+    /// ([`param_tys_as_seen_from`](Self::param_tys_as_seen_from)) while `own`'s are read in its own
+    /// declaring scope ([`resolved_param_tys`](Self::resolved_param_tys)). A type variable surviving
+    /// on `own` therefore says nothing about `inherited`, which is what
+    /// [`same_parameter`](Self::same_parameter)'s one-sided arms rest on.
+    pub fn implements_for(&self, item: ItemId, own: MemberId, inherited: MemberId) -> Overrides {
+        let (a, b) = (self.member(own), self.member(inherited));
+        // Shape first. A `static` method *hides* rather than overrides, and a `private` one is not
+        // inherited at all (JLS §8.4.8.1) even though the member walk still lists it. Two members of
+        // one owner are an overload, which is precisely the case the old name-and-arity rule got
+        // wrong. Abstractness is deliberately **not** consulted: an override of a concrete method is
+        // still an override.
+        if own == inherited
+            || a.kind != DefKind::Method
+            || b.kind != DefKind::Method
+            || a.name != b.name
+            || a.params.len() != b.params.len()
+            || a.modifiers.is_static
+            || b.modifiers.is_static
+            || b.modifiers.is_private
+            || a.owner == b.owner
+            || !self.is_subtype(item, b.owner)
+            || !self.is_subtype(item, a.owner)
+        {
+            return Overrides::No;
+        }
+
+        let Some(inherited_tys) = self.param_tys_as_seen_from(item, inherited) else {
+            // `is_subtype` said yes and the declared supertypes disagree; nothing is decidable.
+            return Overrides::Unknown;
+        };
+        let own_tys = self.resolved_param_tys(own);
+
+        let mut unknown = false;
+        for (position, inherited_ty) in inherited_tys.iter().enumerate() {
+            let Some(own_ty) = own_tys.get(position) else {
+                return Overrides::Unknown;
+            };
+            match Self::same_parameter(own_ty, inherited_ty) {
+                Overrides::No => return Overrides::No,
+                Overrides::Unknown => unknown = true,
+                Overrides::Yes => {}
+            }
+        }
+        if unknown {
+            Overrides::Unknown
+        } else {
+            Overrides::Yes
+        }
+    }
+
+    /// Whether two parameter types are the same parameter.
+    ///
+    /// Type **arguments are deliberately ignored** — `(Project, Project)` compares the item and
+    /// `(External, External)` the captured name. JLS §8.4.2 override-equivalence is a subsignature
+    /// question and erasure drops arguments, so this is the rule rather than a shortcut.
+    fn same_parameter(own: &Ty, inherited: &Ty) -> Overrides {
+        match (own, inherited) {
+            (Ty::Array(a), Ty::Array(b)) => Self::same_parameter(a, b),
+            // The three shapes that are provably different parameters.
+            //
+            // An array against a non-array is a different parameter whatever the element is. A
+            // primitive never instantiates a type parameter — which is what rules `put(int)` out
+            // against `Holder<T>.put(T)`, the case name-and-arity could not see, and rules it out
+            // against a *surviving* variable for the same reason.
+            //
+            // And a type variable against a type the index **holds** is a different parameter too:
+            // the substitution has already run, so a concrete inherited parameter is one no
+            // instantiation maps onto the variable. `class C<T extends Number> { boolean equals(T) }`
+            // against `Object.equals(Object)` is an overload, and javac says so by emitting no
+            // bridge. Once a bounded variable erased to its bound rather than to `Object` the two
+            // descriptors differed, and answering `Unknown` here meant a bridge was written for it:
+            // `((Object) new C<Integer>()).equals("hello")` then threw `ClassCastException` where
+            // javac returns `false`, and the same shape sent `((B) c).f("s")` into `C` instead of
+            // `B`.
+            //
+            // The two directions are not symmetric: only the *inherited* side has been substituted,
+            // so a variable arriving on `own` says nothing and falls to the lenient arm below.
+            (Ty::Array(_), _)
+            | (_, Ty::Array(_))
+            | (Ty::Primitive(_), Ty::Class(_) | Ty::TypeVar { .. })
+            | (Ty::Class(_), Ty::Primitive(_))
+            | (Ty::TypeVar { .. }, Ty::Primitive(_) | Ty::Class(ClassTy::Project { .. })) => {
+                Overrides::No
+            }
+            (Ty::Primitive(a), Ty::Primitive(b)) => Self::decide(a == b),
+            (
+                Ty::Class(ClassTy::Project { id: a, .. }),
+                Ty::Class(ClassTy::Project { id: b, .. }),
+            ) => Self::decide(a == b),
+            // Two names the index does not hold. A [`MemberType`] captures a reference type's
+            // **simple** name — the source path takes the last `IDENT` and the classpath path takes
+            // `Fqn::simple_name_of`, with the dotted spelling kept in a separate field this
+            // conversion drops once resolution has failed — so this is exact equality of the one
+            // spelling there is, not a last-segment match.
+            //
+            // It is deliberately neither of the two neighbouring rules. `Ty::is_assignable_to` calls
+            // *every* External pair compatible, which would accept any two unindexed types as one
+            // parameter; `Ty::matchable`'s `java.lang` / `java.io` whitelist answers a different
+            // question (which spellings may name a wrapper class) and its own doc records the defect
+            // that came of matching a last segment blindly. The cost here is that `app.Foo` and
+            // `lib.Foo` are one type — neither is indexed, so no backend can name either, and a
+            // lowering refuses the whole member before an emission exists.
+            (
+                Ty::Class(ClassTy::External { name: a, .. }),
+                Ty::Class(ClassTy::External { name: b, .. }),
+            ) => Self::decide(a == b),
+            // Two type variables are the same parameter when they are the same *variable*. The
+            // declaring scope is part of that: a method's `<T>` shadows its class's, so two `T`s can
+            // be two parameters. Different variables are not decidable here — substitution may yet
+            // relate them — and stay lenient.
+            (
+                Ty::TypeVar {
+                    owner: a,
+                    member: am,
+                    name: an,
+                },
+                Ty::TypeVar {
+                    owner: b,
+                    member: bm,
+                    name: bn,
+                },
+            ) => {
+                if (a, am, an) == (b, bm, bn) {
+                    Overrides::Yes
+                } else {
+                    Overrides::Unknown
+                }
+            }
+            // An indexed type against an unindexed name, a type variable the substitution left on one
+            // side only, or a type inference never worked out: not decidable, and not a licence to
+            // claim either answer.
+            _ => Overrides::Unknown,
+        }
+    }
+
+    /// [`Yes`](Overrides::Yes) or [`No`](Overrides::No) — never `Unknown`, for the arms that decide.
+    const fn decide(same: bool) -> Overrides {
+        if same { Overrides::Yes } else { Overrides::No }
     }
 
     /// Walks `start` and its project-internal supertypes, each visited once with a cycle guard in

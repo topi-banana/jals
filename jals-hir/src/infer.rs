@@ -2184,25 +2184,71 @@ impl ProjectIndex {
     /// second with the first's return type. Overload selection has already chosen one, so the
     /// substitution is done into *that* one — the same walk, stopping at the type that declares it.
     fn selected_member_ty(&self, receiver: ItemId, receiver_args: &[Ty], member: MemberId) -> Ty {
-        let declaring = self.member(member).owner;
+        let info = self.member(member);
+        self.substitution_to(receiver, receiver_args, info.owner)
+            .map_or(Ty::Unknown, |args| {
+                self.subst_member_ty(info.owner, member, &args, info.file, &info.ty)
+            })
+    }
+
+    /// The type arguments in effect at `declaring`, seen from a use of `receiver` with
+    /// `receiver_args`. `None` when `declaring` is not on `receiver`'s indexed supertype chain.
+    ///
+    /// The shared half of [`selected_member_ty`](Self::selected_member_ty) and
+    /// [`param_tys_as_seen_from`](Self::param_tys_as_seen_from): both walk to the type that declares
+    /// a member and differ only in what they project out of the frame the walk stops on. It is
+    /// written once because the walk is the part carrying the rule — the composition down the chain
+    /// (`class A<T> implements B<List<T>>` carries `T` through `B`'s own parameter) and the
+    /// [`walk_supertypes_stateful`](ProjectIndex::walk_supertypes_stateful) visited set that
+    /// terminates it on a malformed index.
+    fn substitution_to(
+        &self,
+        receiver: ItemId,
+        receiver_args: &[Ty],
+        declaring: ItemId,
+    ) -> Option<Vec<Ty>> {
         self.walk_supertypes_stateful(
             receiver,
             receiver_args.to_vec(),
-            |current, args| {
-                (current == declaring).then(|| {
-                    let info = self.member(member);
-                    self.subst_member_ty(current, member, args, info.file, &info.ty)
-                })
-            },
+            |current, args| (current == declaring).then(|| args.clone()),
             |current, args, sup| {
                 let file = self.item(current).file;
+                // A supertype's type arguments belong to the `extends` clause, not to any member,
+                // so `None` is the scope: `class Sub extends Base<T>` threads the *class's* `T`.
                 sup.args
                     .iter()
                     .map(|mt| self.subst_ty(current, None, args, file, mt))
                     .collect()
             },
         )
-        .unwrap_or(Ty::Unknown)
+    }
+
+    /// The formal parameter types of `member`, with the type arguments the path from `seen_from`
+    /// supplies bound in. `None` when `member`'s declaring type is not on `seen_from`'s indexed
+    /// supertype chain.
+    ///
+    /// [`resolved_param_tys`](ProjectIndex::resolved_param_tys) reads a member's parameters in its
+    /// **own** declaring scope, so a generic supertype's `T` stays a type variable. This is the other
+    /// half of the override question: `class Box implements Holder<String>` binds `Holder.put(T)`'s
+    /// parameter to `String` when it is asked about from `Box`, which is exactly what separates the
+    /// `put(String)` that overrides it from the `put(int)` that does not.
+    ///
+    /// `seen_from` is read **raw** — no arguments of its own — because an override is a question
+    /// about the *declaration* rather than about any instantiation of it. Leaving `seen_from`'s own
+    /// parameters as variables is what makes an identically-generic override match itself.
+    pub(crate) fn param_tys_as_seen_from(
+        &self,
+        seen_from: ItemId,
+        member: MemberId,
+    ) -> Option<Vec<Ty>> {
+        let info = self.member(member);
+        let args = self.substitution_to(seen_from, &[], info.owner)?;
+        Some(
+            info.params
+                .iter()
+                .map(|param| self.subst_ty(info.owner, Some(member), &args, info.file, &param.ty))
+                .collect(),
+        )
     }
 
     /// [`member_type_to_ty`](ProjectIndex::member_type_to_ty) for a member-type `mt` declared in
