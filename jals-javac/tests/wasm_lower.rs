@@ -662,3 +662,31 @@ public class S {
         "the report names what it could not lower: {error}"
     );
 }
+
+/// A superclass cycle is finished with, not followed.
+///
+/// `class A extends B {}` beside `class B extends A {}` parses and indexes — nothing rejects it
+/// before a backend sees it — and this lowering walked the chain in two places with no guard. The
+/// class ordering was worse than a hang: its `ordered.contains` check was a test against the
+/// *output*, which a caller appends to only on the way back out, so an ancestor still being
+/// visited was invisible and the recursion aborted the process with a stack overflow. Nothing
+/// catches one of those, and the input reaches an editor as readily as a build.
+///
+/// Three shapes, because the second walk is only reached once the first terminates: no
+/// constructors at all, explicit ones on both sides, and a third class hanging off the cycle.
+#[test]
+fn a_superclass_cycle_terminates_rather_than_recursing() {
+    for (source, functions) in [
+        ("class A extends B {} class B extends A {}", 0),
+        (
+            "class A extends B { A() {} } class B extends A { B() {} }",
+            2,
+        ),
+        (
+            "class A extends B {} class B extends A {} class C extends A { C() {} }",
+            1,
+        ),
+    ] {
+        assert_eq!(module_of(&[source]).funcs.len(), functions, "{source}");
+    }
+}

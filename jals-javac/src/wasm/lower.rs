@@ -823,6 +823,15 @@ impl CompileWasm {
             .map(Some)
     }
 
+    /// Append `item` to `ordered`, its declared supertypes first.
+    ///
+    /// Walked rather than recursed. The recursion this replaces guarded on `ordered`, which a
+    /// caller only appends to on the way *back out* — so an ancestor still being visited was
+    /// invisible to it, and `class A extends B {}` beside `class B extends A {}` recursed until the
+    /// stack ran out. That is an abort rather than a panic: nothing catches it, and the input
+    /// parses and indexes perfectly, so it arrived through an editor as readily as through a build.
+    /// The chain is collected here instead, ending at the first type outside `declared` **or**
+    /// already on it.
     fn push_with_supertypes(
         item: ItemId,
         index: &ProjectIndex,
@@ -832,12 +841,19 @@ impl CompileWasm {
         if ordered.contains(&item) {
             return;
         }
-        if let Some(parent) = index.superclass_of(item)
-            && declared.contains(&parent)
-        {
-            Self::push_with_supertypes(parent, index, declared, ordered);
+        let mut chain = Vec::new();
+        let mut current = Some(item);
+        while let Some(id) = current.filter(|id| !chain.contains(id)) {
+            chain.push(id);
+            current = index
+                .superclass_of(id)
+                .filter(|parent| declared.contains(parent));
         }
-        ordered.push(item);
+        for &id in chain.iter().rev() {
+            if !ordered.contains(&id) {
+                ordered.push(id);
+            }
+        }
     }
 
     /// Register every method and constructor `input` declares.
@@ -1911,8 +1927,13 @@ impl Body {
         index: &ProjectIndex,
         layout: &Layout,
     ) -> Option<(ItemId, u32)> {
+        // `class A extends B {}` with `class B extends A {}` parses and indexes, and an unguarded
+        // walk oscillates between the two forever — the same hazard `common_supertype` states on
+        // the JVM side. A chain that closes on itself has run out, which is what `None` already
+        // means here.
+        let mut seen = BTreeSet::new();
         let mut candidate = index.superclass_of(owner);
-        while let Some(item) = candidate {
+        while let Some(item) = candidate.filter(|&item| seen.insert(item)) {
             let mut declared = layout.constructors(index, item).peekable();
             if declared.peek().is_some() {
                 return declared

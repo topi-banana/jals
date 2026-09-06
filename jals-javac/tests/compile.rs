@@ -7141,3 +7141,32 @@ fn two_local_classes_of_one_name_are_refused() {
         assert_eq!(run(distinct, "Distinct"), "3\n");
     }
 }
+
+/// A superclass cycle compiles here, which is the half of the story that made the other half hard
+/// to see.
+///
+/// `class A extends B {}` beside `class B extends A {}` parses and indexes, and this backend has
+/// guarded its two chain walks since `common_supertype` was written. The wasm backend had not, and
+/// aborted the process on a stack overflow — so the two backends answered the same malformed input
+/// with a class file and with a `SIGABRT`. Both sides are pinned now, because one of them being
+/// right is what kept the corpus quiet.
+#[test]
+fn a_superclass_cycle_compiles_rather_than_recursing() {
+    for (source, classes) in [
+        ("class A extends B {} class B extends A {}", 2),
+        (
+            "class A extends B { A() {} } class B extends A { B() {} }",
+            2,
+        ),
+        (
+            "class A extends B {} class B extends A {} class C extends A { C() {} }",
+            3,
+        ),
+    ] {
+        assert_eq!(
+            compile(source).map(|classes| classes.len()).ok(),
+            Some(classes),
+            "{source}"
+        );
+    }
+}
