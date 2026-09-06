@@ -21,13 +21,18 @@
 
 use expect_test::expect;
 use jals_hir::{FileAnalysis, FileId, FileSemantics, ProjectIndex, TypedFile};
-use jals_javac::wasm::{CompileWasm, ExportKind, Instr, Module};
+use jals_javac::wasm::{CompileWasm, ExportKind, Instr, Module, WasmOptions};
 use jals_syntax::SyntaxNode;
 use std::fmt::Write as _;
 
 /// Compile every source as one module — which is what "the whole project" means for a target with
 /// no dynamic loading and no classpath — and stop at the module rather than at its bytes.
 fn module_of(sources: &[&str]) -> Module {
+    module_with(sources, WasmOptions::default())
+}
+
+/// [`module_of`], with the compile options stated.
+fn module_with(sources: &[&str], options: WasmOptions) -> Module {
     let roots: Vec<(FileId, SyntaxNode)> = sources
         .iter()
         .enumerate()
@@ -54,7 +59,7 @@ fn module_of(sources: &[&str]) -> Module {
         .iter()
         .map(|binding| jals_exec::block_on_inline(binding.typed()))
         .collect();
-    CompileWasm::module(&inputs, &index).unwrap_or_else(|error| panic!("compile: {error}"))
+    CompileWasm::module(&inputs, &index, options).unwrap_or_else(|error| panic!("compile: {error}"))
 }
 
 /// The exported function named `export`, rendered as its declared locals followed by its
@@ -547,7 +552,8 @@ public class Arg {
     let analysis = jals_exec::block_on_inline(FileAnalysis::of(&root));
     let semantics = analysis.in_project(&index, FileId(0));
     let typed = jals_exec::block_on_inline(semantics.typed());
-    let error = CompileWasm::module(&[typed], &index).expect_err("a refusal, not a trap");
+    let error = CompileWasm::module(&[typed], &index, WasmOptions::default())
+        .expect_err("a refusal, not a trap");
     assert_eq!(
         error.to_string(),
         "a lambda or method reference with no single abstract method is not compiled to wasm yet"
@@ -573,11 +579,86 @@ public class Native {
     let analysis = jals_exec::block_on_inline(FileAnalysis::of(&root));
     let semantics = analysis.in_project(&index, FileId(0));
     let typed = jals_exec::block_on_inline(semantics.typed());
-    let error = CompileWasm::module(&[typed], &index).expect_err("a refusal, not a trap");
+    let error = CompileWasm::module(&[typed], &index, WasmOptions::default())
+        .expect_err("a refusal, not a trap");
     assert!(
         error
             .to_string()
             .contains("no body for it is compiled into the module"),
         "the report names the missing implementation: {error}"
+    );
+}
+
+/// `assert` is compiled into nothing by default, and that is not a gap: a JVM evaluates one only
+/// when it was started with `-ea`, so a module that always checked would be *stricter* than Java.
+///
+/// The pin is the whole default half of the contract — `jals build` behaves the same on both
+/// backends — and it is what the armed test below is the complement of.
+#[test]
+fn an_assert_compiles_to_nothing_by_default() {
+    let module =
+        module_of(&["public class S { public static int run(int n) { assert n > 0; return n; } }"]);
+    let body = body_of(&module, "run");
+    // `If` and not `Unreachable`: a body's own trailing `unreachable` is how a function that
+    // returns on every path ends, so the branch is what says a check was emitted.
+    assert!(
+        !body.contains("If"),
+        "an unarmed `assert` emits no check: {body}"
+    );
+}
+
+/// Armed, an `assert` is a conditional trap.
+///
+/// A trap and not a `throw`: Java raises `AssertionError`, which no module declares and no `catch`
+/// here could name, and the point of that error is that ordinary code does not handle it. Nothing
+/// catches a trap either, where a `throw` on the module's tag would be offered to any `catch`
+/// clause whose `ref.test` happened to accept a null payload.
+#[test]
+fn an_armed_assert_emits_a_conditional_trap() {
+    let module = module_with(
+        &["public class S { public static int run(int n) { assert n > 0; return n; } }"],
+        WasmOptions { assertions: true },
+    );
+    let body = body_of(&module, "run");
+    assert!(
+        body.contains("If") && body.contains("Else") && body.contains("  Unreachable"),
+        "an armed `assert` traps on the false arm of the condition it was written with: {body}"
+    );
+}
+
+/// The condition is lowered only when the check is emitted, so a project whose `assert` names
+/// something with no wasm representation still builds — and stops compiling the moment a test run
+/// arms it.
+///
+/// Stated rather than discovered: `jals build` and `jals test` genuinely differ on such a file,
+/// and it is the test run that reports what the build accepted.
+#[test]
+fn an_assert_condition_is_lowered_only_when_it_is_armed() {
+    let source = r#"
+public class S {
+    public static int run(int n) { assert "x" != null; return n; }
+}
+"#;
+    // Unarmed: the condition is never visited, so the `String` in it is never asked for.
+    let module = module_of(&[source]);
+    assert!(!body_of(&module, "run").contains("If"));
+
+    // Armed: it is, and there is no `String` on this target.
+    let root = jals_exec::block_on_inline(jals_syntax::Parse::parse(source)).syntax();
+    let index = jals_exec::block_on_inline(
+        ProjectIndex::builder(&[(FileId(0), root.clone())])
+            .with_stdlib()
+            .build(),
+    );
+    let analysis = jals_exec::block_on_inline(FileAnalysis::of(&root));
+    let semantics = analysis.in_project(&index, FileId(0));
+    let typed = jals_exec::block_on_inline(semantics.typed());
+    let error = CompileWasm::module(&[typed], &index, WasmOptions { assertions: true })
+        .expect_err("the condition is compiled now, and it names a library type");
+    assert!(
+        error
+            .to_string()
+            .contains("`String` has no wasm representation"),
+        "the report names what it could not lower: {error}"
     );
 }

@@ -34,6 +34,8 @@ build front end (`jals build` / `run` / `test` / `clean` / `init`) wraps the JDK
 - **Tests without a framework.** A test is a method carrying `#[test]` — no JUnit, no annotation
   processor, no launcher jar. `jals test` runs each one in its own JVM in parallel, with
   `cargo nextest`-shaped output, and `jals build` compiles none of them into the project's classes.
+  `[toolchain] runtime = "wasm"` runs the same tests as WebAssembly exports on the engine compiled
+  into `jals` instead — no JDK at any step.
 - **Cargo-style Java builds.** A `jals.toml` manifest — the Java analogue of `Cargo.toml` —
   drives `jals build` / `run` / `test` / `clean` / `init`. Optional Rhai scripts run before `javac`, using
   bounded storage-only APIs to generate sources and augment flags, classpaths, and environments.

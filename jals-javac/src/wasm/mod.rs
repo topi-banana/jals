@@ -51,4 +51,4 @@ pub use encode::{
     ValType,
 };
 pub use insn::{Insn, Instr, NumOp};
-pub use lower::{CompileWasm, WasmError};
+pub use lower::{CompileWasm, WasmError, WasmOptions};

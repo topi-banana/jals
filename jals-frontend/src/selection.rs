@@ -21,6 +21,7 @@ use jals_storage::{ArtifactCache, CacheBackend};
 use crate::dialect::{DialectFlags, DialectFrontend};
 use crate::driver::{Driver, LowerError, Lowered};
 use crate::frontend::Frontend;
+use crate::harness::{TestCatalog, TestEntry, TestHarness, TestShape};
 use crate::ir::IrFile;
 use crate::key::FrontendKey;
 use crate::vanilla::VanillaFrontend;
@@ -33,6 +34,11 @@ use crate::vanilla::VanillaFrontend;
 /// An `Absent` arm would be a fiction — and it would be the one thing hosts still had to match on.
 pub struct FrontendSelection {
     frontend: Box<dyn Frontend>,
+    /// The flags the selection was built from, kept so [`discover_tests`](Self::discover_tests)
+    /// answers with the same feature set and the same shape the lowering used. Asking it again
+    /// with a separately-resolved set would be a second place for a `cfg`-disabled test to be got
+    /// wrong.
+    flags: DialectFlags,
 }
 
 impl FrontendSelection {
@@ -51,7 +57,7 @@ impl FrontendSelection {
     /// of the rule, and keeping it here is what makes an attribute-free project's cache identity
     /// independent of the feature selection on every host at once.
     pub fn for_manifest(manifest: &Manifest, build_features: &BTreeSet<String>) -> Self {
-        Self::select(manifest, build_features, false)
+        Self::select(manifest, build_features, TestShape::None)
     }
 
     /// The same selection, lowering for a **test run**: `#[test]` methods are kept and the harness
@@ -61,12 +67,20 @@ impl FrontendSelection {
     /// ordinary path cannot pass `true` by accident — and a separate *selection* rather than a
     /// separate frontend, because everything else about the lowering is identical and must stay
     /// that way. The two differ in `config_digest`, so their cache entries never collide.
-    pub fn for_manifest_tests(manifest: &Manifest, build_features: &BTreeSet<String>) -> Self {
-        Self::select(manifest, build_features, true)
+    /// `harness` is how the runner about to execute the result reaches a test, and it is
+    /// **stated** rather than derived: this crate never reads `[build] backend`, and the manifest
+    /// alone does not say which runner a command selected — the same reason
+    /// `jals_config::DependencyScope` is a host's word.
+    pub fn for_manifest_tests(
+        manifest: &Manifest,
+        build_features: &BTreeSet<String>,
+        harness: TestHarness,
+    ) -> Self {
+        Self::select(manifest, build_features, TestShape::of(Some(harness)))
     }
 
     /// The one decision table, shared by both entries.
-    fn select(manifest: &Manifest, build_features: &BTreeSet<String>, tests: bool) -> Self {
+    fn select(manifest: &Manifest, build_features: &BTreeSet<String>, tests: TestShape) -> Self {
         let feature_set = manifest.feature_set();
         let attributes = feature_set.contains(Feature::Attributes);
         let flags = DialectFlags {
@@ -81,13 +95,14 @@ impl FrontendSelection {
             // nothing to keep. Folding it in only when the dialect is on is the same rule the
             // build features follow, and for the same reason: it keeps an attribute-free
             // project's cache identity independent of how it was invoked.
-            tests: tests && attributes,
+            tests: if attributes { tests } else { TestShape::None },
         };
         // Exhaustive with no `_` arm, deliberately: adding a `[build.frontend]` variant must be a
         // compile error *here*, which is the whole reason the table moved into one place.
         match manifest.build.frontend {
             FrontendKind::Vanilla {} if flags.any() => Self {
-                frontend: Box::new(DialectFrontend::new(flags)),
+                frontend: Box::new(DialectFrontend::new(flags.clone())),
+                flags,
             },
             FrontendKind::Vanilla {} => Self::vanilla(),
         }
@@ -101,7 +116,35 @@ impl FrontendSelection {
     pub fn vanilla() -> Self {
         Self {
             frontend: Box::new(VanillaFrontend),
+            flags: DialectFlags::default(),
         }
+    }
+
+    /// Every `#[test]` method these sources declare, as a runner addresses them.
+    ///
+    /// Asked of the **sources** rather than read off a completed lowering, and that is not a
+    /// convenience: a lowering restored from the artifact cache never runs the frontend at all, so
+    /// a catalog carried on its result would come back empty — and the second `jals test` in a warm
+    /// tree is exactly the run that would then find no test and report green.
+    ///
+    /// Empty for a selection built by [`for_manifest`](Self::for_manifest), which removes every
+    /// `#[test]` instead, and for [`TestHarness::Main`], whose runner asks the compiled harness
+    /// itself. The order is the one the harness generator emits in, and the export names are the
+    /// ones it wrote, because both come from the same catalog.
+    pub async fn discover_tests(&self, files: &[IrFile]) -> Vec<TestEntry> {
+        if !matches!(self.flags.tests, TestShape::Exports) {
+            return Vec::new();
+        }
+        let mut catalog = TestCatalog::default();
+        for file in files {
+            let Ok(text) = core::str::from_utf8(&file.bytes) else {
+                continue;
+            };
+            let parse = jals_syntax::Parse::parse(text).await;
+            let cfg = jals_syntax::cfg::CfgMap::compute(&parse, &self.flags.build_features);
+            catalog.extend_from_file(&parse, cfg.tests());
+        }
+        catalog.entries()
     }
 
     /// The selected frontend's stable identity, for diagnostics. Also its cache identity.

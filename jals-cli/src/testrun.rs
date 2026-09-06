@@ -245,8 +245,15 @@ impl TestReporter {
             TestVerdict::TimedOut => (Style::Bad, "TIMEOUT"),
             TestVerdict::Skipped => (Style::Note, "SKIP"),
         };
+        // The runner's own account, where it has one. Not gated on `--failure-output`, which
+        // governs a *test's* streams: a wasm test writes none, so this is the only thing that ever
+        // says why it failed.
+        let detail = outcome
+            .detail
+            .as_ref()
+            .map_or_else(String::new, |detail| format!(": {detail}"));
         format!(
-            "{} [{:>8.3}s] {}",
+            "{} [{:>8.3}s] {}{detail}",
             self.verb(style, verb),
             outcome.duration.as_secs_f64(),
             outcome.id
@@ -389,11 +396,15 @@ impl TestReporter {
             };
             shell.machine(format_args!(
                 "{{\"id\":{},\"verdict\":\"{verdict}\",\"exit-code\":{},\"duration-ms\":{},\
-                 \"attempts\":{}}}",
+                 \"attempts\":{},\"detail\":{}}}",
                 Self::json_string(&outcome.id),
                 code.map_or_else(|| "null".to_owned(), |code| code.to_string()),
                 outcome.duration.as_millis(),
-                outcome.attempts
+                outcome.attempts,
+                outcome
+                    .detail
+                    .as_deref()
+                    .map_or_else(|| "null".to_owned(), Self::json_string),
             ));
         }
     }

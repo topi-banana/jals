@@ -159,13 +159,37 @@ struct Method {
 /// Compiles a whole project to one WebAssembly module.
 pub struct CompileWasm;
 
+/// What a compile does with the source beyond lowering it.
+///
+/// One struct rather than a second entry point per choice, so a caller states what it wants and a
+/// new choice reaches every caller as a field with a default rather than as a signature they all
+/// have to be edited for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WasmOptions {
+    /// Whether `assert` evaluates its condition and traps when it is false.
+    ///
+    /// Off by default, which is what a JVM does with an `assert` unless it was started with `-ea`
+    /// — so an ordinary `jals build` behaves the same on both backends. There is no `-ea` here to
+    /// turn it on later: a wasm host has no flag for it and this backend emits no
+    /// `$assertionsDisabled` global to read one into, so the decision is the compile's.
+    ///
+    /// A test run is what turns it on, and for the reason the JVM test runner prepends `-ea`: a
+    /// suite written with `assert` and compiled without this passes without checking anything,
+    /// which is the failure that looks exactly like success.
+    pub assertions: bool,
+}
+
 impl CompileWasm {
     /// Emit the module's bytes. `index` must have been built over exactly `inputs`.
     ///
     /// [`module`](Self::module) with its encoding run; a module whose own lengths do not fit the
     /// `u32` the format spells them with is refused rather than truncated.
-    pub fn project(inputs: &[TypedFile<'_>], index: &ProjectIndex) -> Result<Vec<u8>> {
-        Self::module(inputs, index)?
+    pub fn project(
+        inputs: &[TypedFile<'_>],
+        index: &ProjectIndex,
+        options: WasmOptions,
+    ) -> Result<Vec<u8>> {
+        Self::module(inputs, index, options)?
             .finish()
             .ok_or(WasmError::TooLarge)
     }
@@ -202,10 +226,15 @@ impl CompileWasm {
         Ok(())
     }
 
-    pub fn module(inputs: &[TypedFile<'_>], index: &ProjectIndex) -> Result<Module> {
+    pub fn module(
+        inputs: &[TypedFile<'_>],
+        index: &ProjectIndex,
+        options: WasmOptions,
+    ) -> Result<Module> {
         let mut module = Module::new();
         let mut layout = Layout {
             object: index.item_by_fqn("java.lang.Object"),
+            assertions: options.assertions,
             ..Layout::default()
         };
 
@@ -1032,6 +1061,9 @@ struct Layout {
     /// tag carrying one reference covers all of them and the *class* of that reference is what a
     /// `catch` tests.
     tag: Option<u32>,
+    /// [`WasmOptions::assertions`], carried here because the statement lowering is the only thing
+    /// that reads it and every body already holds the layout.
+    assertions: bool,
     /// Every interface this module declares. An interface gets no struct type — wasm's declared
     /// subtyping is single-inheritance, so it could not be a supertype of two unrelated classes — so a
     /// value of interface type is held at the top of the reference hierarchy and narrowed at each use.
@@ -2200,12 +2232,9 @@ impl Lowering<'_> {
     fn stmt(&mut self, statement: &ast::Stmt, insn: &mut Insn) -> Result<()> {
         match statement {
             ast::Stmt::Block(block) => self.block(block, insn),
-            // `;` has nothing to emit, and neither has an `assert`: Java evaluates one only when
-            // assertions are *enabled*, they are disabled by default, and a wasm host has no `-ea` to
-            // turn them on. So an `assert` compiles to nothing, which is exactly what a JVM does with
-            // one by default — the condition is still parsed, resolved, and linted, it simply has no
-            // run-time effect. A trap would be *stricter* than Java.
-            ast::Stmt::Empty(_) | ast::Stmt::Assert(_) => Ok(()),
+            // `;` has nothing to emit.
+            ast::Stmt::Empty(_) => Ok(()),
+            ast::Stmt::Assert(statement) => self.assert(statement, insn),
             ast::Stmt::LocalVar(declaration) => self.local(declaration, insn),
             ast::Stmt::Expr(expression) => {
                 let Some(value) = expression.expr() else {
@@ -2307,6 +2336,43 @@ impl Lowering<'_> {
             insn.else_();
             self.stmt(&otherwise, insn)?;
         }
+        insn.end();
+        Ok(())
+    }
+
+    /// `assert cond;` — nothing at all, or a trap when the condition is false.
+    ///
+    /// Which one is [`WasmOptions::assertions`], and it is a *compile-time* decision because there
+    /// is nowhere else to put it. The JVM backend emits the check behind a `$assertionsDisabled`
+    /// read, so one class file serves both `-ea` and not; a wasm host has no flag to read, so a
+    /// module either checks or it does not. Off is the default, which is what an unflagged JVM
+    /// does — and the condition is still parsed, resolved, and linted either way.
+    ///
+    /// A failure is `unreachable` and not a `throw`. Java's is an `AssertionError`, which nothing
+    /// in this module declares and no `catch` here could name — and the whole point of the error
+    /// is that ordinary code does not handle it. A trap is the instruction with that property: it
+    /// leaves through every `try` in the module, exactly as an `Error` climbs past every
+    /// `catch (Exception e)` on a JVM. Throwing on the module's tag would instead offer it to any
+    /// `catch` clause whose `ref.test` happened to accept the payload.
+    ///
+    /// The detail expression of `assert cond : message` is **dropped**, not evaluated. There is no
+    /// `String` to build one with and no error object to attach it to, and Java evaluates it only
+    /// on the failing path — so what is lost is a side effect in a message on a run that is about
+    /// to trap. Said here rather than reported, because refusing `assert x : y` outright would put
+    /// a whole suite outside the subset over a diagnostic string.
+    fn assert(&mut self, statement: &ast::AssertStmt, insn: &mut Insn) -> Result<()> {
+        if !self.layout.assertions {
+            return Ok(());
+        }
+        let condition = statement
+            .syntax()
+            .children()
+            .find_map(ast::Expr::cast)
+            .ok_or(WasmError::Unsupported("an `assert` with no condition"))?;
+        self.expr(&condition, insn)?;
+        insn.if_();
+        insn.else_();
+        insn.unreachable();
         insn.end();
         Ok(())
     }

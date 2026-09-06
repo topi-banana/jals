@@ -74,7 +74,7 @@ use std::path::{Path, PathBuf};
 
 use jals_classfile::ClassFile;
 use jals_hir::{FileAnalysis, FileId, LoweredClasspath, ProjectIndex};
-use jals_javac::wasm::{CompileWasm, ExportKind, WasmError};
+use jals_javac::wasm::{CompileWasm, ExportKind, WasmError, WasmOptions};
 use rayon::prelude::*;
 use walkdir::WalkDir;
 
@@ -895,7 +895,7 @@ impl CaseResult {
             );
             let semantics = analysis.in_project(&index, FileId(0));
             let typed = jals_exec::block_on_inline(semantics.typed());
-            let module = match CompileWasm::module(&[typed], &index) {
+            let module = match CompileWasm::module(&[typed], &index, WasmOptions::default()) {
                 Ok(module) => module,
                 Err(WasmError::NoRepresentation(ty)) => {
                     return Lowered::stopped(Outcome::OutOfSubset(ty));

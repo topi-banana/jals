@@ -3709,3 +3709,198 @@ fn timings_covers_a_command_that_never_finds_a_project() {
         .expect("the report is written under the directory the command ran in");
     assert!(html.contains("format"), "the sweep is a row: {html}");
 }
+
+/// A `jals-wasm` project whose tests run on the embedded engine: the backend that emits a module
+/// and the runtime that runs one, which `Manifest::validate` requires to travel together.
+fn wasm_test_project() -> tempfile::TempDir {
+    let dir = tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("jals.toml"),
+        "[package]\nname = \"demo\"\nfeatures = [\"attributes\"]\n\n\
+         [build]\nbackend = { type = \"jals-wasm\" }\n\n\
+         [toolchain]\nruntime = \"wasm\"\n",
+    )
+    .unwrap();
+    let src = dir.path().join("src/main/java");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(
+        src.join("Calculator.java"),
+        "public class Calculator {\n\
+         \x20   static int add(int a, int b) { return a + b; }\n\
+         \x20   #[test]\n\
+         \x20   static void addsTwoNumbers() { assert add(2, 3) == 5; }\n\
+         \x20   #[test]\n\
+         \x20   static void aFailingAssertionIsCaught() { assert add(2, 3) == 6; }\n\
+         \x20   #[test]\n\
+         \x20   #[should_fail]\n\
+         \x20   static void dividingByZeroFails() { int n = 1 / (add(1, 1) - 2); }\n\
+         \x20   #[test]\n\
+         \x20   #[ignore]\n\
+         \x20   static void notRunByDefault() { assert false; }\n\
+         }\n",
+    )
+    .unwrap();
+    dir
+}
+
+/// `jals test` on a wasm project runs each test as a module export, in this process — no JVM, and
+/// nothing spawned at all.
+///
+/// The three verdicts are the whole contract: a holding `assert` passes, a failing one fails
+/// (which is what says the compile armed them), and `#[should_fail]` inverts a trap.
+#[test]
+fn tests_run_on_the_embedded_engine_for_a_wasm_project() {
+    let dir = wasm_test_project();
+
+    let output = jals()
+        .args(["test", "--manifest-path"])
+        .arg(dir.path().join("jals.toml"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "one test fails on purpose: {stderr}"
+    );
+    assert!(
+        stderr.contains("PASS") && stderr.contains("Calculator#addsTwoNumbers"),
+        "a holding assertion passes: {stderr}"
+    );
+    assert!(
+        stderr.contains("FAIL") && stderr.contains("Calculator#aFailingAssertionIsCaught"),
+        "a failing assertion is caught, which is what arming `assert` is for: {stderr}"
+    );
+    assert!(
+        stderr.contains("Calculator#dividingByZeroFails"),
+        "`#[should_fail]` inverts the trap: {stderr}"
+    );
+    assert!(
+        stderr.contains("2 passed, 1 failed"),
+        "the ignored test is not run: {stderr}"
+    );
+}
+
+/// `--list` answers from the tests the frontend found, with no module run at all — the ids are
+/// the ones the JVM path spells, so a filter means one thing whichever runner executes it.
+#[test]
+fn listing_a_wasm_projects_tests_names_them_the_same_way() {
+    let dir = wasm_test_project();
+
+    let output = jals()
+        .args(["test", "--list", "--manifest-path"])
+        .arg(dir.path().join("jals.toml"))
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let listed = String::from_utf8(output.stdout).unwrap();
+    assert!(listed.contains("Calculator#addsTwoNumbers"), "{listed}");
+    assert!(
+        listed.contains("Calculator#dividingByZeroFails"),
+        "{listed}"
+    );
+    assert!(
+        !listed.contains("notRunByDefault"),
+        "an `#[ignore]` is listed only when asked for: {listed}"
+    );
+}
+
+/// A wasm test run honours the filters, because it shares the planning half with the JVM one — a
+/// selection that differed between the two would make `--partition count:2/3` mean two things.
+#[test]
+fn a_filter_selects_the_same_way_on_the_embedded_engine() {
+    let dir = wasm_test_project();
+
+    let output = jals()
+        .args(["test", "adds", "--manifest-path"])
+        .arg(dir.path().join("jals.toml"))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "only the passing test ran: {stderr}"
+    );
+    assert!(stderr.contains("1 test run: 1 passed"), "{stderr}");
+}
+
+/// The three flags a module cannot honour are refused rather than dropped, before anything is
+/// compiled. Accepting one and doing something else is how a run comes back green having done
+/// what nobody asked for.
+#[test]
+fn the_flags_a_module_cannot_honour_are_refused() {
+    let dir = wasm_test_project();
+
+    for (flag, value, expected) in [
+        ("--timeout", Some("5"), "cannot be interrupted"),
+        ("--no-capture", None, "no standard output"),
+        ("--retries", Some("2"), "come out differently"),
+    ] {
+        let mut command = jals();
+        command
+            .args(["test", "--manifest-path"])
+            .arg(dir.path().join("jals.toml"))
+            .arg(flag);
+        if let Some(value) = value {
+            command.arg(value);
+        }
+        let output = command.output().unwrap();
+        assert!(!output.status.success(), "`{flag}` must be refused");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(expected),
+            "`{flag}` names why it cannot be honoured, got: {stderr}"
+        );
+    }
+}
+
+/// A wasm backend with a JVM runtime is refused with the selector that does work — the manifest is
+/// what makes the two contradict, and clap cannot see a manifest.
+#[test]
+fn a_wasm_backend_with_a_jvm_runtime_is_refused_by_jals_test() {
+    let dir = wasm_test_project();
+    std::fs::write(
+        dir.path().join("jals.toml"),
+        "[package]\nname = \"demo\"\nfeatures = [\"attributes\"]\n\n\
+         [build]\nbackend = { type = \"jals-wasm\" }\n",
+    )
+    .unwrap();
+
+    let output = jals()
+        .args(["test", "--manifest-path"])
+        .arg(dir.path().join("jals.toml"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("runtime = \"wasm\""),
+        "the refusal names the selector that works: {stderr}"
+    );
+}
+
+/// The other direction is a *manifest* error, not a `jals test` one: it is refused wherever the
+/// manifest is read, so `jals build` and `jals run` reach it too.
+#[test]
+fn the_wasm_runtime_without_the_wasm_backend_is_refused_by_every_command() {
+    let dir = wasm_test_project();
+    std::fs::write(
+        dir.path().join("jals.toml"),
+        "[package]\nname = \"demo\"\nfeatures = [\"attributes\"]\n\n\
+         [toolchain]\nruntime = \"wasm\"\n",
+    )
+    .unwrap();
+
+    for command in ["build", "test"] {
+        let output = jals()
+            .args([command, "--manifest-path"])
+            .arg(dir.path().join("jals.toml"))
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "`jals {command}` must refuse it");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("which compiles to class files"),
+            "`jals {command}` names the pairing, got: {stderr}"
+        );
+    }
+}

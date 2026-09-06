@@ -206,13 +206,18 @@ impl Compile {
         // Decided before any work, and by the selection rather than here: `javac` is not a "compile
         // then fail" case, it is a backend this host cannot have. `in_process` is the entry point
         // for exactly that — choosing it declares there is no process to spawn.
-        let backend =
-            match BackendSelection::in_process(manifest.build.backend, manifest.build.release) {
-                BackendSelection::Available(backend) => backend,
-                BackendSelection::Absent { id, reason } => {
-                    return Err(CompileFailure::BackendUnavailable { id, reason });
-                }
-            };
+        let backend = match BackendSelection::in_process(
+            manifest.build.backend,
+            manifest.build.release,
+            // This pipeline is *Build*. `assert` therefore compiles to nothing, exactly as an
+            // unflagged JVM treats one — the tab runs no tests.
+            jals_build::Assertions::Disabled,
+        ) {
+            BackendSelection::Available(backend) => backend,
+            BackendSelection::Absent { id, reason } => {
+                return Err(CompileFailure::BackendUnavailable { id, reason });
+            }
+        };
         // Asked before any work, like the backend above: a refusal the manifest already implies
         // should not arrive after the slowest step in the host has run.
         if manifest.build.remap.is_some() {

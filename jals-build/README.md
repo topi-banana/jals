@@ -116,7 +116,7 @@ javac-flags = ["-Xlint:all"]      # appended verbatim, before the source files
 
 # [toolchain]                       # which javac/java to use (defaults to the system tools)
 # compiler = { distribution = { name = "temurin", version = 21 } }  # discover an installed JDK
-# runtime  = "system"               # "system" | "builtin" | { path = "…" } | { distribution = { … } }
+# runtime  = "system"               # …same, plus "wasm" (runs a jals-wasm module)
 
 [run]
 main-class = "com.example.Main"   # entry point for `jals run` (used only when no [[bin]] exists)
@@ -628,7 +628,7 @@ is unaffected.
 | Key        | Type            | Default    | Meaning                                    |
 | ---------- | --------------- | ---------- | ------------------------------------------ |
 | `compiler` | string or table | `"system"` | which `javac` to use (see the forms below) |
-| `runtime`  | string or table | `"system"` | which `java` to use (same forms)           |
+| `runtime`  | string or table | `"system"` | which `java` to use, or `"wasm"` for no `java` at all |
 
 Each value is one of four forms — a keyword string, or a tagged table naming the form (the enum's
 plain serde representation; nothing is classified from a free-form string):
@@ -639,6 +639,7 @@ plain serde representation; nothing is classified from a free-form string):
 | `"builtin"`                | `"builtin"`                                                | the **in-process backend** instead of a JDK tool — today a _dummy_ (compile copies each source into the `classes-dir` unchanged, nothing is compiled; run is a successful no-op, nothing is executed), the placeholder a future embedded compiler replaces behind the same selector |
 | `{ path = "…" }`           | `{ path = "/opt/jdk-21" }`, `{ path = "./jdk/bin/javac" }` | an explicit JDK home directory (the tool is `<path>/bin/<tool>`) or the tool binary itself; a relative path resolves against the manifest dir. Used verbatim — a non-existent path errors rather than silently reverting to `PATH`.                                                 |
 | `{ distribution = { … } }` | `{ distribution = { name = "temurin", version = 21 } }`    | a JDK to **discover** among the installed ones by distribution and/or version; both keys are optional (a bare `version` matches any distribution, a bare `name` any version)                                                                                                        |
+| `"wasm"` (`runtime` only)  | `"wasm"`                                                   | the **WebAssembly engine compiled into this binary**, running the module `[build] backend = { type = "jals-wasm" }` emitted. Resolves no program — the engine is already linked in — and is the one `runtime` value constrained by `[build] backend` |
 
 A JDK tool is resolved in this order: the `$JAVAC`/`$JAVA` environment override (wins
 unconditionally, for CI/back-compat) → the `[toolchain]` selection above → `$JAVA_HOME/bin/<tool>` →
@@ -649,6 +650,14 @@ future work, and an un-discovered distribution falls back to the system tools. A
 selector skips program resolution entirely — no process is spawned for that step; the two selectors
 are independent (each is its own enum, matched by its own `select` factory), so e.g.
 `compiler = "builtin"` with the runtime unset dummy-"compiles" but still runs with the real `java`.
+
+**`runtime = "wasm"` is the one exception to that independence.** Every other value answers *which
+`java`* and pairs with any backend; that one answers *not a `java` at all* — it runs a WebAssembly
+module, and only `[build] backend = { type = "jals-wasm" }` produces one. The pair is checked in
+`Manifest::validate` and refused in both directions, so `jals build`, `jals run`, `jals test` and
+the analysis hosts all reach it: a selection that can never be honoured is a manifest error wherever
+the manifest is read, not one command's. See [§5](#5-testing) for what it does to a test run, and
+[`examples/unit_tests_wasm`](../examples/unit_tests_wasm) for a worked project.
 
 ### `[[bin]]`
 
@@ -685,6 +694,8 @@ module has no room for. `RunTarget::resolve` is not called for such a project: i
 went — a project with no static state has none). `--main-class`/`--bin` against that backend, and
 `--invoke` against a class-file one, are refused rather than ignored; a `[run] main-class` left in
 the manifest is warned about.
+[`examples/hello_world_wasm`](../examples/hello_world_wasm) is a worked example: it builds and runs
+with no JDK on `PATH`, and its greeting is a `char[]` because the module has no `String`.
 
 ### `[dependencies]`
 
@@ -1051,6 +1062,56 @@ The flags follow `cargo nextest run`: positional substring filters plus `--exact
 `--final-status-level`, `--failure-output`/`--success-output`, `--list`, `--message-format`,
 `--no-run`, `--hide-progress-bar`, `--color` and `--no-tests`.
 [`examples/unit_tests`](../examples/unit_tests) is a worked example.
+
+#### Running the tests on the embedded WebAssembly engine
+
+`[toolchain] runtime = "wasm"`, beside `[build] backend = { type = "jals-wasm" }`, runs the suite on
+the interpreter compiled into `jals` instead of on a JVM — **no JDK at any step**, since the
+compiler and the engine are both in-process.
+[`examples/unit_tests_wasm`](../examples/unit_tests_wasm) is a worked example. Four things differ,
+and each is forced by the target rather than chosen:
+
+- **The harness is one exported function per test**, not a generated `main`. wasm has no
+  entry-point convention and Java's cannot be lowered — `main` takes a `String[]`, and a module has
+  no `java.base` to supply `String`. An export name carries no owner, so the generated name carries
+  the class (`JalsTest$com$example$MathTest$adds`); two tests that would still collide are a
+  compile-time error rather than a module that silently holds one of them.
+- **`assert` is armed by the compile, not by the launcher.** A JVM decides at start-up whether
+  assertions run and `jals test` passes `-ea` for exactly that; a wasm host has no such moment, so
+  `jals test` compiles the checks in and `jals build` does not. Two consequences worth knowing: the
+  two commands produce genuinely different modules (and different cache entries), and an `assert`
+  whose condition names something with no wasm representation compiles under `jals build` and is
+  reported under `jals test`. A failed assertion is a **trap** — `AssertionError` is a library type
+  no module declares, and nothing catches a trap, which is the property an assertion failure needs.
+- **`#[should_fail]` is inverted by the runner.** The JVM shim wraps the call in
+  `catch (Throwable)`; here a `catch` type has to be a class the project declares, so the runner
+  reads the call's outcome instead. A trap and an uncaught `throw` are one verdict, as they are on
+  a JVM where both are `Throwable`s. What a module cannot report is *what* was thrown: the object
+  belongs to the engine's collector and the store is gone by the time a caller sees the failure, so
+  a failing test's account is one line and never a stack trace.
+- **Three flags are refused rather than ignored**, because dropping a product the command line asked
+  for is worse than saying the two do not go together. `--timeout`, since a wasm call cannot be
+  interrupted — the pinned engine has no fuel and no epoch deadline, so a test that never returns
+  holds its worker until the process is killed. `--no-capture`, since a module has no standard
+  output to hand to the terminal. `--retries`, since a run has no clock, no network, no threads, no
+  filesystem and a fresh store per test, so the second attempt recomputes the identical answer.
+
+Everything else is shared with the JVM runner and means exactly what it does there: the filters,
+`--exact`, `--skip`, `--run-ignored`, `--partition`, `-j`, `--fail-fast`/`--max-fail`, `--list`,
+`--no-run`, `--message-format`, `--no-tests`. Sharing the planning half is not a convenience — a
+selection that differed between the two would make `--partition count:2/3` mean two things.
+`--list` keeps that meaning too, and pays a compile it could technically skip: the ids come from the
+sources — the same catalog the wrappers are generated from, so no export name is ever un-mangled to
+recover one — but a test that does not compile is not a test the flag should name, and on a JVM the
+compile is a precondition rather than a choice.
+
+Each test runs in a fresh instance, which is the same isolation one JVM per test buys at a far
+lower price; it also re-runs every `static` initialiser, so one that traps fails the whole run up
+front rather than each test — a trap seen later has to mean the body. A test body is bounded by
+what the wasm backend compiles: primitives, project classes, arrays, generics, interfaces and
+project-declared exceptions, but no `String`, no boxing and no I/O. A construct with no lowering is
+reported at compile time and today **without the file it is in** — `CompileWasm` takes the whole
+project at once and names the construct rather than the position.
 
 **Still open:** a filter *expression* language (nextest's `-E`), JUnit XML output, reusing a
 compiled test build across runs (`--archive-file`), interoperating with an existing JUnit suite,

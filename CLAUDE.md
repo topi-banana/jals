@@ -324,6 +324,18 @@ filesystem reads into portable interfaces.
     line can write: that is refused with the position that caused it, and a name that is not there
     reports the names that are — the only evidence a caller gets that two `static` methods of one
     name collided into one export.
+  - **`WasmTestLauncher` (`wasm_test.rs`) sits *over* `WasmRunner`, and is gated on `native` as well
+    as `wasm-run`.** It is what `jals test` reaches under `[toolchain] runtime = "wasm"`: one export
+    per test, called on a fresh `Store`, over the same `test_plan.rs` selection and the same
+    `TestOutcome` the JVM runner reports. The `native` half is not incidental — that vocabulary
+    names host paths for a JVM run's captures — and the one configuration with `wasm-run` and no
+    `native` is the browser, which has no test surface to publish it to. Two properties are
+    load-bearing. `resolve` **instantiates once up front** and fails the whole run there: every
+    call runs the module's start function, so a trapping `static {}` would otherwise be
+    indistinguishable from a trap the body caused and would report every `#[should_fail]` test as
+    passed. And the **verdict is the runner's**, inverted on `WasmRunError::is_execution_failure`
+    and on nothing else — an export that is not there is a test that did not run, never a
+    `#[should_fail]` pass.
   - A `BuildScriptDiagnostic`'s fields are sealed and it renders as `<severity>: <message>` through
     its own `Display`; `BuildScriptError::ReportedErrors` renders every diagnostic it carries, in
     emission order. A `build.warning` and a `build.error` read identically once the severity is
@@ -451,6 +463,24 @@ filesystem reads into portable interfaces.
   root script only. A captured pass is the sentinel and never the exit status, which is also `1`
   for a missing main class and `0` for a body that called `System.exit(0)`; `--no-capture` gives up
   that reading along with the capture, and says so.
+
+  **Which runner executes is `[toolchain] runtime`, and `wasm` is the one value that constrains
+  `[build] backend`** — because the module it runs has exactly one producer, so `Manifest::validate`
+  refuses the pair apart in both directions rather than each command doing it. Under it,
+  `jals-frontend` emits **one exported function per test** instead of a `main` (there is no
+  entry-point convention and no `String` to route an id with) and `jals-build`'s `wasm_test.rs`
+  calls each export on a fresh `Store`. Three things move with that seam. The **shape is stated by
+  the host** as a `TestHarness`, never derived — this crate reads no `[build] backend`, the same
+  rule `DependencyScope` follows — and changing what either shape emits means bumping
+  `DialectFrontend`'s `caps().version`, since a cached lowering is restored without the frontend
+  running. The **verdict moves to the runner**, because `#[should_fail]` cannot be inverted in
+  generated Java here: that needs `catch (Throwable)`, and a `catch` type has to be a class the
+  module declares. And `assert` is armed **at compile time** (`Assertions` into
+  `JalsBackend::wasm`, folded into its `config_digest`) rather than by a launcher's `-ea`, because
+  a wasm host has no start-up moment to read a flag at — which is also why `jals build` and
+  `jals test` produce different modules from one source. `--timeout`, `--no-capture` and
+  `--retries` are refused there rather than ignored; everything else in `test_plan.rs` is shared,
+  so a `--partition` shard means one thing whichever runner runs it.
 - `jals-cli`: the host boundary from clap `PathBuf` values to `NativeStorage` and typed keys. It
   owns the terminal: `shell::Shell` is the **only** thing in the crate that writes to a stream, and
   `no-raw-print.yml` keeps that structural rather than intended. Three rules live there and nowhere

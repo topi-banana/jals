@@ -46,7 +46,9 @@ pub mod vanilla;
 
 pub use driver::{LowerError, Lowered};
 pub use frontend::{Frontend, FrontendCaps, FrontendError, FrontendFuture};
-pub use harness::{HARNESS_CLASS, LIST_ARGUMENT, OK_SENTINEL, QUIET_ARGUMENT, SHIM_PREFIX};
+pub use harness::{
+    HARNESS_CLASS, LIST_ARGUMENT, OK_SENTINEL, QUIET_ARGUMENT, SHIM_PREFIX, TestEntry, TestHarness,
+};
 pub use ir::{
     FrontendDiagnostic, FrontendOutput, Ir, IrFile, LoweredFile, LoweredTree, OriginSpan, Severity,
 };

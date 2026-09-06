@@ -173,6 +173,22 @@ pub enum WasmRunError {
     Signature { name: String, message: String },
 }
 
+impl WasmRunError {
+    /// Whether the project's own code ran and did not return normally.
+    ///
+    /// The two variants [`execution_failure`](WasmRunner::execution_failure) produces, and nothing
+    /// else: every other variant here is the request or the module being wrong, which is this
+    /// crate failing to *reach* the code rather than the code failing. A test runner inverts
+    /// `#[should_fail]` on this and on nothing else — an export that is not there, reported as a
+    /// pass because the test was expected to fail, is a missing test claiming to have run.
+    ///
+    /// Crate-internal: `WasmTestLauncher` is the only thing that has to tell the two apart, and a
+    /// host reads a verdict rather than re-deriving one.
+    pub(crate) const fn is_execution_failure(&self) -> bool {
+        matches!(self, Self::Trap(_) | Self::Exception)
+    }
+}
+
 impl fmt::Display for WasmRunError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -460,7 +476,7 @@ mod tests {
             options: &options,
             progress: &Progress::SILENT,
         };
-        let backend = JalsBackend::wasm();
+        let backend = JalsBackend::wasm(crate::Assertions::Disabled);
         let outcome =
             jals_exec::block_on_inline(backend.compile(&request)).expect("the backend ran");
         assert!(

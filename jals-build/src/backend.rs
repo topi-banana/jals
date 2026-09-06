@@ -241,6 +241,34 @@ pub enum BackendSelection {
     },
 }
 
+/// Whether a compile emits the `assert` checks its source wrote.
+///
+/// Only the wasm backend reads this, and only because wasm has nowhere else to put the decision.
+/// A JVM reads `-ea` when the process starts, so one class file serves an assertion-checking run
+/// and an ordinary one; a module has no such flag, and this backend emits no `$assertionsDisabled`
+/// global for one to reach — so a module either checks or it does not, and the compile is where
+/// that is settled.
+///
+/// It is a compile input and not a run-time one, which is why it reaches
+/// [`Backend::config_digest`] and separates a test compile's cached module from a build's.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Assertions {
+    /// Off — what a JVM does with an `assert` unless it was started with `-ea`, and so what
+    /// `jals build` produces on either backend.
+    #[default]
+    Disabled,
+    /// On — what a test run compiles with, for the reason the JVM test runner prepends `-ea`: a
+    /// suite written with `assert` and compiled without this passes without checking anything.
+    Enabled,
+}
+
+impl Assertions {
+    /// Whether the checks are emitted.
+    pub(crate) const fn enabled(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+}
+
 impl BackendSelection {
     /// The backend `[build] backend` names, on a host with no process to spawn.
     ///
@@ -249,12 +277,15 @@ impl BackendSelection {
     /// than being probed for. A native host calls `BackendSelection::for_host` instead, which adds
     /// the `javac` arm and delegates the other two straight back here — so every [`BackendKind`] is
     /// answered in exactly one place.
-    pub fn in_process(backend: BackendKind, release: Option<u32>) -> Self {
+    pub fn in_process(backend: BackendKind, release: Option<u32>, assertions: Assertions) -> Self {
         match backend {
             BackendKind::Jals {} => Self::Available(Box::new(crate::JalsBackend::new(release))),
             // wasm is a different *target*, not just a different tool: one module for the whole
-            // project, and the host's collector rather than a JVM's.
-            BackendKind::JalsWasm {} => Self::Available(Box::new(crate::JalsBackend::wasm())),
+            // project, and the host's collector rather than a JVM's. It is also the only backend
+            // that reads `assertions`: the other two produce class files a JVM applies `-ea` to.
+            BackendKind::JalsWasm {} => {
+                Self::Available(Box::new(crate::JalsBackend::wasm(assertions)))
+            }
             BackendKind::Javac {} => Self::Absent {
                 id: backend.tag_name(),
                 reason: BackendAbsence::NoHostProcess,
@@ -382,19 +413,24 @@ mod tests {
         // Each arm answers with the backend whose `id` is the manifest tag that selected it, so the
         // selection cannot silently route one backend's key to another's output.
         assert_eq!(
-            available_id(&BackendSelection::in_process(BackendKind::Jals {}, None)),
+            available_id(&BackendSelection::in_process(
+                BackendKind::Jals {},
+                None,
+                Assertions::Disabled
+            )),
             Some(BackendKind::Jals {}.tag_name())
         );
         assert_eq!(
             available_id(&BackendSelection::in_process(
                 BackendKind::JalsWasm {},
-                None
+                None,
+                Assertions::Disabled,
             )),
             Some(BackendKind::JalsWasm {}.tag_name())
         );
 
         // javac is absent as a *value* carrying its reason, not an error raised later.
-        match BackendSelection::in_process(BackendKind::Javac {}, None) {
+        match BackendSelection::in_process(BackendKind::Javac {}, None, Assertions::Disabled) {
             BackendSelection::Absent { id, reason } => {
                 assert_eq!(id, BackendKind::Javac {}.tag_name());
                 assert_eq!(reason, BackendAbsence::NoHostProcess);
@@ -416,7 +452,11 @@ mod tests {
             classpath: &[],
             options: &options,
         };
-        let digest = |release| match BackendSelection::in_process(BackendKind::Jals {}, release) {
+        let digest = |release| match BackendSelection::in_process(
+            BackendKind::Jals {},
+            release,
+            Assertions::Disabled,
+        ) {
             BackendSelection::Available(backend) => backend.config_digest(&request),
             BackendSelection::Absent { .. } => panic!("the jals backend is always available"),
         };

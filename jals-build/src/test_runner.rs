@@ -95,6 +95,14 @@ pub struct TestOutcome {
     pub stdout: Option<PathBuf>,
     /// The captured standard error, absent when the run did not capture.
     pub stderr: Option<PathBuf>,
+    /// What the *runner* has to say about this outcome, when the failure is not something the
+    /// test wrote.
+    ///
+    /// `None` on the JVM path, where a failing test's account is the output it produced and
+    /// `--failure-output` replays it. A module writes nothing at all, so for a wasm run this is
+    /// the only account there is — the engine's trap message, or the reason a `#[should_fail]`
+    /// test was judged the way it was.
+    pub detail: Option<String>,
 }
 
 impl TestOutcome {
@@ -467,6 +475,7 @@ impl SharedRun {
             attempts: 0,
             stdout: None,
             stderr: None,
+            detail: None,
         }
     }
 
@@ -503,6 +512,9 @@ impl SharedRun {
                     attempts: 1,
                     stdout: raw.captured.then(|| raw.stdout.clone()),
                     stderr: raw.captured.then(|| raw.stderr.clone()),
+                    // A JVM run's account of itself is the output it produced, which
+                    // `--failure-output` replays; there is nothing for the runner to add.
+                    detail: None,
                 }
             }
             // A JVM that could not be started is the test's failure to report: the alternative is
@@ -514,6 +526,7 @@ impl SharedRun {
                 attempts: 1,
                 stdout: None,
                 stderr: None,
+                detail: None,
             },
         }
     }
@@ -561,13 +574,16 @@ impl SharedRun {
 ///
 /// `-j` can only ever *narrow* what the fan-out already provides: its worker pool is sized to the
 /// machine's parallelism and is not resizable, so a larger `-j` has nothing to widen.
-struct Permits {
+///
+/// Shared with the wasm test runner rather than written twice: `-j` means one thing across both,
+/// and a second implementation is a second answer to what a narrowed pool is.
+pub(crate) struct Permits {
     free: Mutex<usize>,
     released: Condvar,
 }
 
 impl Permits {
-    const fn new(count: usize) -> Self {
+    pub(crate) const fn new(count: usize) -> Self {
         Self {
             free: Mutex::new(count),
             released: Condvar::new(),
@@ -575,7 +591,7 @@ impl Permits {
     }
 
     /// Take a permit, waiting for one when none is free.
-    fn acquire(&self) -> Permit<'_> {
+    pub(crate) fn acquire(&self) -> Permit<'_> {
         // A poisoned mutex is a job that panicked while holding a permit. The count it guards is
         // an integer, so it cannot be left half-written, and refusing to run the rest of the
         // suite over one panicked test would lose every result still to come.
@@ -594,7 +610,7 @@ impl Permits {
 }
 
 /// One held permit, returned on drop.
-struct Permit<'a> {
+pub(crate) struct Permit<'a> {
     permits: &'a Permits,
 }
 

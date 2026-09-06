@@ -34,7 +34,8 @@ linter・language server（LSP）を提供しており、いずれも名前解�
 - **フレームワーク不要のテスト。** テストとは `#[test]` を付けたメソッドのことで、JUnit も
   annotation processor も launcher jar も要りません。`jals test` は各テストを専用の JVM で並列に
   実行し、`cargo nextest` と同じ形で結果を報告します。`jals build` はそれらを 1 つもコンパイル
-  しません。
+  しません。`[toolchain] runtime = "wasm"` を選ぶと、同じテストを `jals` に組み込まれたエンジン上で
+  WebAssembly export として実行します——どの段階でも JDK は要りません。
 - **Cargo 風の Java ビルド。** `Cargo.toml` の Java 版にあたる `jals.toml` マニフェストが
   `jals build` / `run` / `test` / `clean` / `init` を駆動します。任意の Rhai script は `javac` より先に、
   制限付きの storage-only API だけを使って source を生成し、flag・classpath・environment を追加します。

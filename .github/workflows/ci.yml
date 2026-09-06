@@ -548,6 +548,16 @@ jobs:
             dir: examples/unit_tests
             run: true
             test: true
+          # The same `#[test]` model on the other runner, and the second cell here that needs no
+          # JDK: `[toolchain] runtime = "wasm"` runs the module `[build] backend` emitted, and both
+          # the compiler and the engine are in-process. No `run:` — a wasm project declares no main
+          # class, so `jals run` with no `--invoke` would only instantiate, which `hello_world_wasm`
+          # already covers. `test: true` is the whole point: it is the only end-to-end proof in the
+          # shipped product that a test compiles to an export, that `assert` is armed for a test
+          # run and not for a build, and that `#[should_fail]` inverts a trap.
+          - name: unit_tests_wasm
+            dir: examples/unit_tests_wasm
+            test: true
           # The consumer is the entry point; `library/` is built through the dependency edge and has
           # no sources of its own to format or lint.
           - name: task_dependency

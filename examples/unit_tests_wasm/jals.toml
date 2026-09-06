@@ -1,0 +1,22 @@
+[package]
+name = "unit_tests_wasm"
+version = "0.1.0"
+# `#[test]` is an attribute, so the attributes dialect is what makes tests possible at all.
+features = ["attributes"]
+
+[build]
+source-dirs = ["src/main/java"]
+classes-dir = "target/classes"
+# One WebAssembly module for the whole project, compiled in this process.
+backend = { type = "jals-wasm" }
+
+# The pair is what makes this project testable. `runtime = "wasm"` runs the module the backend
+# above emits, and nothing else emits one — so `jals.toml` refuses the two apart. There is no
+# `release` and no `[run] main-class`: the first is a `javac` flag with no meaning here, and a
+# module has no main class.
+[toolchain]
+runtime = "wasm"
+
+[test]
+source-dirs = ["src/test/java"]
+classes-dir = "target/test-classes"

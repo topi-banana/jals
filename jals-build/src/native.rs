@@ -63,11 +63,19 @@ impl dyn Runtime {
     /// the run-step mirror of `<dyn Compiler>::select`, matching [`jals_config::Runtime`]. The two
     /// selections are independent, so a builtin compile can pair with a real `java` run (and vice
     /// versa) with no routing composite in between.
-    pub async fn select(manifest: &Manifest, exec: &Exec) -> Box<dyn Runtime> {
+    ///
+    /// `None` for `runtime = "wasm"`, and that is not an absent implementation: every field of the
+    /// [`RunRequest`](crate::RunRequest) this trait takes describes a `java` invocation — a main
+    /// class, a classpath, JVM arguments — and a module has none of them. The engine is reached
+    /// through `WasmRunner` instead, which takes bytes and an export name. A caller that has a
+    /// `RunRequest` to hand therefore always gets a `Some` here: `Manifest::validate` admits the
+    /// wasm runtime only alongside the backend that emits no main class.
+    pub async fn select(manifest: &Manifest, exec: &Exec) -> Option<Box<dyn Runtime>> {
         match &manifest.toolchain.runtime {
-            RuntimeSpec::Builtin => Box::new(BuiltinToolchain::host(exec.clone())),
+            RuntimeSpec::Wasm => None,
+            RuntimeSpec::Builtin => Some(Box::new(BuiltinToolchain::host(exec.clone()))),
             RuntimeSpec::System | RuntimeSpec::Path(_) | RuntimeSpec::Distribution(_) => {
-                Box::new(SubprocessToolchain::from_manifest(manifest).await)
+                Some(Box::new(SubprocessToolchain::from_manifest(manifest).await))
             }
         }
     }
@@ -343,8 +351,9 @@ mod tests {
                 .describe_compile(&compile_req)
                 .starts_with("builtin:")
         );
-        let run_description =
-            block_on_inline(<dyn Runtime>::select(&manifest, &exec)).describe_run(&run_req);
+        let run_description = block_on_inline(<dyn Runtime>::select(&manifest, &exec))
+            .expect("a JDK selector always resolves a runtime")
+            .describe_run(&run_req);
         assert!(run_description.contains("java"));
         assert!(!run_description.starts_with("builtin:"));
 
@@ -373,7 +382,8 @@ mod tests {
             extra_classpath: &[],
             run_env: &BTreeMap::new(),
         };
-        let runtime = block_on_inline(<dyn Runtime>::select(&manifest, &exec));
+        let runtime = block_on_inline(<dyn Runtime>::select(&manifest, &exec))
+            .expect("`builtin` resolves the in-process runtime");
         assert!(runtime.describe_run(&run_req).starts_with("builtin:"));
         let compile_req = CompileRequest {
             manifest: &manifest,
