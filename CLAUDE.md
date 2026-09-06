@@ -378,17 +378,24 @@ filesystem reads into portable interfaces.
     the span the inference memo is keyed on, the definition a name binds to, the locals a class
     captures, the constant a `case` label denotes (a full JLS §15.29 evaluator, `static final`
     constants included), the operator token run (`>>` is `[GT, GT]`, because the lexer never joins
-    a `>` to what follows). It reads `TypedFile` and nothing else, so it names no instruction:
-    `Layout`, `Slots`, `Descriptor`, and control flow stay with the backend that owns them.
-    Crate-internal — a consumer wanting a fact about Java source asks `jals-hir`, not a compiler.
-  - A fact both backends need goes in `facts`; one that names an instruction does not.
+    a `>` to what follows), the type a written name denotes when the grammar parsed it as an
+    expression. It reads `TypedFile` and nothing else, so it names no instruction: `Layout`,
+    `Slots`, `Descriptor`, and control flow stay with the backend that owns them. Crate-internal —
+    a consumer wanting a fact about Java source asks `jals-hir`, not a compiler.
+  - **Which crate states a fact is decided by what answering it needs.** A `TypedFile` — a question
+    about one file as written — puts it here; a `ProjectIndex` alone puts it in `jals-hir`; an
+    instruction name puts it in neither. Three facts were written in a backend first and all three
+    had to move once they were found re-deriving the index's own supertype walk: which supertype
+    `super` names, an interface's single abstract method, and whether one method overrides another.
     `no-wasm-into-jvm-lowering` and its mirror `no-jvm-into-wasm-lowering` reject one backend naming
     the other, and `facts-names-no-instruction` rejects `Descriptor`/`ValType`/`Slots`/`Label`
-    inside `facts`. All three are ratchets against one regression class and none catches a backend
-    re-implementing a fact *inline*, so what makes a fact single-sourced is that there is one place
-    to ask and it has a test. `facts` therefore carries its own `#[cfg(test)]` suites — the JLS
-    §15.29 evaluator is verified with no JDK in reach, because the end-to-end tests stand down
-    without one and CI's wasm cell never has one.
+    inside `facts`. All three are ratchets against one regression class, and none catches the one
+    that keeps recurring: a backend holding its **own private copy** of a fact. `lower/mod.rs` held
+    `ty_of_type` and `ty_of_name` verbatim down to the doc paragraph, so fixing the shared pair left
+    the JVM lowering unfixed and `java.lang.String.class` uncompilable. What makes a fact
+    single-sourced is that there is one place to ask and it has a test — so **every** file in
+    `facts` carries its own `#[cfg(test)]` suite, because the end-to-end tests stand down without a
+    JDK and CI's wasm cell never has one.
 - `jals-hir`: the semantic analysis. Its three layers have one order — resolve a file, index the
   project, infer types against both — and that order lives in `FileAnalysis` / `FileSemantics` /
   `TypedFile` rather than in each consumer. `FileAnalysis` is index-independent, so it is the half a
@@ -399,6 +406,18 @@ filesystem reads into portable interfaces.
   exported**, exactly as `jals-project` withholds `ResolvedProjectGraph`. `TypedFile` is the witness
   that the inference has run, and therefore the only place types are readable without an `await` —
   which is what keeps `jals-javac`'s lowering synchronous.
+
+  It states facts for a **code generator** as well as for a linter, and both sets are asked the same
+  way: `superclass_of` and `functional_member`, the `overrides` / `implements_for` pair,
+  `inherited_field`, and `type_var_erasure`. Every one was written inside `jals-javac` first, and
+  every one was a second implementation of a walk this crate already had — a `DEPTH = 64` beside a
+  visited set, a substitution over *spellings* that had to carry a `FileId` beside one over resolved
+  `Ty`s that does not. `Overrides` has three variants rather than two because its consumers collapse
+  it in **opposite** directions: a JVM bridge is emitted on `is_possible` (a missing one is an
+  `AbstractMethodError` at run time, a spurious one is dead code) and a wasm virtual dispatch is
+  routed on `is_certain` (a false positive calls the wrong method). Folding `Unknown` in by
+  exclusion — `!= No`, `== Yes` — is what silently reclassifies it when a fourth answer is added,
+  so the two policies have names and the `match` is exhaustive.
 
   `jals-hir` states *facts* (`DeadIf`, `UnreportedException`, `TypeMismatch` with its
   `MismatchKind`, `UnresolvedType` and its value/method sibling `UnresolvedName`, `UnusedImport`,
