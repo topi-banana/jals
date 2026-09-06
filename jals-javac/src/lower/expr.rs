@@ -29,7 +29,7 @@ use jals_syntax::SyntaxNode;
 use jals_syntax::ast::{self, AstNode as _};
 
 use crate::desc::{DescError, Descriptor};
-use crate::facts::{Facts, Hierarchy, Literal, Operator, Unary};
+use crate::facts::{Facts, Literal, Operator, Unary};
 use crate::jvm::{BinOp, Branch, Compare, Numeric, NumericStack as _};
 use crate::lower::place::Place;
 use crate::lower::{Context, Emit, LowerError, OUTER, Result};
@@ -573,7 +573,7 @@ impl Expr {
     /// So a name that resolved to nothing is looked up by name on the enclosing type and then up the
     /// superclass chain, nearest first, which is the order that makes a shadowing field win.
     pub(crate) fn inherited_field(name: &str, context: &Context<'_>) -> Option<MemberId> {
-        Hierarchy::of(context.index).inherited_field(context.this_item, name)
+        context.index.inherited_field(context.this_item, name)
     }
 
     /// `receiver.name`: a field read, `static` or instance.
@@ -745,9 +745,11 @@ impl Expr {
         // Through the *erasure*: a receiver of type-variable type is the bound at run time, and it
         // is the bound the verifier reads too — `<T extends C & I> void m(T t) { t.clone(); }` is
         // reached through a `C`, which is the accessing class.
+        // A variable whose bound cannot be followed is left alone: it names no class, so it names
+        // none to check accessibility against, and `project_id` answers `None` for it either way.
         let through = Self::type_of(receiver.syntax(), context)
             .ok()
-            .map(|ty| Self::erased(ty, context))
+            .map(|ty| context.index.type_var_erasure(&ty).unwrap_or(ty))
             .and_then(|ty| ty.project_id());
         match through {
             Some(item) if context.index.is_subtype(item, context.this_item) => Ok(()),
@@ -755,30 +757,6 @@ impl Expr {
                 "a `protected` member reached through another type",
             )),
         }
-    }
-
-    /// A type with its type variables erased to their bounds (JLS §4.6), one level at a time until a
-    /// nominal type or nothing is left.
-    fn erased(ty: Ty, context: &Context<'_>) -> Ty {
-        /// A `<T extends U, U extends V>` chain is one lookup per step; `<T extends U, U extends T>`
-        /// is not a Java program but a reader of one has to terminate anyway.
-        const DEPTH: u8 = 8;
-        let mut ty = ty;
-        for _ in 0..DEPTH {
-            let Ty::TypeVar {
-                owner,
-                member,
-                name,
-            } = &ty
-            else {
-                return ty;
-            };
-            let Some(bound) = context.index.type_var_bound(*owner, *member, name) else {
-                return ty;
-            };
-            ty = bound;
-        }
-        ty
     }
 
     /// The runtime package of an indexed type — everything before the last `/` of its internal name,
@@ -1069,10 +1047,10 @@ impl Expr {
                 .get_static("java/lang/Void", "TYPE", "Ljava/lang/Class;")?);
         }
         let mut named = match (literal.ty(), literal.expr()) {
-            (Some(ty), _) => context.ty_of_type(&ty)?,
+            (Some(ty), _) => context.facts().ty_of_type(&ty)?,
             // The reference form's base is parsed as an *expression* — a bare `String` is a name
             // reference — so it is resolved as a type name rather than lowered as a value.
-            (None, Some(base)) => context.ty_of_name(base.syntax())?,
+            (None, Some(base)) => context.facts().ty_of_name(base.syntax())?,
             (None, None) => return Err(LowerError::Unsupported("a `.class` with no type")),
         };
         for _ in 0..dimensions {
@@ -1747,7 +1725,7 @@ impl Expr {
                 .children()
                 .find_map(ast::Type::cast)
                 .ok_or(LowerError::Unsupported("an `instanceof` with no type"))?;
-            let target = context.ty_of_type(&ty)?;
+            let target = context.facts().ty_of_type(&ty)?;
             Self::lower(&operand, context, emit)?;
             return Ok(emit
                 .asm
@@ -1862,7 +1840,7 @@ impl Expr {
                     .children()
                     .find_map(ast::Type::cast)
                     .ok_or(LowerError::Unsupported("a `record` pattern with no type"))?;
-                let target = context.ty_of_type(&ty)?;
+                let target = context.facts().ty_of_type(&ty)?;
                 let item = target
                     .project_id()
                     .ok_or(LowerError::Unsupported("a `record` pattern on no record"))?;

@@ -2259,6 +2259,33 @@ public class Named {
     );
 }
 
+/// A `.class` whose base is written with dots, which is the shape a JVM never got to see.
+///
+/// `java.lang.String.class` did not compile. The base parses as a `FIELD_ACCESS` whose receiver is
+/// a node, and the name walk read only the access's own direct tokens — so it resolved `.String`,
+/// which is nothing. Both this backend and the facts layer held their own copy of that walk, and
+/// the copies are why the fix had to land twice to be a fix at all; there is one now, and this
+/// asserts the *lowering* reaches it rather than its own.
+///
+/// Host-free on purpose. The sibling above says what the bytes mean and stands down without a
+/// `java`, which is every run in CI's wasm cell — so the construct that did not lower had nothing
+/// watching it there.
+#[test]
+fn a_class_literal_written_with_a_dotted_name_lowers() {
+    let source = r#"
+public class Dotted {
+    static class Inner {}
+    public static void main(String[] args) {
+        Object a = java.lang.String.class;
+        Object b = Dotted.Inner.class;
+        Object c = String.class;
+        System.out.println(a + " " + b + " " + c);
+    }
+}
+"#;
+    assert!(compile(source).is_ok(), "{:?}", compile(source).err());
+}
+
 /// An `assert` inside an interface's `default` method.
 ///
 /// JVMS §4.5 requires every interface field to be `public static final`, with no exception for a
@@ -7112,5 +7139,34 @@ fn two_local_classes_of_one_name_are_refused() {
     assert!(compile(distinct).is_ok());
     if java_available() {
         assert_eq!(run(distinct, "Distinct"), "3\n");
+    }
+}
+
+/// A superclass cycle compiles here, which is the half of the story that made the other half hard
+/// to see.
+///
+/// `class A extends B {}` beside `class B extends A {}` parses and indexes, and this backend has
+/// guarded its two chain walks since `common_supertype` was written. The wasm backend had not, and
+/// aborted the process on a stack overflow — so the two backends answered the same malformed input
+/// with a class file and with a `SIGABRT`. Both sides are pinned now, because one of them being
+/// right is what kept the corpus quiet.
+#[test]
+fn a_superclass_cycle_compiles_rather_than_recursing() {
+    for (source, classes) in [
+        ("class A extends B {} class B extends A {}", 2),
+        (
+            "class A extends B { A() {} } class B extends A { B() {} }",
+            2,
+        ),
+        (
+            "class A extends B {} class B extends A {} class C extends A { C() {} }",
+            3,
+        ),
+    ] {
+        assert_eq!(
+            compile(source).map(|classes| classes.len()).ok(),
+            Some(classes),
+            "{source}"
+        );
     }
 }

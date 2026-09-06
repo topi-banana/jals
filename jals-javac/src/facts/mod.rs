@@ -1,11 +1,17 @@
 //! The source facts both lowerings read.
 //!
-//! A *fact* here is an answer about the program as written — the span the inference memo is keyed
-//! on, the definition a name binds to, the locals a class captures, the constant a `case` label
-//! names, whether one method overrides another. Every one is derived from the CST plus [`jals_hir`]
-//! and nothing else. **This module knows no instruction.** It names no `Descriptor`, no
-//! `Assembler`, no `ValType`, and no local-slot numbering, because those are answers about a
-//! *target* rather than about the source.
+//! A *fact* here is an answer about the program **as written in one file** — the span the inference
+//! memo is keyed on, the definition a name binds to, the locals a class captures, the constant a
+//! `case` label names. Every one is derived from the CST plus [`jals_hir`] and nothing else.
+//! **This module knows no instruction.** It names no `Descriptor`, no `Assembler`, no `ValType`, and
+//! no local-slot numbering, because those are answers about a *target* rather than about the source.
+//!
+//! A fact about the **project index** rather than about a file is [`jals_hir`]'s to state, and lives
+//! there: which supertype `super` names, an interface's single abstract method, and whether one
+//! method overrides another are all that shape. All three were written in a backend first, and all
+//! three had to be moved once they were found re-deriving the index's own supertype walk. The rule
+//! that separates them is what a caller holds: if answering needs a `TypedFile`, it belongs here; if
+//! a `ProjectIndex` alone answers it, asking a compiler for it is how a second copy starts.
 //!
 //! # Why it exists
 //!
@@ -35,8 +41,10 @@
 //! is that there is one place to ask and it has a test; the rules only stop the cheapest way to get
 //! a second one.
 //!
-//! A fact both backends need goes here. One that names an instruction does not — and
-//! `facts-names-no-instruction` is what keeps that sentence from going back to being prose.
+//! A fact both backends need **about a file** goes here. One that names an instruction does not —
+//! and `facts-names-no-instruction` is what keeps that sentence from going back to being prose. One
+//! answerable from the index with no file in hand does not either: it goes to [`jals_hir`], where
+//! the walk and the substitution it would otherwise be rebuilt on top of already live.
 //!
 //! # What the ratchets could not see
 //!
@@ -78,7 +86,6 @@
 
 mod constant;
 mod enclosing;
-mod inherit;
 mod literal;
 mod method_ref;
 mod numeric;
@@ -86,7 +93,6 @@ mod operator;
 mod switch;
 
 pub(crate) use constant::CaseKey;
-pub(crate) use inherit::{Hierarchy, Overrides};
 pub(crate) use literal::Literal;
 pub(crate) use method_ref::RefReceiver;
 pub use numeric::Numeric;
@@ -526,8 +532,10 @@ impl<'a> Facts<'a> {
     /// The primitive a `TYPE` node's keyword names.
     ///
     /// The JVM backend carried a verbatim second copy of this, down to the keyword list, because the
-    /// one here was private and the erasure path needed it.
-    pub(crate) fn primitive_of(node: &ast::Type) -> Option<jals_hir::Primitive> {
+    /// one here was private and the erasure path needed it. It is private again: the backend's copy
+    /// of [`ty_of_type`](Self::ty_of_type) — the *reader* of this, and the reason a second keyword
+    /// list existed at all — is gone too, so both callers are in this module again.
+    fn primitive_of(node: &ast::Type) -> Option<jals_hir::Primitive> {
         use jals_hir::Primitive;
         use jals_syntax::SyntaxKind::{
             BOOLEAN_KW, BYTE_KW, CHAR_KW, DOUBLE_KW, FLOAT_KW, INT_KW, LONG_KW, SHORT_KW,

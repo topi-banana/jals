@@ -52,7 +52,7 @@ use jals_syntax::SyntaxKind::{
 use jals_syntax::ast::{self, AstNode as _};
 use jals_syntax::{SyntaxNode, SyntaxToken};
 
-use crate::facts::{ArmLabels, Facts, Hierarchy, Literal, Overrides};
+use crate::facts::{ArmLabels, Facts, Literal};
 use crate::facts::{Numeric, Operator, Unary};
 use crate::wasm::encode::{
     CompType, ExportKind, FieldType, Func, Global, HeapType, Module, RefType, StorageType, SubType,
@@ -823,6 +823,15 @@ impl CompileWasm {
             .map(Some)
     }
 
+    /// Append `item` to `ordered`, its declared supertypes first.
+    ///
+    /// Walked rather than recursed. The recursion this replaces guarded on `ordered`, which a
+    /// caller only appends to on the way *back out* — so an ancestor still being visited was
+    /// invisible to it, and `class A extends B {}` beside `class B extends A {}` recursed until the
+    /// stack ran out. That is an abort rather than a panic: nothing catches it, and the input
+    /// parses and indexes perfectly, so it arrived through an editor as readily as through a build.
+    /// The chain is collected here instead, ending at the first type outside `declared` **or**
+    /// already on it.
     fn push_with_supertypes(
         item: ItemId,
         index: &ProjectIndex,
@@ -832,12 +841,19 @@ impl CompileWasm {
         if ordered.contains(&item) {
             return;
         }
-        if let Some(parent) = Hierarchy::of(index).superclass(item)
-            && declared.contains(&parent)
-        {
-            Self::push_with_supertypes(parent, index, declared, ordered);
+        let mut chain = Vec::new();
+        let mut current = Some(item);
+        while let Some(id) = current.filter(|id| !chain.contains(id)) {
+            chain.push(id);
+            current = index
+                .superclass_of(id)
+                .filter(|parent| declared.contains(parent));
         }
-        ordered.push(item);
+        for &id in chain.iter().rev() {
+            if !ordered.contains(&id) {
+                ordered.push(id);
+            }
+        }
     }
 
     /// Register every method and constructor `input` declares.
@@ -1163,8 +1179,8 @@ impl Layout {
         if self.structs.contains_key(&item) {
             return;
         }
-        let parent = Hierarchy::of(index)
-            .superclass(item)
+        let parent = index
+            .superclass_of(item)
             .filter(|id| self.structs.contains_key(id));
         // The supertype's *whole* list, synthetic fields included: a subtype's fields extend its
         // supertype's as a prefix, so anything the supertype holds occupies a slot here too.
@@ -1220,8 +1236,8 @@ impl Layout {
                 mutable: true,
             });
         }
-        let parent = Hierarchy::of(index)
-            .superclass(item)
+        let parent = index
+            .superclass_of(item)
             .and_then(|id| self.structs.get(&id).copied());
         module.set_type(
             type_index,
@@ -1616,8 +1632,8 @@ impl Body {
             // a subclass whose *constant site* calls the enum's constructor, that being the one place
             // the constant's arguments exist — calling it here too would run the enum's twice, and the
             // no-argument one at that, which is a different constructor from the one selected.
-            let under_enum = Hierarchy::of(index)
-                .superclass(owner)
+            let under_enum = index
+                .superclass_of(owner)
                 .is_some_and(|parent| index.item(parent).kind == DefKind::Enum);
             if let Some((declaring, function)) = Self::super_constructor(owner, index, layout)
                 && !under_enum
@@ -1911,8 +1927,13 @@ impl Body {
         index: &ProjectIndex,
         layout: &Layout,
     ) -> Option<(ItemId, u32)> {
-        let mut candidate = Hierarchy::of(index).superclass(owner);
-        while let Some(item) = candidate {
+        // `class A extends B {}` with `class B extends A {}` parses and indexes, and an unguarded
+        // walk oscillates between the two forever — the same hazard `common_supertype` states on
+        // the JVM side. A chain that closes on itself has run out, which is what `None` already
+        // means here.
+        let mut seen = BTreeSet::new();
+        let mut candidate = index.superclass_of(owner);
+        while let Some(item) = candidate.filter(|&item| seen.insert(item)) {
             let mut declared = layout.constructors(index, item).peekable();
             if declared.peek().is_some() {
                 return declared
@@ -1923,7 +1944,7 @@ impl Body {
             if let Some(&function) = layout.default_constructors.get(&item) {
                 return Some((item, function));
             }
-            candidate = Hierarchy::of(index).superclass(item);
+            candidate = index.superclass_of(item);
         }
         None
     }
@@ -3695,7 +3716,8 @@ impl Lowering<'_> {
     /// supertype's fields first, so the slot the inherited member lands in is the enclosing type's own.
     fn inherited_field(&self, node: &SyntaxNode) -> Option<MemberId> {
         let name = Facts::name_token(node)?;
-        Hierarchy::of(self.index).inherited_field(self.owner?, &jals_syntax::decoded_ident(&name))
+        self.index
+            .inherited_field(self.owner?, &jals_syntax::decoded_ident(&name))
     }
 
     /// `{1, 2, 3}`, whose elements are written rather than defaulted.
@@ -4880,11 +4902,11 @@ impl Lowering<'_> {
             if item == owner || !self.index.is_subtype(item, owner) {
                 continue;
             }
-            // Only a definite override. A false positive here routes a call to the wrong method
-            // — output that loads, validates, and runs wrongly, which no later stage catches —
-            // while a false negative leaves the direct `call` a non-overridden method would have
-            // had anyway. That is the opposite collapse from the bridge emission's, and it is why
-            // the shared fact has three answers rather than two.
+            // Only a definite override — the strict collapse, by name. A false positive here routes
+            // a call to the wrong method (output that loads, validates, and runs wrongly, which no
+            // later stage catches) while a false negative leaves the direct `call` a non-overridden
+            // method would have had anyway. That is the opposite collapse from the bridge
+            // emission's, and it is why the shared fact has three answers rather than two.
             //
             // **Inherited, not just declared.** `interface I { int f(); }` with
             // `class Base { public int f() { … } }` and `class C extends Base implements I {}` is a
@@ -4898,7 +4920,7 @@ impl Lowering<'_> {
             let over = self.index.members_of(item).into_iter().find(|&id| {
                 id != member
                     && self.layout.functions.contains_key(&id)
-                    && Hierarchy::of(self.index).implements_for(item, id, member) == Overrides::Yes
+                    && self.index.implements_for(item, id, member).is_certain()
             });
             if let Some(over) = over {
                 found.push((item, over));

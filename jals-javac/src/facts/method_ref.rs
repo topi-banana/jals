@@ -64,7 +64,7 @@ impl Facts<'_> {
     /// `instanceof`'s target has nowhere to be read from and is resolved here instead. A name the
     /// index does not hold is reported rather than guessed at, because an invented package produces
     /// a class that loads and then throws `NoClassDefFoundError`.
-    fn ty_of_type(self, node: &ast::Type) -> Result<Ty> {
+    pub(crate) fn ty_of_type(self, node: &ast::Type) -> Result<Ty> {
         let dimensions = node
             .syntax()
             .children_with_tokens()
@@ -98,12 +98,32 @@ impl Facts<'_> {
         Ok(ty)
     }
 
-    /// The type a *name* names, when the grammar parsed it as an expression.
+    /// The dotted name a chain of plain names spells, or `None` for anything that is not one.
     ///
-    /// `String.class`'s base is a name reference, not a type node, because nothing tells the parser
-    /// which of the two it is until the `.class` arrives. So the dotted text is resolved against
-    /// the index directly.
-    pub(crate) fn ty_of_name(self, node: &SyntaxNode) -> Result<Ty> {
+    /// `Outer.Inner` and `java.lang.String` parse as a `FIELD_ACCESS` whose receiver is a *node*,
+    /// so a walk over the access's own direct tokens sees `.Inner` and has already lost the head.
+    /// Every such spelling therefore resolved as nothing, which made `java.lang.String.class` — and
+    /// `Outer.Inner::go`, which fell through to being read as a *value* — a compile error in
+    /// ordinary Java, on both backends, because each held its own copy of the same walk.
+    ///
+    /// The chain is followed structurally instead, and a link that is not a plain name ends it:
+    /// `foo().bar` is a value access and must never be offered to a type lookup. What the chain
+    /// *denotes* is still the index's answer rather than this one's — `System.err` is a name chain
+    /// whose head is a type and whose whole is not, and it stays a value because no item is
+    /// registered under it.
+    fn dotted_name(node: &SyntaxNode) -> Option<alloc::string::String> {
+        if let Some(access) = ast::FieldAccess::cast(node.clone()) {
+            let receiver = Self::dotted_name(access.receiver()?.syntax())?;
+            let name = node
+                .children_with_tokens()
+                .filter_map(jals_syntax::SyntaxElement::into_token)
+                .filter(|token| token.kind() == SyntaxKind::IDENT)
+                .last()?;
+            return Some(alloc::format!(
+                "{receiver}.{}",
+                jals_syntax::decoded_ident(&name)
+            ));
+        }
         let mut text = alloc::string::String::new();
         for token in node
             .children_with_tokens()
@@ -112,6 +132,18 @@ impl Facts<'_> {
         {
             text.push_str(&jals_syntax::decoded_ident(&token));
         }
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// The type a *name* names, when the grammar parsed it as an expression.
+    ///
+    /// `String.class`'s base is a name reference, not a type node, because nothing tells the parser
+    /// which of the two it is until the `.class` arrives. So the dotted text is resolved against
+    /// the index directly.
+    pub(crate) fn ty_of_name(self, node: &SyntaxNode) -> Result<Ty> {
+        let text = Self::dotted_name(node).ok_or(FactError::Unsupported(
+            "a qualifier that is not a plain name",
+        ))?;
         let simple = alloc::borrow::ToOwned::to_owned(text.rsplit('.').next().unwrap_or(&text));
         let qualified = text.contains('.').then(|| text.clone());
         let id = self
@@ -276,5 +308,306 @@ impl Facts<'_> {
             receiver,
             qualifier: bound_to,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::borrow::ToOwned as _;
+    use alloc::format;
+    use alloc::string::{String, ToString as _};
+    use alloc::vec::Vec;
+
+    use jals_exec::block_on_inline;
+    use jals_hir::{FileAnalysis, FileId, ProjectIndex};
+    use jals_syntax::SyntaxKind;
+
+    use crate::facts::Facts;
+
+    /// Every method reference in `source`, rendered as `written => receiver owner.member/arity`.
+    ///
+    /// The chain is spelled out rather than hidden behind a helper returning a [`Facts`], for the
+    /// reason `constant.rs`'s suite gives: a `TypedFile` borrows the binding, which borrows the
+    /// analysis *and* the index, so nothing shorter than the whole chain can be handed back. The
+    /// stdlib stubs are folded in because a `String::new` needs `java.lang.String` to resolve, and
+    /// they are parsed in memory rather than read from a host — which is what lets this run in
+    /// CI's wasm cell, where the end-to-end tests stand down.
+    fn refs(source: &str) -> Vec<String> {
+        let root = block_on_inline(jals_syntax::Parse::parse(source)).syntax();
+        let analysis = block_on_inline(FileAnalysis::of(&root));
+        let index = block_on_inline(
+            ProjectIndex::builder(&[(FileId(0), root.clone())])
+                .with_stdlib()
+                .build(),
+        );
+        let semantics = analysis.in_project(&index, FileId(0));
+        let facts = Facts::of(block_on_inline(semantics.typed()));
+        root.descendants()
+            .filter(|node| node.kind() == SyntaxKind::METHOD_REF_EXPR)
+            .map(|node| {
+                let written = node.text().to_string().trim().to_owned();
+                match facts.method_ref(&node) {
+                    Ok(found) => {
+                        let target = found.target.map_or_else(
+                            || "<no member>".to_owned(),
+                            |id| {
+                                let info = index.member(id);
+                                format!("{}/{}", info.name, info.params.len())
+                            },
+                        );
+                        format!(
+                            "{written} => {:?} {}.{target}",
+                            found.receiver,
+                            index.item(found.owner).fqn,
+                        )
+                    }
+                    Err(err) => format!("{written} => Err({err:?})"),
+                }
+            })
+            .collect()
+    }
+
+    /// The type each class literal's base names, in source order.
+    fn literals(source: &str) -> Vec<String> {
+        let root = block_on_inline(jals_syntax::Parse::parse(source)).syntax();
+        let analysis = block_on_inline(FileAnalysis::of(&root));
+        let index = block_on_inline(
+            ProjectIndex::builder(&[(FileId(0), root.clone())])
+                .with_stdlib()
+                .build(),
+        );
+        let semantics = analysis.in_project(&index, FileId(0));
+        let facts = Facts::of(block_on_inline(semantics.typed()));
+        root.descendants()
+            .filter(|node| node.kind() == SyntaxKind::CLASS_LITERAL)
+            .map(|node| {
+                let written = node.text().to_string().trim().to_owned();
+                let Some(base) = node.children().next() else {
+                    return format!("{written} => <no base>");
+                };
+                match facts.ty_of_name(&base) {
+                    Ok(ty) => format!(
+                        "{written} => {}",
+                        ty.project_id().map_or_else(
+                            || "<not a project type>".to_owned(),
+                            |id| index.item(id).fqn.to_string()
+                        )
+                    ),
+                    Err(err) => format!("{written} => Err({err:?})"),
+                }
+            })
+            .collect()
+    }
+
+    /// A class literal whose base is written with dots resolves to the type those dots name.
+    ///
+    /// `java.lang.String.class` is as ordinary as Java gets, and it did not compile: the base is a
+    /// `FIELD_ACCESS`, the walk read only the access's own direct tokens, and `.String` resolved as
+    /// nothing. The failure was invisible because the corpus harnesses count a file that does not
+    /// lower without saying which construct stopped it.
+    #[test]
+    fn a_class_literal_written_with_dots_names_the_type_the_dots_spell() {
+        assert_eq!(
+            literals(
+                "class Outer {
+                     static class Inner {}
+                     void use() {
+                         Class<?> a = java.lang.String.class;
+                         Class<?> b = String.class;
+                         Class<?> c = Outer.Inner.class;
+                         Class<?> d = Inner.class;
+                     }
+                 }",
+            ),
+            [
+                "java.lang.String.class => java.lang.String",
+                "String.class => java.lang.String",
+                "Outer.Inner.class => Outer.Inner",
+                "Inner.class => Outer.Inner",
+            ]
+        );
+    }
+
+    /// A nested type names the member it qualifies, whichever way the nesting is spelled.
+    ///
+    /// `Outer.Inner::go` used to lose its head to the direct-token walk, find no type, and fall
+    /// through to the branch that reads the qualifier as a *value* — reporting a reference to a
+    /// `static` method as one on a value of an unindexed type.
+    #[test]
+    fn a_nested_type_qualifies_a_reference_however_the_nesting_is_written() {
+        assert_eq!(
+            refs(
+                "interface Run { void run(); }
+                 class Outer {
+                     static class Inner { static void go() {} }
+                     void use() {
+                         Run a = Inner::go;
+                         Run b = Outer.Inner::go;
+                     }
+                 }",
+            ),
+            [
+                "Inner::go => Static Outer.Inner.go/0",
+                "Outer.Inner::go => Static Outer.Inner.go/0",
+            ]
+        );
+    }
+
+    /// A dotted chain whose head is a type and whose whole is not stays a **value**.
+    ///
+    /// `System.err::println` is the shape that following the chain could plausibly have broken:
+    /// `System` resolves, so a lookup that stopped at the head would call `println` on the class.
+    /// It is the index that decides — no item is registered under `java.lang.System.err` — which is
+    /// what keeps JLS §6.5.2's ambiguity resolved by what exists rather than by what parses.
+    #[test]
+    fn a_dotted_chain_whose_head_is_a_type_is_still_a_value_when_the_whole_is_not() {
+        assert_eq!(
+            refs(
+                "interface Give { int give(); }
+                 class P {
+                     P held;
+                     int size() { return 0; }
+                     void use(P p) { Give g = p.held::size; }
+                 }",
+            ),
+            ["p.held::size => Bound P.size/0"]
+        );
+    }
+
+    /// The same written reference names two different methods, and which one is the *interface's*
+    /// arity rather than the order they were declared in.
+    ///
+    /// This is the module's founding incident. The wasm lowering selected by **name alone** and so
+    /// took whichever overload `own_members` yielded first — declaration order — while the JVM one
+    /// already read the arity. `go(int, int)` is declared **before** `go(int)` here precisely so
+    /// that an order-driven selection would answer `go/2` for both, and be visible.
+    #[test]
+    fn the_interfaces_arity_selects_the_overload_and_declaration_order_does_not() {
+        assert_eq!(
+            refs(
+                "interface Take { void take(int v); }
+                 interface Both { void both(int a, int b); }
+                 class P {
+                     static void go(int a, int b) {}
+                     static void go(int a) {}
+                     void use() {
+                         Take one = P::go;
+                         Both two = P::go;
+                     }
+                 }",
+            ),
+            ["P::go => Static P.go/1", "P::go => Static P.go/2"]
+        );
+    }
+
+    /// A `static` and an instance method of one name and one arity are told apart by whether the
+    /// qualifier is a type or a value, and the `static` one wins the *unbound* reading.
+    ///
+    /// `P::val` could be read two ways against a one-argument interface: the `static val(P)`, or the
+    /// instance `val()` with the interface's argument supplied as the receiver. JLS §15.13.1 makes
+    /// the first the answer, which is why the primary search runs before the unbound fallback —
+    /// reversing them compiles a call to the wrong body with no diagnostic.
+    #[test]
+    fn a_static_and_an_instance_method_of_one_name_are_told_apart_by_the_qualifier() {
+        assert_eq!(
+            refs(
+                "interface Grab { int grab(P p); }
+                 interface Give { int give(); }
+                 class P {
+                     static int val(P p) { return 0; }
+                     int val() { return 0; }
+                     void use(P p) {
+                         Grab byType = P::val;
+                         Give byValue = p::val;
+                     }
+                 }",
+            ),
+            ["P::val => Static P.val/1", "p::val => Bound P.val/0"]
+        );
+    }
+
+    /// With no `static` method to take the arity, `Type::instanceMethod` is the *unbound* form: the
+    /// interface passes the receiver as its first argument, so the referenced method takes one
+    /// fewer parameter than the interface declares.
+    #[test]
+    fn the_unbound_form_takes_one_fewer_parameter_than_the_interface_declares() {
+        assert_eq!(
+            refs(
+                "interface Grab { int grab(P p); }
+                 class P {
+                     int size() { return 0; }
+                     void use() { Grab g = P::size; }
+                 }",
+            ),
+            ["P::size => Unbound P.size/0"]
+        );
+    }
+
+    /// `this::m` is a bound reference, and `this` is not an expression the inference records.
+    ///
+    /// The type of the qualifier is asked three ways because the three shapes are recorded in three
+    /// places, and this is the arm no memo answers: a lookup that only consulted `type_of_expr`
+    /// reports `this::m` as a reference on a value of an unindexed type — a construct the source is
+    /// entitled to write, rejected.
+    #[test]
+    fn a_bound_reference_on_this_is_read_through_the_enclosing_type() {
+        assert_eq!(
+            refs(
+                "interface Give { int give(); }
+                 class P {
+                     int size() { return 0; }
+                     void use() { Give g = this::size; }
+                 }",
+            ),
+            ["this::size => Bound P.size/0"]
+        );
+    }
+
+    /// A constructor reference matches the interface's arity, and a class that declares none still
+    /// answers — with the descriptor but no member.
+    ///
+    /// `String::new` is the documented `target: None`: the stubs carry no constructor for
+    /// `java.lang.String`, and `()V` exists where the member does not. A search that treated the
+    /// missing member as a failure would reject the commonest constructor reference there is.
+    #[test]
+    fn a_constructor_reference_answers_even_where_the_class_declares_no_constructor() {
+        assert_eq!(
+            refs(
+                "interface Make { P make(int v); }
+                 interface MakeText { String make(); }
+                 class P {
+                     P(int v) {}
+                     void use() {
+                         Make m = P::new;
+                         MakeText t = String::new;
+                     }
+                 }",
+            ),
+            [
+                "P::new => Constructs P.P/1",
+                "String::new => Constructs java.lang.String.<no member>"
+            ]
+        );
+    }
+
+    /// `super::m` is reported rather than compiled.
+    ///
+    /// It is a *non-virtual* call on an inherited method, and no `LambdaMetafactory` handle spells
+    /// one: javac synthesises a bridge that makes the `invokespecial` and points the handle at
+    /// that. Compiling it as `this::m` is the same bytes dispatching virtually — a program that
+    /// runs and calls the override the source wrote `super` to avoid, which is why the refusal is
+    /// asserted rather than left to a lowering to notice.
+    #[test]
+    fn a_super_method_reference_is_reported_rather_than_compiled_as_this() {
+        assert_eq!(
+            refs(
+                "interface Give { String give(); }
+                 class P {
+                     public String toString() { return \"\"; }
+                     void use() { Give g = super::toString; }
+                 }",
+            ),
+            ["super::toString => Err(Unsupported(\"a `super` method reference\"))"]
+        );
     }
 }

@@ -320,7 +320,7 @@ impl Stmt {
 
         for (clause, &handler) in clauses.iter().zip(&handlers) {
             for ty in clause.types() {
-                let caught = context.ty_of_type(&ty)?;
+                let caught = context.facts().ty_of_type(&ty)?;
                 let entry = Descriptor::class_entry(&caught, context.index)?;
                 for &(from, to) in &body_ranges {
                     emit.asm.protect(from, to, handler, Some(&entry))?;
@@ -457,7 +457,7 @@ impl Stmt {
         let ty = match resource.syntax().children().find_map(ast::Type::cast) {
             // A declared resource takes its written type; one that names an existing variable takes
             // the expression's.
-            Some(declared) => context.ty_of_type(&declared)?,
+            Some(declared) => context.facts().ty_of_type(&declared)?,
             None => Expr::type_of(value.syntax(), context)?,
         };
         let Ty::Class(jals_hir::ClassTy::Project { id, .. }) = &ty else {
@@ -528,7 +528,7 @@ impl Stmt {
     fn caught_type(clause: &ast::CatchClause, context: &Context<'_>) -> Result<Ty> {
         let arms: Vec<Ty> = clause
             .types()
-            .map(|ty| context.ty_of_type(&ty))
+            .map(|ty| context.facts().ty_of_type(&ty).map_err(LowerError::from))
             .collect::<Result<_>>()?;
         let (first, rest) = arms
             .split_first()
