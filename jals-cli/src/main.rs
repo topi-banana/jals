@@ -1074,6 +1074,24 @@ impl RunArgs {
                  ignored; the module's entry point is an exported method named with `--invoke`.",
             );
         }
+        // The same disclosure for the other selector this arm discards. A module is executed by
+        // the engine compiled into this binary, so no `java` is resolved at all — and a JDK the
+        // manifest went out of its way to name is a selection the user expects to be honoured.
+        // Said rather than refused, because a module genuinely needs no `java`: `jals test` is the
+        // command for which the same manifest *is* a contradiction, and it refuses it there.
+        // Nothing is warned about the default, which every manifest that never mentions a runtime
+        // carries.
+        if wasm
+            && !manifest.toolchain.runtime.is_wasm()
+            && manifest.toolchain.runtime != jals_config::Runtime::System
+        {
+            session.shell().warn(
+                "this project selects a `[toolchain] runtime`, and `[build] backend` is \
+                 `jals-wasm`, whose module is run by the engine compiled into this binary — so no \
+                 `java` is resolved and the selection is ignored. Write `runtime = \"wasm\"` to \
+                 say so (which is also what `jals test` requires), or drop the key.",
+            );
+        }
         let features = self.features.resolve(&manifest)?;
         // `--main-class` overrides all manifest-based selection; otherwise resolve the entry point
         // from `[[bin]]` / `[package] default-run` / `[run] main-class`.

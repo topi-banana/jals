@@ -653,10 +653,18 @@ are independent (each is its own enum, matched by its own `select` factory), so 
 
 **`runtime = "wasm"` is the one exception to that independence.** Every other value answers *which
 `java`* and pairs with any backend; that one answers *not a `java` at all* — it runs a WebAssembly
-module, and only `[build] backend = { type = "jals-wasm" }` produces one. The pair is checked in
-`Manifest::validate` and refused in both directions, so `jals build`, `jals run`, `jals test` and
-the analysis hosts all reach it: a selection that can never be honoured is a manifest error wherever
-the manifest is read, not one command's. See [§5](#5-testing) for what it does to a test run, and
+module, and only `[build] backend = { type = "jals-wasm" }` produces one. `Manifest::validate`
+refuses `runtime = "wasm"` beside a class-file backend, so `jals build`, `jals run`, `jals test` and
+the analysis hosts all reach that half: a selection that could never be honoured is a manifest error
+wherever the manifest is read, not one command's.
+
+The other half is **not** symmetric, and deliberately so. `backend = { type = "jals-wasm" }` under
+a JVM `runtime` validates cleanly, because it is only a contradiction for a command that runs
+something: `jals test` refuses it by name (it has a module and a runtime that cannot load one),
+while `jals run` needs no `java` for a module and so *ignores* the `[toolchain] runtime` selection
+rather than refusing it — which is why [`examples/hello_world_wasm`](../examples/hello_world_wasm)
+declares no `[toolchain]` at all. Adding a `#[test]` to such a project therefore also means adding
+`runtime = "wasm"`. See [§5](#5-testing) for what it does to a test run, and
 [`examples/unit_tests_wasm`](../examples/unit_tests_wasm) for a worked project.
 
 ### `[[bin]]`

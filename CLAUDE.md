@@ -466,7 +466,10 @@ filesystem reads into portable interfaces.
 
   **Which runner executes is `[toolchain] runtime`, and `wasm` is the one value that constrains
   `[build] backend`** — because the module it runs has exactly one producer, so `Manifest::validate`
-  refuses the pair apart in both directions rather than each command doing it. Under it,
+  refuses `runtime = "wasm"` beside a class-file backend wherever a manifest is read. The converse
+  is **not** a manifest error and must not be made one: a wasm backend under a JVM `runtime` is a
+  contradiction only for a command that runs something, so `jals test` refuses it and `jals run`
+  warns and ignores the selection (a module needs no `java`). Under it,
   `jals-frontend` emits **one exported function per test** instead of a `main` (there is no
   entry-point convention and no `String` to route an id with) and `jals-build`'s `wasm_test.rs`
   calls each export on a fresh `Store`. Three things move with that seam. The **shape is stated by
