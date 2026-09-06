@@ -184,6 +184,12 @@ impl WasmRunError {
     ///
     /// Crate-internal: `WasmTestLauncher` is the only thing that has to tell the two apart, and a
     /// host reads a verdict rather than re-deriving one.
+    ///
+    /// Gated on `native` for exactly that reason. `wasm_test` is the only caller and is itself
+    /// `#[cfg(all(feature = "native", feature = "wasm-run"))]`, so in the browser's configuration
+    /// — `wasm-run` with no `native` — this method has none, and an item reachable solely from a
+    /// `native`-gated module has to carry that gate itself or it is dead code there.
+    #[cfg(feature = "native")]
     pub(crate) const fn is_execution_failure(&self) -> bool {
         matches!(self, Self::Trap(_) | Self::Exception)
     }
@@ -237,6 +243,30 @@ impl fmt::Display for WasmRunError {
     }
 }
 
+/// Bytes this engine has already accepted as a module.
+///
+/// Decoding and validating is by far the most expensive step here — linear in the module's size,
+/// and tens of milliseconds for a project-sized one — while instantiating is microseconds. A
+/// caller that runs *one* module many times therefore pays it once rather than once per call:
+/// that is `WasmTestLauncher`, whose whole suite is one module and one call per test. (Named in
+/// plain text rather than linked, because that type exists only in the `native` configuration and
+/// an intra-doc link from here would not resolve in the browser's.)
+///
+/// Opaque and crate-internal, so the engine's own types stay inside this crate exactly as
+/// [`WasmValue`] keeps them out of the two hosts. A `tinywasm::Module` is an `Arc` newtype, so
+/// cloning one is a refcount bump and it crosses a fan-out worker as itself.
+#[derive(Clone)]
+pub(crate) struct ParsedModule(tinywasm::Module);
+
+// The engine derives `Debug` only under its own `debug` feature, which this build does not enable,
+// and a launcher holding one still has to be `Debug`. There is nothing a reader could act on in a
+// decoded module anyway.
+impl fmt::Debug for ParsedModule {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ParsedModule")
+    }
+}
+
 /// Runs a `jals-wasm` module with the embedded interpreter.
 ///
 /// A namespace rather than a value: the engine holds no configuration of its own, and a `Store` is
@@ -246,10 +276,41 @@ pub struct WasmRunner;
 impl WasmRunner {
     /// Instantiate the module, and call the named export when there is one.
     pub fn run(request: &WasmRunRequest<'_>) -> Result<WasmRunOutcome, WasmRunError> {
-        let task = request
-            .progress
-            .begin(Activity::Run, request.invoke.unwrap_or("module"));
-        match Self::execute(request) {
+        Self::reporting(request.progress, request.invoke, || {
+            let module = Self::parse(request.module)?;
+            Self::invoke(&module, request.invoke, request.args)
+        })
+    }
+
+    /// [`run`](Self::run) for a module this engine has already accepted.
+    ///
+    /// The parse is the caller's, once, rather than this function's, every time — see
+    /// [`ParsedModule`].
+    #[cfg(feature = "native")]
+    pub(crate) fn run_parsed(
+        module: &ParsedModule,
+        invoke: Option<&str>,
+        args: &[String],
+        progress: &Progress,
+    ) -> Result<WasmRunOutcome, WasmRunError> {
+        Self::reporting(progress, invoke, || Self::invoke(module, invoke, args))
+    }
+
+    /// Decode and validate the bytes, without running anything.
+    pub(crate) fn parse(bytes: &[u8]) -> Result<ParsedModule, WasmRunError> {
+        tinywasm::parse_bytes(bytes)
+            .map(ParsedModule)
+            .map_err(|error| WasmRunError::Parse(error.to_string()))
+    }
+
+    /// One run as one progress unit, so both entry points end it in the same place.
+    fn reporting(
+        progress: &Progress,
+        invoke: Option<&str>,
+        body: impl FnOnce() -> Result<WasmRunOutcome, WasmRunError>,
+    ) -> Result<WasmRunOutcome, WasmRunError> {
+        let task = progress.begin(Activity::Run, invoke.unwrap_or("module"));
+        match body() {
             Ok(outcome) => {
                 task.finish(Outcome::Completed);
                 Ok(outcome)
@@ -286,10 +347,13 @@ impl WasmRunner {
         }
     }
 
-    /// The run itself, so [`run`](Self::run) has one place to end the progress unit from.
-    fn execute(request: &WasmRunRequest<'_>) -> Result<WasmRunOutcome, WasmRunError> {
-        let module = tinywasm::parse_bytes(request.module)
-            .map_err(|error| WasmRunError::Parse(error.to_string()))?;
+    /// The run itself, minus the decode: instantiate, then call the named export when there is one.
+    fn invoke(
+        module: &ParsedModule,
+        invoke: Option<&str>,
+        args: &[String],
+    ) -> Result<WasmRunOutcome, WasmRunError> {
+        let module = &module.0;
         let mut store = Store::default();
         // Instantiating in two halves rather than through `instantiate`, which is exactly these
         // two calls. Only the first is *linking* — a malformed module, an unknown import, a
@@ -297,13 +361,13 @@ impl WasmRunner {
         // `static` initialisers are lowered, so it is already the project's own code executing:
         // folding its failure into `Instantiate` reported a divide-by-zero in a `static {}` block
         // as "the module could not be instantiated", which sends the reader to the encoding.
-        let instance = ModuleInstance::instantiate_no_start(&mut store, &module, None)
+        let instance = ModuleInstance::instantiate_no_start(&mut store, module, None)
             .map_err(|error| WasmRunError::Instantiate(error.to_string()))?;
         instance
             .start(&mut store)
             .map_err(Self::execution_failure)?;
 
-        let Some(name) = request.invoke else {
+        let Some(name) = invoke else {
             return Ok(WasmRunOutcome::Instantiated);
         };
         let func = instance
@@ -334,16 +398,16 @@ impl WasmRunner {
                 });
             }
         }
-        if params.len() != request.args.len() {
+        if params.len() != args.len() {
             return Err(WasmRunError::ArgumentCount {
                 name: name.to_owned(),
                 expected: params.len(),
-                given: request.args.len(),
+                given: args.len(),
             });
         }
 
         let mut arguments = Vec::with_capacity(params.len());
-        for (position, (text, ty)) in request.args.iter().zip(&params).enumerate() {
+        for (position, (text, ty)) in args.iter().zip(&params).enumerate() {
             arguments.push(Self::argument(text, *ty, name, position)?);
         }
         // The engine writes into a buffer the caller sizes, and `tinywasm::WasmValue` has no

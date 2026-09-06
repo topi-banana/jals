@@ -201,6 +201,44 @@ impl BackendOutcome {
     pub const fn code(&self) -> Option<i32> {
         self.code
     }
+
+    /// The artifact published under `path`, by name.
+    ///
+    /// By name and not by position, because a backend is free to grow a second artifact and taking
+    /// whatever came first would then hand back — and run — something else under the old name. The
+    /// question is asked in three places (`jals run` and `jals test` reading back the module they
+    /// just compiled, and the playground offering it), so it is answered here rather than three
+    /// times: a `find` over a tuple list, re-derived per host, is three chances to compare the
+    /// wrong half.
+    #[must_use]
+    pub fn artifact(&self, path: &str) -> Option<&[u8]> {
+        self.artifacts
+            .get(self.index_of(path)?)
+            .map(|(_, bytes)| bytes.as_slice())
+    }
+
+    /// [`artifact`](Self::artifact) for a caller that owns the outcome and wants the bytes.
+    ///
+    /// Consuming rather than cloning: a host that is done with the compile — the playground, which
+    /// returns the module straight to its caller — would otherwise copy a whole module to hand it
+    /// on. The lookup is the same one, so the two cannot disagree about which artifact is meant.
+    #[must_use]
+    pub fn into_artifact(mut self, path: &str) -> Option<Vec<u8>> {
+        let index = self.index_of(path)?;
+        Some(self.artifacts.swap_remove(index).1)
+    }
+
+    /// Where `path` sits in [`artifacts`](Self::artifacts), so both accessors ask one question.
+    ///
+    /// The wanted name is parsed once and compared as a path, rather than rendering every
+    /// candidate back to a string; a name that is not a `RelativePath` names no artifact, and
+    /// saying so here costs nothing.
+    fn index_of(&self, path: &str) -> Option<usize> {
+        let wanted = RelativePath::parse(path).ok()?;
+        self.artifacts
+            .iter()
+            .position(|(candidate, _)| *candidate == wanted)
+    }
 }
 
 pub type BackendFuture<'a> =

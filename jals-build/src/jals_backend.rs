@@ -377,6 +377,18 @@ mod tests {
             JalsBackend::new(Some(25)).config_digest(&request),
             "a class-file version is part of the output"
         );
+        // The wasm half of the same slot, and the one claim in `config_digest` nothing was
+        // asserting: `Assertions` decides whether the module carries the `assert` checks, so a
+        // test compile's module and a build's are two artifacts. Reverting the wasm arm to a
+        // constant `.version(0)` — the regression the comment there warns about — passed every
+        // gate without this line, and `Backend::config_digest` has no production caller yet
+        // (`CacheNamespace::BackendOutput` memoization is still the TODO in `backend.rs`), so
+        // this test is the only thing holding the property until one exists.
+        assert_ne!(
+            JalsBackend::wasm(crate::Assertions::Disabled).config_digest(&request),
+            JalsBackend::wasm(crate::Assertions::Enabled).config_digest(&request),
+            "an assertion-checking module is not the module a build produces"
+        );
     }
 
     /// `--release N` selects the class-file version, which is what a JVM checks before anything

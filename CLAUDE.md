@@ -330,12 +330,16 @@ filesystem reads into portable interfaces.
     `TestOutcome` the JVM runner reports. The `native` half is not incidental — that vocabulary
     names host paths for a JVM run's captures — and the one configuration with `wasm-run` and no
     `native` is the browser, which has no test surface to publish it to. Two properties are
-    load-bearing. `resolve` **instantiates once up front** and fails the whole run there: every
-    call runs the module's start function, so a trapping `static {}` would otherwise be
+    load-bearing. `run` **instantiates once before the first test** and fails the whole run there:
+    every call runs the module's start function, so a trapping `static {}` would otherwise be
     indistinguishable from a trap the body caused and would report every `#[should_fail]` test as
-    passed. And the **verdict is the runner's**, inverted on `WasmRunError::is_execution_failure`
-    and on nothing else — an export that is not there is a test that did not run, never a
-    `#[should_fail]` pass.
+    passed. That probe is in `run` and not in `resolve` because it *executes the project's code*,
+    and `jals test --list` builds a launcher without running one — the JVM path answers a `--list`
+    from the harness's own listing arm and loads no test class, so a probe at construction would
+    make one runner's `--list` fail (or, on a `static {}` that never returns, hang) where the
+    other's does not. `resolve` decodes and validates, and nothing else. And the **verdict is the
+    runner's**, inverted on `WasmRunError::is_execution_failure` and on nothing else — an export
+    that is not there is a test that did not run, never a `#[should_fail]` pass.
   - A `BuildScriptDiagnostic`'s fields are sealed and it renders as `<severity>: <message>` through
     its own `Display`; `BuildScriptError::ReportedErrors` renders every diagnostic it carries, in
     emission order. A `build.warning` and a `build.error` read identically once the severity is

@@ -249,16 +249,13 @@ impl Compile {
         // How the output is *packaged* is still this host's question: one module for the whole
         // project passes straight through, one class file per type goes into a jar.
         if matches!(manifest.build.backend, BackendKind::JalsWasm {}) {
-            let (_, bytes) = outcome
-                .artifacts
-                .into_iter()
-                // By name and not by position: `jals run` looks the module up the same way, and
-                // taking whatever came first would silently offer — and execute — a second
-                // artifact the backend grew later while still calling it `WASM_ARTIFACT`.
-                .find(|(path, _)| path.to_string() == WASM_ARTIFACT)
-                .ok_or_else(|| {
-                    CompileFailure::Backend(format!("the wasm backend emitted no {WASM_ARTIFACT}"))
-                })?;
+            // By name and not by position, and through the outcome's own accessor rather than a
+            // `find` written here: `jals run` and `jals test` look the module up the same way, and
+            // taking whatever came first would silently offer — and execute — a second artifact
+            // the backend grew later while still calling it `WASM_ARTIFACT`.
+            let bytes = outcome.into_artifact(WASM_ARTIFACT).ok_or_else(|| {
+                CompileFailure::Backend(format!("the wasm backend emitted no {WASM_ARTIFACT}"))
+            })?;
             return Ok(CompileArtifact {
                 name: WASM_ARTIFACT.to_owned(),
                 summary: format!(

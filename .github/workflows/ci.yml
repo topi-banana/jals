@@ -33,6 +33,17 @@ env:
   # here without host features.
   WASM_CORE_PACKAGES: >-
     --package jals-classpath --package jals-build --no-default-features
+  # The same core plus `wasm-run` — the configuration the *browser* ships, and the one no
+  # `-D warnings` gate used to see. `clippy (wasm-core)` above lints jals-build with `wasm-run`
+  # off, so `wasm_run.rs` is not even compiled there; the three host cells use `--all-features`,
+  # where `native` is on and every `#[cfg(feature = "native")]`-gated caller exists. An item
+  # reachable only from the `native`-gated `wasm_test.rs` is therefore dead in the browser build
+  # and nothing failed — which is exactly how one shipped and had to be found by hand. The
+  # portable audit's `cargo check ... --features wasm-run` and the playground build both compile
+  # this configuration, but only warn.
+  WASM_BROWSER_PACKAGES: >-
+    --package jals-classpath --package jals-build --no-default-features
+    --features jals-build/wasm-run
   # The `test (wasm)` cell: the crates whose *tests* need no host at all. Every other workspace
   # member tests a native adapter, and its dev-dependencies say so — they pull `jals-exec/tokio`
   # (tokio refuses to compile its `net` feature for wasm) or a `tempfile` scratch directory
@@ -138,6 +149,12 @@ jobs:
             runner: ubuntu-latest
             target: wasm32-unknown-unknown
             args: --target wasm32-unknown-unknown $WASM_CORE_PACKAGES
+          # Beside `wasm-core` rather than folded into it: the two differ by one feature, and
+          # linting only the union would stop gating the core without it.
+          - name: wasm-browser
+            runner: ubuntu-latest
+            target: wasm32-unknown-unknown
+            args: --target wasm32-unknown-unknown $WASM_BROWSER_PACKAGES
     steps:
       - parallel:
           - uses: actions/checkout@v7

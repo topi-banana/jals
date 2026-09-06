@@ -1099,10 +1099,11 @@ and each is forced by the target rather than chosen:
   a failing test's account is one line and never a stack trace.
 - **Three flags are refused rather than ignored**, because dropping a product the command line asked
   for is worse than saying the two do not go together. `--timeout`, since a wasm call cannot be
-  interrupted — the pinned engine has no fuel and no epoch deadline, so a test that never returns
-  holds its worker until the process is killed. `--no-capture`, since a module has no standard
-  output to hand to the terminal. `--retries`, since a run has no clock, no network, no threads, no
-  filesystem and a fresh store per test, so the second attempt recomputes the identical answer.
+  interrupted by this runner, which calls each export straight through with no execution budget, so
+  a test that never returns holds its worker until the process is killed. `--no-capture`, since a
+  module has no standard output to hand to the terminal. `--retries`, since a run has no clock,
+  no network, no threads, no filesystem and a fresh store per test, so the second attempt
+  recomputes the identical answer.
 
 Everything else is shared with the JVM runner and means exactly what it does there: the filters,
 `--exact`, `--skip`, `--run-ignored`, `--partition`, `-j`, `--fail-fast`/`--max-fail`, `--list`,

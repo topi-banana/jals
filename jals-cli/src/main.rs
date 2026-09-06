@@ -154,12 +154,14 @@ impl FeatureArgs {
     }
 }
 
-/// Which of the two lowerings a compile is part of.
+/// Which lowering a compile is part of.
 ///
-/// The difference is three things and no more: which source roots are gathered, which frontend
-/// selection runs, and where the staged tree and the classes go. Everything else — the build
-/// script, the project graph, the backend selection — is shared, which is why this is a parameter
-/// on the existing path rather than a second one beside it.
+/// The difference is four things and no more: which source roots are gathered, which dependency
+/// tables resolve, which frontend selection runs (and with which harness shape), and where the
+/// staged tree and the classes go — plus, on the one lowering whose target has no run-time flag
+/// for it, whether `assert` is compiled into a check. Everything else — the build script, the
+/// project graph, the backend selection — is shared, which is why this is a parameter on the
+/// existing path rather than a second one beside it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Lowering {
     /// `jals build` / `jals run`: `#[test]` methods are removed.
@@ -187,12 +189,6 @@ impl Lowering {
         }
     }
 
-    /// Whether this lowering's compile emits the `assert` checks the source wrote.
-    ///
-    /// The wasm backend's answer to `-ea`, and it has to be a compile-time one: a JVM decides at
-    /// start-up whether a class file's assertions run, and a wasm host has no such moment. Only
-    /// the wasm test lowering turns them on — a `jals build` behaves the same on both backends,
-    /// and a JVM test run gets its `-ea` from the launcher instead.
     /// How a test run reaches a `#[test]` method, or `None` for a build.
     ///
     /// Stated here and passed to `jals-frontend`, which never reads `[build] backend` or
@@ -205,6 +201,12 @@ impl Lowering {
         }
     }
 
+    /// Whether this lowering's compile emits the `assert` checks the source wrote.
+    ///
+    /// The wasm backend's answer to `-ea`, and it has to be a compile-time one: a JVM decides at
+    /// start-up whether a class file's assertions run, and a wasm host has no such moment. Only
+    /// the wasm test lowering turns them on — a `jals build` behaves the same on both backends,
+    /// and a JVM test run gets its `-ea` from the launcher instead.
     const fn assertions(self) -> jals_build::Assertions {
         match self {
             Self::Build | Self::Test => jals_build::Assertions::Disabled,
@@ -214,10 +216,10 @@ impl Lowering {
 
     /// Which dependency tables this lowering resolves.
     ///
-    /// The fourth thing the two differ in, and the one that makes `[dev-dependencies]` mean
-    /// anything: a test-support library's `.java` is compiled into whoever consumes it, so a build
-    /// that resolved it would package it. Answered here so the correspondence is written once,
-    /// exactly like [`staging_root`](Self::staging_root).
+    /// The one that makes `[dev-dependencies]` mean anything: a test-support library's `.java` is
+    /// compiled into whoever consumes it, so a build that resolved it would package it. Answered
+    /// here so the correspondence is written once, exactly like
+    /// [`staging_root`](Self::staging_root).
     const fn dependency_scope(self) -> DependencyScope {
         match self {
             Self::Build => DependencyScope::Build,
@@ -1241,10 +1243,7 @@ impl RunArgs {
         progress: &jals_progress::Progress,
     ) -> Result<ExitCode> {
         let module = outcome
-            .artifacts
-            .iter()
-            .find(|(path, _)| path.to_string() == jals_build::JalsBackend::WASM_MODULE)
-            .map(|(_, bytes)| bytes.as_slice())
+            .artifact(jals_build::JalsBackend::WASM_MODULE)
             .with_context(|| {
                 format!(
                     "the compile produced no `{}`",
@@ -1295,16 +1294,23 @@ impl Launcher {
     }
 
     /// Run the selected tests, reporting each start and finish through `observe`.
+    ///
+    /// Fallible for the wasm arm alone, and only before the first test: instantiating the module
+    /// is the project's own code running, so it happens here rather than where the launcher was
+    /// built — a `--list` never reaches it.
     async fn run(
         &self,
         cases: &[jals_build::TestCase],
         options: jals_build::RunOptions,
         observe: std::sync::Arc<dyn Fn(jals_build::TestEvent) + Send + Sync>,
         exec: &Exec,
-    ) -> Vec<jals_build::TestOutcome> {
+    ) -> Result<Vec<jals_build::TestOutcome>> {
         match self {
-            Self::Jvm(launcher) => launcher.run(cases, options, observe, exec).await,
-            Self::Wasm(launcher) => launcher.run(cases, options, observe, exec).await,
+            Self::Jvm(launcher) => Ok(launcher.run(cases, options, observe, exec).await),
+            Self::Wasm(launcher) => launcher
+                .run(cases, options, observe, exec)
+                .await
+                .map_err(|e| anyhow!("{e}")),
         }
     }
 }
@@ -1394,10 +1400,7 @@ impl TestArgs {
             // `finish_compile` wrote beside it, exactly as `jals run` reads it: what runs is then
             // precisely what was compiled.
             let module = outcome
-                .artifacts
-                .iter()
-                .find(|(path, _)| path.to_string() == jals_build::JalsBackend::WASM_MODULE)
-                .map(|(_, bytes)| bytes.clone())
+                .artifact(jals_build::JalsBackend::WASM_MODULE)
                 .with_context(|| {
                     format!(
                         "the compile produced no `{}`",
@@ -1493,7 +1496,7 @@ impl TestArgs {
                 }),
                 exec,
             )
-            .await;
+            .await?;
         if session.message_format() == shell::MessageFormat::Json {
             testrun::TestReporter::report_json(session.shell(), &outcomes);
         }
@@ -1557,9 +1560,9 @@ impl TestArgs {
         if self.timeout.is_some() {
             bail!(
                 "`--timeout` kills a test that overran, and a WebAssembly call cannot be \
-                 interrupted: the engine compiled into this binary has no fuel and no epoch \
-                 deadline, so a test that never returns holds its worker until this process is \
-                 killed. Drop the flag, or run the tests on a JVM."
+                 interrupted here: this runner calls each export straight through, with no \
+                 execution budget, so a test that never returns holds its worker until this \
+                 process is killed. Drop the flag, or run the tests on a JVM."
             );
         }
         if self.no_capture {

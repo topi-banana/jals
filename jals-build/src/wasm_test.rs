@@ -24,9 +24,16 @@
 //! initialiser the project declares. A `static {}` that traps therefore fails *every* test
 //! identically, and at the call site that trap is indistinguishable from one the test body caused.
 //! Left there, a project with a trapping initialiser would report every `#[should_fail]` test as
-//! **passed**. [`WasmTestLauncher::resolve`] instantiates once up front and fails the whole run
-//! instead, which is what makes a trap seen later mean the body and only the body — the same job
-//! the JVM path's `JalsTestHarness.class` probe does.
+//! **passed**. [`WasmTestLauncher::run`] instantiates once before the first test and fails the
+//! whole run instead, which is what makes a trap seen later mean the body and only the body — the
+//! same job the JVM path's `JalsTestHarness.class` probe does.
+//!
+//! In [`run`](WasmTestLauncher::run) and not in [`resolve`](WasmTestLauncher::resolve), because
+//! the probe *executes the project's code* and only a command that runs a test may do that.
+//! `jals test --list` builds a launcher and never runs one: the JVM path answers it from the
+//! harness's own listing arm, loading no test class and running no `<clinit>`, and a `--list` that
+//! instantiated here would fail — or, on a `static {}` that never returns, hang — over a command
+//! that executes nothing. The two runners have to answer `--list` alike.
 
 use alloc::borrow::ToOwned as _;
 use alloc::format;
@@ -41,7 +48,7 @@ use jals_progress::Progress;
 
 use crate::test_plan::TestCase;
 use crate::test_runner::{Permits, RunOptions, TestEvent, TestOutcome, TestVerdict};
-use crate::wasm_run::{WasmRunError, WasmRunOutcome, WasmRunRequest, WasmRunner};
+use crate::wasm_run::{ParsedModule, WasmRunError, WasmRunOutcome, WasmRunner};
 
 /// One test, as this runner addresses it.
 ///
@@ -65,31 +72,25 @@ pub struct WasmTestEntry {
 /// A module and the tests exported from it, ready to run.
 #[derive(Debug)]
 pub struct WasmTestLauncher {
-    /// The module as the backend emitted it. `Arc` because every fan-out worker gets its own
-    /// handle and the bytes are read-only from here on.
-    module: Arc<[u8]>,
+    /// The module, decoded and validated once. Decoding is linear in the module's size and by far
+    /// the most expensive part of a call — instantiating it is microseconds — so a suite that runs
+    /// one module once per test pays it here rather than N times. It is also where a module that
+    /// is not one has to fail: [`resolve`](Self::resolve) is already the step that refuses a
+    /// module the whole run could not have used.
+    module: ParsedModule,
     entries: Vec<WasmTestEntry>,
 }
 
 impl WasmTestLauncher {
-    /// Take the module the backend just produced and the tests the frontend found, having checked
-    /// the module instantiates at all.
+    /// Take the module the backend just produced and the tests the frontend found.
     ///
-    /// The probe is a precondition and not an optimisation — see the module docs. It runs with no
-    /// export named, which is exactly the module's start function and nothing else.
-    ///
-    /// Silent: the probe is machinery rather than work the caller asked about, and a `Run` event
-    /// here reads as the suite starting when nothing has run yet. What it can produce that a
-    /// reader needs is the error, and that is returned.
-    pub fn resolve(module: Vec<u8>, entries: Vec<WasmTestEntry>) -> Result<Self, WasmRunError> {
-        WasmRunner::run(&WasmRunRequest {
-            module: &module,
-            invoke: None,
-            args: &[],
-            progress: &Progress::SILENT,
-        })?;
+    /// Decodes and validates the module — bytes that are not one are refused here, before
+    /// anything else — and executes none of it. Running the start function is
+    /// [`run`](Self::run)'s, for the reason the module docs give: it is the project's own code,
+    /// and `jals test --list` reaches this constructor while running no test at all.
+    pub fn resolve(module: &[u8], entries: Vec<WasmTestEntry>) -> Result<Self, WasmRunError> {
         Ok(Self {
-            module: module.into(),
+            module: WasmRunner::parse(module)?,
             entries,
         })
     }
@@ -112,15 +113,21 @@ impl WasmTestLauncher {
     /// Results come back in the order `cases` were given — the order a summary is printed in —
     /// while `observe` fires in completion order, which is what a live progress display needs.
     /// Both properties are `Exec::fan_out`'s, exactly as on the JVM path.
+    ///
+    /// Instantiates once before the first test and returns that failure whole rather than running
+    /// anything — the precondition the `#[should_fail]` inversion rests on, described in the
+    /// module docs. Silent: the probe is machinery rather than work the caller asked about, and a
+    /// `Run` event here reads as the suite starting when nothing has run yet.
     pub async fn run(
         &self,
         cases: &[TestCase],
         options: RunOptions,
         observe: Arc<dyn Fn(TestEvent) + Send + Sync>,
         exec: &Exec,
-    ) -> Vec<TestOutcome> {
+    ) -> Result<Vec<TestOutcome>, WasmRunError> {
+        WasmRunner::run_parsed(&self.module, None, &[], &Progress::SILENT)?;
         let shared = Arc::new(SharedWasmRun {
-            module: Arc::clone(&self.module),
+            module: self.module.clone(),
             exports: self
                 .entries
                 .iter()
@@ -135,14 +142,15 @@ impl WasmTestLauncher {
             .iter()
             .map(|case| (case.clone(), Arc::clone(&shared)))
             .collect();
-        exec.fan_out(jobs, |(case, shared)| async move { shared.run_one(&case) })
-            .await
+        Ok(exec
+            .fan_out(jobs, |(case, shared)| async move { shared.run_one(&case) })
+            .await)
     }
 }
 
 /// What every worker shares for one run.
 struct SharedWasmRun {
-    module: Arc<[u8]>,
+    module: ParsedModule,
     /// Test id to the export that runs it. A `Vec` rather than a map: a suite is small enough that
     /// the scan is free, and it keeps the frontend's order visible.
     exports: Vec<(String, String)>,
@@ -214,12 +222,7 @@ impl SharedWasmRun {
         // Silent: a test run reports through `observe`, which is what the reporter draws from, and
         // a second `Run` event per test would put the engine's own activity beside it saying the
         // same thing in another vocabulary.
-        let result = WasmRunner::run(&WasmRunRequest {
-            module: &self.module,
-            invoke: Some(export),
-            args: &[],
-            progress: &Progress::SILENT,
-        });
+        let result = WasmRunner::run_parsed(&self.module, Some(export), &[], &Progress::SILENT);
         match result {
             Ok(WasmRunOutcome::Returned(_) | WasmRunOutcome::Instantiated) => {
                 if case.should_fail() {
@@ -314,17 +317,18 @@ mod tests {
 
     /// Run every entry and return `(id, verdict, detail)` in the order given.
     fn verdicts(
-        module: Vec<u8>,
+        module: &[u8],
         entries: Vec<WasmTestEntry>,
     ) -> Vec<(String, TestVerdict, Option<String>)> {
-        let launcher = WasmTestLauncher::resolve(module, entries).expect("the module instantiates");
+        let launcher = WasmTestLauncher::resolve(module, entries).expect("the module parses");
         let cases = launcher.list();
         let outcomes = jals_exec::block_on_inline(launcher.run(
             &cases,
             RunOptions::default(),
             Arc::new(|_| {}),
             &Exec::inline(),
-        ));
+        ))
+        .expect("the module instantiates");
         outcomes
             .into_iter()
             .map(|outcome| (outcome.id, outcome.verdict, outcome.detail))
@@ -344,7 +348,7 @@ mod tests {
              }\n",
         );
         let results = verdicts(
-            module,
+            &module,
             alloc::vec![
                 entry("T#holds", "JalsTest$T$holds", false),
                 entry("T#fails", "JalsTest$T$fails", false),
@@ -374,7 +378,7 @@ mod tests {
              }\n",
         );
         let results = verdicts(
-            module,
+            &module,
             alloc::vec![
                 entry("T#boom", "JalsTest$T$boom", true),
                 entry("T#quiet", "JalsTest$T$quiet", true),
@@ -404,12 +408,12 @@ mod tests {
              }\n",
         );
         let plain = verdicts(
-            module.clone(),
+            &module,
             alloc::vec![entry("T#throws_", "JalsTest$T$throws_", false)],
         );
         assert_eq!(plain[0].1, TestVerdict::Failed { code: None });
         let inverted = verdicts(
-            module,
+            &module,
             alloc::vec![entry("T#throws_", "JalsTest$T$throws_", true)],
         );
         assert_eq!(inverted[0].1, TestVerdict::Passed);
@@ -422,7 +426,7 @@ mod tests {
     fn a_missing_export_is_a_failure_that_should_fail_does_not_invert() {
         let module = module("public class T { public static void JalsTest$T$here() {} }");
         let results = verdicts(
-            module,
+            &module,
             alloc::vec![entry("T#gone", "JalsTest$T$gone", true)],
         );
         assert_eq!(results[0].1, TestVerdict::Failed { code: None });
@@ -436,12 +440,14 @@ mod tests {
         );
     }
 
-    /// A `static` initialiser that traps fails `resolve`, before a single test runs.
+    /// A `static` initialiser that traps fails the whole run, before a single test runs — and
+    /// leaves `list` answerable, because listing executes nothing.
     ///
     /// The precondition the whole `#[should_fail]` inversion rests on. Every call instantiates the
     /// module, so a trapping initialiser would trap in every test — and at the call site that is
     /// indistinguishable from a trap the body caused, which would report every `#[should_fail]`
-    /// test as passed.
+    /// test as passed. The second half is the other side of the same rule: the probe is the
+    /// project's code running, so a command that runs no test must not reach it.
     #[test]
     fn a_trapping_static_initialiser_fails_the_run_rather_than_every_test() {
         let module = module(
@@ -451,9 +457,18 @@ mod tests {
              \x20   public static void JalsTest$T$t() {}\n\
              }\n",
         );
-        let error =
-            WasmTestLauncher::resolve(module, alloc::vec![entry("T#t", "JalsTest$T$t", true)])
-                .expect_err("the module does not instantiate");
+        let launcher =
+            WasmTestLauncher::resolve(&module, alloc::vec![entry("T#t", "JalsTest$T$t", true)])
+                .expect("the module parses");
+        let cases = launcher.list();
+        assert_eq!(cases.len(), 1, "listing runs none of the module");
+        let error = jals_exec::block_on_inline(launcher.run(
+            &cases,
+            RunOptions::default(),
+            Arc::new(|_| {}),
+            &Exec::inline(),
+        ))
+        .expect_err("the module does not instantiate");
         assert!(error.is_execution_failure(), "reported as a trap: {error}");
     }
 }
