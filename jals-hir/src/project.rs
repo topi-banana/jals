@@ -1878,12 +1878,7 @@ impl ProjectIndex {
     /// [`type_var_erasure`](Self::type_var_erasure) — its only caller. This was `pub` while three
     /// separate consumers reached for it, and each built the same walk again around it with a
     /// different fallback; publishing the step is what let that happen.
-    fn type_var_bound(
-        &self,
-        owner: ItemId,
-        member: Option<MemberId>,
-        name: &str,
-    ) -> Option<Ty> {
+    fn type_var_bound(&self, owner: ItemId, member: Option<MemberId>, name: &str) -> Option<Ty> {
         let (declared, file) = member
             .filter(|&id| self.is_member_type_param(id, name))
             .map_or_else(
