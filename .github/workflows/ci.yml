@@ -527,6 +527,17 @@ jobs:
           - name: hello_world
             dir: examples/hello_world
             run: true
+          # The same greeting through the `jals-wasm` backend, and the one cell here that needs
+          # no JDK at all: the compiler and the engine are both in-process, so nothing this cell
+          # runs spawns `javac` or `java`. `invoke` is what makes it an assertion rather than a
+          # smoke test — a bare `jals run` against a wasm project instantiates the module and
+          # stops, which passes whether or not a single export is reachable. Naming one requires
+          # the start function to have allocated the greeting and the export to still be there
+          # under the name the README tells a reader to call.
+          - name: hello_world_wasm
+            dir: examples/hello_world_wasm
+            run: true
+            invoke: --invoke greetingLength
           - name: rhai_build_script
             dir: examples/rhai_build_script
             run: true
@@ -683,10 +694,13 @@ jobs:
               exit 1
             fi
           done
+      # `invoke` is empty for every cell but the wasm one, where it names the export to call —
+      # a class-file project has no such selector and a wasm project has no main class, so the
+      # two never both apply.
       - name: Run
         if: ${{ matrix.example.run }}
         working-directory: ${{ matrix.example.dir }}
-        run: jals run ${{ matrix.example.features }}
+        run: jals run ${{ matrix.example.features }} ${{ matrix.example.invoke }}
       # `jals test` compiles a second time (the test lowering keeps the `#[test]` methods the
       # build removes) and then runs each test in its own JVM. A non-zero status here is a failing
       # test, which is exactly what the cell is for — and, for the two `minecraft_mod` cells that
