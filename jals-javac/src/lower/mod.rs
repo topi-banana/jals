@@ -2398,12 +2398,10 @@ impl Compile {
                 out.push_str(":Ljava/lang/Object;");
                 continue;
             }
-            for (position, bound) in bounds.iter().enumerate() {
-                // The first bound may be a class or an interface, and the encoding does not distinguish:
-                // `:` introduces the class bound and each further `:` an interface bound.
-                // `:` introduces the class bound and each further `:` an interface bound, so one per
-                // bound is the whole rule and the position does not change it.
-                let _ = position;
+            for bound in &bounds {
+                // The first bound may be a class or an interface, and the encoding does not
+                // distinguish: `:` introduces the class bound and each further `:` an interface
+                // bound, so one per bound is the whole rule and the position does not change it.
                 out.push(':');
                 let erased = context
                     .facts()
@@ -2424,14 +2422,30 @@ impl Compile {
                 .flat_map(|clause| clause.children().filter_map(ast::Type::cast))
                 .collect()
         };
-        if let Some(ty) = written(jals_syntax::SyntaxKind::EXTENDS_CLAUSE).first() {
+        // Which clause holds the superinterfaces is the declaration's kind, not a constant. A class
+        // writes them in `implements` and its `extends` names the superclass; an interface writes
+        // them in `extends` and has no superclass to write — JVMS §4.7.9.1 requires
+        // `Ljava/lang/Object;` in that slot, which is also what `super_name` already holds for one.
+        // Reading `extends` as the superclass for both put the first superinterface in the
+        // superclass position *and* left `implemented` empty, so the length gate below could never
+        // hold for an interface and every written type argument demoted to an erased name:
+        // `interface I<T> extends J<T>` wrote `<T:Ljava/lang/Object;>LJ<TT;>;LJ;`, which names `J`
+        // twice and contradicts the `super_class` the same class file emits.
+        let interface_decl = matches!(node.kind(), INTERFACE_DECL | ANNOTATION_TYPE_DECL);
+        let extends = written(jals_syntax::SyntaxKind::EXTENDS_CLAUSE);
+        let superclass = (!interface_decl).then(|| extends.first()).flatten();
+        if let Some(ty) = superclass {
             out.push_str(&Self::type_signature(ty, &vars, context)?);
         } else {
             out.push('L');
             out.push_str(super_name);
             out.push(';');
         }
-        let implemented = written(jals_syntax::SyntaxKind::IMPLEMENTS_CLAUSE);
+        let implemented = if interface_decl {
+            extends
+        } else {
+            written(jals_syntax::SyntaxKind::IMPLEMENTS_CLAUSE)
+        };
         if implemented.len() == interface_names.len() {
             for ty in &implemented {
                 out.push_str(&Self::type_signature(ty, &vars, context)?);

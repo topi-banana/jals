@@ -421,6 +421,36 @@ fn a_self_referential_superclass_is_not_its_own_superclass() {
     );
 }
 
+/// A type's own field is found before the chain is walked at all.
+///
+/// `inherited_field` leads with `from` because `superclasses` excludes its start, and nothing
+/// asserted that: every shadowing case in this file declares the field on two *ancestors* and asks
+/// from a third, so the answer comes from the chain either way and dropping the head passes.
+#[test]
+fn a_type_finds_its_own_field_before_any_inherited_one() {
+    let sources = ["class Base { int x; } class Sub extends Base { int x; }"];
+    let (_nodes, index) = build(&sources);
+    let (base, sub) = (item(&index, "Base"), item(&index, "Sub"));
+
+    let found = index.inherited_field(sub, "x").expect("`Sub` declares `x`");
+    assert_eq!(
+        index.member(found).owner,
+        sub,
+        "`Sub`'s own `x` shadows `Base`'s"
+    );
+    assert_eq!(
+        index
+            .member(
+                index
+                    .inherited_field(base, "x")
+                    .expect("`Base` declares `x`")
+            )
+            .owner,
+        base,
+        "and `Base` still answers with its own"
+    );
+}
+
 /// The chain follows one kind of edge where `is_subtype` follows every kind.
 ///
 /// An interface is a supertype and is not a superclass; a walk that conflated the two would put a
@@ -459,6 +489,37 @@ fn an_annotation_type_is_a_direct_interface_and_not_a_superclass() {
     );
 }
 
+/// An `@interface` is a reference type, so it carries the implicit `java.lang.Object` edge that
+/// every other type-declaration kind does.
+///
+/// Leaving `DefKind::AnnotationType` out of the builder's kind list was the same silent
+/// reclassification the `kind != Interface` filters were, one layer down: without the edge
+/// `Object o = someAnnotation;` is a mismatch and `someAnnotation.toString()` an unresolved name,
+/// on legal Java, while the backend emits the type with `ACC_INTERFACE` and the `Annotation`
+/// superinterface.
+#[test]
+fn an_annotation_type_is_a_subtype_of_object_like_every_other_reference_type() {
+    let sources = ["@interface Marker {} interface I {}"];
+    let (_nodes, index) = build(&sources);
+    let (marker, iface) = (item(&index, "Marker"), item(&index, "I"));
+    let object = item(&index, "java.lang.Object");
+
+    for (name, id) in [("Marker", marker), ("I", iface)] {
+        assert!(index.is_subtype(id, object), "{name} is an Object");
+        assert_eq!(
+            index.superclasses(id).collect::<Vec<_>>(),
+            [object],
+            "{name}'s chain is the implicit Object edge"
+        );
+        assert!(
+            index
+                .resolve_member(id, "toString", jals_hir::Namespace::Method)
+                .is_some(),
+            "{name} inherits Object's public instance methods"
+        );
+    }
+}
+
 /// `ClassFile.interfaces` is emitted from this in sequence, and a generic type's `Signature` is
 /// written against the same sequence — so the order is contract, not incidental.
 #[test]
@@ -475,13 +536,17 @@ fn direct_interfaces_keeps_the_order_the_source_wrote() {
     );
 }
 
-/// The two edge answers **partition** a type's supertypes: every one is a superclass or an
-/// interface, never both and never neither.
+/// Every supertype the source *wrote* is claimed by exactly one of the two edge answers, and an
+/// `@interface` by the interface half — which is the property both filters are written positively
+/// for.
 ///
-/// This is what makes the pair complete, and it is why both filters are written positively. A sixth
-/// type-declaration `DefKind` that neither claims fails here rather than in an emitted artifact.
+/// Deliberately not called a partition of the type's edges: it is not one. `direct_superclass` is a
+/// `.find`, so `C`'s implicit `java.lang.Object` edge — which it carries beside the written
+/// `extends B` — is claimed by neither answer. `ProjectIndex::direct_superclass`'s doc says so, and
+/// the edge list it is a claim about is crate-private, so the whole-edge-set assertion lives beside
+/// the builder in `project.rs` instead.
 #[test]
-fn the_two_edge_answers_partition_the_supertypes() {
+fn the_two_edge_answers_claim_every_written_supertype() {
     let sources = [
         "@interface Marker {} interface I {} class B {} class C extends B implements I, Marker {}",
     ];
@@ -495,7 +560,7 @@ fn the_two_edge_answers_partition_the_supertypes() {
     expected.sort_unstable();
     assert_eq!(
         edges, expected,
-        "every declared edge is claimed exactly once"
+        "every written edge is claimed exactly once"
     );
 }
 

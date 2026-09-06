@@ -852,7 +852,16 @@ impl Expr {
             )
         };
         Self::check_protected_receiver(call, member, context)?;
-        let interface_owner = context.index.item(owner_item).kind == DefKind::Interface;
+        // Positively, for the reason `ProjectIndex::direct_interfaces` states: an `@interface` is
+        // `DefKind::AnnotationType` and *is* an interface (JLS §9.6), and `class_file` emits one with
+        // `ACC_INTERFACE` set. Asking `kind != Interface` here answered "not an interface" for it and
+        // produced an `invokevirtual` against a `Methodref` naming an interface method, which is an
+        // `IncompatibleClassChangeError` at the first call rather than anything the verifier reports
+        // — the same rule `Compile::method_reference`'s `owner_is_interface` already spells out.
+        let interface_owner = matches!(
+            context.index.item(owner_item).kind,
+            DefKind::Interface | DefKind::AnnotationType
+        );
         // The receiver comes first on the stack, below the arguments.
         if !is_static {
             match call.callee() {

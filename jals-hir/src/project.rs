@@ -1306,10 +1306,8 @@ impl ProjectIndex {
             // the descriptor itself. Done after the supertypes resolve, because the interface is one of them.
             if self.items[owner.0 as usize]
                 .fqn
-                .as_str()
-                .rsplit('.')
-                .next()
-                .is_some_and(|simple| simple.starts_with("lambda$"))
+                .simple_name()
+                .starts_with("lambda$")
                 && let Some(implemented) = supertypes.first().map(|supertype| supertype.id)
                 && let Some(&method) = self
                     .own_members(implemented)
@@ -1399,6 +1397,12 @@ impl ProjectIndex {
     /// methods** and every interface-typed value is an `Object`; [`implicit`](Supertype::implicit)
     /// is what records that the edge is not a written `extends`.
     ///
+    /// So does an `@interface`, and the kind list is written out for that reason: an annotation type
+    /// *is* an interface (JLS §9.6), and leaving [`DefKind::AnnotationType`] out of it was the same
+    /// silent reclassification the `kind != Interface` filters were. Without the edge
+    /// `is_subtype(A, Object)` is `false` and `resolve_member(A, "toString")` is `None`, so
+    /// `Object o = a;` reports a mismatch and `a.toString()` an unresolved name, on legal Java.
+    ///
     /// "Public instance methods" is the whole of what §9.2 gives it, and the member walks enforce
     /// that half rather than this one — see [`interface_declares`](Self::interface_declares). The
     /// edge is a *supertype* relation, which is true of the whole of `Object`; which of its members
@@ -1407,7 +1411,11 @@ impl ProjectIndex {
     fn push_implicit_object(&self, owner: ItemId, file: FileId, supertypes: &mut Vec<Supertype>) {
         if !matches!(
             self.items[owner.0 as usize].kind,
-            DefKind::Class | DefKind::Interface | DefKind::Enum | DefKind::Record
+            DefKind::Class
+                | DefKind::Interface
+                | DefKind::AnnotationType
+                | DefKind::Enum
+                | DefKind::Record
         ) {
             return;
         }
@@ -2147,8 +2155,11 @@ impl ProjectIndex {
     /// [`superclasses`](Self::superclasses) into a `.find(…)` at any of them; ask for the chain only
     /// when the question is genuinely transitive.
     ///
-    /// `None` for an interface, for a type whose only supertypes are interfaces, and for one whose
-    /// superclass is not indexed at all.
+    /// `None` only when no supertype edge lands on an indexed class — which, once `java.lang.Object`
+    /// is indexed, means no type at all: the implicit `Object` edge below is one, and every
+    /// reference type carries it. So this answers `Some(java.lang.Object)` for an interface and for
+    /// a class whose only written supertypes are interfaces; it is not a test for "has no
+    /// superclass", and reading it as one is what made `Iface.super.m()` resolve against `Object`.
     ///
     /// The rule is stated **positively**. Asking which supertype is `kind != Interface` is not the
     /// same question: an `@interface` is [`DefKind::AnnotationType`], which the rest of the
@@ -2158,11 +2169,19 @@ impl ProjectIndex {
     /// `java.lang.Object`. An `enum` counts: a constant with a body is a subclass of one, and it is
     /// the only way a declaration that is not a `class` appears here at all.
     ///
-    /// Together with [`direct_interfaces`](Self::direct_interfaces) this **partitions** `owner`'s
-    /// edges: the five type-declaration [`DefKind`]s split into `Class | Enum | Record` here and
-    /// `Interface | AnnotationType` there, with nothing in both and nothing in neither. That is why
-    /// both filters are written positively — a negative one silently reclassifies whichever kind is
-    /// added next, and it already did exactly that to `@interface` on the JVM lowering's side.
+    /// The five type-declaration [`DefKind`]s partition between this and
+    /// [`direct_interfaces`](Self::direct_interfaces): `Class | Enum | Record` here,
+    /// `Interface | AnnotationType` there, nothing in both and nothing in neither. That is why both
+    /// filters are written positively — a negative one silently reclassifies whichever kind is added
+    /// next, and it already did exactly that to `@interface` on the JVM lowering's side.
+    ///
+    /// **The two answers do not enumerate `owner`'s edges**, and no accessor does. This is a
+    /// `.find`, so a type holding more than one class-kind edge yields only the first: every class
+    /// with a written `extends` also carries the implicit `java.lang.Object` edge, and an `enum` and
+    /// a `record` carry `java.lang.Enum` / `java.lang.Record` beside it — in each case `Object` is
+    /// claimed by neither answer, while [`is_subtype`](Self::is_subtype) still says it is a
+    /// supertype. Reconstructing the direct-supertype *set* from this pair is therefore wrong; ask
+    /// [`is_subtype`](Self::is_subtype) or [`superclasses`](Self::superclasses) instead.
     ///
     /// After the implicit `java.lang.Object` edge this answers for a class with no `extends` too,
     /// which is what makes `super.toString()` resolve.
@@ -2267,6 +2286,12 @@ impl ProjectIndex {
     /// answer whether an arm reaches the candidate at all. Making them agree would change the answer
     /// in both directions.
     ///
+    /// The reflexive first step is the one candidate this does **not** filter by kind: a single
+    /// entry, or a first entry every other is a subtype of, is answered as itself even when it is an
+    /// interface. `common_superclass(&[I, C])` for `class C implements I` is `Some(I)`. That matches
+    /// both loops this replaces and is what a caller holding a written `catch` type wants; it is
+    /// also the one input on which "the nearest *class*" reads narrower than the code.
+    ///
     /// `None` for an empty slice, and for a set whose shared ancestor the index does not hold. The
     /// **fallback stays with the caller**, because the two that exist want different ones — the
     /// inferer keeps the written type, a backend writes `java.lang.Throwable` — and only they can
@@ -2286,9 +2311,9 @@ impl ProjectIndex {
     ///
     /// `name` is the **simple** name, as [`ClassTy::Project`](crate::ClassTy::Project) documents and
     /// as `Display for Ty` renders. Three callers derived that from the FQN by hand before this
-    /// existed, and a fourth — `Inferer::object_ty` — still writes the qualified one, a difference
-    /// that shows up as diagnostic text and so is being corrected separately rather than folded in
-    /// here.
+    /// existed, and a fourth — `ProjectIndex::object_ty`, in `infer.rs` — still writes the qualified
+    /// one, a difference that shows up as diagnostic text and so is being corrected separately
+    /// rather than folded in here.
     ///
     /// For a type written with arguments the answer is the *declaration*, not the parameterized use;
     /// a caller holding a written spelling builds its own `ClassTy` from that spelling instead.
@@ -2676,15 +2701,16 @@ impl ProjectIndex {
                 let simple = alloc::format!("{ordinal}");
                 let fqn = Self::build_fqn(package, enclosing.as_deref(), &simple);
                 let start = usize::from(node.text_range().start());
-                let supertype = enclosing
-                    .as_deref()
-                    .and_then(|fqn| fqn.rsplit('.').next())
-                    .map(|name| MemberType::Named {
-                        name: name.to_owned(),
-                        qualified: None,
-                        dims: 0,
-                        args: Vec::new(),
-                    });
+                let supertype =
+                    enclosing
+                        .as_deref()
+                        .map(Fqn::simple_name_of)
+                        .map(|name| MemberType::Named {
+                            name: name.to_owned(),
+                            qualified: None,
+                            dims: 0,
+                            args: Vec::new(),
+                        });
                 out.push(RawType {
                     fqn,
                     kind: DefKind::Class,

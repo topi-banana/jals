@@ -415,23 +415,27 @@ filesystem reads into portable interfaces.
   beside a visited set, a substitution over *spellings* that had to carry a `FileId` beside one over
   resolved `Ty`s that does not.
 
-  **An edge is asked for by name; a chain is asked for whole.** `Item::supertypes` and `Supertype`
-  are crate-private, so the hierarchy is reachable only through those methods. Publishing the walk
-  is not what closes this — publishing a *step* was never the problem on its own. It was publishing
-  the step while the raw edge list was also public and the walk was not, which let five consumers
-  hand-roll the same visited set: two shipped without one, and they wedged the editor (every runtime
-  here is current-thread) and aborted the process with a stack overflow, on input that parses and
-  indexes perfectly. `direct_superclass` stays published because three binary formats each hold
-  exactly one such edge — JVMS §6.5's `invokespecial`, `ClassFile.super_class`, wasm's
-  `SubType.supertype` — and a chain is the wrong answer at all three. The pair **partitions** a
-  type's edges, and both filters are written **positively** for that reason: the negative one
-  (`kind != Interface`) silently dropped an `@interface` supertype on the JVM side, where the wasm
-  side classified it correctly, so one question had two answers. `Overrides` has three variants rather than two because its consumers collapse
-  it in **opposite** directions: a JVM bridge is emitted on `is_possible` (a missing one is an
-  `AbstractMethodError` at run time, a spurious one is dead code) and a wasm virtual dispatch is
-  routed on `is_certain` (a false positive calls the wrong method). Folding `Unknown` in by
-  exclusion — `!= No`, `== Yes` — is what silently reclassifies it when a fourth answer is added,
-  so the two policies have names and the `match` is exhaustive.
+  **An edge is asked for by name; a chain is asked for whole.** `Item::supertypes` is a private
+  field and `Supertype` is `pub(crate)`, so the hierarchy is reachable only through those methods.
+  Publishing the walk is not what closes this — publishing a *step* was never the problem on its
+  own. It was publishing the step while the raw edge list was also public and the walk was not,
+  which let five consumers hand-roll the same visited set: two shipped without one, and they wedged
+  the editor (every runtime here is current-thread) and aborted the process with a stack overflow,
+  on input that parses and indexes perfectly. `direct_superclass` stays published because three
+  binary formats each hold exactly one such edge — JVMS §6.5's `invokespecial`,
+  `ClassFile.super_class`, wasm's `SubType.supertype` — and a chain is the wrong answer at all
+  three. The five type-declaration `DefKind`s **partition** between the two edge answers, and both
+  filters are written **positively** for that reason: the negative one (`kind != Interface`)
+  silently dropped an `@interface` supertype on the JVM side, where the wasm side classified it
+  correctly, so one question had two answers. What the pair is *not* is an enumeration of a type's
+  edges — `direct_superclass` is a `.find`, so the implicit `java.lang.Object` edge every class with
+  a written `extends` also carries is claimed by neither, and nothing published enumerates them; ask
+  `is_subtype` or `superclasses` instead. `Overrides` has three variants rather than two because its
+  consumers collapse it in **opposite** directions: a JVM bridge is emitted on `is_possible` (a
+  missing one is an `AbstractMethodError` at run time, a spurious one is dead code) and a wasm
+  virtual dispatch is routed on `is_certain` (a false positive calls the wrong method). Folding
+  `Unknown` in by exclusion — `!= No`, `== Yes` — is what silently reclassifies it when a fourth
+  answer is added, so the two policies have names and the `match` is exhaustive.
 
   `jals-hir` states *facts* (`DeadIf`, `UnreportedException`, `TypeMismatch` with its
   `MismatchKind`, `UnresolvedType` and its value/method sibling `UnresolvedName`, `UnusedImport`,

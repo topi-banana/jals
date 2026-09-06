@@ -469,7 +469,13 @@ impl Stmt {
             .ok_or(LowerError::Unsupported("a resource with no `close()`"))?;
         let declaring = context.index.member(closer).owner;
         let owner = Descriptor::internal_name_of(declaring, context.index);
-        let interface = context.index.item(declaring).kind == jals_hir::DefKind::Interface;
+        // Positively: an `@interface` is `jals_hir::DefKind::AnnotationType` and is an interface
+        // (JLS §9.6), so `close()` declared on one needs `invokeinterface` and an
+        // `InterfaceMethodref` like any other. See `Expr::call`'s `interface_owner`.
+        let interface = matches!(
+            context.index.item(declaring).kind,
+            jals_hir::DefKind::Interface | jals_hir::DefKind::AnnotationType
+        );
 
         // A declared resource is a local the body can read; one naming an existing variable still gets
         // a slot, because the handler needs the value the acquisition produced rather than whatever
