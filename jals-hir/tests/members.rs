@@ -402,3 +402,67 @@ fn super_dot_object_method_resolves_after_the_implicit_edge() {
     let target = call_target(src, "super.toString()");
     assert_eq!(target, "java.lang.Object.toString()", "got {target}");
 }
+
+/// A type variable erases to its leftmost bound (JLS §4.6), transitively.
+///
+/// The descriptor a backend emits for `<T extends Number> void f(T)` is `f(LNumber;)V`, not
+/// `f(LObject;)V`: the two are self-consistent within one compilation and disagree with every
+/// separately compiled caller, which is a `NoSuchMethodError` rather than an imprecision.
+///
+/// The walk and its stop live here because the transitivity does. Three consumers followed the chain
+/// themselves before — with the same depth of 8 written out three times and a *different* fallback in
+/// each, which is what made one rule look like three.
+#[test]
+fn a_type_variable_erases_to_its_leftmost_bound() {
+    let src = "class Number {} class Leaf extends Number {}
+               class C<T extends Number, U extends T, V> { }";
+    let fixture = Fixture::new(src);
+    let index = &fixture.index;
+    let c = index.item_by_fqn("C").expect("C is indexed");
+    let number = index.item_by_fqn("Number").expect("Number is indexed");
+
+    let var = |name: &str| jals_hir::Ty::TypeVar {
+        owner: c,
+        member: None,
+        name: name.to_owned(),
+    };
+
+    // One step, and then transitively through `U extends T extends Number`.
+    for name in ["T", "U"] {
+        assert_eq!(
+            index
+                .type_var_erasure(&var(name))
+                .and_then(|t| t.project_id()),
+            Some(number),
+            "`{name}` erases to Number"
+        );
+    }
+    // An *unbounded* variable has no erasure this can name. Answering `Object` here would fold one
+    // consumer's fallback into a rule the other two want a different one from.
+    assert_eq!(index.type_var_erasure(&var("V")), None);
+    // A type that is not a variable is its own erasure, and comes back unchanged.
+    let leaf = jals_hir::Ty::Class(jals_hir::ClassTy::Project {
+        id: index.item_by_fqn("Leaf").expect("Leaf is indexed"),
+        name: "Leaf".to_owned(),
+        args: Vec::new(),
+    });
+    assert_eq!(index.type_var_erasure(&leaf), Some(leaf));
+}
+
+/// A bound chain that closes on itself is not a Java program, but a reader of one still has to
+/// terminate on it.
+#[test]
+fn a_cyclic_bound_chain_is_abandoned_rather_than_followed() {
+    let src = "class C<T extends U, U extends T> { }";
+    let fixture = Fixture::new(src);
+    let c = fixture.index.item_by_fqn("C").expect("C is indexed");
+
+    assert_eq!(
+        fixture.index.type_var_erasure(&jals_hir::Ty::TypeVar {
+            owner: c,
+            member: None,
+            name: "T".to_owned(),
+        }),
+        None
+    );
+}

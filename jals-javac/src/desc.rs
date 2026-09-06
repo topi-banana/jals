@@ -94,11 +94,6 @@ impl Descriptor {
         out
     }
 
-    /// The field type a value of `ty` has, erased.
-    fn field_type(ty: &Ty, index: &ProjectIndex) -> Result<FieldType> {
-        Self::field_type_within(ty, index, 0)
-    }
-
     /// [`field_type`](Self::field_type), for a lowering that has to compare a value's erasure with a
     /// slot's — the argument narrowing an unchecked call needs.
     ///
@@ -109,23 +104,16 @@ impl Descriptor {
         Self::field_type(ty, index)
     }
 
-    /// How far a chain of type-variable bounds is followed before answering `Object`.
-    ///
-    /// `<T extends U, U extends Number>` erases `T` through `U`, so the walk is genuinely recursive
-    /// and needs a stop. Real bound chains are a step or two; the limit exists so a cyclic or
-    /// malformed one — this crate never checks, so it can be handed either — terminates with the
-    /// conservative answer rather than the stack.
-    const BOUND_DEPTH: u8 = 8;
     /// The one type every erasure falls back to.
     const OBJECT: &'static str = "java/lang/Object";
 
-    /// [`field_type`](Self::field_type), tracking how many type-variable bounds have been followed.
-    fn field_type_within(ty: &Ty, index: &ProjectIndex, depth: u8) -> Result<FieldType> {
+    /// The field type a value of `ty` has, erased.
+    fn field_type(ty: &Ty, index: &ProjectIndex) -> Result<FieldType> {
         Ok(match ty {
             Ty::Primitive(primitive) => FieldType::Base(Self::base_type(*primitive)),
-            Ty::Array(element) => FieldType::Array(alloc::boxed::Box::new(
-                Self::field_type_within(element, index, depth)?,
-            )),
+            Ty::Array(element) => {
+                FieldType::Array(alloc::boxed::Box::new(Self::field_type(element, index)?))
+            }
             Ty::Class(ClassTy::Project { id, .. }) => {
                 FieldType::Object(Self::internal_name_of(*id, index))
             }
@@ -139,7 +127,8 @@ impl Descriptor {
             // declares none. Answering `Object` for a *bounded* one is self-consistent within a
             // single compilation — the declaration and its call sites agree — and disagrees with
             // every separately compiled caller, which is a `NoSuchMethodError` rather than an
-            // imprecision.
+            // imprecision. `ProjectIndex::type_var_erasure` follows the chain and holds the depth
+            // cap, and never hands back a variable, so this recursion needs no counter of its own.
             //
             // A bound this layer cannot *name* falls back to `Object` rather than refusing, which
             // is the one place that leniency is right. Every other unresolved type is a value the
@@ -149,17 +138,10 @@ impl Descriptor {
             // `<T extends Runnable>` uncompilable in the stub-only configuration the playground and
             // this crate's own tests use. `Object` is what an unbounded parameter erases to anyway,
             // so the fallback is the answer this line gave before bounds were read at all.
-            Ty::TypeVar {
-                owner,
-                member,
-                name,
-            } => match index.type_var_bound(*owner, *member, name) {
-                Some(bound) if depth < Self::BOUND_DEPTH => {
-                    Self::field_type_within(&bound, index, depth + 1)
-                        .unwrap_or_else(|_| FieldType::Object(Self::OBJECT.to_owned()))
-                }
-                _ => FieldType::Object(Self::OBJECT.to_owned()),
-            },
+            Ty::TypeVar { .. } => index
+                .type_var_erasure(ty)
+                .and_then(|bound| Self::field_type(&bound, index).ok())
+                .unwrap_or_else(|| FieldType::Object(Self::OBJECT.to_owned())),
             Ty::Void => return Err(DescError::Void),
             Ty::Unknown => return Err(DescError::Unknown),
         })

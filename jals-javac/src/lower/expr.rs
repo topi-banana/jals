@@ -745,9 +745,11 @@ impl Expr {
         // Through the *erasure*: a receiver of type-variable type is the bound at run time, and it
         // is the bound the verifier reads too — `<T extends C & I> void m(T t) { t.clone(); }` is
         // reached through a `C`, which is the accessing class.
+        // A variable whose bound cannot be followed is left alone: it names no class, so it names
+        // none to check accessibility against, and `project_id` answers `None` for it either way.
         let through = Self::type_of(receiver.syntax(), context)
             .ok()
-            .map(|ty| Self::erased(ty, context))
+            .map(|ty| context.index.type_var_erasure(&ty).unwrap_or(ty))
             .and_then(|ty| ty.project_id());
         match through {
             Some(item) if context.index.is_subtype(item, context.this_item) => Ok(()),
@@ -755,30 +757,6 @@ impl Expr {
                 "a `protected` member reached through another type",
             )),
         }
-    }
-
-    /// A type with its type variables erased to their bounds (JLS §4.6), one level at a time until a
-    /// nominal type or nothing is left.
-    fn erased(ty: Ty, context: &Context<'_>) -> Ty {
-        /// A `<T extends U, U extends V>` chain is one lookup per step; `<T extends U, U extends T>`
-        /// is not a Java program but a reader of one has to terminate anyway.
-        const DEPTH: u8 = 8;
-        let mut ty = ty;
-        for _ in 0..DEPTH {
-            let Ty::TypeVar {
-                owner,
-                member,
-                name,
-            } = &ty
-            else {
-                return ty;
-            };
-            let Some(bound) = context.index.type_var_bound(*owner, *member, name) else {
-                return ty;
-            };
-            ty = bound;
-        }
-        ty
     }
 
     /// The runtime package of an indexed type — everything before the last `/` of its internal name,

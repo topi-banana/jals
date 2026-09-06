@@ -1952,12 +1952,6 @@ impl<'a> Inferer<'a> {
 }
 
 impl ProjectIndex {
-    /// How deep a chain of type-variable bounds is followed before giving up.
-    ///
-    /// `<T extends U, U extends V>` is legal and each step is one lookup; `<T extends U, U extends T>`
-    /// is not, but a resolver reads what is written and must terminate on it anyway.
-    const BOUND_DEPTH: u8 = 8;
-
     /// The scope a written type name `name` is a **type variable** of, seen from `node`: the
     /// declaring `(owner, member)` pair, or `None` when no enclosing declaration declares it.
     ///
@@ -2007,26 +2001,16 @@ impl ProjectIndex {
     ///   what `clone()` returns, which `Object`'s declaration cannot say); everything else —
     ///   `equals`, `hashCode`, `getClass` — is genuinely `Object`'s and is answered here.
     ///
-    /// Anything else is its own receiver. Bounds are followed transitively, which is why the depth
-    /// cap is here rather than at a call site.
+    /// Anything else is its own receiver. Bounds are followed transitively by
+    /// [`type_var_erasure`](ProjectIndex::type_var_erasure), which is where the depth cap lives
+    /// because that is where the transitivity is.
     fn member_receiver(&self, ty: &Ty) -> Ty {
-        let mut current = ty.clone();
-        for _ in 0..Self::BOUND_DEPTH {
-            current = match current {
-                Ty::TypeVar {
-                    owner,
-                    member,
-                    ref name,
-                } => self
-                    .type_var_bound(owner, member, name)
-                    // An unbounded variable erases to `Object`, and `Object`'s members are the ones
-                    // it really does have.
-                    .unwrap_or_else(|| self.object_ty()),
-                Ty::Array(_) => return self.object_ty(),
-                other => return other,
-            };
+        match self.type_var_erasure(ty) {
+            // An array's members are `Object`'s (JLS §10.7), and so are an *unbounded* variable's —
+            // which is also the conservative answer for a chain too deep to follow.
+            Some(Ty::Array(_)) | None => self.object_ty(),
+            Some(other) => other,
         }
-        self.object_ty()
     }
 
     /// `java.lang.Object` as a receiver type, or [`Ty::Unknown`] when it is not indexed at all.

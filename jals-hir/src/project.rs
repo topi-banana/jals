@@ -1873,7 +1873,12 @@ impl ProjectIndex {
     /// consistent within one compilation, and a `NoSuchMethodError` against a caller compiled
     /// separately. Resolved in the member's own declaring file, so the bound's name sees the imports
     /// it was written under.
-    pub fn type_var_bound(
+    ///
+    /// **One step, and private.** A consumer wants the whole chain and a stop for it, which is
+    /// [`type_var_erasure`](Self::type_var_erasure) — its only caller. This was `pub` while three
+    /// separate consumers reached for it, and each built the same walk again around it with a
+    /// different fallback; publishing the step is what let that happen.
+    fn type_var_bound(
         &self,
         owner: ItemId,
         member: Option<MemberId>,
@@ -1887,6 +1892,48 @@ impl ProjectIndex {
             );
         let bound = declared.iter().find(|p| p.name == name)?.bounds.first()?;
         Some(self.member_type_to_ty(file, owner, member, bound))
+    }
+
+    /// How far a chain of type-variable bounds is followed before it is abandoned.
+    ///
+    /// `<T extends U, U extends Number>` erases `T` through `U`, so the walk is genuinely recursive
+    /// and needs a stop; `<T extends U, U extends T>` is not a Java program, but nothing here checks
+    /// and a reader of one still has to terminate. Real chains are a step or two.
+    ///
+    /// The cap is **here rather than at a call site** because the transitivity is here. It was
+    /// written out three times before this — once in each of two backend layers and once in this
+    /// crate's own receiver lookup — with the same `8` in all three and a different fallback in
+    /// each, which is what made them look like three rules instead of one.
+    const BOUND_DEPTH: u8 = 8;
+
+    /// `ty` with its type variables erased to their bounds (JLS §4.6), or `None` when that cannot be
+    /// answered — the chain ends at an **unbounded** variable, or runs past [`BOUND_DEPTH`].
+    ///
+    /// A type that is not a variable is its own erasure and comes back unchanged. The post-condition
+    /// is what callers rely on: **a `Some` is never a [`Ty::TypeVar`]**, so a consumer may recurse
+    /// into it without a depth counter of its own.
+    ///
+    /// `None` rather than a substituted default because the three consumers want three different
+    /// ones and only they can say which: a receiver lookup wants `java.lang.Object` (whose members an
+    /// unbounded variable really does have), a descriptor wants the *internal name* `java/lang/Object`
+    /// (and the same for a bound it cannot name, since the index is routinely partial), and an
+    /// accessibility check wants the variable left alone, because a variable names no class to check
+    /// against. Folding any one of them in here would make the other two wrong.
+    #[must_use]
+    pub fn type_var_erasure(&self, ty: &Ty) -> Option<Ty> {
+        let mut current = ty.clone();
+        for _ in 0..Self::BOUND_DEPTH {
+            let Ty::TypeVar {
+                owner,
+                member,
+                ref name,
+            } = current
+            else {
+                return Some(current);
+            };
+            current = self.type_var_bound(owner, member, name)?;
+        }
+        None
     }
 
     /// Resolves a member named `name` in name-space `namespace` (value for a field / enum constant,
