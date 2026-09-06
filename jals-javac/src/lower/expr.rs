@@ -1047,10 +1047,10 @@ impl Expr {
                 .get_static("java/lang/Void", "TYPE", "Ljava/lang/Class;")?);
         }
         let mut named = match (literal.ty(), literal.expr()) {
-            (Some(ty), _) => context.ty_of_type(&ty)?,
+            (Some(ty), _) => context.facts().ty_of_type(&ty)?,
             // The reference form's base is parsed as an *expression* — a bare `String` is a name
             // reference — so it is resolved as a type name rather than lowered as a value.
-            (None, Some(base)) => context.ty_of_name(base.syntax())?,
+            (None, Some(base)) => context.facts().ty_of_name(base.syntax())?,
             (None, None) => return Err(LowerError::Unsupported("a `.class` with no type")),
         };
         for _ in 0..dimensions {
@@ -1725,7 +1725,7 @@ impl Expr {
                 .children()
                 .find_map(ast::Type::cast)
                 .ok_or(LowerError::Unsupported("an `instanceof` with no type"))?;
-            let target = context.ty_of_type(&ty)?;
+            let target = context.facts().ty_of_type(&ty)?;
             Self::lower(&operand, context, emit)?;
             return Ok(emit
                 .asm
@@ -1840,7 +1840,7 @@ impl Expr {
                     .children()
                     .find_map(ast::Type::cast)
                     .ok_or(LowerError::Unsupported("a `record` pattern with no type"))?;
-                let target = context.ty_of_type(&ty)?;
+                let target = context.facts().ty_of_type(&ty)?;
                 let item = target
                     .project_id()
                     .ok_or(LowerError::Unsupported("a `record` pattern on no record"))?;

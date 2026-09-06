@@ -2138,8 +2138,8 @@ impl Compile {
             // reference, so it is resolved as a type name rather than read as a `TYPE` node.
             ast::Expr::ClassLiteral(literal) => {
                 let named = match (literal.ty(), literal.expr()) {
-                    (Some(ty), _) => context.ty_of_type(&ty)?,
-                    (None, Some(base)) => context.ty_of_name(base.syntax())?,
+                    (Some(ty), _) => context.facts().ty_of_type(&ty)?,
+                    (None, Some(base)) => context.facts().ty_of_name(base.syntax())?,
                     (None, None) => return Err(unsupported()),
                 };
                 let descriptor = Descriptor::descriptor_of(&named, context.index)?.to_string();
@@ -2402,7 +2402,9 @@ impl Compile {
                 let _ = position;
                 out.push(':');
                 let erased = context
+                    .facts()
                     .ty_of_type(bound)
+                    .map_err(LowerError::from)
                     .and_then(|ty| Ok(Descriptor::descriptor_of(&ty, context.index)?.to_string()))
                     .unwrap_or_else(|_| Self::UNNAMEABLE_BOUND.to_owned());
                 out.push_str(&erased);
@@ -2583,7 +2585,7 @@ impl Compile {
         }
         // Not a variable: the erased descriptor for the name, plus the type *arguments* the source
         // wrote. A reflective reader gets `List<T>` from this where the descriptor alone says `List`.
-        let erased = context.ty_of_type(ty)?;
+        let erased = context.facts().ty_of_type(ty)?;
         let descriptor = Descriptor::descriptor_of(&erased, context.index)?.to_string();
         let name = descriptor.trim_start_matches('[');
         let Some(args) = ty
@@ -3823,44 +3825,6 @@ impl Context<'_> {
             .map_or(&[], alloc::vec::Vec::as_slice)
     }
 
-    /// The type a `TYPE` node names.
-    ///
-    /// Inference keys its record by *expression* span and a `TYPE` node is not an expression, so an
-    /// `instanceof`'s target has nowhere to be read from and is resolved here instead. Only what a
-    /// `Class` entry needs is recovered — the array dimensions and the item the name binds to — and a
-    /// name the index does not hold is reported rather than guessed at, because an invented package
-    /// produces a class that loads and then throws `NoClassDefFoundError`.
-    fn ty_of_type(&self, node: &ast::Type) -> Result<jals_hir::Ty> {
-        use jals_syntax::SyntaxKind::LBRACK;
-        let dimensions = node
-            .syntax()
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .filter(|token| token.kind() == LBRACK)
-            .count();
-
-        let mut ty = if node.is_primitive_or_var() {
-            jals_hir::Ty::Primitive(Facts::primitive_of(node).ok_or(DescError::Unknown)?)
-        } else {
-            let name = node.simple_name().ok_or(DescError::Unknown)?;
-            let qualified = node.is_qualified().then(|| node.qualified_text()).flatten();
-            let id = self
-                .index
-                .resolve_type_name(self.file, &name, qualified.as_deref())
-                .project_id()
-                .ok_or_else(|| DescError::Unresolved(name.clone()))?;
-            jals_hir::Ty::Class(jals_hir::ClassTy::Project {
-                id,
-                name,
-                args: Vec::new(),
-            })
-        };
-        for _ in 0..dimensions {
-            ty = jals_hir::Ty::Array(alloc::boxed::Box::new(ty));
-        }
-        Ok(ty)
-    }
-
     /// The nearest type every entry in `types` is assignable to.
     ///
     /// What a multi-catch's binding has. Walked over the *class* chain only, because a common
@@ -3904,37 +3868,6 @@ impl Context<'_> {
             candidate = next;
         }
         throwable()
-    }
-
-    /// The type a *name* names, when the grammar parsed it as an expression.
-    ///
-    /// `String.class`'s base is a name reference, not a type node, because nothing tells the parser
-    /// which of the two it is until the `.class` arrives. So the dotted text is resolved against the
-    /// index directly.
-    fn ty_of_name(&self, node: &SyntaxNode) -> Result<jals_hir::Ty> {
-        let text: String = node
-            .children_with_tokens()
-            .filter_map(jals_syntax::SyntaxElement::into_token)
-            .filter(|token| {
-                matches!(
-                    token.kind(),
-                    jals_syntax::SyntaxKind::IDENT | jals_syntax::SyntaxKind::DOT
-                )
-            })
-            .map(|token| jals_syntax::decoded_ident(&token).into_owned())
-            .collect();
-        let simple = text.rsplit('.').next().unwrap_or(&text).to_owned();
-        let qualified = text.contains('.').then(|| text.clone());
-        let id = self
-            .index
-            .resolve_type_name(self.file, &simple, qualified.as_deref())
-            .project_id()
-            .ok_or_else(|| DescError::Unresolved(simple.clone()))?;
-        Ok(jals_hir::Ty::Class(jals_hir::ClassTy::Project {
-            id,
-            name: simple,
-            args: Vec::new(),
-        }))
     }
 
     /// The source facts of the file being lowered.

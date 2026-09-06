@@ -2259,6 +2259,33 @@ public class Named {
     );
 }
 
+/// A `.class` whose base is written with dots, which is the shape a JVM never got to see.
+///
+/// `java.lang.String.class` did not compile. The base parses as a `FIELD_ACCESS` whose receiver is
+/// a node, and the name walk read only the access's own direct tokens — so it resolved `.String`,
+/// which is nothing. Both this backend and the facts layer held their own copy of that walk, and
+/// the copies are why the fix had to land twice to be a fix at all; there is one now, and this
+/// asserts the *lowering* reaches it rather than its own.
+///
+/// Host-free on purpose. The sibling above says what the bytes mean and stands down without a
+/// `java`, which is every run in CI's wasm cell — so the construct that did not lower had nothing
+/// watching it there.
+#[test]
+fn a_class_literal_written_with_a_dotted_name_lowers() {
+    let source = r#"
+public class Dotted {
+    static class Inner {}
+    public static void main(String[] args) {
+        Object a = java.lang.String.class;
+        Object b = Dotted.Inner.class;
+        Object c = String.class;
+        System.out.println(a + " " + b + " " + c);
+    }
+}
+"#;
+    assert!(compile(source).is_ok(), "{:?}", compile(source).err());
+}
+
 /// An `assert` inside an interface's `default` method.
 ///
 /// JVMS §4.5 requires every interface field to be `public static final`, with no exception for a

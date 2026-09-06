@@ -532,8 +532,10 @@ impl<'a> Facts<'a> {
     /// The primitive a `TYPE` node's keyword names.
     ///
     /// The JVM backend carried a verbatim second copy of this, down to the keyword list, because the
-    /// one here was private and the erasure path needed it.
-    pub(crate) fn primitive_of(node: &ast::Type) -> Option<jals_hir::Primitive> {
+    /// one here was private and the erasure path needed it. It is private again: the backend's copy
+    /// of [`ty_of_type`](Self::ty_of_type) — the *reader* of this, and the reason a second keyword
+    /// list existed at all — is gone too, so both callers are in this module again.
+    fn primitive_of(node: &ast::Type) -> Option<jals_hir::Primitive> {
         use jals_hir::Primitive;
         use jals_syntax::SyntaxKind::{
             BOOLEAN_KW, BYTE_KW, CHAR_KW, DOUBLE_KW, FLOAT_KW, INT_KW, LONG_KW, SHORT_KW,

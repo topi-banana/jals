@@ -64,7 +64,7 @@ impl Facts<'_> {
     /// `instanceof`'s target has nowhere to be read from and is resolved here instead. A name the
     /// index does not hold is reported rather than guessed at, because an invented package produces
     /// a class that loads and then throws `NoClassDefFoundError`.
-    fn ty_of_type(self, node: &ast::Type) -> Result<Ty> {
+    pub(crate) fn ty_of_type(self, node: &ast::Type) -> Result<Ty> {
         let dimensions = node
             .syntax()
             .children_with_tokens()
