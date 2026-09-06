@@ -98,12 +98,32 @@ impl Facts<'_> {
         Ok(ty)
     }
 
-    /// The type a *name* names, when the grammar parsed it as an expression.
+    /// The dotted name a chain of plain names spells, or `None` for anything that is not one.
     ///
-    /// `String.class`'s base is a name reference, not a type node, because nothing tells the parser
-    /// which of the two it is until the `.class` arrives. So the dotted text is resolved against
-    /// the index directly.
-    pub(crate) fn ty_of_name(self, node: &SyntaxNode) -> Result<Ty> {
+    /// `Outer.Inner` and `java.lang.String` parse as a `FIELD_ACCESS` whose receiver is a *node*,
+    /// so a walk over the access's own direct tokens sees `.Inner` and has already lost the head.
+    /// Every such spelling therefore resolved as nothing, which made `java.lang.String.class` — and
+    /// `Outer.Inner::go`, which fell through to being read as a *value* — a compile error in
+    /// ordinary Java, on both backends, because each held its own copy of the same walk.
+    ///
+    /// The chain is followed structurally instead, and a link that is not a plain name ends it:
+    /// `foo().bar` is a value access and must never be offered to a type lookup. What the chain
+    /// *denotes* is still the index's answer rather than this one's — `System.err` is a name chain
+    /// whose head is a type and whose whole is not, and it stays a value because no item is
+    /// registered under it.
+    fn dotted_name(node: &SyntaxNode) -> Option<alloc::string::String> {
+        if let Some(access) = ast::FieldAccess::cast(node.clone()) {
+            let receiver = Self::dotted_name(access.receiver()?.syntax())?;
+            let name = node
+                .children_with_tokens()
+                .filter_map(jals_syntax::SyntaxElement::into_token)
+                .filter(|token| token.kind() == SyntaxKind::IDENT)
+                .last()?;
+            return Some(alloc::format!(
+                "{receiver}.{}",
+                jals_syntax::decoded_ident(&name)
+            ));
+        }
         let mut text = alloc::string::String::new();
         for token in node
             .children_with_tokens()
@@ -112,6 +132,18 @@ impl Facts<'_> {
         {
             text.push_str(&jals_syntax::decoded_ident(&token));
         }
+        (!text.is_empty()).then_some(text)
+    }
+
+    /// The type a *name* names, when the grammar parsed it as an expression.
+    ///
+    /// `String.class`'s base is a name reference, not a type node, because nothing tells the parser
+    /// which of the two it is until the `.class` arrives. So the dotted text is resolved against
+    /// the index directly.
+    pub(crate) fn ty_of_name(self, node: &SyntaxNode) -> Result<Ty> {
+        let text = Self::dotted_name(node).ok_or(FactError::Unsupported(
+            "a qualifier that is not a plain name",
+        ))?;
         let simple = alloc::borrow::ToOwned::to_owned(text.rsplit('.').next().unwrap_or(&text));
         let qualified = text.contains('.').then(|| text.clone());
         let id = self
@@ -333,6 +365,113 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    /// The type each class literal's base names, in source order.
+    fn literals(source: &str) -> Vec<String> {
+        let root = block_on_inline(jals_syntax::Parse::parse(source)).syntax();
+        let analysis = block_on_inline(FileAnalysis::of(&root));
+        let index = block_on_inline(
+            ProjectIndex::builder(&[(FileId(0), root.clone())])
+                .with_stdlib()
+                .build(),
+        );
+        let semantics = analysis.in_project(&index, FileId(0));
+        let facts = Facts::of(block_on_inline(semantics.typed()));
+        root.descendants()
+            .filter(|node| node.kind() == SyntaxKind::CLASS_LITERAL)
+            .map(|node| {
+                let written = node.text().to_string().trim().to_owned();
+                let Some(base) = node.children().next() else {
+                    return format!("{written} => <no base>");
+                };
+                match facts.ty_of_name(&base) {
+                    Ok(ty) => format!(
+                        "{written} => {}",
+                        ty.project_id().map_or_else(
+                            || "<not a project type>".to_owned(),
+                            |id| index.item(id).fqn.to_string()
+                        )
+                    ),
+                    Err(err) => format!("{written} => Err({err:?})"),
+                }
+            })
+            .collect()
+    }
+
+    /// A class literal whose base is written with dots resolves to the type those dots name.
+    ///
+    /// `java.lang.String.class` is as ordinary as Java gets, and it did not compile: the base is a
+    /// `FIELD_ACCESS`, the walk read only the access's own direct tokens, and `.String` resolved as
+    /// nothing. The failure was invisible because the corpus harnesses count a file that does not
+    /// lower without saying which construct stopped it.
+    #[test]
+    fn a_class_literal_written_with_dots_names_the_type_the_dots_spell() {
+        assert_eq!(
+            literals(
+                "class Outer {
+                     static class Inner {}
+                     void use() {
+                         Class<?> a = java.lang.String.class;
+                         Class<?> b = String.class;
+                         Class<?> c = Outer.Inner.class;
+                         Class<?> d = Inner.class;
+                     }
+                 }",
+            ),
+            [
+                "java.lang.String.class => java.lang.String",
+                "String.class => java.lang.String",
+                "Outer.Inner.class => Outer.Inner",
+                "Inner.class => Outer.Inner",
+            ]
+        );
+    }
+
+    /// A nested type names the member it qualifies, whichever way the nesting is spelled.
+    ///
+    /// `Outer.Inner::go` used to lose its head to the direct-token walk, find no type, and fall
+    /// through to the branch that reads the qualifier as a *value* — reporting a reference to a
+    /// `static` method as one on a value of an unindexed type.
+    #[test]
+    fn a_nested_type_qualifies_a_reference_however_the_nesting_is_written() {
+        assert_eq!(
+            refs(
+                "interface Run { void run(); }
+                 class Outer {
+                     static class Inner { static void go() {} }
+                     void use() {
+                         Run a = Inner::go;
+                         Run b = Outer.Inner::go;
+                     }
+                 }",
+            ),
+            [
+                "Inner::go => Static Outer.Inner.go/0",
+                "Outer.Inner::go => Static Outer.Inner.go/0",
+            ]
+        );
+    }
+
+    /// A dotted chain whose head is a type and whose whole is not stays a **value**.
+    ///
+    /// `System.err::println` is the shape that following the chain could plausibly have broken:
+    /// `System` resolves, so a lookup that stopped at the head would call `println` on the class.
+    /// It is the index that decides — no item is registered under `java.lang.System.err` — which is
+    /// what keeps JLS §6.5.2's ambiguity resolved by what exists rather than by what parses.
+    #[test]
+    fn a_dotted_chain_whose_head_is_a_type_is_still_a_value_when_the_whole_is_not() {
+        assert_eq!(
+            refs(
+                "interface Give { int give(); }
+                 class P {
+                     P held;
+                     int size() { return 0; }
+                     void use(P p) { Give g = p.held::size; }
+                 }",
+            ),
+            ["p.held::size => Bound P.size/0"]
+        );
     }
 
     /// The same written reference names two different methods, and which one is the *interface's*
