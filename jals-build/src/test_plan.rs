@@ -63,6 +63,21 @@ impl TestCase {
         Some(case)
     }
 
+    /// One test a frontend reported, rather than one a harness printed.
+    ///
+    /// The wasm runner's counterpart to [`parse`](Self::parse): there is no `--list` output to
+    /// read, because a module has no stream to print one on — the tests come from the same
+    /// catalog that generated the exports. Crate-internal for the same reason `parse` is: a host
+    /// receives `TestCase`s from a launcher's `list`, never builds one.
+    #[cfg(feature = "wasm-run")]
+    pub(crate) const fn from_parts(id: String, ignore: bool, should_fail: bool) -> Self {
+        Self {
+            id,
+            ignore,
+            should_fail,
+        }
+    }
+
     /// The full id.
     pub fn id(&self) -> &str {
         &self.id

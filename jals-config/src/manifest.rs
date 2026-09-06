@@ -2578,6 +2578,22 @@ impl Manifest {
             }
         }
 
+        // `[toolchain] runtime = "wasm"` runs a WebAssembly module, and only `[build] backend =
+        // { type = "jals-wasm" }` produces one. Every other `runtime` value selects *which* `java`
+        // and pairs with any backend; this one selects something a class-file compile never emits,
+        // so the pair is checked here rather than at each command.
+        //
+        // Here and not in `jals test`, because the contradiction is the manifest's and not one
+        // command's: `jals run` would reach it too, and a project that only ever builds would
+        // carry a runtime selection that can never be honoured with nothing saying so.
+        if self.toolchain.runtime.is_wasm()
+            && !matches!(self.build.backend, BackendKind::JalsWasm {})
+        {
+            return Err(ValidationError::WasmRuntimeWithoutWasmBackend {
+                backend: self.build.backend.tag_name(),
+            });
+        }
+
         Ok(())
     }
 
@@ -3027,6 +3043,14 @@ pub enum ValidationError {
         /// Which field was empty (`"name"` or `"main-class"`).
         field: &'static str,
     },
+    /// `[toolchain] runtime = "wasm"` without `[build] backend = { type = "jals-wasm" }`.
+    ///
+    /// The one pairing constraint between the two tables, and it exists because the wasm runtime
+    /// runs a *module*: no other backend emits one, so the selection could never be honoured.
+    WasmRuntimeWithoutWasmBackend {
+        /// The backend actually selected, by its serialized `type` tag.
+        backend: &'static str,
+    },
     /// A `[dependencies]` or `[dev-dependencies]` entry could not be classified — an empty `jar`, an
     /// unsupported URL scheme, or conflicting git refs. Wraps the classification [`DependencyError`]
     /// so the two layers share a single message and the variant set never drifts apart.
@@ -3199,6 +3223,12 @@ impl fmt::Display for ValidationError {
             Self::EmptyBinField { field } => {
                 write!(f, "a `[[bin]]` has an empty `{field}`")
             }
+            Self::WasmRuntimeWithoutWasmBackend { backend } => write!(
+                f,
+                "`[toolchain] runtime` is `wasm`, which runs a WebAssembly module, and `[build] \
+                 backend` is `{backend}`, which compiles to class files. Select the backend that \
+                 emits a module: `backend = {{ type = \"jals-wasm\" }}`"
+            ),
             Self::Dependency(err) => write!(f, "{err}"),
             Self::DuplicateDependency { name } => write!(
                 f,
@@ -4250,6 +4280,40 @@ mod tests {
                 field: "main-class"
             })
         );
+    }
+
+    /// `runtime = "wasm"` runs a module, and only the `jals-wasm` backend emits one. The pair is
+    /// checked in the manifest rather than in `jals test`, so `jals run` and a build-only project
+    /// reach it too — a selection that can never be honoured is a manifest error wherever it is
+    /// read from.
+    #[test]
+    fn validate_rejects_the_wasm_runtime_without_the_wasm_backend() {
+        for backend in [BackendKind::Javac {}, BackendKind::Jals {}] {
+            let mut m = Manifest::default();
+            m.toolchain.runtime = crate::Runtime::Wasm;
+            m.build.backend = backend;
+            assert_eq!(
+                m.validate(),
+                Err(ValidationError::WasmRuntimeWithoutWasmBackend {
+                    backend: backend.tag_name(),
+                })
+            );
+        }
+    }
+
+    /// The pairing the previous test refuses the complement of. Every other runtime selector still
+    /// pairs with the wasm backend — that combination is `jals test`'s to refuse, since it is only
+    /// a contradiction for a command that runs something.
+    #[test]
+    fn validate_accepts_the_wasm_runtime_beside_the_wasm_backend() {
+        let mut m = Manifest::default();
+        m.toolchain.runtime = crate::Runtime::Wasm;
+        m.build.backend = BackendKind::JalsWasm {};
+        assert_eq!(m.validate(), Ok(()));
+
+        let mut m = Manifest::default();
+        m.build.backend = BackendKind::JalsWasm {};
+        assert_eq!(m.validate(), Ok(()));
     }
 
     /// A `jar`-form dependency with no companion `sources` jar and no bundled-jar recursion.

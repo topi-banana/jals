@@ -33,6 +33,17 @@ env:
   # here without host features.
   WASM_CORE_PACKAGES: >-
     --package jals-classpath --package jals-build --no-default-features
+  # The same core plus `wasm-run` — the configuration the *browser* ships, and the one no
+  # `-D warnings` gate used to see. `clippy (wasm-core)` above lints jals-build with `wasm-run`
+  # off, so `wasm_run.rs` is not even compiled there; the three host cells use `--all-features`,
+  # where `native` is on and every `#[cfg(feature = "native")]`-gated caller exists. An item
+  # reachable only from the `native`-gated `wasm_test.rs` is therefore dead in the browser build
+  # and nothing failed — which is exactly how one shipped and had to be found by hand. The
+  # portable audit's `cargo check ... --features wasm-run` and the playground build both compile
+  # this configuration, but only warn.
+  WASM_BROWSER_PACKAGES: >-
+    --package jals-classpath --package jals-build --no-default-features
+    --features jals-build/wasm-run
   # The `test (wasm)` cell: the crates whose *tests* need no host at all. Every other workspace
   # member tests a native adapter, and its dev-dependencies say so — they pull `jals-exec/tokio`
   # (tokio refuses to compile its `net` feature for wasm) or a `tempfile` scratch directory
@@ -138,6 +149,12 @@ jobs:
             runner: ubuntu-latest
             target: wasm32-unknown-unknown
             args: --target wasm32-unknown-unknown $WASM_CORE_PACKAGES
+          # Beside `wasm-core` rather than folded into it: the two differ by one feature, and
+          # linting only the union would stop gating the core without it.
+          - name: wasm-browser
+            runner: ubuntu-latest
+            target: wasm32-unknown-unknown
+            args: --target wasm32-unknown-unknown $WASM_BROWSER_PACKAGES
     steps:
       - parallel:
           - uses: actions/checkout@v7
@@ -311,8 +328,14 @@ jobs:
       # cargo-hawk release to install, pinned like the workflow's other tools. Hawk uses
       # `rustc_private`, so it is bound to one exact rustc: `HAWK_RUSTC` is that compiler, and
       # bumping `HAWK_VERSION` means bumping it to whatever the new release pins.
-      HAWK_VERSION: "0.1.9"
-      HAWK_RUSTC: "1.97.1"
+      #
+      # 0.1.13 is the first release on rustc 1.98, and that is why this moved off 0.1.9/1.97.1:
+      # `jals-build`'s `wasm-run` feature pins tinywasm to a revision declaring `rust-version =
+      # "1.98"`, which cargo refuses under an older compiler before hawk's instrumented build even
+      # starts. The bump found nothing — 0 findings against the same hawk.toml — so it is a
+      # toolchain move and not a re-tuning.
+      HAWK_VERSION: "0.1.13"
+      HAWK_RUSTC: "1.98.0"
     steps:
       - parallel:
           - uses: actions/checkout@v7
@@ -452,7 +475,7 @@ jobs:
             with:
               targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      # The fourteen checks below stay sequential, and deliberately so: they share one target
+      # The fifteen checks below stay sequential, and deliberately so: they share one target
       # directory, whose lock cargo holds for a whole build, and they select deliberately different
       # feature sets — so grouping them would trade a queue for a fingerprint fight and check the
       # same things more slowly.
@@ -465,6 +488,13 @@ jobs:
       - run: cargo check -p jals-frontend
       - run: cargo check -p jals-project --all-features
       - run: cargo check -p jals-build --no-default-features --features rhai --target wasm32-unknown-unknown
+      # The `wasm-run` half of the same statement, and the one the browser rests on: the engine
+      # `jals run --invoke` reaches and the one a playground tab reaches are the same code, which
+      # holds only while it is portable on its own — `no_std + alloc`, no `native`. The playground
+      # build below compiles it for wasm32 too, but with `rhai` beside it, which is a different
+      # claim; and the feature is pinned to an unpublished revision, so it is the one here most
+      # likely to stop being portable without anybody editing this repository.
+      - run: cargo check -p jals-build --no-default-features --features wasm-run --target wasm32-unknown-unknown
       - run: cargo check -p jals-classpath --no-default-features --target wasm32-unknown-unknown
       - run: cargo check -p jals-project --no-default-features --target wasm32-unknown-unknown
       - run: cargo check -p jals-frontend --target wasm32-unknown-unknown
@@ -514,6 +544,17 @@ jobs:
           - name: hello_world
             dir: examples/hello_world
             run: true
+          # The same greeting through the `jals-wasm` backend, and the one cell here that needs
+          # no JDK at all: the compiler and the engine are both in-process, so nothing this cell
+          # runs spawns `javac` or `java`. `invoke` is what makes it an assertion rather than a
+          # smoke test — a bare `jals run` against a wasm project instantiates the module and
+          # stops, which passes whether or not a single export is reachable. Naming one requires
+          # the start function to have allocated the greeting and the export to still be there
+          # under the name the README tells a reader to call.
+          - name: hello_world_wasm
+            dir: examples/hello_world_wasm
+            run: true
+            invoke: --invoke greetingLength
           - name: rhai_build_script
             dir: examples/rhai_build_script
             run: true
@@ -523,6 +564,16 @@ jobs:
           - name: unit_tests
             dir: examples/unit_tests
             run: true
+            test: true
+          # The same `#[test]` model on the other runner, and the second cell here that needs no
+          # JDK: `[toolchain] runtime = "wasm"` runs the module `[build] backend` emitted, and both
+          # the compiler and the engine are in-process. No `run:` — a wasm project declares no main
+          # class, so `jals run` with no `--invoke` would only instantiate, which `hello_world_wasm`
+          # already covers. `test: true` is the whole point: it is the only end-to-end proof in the
+          # shipped product that a test compiles to an export, that `assert` is armed for a test
+          # run and not for a build, and that `#[should_fail]` inverts a trap.
+          - name: unit_tests_wasm
+            dir: examples/unit_tests_wasm
             test: true
           # The consumer is the entry point; `library/` is built through the dependency edge and has
           # no sources of its own to format or lint.
@@ -670,10 +721,13 @@ jobs:
               exit 1
             fi
           done
+      # `invoke` is empty for every cell but the wasm one, where it names the export to call —
+      # a class-file project has no such selector and a wasm project has no main class, so the
+      # two never both apply.
       - name: Run
         if: ${{ matrix.example.run }}
         working-directory: ${{ matrix.example.dir }}
-        run: jals run ${{ matrix.example.features }}
+        run: jals run ${{ matrix.example.features }} ${{ matrix.example.invoke }}
       # `jals test` compiles a second time (the test lowering keeps the `#[test]` methods the
       # build removes) and then runs each test in its own JVM. A non-zero status here is a failing
       # test, which is exactly what the cell is for — and, for the two `minecraft_mod` cells that

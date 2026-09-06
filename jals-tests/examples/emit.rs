@@ -21,7 +21,7 @@ use std::process::ExitCode;
 
 use jals_hir::{FileAnalysis, FileId, FileSemantics, LoweredClasspath, ProjectIndex, TypedFile};
 use jals_javac::lower::Compile;
-use jals_javac::wasm::CompileWasm;
+use jals_javac::wasm::{CompileWasm, WasmOptions};
 use jals_syntax::SyntaxNode;
 use jals_tests::compile::Jdk;
 
@@ -78,7 +78,7 @@ fn main() -> ExitCode {
     let typed: TypedFile<'_> = jals_exec::block_on_inline(semantics.typed());
 
     if wasm {
-        match CompileWasm::project(&[typed], &index) {
+        match CompileWasm::project(&[typed], &index, WasmOptions::default()) {
             Ok(bytes) => {
                 if let Err(error) = std::fs::write(destination, &bytes) {
                     eprintln!("error: write {destination}: {error}");

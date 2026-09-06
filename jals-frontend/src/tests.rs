@@ -475,9 +475,14 @@ mod test_helpers {
     use super::*;
 
     pub(super) fn test_flags() -> DialectFlags {
+        flags_for(crate::harness::TestShape::Main)
+    }
+
+    /// The same flags with the harness shape stated.
+    pub(super) fn flags_for(tests: crate::harness::TestShape) -> DialectFlags {
         DialectFlags {
             attributes: true,
-            tests: true,
+            tests,
             ..DialectFlags::default()
         }
     }
@@ -486,6 +491,38 @@ mod test_helpers {
     pub(super) fn lower_tests(src: &str) -> Vec<(alloc::string::String, alloc::string::String)> {
         let files = vec![Fixture::file("src/main/java/Main.java", src.as_bytes())];
         let frontend = DialectFrontend::new(test_flags());
+        let output = block_on_inline(frontend.run(Ir::Bytes { files: &files })).unwrap();
+        assert!(
+            !output.has_errors(),
+            "unexpected error: {:?}",
+            output.diagnostics
+        );
+        output
+            .files
+            .into_iter()
+            .map(|(path, bytes)| {
+                (
+                    alloc::format!("{path}"),
+                    alloc::string::String::from_utf8(bytes).unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    /// Lower `src` for a wasm test run and return every emitted file as `(path, text)`.
+    pub(super) fn lower_exported_tests(
+        src: &str,
+    ) -> Vec<(alloc::string::String, alloc::string::String)> {
+        lower_shaped(src, crate::harness::TestShape::Exports)
+    }
+
+    /// [`lower_tests`], with the harness shape stated.
+    fn lower_shaped(
+        src: &str,
+        shape: crate::harness::TestShape,
+    ) -> Vec<(alloc::string::String, alloc::string::String)> {
+        let files = vec![Fixture::file("src/main/java/Main.java", src.as_bytes())];
+        let frontend = DialectFrontend::new(flags_for(shape));
         let output = block_on_inline(frontend.run(Ir::Bytes { files: &files })).unwrap();
         assert!(
             !output.has_errors(),
@@ -522,7 +559,7 @@ mod test_helpers {
     }
 }
 
-use test_helpers::{generated, lower_tests, test_flags};
+use test_helpers::{generated, lower_exported_tests, lower_tests, test_flags};
 
 /// The source every test-lowering case starts from: one package-private `static void` test and
 /// one the harness has to wrap.
@@ -1061,4 +1098,146 @@ fn a_test_method_containing_a_syntax_error_fails_instead_of_being_erased() {
         messages.iter().any(|m| m.contains("syntax errors")),
         "expected the mis-extended host to be refused: {messages:?}"
     );
+}
+
+/// The wasm shape: one exported wrapper per test, and no root harness at all.
+///
+/// The absences are the assertion. A module has no `main` convention, no `String` to route an id
+/// with and no stream to print a sentinel on — so a harness that needed any of them would not
+/// compile for this target, and would be reported without the file it came from.
+#[test]
+fn an_exported_test_lowering_generates_one_wrapper_per_test() {
+    let files = lower_exported_tests(TEST_SOURCE);
+    // The authored file plus one wrapper class. No root: there is nothing for it to hold.
+    assert_eq!(
+        files.len(),
+        2,
+        "emitted: {:?}",
+        files.iter().map(|(p, _)| p).collect::<Vec<_>>()
+    );
+    assert!(
+        !files
+            .iter()
+            .any(|(path, _)| path.contains("JalsTestHarness")),
+        "an export-shaped lowering emits no root harness"
+    );
+
+    let wrapper = generated(&files, "JalsTest$com$example$MathTest.java");
+    assert!(
+        wrapper.contains("package com.example;"),
+        "the wrapper shares the package, which is what reaches a package-private test: {wrapper}"
+    );
+    // One `static void` per test, named uniquely across the project, calling the test and nothing
+    // else. `#[should_fail]` is *not* inverted here — that needs `catch (Throwable)`, and a catch
+    // type has to be a class this module declares.
+    for method in ["adds", "divides", "slow"] {
+        assert!(
+            wrapper.contains(&alloc::format!(
+                "public static void JalsTest$com$example$MathTest${method}() {{ MathTest.{method}(); }}"
+            )),
+            "a wrapper for `{method}`: {wrapper}"
+        );
+    }
+    for absent in [
+        "String",
+        "System.out",
+        "Throwable",
+        "AssertionError",
+        "--list",
+        "main(",
+    ] {
+        assert!(
+            !wrapper.contains(absent),
+            "`{absent}` has no wasm representation and must not be emitted: {wrapper}"
+        );
+    }
+}
+
+/// Two tests that would share one export are refused, not emitted.
+///
+/// A wasm export name carries no owner, so a module with two functions under one name keeps the
+/// first and drops the second — silently. A lost test is a suite reporting green having run one
+/// fewer thing than it listed, so the collision is an error here instead.
+#[test]
+fn two_tests_that_would_share_an_export_are_refused() {
+    // `$` is an ordinary identifier character, which is what makes the mangling ambiguous: these
+    // two qualified names differ, and both spell `JalsTest$a$b$T$f`.
+    let files = vec![
+        Fixture::file(
+            "src/main/java/A.java",
+            b"package a; public class b$T { #[test] static void f() {} }",
+        ),
+        Fixture::file(
+            "src/main/java/B.java",
+            b"package a.b; public class T { #[test] static void f() {} }",
+        ),
+    ];
+    let frontend =
+        DialectFrontend::new(test_helpers::flags_for(crate::harness::TestShape::Exports));
+    let output = block_on_inline(frontend.run(Ir::Bytes { files: &files })).unwrap();
+    assert!(
+        output.has_errors(),
+        "the collision must be reported: {:?}",
+        output.diagnostics
+    );
+    let message = &output.diagnostics[0].message;
+    assert!(
+        message.contains("JalsTest$a$b$T$f") && message.contains("rename one of them"),
+        "the report names the export and both tests: {message}"
+    );
+}
+
+/// The `main` shape has no such constraint, because a shim's dispatch is on the id and never on
+/// the method name — so the same two classes lower without complaint there.
+#[test]
+fn the_main_shape_admits_names_the_export_shape_refuses() {
+    let files = vec![
+        Fixture::file(
+            "src/main/java/A.java",
+            b"package a; public class b$T { #[test] static void f() {} }",
+        ),
+        Fixture::file(
+            "src/main/java/B.java",
+            b"package a.b; public class T { #[test] static void f() {} }",
+        ),
+    ];
+    let frontend = DialectFrontend::new(test_helpers::flags_for(crate::harness::TestShape::Main));
+    let output = block_on_inline(frontend.run(Ir::Bytes { files: &files })).unwrap();
+    assert!(
+        !output.has_errors(),
+        "unexpected error: {:?}",
+        output.diagnostics
+    );
+}
+
+/// Discovery and the generated harness name the same exports.
+///
+/// The join that keeps `export_name`'s two consumers from drifting: a runner lists a test by the
+/// export discovery gave it and then calls that name on the module the harness generated. If the
+/// two ever disagree, the run lists a test it cannot find — and the only evidence would be a
+/// `NoSuchExport` naming a function nobody wrote.
+#[test]
+fn discovery_and_the_generated_harness_agree_on_every_export() {
+    let parse = block_on_inline(jals_syntax::Parse::parse(TEST_SOURCE));
+    let cfg = jals_syntax::cfg::CfgMap::compute(&parse, &alloc::collections::BTreeSet::new());
+    let mut catalog = crate::harness::TestCatalog::default();
+    catalog.extend_from_file(&parse, cfg.tests());
+
+    let entries = catalog.entries();
+    assert_eq!(entries.len(), 3);
+    let rendered = catalog.render(crate::harness::TestShape::Exports);
+    let wrapper = alloc::string::String::from_utf8(rendered[0].1.clone()).unwrap();
+    for entry in &entries {
+        assert!(
+            wrapper.contains(&alloc::format!("void {}()", entry.export)),
+            "`{}` is listed as `{}`, which the harness does not define: {wrapper}",
+            entry.id,
+            entry.export
+        );
+    }
+    // And the ids are the ones the JVM path already spells, so a reader's filter means one thing
+    // whichever runner executes it.
+    assert_eq!(entries[0].id, "com.example.MathTest#adds");
+    assert!(entries[1].should_fail);
+    assert!(entries[2].ignore);
 }

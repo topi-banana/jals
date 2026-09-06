@@ -4,6 +4,10 @@ A project whose tests are `#[test]` methods rather than a separate framework. `j
 them, compiles them, and runs **each one in its own JVM**, in parallel, with a progress bar and
 `cargo nextest`-shaped output.
 
+A JVM is not the only runner: [`unit_tests_wasm`](../unit_tests_wasm) is the same model with
+`[toolchain] runtime = "wasm"`, which runs each test as a WebAssembly export in the `jals` process
+and needs no JDK at all.
+
 ## Layout
 
 ```

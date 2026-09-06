@@ -11,6 +11,12 @@ edition.workspace = true
 default = ["native"]
 native = ["jals-storage/std", "jals-exec/tokio"]
 rhai = ["dep:rhai", "dep:serde", "dep:serde_json"]
+# Runs what the `jals-wasm` backend emits. Off by default and independent of `native` for the same
+# reason `rhai` is a feature: it is the one dependency in this crate pinned to an unpublished
+# revision, and every consumer of the portable core should not inherit that. Portable itself — the
+# engine is an interpreter over `core + alloc`, so `jals-cli` and the browser enable the same
+# feature and reach the same code.
+wasm-run = ["dep:tinywasm"]
 
 [dependencies]
 # The in-process compile backend. Portable in every configuration, like the `Backend` contract it
@@ -32,6 +38,7 @@ serde = { workspace = true, optional = true }
 serde_json = { version = "1.0", optional = true, default-features = false, features = [
   "alloc",
 ] }
+tinywasm = { workspace = true, optional = true }
 toml.workspace = true
 
 [dev-dependencies]

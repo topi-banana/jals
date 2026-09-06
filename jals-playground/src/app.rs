@@ -41,7 +41,7 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::spawn_local;
 use yew::prelude::*;
 
-use crate::compile::Compile;
+use crate::compile::{Compile, Execute};
 use crate::components::{EditorPane, FileTree, Header, PaneTab, ResultPane, TreeEntry};
 use crate::download::Download;
 use crate::fetcher::BrowserFetcher;
@@ -348,11 +348,19 @@ pub enum Msg {
         name: String,
         bytes: Vec<u8>,
         summary: String,
+        runnable: bool,
     },
     /// A compile produced no artifact, with the reason to show in the Build output tab.
     CompileFailed { generation: u64, message: String },
     /// The user pressed *Download* in the Build output tab.
     Download,
+    /// The run box's text changed: an exported method name and its arguments.
+    RunCommandChanged(String),
+    /// The user pressed *Run* in the Build output tab.
+    ///
+    /// No generation and no `spawn_local`, unlike a compile: running a module is synchronous and
+    /// bounded by the module itself, so there is nothing in flight for a newer press to invalidate.
+    RunModule,
     /// The right pane's tab selection changed.
     SelectTab(PaneTab),
 }
@@ -392,6 +400,15 @@ pub struct App {
     /// rather than in the pane's props so a render never clones the bytes and the download stays a
     /// direct response to the user's click.
     compile_artifact: Option<(String, Vec<u8>)>,
+    /// Whether that artifact is one this host can execute — a WebAssembly module, never a jar.
+    /// What decides it is the compile that produced it, not a test on the file name.
+    compile_runnable: bool,
+    /// The run box's text: an exported method name and its arguments, or empty to instantiate the
+    /// module and stop, which still runs its static initialisers.
+    run_command: String,
+    /// What the last run said, or `None` before one. Cleared by the next compile, since a report
+    /// about the previous module would outlive the module it describes.
+    run_output: Option<String>,
     /// Which tab the right pane shows.
     result_tab: PaneTab,
     /// The latest build-script/classpath status line shown in the [`Header`], if any.
@@ -490,6 +507,9 @@ impl App {
             syntax_dump: None,
             compile_output: None,
             compile_artifact: None,
+            compile_runnable: false,
+            run_command: String::new(),
+            run_output: None,
             result_tab: PaneTab::Syntax,
             deps_status: None,
             format_notice: None,
@@ -1586,8 +1606,12 @@ impl Component for App {
                 };
                 self.result_tab = PaneTab::Output;
                 // Dropped before the compile rather than after it fails, so a stale jar is never
-                // downloadable while a newer compile is in flight.
+                // downloadable while a newer compile is in flight. The Run box and the last run's
+                // report go with it: both describe these bytes, and leaving them up renders a
+                // button whose handler finds no artifact and does nothing at all.
                 self.compile_artifact = None;
+                self.compile_runnable = false;
+                self.run_output = None;
                 let manifest = match ConfigParseError::parse_manifest(&self.manifest_src) {
                     Ok(manifest) => manifest,
                     Err(error) => {
@@ -1620,6 +1644,7 @@ impl Component for App {
                             name: artifact.name,
                             bytes: artifact.bytes,
                             summary: artifact.summary,
+                            runnable: artifact.runnable,
                         },
                         Err(error) => Msg::CompileFailed {
                             generation: token.captured,
@@ -1637,12 +1662,17 @@ impl Component for App {
                 name,
                 bytes,
                 summary,
+                runnable,
             } => {
                 if generation != self.compile_generation.get() {
                     return false;
                 }
                 self.compile_output = Some(summary);
                 self.compile_artifact = Some((name, bytes));
+                self.compile_runnable = runnable;
+                // A report about the module that was there before this compile describes bytes
+                // nothing holds any more.
+                self.run_output = None;
                 self.result_tab = PaneTab::Output;
                 true
             }
@@ -1655,6 +1685,8 @@ impl Component for App {
                 }
                 self.compile_output = Some(message);
                 self.compile_artifact = None;
+                self.compile_runnable = false;
+                self.run_output = None;
                 self.result_tab = PaneTab::Output;
                 true
             }
@@ -1663,6 +1695,28 @@ impl Component for App {
                     Download::save(name, bytes);
                 }
                 false
+            }
+            Msg::RunCommandChanged(command) => {
+                self.run_command = command;
+                // No re-render: the DOM already holds what was typed, so redrawing would only
+                // fight the cursor. The value still travels to the pane as a prop, because the
+                // node does not always survive — switching to the Syntax tab, or a compile whose
+                // artifact is not runnable, unmounts it — and a box that came back empty while
+                // this field kept the old text ran a command nobody could see.
+                false
+            }
+            Msg::RunModule => {
+                let Some((_, bytes)) = &self.compile_artifact else {
+                    return false;
+                };
+                // Failure is a line in the same place success is: what the engine refused — an
+                // export that is not there, an argument that is not an `i32` — is the answer to
+                // what was asked, not an error about the playground.
+                self.run_output = Some(match Execute::run(bytes, &self.run_command) {
+                    Ok(report) => report,
+                    Err(error) => format!("error: {error}"),
+                });
+                true
             }
             Msg::SelectTab(tab) => {
                 self.result_tab = tab;
@@ -1731,6 +1785,11 @@ impl Component for App {
                             output={self.compile_output.clone()}
                             artifact={self.compile_artifact.as_ref().map(|(name, _)| name.clone())}
                             on_download={link.callback(|_| Msg::Download)}
+                            runnable={self.compile_runnable}
+                            run_command={self.run_command.clone()}
+                            on_run_command={link.callback(Msg::RunCommandChanged)}
+                            on_run={link.callback(|_| Msg::RunModule)}
+                            run_output={self.run_output.clone()}
                         />
                     </main>
                 </div>

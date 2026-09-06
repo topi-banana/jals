@@ -1,5 +1,6 @@
 //! The right pane: the active file's lossless CST dump, or the last compile's report.
 
+use web_sys::HtmlInputElement;
 use yew::prelude::*;
 
 use super::PANE_LABEL;
@@ -39,6 +40,25 @@ pub struct ResultPaneProps {
     pub artifact: Option<String>,
     /// Invoked when the *Download* button is pressed.
     pub on_download: Callback<()>,
+    /// Whether the artifact is one this host can execute, which is what puts the run controls
+    /// under the report. A WebAssembly module is; a jar is not, because running one needs a JVM.
+    pub runnable: bool,
+    /// What the run box should hold. Rendered as the input's `value` so the node comes back with
+    /// the text after an unmount — a tab switch, or a compile whose artifact is not runnable —
+    /// rather than empty while [`App`] still holds a command the user can no longer see.
+    ///
+    /// [`App`]: crate::app::App
+    pub run_command: String,
+    /// Emitted with the run box's text on every keystroke. Typing does not round-trip through a
+    /// re-render: the DOM holds what was typed, and this only keeps [`App`]'s copy current for
+    /// the press that reads it.
+    ///
+    /// [`App`]: crate::app::App
+    pub on_run_command: Callback<String>,
+    /// Invoked when the *Run* button is pressed.
+    pub on_run: Callback<()>,
+    /// What the last run said, or `None` before one.
+    pub run_output: Option<String>,
 }
 
 /// The right pane: a tab strip over either the active file's lossless CST dump or the last
@@ -138,6 +158,7 @@ impl ResultPane {
         // not on the compiler's classpath, and why a path nobody authored appears in the errors.
         html! {
             { body }
+            { Self::run_controls(props) }
             { download }
             <div class="shrink-0 border-t border-hairline bg-canvas px-4 py-2 font-mono text-[11px] leading-4 text-mute">
                 { "The in-process compiler reads library signatures from the embedded JDK stubs; \
@@ -145,5 +166,49 @@ impl ResultPane {
                    build-script output." }
             </div>
         }
+    }
+
+    /// The run box, for the one artifact this host can execute.
+    ///
+    /// A method name and its arguments rather than a *Run* with no target: wasm has no entry-point
+    /// convention, and Java's `main` cannot be lowered here — its `String[]` needs a `java.base`
+    /// the module has no room for. An empty box still runs something: instantiating executes the
+    /// module's start function, which is where the project's `static` initialisers went.
+    fn run_controls(props: &ResultPaneProps) -> Option<Html> {
+        if !props.runnable {
+            return None;
+        }
+        let on_input = {
+            let command = props.on_run_command.clone();
+            Callback::from(move |event: InputEvent| {
+                let element: HtmlInputElement = event.target_unchecked_into();
+                command.emit(element.value());
+            })
+        };
+        let on_click = props.on_run.reform(|_| ());
+        Some(html! {
+            <div class="shrink-0 border-t border-hairline bg-canvas px-4 py-3">
+                <div class="flex items-center gap-2">
+                    <input
+                        class="h-9 flex-1 rounded-md border border-hairline bg-canvas px-2 font-mono text-sm text-ink outline-none"
+                        type="text"
+                        value={props.run_command.clone()}
+                        placeholder="exported static method and arguments, e.g. twice 21 (empty: instantiate only)"
+                        oninput={on_input}
+                    />
+                    <button
+                        onclick={on_click}
+                        class="inline-flex h-9 cursor-pointer items-center rounded-md bg-ink px-3 text-sm font-medium text-canvas transition-colors hover:opacity-90"
+                    >
+                        { "Run" }
+                    </button>
+                </div>
+                if let Some(output) = &props.run_output {
+                    <pre class="mt-2 whitespace-pre-wrap break-words font-mono text-[13px] leading-5 text-ink">
+                        { output }
+                    </pre>
+                }
+            </div>
+        })
     }
 }

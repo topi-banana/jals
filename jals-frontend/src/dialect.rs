@@ -33,7 +33,7 @@ use jals_syntax::{Parse, SyntaxElement, SyntaxKind};
 
 use crate::attr::AttrPlan;
 use crate::frontend::{Frontend, FrontendCaps, FrontendFuture};
-use crate::harness::TestCatalog;
+use crate::harness::{TestCatalog, TestShape};
 use crate::ir::{FrontendDiagnostic, FrontendOutput, Ir, Severity};
 use crate::level::IrLevel;
 
@@ -53,14 +53,14 @@ pub(crate) struct DialectFlags {
     /// The resolved build features `#[cfg(feature = "...")]` tests. Populated by the caller only
     /// when `attributes` is on; a name absent here is simply false (Cargo/Rust cfg semantics).
     pub(crate) build_features: BTreeSet<String>,
-    /// Whether this lowering is for a test run: keep every `#[test]` method and generate the
-    /// harness that calls them. Off, a `#[test]` method is blanked exactly as a `cfg`-disabled
-    /// host is, so an ordinary build's classes hold no test.
+    /// Whether this lowering is for a test run, and how the harness reaches the tests. `None`
+    /// blanks every `#[test]` method exactly as a `cfg`-disabled host is, so an ordinary build's
+    /// classes hold no test.
     ///
     /// Only meaningful with `attributes` on — a `#[test]` is an attribute — which is why
     /// [`any`](DialectFlags::any) does not consult it: turning it on alone would select this
     /// frontend over the identity one and change every cache key for nothing.
-    pub(crate) tests: bool,
+    pub(crate) tests: TestShape,
 }
 
 impl DialectFlags {
@@ -97,7 +97,7 @@ impl Frontend for DialectFrontend {
             // `cfg`, however, removes whole declarations (types included) from the output.
             // A test lowering *adds* types (the generated harness and its shims) on top of the
             // declarations a false `cfg` removes.
-            type_stable: !(self.flags.attributes || self.flags.tests),
+            type_stable: !(self.flags.attributes || self.flags.tests.keeps_tests()),
             // Bumped whenever this frontend's *output* changes for unchanged input — the
             // generated test harness included, since a cached lowering is restored without the
             // frontend running at all and would otherwise keep an older harness alive.
@@ -108,7 +108,14 @@ impl Frontend for DialectFrontend {
             // file's path. Without this, a project that ran `jals test` before the fix keeps
             // compiling the qualified call the fix removed — which is the whole failure, since a
             // classpath carrying a class named `com` resolves `com.example.Foo` as a field of it.
-            version: 3,
+            //
+            // 4: a test lowering now has two shapes — a `main` a launcher starts, and one export
+            // per test a runner calls — and which one was emitted is a `TestShape` folded into
+            // `config_digest`. The version moves with it so that the discriminant ordering is not
+            // what keeps a cached `main` harness out of an export run: served to one, it is a
+            // class full of `String.equals` and `System.out.println` compiled for a target with
+            // no `java.base`, reported without the file it came from.
+            version: 4,
         }
     }
 
@@ -120,7 +127,7 @@ impl Frontend for DialectFrontend {
         let mut bytes = alloc::vec![
             u8::from(self.flags.grouped_imports),
             u8::from(self.flags.attributes),
-            u8::from(self.flags.tests),
+            self.flags.tests as u8,
         ];
         for feature in &self.flags.build_features {
             bytes.extend_from_slice(feature.as_bytes());
@@ -171,7 +178,19 @@ impl Frontend for DialectFrontend {
             // The harness is a function of the whole catalog, so it is emitted once, last. A
             // lowering that produced an error publishes nothing anyway, so generating it here
             // costs nothing on the failing path either.
-            files.extend(catalog.render());
+            // Refused rather than emitted: two tests sharing an export name become one function
+            // in the module and one silently missing test in a suite that still lists both.
+            diagnostics.extend(
+                catalog
+                    .conflicting_exports(self.flags.tests)
+                    .into_iter()
+                    .map(|message| FrontendDiagnostic {
+                        severity: Severity::Error,
+                        file: None,
+                        message,
+                    }),
+            );
+            files.extend(catalog.render(self.flags.tests));
             Ok(FrontendOutput {
                 files,
                 diagnostics,
@@ -221,7 +240,12 @@ impl DialectFrontend {
             return Desugared::Unchanged;
         };
         let attr_plan = if flags.attributes {
-            AttrPlan::compute(&parse, text, &flags.build_features, flags.tests)
+            AttrPlan::compute(
+                &parse,
+                text,
+                &flags.build_features,
+                flags.tests.keeps_tests(),
+            )
         } else {
             AttrPlan::default()
         };

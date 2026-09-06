@@ -113,6 +113,18 @@ serde = { version = "1.0.219", default-features = false, features = [
 serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
 similar = { version = "3" }
 text-size = { version = "1.1.1" }
+# The engine that runs what the `jals-wasm` backend emits, behind `jals-build`'s `wasm-run`.
+# Pinned to a `next` revision rather than a published release because the GC proposal is
+# implemented there and in no version on crates.io: the backend's output opens with a `rec` group
+# of `struct` types, and 0.10.0 refuses it at the first type section ("rec group usage requires
+# `gc` proposal to be enabled"). Move to the crates.io release once 0.11 ships. A `rev` rather than
+# `branch = "next"`, so `Cargo.lock` and what resolution actually picks cannot drift apart.
+# `default-features = false` keeps it `no_std + alloc`, which is what lets the portable core and the
+# browser both hold it; `parallel-parser` needs `std` and threads and is deliberately off.
+tinywasm = { git = "https://github.com/explodingcamera/tinywasm", rev = "c67ce64bfc88eada4d2b611e30b2dd307a7f7526", default-features = false, features = [
+  "parser",
+  "validate",
+] }
 tokio = { version = "1", features = ["net", "rt"] }
 # Non-unix only: adapts tokio's stdin/stdout into futures' `Async{Read,Write}` for the LSP loop
 # (async-lsp's `stdio` pipe helpers are unix-only). See jals-lsp/src/server.rs.

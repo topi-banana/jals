@@ -72,13 +72,25 @@ pub mod task;
 mod test_plan;
 #[cfg(feature = "native")]
 mod toolchain;
+#[cfg(feature = "wasm-run")]
+mod wasm_run;
+// Both features, and the `native` half is not incidental: this runner shares the JVM runner's
+// reporting vocabulary, and `TestOutcome` names host paths for the captures a JVM run produces.
+// The one configuration with `wasm-run` and no `native` is the browser, which has no test surface
+// at all — publishing the runner there would be an item with no caller in exactly the
+// configuration the wasm clippy cells run at `-D warnings`. The other absent pairing is deliberate
+// and not a hole: `native` without `wasm-run` is a `jals-build` that can compile and run on a JVM
+// and has no wasm test surface, which is why `jals-cli` pins both features rather than inheriting
+// one.
+#[cfg(all(feature = "native", feature = "wasm-run"))]
+mod wasm_test;
 
 #[cfg(feature = "native")]
 mod native;
 
 pub use backend::{
-    Backend, BackendAbsence, BackendError, BackendFuture, BackendOptions, BackendOutcome,
-    BackendRequest, BackendSelection, BackendSource,
+    Assertions, Backend, BackendAbsence, BackendError, BackendFuture, BackendOptions,
+    BackendOutcome, BackendRequest, BackendSelection, BackendSource,
 };
 #[cfg(feature = "native")]
 pub use builtin::BuiltinToolchain;
@@ -103,6 +115,11 @@ pub use test_plan::{Partition, PartitionError, RunIgnored, Selection, TestCase, 
 pub(crate) use toolchain::Candidates;
 #[cfg(feature = "native")]
 pub use toolchain::{BuildOutcome, JdkInstall, Runtime, ToolchainError, ToolchainFuture};
+
+#[cfg(feature = "wasm-run")]
+pub use wasm_run::{WasmRunError, WasmRunOutcome, WasmRunRequest, WasmRunner, WasmValue};
+#[cfg(all(feature = "native", feature = "wasm-run"))]
+pub use wasm_test::{WasmTestEntry, WasmTestLauncher};
 
 #[cfg(feature = "native")]
 pub use native::SubprocessToolchain;

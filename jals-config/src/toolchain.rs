@@ -84,11 +84,18 @@ impl Compiler {
     }
 }
 
-/// Which `java` runs the project (`[toolchain] runtime`).
+/// What runs the project (`[toolchain] runtime`).
 ///
-/// The exact mirror of [`Compiler`] for the run half, with the same TOML forms: the keywords
+/// Almost the mirror of [`Compiler`] for the run half, with the same TOML forms: the keywords
 /// `"system"` / `"builtin"`, or a tagged table `{ path = "…" }` / `{ distribution = { … } }`.
 /// Defaults to the system `java`.
+///
+/// The one selector with no counterpart on the compile side is [`Wasm`](Self::Wasm), and the
+/// asymmetry is the point: every other value here answers *which `java`*, while that one answers
+/// *not a `java` at all*. It is therefore the only value constrained by `[build] backend` —
+/// [`Manifest::validate`](crate::Manifest::validate) rejects it without the backend that emits a
+/// module — because a runtime that runs modules has nothing to run when the compile produced
+/// class files.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Runtime {
@@ -106,18 +113,35 @@ pub enum Runtime {
     /// A JDK to discover among the installed ones (`{ distribution = { name = "temurin",
     /// version = 21 } }`), see [`Distribution`].
     Distribution(Distribution),
+    /// The WebAssembly engine compiled into the host (`"wasm"`), running the module
+    /// `[build] backend = { type = "jals-wasm" }` emitted.
+    ///
+    /// Not a JDK, and so not a [`ToolSpec`]: there is no program to find, because the engine is
+    /// already linked in. That is also why it is the one runtime a manifest cannot pair freely —
+    /// it runs a module, and only the `jals-wasm` backend produces one.
+    Wasm,
 }
 
 impl Runtime {
-    /// The `java` selector as the borrowed [`ToolSpec`] view, or `None` for the in-process
-    /// backend (which resolves no program).
+    /// The `java` selector as the borrowed [`ToolSpec`] view, or `None` for a runtime that
+    /// resolves no program at all — the in-process dummy and the wasm engine alike.
     pub fn spec(&self) -> Option<ToolSpec<'_>> {
         match self {
-            Self::Builtin => None,
+            Self::Builtin | Self::Wasm => None,
             Self::System => Some(ToolSpec::System),
             Self::Path(path) => Some(ToolSpec::Path(path)),
             Self::Distribution(distribution) => Some(distribution.spec()),
         }
+    }
+
+    /// Whether this selector runs a WebAssembly module rather than a `java` process.
+    ///
+    /// A predicate rather than a `matches!` at each site, because three crates ask it and the
+    /// question — "is this the module runtime" — is the manifest's to answer, not each caller's
+    /// to re-spell.
+    #[must_use]
+    pub const fn is_wasm(&self) -> bool {
+        matches!(self, Self::Wasm)
     }
 }
 
@@ -248,6 +272,21 @@ mod tests {
             })
         );
         assert_eq!(Runtime::Builtin.spec(), None);
+        // The wasm engine is linked in, so there is no program to resolve — the same answer the
+        // in-process dummy gives, for a different reason.
+        assert_eq!(Runtime::Wasm.spec(), None);
+    }
+
+    /// `"wasm"` is a keyword like `"system"` and `"builtin"`, and it exists on the run half only:
+    /// there is no wasm *compiler* selector, because what emits a module is `[build] backend`.
+    #[test]
+    fn the_wasm_runtime_is_a_keyword_on_the_run_half_alone() {
+        let tc: Toolchain = toml::from_str("runtime = \"wasm\"\n").unwrap();
+        assert_eq!(tc.runtime, Runtime::Wasm);
+        assert!(tc.runtime.is_wasm());
+        assert!(!Runtime::System.is_wasm());
+
+        assert!(toml::from_str::<Toolchain>("compiler = \"wasm\"\n").is_err());
     }
 
     #[test]

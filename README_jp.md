@@ -34,7 +34,8 @@ linter・language server（LSP）を提供しており、いずれも名前解�
 - **フレームワーク不要のテスト。** テストとは `#[test]` を付けたメソッドのことで、JUnit も
   annotation processor も launcher jar も要りません。`jals test` は各テストを専用の JVM で並列に
   実行し、`cargo nextest` と同じ形で結果を報告します。`jals build` はそれらを 1 つもコンパイル
-  しません。
+  しません。`[toolchain] runtime = "wasm"` を選ぶと、同じテストを `jals` に組み込まれたエンジン上で
+  WebAssembly export として実行します——どの段階でも JDK は要りません。
 - **Cargo 風の Java ビルド。** `Cargo.toml` の Java 版にあたる `jals.toml` マニフェストが
   `jals build` / `run` / `test` / `clean` / `init` を駆動します。任意の Rhai script は `javac` より先に、
   制限付きの storage-only API だけを使って source を生成し、flag・classpath・environment を追加します。
@@ -353,6 +354,7 @@ jals build                  # javac でコンパイル
 jals build --dry-run        # コンパイルせず javac コマンドを表示
 jals run                    # コンパイルしてから [run] main-class を実行
 jals run -- arg1 arg2       # ...プログラムへ引数を渡す
+jals run --invoke f -- 7    # jals-wasm プロジェクトで export された static メソッドを呼ぶ
 jals test                   # `#[test]` メソッドを 1 テスト 1 JVM で実行
 jals test --list            # 実行せずにテスト一覧を表示
 jals clean                  # ビルド出力（target/classes・target/test-classes）を削除
@@ -585,6 +587,13 @@ WebAssembly module として出力します（manifest の既定値 `{ type = "j
 JDK stub に対して解決するので、解決済みの `[dependencies]` jar は editor の classpath には載っても
 コンパイラの classpath には載りません。まだ lowering のない構文は誤ったコードを吐かず、Build output
 タブに*報告*されます。
+
+module は、タブがそのまま**実行**もできる唯一の成果物です。背後のエンジンが `core + alloc` 上の
+interpreter であり、playground の他の部分と同じく `wasm32` にコンパイルされるためです。Build output
+タブに入力欄が現れ、そこに書いた export 済みの `static` メソッドが、続く引数とともに呼ばれます。空のまま
+でも実行は起こります — module を instantiate すると start function が走り、そこにクラスの `static`
+初期化子が lowering されています。`.jar` に *Run* はありません。その class file には JVM が必要で、
+ブラウザタブには JVM を起動するプロセスがないからです。
 
 ```sh
 # 初回のみ: wasm ターゲットと Trunk を用意

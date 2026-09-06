@@ -32,7 +32,10 @@ enum Target {
     /// One class file per declared type, for a JVM.
     ClassFiles { class_version: u16 },
     /// One WebAssembly module for the whole project, with the host's collector managing objects.
-    Wasm,
+    ///
+    /// Carries whether `assert` checks are emitted, because wasm has no run-time flag for them —
+    /// see [`Assertions`](crate::Assertions).
+    Wasm { assertions: bool },
 }
 
 /// Compiles with `jals-javac`, in this process.
@@ -41,6 +44,15 @@ pub struct JalsBackend {
 }
 
 impl JalsBackend {
+    /// The project-relative path the whole-project WebAssembly module is published under.
+    ///
+    /// One name, because there is one module: wasm has no dynamic loading and no classpath, so the
+    /// unit is the project rather than the declared type. Published as a constant because three
+    /// places have to agree on it — this backend writes it, `jals run` reads it back to execute,
+    /// and the playground offers it as a download — and a literal repeated in each is three places
+    /// to edit and two chances to be wrong.
+    pub const WASM_MODULE: &'static str = "project.wasm";
+
     /// The class-file major version each `--release N` produces: 45 for Java 1.1, then one per
     /// release (JVMS §4.1 Table 4.1-A).
     ///
@@ -71,9 +83,14 @@ impl JalsBackend {
     ///
     /// `release` has no meaning here: there is no class-file version to pick, and no JVM to accept
     /// it. What bounds the output instead is the language subset with a wasm representation.
-    pub(crate) const fn wasm() -> Self {
+    ///
+    /// `assertions` takes the place `-ea` has on the other target: a JVM decides at start-up
+    /// whether a class file's `assert` checks run, and a wasm host has no such moment.
+    pub(crate) const fn wasm(assertions: crate::Assertions) -> Self {
         Self {
-            target: Target::Wasm,
+            target: Target::Wasm {
+                assertions: assertions.enabled(),
+            },
         }
     }
 
@@ -133,12 +150,13 @@ impl JalsBackend {
             Target::ClassFiles { class_version } => class_version,
             // wasm has no dynamic loading and no classpath, so the whole project is one module
             // rather than one artifact per declared type.
-            Target::Wasm => {
+            Target::Wasm { assertions } => {
                 // The whole project is one module, so this arm *is* the wasm compile — and it
                 // returns past the `finish` below. Ending the unit here is what keeps a green
                 // wasm build from reporting `Abandoned`, which says the emitter has a hole in it.
-                let outcome = match CompileWasm::project(&typed_files, &index) {
-                    Ok(module) => match RelativePath::parse("project.wasm") {
+                let options = jals_javac::wasm::WasmOptions { assertions };
+                let outcome = match CompileWasm::project(&typed_files, &index, options) {
+                    Ok(module) => match RelativePath::parse(Self::WASM_MODULE) {
                         Ok(path) => BackendOutcome::compiled(alloc::vec![(path, module)]),
                         Err(error) => BackendOutcome::failed(alloc::vec![format!("{error:?}")]),
                     },
@@ -188,7 +206,7 @@ impl Backend for JalsBackend {
     fn id(&self) -> &'static str {
         match self.target {
             Target::ClassFiles { .. } => jals_config::BackendKind::Jals {}.tag_name(),
-            Target::Wasm => jals_config::BackendKind::JalsWasm {}.tag_name(),
+            Target::Wasm { .. } => jals_config::BackendKind::JalsWasm {}.tag_name(),
         }
     }
 
@@ -201,11 +219,16 @@ impl Backend for JalsBackend {
         fold.bytes(jals_javac::VERSION.as_bytes())
             .bytes(match self.target {
                 Target::ClassFiles { .. } => b"class",
-                Target::Wasm => b"wasm",
+                Target::Wasm { .. } => b"wasm",
             })
+            // One slot, two meanings, because the two targets have one number each that changes
+            // what comes out: the class-file version there, and whether `assert` checks are
+            // emitted here. Folding the wasm one is what keeps a test compile's module out of an
+            // ordinary build's cache entry — without it, `jals build` would be served the
+            // assertion-checking module a `jals test` left behind, and vice versa.
             .version(match self.target {
                 Target::ClassFiles { class_version } => u32::from(class_version),
-                Target::Wasm => 0,
+                Target::Wasm { assertions } => u32::from(assertions),
             })
             .digest(request.options.digest());
         fold.finish()
@@ -221,7 +244,7 @@ impl Backend for JalsBackend {
                 "jals-javac: {} source(s) -> class files at major version {class_version}",
                 request.tree.len()
             ),
-            Target::Wasm => format!(
+            Target::Wasm { .. } => format!(
                 "jals-javac: {} source(s) -> one WebAssembly module (host-managed memory)",
                 request.tree.len()
             ),
@@ -327,7 +350,7 @@ mod tests {
             jals_config::BackendKind::Jals {}.tag_name()
         );
         assert_eq!(
-            JalsBackend::wasm().id(),
+            JalsBackend::wasm(crate::Assertions::Disabled).id(),
             jals_config::BackendKind::JalsWasm {}.tag_name()
         );
     }
@@ -346,13 +369,25 @@ mod tests {
         };
         assert_ne!(
             JalsBackend::new(Some(25)).config_digest(&request),
-            JalsBackend::wasm().config_digest(&request),
+            JalsBackend::wasm(crate::Assertions::Disabled).config_digest(&request),
             "two targets are two sets of artifacts"
         );
         assert_ne!(
             JalsBackend::new(Some(21)).config_digest(&request),
             JalsBackend::new(Some(25)).config_digest(&request),
             "a class-file version is part of the output"
+        );
+        // The wasm half of the same slot, and the one claim in `config_digest` nothing was
+        // asserting: `Assertions` decides whether the module carries the `assert` checks, so a
+        // test compile's module and a build's are two artifacts. Reverting the wasm arm to a
+        // constant `.version(0)` — the regression the comment there warns about — passed every
+        // gate without this line, and `Backend::config_digest` has no production caller yet
+        // (`CacheNamespace::BackendOutput` memoization is still the TODO in `backend.rs`), so
+        // this test is the only thing holding the property until one exists.
+        assert_ne!(
+            JalsBackend::wasm(crate::Assertions::Disabled).config_digest(&request),
+            JalsBackend::wasm(crate::Assertions::Enabled).config_digest(&request),
+            "an assertion-checking module is not the module a build produces"
         );
     }
 

@@ -34,6 +34,8 @@ build front end (`jals build` / `run` / `test` / `clean` / `init`) wraps the JDK
 - **Tests without a framework.** A test is a method carrying `#[test]` — no JUnit, no annotation
   processor, no launcher jar. `jals test` runs each one in its own JVM in parallel, with
   `cargo nextest`-shaped output, and `jals build` compiles none of them into the project's classes.
+  `[toolchain] runtime = "wasm"` runs the same tests as WebAssembly exports on the engine compiled
+  into `jals` instead — no JDK at any step.
 - **Cargo-style Java builds.** A `jals.toml` manifest — the Java analogue of `Cargo.toml` —
   drives `jals build` / `run` / `test` / `clean` / `init`. Optional Rhai scripts run before `javac`, using
   bounded storage-only APIs to generate sources and augment flags, classpaths, and environments.
@@ -359,6 +361,7 @@ jals build --dry-run        # print the javac command without compiling
 jals run                    # compile, then run the resolved entry point
 jals run --bin server       # run a named [[bin]] entry point
 jals run -- arg1 arg2       # ...passing args to the program
+jals run --invoke f -- 7    # for a `jals-wasm` project: call an exported static method
 jals test                   # run every `#[test]` method, one JVM per test
 jals test --list            # list the tests without running them
 jals clean                  # remove the build output (target/classes, target/test-classes)
@@ -601,6 +604,13 @@ whole project. (`{ type = "javac" }`, the manifest default, has nothing to spawn
 says so.) The compiler resolves against `jals-hir`'s embedded JDK stubs rather than a classpath, so
 resolved `[dependencies]` jars stay on the editor's classpath but not the compiler's, and any
 construct without a lowering yet is *reported* in the Build output tab rather than mis-emitted.
+
+A module is the one artifact the tab can also **run**, because the engine behind it is an
+interpreter over `core + alloc` that compiles to `wasm32` like the rest of the playground: the Build
+output tab grows a box, and the exported `static` method named in it is called with the arguments
+that follow. Leaving it empty still runs something — instantiating executes the module's start
+function, which is where a class's `static` initialisers went. There is no *Run* for a `.jar`: those
+class files need a JVM, and a browser tab has no process to start one in.
 
 ```sh
 # One-time setup: the wasm target and Trunk

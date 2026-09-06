@@ -8,7 +8,7 @@ use std::io::Write as _;
 use std::process::{Command, Stdio};
 
 use jals_hir::{FileAnalysis, FileId, FileSemantics, ProjectIndex, TypedFile};
-use jals_javac::wasm::{CompileWasm, WasmError};
+use jals_javac::wasm::{CompileWasm, WasmError, WasmOptions};
 use jals_syntax::SyntaxNode;
 
 /// Whether `name` is on this host. A missing engine is a missing *oracle*, not a broken compiler,
@@ -29,7 +29,16 @@ fn tool(name: &str) -> bool {
 
 /// Compile every source as one module — which is what "the whole project" means for a target with
 /// no dynamic loading and no classpath.
+///
+/// Assertions off, which is the default a `jals build` gets. `compile_with` is the same compile
+/// with the choice stated, and the two exist apart so that every test here keeps asserting what an
+/// ordinary build emits.
 fn compile(sources: &[&str]) -> Result<Vec<u8>, WasmError> {
+    compile_with(sources, WasmOptions::default())
+}
+
+/// [`compile`], with the compile options stated.
+fn compile_with(sources: &[&str], options: WasmOptions) -> Result<Vec<u8>, WasmError> {
     let roots: Vec<(FileId, SyntaxNode)> = sources
         .iter()
         .enumerate()
@@ -56,7 +65,7 @@ fn compile(sources: &[&str]) -> Result<Vec<u8>, WasmError> {
         .iter()
         .map(|binding| jals_exec::block_on_inline(binding.typed()))
         .collect();
-    CompileWasm::project(&inputs, &index)
+    CompileWasm::project(&inputs, &index, options)
 }
 
 /// `wasm-tools validate` is the specification's own answer to "is this a module".

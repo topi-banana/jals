@@ -154,18 +154,28 @@ impl FeatureArgs {
     }
 }
 
-/// Which of the two lowerings a compile is part of.
+/// Which lowering a compile is part of.
 ///
-/// The difference is three things and no more: which source roots are gathered, which frontend
-/// selection runs, and where the staged tree and the classes go. Everything else — the build
-/// script, the project graph, the backend selection — is shared, which is why this is a parameter
-/// on the existing path rather than a second one beside it.
+/// The difference is four things and no more: which source roots are gathered, which dependency
+/// tables resolve, which frontend selection runs (and with which harness shape), and where the
+/// staged tree and the classes go — plus, on the one lowering whose target has no run-time flag
+/// for it, whether `assert` is compiled into a check. Everything else — the build script, the
+/// project graph, the backend selection — is shared, which is why this is a parameter on the
+/// existing path rather than a second one beside it.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Lowering {
     /// `jals build` / `jals run`: `#[test]` methods are removed.
     Build,
-    /// `jals test`: `#[test]` methods are kept and the harness that calls them is generated.
+    /// `jals test` on a JVM: `#[test]` methods are kept and the harness that calls them is
+    /// generated.
     Test,
+    /// `jals test` on the WebAssembly engine compiled into this binary.
+    ///
+    /// The same lowering as [`Test`](Self::Test) in everything a dependency or a staging root can
+    /// see; what differs is what the harness *is* — one export per test rather than a `main` a
+    /// launcher starts — and that `assert` is compiled into a check, because a module has no
+    /// `-ea` to turn one on later.
+    TestOnWasm,
 }
 
 impl Lowering {
@@ -173,20 +183,47 @@ impl Lowering {
     const fn staging_root(self) -> &'static str {
         match self {
             Self::Build => jals_build::FRONTEND_OUT_DIR,
-            Self::Test => jals_build::TEST_FRONTEND_OUT_DIR,
+            // One root for both test lowerings: they cannot occur in one command, and their
+            // frontend cache keys already differ by the harness shape.
+            Self::Test | Self::TestOnWasm => jals_build::TEST_FRONTEND_OUT_DIR,
+        }
+    }
+
+    /// How a test run reaches a `#[test]` method, or `None` for a build.
+    ///
+    /// Stated here and passed to `jals-frontend`, which never reads `[build] backend` or
+    /// `[toolchain]`: the runner a command selected is the host's own knowledge.
+    const fn harness(self) -> Option<jals_frontend::TestHarness> {
+        match self {
+            Self::Build => None,
+            Self::Test => Some(jals_frontend::TestHarness::Main),
+            Self::TestOnWasm => Some(jals_frontend::TestHarness::Exports),
+        }
+    }
+
+    /// Whether this lowering's compile emits the `assert` checks the source wrote.
+    ///
+    /// The wasm backend's answer to `-ea`, and it has to be a compile-time one: a JVM decides at
+    /// start-up whether a class file's assertions run, and a wasm host has no such moment. Only
+    /// the wasm test lowering turns them on — a `jals build` behaves the same on both backends,
+    /// and a JVM test run gets its `-ea` from the launcher instead.
+    const fn assertions(self) -> jals_build::Assertions {
+        match self {
+            Self::Build | Self::Test => jals_build::Assertions::Disabled,
+            Self::TestOnWasm => jals_build::Assertions::Enabled,
         }
     }
 
     /// Which dependency tables this lowering resolves.
     ///
-    /// The fourth thing the two differ in, and the one that makes `[dev-dependencies]` mean
-    /// anything: a test-support library's `.java` is compiled into whoever consumes it, so a build
-    /// that resolved it would package it. Answered here so the correspondence is written once,
-    /// exactly like [`staging_root`](Self::staging_root).
+    /// The one that makes `[dev-dependencies]` mean anything: a test-support library's `.java` is
+    /// compiled into whoever consumes it, so a build that resolved it would package it. Answered
+    /// here so the correspondence is written once, exactly like
+    /// [`staging_root`](Self::staging_root).
     const fn dependency_scope(self) -> DependencyScope {
         match self {
             Self::Build => DependencyScope::Build,
-            Self::Test => DependencyScope::Test,
+            Self::Test | Self::TestOnWasm => DependencyScope::Test,
         }
     }
 }
@@ -239,6 +276,11 @@ struct RunArgs {
     /// Run the `[[bin]]` with this name. Mutually exclusive with `--main-class`.
     #[arg(long, value_name = "NAME", conflicts_with = "main_class")]
     bin: Option<String>,
+
+    /// Call this exported function of the WebAssembly module, for a `jals-wasm` project. Without
+    /// it the module is instantiated, which runs its static initialisers.
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["main_class", "bin"])]
+    invoke: Option<String>,
 
     /// Arguments passed to the program after `--`.
     #[arg(last = true)]
@@ -914,7 +956,7 @@ impl BuildArgs {
             jals_classpath::NetworkPolicy::when_offline(self.offline),
             jals_classpath::RetrySchedule::new(self.network_retry),
         );
-        let (sources, tree, inputs) = App::prepare_compile_inputs(
+        let (sources, tree, inputs, _) = App::prepare_compile_inputs(
             &mut manifest,
             &root,
             &features,
@@ -936,6 +978,7 @@ impl BuildArgs {
             &sources,
             tree,
             &inputs,
+            Lowering::Build,
             exec,
             session.for_package(App::package_ref(&manifest)),
         )
@@ -989,29 +1032,84 @@ impl RunArgs {
         }
         let (mut manifest, root) = App::resolve_manifest(self.manifest_path.as_deref()).await?;
         session.note_project(&root, manifest.package.name.as_deref());
-        // `jals run` is `java`, and a WebAssembly module is not something `java` can be handed. The
-        // check is here rather than at the launch because the failure would otherwise surface as a
-        // missing main class in a `classes-dir` that holds a `.wasm` — true, and useless.
-        if matches!(
+        // Which of the two run steps this project has. `[build] backend` decides it, because the
+        // two produce different things: class files a JVM loads by name, or one module an engine
+        // instantiates. Read once here rather than matched again at each step.
+        let wasm = matches!(
             manifest.build.backend,
             jals_config::BackendKind::JalsWasm {}
-        ) {
+        );
+        // clap can reject two flags that contradict each other, but not a flag that contradicts the
+        // *manifest* — so the entry-point selectors are checked against the backend here. Ignoring
+        // one silently is the worst of the three options: the run would succeed having done
+        // something the user did not ask for.
+        if wasm && (self.main_class.is_some() || self.bin.is_some()) {
             bail!(
-                "`jals run` runs a main class on a JVM, and `[build] backend` is `jals-wasm`, \
-                 which compiles the project to a WebAssembly module instead. Run the module with a \
-                 wasm engine (`wasmtime run --invoke <method> {}/project.wasm`), or switch the \
-                 backend to `jals` or `javac` to produce class files.",
-                manifest.build.classes_dir
+                "`[build] backend` is `jals-wasm`, which compiles the project to one WebAssembly \
+                 module with no main class in it — wasm has no entry-point convention. Name the \
+                 exported method instead: `--invoke <name>`."
+            );
+        }
+        if wasm && self.invoke.is_none() && !self.args.is_empty() {
+            bail!(
+                "`jals run` passed {} argument(s) after `--`, and `[build] backend` is \
+                 `jals-wasm`, which has no entry point to pass them to — a module is instantiated, \
+                 and only a named export takes arguments. Name it: `--invoke <name> -- {}`.",
+                self.args.len(),
+                self.args.join(" ")
+            );
+        }
+        if let Some(invoke) = &self.invoke
+            && !wasm
+        {
+            bail!(
+                "`--invoke {invoke}` names an export of a WebAssembly module, and `[build] \
+                 backend` is `{}`, which produces class files. Run those by their main class, or \
+                 select `backend = {{ type = \"jals-wasm\" }}`.",
+                manifest.build.backend.tag_name()
+            );
+        }
+        if wasm && (manifest.run.main_class.is_some() || !manifest.bin.is_empty()) {
+            session.shell().warn(
+                "this project declares a main class, and `[build] backend` is `jals-wasm`, which \
+                 compiles to one WebAssembly module with no main class in it. The declaration is \
+                 ignored; the module's entry point is an exported method named with `--invoke`.",
+            );
+        }
+        // The same disclosure for the other selector this arm discards. A module is executed by
+        // the engine compiled into this binary, so no `java` is resolved at all — and a JDK the
+        // manifest went out of its way to name is a selection the user expects to be honoured.
+        // Said rather than refused, because a module genuinely needs no `java`: `jals test` is the
+        // command for which the same manifest *is* a contradiction, and it refuses it there.
+        // Nothing is warned about the default, which every manifest that never mentions a runtime
+        // carries.
+        if wasm
+            && !manifest.toolchain.runtime.is_wasm()
+            && manifest.toolchain.runtime != jals_config::Runtime::System
+        {
+            session.shell().warn(
+                "this project selects a `[toolchain] runtime`, and `[build] backend` is \
+                 `jals-wasm`, whose module is run by the engine compiled into this binary — so no \
+                 `java` is resolved and the selection is ignored. Write `runtime = \"wasm\"` to \
+                 say so (which is also what `jals test` requires), or drop the key.",
             );
         }
         let features = self.features.resolve(&manifest)?;
         // `--main-class` overrides all manifest-based selection; otherwise resolve the entry point
         // from `[[bin]]` / `[package] default-run` / `[run] main-class`.
-        let main_class: String = match &self.main_class {
-            Some(explicit) => explicit.clone(),
-            None => jals_build::RunTarget::resolve(&manifest, self.bin.as_deref())
-                .map_err(|e| anyhow!("{e}"))?
-                .to_owned(),
+        //
+        // Inside the JVM arm, because a wasm project declares no main class and must not be asked
+        // for one: its entry point is an export name, which is a different question with a
+        // different answer for the same manifest.
+        let main_class: Option<String> = if wasm {
+            None
+        } else {
+            Some(match &self.main_class {
+                Some(explicit) => explicit.clone(),
+                None => jals_build::RunTarget::resolve(&manifest, self.bin.as_deref())
+                    .map_err(|e| anyhow!("{e}"))?
+                    .to_owned(),
+            })
         };
         // Assemble the compile inputs once. Transitive sources compile into `classes-dir`, while every
         // verified graph classpath artifact is shared by the javac and java requests.
@@ -1021,7 +1119,7 @@ impl RunArgs {
             jals_classpath::NetworkPolicy::when_offline(self.offline),
             jals_classpath::RetrySchedule::new(self.network_retry),
         );
-        let (sources, tree, inputs) = App::prepare_compile_inputs(
+        let (sources, tree, inputs, _) = App::prepare_compile_inputs(
             &mut manifest,
             &root,
             &features,
@@ -1035,15 +1133,19 @@ impl RunArgs {
             session,
         )
         .await?;
-        let run_request = jals_build::RunRequest {
-            manifest: &manifest,
-            project_root: &root,
-            jvm_args: &inputs.jvm_args,
-            main_class: &main_class,
-            program_args: &self.args,
-            extra_classpath: &inputs.extra_classpath,
-            run_env: &inputs.run_env,
-        };
+        // Built only for the JVM arm: every field of a `RunRequest` describes a `java` invocation —
+        // a main class, a classpath, JVM arguments — and a module run has none of them.
+        let run_request = main_class
+            .as_deref()
+            .map(|main_class| jals_build::RunRequest {
+                manifest: &manifest,
+                project_root: &root,
+                jvm_args: &inputs.jvm_args,
+                main_class,
+                program_args: &self.args,
+                extra_classpath: &inputs.extra_classpath,
+                run_env: &inputs.run_env,
+            });
         // The compile step goes through the same `[build] backend` selection `jals build` uses, so a
         // manifest asking for the in-process compiler gets it here too. The run step is selected
         // independently from `[toolchain] runtime`: `"builtin"` is the in-process dummy, anything
@@ -1054,27 +1156,38 @@ impl RunArgs {
             &sources,
             tree,
             &inputs,
+            Lowering::Build,
             exec,
             session.for_package(App::package_ref(&manifest)),
         )
         .await?;
-        let runtime = <dyn Runtime>::select(&manifest, exec).await;
+        // Which `java` to start is a question only the JVM arm has. A module is executed by the
+        // engine compiled into this binary, so there is nothing to select and nothing to discover.
+        //
+        // `flatten` rather than a second arm for the selection's own `None`: that is
+        // `runtime = "wasm"`, which `Manifest::validate` admits only beside the backend that
+        // produces no main class — so it cannot reach a `Some(run_request)`, and collapsing the
+        // two `None`s keeps one absent runtime rather than two spellings of it.
+        let runtime = match &run_request {
+            Some(_) => <dyn Runtime>::select(&manifest, exec).await,
+            None => None,
+        };
         let compile_request = plan.request();
 
         if self.dry_run {
             session
                 .shell()
                 .machine(plan.backend.describe(&compile_request));
-            session.shell().machine(runtime.describe_run(&run_request));
-        } else {
-            session.shell().verbose_status(
-                Verb::Running,
-                format_args!("`{}`", plan.backend.describe(&compile_request)),
-            );
-        }
-        if self.dry_run {
+            session.shell().machine(match (&runtime, &run_request) {
+                (Some(runtime), Some(run_request)) => runtime.describe_run(run_request),
+                _ => jals_build::WasmRunner::describe(self.invoke.as_deref(), &self.args),
+            });
             return Ok(ExitCode::SUCCESS);
         }
+        session.shell().verbose_status(
+            Verb::Running,
+            format_args!("`{}`", plan.backend.describe(&compile_request)),
+        );
 
         // Compile first; only run when compilation succeeds. `finish_compile` also persists whatever
         // an in-process backend produced, so the classes are on disk before `java` looks for them.
@@ -1089,11 +1202,17 @@ impl RunArgs {
             return Ok(App::outcome_exit_code(outcome.code()));
         }
         session.finished(&format!("`{}` profile", App::profile_label(&manifest)));
+
+        // The two are built together, so one without the other cannot happen; the module arm is
+        // what the `else` is.
+        let (Some(runtime), Some(run_request)) = (&runtime, &run_request) else {
+            return self.run_module(session, &outcome, &package);
+        };
         let running = package.begin(jals_progress::Activity::Run, run_request.main_class);
         // The child owns this terminal from here on and never gives it back, so the display comes
         // down rather than being suspended around it. The `Running` line is already out.
         session.shell().clear_progress();
-        let run_outcome = match runtime.run(&run_request).await {
+        let run_outcome = match runtime.run(run_request).await {
             Ok(run_outcome) => {
                 running.finish(jals_progress::Outcome::Completed);
                 run_outcome
@@ -1104,6 +1223,95 @@ impl RunArgs {
             }
         };
         Ok(App::outcome_exit_code(run_outcome.code))
+    }
+
+    /// Execute the module the wasm backend just produced, in this process.
+    ///
+    /// The bytes come from the backend's own outcome rather than from the file `finish_compile`
+    /// wrote beside it: what runs is then exactly what was compiled, and the path is read by one
+    /// place instead of two.
+    ///
+    /// Returning values on stdout is why `jals run` takes the stream — the same contract `jals
+    /// test`'s result objects have. A run that named no export produced no value and writes
+    /// nothing there; what it did is a `-v` status line on stderr, and it is phrased as "any
+    /// static initialisers it has" rather than as a claim that some ran — the backend emits a
+    /// start function only for a project with static state.
+    fn run_module(
+        &self,
+        session: &Session,
+        outcome: &jals_build::BackendOutcome,
+        progress: &jals_progress::Progress,
+    ) -> Result<ExitCode> {
+        let module = outcome
+            .artifact(jals_build::JalsBackend::WASM_MODULE)
+            .with_context(|| {
+                format!(
+                    "the compile produced no `{}`",
+                    jals_build::JalsBackend::WASM_MODULE
+                )
+            })?;
+        let request = jals_build::WasmRunRequest {
+            module,
+            invoke: self.invoke.as_deref(),
+            args: &self.args,
+            progress,
+        };
+        match jals_build::WasmRunner::run(&request).map_err(|error| anyhow!("{error}"))? {
+            jals_build::WasmRunOutcome::Instantiated => session.shell().verbose_status(
+                Verb::Running,
+                "instantiated the module, running any static initialisers it has",
+            ),
+            jals_build::WasmRunOutcome::Returned(values) => {
+                for value in values {
+                    session.shell().machine(value);
+                }
+            }
+        }
+        Ok(ExitCode::SUCCESS)
+    }
+}
+
+/// Which runner is executing this suite.
+///
+/// The two speak the same vocabulary from `list()` onward — `TestCase`, `RunOptions`, `TestEvent`,
+/// `TestOutcome` — so this exists only to hold one of two types, and everything after it in
+/// `TestArgs::run` is written once. A selection that differed between the two would make
+/// `--partition count:2/3` mean two things.
+enum Launcher {
+    /// One JVM per test, over the generated `main`.
+    Jvm(jals_build::TestLauncher),
+    /// One module instantiation per test, over the generated exports.
+    Wasm(jals_build::WasmTestLauncher),
+}
+
+impl Launcher {
+    /// The tests this suite holds.
+    async fn list(&self) -> Result<Vec<jals_build::TestCase>> {
+        match self {
+            Self::Jvm(launcher) => launcher.list().await.map_err(|e| anyhow!("{e}")),
+            Self::Wasm(launcher) => Ok(launcher.list()),
+        }
+    }
+
+    /// Run the selected tests, reporting each start and finish through `observe`.
+    ///
+    /// Fallible for the wasm arm alone, and only before the first test: instantiating the module
+    /// is the project's own code running, so it happens here rather than where the launcher was
+    /// built — a `--list` never reaches it.
+    async fn run(
+        &self,
+        cases: &[jals_build::TestCase],
+        options: jals_build::RunOptions,
+        observe: std::sync::Arc<dyn Fn(jals_build::TestEvent) + Send + Sync>,
+        exec: &Exec,
+    ) -> Result<Vec<jals_build::TestOutcome>> {
+        match self {
+            Self::Jvm(launcher) => Ok(launcher.run(cases, options, observe, exec).await),
+            Self::Wasm(launcher) => launcher
+                .run(cases, options, observe, exec)
+                .await
+                .map_err(|e| anyhow!("{e}")),
+        }
     }
 }
 
@@ -1123,7 +1331,7 @@ impl TestArgs {
         session.owns_stdout();
         let (mut manifest, root) = App::resolve_manifest(self.manifest_path.as_deref()).await?;
         session.note_project(&root, manifest.package.name.as_deref());
-        Self::refuse_unsupported(&manifest)?;
+        self.refuse_unsupported(&manifest)?;
         let features = self.features.resolve(&manifest)?;
         // The classes a test run produces hold the test methods and the generated harness, so
         // they go to their own directory. Everything downstream reads `[build] classes-dir` —
@@ -1131,19 +1339,28 @@ impl TestArgs {
         // it here is what keeps `jals build`'s output untouched, with no second mechanism.
         manifest.build.classes_dir = manifest.test.classes_dir.clone();
 
+        // Which runner executes is `[toolchain] runtime`, and this is the one place the CLI reads
+        // it for routing. `Manifest::validate` has already refused `wasm` beside a class-file
+        // backend, so the value alone decides the whole lowering.
+        let lowering = if manifest.toolchain.runtime.is_wasm() {
+            Lowering::TestOnWasm
+        } else {
+            Lowering::Test
+        };
+
         let reporter = self.reporter(0, session);
         let fetcher = jals_classpath::ReqwestFetcher::for_project(
             root.clone(),
             jals_classpath::NetworkPolicy::when_offline(self.offline),
             jals_classpath::RetrySchedule::new(self.network_retry),
         );
-        let (sources, tree, inputs) = App::prepare_compile_inputs(
+        let (sources, tree, inputs, discovered_tests) = App::prepare_compile_inputs(
             &mut manifest,
             &root,
             &features,
             &fetcher,
             jals_project::SourcePublication::Apply,
-            Lowering::Test,
+            lowering,
             session,
         )
         .await?;
@@ -1153,6 +1370,7 @@ impl TestArgs {
             &sources,
             tree,
             &inputs,
+            lowering,
             exec,
             session.for_package(App::package_ref(&manifest)),
         )
@@ -1177,40 +1395,75 @@ impl TestArgs {
         if self.no_run {
             return Ok(ExitCode::SUCCESS);
         }
-        // The frontend generates no harness for a project that declares no test, so there is no
-        // main class to launch. Answered here rather than by launching anyway and reading an empty
-        // list: that reading is also what a JVM which failed to start produces, and the two have
-        // to stay distinguishable — `TestLauncher::list` reports a non-zero status as the failure
-        // it is precisely because this branch has already taken the innocent case.
-        let harness_class = root
-            .join(&manifest.build.classes_dir)
-            .join(format!("{}.class", jals_frontend::HARNESS_CLASS));
-        if !harness_class.is_file() {
-            return Ok(self.report_empty(&reporter, &[]));
-        }
+        let launcher = if matches!(lowering, Lowering::TestOnWasm) {
+            // The module comes from the backend's own outcome rather than from the file
+            // `finish_compile` wrote beside it, exactly as `jals run` reads it: what runs is then
+            // precisely what was compiled.
+            let module = outcome
+                .artifact(jals_build::JalsBackend::WASM_MODULE)
+                .with_context(|| {
+                    format!(
+                        "the compile produced no `{}`",
+                        jals_build::JalsBackend::WASM_MODULE
+                    )
+                })?;
+            // The export-shaped harness generates nothing at all for a project with no test, so
+            // an empty catalog is this arm's answer to the JVM arm's missing-`.class` probe.
+            if discovered_tests.is_empty() {
+                return Ok(self.report_empty(&reporter, &[]));
+            }
+            let entries = discovered_tests
+                .into_iter()
+                .map(|test| jals_build::WasmTestEntry {
+                    id: test.id,
+                    export: test.export,
+                    ignore: test.ignore,
+                    should_fail: test.should_fail,
+                })
+                .collect();
+            Launcher::Wasm(
+                jals_build::WasmTestLauncher::resolve(module, entries)
+                    .map_err(|e| anyhow!("{e}"))?,
+            )
+        } else {
+            // The frontend generates no harness for a project that declares no test, so there is
+            // no main class to launch. Answered here rather than by launching anyway and reading
+            // an empty list: that reading is also what a JVM which failed to start produces, and
+            // the two have to stay distinguishable — `TestLauncher::list` reports a non-zero
+            // status as the failure it is precisely because this branch has already taken the
+            // innocent case.
+            let harness_class = root
+                .join(&manifest.build.classes_dir)
+                .join(format!("{}.class", jals_frontend::HARNESS_CLASS));
+            if !harness_class.is_file() {
+                return Ok(self.report_empty(&reporter, &[]));
+            }
 
-        let run_request = jals_build::RunRequest {
-            manifest: &manifest,
-            project_root: &root,
-            jvm_args: &inputs.jvm_args,
-            main_class: jals_frontend::HARNESS_CLASS,
-            program_args: &[],
-            extra_classpath: &inputs.extra_classpath,
-            run_env: &inputs.run_env,
+            let run_request = jals_build::RunRequest {
+                manifest: &manifest,
+                project_root: &root,
+                jvm_args: &inputs.jvm_args,
+                main_class: jals_frontend::HARNESS_CLASS,
+                program_args: &[],
+                extra_classpath: &inputs.extra_classpath,
+                run_env: &inputs.run_env,
+            };
+            Launcher::Jvm(
+                jals_build::TestLauncher::resolve(
+                    &manifest,
+                    &run_request,
+                    jals_build::HarnessContract {
+                        list_argument: jals_frontend::LIST_ARGUMENT.to_owned(),
+                        ok_sentinel: jals_frontend::OK_SENTINEL.to_owned(),
+                        quiet_argument: jals_frontend::QUIET_ARGUMENT.to_owned(),
+                    },
+                )
+                .await
+                .map_err(|e| anyhow!("{e}"))?,
+            )
         };
-        let launcher = jals_build::TestLauncher::resolve(
-            &manifest,
-            &run_request,
-            jals_build::HarnessContract {
-                list_argument: jals_frontend::LIST_ARGUMENT.to_owned(),
-                ok_sentinel: jals_frontend::OK_SENTINEL.to_owned(),
-                quiet_argument: jals_frontend::QUIET_ARGUMENT.to_owned(),
-            },
-        )
-        .await
-        .map_err(|e| anyhow!("{e}"))?;
 
-        let cases = launcher.list().await.map_err(|e| anyhow!("{e}"))?;
+        let cases = launcher.list().await?;
         let selection = self.filter()?.select(&cases);
         if self.list {
             testrun::TestReporter::list(
@@ -1243,7 +1496,7 @@ impl TestArgs {
                 }),
                 exec,
             )
-            .await;
+            .await?;
         if session.message_format() == shell::MessageFormat::Json {
             testrun::TestReporter::report_json(session.shell(), &outcomes);
         }
@@ -1255,11 +1508,11 @@ impl TestArgs {
         })
     }
 
-    /// Refuse the two configurations that cannot run a test at all, before anything is compiled.
+    /// Refuse the configurations that cannot run a test at all, before anything is compiled.
     ///
     /// Each names what the project would have to change: a failure discovered at launch would read
     /// as a missing class or a silent success, and neither points at the manifest line responsible.
-    fn refuse_unsupported(manifest: &Manifest) -> Result<()> {
+    fn refuse_unsupported(&self, manifest: &Manifest) -> Result<()> {
         if !manifest
             .feature_set()
             .contains(jals_config::Feature::Attributes)
@@ -1270,20 +1523,61 @@ impl TestArgs {
                  `features = [\"attributes\"]` to `[package]` in `jals.toml`."
             );
         }
+        // A wasm project is testable, but only through the runtime that can run a module. The
+        // pair is what decides it: `Manifest::validate` has already refused `runtime = "wasm"`
+        // beside a class-file backend, so the one contradiction left to name here is the other
+        // direction — a module to run, and a `[toolchain] runtime` that still selects a JVM.
         if matches!(
             manifest.build.backend,
             jals_config::BackendKind::JalsWasm {}
-        ) {
+        ) && !manifest.toolchain.runtime.is_wasm()
+        {
             bail!(
-                "`jals test` runs each test on a JVM, and `[build] backend` is `jals-wasm`, which \
-                 compiles the project to a WebAssembly module instead. Switch the backend to \
-                 `jals` or `javac` to produce class files."
+                "`[build] backend` is `jals-wasm`, which compiles the project to one WebAssembly \
+                 module rather than to class files, and `[toolchain] runtime` still selects a \
+                 JVM — which has nothing to load. Select the engine that can run it: \
+                 `[toolchain] runtime = \"wasm\"`."
             );
         }
         if matches!(manifest.toolchain.runtime, jals_config::Runtime::Builtin) {
             bail!(
                 "`[toolchain] runtime` is `builtin`, which runs nothing — every test would report \
                  success without executing. Select `system`, a `path`, or a `distribution`."
+            );
+        }
+        if manifest.toolchain.runtime.is_wasm() {
+            self.refuse_flags_a_module_cannot_honour()?;
+        }
+        Ok(())
+    }
+
+    /// The three flags a wasm test run cannot honour, refused rather than ignored.
+    ///
+    /// Each is a product the caller asked for and would not get: dropping one silently is how a
+    /// run comes back green having done something other than what the command line said. All
+    /// three are opt-in and off by default, so refusing them costs an ordinary run nothing.
+    fn refuse_flags_a_module_cannot_honour(&self) -> Result<()> {
+        if self.timeout.is_some() {
+            bail!(
+                "`--timeout` kills a test that overran, and a WebAssembly call cannot be \
+                 interrupted here: this runner calls each export straight through, with no \
+                 execution budget, so a test that never returns holds its worker until this \
+                 process is killed. Drop the flag, or run the tests on a JVM."
+            );
+        }
+        if self.no_capture {
+            bail!(
+                "`--no-capture` hands the tests this terminal, and a WebAssembly module has no \
+                 standard output to write to it — there is no `java.base` in it to supply one. A \
+                 failing test's account is on its own result line."
+            );
+        }
+        if self.retries > 0 {
+            bail!(
+                "`--retries` gives a failing test another go, and a wasm test run has nothing \
+                 that could come out differently the second time: no clock, no network, no \
+                 threads, no filesystem, and a fresh store per test. Drop the flag, or run the \
+                 tests on a JVM."
             );
         }
         Ok(())
@@ -1949,12 +2243,18 @@ impl CompilePlan {
     ///
     /// Absence is a value the selection returns rather than a failure raised somewhere downstream,
     /// so this is the only place a missing backend has to be handled.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "every one is a borrow of something the caller already holds, and the \
+                  alternative is a struct whose only job is to be unpacked here"
+    )]
     async fn prepare(
         manifest: &Manifest,
         root: &Path,
         staged: &jals_build::StagedTree,
         tree: Vec<jals_build::BackendSource>,
         inputs: &HostProjectInputs,
+        lowering: Lowering,
         exec: &Exec,
         progress: jals_progress::Progress,
     ) -> Result<Self> {
@@ -1970,6 +2270,10 @@ impl CompilePlan {
                 extra_javac_args: &inputs.javac_args,
                 compile_env: &inputs.compile_env,
             },
+            // Read off the lowering rather than off the manifest: whether `assert` checks are
+            // emitted is a property of *this compile*, not of the project — the same wasm project
+            // builds without them and tests with them.
+            lowering.assertions(),
             exec,
         )
         .await;
@@ -2251,6 +2555,7 @@ impl App {
         jals_build::StagedTree,
         Vec<jals_build::BackendSource>,
         HostProjectInputs,
+        Vec<jals_frontend::TestEntry>,
     )> {
         let exec = session.exec();
         let environment = Self::build_script_environment(manifest, features);
@@ -2306,7 +2611,7 @@ impl App {
                 to_lower.push(path.clone());
             }
         }
-        let (staged, tree) =
+        let (staged, tree, tests) =
             Self::lower_sources(manifest, root, &to_lower, features, lowering).await?;
         // Whatever was lowered is now represented by its staged copy; leaving the original in
         // `extra_sources` would hand javac the pre-frontend file as well.
@@ -2326,7 +2631,7 @@ impl App {
         // rewriting frontend that relies on implicit resolution would have to stage under the
         // original source-dir prefix instead.
         manifest.build.source_dirs = Self::staged_source_dirs(root, &staged);
-        Ok((staged, tree, inputs))
+        Ok((staged, tree, inputs, tests))
     }
 
     /// Construct the explicit environment visible to both root and dependency build scripts.
@@ -2517,7 +2822,7 @@ impl App {
     ) -> Result<Vec<PathBuf>> {
         let source_roots = match lowering {
             Lowering::Build => manifest.source_roots(root),
-            Lowering::Test => manifest.test_source_roots(root),
+            Lowering::Test | Lowering::TestOnWasm => manifest.test_source_roots(root),
         };
         for dir in &source_roots {
             // A declared `[test] source-dirs` that does not exist is not an error the way a
@@ -2527,7 +2832,7 @@ impl App {
             // Only under the test lowering, though: naming the same directory in both sections is
             // legal, and a `[build] source-dirs` entry that is missing must still be reported as
             // missing when it is `jals build` that is looking for it.
-            let declared_for_tests = matches!(lowering, Lowering::Test)
+            let declared_for_tests = matches!(lowering, Lowering::Test | Lowering::TestOnWasm)
                 && manifest
                     .test
                     .source_dirs
@@ -2568,18 +2873,24 @@ impl App {
         sources: &[PathBuf],
         features: &ResolvedBuildFeatures,
         lowering: Lowering,
-    ) -> Result<(jals_build::StagedTree, Vec<jals_build::BackendSource>)> {
+    ) -> Result<(
+        jals_build::StagedTree,
+        Vec<jals_build::BackendSource>,
+        Vec<jals_frontend::TestEntry>,
+    )> {
         // `[build.frontend]` and the dialect features that override it are answered in
         // `jals-frontend`, not here — the host supplies the resolved build features (the same set
         // a build script queries) and asks once.
-        let frontend = match lowering {
-            Lowering::Build => {
-                jals_frontend::FrontendSelection::for_manifest(manifest, features.features())
-            }
-            Lowering::Test => {
-                jals_frontend::FrontendSelection::for_manifest_tests(manifest, features.features())
-            }
-        };
+        let frontend = lowering.harness().map_or_else(
+            || jals_frontend::FrontendSelection::for_manifest(manifest, features.features()),
+            |harness| {
+                jals_frontend::FrontendSelection::for_manifest_tests(
+                    manifest,
+                    features.features(),
+                    harness,
+                )
+            },
+        );
 
         let mut files = Vec::with_capacity(sources.len());
         for path in sources {
@@ -2597,6 +2908,13 @@ impl App {
         let mut cache = jals_storage::ArtifactCache::new(jals_storage::NativeCache::new(
             root.join(NativeStorage::PROJECT_CACHE_DIR),
         ));
+
+        // Asked before `lower` moves the files, and of the same list the compile is about to get:
+        // discovery has to see exactly what was compiled, and it is the only thing that can — a
+        // lowering restored from the artifact cache never runs the frontend, so the catalog it
+        // built is not there to be read afterwards. Empty for every lowering but the export-shaped
+        // one, which is the only runner that has to name a test itself.
+        let tests = frontend.discover_tests(&files).await;
 
         let lowered = frontend
             .lower(&mut cache, files)
@@ -2635,7 +2953,7 @@ impl App {
         let staged = jals_build::StagedTree::write(&tree, root.join(lowering.staging_root()))
             .await
             .map_err(|error| anyhow!("staging frontend output failed: {error}"))?;
-        Ok((staged, tree))
+        Ok((staged, tree, tests))
     }
 
     /// Report what a compile said and persist what it produced.
