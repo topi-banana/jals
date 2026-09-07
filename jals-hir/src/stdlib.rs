@@ -8,6 +8,15 @@
 //! [`ProjectIndexBuilder::with_stdlib`] parses with the real parser and folds into the index as
 //! just-another-set-of-files (origin [`Stdlib`](crate::ItemOrigin::Stdlib)).
 //!
+//! **These are bones, and there is a body.** `jals-native`'s `java.base` package declares the same
+//! `java.lang` and `java.io` types *with implementations*, compiled into the module a `jals-wasm`
+//! project produces. A native package outranks a stub per fully-qualified name, so a project that
+//! selects it is analysed against the code it will actually run; a project that does not — every
+//! `javac`-backend build, and every editor session before a build — is analysed against these.
+//! Keep the two in step in one direction only: the package must declare everything a stub here
+//! does, and `jals-build/tests/java_base.rs` is what checks it. Nothing requires the reverse, and
+//! nothing here should be edited to match the package.
+//!
 //! This is the "stubs-as-source" approach: it reuses the whole project-indexing machinery
 //! (member lookup, the supertype walk, inference, generic substitution) with no new resolution path.
 //! It stays **pure** and `wasm32`-compatible — the stub text is a compile-time constant, parsed in

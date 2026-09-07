@@ -9,6 +9,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use jals_native::packages::jals_io::{CapturedConsole, ConsoleSink, JalsIo};
+use jals_native::packages::java_base::{CapturedSystem, JavaBase, Stream, SystemHost};
 use jals_native::{
     Args, NativeBindings, NativeError, NativeHost, NativePackage, NativePackageSet, NativeRegistry,
     NativeValue, Provenance, RefSlot, Results,
@@ -32,6 +33,16 @@ impl FakeHost {
             array: RefCell::new(values.to_vec()),
             calls: RefCell::new(Vec::new()),
         }
+    }
+
+    /// The first `count` elements read back as text, for a binding that *wrote* into the array.
+    fn text(&self, count: usize) -> String {
+        self.array
+            .borrow()
+            .iter()
+            .take(count)
+            .map(|unit| char::from_u32(u32::try_from(*unit).expect("a code unit")).expect("a char"))
+            .collect()
     }
 }
 
@@ -421,4 +432,156 @@ fn the_shipped_package_buffers_until_it_is_flushed() {
         )
         .is_err()
     );
+}
+
+/// `java.base`'s ten bindings, driven without an engine.
+///
+/// The whole Rust half in one test: the two streams stay apart, the clock is the host's, the bit
+/// casts round-trip, and a rendering is written into the array the module allocated for it. What
+/// the *Java* half answers is asserted where a compiler and an engine exist —
+/// `jals-build/tests/java_base.rs` — because nothing in this crate can run a module.
+#[test]
+fn the_java_base_package_writes_two_streams_and_renders_through_the_host() {
+    let system = Rc::new(CapturedSystem::at(1_700_000_000_000));
+    let package = JavaBase::package(Rc::clone(&system) as Rc<dyn SystemHost>);
+    assert_eq!(package.name(), JavaBase::NAME);
+
+    let bindings: Vec<(String, String, jals_native::NativeFn)> = package
+        .bindings()
+        .map(|(owner, signature, binding)| {
+            (owner.to_owned(), signature.to_owned(), binding.clone())
+        })
+        .collect();
+    let call = |owner: &str,
+                signature: &str,
+                host: &mut FakeHost,
+                args: &[NativeValue],
+                results: &mut [NativeValue]| {
+        let (_, _, binding) = bindings
+            .iter()
+            .find(|(key, name, _)| key == owner && name == signature)
+            .unwrap_or_else(|| panic!("`{owner}.{signature}` is bound"));
+        binding(host, Args::new(args), Results::new(results))
+    };
+
+    // Two streams, kept apart. `System.ERR_STREAM` is 1 and everything else is the output sink,
+    // which is what makes `new PrintStream(n)` total rather than a trap.
+    let mut host = FakeHost::with(&['h' as i32, 'i' as i32]);
+    for stream in [0, 1] {
+        call(
+            "java/io/PrintStream",
+            "writeUnits(I[CII)V",
+            &mut host,
+            &[
+                NativeValue::I32(stream),
+                NativeValue::Ref(FakeHost::ARRAY),
+                NativeValue::I32(0),
+                NativeValue::I32(2),
+            ],
+            &mut [],
+        )
+        .expect("two code units");
+    }
+    // Nothing yet: a code unit is half of a surrogate pair, so the host cannot decode as it goes —
+    // the same reason `jals.io` buffers.
+    assert_eq!(system.take_out(), "");
+    assert_eq!(system.take_err(), "");
+    for stream in [0, 1] {
+        call(
+            "java/io/PrintStream",
+            "flushStream(I)V",
+            &mut host,
+            &[NativeValue::I32(stream)],
+            &mut [],
+        )
+        .expect("a flush");
+    }
+    assert_eq!(system.take_out(), "hi");
+    assert_eq!(system.take_err(), "hi");
+
+    // The clock is the host's, and `nanoTime` is a different reading from `currentTimeMillis`.
+    let mut results = [NativeValue::I32(0)];
+    call(
+        "java/lang/System",
+        "currentTimeMillis()J",
+        &mut host,
+        &[],
+        &mut results,
+    )
+    .expect("a clock reading");
+    assert_eq!(results[0], NativeValue::I64(1_700_000_000_000));
+    call(
+        "java/lang/System",
+        "nanoTime()J",
+        &mut host,
+        &[],
+        &mut results,
+    )
+    .expect("a monotonic reading");
+    assert_eq!(results[0], NativeValue::I64(1_700_000_000_000_000_000));
+
+    // The bit casts, which are the operations Java has no syntax for.
+    call(
+        "java/lang/Double",
+        "doubleToRawLongBits(D)J",
+        &mut host,
+        &[NativeValue::F64(1.0)],
+        &mut results,
+    )
+    .expect("the bits of a double");
+    assert_eq!(results[0], NativeValue::I64(4_607_182_418_800_017_408));
+    call(
+        "java/lang/Float",
+        "floatToRawIntBits(F)I",
+        &mut host,
+        &[NativeValue::F32(1.0)],
+        &mut results,
+    )
+    .expect("the bits of a float");
+    assert_eq!(results[0], NativeValue::I32(1_065_353_216));
+
+    // A rendering is written into the array the *module* allocated, because a host function cannot
+    // allocate one — and the length comes back so the Java side can build the `String`.
+    let mut destination = FakeHost::with(&[0; 32]);
+    call(
+        "java/lang/Double",
+        "toChars(D[C)I",
+        &mut destination,
+        &[NativeValue::F64(0.0001), NativeValue::Ref(FakeHost::ARRAY)],
+        &mut results,
+    )
+    .expect("a rendering");
+    assert_eq!(results[0], NativeValue::I32(6));
+    assert_eq!(destination.text(6), "1.0E-4");
+
+    // And the reverse, which is what `Double.parseDouble` is written on.
+    let mut text = FakeHost::with(&['1', '.', '5'].map(|unit| unit as i32));
+    call(
+        "java/lang/Double",
+        "parseChars([CII)D",
+        &mut text,
+        &[
+            NativeValue::Ref(FakeHost::ARRAY),
+            NativeValue::I32(0),
+            NativeValue::I32(3),
+        ],
+        &mut results,
+    )
+    .expect("a parse");
+    assert_eq!(results[0], NativeValue::F64(1.5));
+}
+
+/// A host with no clock is a real host, not a broken one: the two clock readings are provided.
+#[test]
+fn a_system_host_without_a_clock_answers_zero() {
+    struct Silent;
+    impl SystemHost for Silent {
+        fn write(&self, _stream: Stream, _text: &str) {}
+    }
+    assert_eq!(Silent.current_time_millis(), 0);
+    assert_eq!(Silent.nano_time(), 0);
+    Silent.write(Stream::Out, "discarded");
+    Silent.write(Stream::Err, "discarded");
+    assert_eq!(Stream::Out, Stream::Out);
+    assert_ne!(Stream::Out, Stream::Err);
 }

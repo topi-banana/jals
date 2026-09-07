@@ -1,0 +1,15 @@
+[package]
+name = "hello_world_java_base"
+version = "0.1.0"
+
+# One WebAssembly module for the whole project, and the JDK module a wasm host does not have.
+#
+# `java.base` is a native package: `jals-hir` ships signature-only stubs for `java.lang` and
+# `java.io` so a reference to `String` resolves, and this is the same set of types with the bodies
+# those stubs do not have — compiled into this module, beside `Greeting.java`. Only this backend can
+# take one in, so `jals.toml` refuses the two apart.
+[build]
+backend = { type = "jals-wasm" }
+native-packages = ["java.base"]
+source-dirs = ["src/main/java"]
+classes-dir = "target/classes"   # where project.wasm lands (also what `jals clean` removes)

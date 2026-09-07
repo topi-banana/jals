@@ -73,14 +73,16 @@ own layout, and a package that read one would be reading a fact no declaration s
 ## The host supplies the state
 
 This crate is `no_std` and has no dependencies, so there is no `println!` here and there cannot be
-one. A package that writes text is therefore *constructed with* the place its output goes — which
-is not a workaround but the shape every stateful package has. `jals.io` is the worked example:
+one — and no clock either. A package that writes text or reads the time is therefore *constructed
+with* the host that supplies it, which is not a workaround but the shape every stateful package
+has. Both shipped packages are built this way:
 
-| host | sink |
-| --- | --- |
-| `jals` | writes through `jals-cli`'s `Shell`, so output lands on stdout and status lines stay on stderr |
-| the browser playground | appends to the Run pane |
-| this crate's own tests | appends to a `String` (`CapturedConsole`) |
+| host | `jals.io`'s sink | `java.base`'s streams and clock |
+| --- | --- | --- |
+| `jals` | writes through `jals-cli`'s `Shell`, so output lands on stdout and status lines stay on stderr | `System.out` to stdout, `System.err` to stderr, a real clock |
+| the browser playground | appends to the Run pane | both streams appended to the same pane; the clock reads zero |
+| the language server | discards | discards; nothing here instantiates a module |
+| this crate's own tests | appends to a `String` (`CapturedConsole`) | appends per stream (`CapturedSystem`), with a stated clock |
 
 Bindings are `!Send` by construction for the same reason — they capture host state, and every
 runtime in this workspace is current-thread.
@@ -104,9 +106,79 @@ the previous answer and the fix is invisible.
 - `jals-hir` indexes the same Java under `ItemOrigin::Native`, so the project's own source resolves
   against it and the linter reports nothing about names that are really there.
 
-## What the shipped package looks like
+## What the shipped packages look like
+
+Two, and they are the two ends of the same idea.
+
+### `jals.io` — the smallest a package can be
 
 [`jals.io`](java/jals/io/Out.java) declares three `native` methods and writes everything else in
 Java on top of them — the seam is three Rust functions and the library is Java. That ratio is the
 point, and it is what makes `examples/hello_world_native` print `Hello, world!` from a module that
 still has no `String` in it.
+
+### `java.base` — the JDK module a wasm host does not have
+
+`jals-hir` ships signature-only stubs for `java.lang` and `java.io` so that a reference to `String`
+or `IOException` resolves. They are *bones*: no bodies, nothing to run, and the wasm backend says so
+in as many words — "a wasm host has no `java.base` to supply the rest".
+
+[`java.base`](src/packages/java_base.rs) is that `java.base`. Fifty-two Java files under
+[`java/java`](java/java) — `String`, `StringBuilder`, every wrapper, `Math`, `System`,
+`PrintStream`, and the whole `Throwable` hierarchy — compiled into the same module the project is,
+and **ten** host functions behind them:
+
+| binding | why it cannot be Java |
+| --- | --- |
+| `Double`/`Float` bit casts | Java has no reinterpreting cast |
+| `Double`/`Float` render and parse | shortest-round-trip decimal is a rounding problem `core` already solves correctly |
+| `System.currentTimeMillis` / `nanoTime` | a module has no clock |
+| `PrintStream` write and flush | a module has no console |
+
+Everything a program actually calls is the Java half. `Integer.parseInt`, `String.hashCode`,
+`Math.sqrt` — that last one exactly, by Newton's iteration over a reduced mantissa with an
+exact-residual correction — are lowered by the same backend that lowers the project's own sources.
+
+```toml
+[build]
+backend = { type = "jals-wasm" }
+native-packages = ["java.base"]
+```
+
+```java
+System.out.println(Integer.toString(-2147483648));
+try {
+    Integer.parseInt(text);
+} catch (NumberFormatException failure) {
+    System.err.println(failure.toString());   // java.lang.NumberFormatException: 12x
+}
+```
+
+Three things are deliberately **not** in it, and each is a fact about the target rather than an
+omission:
+
+- **`java.lang.Object`.** It is the backend's `anyref` — the top of wasm's reference hierarchy —
+  so giving it a struct type as well would be one question with two answers. `jals-hir`'s stub
+  needs no body and stays.
+- **`Enum`, `Record`, `Iterable`, reflection.** The first two are supertypes the compiler
+  synthesises; `Iterable` needs `java.util.Iterator`, which is another package's; reflection needs
+  a runtime that reads metadata, and there is none.
+- **`Math`'s transcendentals and full Unicode case mapping.** Both would be approximations. This
+  crate is dependency-free by design, so there is no rounded elementary-function library to reach
+  for, and a hand-rolled series is a wrong answer that looks like a right one.
+
+Two things a *project* still cannot write, and both are gaps in the wasm backend rather than in
+this package — `jals-build/tests/java_base.rs` pins them as failures, so closing one fails that
+test and says which line to delete:
+
+- a **string literal** (`String s = "x"`), so a constant string is spelled as a `char[]` — which is
+  what every constant in this package's own Java looks like;
+- an **autoboxing conversion** (`Integer n = 1`), so a wrapper is reached by writing
+  `Integer.valueOf(1)`.
+
+### Why one package publishes two Java packages
+
+`System.out` is a `java.io.PrintStream` in the JDK and in the stub this shadows. A native package's
+Java outranks a stub *per fully-qualified name*, so a `java.lang` that superseded `System` without
+`java.io` beside it would be a `System` whose `out` had no type left. The two are one declaration,
+and the JDK already has a name for the unit that holds both.

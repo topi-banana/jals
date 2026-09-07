@@ -517,6 +517,27 @@ filesystem reads into portable interfaces.
   `NativePackage::new` takes a version and it is the **package author's**, for the reason
   `FrontendCaps::version` exists: a consumer memoizes a compile against everything it observed, and
   a Rust closure's body is the one input it cannot observe.
+
+  Two packages ship, and they are the two ends of the same idea. `jals.io` is the smallest a package
+  can be — three `native` methods and a `char[]`. **`java.base`** is the largest: the `java.lang` and
+  `java.io` that `jals-hir` publishes signature-only stubs of, with the bodies those stubs do not
+  have — fifty-two Java files behind ten host functions, which are exactly the operations Java cannot
+  express and a dependency-free `no_std` crate can (the `double`/`float` bit casts and decimal
+  conversions, the clock, and the two `PrintStream` writes). Four properties are load-bearing.
+  - **A package's Java outranks a stub per FQN, so a type it declares must be a *superset* of the
+    stub's members.** A member the stub had and the package does not is one that disappears from
+    analysis for every project that selects it — a regression with no diagnostic — so
+    `jals-build/tests/java_base.rs` diffs the two member sets rather than trusting the reading.
+  - **`java.lang.Object` is not declared and must not be.** It is the wasm backend's `anyref`, and
+    `Layout::class_ref` answers for it *before* it consults the struct table — so a declared
+    `Object` would be one question with two answers, silently: a class that writes no `extends`
+    gets no `Object` struct prefix, so a field on it would exist on some instances and not others.
+  - **One package publishes two Java packages**, and the JDK's own module name is why: `System.out`
+    is a `java.io.PrintStream` in the stub this shadows, so a `java.lang` that superseded `System`
+    without `java.io` beside it would be a `System` whose `out` had no type left.
+  - **What a project still cannot write is the backend's gap, not the package's** — a string literal
+    and an autoboxing conversion. Both are pinned as *failures* in that same test file, so closing
+    one fails the test and says which line to delete.
 - `jals-lint`: the rule engine. A rule is a name, a `Category` (the `jalslint.toml` section it is
   configured under), a level accessor into `jals_config::lint`, and a checker; `RuleInfo::all()`
   publishes the registry so a consumer enumerates rules instead of restating them. **The rule name
@@ -776,9 +797,11 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo unused-allow --all-targets -- --workspace --all-features
 cargo nextest run --workspace --all-features --no-fail-fast
 cargo test --workspace --all-features --doc     # nextest does not run doctests
-cargo hawk check --exclude-crate jinja -D warnings   # closed-world visibility over hawk.toml's
-                                                    # roots; `jinja`'s API is an external
-                                                    # boundary, and hawk.toml says why
+cargo hawk check --exclude-crate jinja --exclude-crate jals_native -D warnings
+                        # closed-world visibility over hawk.toml's roots. `jinja` and
+                        # `jals-native` are excluded because each crate's API is an external
+                        # boundary rather than one consumer's; hawk.toml says why, and each is
+                        # held honest by its own `tests/` file instead
 ```
 
 The portable-core and feature audit (CI's `portable core and feature audit` job) — run it whenever

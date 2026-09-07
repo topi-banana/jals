@@ -565,6 +565,17 @@ jobs:
             dir: examples/hello_world_native
             run: true
             invoke: --invoke greet
+          # The largest native package, in the cell shaped like the smallest one. `java.base` is
+          # fifty-two Java files compiled into the module beside the project's own, so this is also
+          # the only cell where a build failure means "a `java.lang` method stopped lowering" rather
+          # than "the example stopped compiling" — a library input has every body lowered, not just
+          # the ones the export reaches. `invoke` picks the export that exercises the whole seam:
+          # `String` built from a `char[]`, `StringBuilder`, `Math.sqrt`, and `System.out` through
+          # a host function.
+          - name: hello_world_java_base
+            dir: examples/hello_world_java_base
+            run: true
+            invoke: "--invoke describe -- 2"
           - name: rhai_build_script
             dir: examples/rhai_build_script
             run: true

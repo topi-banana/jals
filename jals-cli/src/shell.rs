@@ -410,6 +410,21 @@ impl Shell {
         })
     }
 
+    /// Bytes to stderr, unchanged.
+    ///
+    /// [`machine_bytes`](Self::machine_bytes)'s counterpart, and it exists for one caller: what a
+    /// run's own `System.err` produced. A module decides where its own line breaks are, so a
+    /// line-oriented writer would add one the program did not write — which is the same reason
+    /// `jals.io`'s output goes through the stdout half rather than through [`machine`](Self::machine).
+    /// The failure is dropped rather than returned, because a program's diagnostics failing to
+    /// reach a closed stderr is not a reason to fail its build.
+    pub(crate) fn plain_bytes(&self, bytes: &[u8]) {
+        self.suspend(|| {
+            let mut err = std::io::stderr().lock();
+            let _ = err.write_all(bytes);
+        });
+    }
+
     /// A label right-aligned in the verb column and painted.
     ///
     /// The lead of a line something else assembles: a bar's prefix, and `jals test`'s own

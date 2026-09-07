@@ -64,6 +64,16 @@
 //!   [`provenance`](NativePackageSet::provenance) into the backend's cache key, and links its
 //!   [`bindings`](NativePackageSet::bindings) when the module is instantiated.
 //! - `jals-hir` indexes the same Java, so the project's own source resolves against it.
+//!
+//! # The two packages this crate ships
+//!
+//! [`packages::jals_io`] is the smallest thing this seam can be: three `native` methods, a
+//! `char[]`, and a library written in Java on top of them.
+//!
+//! [`packages::java_base`] is the largest. `jals-hir` publishes signature-only stubs for
+//! `java.lang` and `java.io` so a reference to `String` resolves; this is the same set of types
+//! with the bodies those stubs do not have — `String`, `StringBuilder`, every wrapper, `Math`,
+//! `System`, `PrintStream`, and the whole `Throwable` hierarchy — behind ten host functions.
 
 extern crate alloc;
 

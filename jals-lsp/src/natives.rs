@@ -6,11 +6,12 @@
 //! as unresolved — an analysis reporting the absence of code the build compiles.
 //!
 //! A package is one value holding both halves, so getting the Java means constructing the Rust too.
-//! What that costs here is one sink that discards, and saying so is the point: nothing in a
-//! language server instantiates a module, so nothing ever writes through it.
+//! What that costs here is a sink per package that discards, and saying so is the point: nothing in
+//! a language server instantiates a module, so nothing ever writes through one.
 
 use jals_config::Manifest;
 use jals_native::packages::jals_io::{ConsoleSink, JalsIo};
+use jals_native::packages::java_base::{JavaBase, Stream, SystemHost};
 use jals_native::{NativeRegistry, UnknownNativePackage};
 
 /// `jals.io`'s output, in a host that runs nothing.
@@ -18,6 +19,16 @@ struct SilentConsole;
 
 impl ConsoleSink for SilentConsole {
     fn write(&self, _text: &str) {}
+}
+
+/// `java.base`'s streams and clock, in a host that runs nothing.
+///
+/// The clock takes the trait's defaults — zero — for the same reason the sink discards: nothing
+/// here instantiates a module, so nothing ever reads either.
+struct SilentSystem;
+
+impl SystemHost for SilentSystem {
+    fn write(&self, _stream: Stream, _text: &str) {}
 }
 
 /// The native packages this server can describe.
@@ -43,6 +54,7 @@ impl Natives {
         }
         let mut registry = NativeRegistry::new();
         registry.add(JalsIo::package(std::rc::Rc::new(SilentConsole)));
+        registry.add(JavaBase::package(std::rc::Rc::new(SilentSystem)));
         Ok(registry
             .select(&manifest.build.native_packages)?
             .sources()
