@@ -125,6 +125,15 @@ pub enum HeapType {
     /// declared subtyping is single-inheritance, so it cannot be a supertype of two unrelated classes —
     /// so the value is kept at the top of the hierarchy and narrowed with `ref.cast` at each use.
     Any,
+    /// The half of [`Any`](Self::Any) that `ref.eq` accepts.
+    ///
+    /// Reached in exactly one place: Java's `==` over two references is `ref.eq`, whose operands
+    /// must be `eqref` — and an interface-typed, `Object`-typed or type-variable-typed value is
+    /// held at `anyref`, which is one step *above* `eqref` and so not accepted. Every reference
+    /// this backend produces is a struct or an array and therefore an `eqref`, so the narrowing
+    /// always succeeds; what it is not is implicit, and a module that skipped it failed validation
+    /// rather than misbehaving.
+    Eq,
     /// The bottom of the reference hierarchy, whose only inhabitant is `null`.
     ///
     /// The one abstract heap type this backend needs: a bare `null` has no type of its own in Java, and
@@ -142,6 +151,7 @@ impl HeapType {
             // The abstract heap types occupy the negative range of the same signed encoding, which
             // is what keeps them apart from an index.
             Self::Any => out.byte(0x6E),
+            Self::Eq => out.byte(0x6D),
             Self::None => out.byte(0x71),
         };
     }
