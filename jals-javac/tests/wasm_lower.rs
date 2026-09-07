@@ -897,3 +897,90 @@ fn the_super_constructor_search_continues_past_an_ancestor_that_declares_none() 
         "`C()` calls `G`'s initialiser through the constructor-less `P`"
     );
 }
+
+// --- the three refusals a `java.base` in the library slot found ------------------------------
+
+/// An `int` literal past `i32::MAX` denotes its low 32 bits, and every legal spelling of one is
+/// past it.
+///
+/// `Integer.MIN_VALUE` is written `-2147483648`, whose *literal* is `2147483648` — JLS §3.10.1
+/// admits that spelling only as the operand of a unary minus, and the negation wraps it back to
+/// itself. `0xFFFFFFFF` is the same shape without the minus. Both were refused as out of range
+/// until a `java.lang` that has to declare `Integer.MIN_VALUE` reached them.
+#[test]
+fn an_int_literal_past_i32_max_is_its_low_thirty_two_bits() {
+    let module = module_of(&["public class A {\n\
+         \x20   public static int floor() { return -2147483648; }\n\
+         \x20   public static int all() { return 0xFFFFFFFF; }\n\
+         }"]);
+    // `0 - 2147483648`, because a unary minus is a subtraction here — and the subtraction wraps,
+    // which is exactly what makes this spelling denote `Integer.MIN_VALUE` rather than overflow.
+    expect![[r"
+        locals: []
+        I32Const(0)
+        I32Const(-2147483648)
+        Numeric(Sub, I32)
+        Return
+        Unreachable
+    "]]
+    .assert_eq(&body_of(&module, "floor"));
+    expect![[r"
+        locals: []
+        I32Const(-1)
+        Return
+        Unreachable
+    "]]
+    .assert_eq(&body_of(&module, "all"));
+}
+
+/// `==` over two references narrows to `eqref` first, because that is what `ref.eq` takes.
+///
+/// An `Object`-typed, interface-typed or type-variable-typed value is held at `anyref`, which sits
+/// one step *above* `eqref`. Pushing two of them at `ref.eq` produced a module the validator
+/// rejects — "expected subtype of eqref, found anyref" — which is what
+/// `String.equals(Object other) { if (other == this) … }` compiles to.
+#[test]
+fn a_reference_comparison_narrows_an_anyref_to_eqref() {
+    let module = module_of(&["public class A {\n\
+         \x20   public static boolean same(Object left, Object right) { return left == right; }\n\
+         }"]);
+    expect![[r"
+        locals: []
+        LocalGet(0)
+        RefCast(Eq, true)
+        LocalGet(1)
+        RefCast(Eq, true)
+        RefEq
+        Return
+        Unreachable
+    "]]
+    .assert_eq(&body_of(&module, "same"));
+}
+
+/// A method with many overriders is ordered by depth, and the ordering terminates.
+///
+/// The predicate this replaces compared two candidates with `is_subtype`, which is not a total
+/// order — three classes where one extends another and the third is unrelated compare as
+/// `a < b`, `b == c`, `a == c` — so Rust's sort detected the intransitivity and panicked. It went
+/// unnoticed until a dispatch had enough overriders to reach the check, which a `java.lang` with
+/// two dozen exception classes overriding one method does. The assertion is that this compiles at
+/// all; the ordering itself is asserted by `an_inherited_implementation_is_dispatched_to`.
+#[test]
+fn a_dispatch_over_many_unrelated_overriders_orders_without_panicking() {
+    let mut sources = vec![
+        "public class Base { public int tag() { return 0; } }".to_owned(),
+        "public class Deep extends Sub0 { public int tag() { return 99; } }".to_owned(),
+    ];
+    for at in 0..12 {
+        sources.push(format!(
+            "public class Sub{at} extends Base {{ public int tag() {{ return {at}; }} }}"
+        ));
+    }
+    sources.push("public class A { public static int ask(Base b) { return b.tag(); } }".to_owned());
+    let borrowed: Vec<&str> = sources.iter().map(String::as_str).collect();
+    let module = module_of(&borrowed);
+    assert!(
+        module.exports.iter().any(|(name, _, _)| name == "ask"),
+        "the dispatch compiled"
+    );
+}

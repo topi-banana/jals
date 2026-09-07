@@ -1574,15 +1574,16 @@ impl Layout {
                 let Ok((value, _)) = Literal::integer(text) else {
                     return default();
                 };
-                #[allow(clippy::cast_precision_loss)]
+                #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
                 match ty {
                     ValType::I64 => insn.i64_const(value),
                     ValType::F32 => insn.f32_const(value as f32),
                     ValType::F64 => insn.f64_const(value as f64),
-                    _ => match i32::try_from(value) {
-                        Ok(value) => insn.i32_const(value),
-                        Err(_) => return default(),
-                    },
+                    // The low 32 bits, for the reason the expression path takes them: an `int`
+                    // literal past `i32::MAX` spells a bit pattern. Falling back to the start
+                    // function instead only moved the same value to the same refusal one pass
+                    // later.
+                    _ => insn.i32_const(value as i32),
                 };
             }
             (FLOAT_LITERAL, ValType::F32 | ValType::F64) => {
@@ -3757,12 +3758,22 @@ impl Lowering<'_> {
                 // about one of them. The width comes from the inferred type below, so the one the
                 // fact reads off the suffix is dropped.
                 let (value, _) = Literal::integer(text)?;
+                #[expect(
+                    clippy::cast_possible_truncation,
+                    reason = "an `int` literal denotes its low 32 bits (JLS \u{a7}3.10.1) \u{2014} see below"
+                )]
                 match ty {
                     ValType::I64 => insn.i64_const(value),
-                    _ => insn
-                        .i32_const(i32::try_from(value).map_err(|_| {
-                            WasmError::Unsupported("an out-of-range `int` literal")
-                        })?),
+                    // The low 32 bits, not a range check. An `int` literal is legal up to
+                    // `0xFFFFFFFF` in a hexadecimal, octal or binary spelling, where it denotes the
+                    // *bit pattern* and not the number: `0xFFFFFFFF` is `-1`. Decimal has one such
+                    // spelling too, `2147483648`, which JLS \u{a7}3.10.1 admits only as the operand of a
+                    // unary minus \u{2014} and the negation that follows wraps it back to itself, which
+                    // is why `Integer.MIN_VALUE` is written that way and no other. Refusing the
+                    // value here rejected all four, and `i64` already reads its own out-of-range
+                    // spellings this way (`Literal::integer` falls back to `u64`), so this is the
+                    // one width that answered differently.
+                    _ => insn.i32_const(value as i32),
                 };
             }
             FLOAT_LITERAL => {
@@ -4237,12 +4248,16 @@ impl Lowering<'_> {
         } else {
             (left, Some(right))
         };
-        self.expr(value, insn)?
+        let value_ty = self
+            .expr(value, insn)?
             .ok_or(WasmError::Unsupported("a comparison operand with no value"))?;
         match other {
             Some(other) => {
-                self.expr(other, insn)?
+                Self::narrow_to_eq(value_ty, insn);
+                let other_ty = self
+                    .expr(other, insn)?
                     .ok_or(WasmError::Unsupported("a comparison operand with no value"))?;
+                Self::narrow_to_eq(other_ty, insn);
                 insn.ref_eq();
             }
             None => {
@@ -4253,6 +4268,24 @@ impl Lowering<'_> {
             insn.i32_eqz();
         }
         Ok(ValType::I32)
+    }
+
+    /// Narrow an `anyref` operand to `eqref`, which is what `ref.eq` takes.
+    ///
+    /// `Object`, an interface, and a type variable are all held at the top of the reference
+    /// hierarchy, and `eqref` sits one step below it — so `a == b` over any of them pushed two
+    /// `anyref`s at an instruction that accepts neither, and the module failed validation with
+    /// "expected subtype of eqref". A `String.equals(Object other)` opening with `other == this`
+    /// is the everyday shape.
+    ///
+    /// The cast always succeeds: every reference this backend creates is a `struct.new` or an
+    /// `array.new`, and both are `eqref`. It is nullable because Java's `==` compares two nulls as
+    /// equal and `ref.eq` answers that correctly — a non-nullable cast would trap on the one
+    /// comparison that has a defined answer.
+    fn narrow_to_eq(ty: ValType, insn: &mut Insn) {
+        if ty == ValType::Ref(RefType::nullable(HeapType::Any)) {
+            insn.ref_cast(HeapType::Eq, true);
+        }
     }
 
     /// `e instanceof T`.
@@ -5103,12 +5136,17 @@ impl Lowering<'_> {
         // Most-derived first, so a subclass's override is tested before its superclass's: testing the
         // other way round would let the base class's `ref.test` succeed for every descendant and answer
         // with the wrong method.
-        found.sort_by(|&(a, _), &(b, _)| {
-            self.index
-                .is_subtype(a, b)
-                .cmp(&self.index.is_subtype(b, a))
-                .reverse()
-        });
+        //
+        // By **depth in the class chain**, and not by comparing the two entries with `is_subtype`.
+        // That comparator is not a total order — three classes where one extends another and the
+        // third is unrelated compare as `a < b`, `b == c`, `a == c` — so it is intransitive, and
+        // Rust's sort detects that and panics rather than producing a wrong order. It went
+        // unnoticed for as long as no dispatch had enough overriders to reach the check: a
+        // `java.lang` with twenty-four exception classes overriding one method is what found it.
+        // Depth is the property the ordering actually wants and is transitive by construction —
+        // a subclass's chain strictly contains its superclass's, so `depth(sub) > depth(super)`
+        // always — and it leaves unrelated classes in `structs` order, which is deterministic.
+        found.sort_by_key(|&(item, _)| core::cmp::Reverse(self.index.superclasses(item).count()));
         found
     }
 
