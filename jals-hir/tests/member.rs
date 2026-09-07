@@ -1,7 +1,7 @@
 //! Tests for the project member model: member indexing, declared-type capture, and member
 //! resolution through project-internal inheritance.
 
-use jals_hir::{DefKind, FileId, MemberType, Namespace, ProjectIndex, Supertype, TypeParamDecl};
+use jals_hir::{DefKind, FileId, MemberType, Namespace, ProjectIndex, TypeParamDecl};
 use jals_syntax::SyntaxNode;
 
 /// Parses each source (keeping the `SOURCE_FILE` nodes alive) and builds a [`ProjectIndex`].
@@ -137,31 +137,6 @@ fn type_parameters_are_recorded_with_their_bounds() {
     );
     assert_eq!(holder.type_params[1].name, "V");
     assert!(holder.type_params[1].bounds.is_empty());
-}
-
-/// A project-internal supertype records the type arguments the clause supplies (`extends
-/// Base<String>` → `[String]`), keyed to the resolved supertype item.
-#[test]
-fn supertype_arguments_are_recorded() {
-    let sources = ["class Base<T> { } class Sub extends Base<String> { }"];
-    let (_nodes, index) = build(&sources);
-    let base_id = item(&index, &sources, 0, "Base");
-    let sub = index.item(item(&index, &sources, 0, "Sub"));
-    assert_eq!(
-        sub.supertypes,
-        // One edge, not two: `build` indexes no stubs and no classpath, so `java.lang.Object` is not
-        // an indexed type and the implicit edge has nothing to point at.
-        vec![Supertype {
-            id: base_id,
-            args: vec![MemberType::Named {
-                name: "String".into(),
-                qualified: None,
-                dims: 0,
-                args: Vec::new(),
-            }],
-            implicit: false,
-        }]
-    );
 }
 
 #[test]

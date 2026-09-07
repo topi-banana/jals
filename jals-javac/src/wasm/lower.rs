@@ -830,8 +830,11 @@ impl CompileWasm {
     /// invisible to it, and `class A extends B {}` beside `class B extends A {}` recursed until the
     /// stack ran out. That is an abort rather than a panic: nothing catches it, and the input
     /// parses and indexes perfectly, so it arrived through an editor as readily as through a build.
-    /// The chain is collected here instead, ending at the first type outside `declared` **or**
-    /// already on it.
+    ///
+    /// The chain comes from [`ProjectIndex::superclasses`], which carries the cycle guard, and ends
+    /// at the first type outside `declared`. The cutoff has always applied to the *parent* and never
+    /// to `item` itself — leading with `item` is what makes that visible, where a `.filter()` on the
+    /// step hid it.
     fn push_with_supertypes(
         item: ItemId,
         index: &ProjectIndex,
@@ -841,14 +844,13 @@ impl CompileWasm {
         if ordered.contains(&item) {
             return;
         }
-        let mut chain = Vec::new();
-        let mut current = Some(item);
-        while let Some(id) = current.filter(|id| !chain.contains(id)) {
-            chain.push(id);
-            current = index
-                .superclass_of(id)
-                .filter(|parent| declared.contains(parent));
-        }
+        let chain: Vec<ItemId> = core::iter::once(item)
+            .chain(
+                index
+                    .superclasses(item)
+                    .take_while(|id| declared.contains(id)),
+            )
+            .collect();
         for &id in chain.iter().rev() {
             if !ordered.contains(&id) {
                 ordered.push(id);
@@ -1057,6 +1059,27 @@ struct Layout {
     structs: BTreeMap<ItemId, u32>,
     /// Each class's instance fields, in slot order, including those inherited.
     fields: BTreeMap<ItemId, Vec<Slot>>,
+    /// Each class's declared wasm supertype, as the *type index*
+    /// [`reserve_class`](Layout::reserve_class) resolved it — not an [`ItemId`] to be looked up
+    /// again later.
+    ///
+    /// One question, one read. `reserve_class` builds the field prefix from whichever parent was
+    /// already reserved, and `fill_class` runs after *every* class is reserved, so re-deriving the
+    /// parent there answered against a fuller map and could name a supertype whose fields the
+    /// prefix does not extend. On a supertype cycle it named the type itself, and the module was
+    /// rejected by the validator rather than merely wrong. Recording the index here also carries
+    /// the ordering wasm requires for free: a parent found in `structs` at reserve time was
+    /// reserved strictly earlier, so its index is strictly lower.
+    parents: BTreeMap<ItemId, u32>,
+    /// The same edge as [`parents`](Self::parents), by [`ItemId`] — the *declared wasm* supertype
+    /// chain, which is what a value of this struct may be passed as.
+    ///
+    /// It is a subset of the index's superclass chain, not a copy of it: an ancestor the module does
+    /// not declare has no struct to be passed at, and under a supertype cycle the index's chain
+    /// climbs an edge wasm's declared subtyping does not have. Following it here is what keeps a
+    /// super-constructor call well-typed. Each entry points at a type reserved strictly earlier, so
+    /// the chain is finite by construction and needs no visited set.
+    parent_item: BTreeMap<ItemId, ItemId>,
     /// Each method's function index.
     functions: BTreeMap<MemberId, u32>,
     /// A non-`static` nested class and the class that encloses it. Its instance holds the enclosing one
@@ -1180,7 +1203,7 @@ impl Layout {
             return;
         }
         let parent = index
-            .superclass_of(item)
+            .direct_superclass(item)
             .filter(|id| self.structs.contains_key(id));
         // The supertype's *whole* list, synthetic fields included: a subtype's fields extend its
         // supertype's as a prefix, so anything the supertype holds occupies a slot here too.
@@ -1208,6 +1231,12 @@ impl Layout {
                 slots.push(Slot::Capture(ty.clone()));
             }
         }
+        if let Some(id) = parent
+            && let Some(&index) = self.structs.get(&id)
+        {
+            self.parents.insert(item, index);
+            self.parent_item.insert(item, id);
+        }
         self.structs.insert(item, module.reserve_type());
         self.fields.insert(item, slots);
     }
@@ -1217,6 +1246,15 @@ impl Layout {
     /// The order and the synthetic entries were settled by
     /// [`reserve_class`](Self::reserve_class) — which is what makes a subtype's fields a real prefix
     /// extension of its supertype's — so this only resolves each slot to a wasm type.
+    ///
+    /// The declared supertype is **read** from [`parents`](Self::parents) rather than re-derived
+    /// from the index, and that is what keeps the two halves of one type consistent by
+    /// construction: `reserve_class` chose the parent whose field list became this struct's prefix,
+    /// while every class is reserved before any is filled, so asking the index again here answers
+    /// against a fuller `structs` and may name a different type. `class A extends B {}` beside
+    /// `class B extends A {}` — which parses and indexes — reserved `B` with no prefix and then
+    /// declared `A` as its supertype, and `class C extends C {}` declared its own type index; both
+    /// are modules a wasm validator refuses, and one bad type invalidates the whole module.
     fn fill_class(&self, item: ItemId, index: &ProjectIndex, module: &mut Module) -> Result<()> {
         let Some(&type_index) = self.structs.get(&item) else {
             return Ok(());
@@ -1236,14 +1274,11 @@ impl Layout {
                 mutable: true,
             });
         }
-        let parent = index
-            .superclass_of(item)
-            .and_then(|id| self.structs.get(&id).copied());
         module.set_type(
             type_index,
             SubType {
                 is_final: false,
-                supertype: parent,
+                supertype: self.parents.get(&item).copied(),
                 comp: CompType::Struct(fields),
             },
         );
@@ -1633,7 +1668,7 @@ impl Body {
             // the constant's arguments exist — calling it here too would run the enum's twice, and the
             // no-argument one at that, which is a different constructor from the one selected.
             let under_enum = index
-                .superclass_of(owner)
+                .direct_superclass(owner)
                 .is_some_and(|parent| index.item(parent).kind == DefKind::Enum);
             if let Some((declaring, function)) = Self::super_constructor(owner, index, layout)
                 && !under_enum
@@ -1891,17 +1926,12 @@ impl Body {
         Facts::body_delegates_to(block, jals_syntax::SyntaxKind::SUPER_KW)
     }
 
-    /// The function an implicit `super()` calls: the nearest ancestor with initialisers to run.
+    /// The function that runs `owner`'s inherited initialisers when nothing else will: its own
+    /// synthesised one, or the nearest ancestor's, which is
+    /// [`super_constructor`](Self::super_constructor)'s answer.
     ///
     /// A subclass's construction runs its superclass's field initialisers first (JLS §12.5), and
-    /// leaving that out read every inherited field back as its default in a module that validates. The
-    /// walk continues past an ancestor that has no constructor function of its own, because *its*
-    /// superclass may still have one — a class with no initialisers is a link in the chain, not its end.
-    ///
-    /// `None` at a class whose declared constructors all take arguments: Java requires an explicit
-    /// `super(…)` there, so there is nothing implicit to call, and the source wrote what to run.
-    /// The function that runs `owner`'s inherited initialisers when nothing else will: its own
-    /// synthesised one, or the nearest ancestor's.
+    /// leaving that out read every inherited field back as its default in a module that validates.
     ///
     /// Every caller has only the receiver to pass, so a constructor that takes an enclosing instance
     /// too is reported rather than called one argument short — and rather than skipped, which would
@@ -1922,18 +1952,39 @@ impl Body {
         }
     }
 
+    /// The function an implicit `super()` calls: the nearest **declared** ancestor with initialisers
+    /// to run.
+    ///
+    /// The walk continues past an ancestor that has no constructor function of its own, because
+    /// *its* supertype may still have one — a class with no initialisers is a link in the chain, not
+    /// its end. It stops at the first that *declares* one, and answers `None` there when every
+    /// declared constructor takes arguments: Java requires an explicit `super(…)` in that case, so
+    /// there is nothing implicit to call and the source wrote what to run.
+    ///
+    /// "Ancestor" is the layout's declared wasm supertype chain, not the index's superclass chain —
+    /// see the walk below for why the two are not interchangeable here, and
+    /// [`Layout::parent_item`] for what separates them.
     fn super_constructor(
         owner: ItemId,
         index: &ProjectIndex,
         layout: &Layout,
     ) -> Option<(ItemId, u32)> {
-        // `class A extends B {}` with `class B extends A {}` parses and indexes, and an unguarded
-        // walk oscillates between the two forever — the same hazard `common_supertype` states on
-        // the JVM side. A chain that closes on itself has run out, which is what `None` already
-        // means here.
-        let mut seen = BTreeSet::new();
-        let mut candidate = index.superclass_of(owner);
-        while let Some(item) = candidate.filter(|&item| seen.insert(item)) {
+        // The *declared wasm* supertype chain ([`Layout::parent_item`]), not the index's superclass
+        // chain. The receiver this call passes is `owner`'s struct, so the constructor it reaches
+        // has to belong to a type `owner`'s struct is a declared subtype of — and the two chains
+        // agree on every well-formed hierarchy and diverge on exactly one input. `class A extends B
+        // {}` beside `class B extends A {}` parses and indexes; the layout can declare only one of
+        // the two edges, so following the index's chain from the other one found a constructor whose
+        // parameter no subtyping relation admits, and the module failed to validate. The layout's
+        // chain also needs no cycle guard: each link was reserved strictly earlier than the last.
+        //
+        // Not a `find_map`. The first ancestor declaring any constructor ends the search **even when
+        // it answers `None`** (the doc above says so): a `find_map` would skip that `None` and keep
+        // climbing, so `class P { P(int x) {} } class C extends P {}` would call a grandparent's
+        // constructor and leave `P`'s fields at their defaults — in a module that validates.
+        for item in core::iter::successors(layout.parent_item.get(&owner).copied(), |&item| {
+            layout.parent_item.get(&item).copied()
+        }) {
             let mut declared = layout.constructors(index, item).peekable();
             if declared.peek().is_some() {
                 return declared
@@ -1944,7 +1995,6 @@ impl Body {
             if let Some(&function) = layout.default_constructors.get(&item) {
                 return Some((item, function));
             }
-            candidate = index.superclass_of(item);
         }
         None
     }

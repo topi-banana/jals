@@ -80,7 +80,7 @@ pub use names::UnresolvedName;
 pub use project::{
     FileFacts, FileId, Fqn, Item, ItemId, ItemOrigin, LoweredClasspath, Member, MemberId,
     MemberModifiers, MemberType, Overrides, Param, ProjectIndex, ProjectIndexBuilder,
-    SourceLocations, Supertype, TypeParamDecl, TypeResolution, UnresolvedType,
+    SourceLocations, TypeParamDecl, TypeResolution, UnresolvedType,
 };
 pub use reference::{Reference, Resolution};
 pub use throws::UnreportedException;

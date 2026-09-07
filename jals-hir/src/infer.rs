@@ -657,7 +657,7 @@ impl TypeInference {
         } else {
             // The class supertype, which is the only one a `super(…)` can name. An interface has no
             // constructor to reach.
-            index.superclass_of(enclosing)?
+            index.direct_superclass(enclosing)?
         };
         let args: Vec<ast::Expr> = call
             .args()
@@ -826,7 +826,7 @@ impl TypeInference {
         // is exactly right, because `super.f()` may bind to the superclass's own `f`. Answering with
         // the enclosing type instead would bind an overridden member to the override.
         if Cst::is_super(receiver) {
-            return index.superclass_of(index.enclosing_item(file, receiver.syntax())?);
+            return index.direct_superclass(index.enclosing_item(file, receiver.syntax())?);
         }
         // Through `member_receiver`, so a type variable is looked up on its bound and an array on
         // `Object` (JLS §4.4, §10.7) — the two shapes that resolved to nothing at all.
@@ -1174,30 +1174,11 @@ impl<'a> Inferer<'a> {
                     .project_id()
             })
             .collect::<Option<Vec<_>>>()?;
-        let [first, rest @ ..] = arms.as_slice() else {
-            return None;
-        };
-        // Up the first arm's class chain, nearest first, to the first ancestor every other arm also
-        // has. Only the *class* chain: the lub's interfaces are part of it too, and no descriptor
-        // records them — a class file writes the erasure, which is the class.
-        //
-        // Guarded against a cycle for the same reason [`ProjectIndex::walk_supertypes_stateful`] is:
-        // `class A extends B {}` with `class B extends A {}` parses and indexes, and an unguarded
-        // walk oscillates between the two forever. Every runtime here is current-thread, so a hang
-        // is the editor wedged rather than one slow request.
-        // A membership test only — never iterated, so no order of it reaches an answer.
-        let mut seen = HashSet::new();
-        let mut candidate = Some(*first);
-        while let Some(item) = candidate {
-            if !seen.insert(item) {
-                break;
-            }
-            if rest.iter().all(|&arm| index.is_subtype(arm, item)) {
-                return Some(self.item_ty(item));
-            }
-            candidate = index.superclass_of(item);
-        }
-        None
+        // The erasure of the arms' lub, which the binding gets. `None` — no shared class the index
+        // holds — keeps the written type, which is this side's fallback and stays here rather than
+        // in the index, because the backend that asks the same question wants `java.lang.Throwable`
+        // instead.
+        Some(index.item_ty(index.common_superclass(&arms)?))
     }
 
     fn set_def_type(&mut self, name_start: usize, ty: Ty) {
@@ -1504,13 +1485,9 @@ impl<'a> Inferer<'a> {
         };
         let mut fqn = String::from("java.lang.");
         fqn.push_str(name);
-        index.item_by_fqn(&fqn).map_or_else(external, |id| {
-            Ty::Class(ClassTy::Project {
-                id,
-                name: name.to_owned(),
-                args: Vec::new(),
-            })
-        })
+        index
+            .item_by_fqn(&fqn)
+            .map_or_else(external, |id| index.item_ty(id))
     }
 
     /// The type `this` has where `node` appears: the enclosing type declaration, raw.
@@ -1524,16 +1501,12 @@ impl<'a> Inferer<'a> {
 
     /// An indexed type as a raw class type — no type arguments, for the reason
     /// [`self_ty`](Self::self_ty) gives.
+    ///
+    /// The index states the type; what belongs here is only the answer for a file being inferred
+    /// with no project behind it, which the index has no way to give.
     fn item_ty(&self, item: ItemId) -> Ty {
-        let Some((index, _)) = self.project else {
-            return Ty::Unknown;
-        };
-        let fqn = index.item(item).fqn.as_str();
-        Ty::Class(ClassTy::Project {
-            id: item,
-            name: fqn.rsplit('.').next().unwrap_or(fqn).to_owned(),
-            args: Vec::new(),
-        })
+        self.project
+            .map_or(Ty::Unknown, |(index, _)| index.item_ty(item))
     }
 
     fn unary_ty(&self, u: &ast::UnaryExpr) -> Ty {
@@ -1790,16 +1763,11 @@ impl<'a> Inferer<'a> {
         let (index, file) = self.project?;
         let named = Cst::type_qualifier(&fa.receiver()?, index, file)?;
         let item = if keyword.kind() == SUPER_KW {
-            index.superclass_of(named)?
+            index.direct_superclass(named)?
         } else {
             named
         };
-        let fqn = index.item(item).fqn.as_str();
-        Some(Ty::Class(ClassTy::Project {
-            id: item,
-            name: fqn.rsplit('.').next().unwrap_or(fqn).to_owned(),
-            args: Vec::new(),
-        }))
+        Some(index.item_ty(item))
     }
 
     /// `receiver.member` resolved in `namespace`: the member's type on the receiver's project type.
@@ -1835,7 +1803,7 @@ impl<'a> Inferer<'a> {
                     let owner = if Cst::is_super(&expr) {
                         index
                             .enclosing_item(file, expr.syntax())
-                            .and_then(|enclosing| index.superclass_of(enclosing))
+                            .and_then(|enclosing| index.direct_superclass(enclosing))
                     } else {
                         Cst::type_qualifier(&expr, index, file)
                     };
@@ -2014,6 +1982,11 @@ impl ProjectIndex {
     }
 
     /// `java.lang.Object` as a receiver type, or [`Ty::Unknown`] when it is not indexed at all.
+    ///
+    /// Deliberately **not** `ProjectIndex::item_ty` yet: this writes the qualified name where
+    /// the `name` field of [`ClassTy::Project`] is the simple one, and `Display for Ty` renders that field — so
+    /// folding it changes diagnostic and hover text and belongs in a change that reviews the
+    /// wording. Known, not latent.
     fn object_ty(&self) -> Ty {
         self.item_by_fqn("java.lang.Object")
             .map_or(Ty::Unknown, |id| {
@@ -2807,7 +2780,7 @@ impl crate::analysis::FileSemantics<'_> {
                 .index()
                 .enclosing_item(self.file(), &before.parent()?)?;
             return if before.kind() == SUPER_KW {
-                self.index().superclass_of(enclosing)
+                self.index().direct_superclass(enclosing)
             } else {
                 Some(enclosing)
             };

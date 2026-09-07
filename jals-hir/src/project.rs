@@ -176,7 +176,19 @@ pub struct Item {
     /// with the type arguments the clause supplies (`extends Container<String>` → `[String]`), for
     /// inherited-member lookup. A supertype outside the indexed sources (a JDK class, an unresolved
     /// name) is simply absent, so a member search up the chain stops at it gracefully.
-    pub supertypes: Vec<Supertype>,
+    ///
+    /// **Private, and that is the point.** An edge is asked for by name
+    /// ([`direct_superclass`](ProjectIndex::direct_superclass),
+    /// [`direct_interfaces`](ProjectIndex::direct_interfaces)) and a chain is asked for whole
+    /// ([`superclasses`](ProjectIndex::superclasses)). While this was public a consumer could reach
+    /// the hierarchy without either, and five of them did — each writing the same visited set, two
+    /// of them shipping without one. Publishing the walk does not close that on its own; withdrawing
+    /// the raw list is what makes the walk the only way through.
+    ///
+    /// Private rather than `pub(crate)` because every reader is in this module: the accessors above,
+    /// the two walks below, and the builder that fills it. The same shape `type_var_bound` has, for
+    /// the same reason.
+    supertypes: Vec<Supertype>,
     /// Whether any `extends` / `implements` clause names a type *outside* the indexed project (a JDK
     /// or third-party class). When true, this type may inherit members — including method overloads —
     /// that the index cannot see, so a "no member / no overload" conclusion is not trustworthy.
@@ -205,8 +217,12 @@ pub struct TypeParamDecl {
 /// `extends` / `implements` clause supplied to it (`extends Container<String>` → `[String]`).
 ///
 /// The arguments are kept for generic inherited-member substitution; plain subtyping ignores them.
+///
+/// Crate-private with [`Item::supertypes`], which is the only thing that holds one: outside this
+/// crate the hierarchy is read through [`ProjectIndex`]'s edge and chain accessors, and a type
+/// reachable from no published signature would only be a name with nothing to say.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Supertype {
+pub(crate) struct Supertype {
     /// The indexed supertype.
     pub id: ItemId,
     /// The type arguments supplied to it, captured like a [`Member`]'s type; empty for a raw use.
@@ -1290,10 +1306,8 @@ impl ProjectIndex {
             // the descriptor itself. Done after the supertypes resolve, because the interface is one of them.
             if self.items[owner.0 as usize]
                 .fqn
-                .as_str()
-                .rsplit('.')
-                .next()
-                .is_some_and(|simple| simple.starts_with("lambda$"))
+                .simple_name()
+                .starts_with("lambda$")
                 && let Some(implemented) = supertypes.first().map(|supertype| supertype.id)
                 && let Some(&method) = self
                     .own_members(implemented)
@@ -1383,6 +1397,12 @@ impl ProjectIndex {
     /// methods** and every interface-typed value is an `Object`; [`implicit`](Supertype::implicit)
     /// is what records that the edge is not a written `extends`.
     ///
+    /// So does an `@interface`, and the kind list is written out for that reason: an annotation type
+    /// *is* an interface (JLS §9.6), and leaving [`DefKind::AnnotationType`] out of it was the same
+    /// silent reclassification the `kind != Interface` filters were. Without the edge
+    /// `is_subtype(A, Object)` is `false` and `resolve_member(A, "toString")` is `None`, so
+    /// `Object o = a;` reports a mismatch and `a.toString()` an unresolved name, on legal Java.
+    ///
     /// "Public instance methods" is the whole of what §9.2 gives it, and the member walks enforce
     /// that half rather than this one — see [`interface_declares`](Self::interface_declares). The
     /// edge is a *supertype* relation, which is true of the whole of `Object`; which of its members
@@ -1391,7 +1411,11 @@ impl ProjectIndex {
     fn push_implicit_object(&self, owner: ItemId, file: FileId, supertypes: &mut Vec<Supertype>) {
         if !matches!(
             self.items[owner.0 as usize].kind,
-            DefKind::Class | DefKind::Interface | DefKind::Enum | DefKind::Record
+            DefKind::Class
+                | DefKind::Interface
+                | DefKind::AnnotationType
+                | DefKind::Enum
+                | DefKind::Record
         ) {
             return;
         }
@@ -1972,21 +1996,18 @@ impl ProjectIndex {
     /// same file.
     ///
     /// Terminates on a malformed index by visiting each type once, so `class A extends B {} class B
-    /// extends A {}` — which parses and indexes — answers rather than hanging.
+    /// extends A {}` — which parses and indexes — answers rather than hanging. That guarantee is
+    /// [`superclasses`](Self::superclasses)'s and is not restated here; `from` leads because the
+    /// chain excludes its own start and a type's own field shadows an inherited one.
     pub fn inherited_field(&self, from: ItemId, name: &str) -> Option<MemberId> {
-        let mut visited = HashSet::new();
-        let mut item = from;
-        while visited.insert(item) {
-            if let Some(member) = self.own_members(item).iter().copied().find(|&member| {
-                let info = self.member(member);
-                info.kind == DefKind::Field && info.name == name
-            }) {
-                return Some(member);
-            }
-            // No superclass left is the end of the search, not an error.
-            item = self.superclass_of(item)?;
-        }
-        None
+        core::iter::once(from)
+            .chain(self.superclasses(from))
+            .find_map(|item| {
+                self.own_members(item).iter().copied().find(|&member| {
+                    let info = self.member(member);
+                    info.kind == DefKind::Field && info.name == name
+                })
+            })
     }
 
     /// Whether members reached from `owner` have to be filtered by JLS §9.2 — i.e. whether `owner`
@@ -2119,12 +2140,26 @@ impl ProjectIndex {
 
     /// The class `super` names inside `owner`: its first indexed supertype that is a *class*.
     ///
-    /// `None` for an interface, for a type whose only supertypes are interfaces, and for one whose
-    /// superclass is not indexed at all. Shared by every question `super` asks — which constructor
-    /// `super(..)` reaches, which type `super.f()` looks its member up on, which class a
-    /// `super.`-qualified `invokespecial` names as its owner, and which struct a wasm layout
-    /// inherits from — because they are the same rule, and having been written more than once is how
-    /// they drifted.
+    /// **One edge, asked for by name.** This is the answer three binary formats each hold exactly
+    /// one of, and a chain is the wrong answer at every one of them:
+    ///
+    /// - JVMS §6.5: an `invokespecial` may name only the **direct** superclass or a *direct*
+    ///   superinterface. Naming what a member walk found produced a class file the JVM refused at
+    ///   load with "interface method to invoke is not in a direct superinterface".
+    /// - `ClassFile.super_class` (JVMS §4.1) is a single constant-pool index.
+    /// - wasm declared subtyping gives a `SubType` one supertype.
+    ///
+    /// A fourth caller — a wasm layout's field-slot prefix — wants one step for the same reason
+    /// from the other direction: a struct's fields extend *its parent's whole list*, which has
+    /// already folded the chain in. So do not turn a `.next()` on
+    /// [`superclasses`](Self::superclasses) into a `.find(…)` at any of them; ask for the chain only
+    /// when the question is genuinely transitive.
+    ///
+    /// `None` only when no supertype edge lands on an indexed class — which, once `java.lang.Object`
+    /// is indexed, means no type at all: the implicit `Object` edge below is one, and every
+    /// reference type carries it. So this answers `Some(java.lang.Object)` for an interface and for
+    /// a class whose only written supertypes are interfaces; it is not a test for "has no
+    /// superclass", and reading it as one is what made `Iface.super.m()` resolve against `Object`.
     ///
     /// The rule is stated **positively**. Asking which supertype is `kind != Interface` is not the
     /// same question: an `@interface` is [`DefKind::AnnotationType`], which the rest of the
@@ -2134,9 +2169,29 @@ impl ProjectIndex {
     /// `java.lang.Object`. An `enum` counts: a constant with a body is a subclass of one, and it is
     /// the only way a declaration that is not a `class` appears here at all.
     ///
+    /// The five type-declaration [`DefKind`]s partition between this and
+    /// [`direct_interfaces`](Self::direct_interfaces): `Class | Enum | Record` here,
+    /// `Interface | AnnotationType` there, nothing in both and nothing in neither. That is why both
+    /// filters are written positively — a negative one silently reclassifies whichever kind is added
+    /// next, and it already did exactly that to `@interface` on the JVM lowering's side.
+    ///
+    /// **The two answers do not enumerate `owner`'s edges**, and no accessor does. This is a
+    /// `.find`, so a type holding more than one class-kind edge yields only the first: every class
+    /// with a written `extends` also carries the implicit `java.lang.Object` edge, and an `enum` and
+    /// a `record` carry `java.lang.Enum` / `java.lang.Record` beside it — in each case `Object` is
+    /// claimed by neither answer, while [`is_subtype`](Self::is_subtype) still says it is a
+    /// supertype. Reconstructing the direct-supertype *set* from this pair is therefore wrong; ask
+    /// [`is_subtype`](Self::is_subtype) or [`superclasses`](Self::superclasses) instead.
+    ///
     /// After the implicit `java.lang.Object` edge this answers for a class with no `extends` too,
     /// which is what makes `super.toString()` resolve.
-    pub fn superclass_of(&self, owner: ItemId) -> Option<ItemId> {
+    ///
+    /// For `class C extends C {}` this answers `Some(C)` — the edge the source wrote, which
+    /// `ClassFile.super_class` emits faithfully — while [`superclasses`](Self::superclasses) yields
+    /// nothing, because a chain refuses to re-enter its own start. That is the one input on which
+    /// the step and the walk disagree, and it is why neither is written in terms of the other's
+    /// answer.
+    pub fn direct_superclass(&self, owner: ItemId) -> Option<ItemId> {
         self.item(owner)
             .supertypes
             .iter()
@@ -2147,6 +2202,127 @@ impl ProjectIndex {
                     DefKind::Class | DefKind::Enum | DefKind::Record
                 )
             })
+    }
+
+    /// The interfaces `owner` directly implements or extends, **in the order the source wrote
+    /// them**.
+    ///
+    /// Order and count are both contract. `ClassFile.interfaces` (JVMS §4.1) is emitted from this
+    /// in sequence, and dropping an entry is an `IncompatibleClassChangeError` at the first
+    /// `invokeinterface` on the missing type — a class that loads and then refuses to dispatch.
+    /// A generic type's `Signature` attribute is written per-interface against the same sequence,
+    /// so a length that disagrees demotes every written type argument to an erased name.
+    ///
+    /// Stated **positively**, and that is a fix rather than a preference: an `@interface` is
+    /// [`DefKind::AnnotationType`], so the `kind != Interface` filter this replaces classified one
+    /// as *not* an interface and skipped it, while
+    /// [`direct_superclass`](Self::direct_superclass)'s positive filter did not claim it either —
+    /// so `@interface Marker {} class C implements Marker {}`, which is legal Java, lost the edge
+    /// entirely. The wasm lowering had always classified it positively (JLS §9.6: an annotation
+    /// type *is* an interface), so one question had two answers, one per backend.
+    ///
+    /// The pair with [`direct_superclass`](Self::direct_superclass) partitions `owner`'s edges; see
+    /// there for why that is the property worth keeping.
+    pub fn direct_interfaces(&self, owner: ItemId) -> impl Iterator<Item = ItemId> {
+        self.item(owner)
+            .supertypes
+            .iter()
+            .map(|supertype| supertype.id)
+            .filter(|&id| {
+                matches!(
+                    self.item(id).kind,
+                    DefKind::Interface | DefKind::AnnotationType
+                )
+            })
+    }
+
+    /// `start`'s superclass chain, nearest first: [`direct_superclass`](Self::direct_superclass) of
+    /// `start`, then *its* superclass, and so on. **`start` itself is not yielded.**
+    ///
+    /// Each type at most once, so the walk is finite for every input. It ends at the first type the
+    /// index does not hold **or** one already visited — and `start` counts as visited, which is what
+    /// makes `class C extends C {}` yield nothing rather than `C`, and stops
+    /// `class A extends B {} class B extends A {}` from handing `A` back to a caller that already
+    /// considered it.
+    ///
+    /// **The class chain only.** [`is_subtype`](Self::is_subtype),
+    /// [`resolve_member`](Self::resolve_member) and [`members_of`](Self::members_of) follow *every*
+    /// supertype edge, interfaces included; this follows one kind of edge. So `is_subtype(s, t)`
+    /// may hold for a `t` this never yields — an interface is a supertype and is not a superclass.
+    ///
+    /// Published because five consumers wrote this visited set themselves — a field lookup here, a
+    /// multi-catch join here and again in a backend, a wasm constructor search, a wasm class
+    /// ordering. Two shipped without one: the join hung the editor (every runtime here is
+    /// current-thread, so an oscillating walk is not one slow request), and the ordering guarded on
+    /// its *output* list, which a caller appends to only on the way back out, so an ancestor still
+    /// being visited was invisible to it and the recursion ran the stack out — an abort rather than
+    /// a panic, on input that parses and indexes perfectly.
+    ///
+    /// Lazy where the crate's other enumerations ([`members_of`](Self::members_of)) return a `Vec`,
+    /// because those accumulate over a *tree* through a callback and cannot stop early, while this
+    /// is a linear chain whose consumers do exactly that — one takes while its types stay inside a
+    /// declared set, another returns from the first ancestor declaring a constructor.
+    pub fn superclasses(&self, start: ItemId) -> impl Iterator<Item = ItemId> {
+        let mut visited = HashSet::new();
+        visited.insert(start);
+        let mut current = start;
+        core::iter::from_fn(move || {
+            let parent = self.direct_superclass(current)?;
+            if !visited.insert(parent) {
+                return None;
+            }
+            current = parent;
+            Some(parent)
+        })
+    }
+
+    /// The nearest class every entry in `items` is a subtype of — the erasure of their least upper
+    /// bound (JLS §4.10.4), which is what a multi-catch binding gets.
+    ///
+    /// Candidates come from the **first** entry's class chain, nearest first; membership is the
+    /// **full** subtype relation. The two halves read different edge sets on purpose: a common
+    /// *interface* is not a `catch` type and no descriptor records one — a class file writes the
+    /// erasure, which is the class — while [`is_subtype`](Self::is_subtype) must see every edge to
+    /// answer whether an arm reaches the candidate at all. Making them agree would change the answer
+    /// in both directions.
+    ///
+    /// The reflexive first step is the one candidate this does **not** filter by kind: a single
+    /// entry, or a first entry every other is a subtype of, is answered as itself even when it is an
+    /// interface. `common_superclass(&[I, C])` for `class C implements I` is `Some(I)`. That matches
+    /// both loops this replaces and is what a caller holding a written `catch` type wants; it is
+    /// also the one input on which "the nearest *class*" reads narrower than the code.
+    ///
+    /// `None` for an empty slice, and for a set whose shared ancestor the index does not hold. The
+    /// **fallback stays with the caller**, because the two that exist want different ones — the
+    /// inferer keeps the written type, a backend writes `java.lang.Throwable` — and only they can
+    /// say which. A single entry answers itself.
+    ///
+    /// This existed twice, once here and once in a backend, with the same predicate and the same
+    /// order; neither guarded against a cycle until both were found, and guarding each is what left
+    /// two of them.
+    pub fn common_superclass(&self, items: &[ItemId]) -> Option<ItemId> {
+        let (&first, rest) = items.split_first()?;
+        core::iter::once(first)
+            .chain(self.superclasses(first))
+            .find(|&candidate| rest.iter().all(|&other| self.is_subtype(other, candidate)))
+    }
+
+    /// `item` as a raw [`Ty`] — the project type itself, with no type arguments applied.
+    ///
+    /// `name` is the **simple** name, as [`ClassTy::Project`](crate::ClassTy::Project) documents and
+    /// as `Display for Ty` renders. Three callers derived that from the FQN by hand before this
+    /// existed, and a fourth — `ProjectIndex::object_ty`, in `infer.rs` — still writes the qualified
+    /// one, a difference that shows up as diagnostic text and so is being corrected separately
+    /// rather than folded in here.
+    ///
+    /// For a type written with arguments the answer is the *declaration*, not the parameterized use;
+    /// a caller holding a written spelling builds its own `ClassTy` from that spelling instead.
+    pub fn item_ty(&self, item: ItemId) -> Ty {
+        Ty::Class(ClassTy::Project {
+            id: item,
+            name: self.item(item).fqn.simple_name().to_owned(),
+            args: Vec::new(),
+        })
     }
 
     /// Whether project type `s` is `t` or a transitive subtype of it, walking `s`'s indexed
@@ -2334,11 +2510,20 @@ impl ProjectIndex {
         if same { Overrides::Yes } else { Overrides::No }
     }
 
-    /// Walks `start` and its project-internal supertypes, each visited once with a cycle guard in
-    /// nearest-first / earlier-declared-first order, calling `visit` on each. The first `Some`
-    /// `visit` yields stops the walk and is returned; an exhausted walk yields `None`. The shared
-    /// inheritance traversal behind member resolution ([`resolve_member`](Self::resolve_member)) and
-    /// subtyping ([`is_subtype`](Self::is_subtype)).
+    /// Walks `start` and its project-internal supertypes, each visited once with a cycle guard,
+    /// calling `visit` on each. The first `Some` `visit` yields stops the walk and is returned; an
+    /// exhausted walk yields `None`. The shared inheritance traversal behind member resolution
+    /// ([`resolve_member`](Self::resolve_member)) and subtyping ([`is_subtype`](Self::is_subtype)).
+    ///
+    /// Depth-first pre-order, earlier-declared-first among siblings: a LIFO stack pushing each
+    /// frame's supertypes reversed. So it is nearest-first only *along one chain* —
+    /// `class C extends B implements I` with `class B extends A` visits `C, B, A, Object, I`, and
+    /// `I` is at distance one. That is what JLS §8.4.8 wants (a class method beats an interface
+    /// default), and it is why [`superclasses`](Self::superclasses) — a chain, one parent per node,
+    /// where the two orders cannot diverge — is a separate walk rather than a filter over this one.
+    ///
+    /// **Every** supertype edge, interfaces included. [`superclasses`](Self::superclasses) follows
+    /// one kind; do not write either in terms of the other.
     fn walk_supertypes<R>(
         &self,
         start: ItemId,
@@ -2516,15 +2701,16 @@ impl ProjectIndex {
                 let simple = alloc::format!("{ordinal}");
                 let fqn = Self::build_fqn(package, enclosing.as_deref(), &simple);
                 let start = usize::from(node.text_range().start());
-                let supertype = enclosing
-                    .as_deref()
-                    .and_then(|fqn| fqn.rsplit('.').next())
-                    .map(|name| MemberType::Named {
-                        name: name.to_owned(),
-                        qualified: None,
-                        dims: 0,
-                        args: Vec::new(),
-                    });
+                let supertype =
+                    enclosing
+                        .as_deref()
+                        .map(Fqn::simple_name_of)
+                        .map(|name| MemberType::Named {
+                            name: name.to_owned(),
+                            qualified: None,
+                            dims: 0,
+                            args: Vec::new(),
+                        });
                 out.push(RawType {
                     fqn,
                     kind: DefKind::Class,
@@ -3276,6 +3462,14 @@ impl ProjectIndex {
     }
 }
 
+/// Tests for how the index is **built**.
+///
+/// The split with `jals-hir/tests/`: what the index *answers* is asked through the published
+/// surface and belongs there; how it *constructs* its edges — the implicit `java.lang.Object` edge,
+/// the arguments a supertype clause records — has no published answer and is asked here, beside the
+/// builder. That is not a preference. [`Item::supertypes`] is crate-private, so these assertions are
+/// unreachable from an integration test by construction, and the alternative to stating them here is
+/// not stating them.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3288,6 +3482,17 @@ mod tests {
 
     fn extract(root: &SyntaxNode) -> FileFacts {
         block_on_inline(ProjectIndex::extract_file(root))
+    }
+
+    /// One file, indexed with the embedded stdlib stubs folded in, so `java.lang.Object` is an
+    /// *indexed* type and the implicit edge has something to point at.
+    fn build_with_stubs(src: &str) -> ProjectIndex {
+        let root = parse_root(src);
+        block_on_inline(
+            ProjectIndex::builder(&[(FileId(0), root)])
+                .with_stdlib()
+                .build(),
+        )
     }
 
     /// A canonical, comparable projection of an index: each [`Item`] (which derives `PartialEq`)
@@ -3395,5 +3600,102 @@ mod tests {
         facts[0].1 = extract(&files[0].1);
         let incremental = assemble(&facts);
         assert_eq!(summary(&full), summary(&incremental));
+    }
+
+    /// `Object` does not extend itself, and a written `extends Object` is not doubled.
+    ///
+    /// Relocated from `tests/members.rs` when [`Item::supertypes`] became crate-private: the claim
+    /// is about the edge list the builder produces, and no published accessor exposes an implicit
+    /// edge as such.
+    #[test]
+    fn the_implicit_object_edge_is_added_exactly_once() {
+        let index = build_with_stubs("class Written extends Object {}");
+        let object = index
+            .item_by_fqn("java.lang.Object")
+            .expect("the stubs declare java.lang.Object");
+        assert!(
+            index.item(object).supertypes.is_empty(),
+            "Object must not be its own supertype"
+        );
+        let written = index.item_by_fqn("Written").expect("Written is indexed");
+        let to_object: Vec<bool> = index
+            .item(written)
+            .supertypes
+            .iter()
+            .filter(|sup| sup.id == object)
+            .map(|sup| sup.implicit)
+            .collect();
+        assert_eq!(
+            to_object,
+            [false],
+            "a written `extends Object` stays the one edge, and stays non-implicit"
+        );
+    }
+
+    /// With no stubs and no classpath there is no `java.lang.Object` to point at, and the absence
+    /// must stay an absence: marking the type as having an *external* supertype instead would
+    /// suppress every "no member" conclusion in the workspace.
+    #[test]
+    fn the_implicit_object_edge_is_absent_without_an_indexed_object() {
+        let root = parse_root("class Foo {}");
+        let index = block_on_inline(ProjectIndex::builder(&[(FileId(0), root)]).build());
+        let foo = index.item_by_fqn("Foo").expect("Foo is indexed");
+        assert!(index.item(foo).supertypes.is_empty());
+        assert!(
+            index.method_set_complete(foo, "anything"),
+            "an unindexed Object is not an external supertype"
+        );
+    }
+
+    /// A project-internal supertype records the type arguments the clause supplies (`extends
+    /// Base<String>` -> `[String]`), keyed to the resolved supertype item.
+    #[test]
+    fn supertype_arguments_are_recorded() {
+        let root = parse_root("class Base<T> { } class Sub extends Base<String> { }");
+        let index = block_on_inline(ProjectIndex::builder(&[(FileId(0), root)]).build());
+        let base_id = index.item_by_fqn("Base").expect("Base is indexed");
+        let sub = index.item(index.item_by_fqn("Sub").expect("Sub is indexed"));
+        assert_eq!(
+            sub.supertypes,
+            // One edge, not two: no stubs and no classpath here, so `java.lang.Object` is not an
+            // indexed type and the implicit edge has nothing to point at.
+            vec![Supertype {
+                id: base_id,
+                args: vec![MemberType::Named {
+                    name: "String".into(),
+                    qualified: None,
+                    dims: 0,
+                    args: Vec::new(),
+                }],
+                implicit: false,
+            }]
+        );
+    }
+
+    /// The edge carries the arguments the inherited-member substitution reads.
+    ///
+    /// Relocated from `tests/overrides.rs`, where its point was that a caller of the override rules
+    /// handles `Supertype` as part of the vocabulary. That stopped being true when the type was
+    /// withdrawn: a caller now sees only the answer. What the edge *records* is still worth pinning,
+    /// and this is the only place that can — the behavioural half, `class Box implements
+    /// Holder<Leaf>` declaring `put(Leaf)` overriding `put(T)`, is covered through the published
+    /// surface in `tests/overrides.rs`.
+    #[test]
+    fn a_supertype_carries_the_arguments_the_substitution_reads() {
+        let index = build_with_stubs(
+            "class Leaf {} interface Holder<T> { void put(T x); } class Box implements Holder<Leaf> { public void put(Leaf x) {} }",
+        );
+        let box_ = index.item_by_fqn("Box").expect("Box is indexed");
+        let holder_edge = index
+            .item(box_)
+            .supertypes
+            .iter()
+            .find(|s| !s.implicit)
+            .expect("Box declares Holder");
+        assert_eq!(holder_edge.args.len(), 1);
+        assert!(matches!(
+            &holder_edge.args[0],
+            MemberType::Named { name, dims: 0, .. } if name == "Leaf"
+        ));
     }
 }

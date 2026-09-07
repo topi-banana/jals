@@ -672,8 +672,16 @@ public class S {
 /// visited was invisible and the recursion aborted the process with a stack overflow. Nothing
 /// catches one of those, and the input reaches an editor as readily as a build.
 ///
-/// Three shapes, because the second walk is only reached once the first terminates: no
-/// constructors at all, explicit ones on both sides, and a third class hanging off the cycle.
+/// Five shapes, because the second walk is only reached once the first terminates: no constructors
+/// at all, explicit ones on both sides, a third class hanging off the cycle, and the two
+/// *self*-cycle shapes — `class C extends C {}` is the input `ProjectIndex::direct_superclass`
+/// answers `Some(C)` for by name, and until it was listed here neither backend had a fixture for it.
+///
+/// What this counts is functions, so it cannot see the shape of the emitted *types*. That half is
+/// by construction: `Layout::fill_class` declares the supertype `Layout::reserve_class` recorded
+/// rather than re-deriving it, and `Body::super_constructor` follows the same declared chain — see
+/// both doc comments. Before that, every source here emitted a module `wasm-tools validate`
+/// rejected, and this test passed.
 #[test]
 fn a_superclass_cycle_terminates_rather_than_recursing() {
     for (source, functions) in [
@@ -686,7 +694,76 @@ fn a_superclass_cycle_terminates_rather_than_recursing() {
             "class A extends B {} class B extends A {} class C extends A { C() {} }",
             1,
         ),
+        ("class C extends C {}", 0),
+        ("class C extends C { int x; C() {} }", 1),
     ] {
         assert_eq!(module_of(&[source]).funcs.len(), functions, "{source}");
     }
+}
+
+/// The super-constructor search stops at the first ancestor that *declares* one, even when that
+/// ancestor has no constructor it can call.
+///
+/// `class P { P(int x) {} }` declares a constructor and no no-arg one, so `class C extends P {}`
+/// has no reachable `super()` — javac rejects the program, and this backend emits a constructor
+/// that calls nothing rather than inventing a call.
+///
+/// Pinned because the obvious way to write this walk over a published chain is `find_map`, which
+/// compiles, passes every cycle test, and is wrong: `find_map` skips the `None` that `P` produces
+/// and keeps climbing, so `C` would call a *grandparent's* constructor and leave `P`'s fields at
+/// their defaults — in a module that validates.
+#[test]
+fn the_super_constructor_search_stops_at_the_first_ancestor_declaring_one() {
+    // `G` is what a `find_map` would climb past `P` and reach: it declares a no-arg constructor, so
+    // the wrong walk has something to emit a call to.
+    let module = module_of(&[
+        "class G { G() {} } class P extends G { P(int x) {} } class C extends P { C() {} }",
+    ]);
+    let calls: usize = module
+        .funcs
+        .iter()
+        .map(|func| {
+            func.body
+                .iter()
+                .filter(|instruction| matches!(instruction, Instr::Call(_)))
+                .count()
+        })
+        .sum();
+    // One, and exactly one: `P(int)` calls `G()`, which is a real `super()` the source implies.
+    // `C()` adds none, because `P` declares a constructor and no no-arg one — the search stops
+    // there. Under a `find_map` this is two, the second being `C()` calling `G()` directly.
+    assert_eq!(
+        calls, 1,
+        "only `P(int)`'s own `super()` is emitted; `C()` reaches no super-constructor"
+    );
+}
+
+/// ...and it does not stop *before* one: an ancestor that declares no constructor is a link in the
+/// chain, not its end.
+///
+/// The mirror of the test above, and the half nothing covered — truncating the walk to
+/// `superclasses(owner).take(1)` left every test in this crate green. `P` contributes no
+/// constructor function of its own, so a walk that stopped there would never reach `G`'s
+/// synthesised one and `C()` would skip `G`'s field initialisers, leaving `x` at zero in a module
+/// that validates.
+#[test]
+fn the_super_constructor_search_continues_past_an_ancestor_that_declares_none() {
+    let module =
+        module_of(&["class G { int x = 1; } class P extends G {} class C extends P { C() {} }"]);
+    let calls: usize = module
+        .funcs
+        .iter()
+        .map(|func| {
+            func.body
+                .iter()
+                .filter(|instruction| matches!(instruction, Instr::Call(_)))
+                .count()
+        })
+        .sum();
+    // One: `C()` reaches `G`'s synthesised initialiser through the constructor-less `P`. Under a
+    // walk that stops at the first ancestor whatever it holds, this is zero.
+    assert_eq!(
+        calls, 1,
+        "`C()` calls `G`'s initialiser through the constructor-less `P`"
+    );
 }

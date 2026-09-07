@@ -9,7 +9,7 @@
 //! JDK and in CI's `wasm32-wasip1` cell, which is why the rule now lives on the index and is
 //! verified here instead, with no host in reach.
 
-use jals_hir::{DefKind, FileId, ItemId, MemberId, MemberType, Overrides, ProjectIndex, Supertype};
+use jals_hir::{DefKind, FileId, ItemId, MemberId, MemberType, Overrides, ProjectIndex};
 use jals_syntax::SyntaxNode;
 
 /// Parses each source (keeping the `SOURCE_FILE` nodes alive) and builds a [`ProjectIndex`].
@@ -360,22 +360,262 @@ fn a_cyclic_hierarchy_still_answers_the_relation() {
     let _ = index.overrides(method(&index, a, "f", &[]), method(&index, b, "f", &[]));
 }
 
-/// `Supertype` is part of the vocabulary these answers are read against; naming it here keeps the
-/// import list honest about what a caller of this rule handles.
+// ---------------------------------------------------------------------------
+// The hierarchy walk the rules above are built on, and the two edge answers it
+// is distinct from. Published because five consumers wrote this visited set
+// themselves; two shipped without one, and they wedged the editor and aborted
+// the process on input that parses and indexes perfectly.
+// ---------------------------------------------------------------------------
+
+/// The chain is nearest-first and does not lead with its own start.
+///
+/// Pinned as a sequence, not as membership: the order is what makes a shadowing field win in
+/// `inherited_field` and what makes a multi-catch join answer the *nearest* shared class, and until
+/// now nothing asserted it.
 #[test]
-fn a_supertype_carries_the_arguments_the_substitution_reads() {
+fn the_superclass_chain_is_nearest_first_and_excludes_its_start() {
+    let sources = ["class Base {} class Mid extends Base {} class Leaf extends Mid {}"];
+    let (_nodes, index) = build(&sources);
+    let object = item(&index, "java.lang.Object");
+
+    let chain: Vec<ItemId> = index.superclasses(item(&index, "Leaf")).collect();
+    assert_eq!(
+        chain,
+        [item(&index, "Mid"), item(&index, "Base"), object],
+        "nearest first, `Leaf` itself absent, ending at the indexed `Object`"
+    );
+}
+
+/// A supertype cycle parses and indexes, so the walk has to terminate on one — by visiting each type
+/// once, which also answers for a chain deeper than any fixed bound.
+#[test]
+fn a_cyclic_superclass_chain_yields_each_type_once() {
+    let sources = ["class A extends B {} class B extends A {}"];
+    let (_nodes, index) = build(&sources);
+
+    assert_eq!(
+        index.superclasses(item(&index, "A")).collect::<Vec<_>>(),
+        [item(&index, "B")]
+    );
+    assert_eq!(
+        index.superclasses(item(&index, "B")).collect::<Vec<_>>(),
+        [item(&index, "A")]
+    );
+}
+
+/// The one input on which the step and the walk disagree, asserted together so the divergence is
+/// documented where a reader of either will meet it.
+///
+/// `ClassFile.super_class` emits the edge the source wrote, cycle or not, so the step must keep
+/// answering `Some(C)`. A chain that re-entered its own start would report `C` as its own ancestor.
+#[test]
+fn a_self_referential_superclass_is_not_its_own_superclass() {
+    let sources = ["class C extends C {}"];
+    let (_nodes, index) = build(&sources);
+    let c = item(&index, "C");
+
+    assert_eq!(index.direct_superclass(c), Some(c), "the written edge");
+    assert!(
+        index.superclasses(c).next().is_none(),
+        "the chain does not re-enter its start"
+    );
+}
+
+/// A type's own field is found before the chain is walked at all.
+///
+/// `inherited_field` leads with `from` because `superclasses` excludes its start, and nothing
+/// asserted that: every shadowing case in this file declares the field on two *ancestors* and asks
+/// from a third, so the answer comes from the chain either way and dropping the head passes.
+#[test]
+fn a_type_finds_its_own_field_before_any_inherited_one() {
+    let sources = ["class Base { int x; } class Sub extends Base { int x; }"];
+    let (_nodes, index) = build(&sources);
+    let (base, sub) = (item(&index, "Base"), item(&index, "Sub"));
+
+    let found = index.inherited_field(sub, "x").expect("`Sub` declares `x`");
+    assert_eq!(
+        index.member(found).owner,
+        sub,
+        "`Sub`'s own `x` shadows `Base`'s"
+    );
+    assert_eq!(
+        index
+            .member(
+                index
+                    .inherited_field(base, "x")
+                    .expect("`Base` declares `x`")
+            )
+            .owner,
+        base,
+        "and `Base` still answers with its own"
+    );
+}
+
+/// The chain follows one kind of edge where `is_subtype` follows every kind.
+///
+/// An interface is a supertype and is not a superclass; a walk that conflated the two would put a
+/// `catch` type's interfaces into a multi-catch join and a layout's slots onto an interface.
+#[test]
+fn the_chain_follows_no_interface() {
+    let sources = ["interface I {} class B {} class C extends B implements I {}"];
+    let (_nodes, index) = build(&sources);
+    let (c, i) = (item(&index, "C"), item(&index, "I"));
+
+    assert!(index.is_subtype(c, i), "C is a subtype of I");
+    assert!(
+        !index.superclasses(c).any(|id| id == i),
+        "and I is still not on C's superclass chain"
+    );
+}
+
+/// An `@interface` is an interface (JLS §9.6), and both edge answers have to agree about that.
+///
+/// The regression this pins: the JVM lowering selected interfaces *negatively* (`kind != Interface`),
+/// so it skipped an `AnnotationType` edge, while the positive superclass filter did not claim it
+/// either — the edge went missing from the emitted class file entirely.
+#[test]
+fn an_annotation_type_is_a_direct_interface_and_not_a_superclass() {
+    let sources = ["@interface Marker {} class C implements Marker {}"];
+    let (_nodes, index) = build(&sources);
+    let c = item(&index, "C");
+
+    assert_eq!(
+        index.direct_interfaces(c).collect::<Vec<_>>(),
+        [item(&index, "Marker")]
+    );
+    assert_eq!(
+        index.direct_superclass(c),
+        Some(item(&index, "java.lang.Object"))
+    );
+}
+
+/// An `@interface` is a reference type, so it carries the implicit `java.lang.Object` edge that
+/// every other type-declaration kind does.
+///
+/// Leaving `DefKind::AnnotationType` out of the builder's kind list was the same silent
+/// reclassification the `kind != Interface` filters were, one layer down: without the edge
+/// `Object o = someAnnotation;` is a mismatch and `someAnnotation.toString()` an unresolved name,
+/// on legal Java, while the backend emits the type with `ACC_INTERFACE` and the `Annotation`
+/// superinterface.
+#[test]
+fn an_annotation_type_is_a_subtype_of_object_like_every_other_reference_type() {
+    let sources = ["@interface Marker {} interface I {}"];
+    let (_nodes, index) = build(&sources);
+    let (marker, iface) = (item(&index, "Marker"), item(&index, "I"));
+    let object = item(&index, "java.lang.Object");
+
+    for (name, id) in [("Marker", marker), ("I", iface)] {
+        assert!(index.is_subtype(id, object), "{name} is an Object");
+        assert_eq!(
+            index.superclasses(id).collect::<Vec<_>>(),
+            [object],
+            "{name}'s chain is the implicit Object edge"
+        );
+        assert!(
+            index
+                .resolve_member(id, "toString", jals_hir::Namespace::Method)
+                .is_some(),
+            "{name} inherits Object's public instance methods"
+        );
+    }
+}
+
+/// `ClassFile.interfaces` is emitted from this in sequence, and a generic type's `Signature` is
+/// written against the same sequence — so the order is contract, not incidental.
+#[test]
+fn direct_interfaces_keeps_the_order_the_source_wrote() {
+    let sources = ["interface A {} interface B {} class C implements B, A {}"];
+    let (_nodes, index) = build(&sources);
+
+    assert_eq!(
+        index
+            .direct_interfaces(item(&index, "C"))
+            .collect::<Vec<_>>(),
+        [item(&index, "B"), item(&index, "A")],
+        "declaration order, not resolution order"
+    );
+}
+
+/// Every supertype the source *wrote* is claimed by exactly one of the two edge answers, and an
+/// `@interface` by the interface half — which is the property both filters are written positively
+/// for.
+///
+/// Deliberately not called a partition of the type's edges: it is not one. `direct_superclass` is a
+/// `.find`, so `C`'s implicit `java.lang.Object` edge — which it carries beside the written
+/// `extends B` — is claimed by neither answer. `ProjectIndex::direct_superclass`'s doc says so, and
+/// the edge list it is a claim about is crate-private, so the whole-edge-set assertion lives beside
+/// the builder in `project.rs` instead.
+#[test]
+fn the_two_edge_answers_claim_every_written_supertype() {
     let sources = [
-        "class Leaf {} interface Holder<T> { void put(T x); } class Box implements Holder<Leaf> { public void put(Leaf x) {} }",
+        "@interface Marker {} interface I {} class B {} class C extends B implements I, Marker {}",
     ];
     let (_nodes, index) = build(&sources);
-    let box_ = item(&index, "Box");
+    let c = item(&index, "C");
 
-    let holder_edge: &Supertype = index
-        .item(box_)
-        .supertypes
-        .iter()
-        .find(|s| !s.implicit)
-        .expect("Box declares Holder");
-    assert_eq!(holder_edge.args.len(), 1);
-    assert_eq!(spelling(&holder_edge.args[0]), "Leaf");
+    let mut edges: Vec<ItemId> = index.direct_superclass(c).into_iter().collect();
+    edges.extend(index.direct_interfaces(c));
+    edges.sort_unstable();
+    let mut expected = vec![item(&index, "B"), item(&index, "I"), item(&index, "Marker")];
+    expected.sort_unstable();
+    assert_eq!(
+        edges, expected,
+        "every written edge is claimed exactly once"
+    );
+}
+
+/// The join answers the nearest class every entry reaches, and says nothing when it cannot.
+#[test]
+fn common_superclass_answers_the_nearest_shared_class() {
+    let sources = ["class Base {} class L extends Base {} class R extends Base {}"];
+    let (_nodes, index) = build(&sources);
+    let (base, l, r) = (item(&index, "Base"), item(&index, "L"), item(&index, "R"));
+
+    assert_eq!(index.common_superclass(&[l, r]), Some(base));
+    assert_eq!(
+        index.common_superclass(&[l]),
+        Some(l),
+        "a single entry is itself"
+    );
+    assert_eq!(index.common_superclass(&[]), None);
+}
+
+/// A shared *interface* is not the answer, even when it is the only thing both entries have in
+/// common besides `Object`.
+///
+/// A class file writes the erasure of a multi-catch's lub, and that erasure is a class — no
+/// descriptor records the interfaces. Nothing asserted this before, in either of the two places
+/// that computed it.
+#[test]
+fn common_superclass_ignores_a_shared_interface() {
+    let sources = ["interface I {} class L implements I {} class R implements I {}"];
+    let (_nodes, index) = build(&sources);
+
+    assert_eq!(
+        index.common_superclass(&[item(&index, "L"), item(&index, "R")]),
+        Some(item(&index, "java.lang.Object")),
+        "the shared class, not the shared interface"
+    );
+}
+
+/// The join terminates on a cycle rather than oscillating — the defect that hung the editor when
+/// this existed twice and neither copy had a visited set.
+#[test]
+fn common_superclass_terminates_on_a_cycle() {
+    let sources = ["class A extends B {} class B extends A {} class Z {}"];
+    let (_nodes, index) = build(&sources);
+
+    // The answer on a malformed hierarchy is uninteresting; returning at all is the assertion.
+    let _ = index.common_superclass(&[item(&index, "A"), item(&index, "Z")]);
+}
+
+/// `ClassTy::Project::name` is the **simple** name, which is the fact three hand-written copies of
+/// this construction each re-derived from the FQN.
+#[test]
+fn item_ty_names_the_type_by_its_simple_name() {
+    let sources = ["class Outer { class Inner {} }"];
+    let (_nodes, index) = build(&sources);
+
+    let ty = index.item_ty(item(&index, "Outer.Inner"));
+    assert_eq!(ty.to_string(), "Inner", "not the qualified `Outer.Inner`");
 }

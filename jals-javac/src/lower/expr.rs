@@ -837,23 +837,31 @@ impl Expr {
         // interface is not `C`'s, and the class file it produced was refused at load with "interface
         // method to invoke is not in a direct superinterface". javac names the direct superclass, so
         // this does. `Iface.super.m()` (JLS §15.12.1) is the other receiver and is still not handled.
-        let (owner_item, owner) =
-            if super_qualified {
-                let superclass = context.index.superclass_of(context.this_item).ok_or(
-                    LowerError::Unsupported("a `super.` call with no indexed superclass"),
-                )?;
-                (
-                    superclass,
-                    Descriptor::internal_name_of(superclass, context.index),
-                )
-            } else {
-                (
-                    info.owner,
-                    Descriptor::internal_name_of(info.owner, context.index),
-                )
-            };
+        let (owner_item, owner) = if super_qualified {
+            let superclass = context.index.direct_superclass(context.this_item).ok_or(
+                LowerError::Unsupported("a `super.` call with no indexed superclass"),
+            )?;
+            (
+                superclass,
+                Descriptor::internal_name_of(superclass, context.index),
+            )
+        } else {
+            (
+                info.owner,
+                Descriptor::internal_name_of(info.owner, context.index),
+            )
+        };
         Self::check_protected_receiver(call, member, context)?;
-        let interface_owner = context.index.item(owner_item).kind == DefKind::Interface;
+        // Positively, for the reason `ProjectIndex::direct_interfaces` states: an `@interface` is
+        // `DefKind::AnnotationType` and *is* an interface (JLS §9.6), and `class_file` emits one with
+        // `ACC_INTERFACE` set. Asking `kind != Interface` here answered "not an interface" for it and
+        // produced an `invokevirtual` against a `Methodref` naming an interface method, which is an
+        // `IncompatibleClassChangeError` at the first call rather than anything the verifier reports
+        // — the same rule `Compile::method_reference`'s `owner_is_interface` already spells out.
+        let interface_owner = matches!(
+            context.index.item(owner_item).kind,
+            DefKind::Interface | DefKind::AnnotationType
+        );
         // The receiver comes first on the stack, below the arguments.
         if !is_static {
             match call.callee() {

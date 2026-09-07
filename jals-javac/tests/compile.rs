@@ -7162,6 +7162,12 @@ fn a_superclass_cycle_compiles_rather_than_recursing() {
             "class A extends B {} class B extends A {} class C extends A { C() {} }",
             3,
         ),
+        // The self-cycle, which `ProjectIndex::direct_superclass` answers `Some(C)` for by name.
+        // What comes out is `super_class == this_class`, which a JVM refuses at load with
+        // `ClassCircularityError` — this asserts only that the lowering finishes, exactly as the
+        // mutual shapes above do, because on this input there is no class file that both loads and
+        // says what the source wrote.
+        ("class C extends C {}", 1),
     ] {
         assert_eq!(
             compile(source).map(|classes| classes.len()).ok(),
@@ -7169,4 +7175,201 @@ fn a_superclass_cycle_compiles_rather_than_recursing() {
             "{source}"
         );
     }
+}
+
+/// An `@interface` supertype reaches the `interfaces` list too, and its `Signature` survives.
+///
+/// An annotation type *is* an interface (JLS §9.6). The filter this pins replaced a negative one —
+/// `kind != DefKind::Interface` — which classified `DefKind::AnnotationType` as "not an interface"
+/// and skipped it, while the positive superclass filter did not claim it either: the edge went
+/// missing from the class file entirely. No JVM needed to see it, which is why this asserts on the
+/// emitted bytes rather than through `run` — CI's wasm cell has no JDK, and that is where this
+/// backend is checked hardest.
+///
+/// The second half is the effect that hides behind the first. `class_signature` writes the declared
+/// generic supertypes only when its interface list has the length the edge walk produced; one short,
+/// and every written type argument silently demotes to an erased name.
+#[test]
+fn an_annotation_type_supertype_is_listed_as_an_interface() {
+    let source = "
+@interface Marker {}
+
+interface Holder<T> {
+    T get();
+}
+
+class Held<T> implements Holder<T>, Marker {
+    public T get() { return null; }
+}
+";
+    let classes = compile(source).expect("compile");
+    let held = classes
+        .iter()
+        .find(|class| class.internal_name == "Held")
+        .expect("the implementing class");
+    let class = jals_exec::block_on_inline(jals_classfile::ClassFile::read(held.bytes.as_slice()))
+        .expect("reparse");
+
+    let named: Vec<String> = class
+        .interfaces
+        .iter()
+        .map(|&index| {
+            class
+                .constant_pool
+                .class_name(index)
+                .expect("a Class entry")
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(
+        named,
+        ["Holder", "Marker"],
+        "both edges, in the order the source listed them"
+    );
+
+    let signature = class
+        .attributes
+        .iter()
+        .find_map(|attribute| match &attribute.body {
+            jals_classfile::AttributeBody::Signature { signature_index } => Some(
+                class
+                    .constant_pool
+                    .utf8(*signature_index)
+                    .expect("utf8")
+                    .into_owned(),
+            ),
+            _ => None,
+        })
+        .expect("a generic class carries a Signature");
+    assert!(
+        signature.contains("LHolder<TT;>;"),
+        "the written type argument survives rather than demoting to an erased name: {signature}"
+    );
+}
+
+/// A call whose owner is an `@interface` is an `invokeinterface`, like any other interface call.
+///
+/// The declaration side of this was the PR that added `ProjectIndex::direct_interfaces`: an
+/// annotation type *is* an interface (JLS §9.6), so `class_file` emits one with `ACC_INTERFACE` set
+/// and lists it among a subtype's `interfaces`. The dispatch side kept asking
+/// `kind == DefKind::Interface`, which `DefKind::AnnotationType` fails, so the call came out
+/// `invokevirtual` against a `Methodref` naming an interface method — `IncompatibleClassChangeError`
+/// at the first call (JVMS §5.4.3.3), from a class file that loads and verifies.
+///
+/// Asserted on the emitted instruction rather than through `run`, because CI's wasm cell has no JVM
+/// and a stood-down assertion reads as a pass.
+#[test]
+fn a_call_on_an_annotation_type_receiver_is_an_invokeinterface() {
+    let source = "
+@interface Marker { int value(); }
+
+class Use {
+    static int read(Marker m) { return m.value(); }
+}
+";
+    let classes = compile(source).expect("compile");
+    let use_class = classes
+        .iter()
+        .find(|class| class.internal_name == "Use")
+        .expect("the calling class");
+    let class =
+        jals_exec::block_on_inline(jals_classfile::ClassFile::read(use_class.bytes.as_slice()))
+            .expect("reparse");
+    let invocations: Vec<&jals_classfile::Instruction> = class
+        .methods
+        .iter()
+        .flat_map(|method| &method.attributes)
+        .filter_map(|attribute| match &attribute.body {
+            jals_classfile::AttributeBody::Code(code) => Some(&code.code),
+            _ => None,
+        })
+        .flatten()
+        .filter(|instruction| {
+            matches!(
+                instruction,
+                jals_classfile::Instruction::InvokeInterface { .. }
+                    | jals_classfile::Instruction::InvokeVirtual(_)
+            )
+        })
+        .collect();
+    assert!(
+        matches!(
+            invocations.as_slice(),
+            [jals_classfile::Instruction::InvokeInterface { .. }]
+        ),
+        "one call, and it names an interface method: {invocations:?}"
+    );
+}
+
+/// A generic *interface*'s `ClassSignature` puts `Object` in the superclass slot and keeps its
+/// superinterfaces' type arguments.
+///
+/// The class shape of this is `an_annotation_type_supertype_is_listed_as_an_interface` above. The
+/// interface shape had the same demotion for a different reason and it fired every time: an
+/// interface writes its superinterfaces in an `extends` clause, so reading `extends` as the
+/// superclass put the first one in the superclass position — which JVMS §4.7.9.1 requires to be
+/// `Ljava/lang/Object;` for an interface, and which then contradicts the `super_class` the same
+/// class file emits — while the `implements` list stayed empty and the length gate sent every
+/// superinterface down the erased branch. `interface I<T> extends J<T>, K<T>` wrote
+/// `<T:Ljava/lang/Object;>LJ<TT;>;LJ;LK;`, so a downstream `javac` read `I<String>.get()` as
+/// `Object`.
+#[test]
+fn a_generic_interfaces_signature_keeps_its_superinterface_arguments() {
+    let source = "
+interface J<T> {}
+
+interface K<T> { T get(); }
+
+interface I<T> extends J<T>, K<T> {}
+";
+    let classes = compile(source).expect("compile");
+    let iface = classes
+        .iter()
+        .find(|class| class.internal_name == "I")
+        .expect("the extending interface");
+    let class = jals_exec::block_on_inline(jals_classfile::ClassFile::read(iface.bytes.as_slice()))
+        .expect("reparse");
+
+    assert_eq!(
+        class
+            .constant_pool
+            .class_name(class.super_class)
+            .expect("a Class entry"),
+        "java/lang/Object"
+    );
+    let named: Vec<String> = class
+        .interfaces
+        .iter()
+        .map(|&index| {
+            class
+                .constant_pool
+                .class_name(index)
+                .expect("a Class entry")
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(
+        named,
+        ["J", "K"],
+        "both, in the order the source listed them"
+    );
+
+    let signature = class
+        .attributes
+        .iter()
+        .find_map(|attribute| match &attribute.body {
+            jals_classfile::AttributeBody::Signature { signature_index } => Some(
+                class
+                    .constant_pool
+                    .utf8(*signature_index)
+                    .expect("utf8")
+                    .into_owned(),
+            ),
+            _ => None,
+        })
+        .expect("a generic interface carries a Signature");
+    assert_eq!(
+        signature, "<T:Ljava/lang/Object;>Ljava/lang/Object;LJ<TT;>;LK<TT;>;",
+        "the superclass slot is `Object` and both arguments survive"
+    );
 }
