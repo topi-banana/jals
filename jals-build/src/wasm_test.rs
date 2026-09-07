@@ -44,6 +44,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 use jals_exec::Exec;
+use jals_native::NativeBindings;
 use jals_progress::Progress;
 
 use crate::test_plan::TestCase;
@@ -79,6 +80,11 @@ pub struct WasmTestLauncher {
     /// module the whole run could not have used.
     module: ParsedModule,
     entries: Vec<WasmTestEntry>,
+    /// The implementations of every `native` method the module imports.
+    ///
+    /// Empty for a project that selected no package, which is what makes the fan-out below the
+    /// ordinary path rather than a special case — see [`run`](Self::run).
+    bindings: NativeBindings,
 }
 
 impl WasmTestLauncher {
@@ -88,10 +94,15 @@ impl WasmTestLauncher {
     /// anything else — and executes none of it. Running the start function is
     /// [`run`](Self::run)'s, for the reason the module docs give: it is the project's own code,
     /// and `jals test --list` reaches this constructor while running no test at all.
-    pub fn resolve(module: &[u8], entries: Vec<WasmTestEntry>) -> Result<Self, WasmRunError> {
+    pub fn resolve(
+        module: &[u8],
+        entries: Vec<WasmTestEntry>,
+        bindings: NativeBindings,
+    ) -> Result<Self, WasmRunError> {
         Ok(Self {
             module: WasmRunner::parse(module)?,
             entries,
+            bindings,
         })
     }
 
@@ -114,6 +125,10 @@ impl WasmTestLauncher {
     /// while `observe` fires in completion order, which is what a live progress display needs.
     /// Both properties are `Exec::fan_out`'s, exactly as on the JVM path.
     ///
+    /// A run that links a native package runs its cases **in order on this task** rather than
+    /// fanning out: a package's implementations capture the host's own state and are `!Send`, and
+    /// two workers writing one console would interleave the suite's output in any case.
+    ///
     /// Instantiates once before the first test and returns that failure whole rather than running
     /// anything — the precondition the `#[should_fail]` inversion rests on, described in the
     /// module docs. Silent: the probe is machinery rather than work the caller asked about, and a
@@ -125,7 +140,7 @@ impl WasmTestLauncher {
         observe: Arc<dyn Fn(TestEvent) + Send + Sync>,
         exec: &Exec,
     ) -> Result<Vec<TestOutcome>, WasmRunError> {
-        WasmRunner::run_parsed(&self.module, None, &[], &Progress::SILENT)?;
+        WasmRunner::run_parsed(&self.module, None, &[], &self.bindings, &Progress::SILENT)?;
         let shared = Arc::new(SharedWasmRun {
             module: self.module.clone(),
             exports: self
@@ -138,13 +153,27 @@ impl WasmTestLauncher {
             max_fail: options.max_fail,
             observe,
         });
-        let jobs: Vec<_> = cases
-            .iter()
-            .map(|case| (case.clone(), Arc::clone(&shared)))
-            .collect();
-        Ok(exec
-            .fan_out(jobs, |(case, shared)| async move { shared.run_one(&case) })
-            .await)
+        // A native package's implementations are host closures over the host's own state — a
+        // console buffer, a counter — so they are `!Send` by construction and cannot reach a
+        // fan-out worker. That is not a limitation to route around: two workers writing one
+        // console would interleave a suite's output anyway. So a run that links a package runs its
+        // cases in order on this task, and one that links none fans out exactly as before.
+        if self.bindings.is_empty() {
+            let jobs: Vec<_> = cases
+                .iter()
+                .map(|case| (case.clone(), Arc::clone(&shared)))
+                .collect();
+            return Ok(exec
+                .fan_out(jobs, |(case, shared)| async move {
+                    shared.run_one(&case, &NativeBindings::new())
+                })
+                .await);
+        }
+        let mut outcomes = Vec::with_capacity(cases.len());
+        for case in cases {
+            outcomes.push(shared.run_one(case, &self.bindings));
+        }
+        Ok(outcomes)
     }
 }
 
@@ -167,7 +196,7 @@ impl SharedWasmRun {
             .is_some_and(|limit| self.failures.load(Ordering::Relaxed) >= limit)
     }
 
-    fn run_one(&self, case: &TestCase) -> TestOutcome {
+    fn run_one(&self, case: &TestCase, bindings: &NativeBindings) -> TestOutcome {
         if self.exhausted() {
             return Self::never_started(case);
         }
@@ -180,7 +209,7 @@ impl SharedWasmRun {
         (self.observe)(TestEvent::Started(case.id().to_owned()));
 
         let started = Instant::now();
-        let (verdict, detail) = self.judge(case);
+        let (verdict, detail) = self.judge(case, bindings);
         let outcome = TestOutcome {
             id: case.id().to_owned(),
             verdict,
@@ -212,7 +241,7 @@ impl SharedWasmRun {
     /// Everything else the engine can return is this runner failing to *reach* the test, and is
     /// never inverted: a missing export reported as a pass because the test was expected to fail
     /// is a test that did not run claiming it did.
-    fn judge(&self, case: &TestCase) -> (TestVerdict, Option<String>) {
+    fn judge(&self, case: &TestCase, bindings: &NativeBindings) -> (TestVerdict, Option<String>) {
         let Some((_, export)) = self.exports.iter().find(|(id, _)| id == case.id()) else {
             return (
                 TestVerdict::Failed { code: None },
@@ -222,7 +251,8 @@ impl SharedWasmRun {
         // Silent: a test run reports through `observe`, which is what the reporter draws from, and
         // a second `Run` event per test would put the engine's own activity beside it saying the
         // same thing in another vocabulary.
-        let result = WasmRunner::run_parsed(&self.module, Some(export), &[], &Progress::SILENT);
+        let result =
+            WasmRunner::run_parsed(&self.module, Some(export), &[], bindings, &Progress::SILENT);
         match result {
             Ok(WasmRunOutcome::Returned(_) | WasmRunOutcome::Instantiated) => {
                 if case.should_fail() {
@@ -295,7 +325,10 @@ mod tests {
             options: &options,
             progress: &Progress::SILENT,
         };
-        let backend = JalsBackend::wasm(crate::Assertions::Enabled);
+        let backend = JalsBackend::wasm(
+            crate::Assertions::Enabled,
+            jals_native::NativePackageSet::empty(),
+        );
         let outcome =
             jals_exec::block_on_inline(backend.compile(&request)).expect("the backend ran");
         assert!(
@@ -320,7 +353,8 @@ mod tests {
         module: &[u8],
         entries: Vec<WasmTestEntry>,
     ) -> Vec<(String, TestVerdict, Option<String>)> {
-        let launcher = WasmTestLauncher::resolve(module, entries).expect("the module parses");
+        let launcher = WasmTestLauncher::resolve(module, entries, NativeBindings::new())
+            .expect("the module parses");
         let cases = launcher.list();
         let outcomes = jals_exec::block_on_inline(launcher.run(
             &cases,
@@ -457,9 +491,12 @@ mod tests {
              \x20   public static void JalsTest$T$t() {}\n\
              }\n",
         );
-        let launcher =
-            WasmTestLauncher::resolve(&module, alloc::vec![entry("T#t", "JalsTest$T$t", true)])
-                .expect("the module parses");
+        let launcher = WasmTestLauncher::resolve(
+            &module,
+            alloc::vec![entry("T#t", "JalsTest$T$t", true)],
+            NativeBindings::new(),
+        )
+        .expect("the module parses");
         let cases = launcher.list();
         assert_eq!(cases.len(), 1, "listing runs none of the module");
         let error = jals_exec::block_on_inline(launcher.run(

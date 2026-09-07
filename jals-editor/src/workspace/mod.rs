@@ -249,6 +249,14 @@ pub struct ProjectLayout {
     /// The `.java` of each `git`/`path` `[dependencies]` entry (virtual paths): index inputs
     /// (`Source`-origin types that resolve for analysis) *and* navigation targets.
     pub source_dep_sources: Vec<FileKey>,
+    /// The Java each selected **native package** publishes: index inputs
+    /// ([`Native`](jals_hir::ItemOrigin::Native)-origin types) and nothing else.
+    ///
+    /// Carried as text rather than as a [`FileKey`] because there is no file: a package's Java is a
+    /// compile-time constant in the binary that shipped it, which is also why nothing navigates
+    /// into one. Without them a project that selected a package sees every reference into it as an
+    /// unresolved name — the analysis would be reporting the absence of code the build compiles.
+    pub native_sources: Vec<PackageSource>,
     /// The project's resolved language feature set (from `[package] features`); empty when the
     /// manifest declares none, disabling the feature-gated lint rules.
     pub feature_set: FeatureSet,
@@ -257,6 +265,17 @@ pub struct ProjectLayout {
     /// `attributes` dialect; empty otherwise, so an attribute-free project's analysis is
     /// independent of the selection.
     pub build_features: BTreeSet<String>,
+}
+
+/// One Java compilation unit a native package publishes, as the workspace receives it.
+///
+/// Deliberately not a [`FileKey`]: the text never came from storage and no host can open it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageSource {
+    /// The logical path, used for ordering and diagnostics only.
+    pub path: String,
+    /// The Java itself.
+    pub text: String,
 }
 
 impl ProjectLayout {
@@ -333,6 +352,11 @@ pub struct Workspace<S: SourceBackend, C: CacheBackend> {
     /// rebuild (they never change), so the stubs are never re-parsed per edit. Their reserved
     /// [`FileId`]s are disjoint from the project / library id-spaces.
     stub_facts: Vec<(FileId, FileFacts)>,
+    /// The facts of the Java each selected native package publishes, extracted once at
+    /// construction and reused on every rebuild — a package's text is a constant in the binary, so
+    /// like the stubs it is never re-parsed per edit. Only the *facts* are kept: there is no file
+    /// behind them, so nothing else in this type would ever have one to hand back.
+    native_facts: Vec<(FileId, FileFacts)>,
     index: ProjectIndex,
 }
 
@@ -367,6 +391,18 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
         let source_dep_files =
             SourceFile::read_all(&exec, &view, &spec.source_dep_sources, ExtractFacts::Plain).await;
 
+        // A native package's Java, parsed and extracted once. Nothing is kept but the facts,
+        // because nothing else is answerable about it: it has no file to open and no overlay to
+        // edit.
+        let mut native_facts = Vec::with_capacity(spec.native_sources.len());
+        for (k, source) in spec.native_sources.iter().enumerate() {
+            let root = jals_syntax::Parse::parse(&source.text).await.syntax();
+            native_facts.push((
+                WorkspaceFileId::of_index(WorkspaceFileId::Native, k),
+                ProjectIndex::extract_file(&root).await,
+            ));
+        }
+
         let mut ws = Self {
             exec,
             storage,
@@ -386,6 +422,7 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
             build_features: spec.build_features,
             // Extracted once; reused on every rebuild (the stubs never change).
             stub_facts: ProjectIndex::stub_facts().await,
+            native_facts,
         };
         ws.reload_project_files().await;
         ws
@@ -485,9 +522,15 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
             .iter()
             .map(|(file, ff)| (*file, ff))
             .collect();
+        let native: Vec<(FileId, &FileFacts)> = self
+            .native_facts
+            .iter()
+            .map(|(file, ff)| (*file, ff))
+            .collect();
         self.index = ProjectIndex::assemble(
             &project,
             &source_deps,
+            &native,
             &stub,
             &self.classpath,
             &self.source_locations,
@@ -526,6 +569,9 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
             WorkspaceFileId::Project(i) => self.files.get(i as usize),
             WorkspaceFileId::Library(i) => self.library_files.get(i as usize),
             WorkspaceFileId::SourceDep(i) => self.source_dep_files.get(i as usize),
+            // A native package's Java is indexed and nothing more: its text is a constant in the
+            // binary, so there is no file to hand back and no position in one to answer with.
+            WorkspaceFileId::Native(_) => None,
         }
     }
 
@@ -534,7 +580,9 @@ impl<S: SourceBackend, C: CacheBackend> Workspace<S, C> {
     fn project_file(&self, id: FileId) -> Option<&SourceFile> {
         match WorkspaceFileId::from_raw(id) {
             WorkspaceFileId::Project(i) => self.files.get(i as usize),
-            WorkspaceFileId::Library(_) | WorkspaceFileId::SourceDep(_) => None,
+            WorkspaceFileId::Library(_)
+            | WorkspaceFileId::SourceDep(_)
+            | WorkspaceFileId::Native(_) => None,
         }
     }
 

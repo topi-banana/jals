@@ -1686,6 +1686,19 @@ pub struct Build {
     /// Extra raw flags appended verbatim after the generated `javac` arguments (before the source
     /// files). An escape hatch for anything the manifest does not model yet.
     pub javac_flags: Vec<String>,
+    /// **Native packages** to link: Java packages whose `native` methods are implemented in Rust,
+    /// by name (`jals.io`).
+    ///
+    /// Each one contributes Java that is compiled into the same artifact the project is, and one
+    /// host import per `native` method it declares. Which names exist is a property of the *binary*
+    /// rather than of the manifest — `jals` ships a set, the browser playground ships another, and
+    /// a program embedding this toolchain registers its own — so an unknown name is reported by the
+    /// host that holds the registry, with the names it does offer.
+    ///
+    /// Only [`BackendKind::JalsWasm`] can take one in, and [`Manifest::validate`] says so: a
+    /// package's implementation is a host function an embedder supplies, and a class file has
+    /// nowhere to put one.
+    pub native_packages: Vec<String>,
     /// Optional post-compile step: **reobfuscate** the compiled classes and package them as a
     /// distributable jar.
     ///
@@ -2109,6 +2122,7 @@ impl Default for Build {
             target: None,
             classpath: Vec::new(),
             javac_flags: Vec::new(),
+            native_packages: Vec::new(),
             remap: None,
         }
     }
@@ -2594,6 +2608,31 @@ impl Manifest {
             });
         }
 
+        // The same shape, and for the same reason. A native package's `native` methods become host
+        // imports of one WebAssembly module, and no other backend emits one — there is nowhere in a
+        // class file for a host function to go. So the pairing is the manifest's contradiction, not
+        // one command's: `jals build` reaches it first, and a project that selected a package under
+        // `javac` would otherwise compile the package's Java and silently drop its implementation.
+        if !self.build.native_packages.is_empty()
+            && !matches!(self.build.backend, BackendKind::JalsWasm {})
+        {
+            return Err(ValidationError::NativePackagesWithoutWasmBackend {
+                backend: self.build.backend.tag_name(),
+            });
+        }
+        // A name that is empty, or declared twice. Both are decidable here; whether a name *exists*
+        // is not — the set is a property of the binary that holds the registry, so an unknown name
+        // is reported there, with the names it does offer.
+        let mut seen = BTreeSet::new();
+        for name in &self.build.native_packages {
+            if name.is_empty() {
+                return Err(ValidationError::InvalidNativePackage { name: name.clone() });
+            }
+            if !seen.insert(name.as_str()) {
+                return Err(ValidationError::DuplicateNativePackage { name: name.clone() });
+            }
+        }
+
         Ok(())
     }
 
@@ -3051,6 +3090,25 @@ pub enum ValidationError {
         /// The backend actually selected, by its serialized `type` tag.
         backend: &'static str,
     },
+    /// `[build] native-packages` is non-empty without `[build] backend = { type = "jals-wasm" }`.
+    ///
+    /// The mirror of [`WasmRuntimeWithoutWasmBackend`](Self::WasmRuntimeWithoutWasmBackend), and it
+    /// exists for the same reason: a native package's implementation is a host function supplied to
+    /// a WebAssembly module, and no other backend emits one for it to be supplied to.
+    NativePackagesWithoutWasmBackend {
+        /// The backend actually selected, by its serialized `type` tag.
+        backend: &'static str,
+    },
+    /// A `[build] native-packages` entry is empty.
+    InvalidNativePackage {
+        /// The offending entry.
+        name: String,
+    },
+    /// A `[build] native-packages` name is listed twice.
+    DuplicateNativePackage {
+        /// The repeated name.
+        name: String,
+    },
     /// A `[dependencies]` or `[dev-dependencies]` entry could not be classified — an empty `jar`, an
     /// unsupported URL scheme, or conflicting git refs. Wraps the classification [`DependencyError`]
     /// so the two layers share a single message and the variant set never drifts apart.
@@ -3228,6 +3286,20 @@ impl fmt::Display for ValidationError {
                 "`[toolchain] runtime` is `wasm`, which runs a WebAssembly module, and `[build] \
                  backend` is `{backend}`, which compiles to class files. Select the backend that \
                  emits a module: `backend = {{ type = \"jals-wasm\" }}`"
+            ),
+            Self::NativePackagesWithoutWasmBackend { backend } => write!(
+                f,
+                "`[build] native-packages` selects packages whose `native` methods become host \
+                 imports of a WebAssembly module, and `[build] backend` is `{backend}`, which \
+                 compiles to class files. Select the backend that emits a module: `backend = \
+                 {{ type = \"jals-wasm\" }}`"
+            ),
+            Self::InvalidNativePackage { name } => {
+                write!(f, "`[build] native-packages` has an empty entry (`{name}`)")
+            }
+            Self::DuplicateNativePackage { name } => write!(
+                f,
+                "`[build] native-packages` lists `{name}` twice: a package is selected or it is not"
             ),
             Self::Dependency(err) => write!(f, "{err}"),
             Self::DuplicateDependency { name } => write!(
@@ -4314,6 +4386,69 @@ mod tests {
         let mut m = Manifest::default();
         m.build.backend = BackendKind::JalsWasm {};
         assert_eq!(m.validate(), Ok(()));
+    }
+
+    /// A native package's implementation is a host function supplied to a WebAssembly module, and
+    /// no other backend emits one — so the pairing is checked here, for the same reason
+    /// `runtime = "wasm"` is: the contradiction is the manifest's, not one command's.
+    #[test]
+    fn validate_rejects_native_packages_without_the_wasm_backend() {
+        for backend in [BackendKind::Javac {}, BackendKind::Jals {}] {
+            let mut m = Manifest::default();
+            m.build.backend = backend;
+            m.build.native_packages = alloc::vec!["jals.io".to_owned()];
+            assert_eq!(
+                m.validate(),
+                Err(ValidationError::NativePackagesWithoutWasmBackend {
+                    backend: backend.tag_name(),
+                })
+            );
+        }
+    }
+
+    /// Beside the backend that can take one in, and with the value-level checks this layer *can*
+    /// answer. Whether a name exists is not one of them: the set is a property of the binary that
+    /// holds the registry, so an unknown name is that host's to report.
+    #[test]
+    fn validate_checks_what_a_native_package_name_can_be_but_not_whether_it_exists() {
+        let mut m = Manifest::default();
+        m.build.backend = BackendKind::JalsWasm {};
+        m.build.native_packages = alloc::vec!["jals.io".to_owned(), "not.a.package".to_owned()];
+        assert_eq!(m.validate(), Ok(()));
+
+        let mut m = Manifest::default();
+        m.build.backend = BackendKind::JalsWasm {};
+        m.build.native_packages = alloc::vec![String::new()];
+        assert_eq!(
+            m.validate(),
+            Err(ValidationError::InvalidNativePackage {
+                name: String::new()
+            })
+        );
+
+        let mut m = Manifest::default();
+        m.build.backend = BackendKind::JalsWasm {};
+        m.build.native_packages = alloc::vec!["jals.io".to_owned(), "jals.io".to_owned()];
+        assert_eq!(
+            m.validate(),
+            Err(ValidationError::DuplicateNativePackage {
+                name: "jals.io".to_owned()
+            })
+        );
+    }
+
+    /// The key parses, and an unlisted one leaves the selection empty.
+    #[test]
+    fn native_packages_parses_as_a_list_of_names() {
+        let manifest: Manifest =
+            "[build]\nbackend = { type = \"jals-wasm\" }\nnative-packages = [\"jals.io\"]\n"
+                .parse()
+                .expect("a valid manifest");
+        assert_eq!(
+            manifest.build.native_packages,
+            alloc::vec!["jals.io".to_owned()]
+        );
+        assert!(Manifest::default().build.native_packages.is_empty());
     }
 
     /// A `jar`-form dependency with no companion `sources` jar and no bundled-jar recursion.

@@ -96,7 +96,8 @@ pub struct ItemId(u32);
 const OBJECT_FQN: &str = "java.lang.Object";
 
 /// Where an indexed [`Item`] comes from: the project's own sources, a `git`/`path` dependency's
-/// sources, an external `.class` file, or an embedded standard-library stub.
+/// sources, a native package's Java, an external `.class` file, or an embedded standard-library
+/// stub.
 ///
 /// All are indexed by the same machinery but treated differently at the edges — e.g. a stub has no
 /// real file the host can open, so navigation into it is suppressed.
@@ -121,6 +122,21 @@ pub enum ItemOrigin {
     /// go-to-definition target — yet it is not one of the project's own files, so the host never lints
     /// or renames it.
     Source,
+    /// Declared in the Java a **native package** publishes — a `jals-native` package the host
+    /// selected through `[build] native-packages`, folded in via
+    /// [`with_native_packages`](ProjectIndexBuilder::with_native_packages).
+    ///
+    /// Indexed from real source, and *complete*: unlike a stub, which records signatures for a JDK
+    /// nobody here has, this Java is compiled into the artifact the project runs — what it does
+    /// not declare, the program does not have. So it is not treated leniently.
+    ///
+    /// What separates it from [`Source`](Self::Source) is that it has no file anywhere. Its text is
+    /// a compile-time constant in the binary that shipped the package, so there is nothing for a
+    /// host to open and [`item_location`] answers nothing for it — the same answer a stub gets, for
+    /// the same reason.
+    ///
+    /// [`item_location`]: https://docs.rs/jals-editor
+    Native,
 }
 
 impl ItemOrigin {
@@ -136,7 +152,9 @@ impl ItemOrigin {
     /// itself as accepting one. Exhaustive, so a new origin has to answer deliberately.
     pub const fn carries_annotations(self) -> bool {
         match self {
-            Self::Project | Self::Source => true,
+            // A native package's Java is written by its author exactly as a project's is, so an
+            // annotation it does not carry is one nobody wrote.
+            Self::Project | Self::Source | Self::Native => true,
             Self::Stdlib | Self::Classpath => false,
         }
     }
@@ -149,7 +167,7 @@ impl ItemOrigin {
     pub const fn is_host_editable(self) -> bool {
         match self {
             Self::Project => true,
-            Self::Stdlib | Self::Classpath | Self::Source => false,
+            Self::Stdlib | Self::Classpath | Self::Source | Self::Native => false,
         }
     }
 }
@@ -788,6 +806,7 @@ impl SourceLocations {
 pub struct ProjectIndexBuilder<'a> {
     files: &'a [(FileId, SyntaxNode)],
     source_files: &'a [(FileId, SyntaxNode)],
+    native_files: &'a [(FileId, SyntaxNode)],
     stdlib: bool,
     classpath: Option<&'a LoweredClasspath>,
     sources: Option<&'a SourceLocations>,
@@ -842,6 +861,23 @@ impl<'a> ProjectIndexBuilder<'a> {
         self
     }
 
+    /// Index `native_files` — the Java a selected **native package** publishes — as
+    /// [`Native`](ItemOrigin::Native)-origin types.
+    ///
+    /// Ranked directly after the project's own sources and its `git`/`path` library sources, and
+    /// ahead of the classpath and the stubs: a native package's Java is compiled into the same
+    /// artifact the project is, so where it and a stub declare one name, the one with a body is
+    /// the one the program will run.
+    ///
+    /// The host parses the text and assigns the [`FileId`]s, exactly as it does for
+    /// [`with_source_deps`](Self::with_source_deps) — a package's Java is a compile-time constant
+    /// in the *host's* binary, so this crate has nothing to read it from.
+    #[must_use]
+    pub const fn with_native_packages(mut self, native_files: &'a [(FileId, SyntaxNode)]) -> Self {
+        self.native_files = native_files;
+        self
+    }
+
     /// Skip each file's `cfg`-disabled hosts during extraction (see
     /// [`ProjectIndex::extract_file_with_cfg`]): a disabled type or member is not indexed, so
     /// references to it from other files resolve as they will after the compile frontend blanks
@@ -861,6 +897,7 @@ impl<'a> ProjectIndexBuilder<'a> {
         ProjectIndex::build_inner(
             self.files,
             self.source_files,
+            self.native_files,
             self.stdlib,
             classes,
             sources,
@@ -889,6 +926,7 @@ impl ProjectIndex {
         ProjectIndexBuilder {
             files,
             source_files: &[],
+            native_files: &[],
             stdlib: false,
             classpath: None,
             sources: None,
@@ -935,6 +973,7 @@ impl ProjectIndex {
     async fn build_inner(
         files: &[(FileId, SyntaxNode)],
         source_files: &[(FileId, SyntaxNode)],
+        native_files: &[(FileId, SyntaxNode)],
         stdlib: bool,
         classes: &[crate::classpath::ClassfileClass],
         sources: &SourceLocations,
@@ -956,6 +995,10 @@ impl ProjectIndex {
         for (file, root) in source_files {
             source.push((*file, Self::extract_file(root).await));
         }
+        let mut native: Vec<(FileId, FileFacts)> = Vec::with_capacity(native_files.len());
+        for (file, root) in native_files {
+            native.push((*file, Self::extract_file(root).await));
+        }
         let stub: Vec<(FileId, FileFacts)> = if stdlib {
             Self::stub_facts().await
         } else {
@@ -964,6 +1007,7 @@ impl ProjectIndex {
         Self::assemble_inner(
             &Self::borrow_facts(&project),
             &Self::borrow_facts(&source),
+            &Self::borrow_facts(&native),
             &Self::borrow_facts(&stub),
             classes,
             sources,
@@ -1102,9 +1146,10 @@ impl ProjectIndex {
 
     /// Assemble an index from pre-extracted per-file [`FileFacts`], folding in the classpath facts and
     /// the source-location overlay — the non-CST-walking half of indexing. `project` (host-editable
-    /// sources), `source` (`git`/`path` library sources), `classes` (the classpath), and `stub`
-    /// (from [`stub_facts`](Self::stub_facts)) are indexed in that priority order, so on a
-    /// fully-qualified-name clash a project type wins over a library type wins over a classpath type
+    /// sources), `source` (`git`/`path` library sources), `native` (a selected native package's
+    /// Java), `classes` (the classpath), and `stub` (from [`stub_facts`](Self::stub_facts)) are
+    /// indexed in that priority order, so on a fully-qualified-name clash a project type wins over a
+    /// library type wins over a native package's type wins over a classpath type
     /// wins over a stub — the stub last because it is signature-only and deliberately partial. Cheap
     /// relative to extraction (allocations, hashing, and supertype resolution only), so re-running it
     /// on every edit — reusing cached facts for the unchanged files — is the incremental path, bit-for
@@ -1113,16 +1158,18 @@ impl ProjectIndex {
     pub async fn assemble(
         project: &[(FileId, &FileFacts)],
         source: &[(FileId, &FileFacts)],
+        native: &[(FileId, &FileFacts)],
         stub: &[(FileId, &FileFacts)],
         classpath: &LoweredClasspath,
         sources: &SourceLocations,
     ) -> Self {
-        Self::assemble_inner(project, source, stub, &classpath.classes, sources).await
+        Self::assemble_inner(project, source, native, stub, &classpath.classes, sources).await
     }
 
     async fn assemble_inner(
         project: &[(FileId, &FileFacts)],
         source: &[(FileId, &FileFacts)],
+        native: &[(FileId, &FileFacts)],
         stub: &[(FileId, &FileFacts)],
         classes: &[crate::classpath::ClassfileClass],
         sources: &SourceLocations,
@@ -1138,8 +1185,11 @@ impl ProjectIndex {
         };
 
         // Every source compilation unit to index, in priority order: the host's project files first,
-        // then the `git`/`path` library sources — so on a fully-qualified-name clash a project type
-        // wins over a library type (`by_fqn` keeps the first insert). Every pass below walks this
+        // then the `git`/`path` library sources, then a selected native package's Java — so on a
+        // fully-qualified-name clash a project type wins over a library type wins over a package's
+        // (`by_fqn` keeps the first insert). A package sits ahead of the classpath and the stubs
+        // because its Java is compiled into the same artifact the project is: where it and a stub
+        // declare one name, the one with a body is the one the program will run. Every pass below walks this
         // list and then `stubs`; the *first* pass interleaves the classpath between them, which is
         // what puts a real `.class` ahead of a stub of the same name.
         let units: Vec<(FileId, &FileFacts, ItemOrigin)> = project
@@ -1149,6 +1199,11 @@ impl ProjectIndex {
                 source
                     .iter()
                     .map(|(file, facts)| (*file, *facts, ItemOrigin::Source)),
+            )
+            .chain(
+                native
+                    .iter()
+                    .map(|(file, facts)| (*file, *facts, ItemOrigin::Native)),
             )
             .collect();
         let stubs: Vec<(FileId, &FileFacts, ItemOrigin)> = stub
@@ -1692,8 +1747,10 @@ impl ProjectIndex {
                     // A classpath type navigates into its library source when that source is indexed;
                     // otherwise it has no host-openable location.
                     ItemOrigin::Classpath => item.source_location.clone(),
-                    // A stub has no real source at all.
-                    ItemOrigin::Stdlib => None,
+                    // A stub and a native package's Java have no real source at all: one describes
+                    // a JDK nobody here has, the other is a constant in the binary that shipped
+                    // the package. Neither is a file a host can open.
+                    ItemOrigin::Stdlib | ItemOrigin::Native => None,
                 }
             }
             TypeResolution::External | TypeResolution::Unresolved => None,
@@ -3526,6 +3583,7 @@ mod tests {
         let assembled = block_on_inline(ProjectIndex::assemble(
             &ProjectIndex::borrow_facts(&facts),
             &[],
+            &[],
             &ProjectIndex::borrow_facts(&stub),
             &block_on_inline(ProjectIndex::lower_classpath(&[])),
             &SourceLocations::default(),
@@ -3588,6 +3646,7 @@ mod tests {
         let assemble = |facts: &[(FileId, FileFacts)]| {
             block_on_inline(ProjectIndex::assemble(
                 &ProjectIndex::borrow_facts(facts),
+                &[],
                 &[],
                 &ProjectIndex::borrow_facts(&stub),
                 &empty_cp,

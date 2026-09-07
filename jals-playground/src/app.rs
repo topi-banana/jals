@@ -409,6 +409,12 @@ pub struct App {
     /// What the last run said, or `None` before one. Cleared by the next compile, since a report
     /// about the previous module would outlive the module it describes.
     run_output: Option<String>,
+    /// The native packages this tab offers, and the console its `jals.io` writes into.
+    ///
+    /// Built once for the tab rather than per run: the console is host state a package captured,
+    /// so a fresh registry per run would hand every run a different buffer and the one that was
+    /// written to would be thrown away.
+    natives: crate::natives::Natives,
     /// Which tab the right pane shows.
     result_tab: PaneTab,
     /// The latest build-script/classpath status line shown in the [`Header`], if any.
@@ -507,6 +513,7 @@ impl App {
             syntax_dump: None,
             compile_output: None,
             compile_artifact: None,
+            natives: crate::natives::Natives::new(),
             compile_runnable: false,
             run_command: String::new(),
             run_output: None,
@@ -560,6 +567,18 @@ impl App {
     }
 
     /// Invalidate older compiles and capture the new compile generation.
+    /// A module's own output followed by this host's report of the call.
+    ///
+    /// One string rather than two panes because the Run box has one: the program's output is what
+    /// the reader came for, and the report — "returned 3", "the call trapped" — is the frame around
+    /// it. A run that wrote nothing is just the report, with no blank line in front of it.
+    fn joined(written: String, report: String) -> String {
+        if written.is_empty() {
+            return report;
+        }
+        format!("{written}\n{report}")
+    }
+
     fn advance_compile(&self) -> BuildToken {
         self.compile_generation
             .set(self.compile_generation.get().wrapping_add(1));
@@ -1619,6 +1638,16 @@ impl Component for App {
                         return true;
                     }
                 };
+                // Resolved on this task, where the registry lives: a selection holds `Rc`s of the
+                // packages' host state, so it cannot cross into the compile future's own scope
+                // and back — it is built here and moved in.
+                let natives = match self.natives.select(&manifest) {
+                    Ok(natives) => natives,
+                    Err(error) => {
+                        self.compile_output = Some(format!("{MANIFEST_PATH}: {error}"));
+                        return true;
+                    }
+                };
                 let token = self.advance_compile();
                 self.compile_output = Some("compiling…".to_owned());
                 let link = ctx.link().clone();
@@ -1638,7 +1667,7 @@ impl Component for App {
                     if !token.is_current() {
                         return;
                     }
-                    let message = match Compile::workspace(&manifest, &files).await {
+                    let message = match Compile::workspace(&manifest, &files, natives).await {
                         Ok(artifact) => Msg::CompileFinished {
                             generation: token.captured,
                             name: artifact.name,
@@ -1712,8 +1741,19 @@ impl Component for App {
                 // Failure is a line in the same place success is: what the engine refused — an
                 // export that is not there, an argument that is not an `i32` — is the answer to
                 // what was asked, not an error about the playground.
-                self.run_output = Some(match Execute::run(bytes, &self.run_command) {
-                    Ok(report) => report,
+                let selection = ConfigParseError::parse_manifest(&self.manifest_src)
+                    .map_err(|error| format!("{MANIFEST_PATH}: {}", error.message))
+                    .and_then(|manifest| self.natives.select(&manifest));
+                self.run_output = Some(match selection {
+                    Ok(natives) => match Execute::run(bytes, &self.run_command, &natives) {
+                        // Whatever the module wrote through a native package comes first: it is
+                        // the program's own output, and the report below is this host describing
+                        // the call. Drained rather than read, so the next run reports only its own.
+                        Ok(report) => Self::joined(self.natives.take_console(), report),
+                        Err(error) => {
+                            Self::joined(self.natives.take_console(), format!("error: {error}"))
+                        }
+                    },
                     Err(error) => format!("error: {error}"),
                 });
                 true

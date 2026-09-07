@@ -33,7 +33,16 @@ fn module_of(sources: &[&str]) -> Module {
 
 /// [`module_of`], with the compile options stated.
 fn module_with(sources: &[&str], options: WasmOptions) -> Module {
-    let roots: Vec<(FileId, SyntaxNode)> = sources
+    module_of_parts(sources, &[], options)
+}
+
+/// A module compiled from the project's own `sources` plus a native package's `libraries`.
+///
+/// The two lists differ in exactly one way — a library declaration is never exported — so every
+/// test that cares about that distinction goes through here.
+fn module_of_parts(sources: &[&str], libraries: &[&str], options: WasmOptions) -> Module {
+    let texts: Vec<&str> = sources.iter().chain(libraries).copied().collect();
+    let roots: Vec<(FileId, SyntaxNode)> = texts
         .iter()
         .enumerate()
         .map(|(index, text)| {
@@ -55,11 +64,13 @@ fn module_with(sources: &[&str], options: WasmOptions) -> Module {
         .zip(&analyses)
         .map(|((file, _), analysis)| analysis.in_project(&index, *file))
         .collect();
-    let inputs: Vec<TypedFile<'_>> = semantics
+    let typed: Vec<TypedFile<'_>> = semantics
         .iter()
         .map(|binding| jals_exec::block_on_inline(binding.typed()))
         .collect();
-    CompileWasm::module(&inputs, &index, options).unwrap_or_else(|error| panic!("compile: {error}"))
+    let (inputs, libraries) = typed.split_at(sources.len());
+    CompileWasm::module(inputs, libraries, &index, options)
+        .unwrap_or_else(|error| panic!("compile: {error}"))
 }
 
 /// The exported function named `export`, rendered as its declared locals followed by its
@@ -81,7 +92,11 @@ fn body_of(module: &Module, export: &str) -> String {
             .collect();
         panic!("no exported function `{export}`; the module exports {names:?}")
     };
-    let func = &module.funcs[usize::try_from(*index).expect("a function index that fits")];
+    // The function index space starts with the imports, so a defined function's place in
+    // `module.funcs` is its index minus their count.
+    let defined =
+        usize::try_from(*index).expect("a function index that fits") - module.imports.len();
+    let func = &module.funcs[defined];
 
     let mut rendered = String::new();
     writeln!(rendered, "locals: {:?}", func.locals).expect("write to a String");
@@ -552,7 +567,7 @@ public class Arg {
     let analysis = jals_exec::block_on_inline(FileAnalysis::of(&root));
     let semantics = analysis.in_project(&index, FileId(0));
     let typed = jals_exec::block_on_inline(semantics.typed());
-    let error = CompileWasm::module(&[typed], &index, WasmOptions::default())
+    let error = CompileWasm::module(&[typed], &[], &index, WasmOptions::default())
         .expect_err("a refusal, not a trap");
     assert_eq!(
         error.to_string(),
@@ -560,14 +575,131 @@ public class Arg {
     );
 }
 
-/// A `static` call with no body in the module is a missing implementation, not an unreachable
-/// dispatch: there is no receiver for "no object of this type can exist" to be about.
+/// A `native` method is a host import, and the two names it is imported under are derivable from
+/// the declaration alone.
+///
+/// The module name is the declaring class's internal name and the field name is the method's name
+/// with its JVM descriptor. Both halves are pinned here because they are the *link symbol*: the
+/// host keys its implementation table on exactly these two strings, so a change to either one is a
+/// change to what every native package has to be registered under.
 #[test]
-fn a_native_call_is_reported_rather_than_trapped() {
-    let source = r"
+fn a_native_method_becomes_a_host_import() {
+    let module = module_of(&[r"
 public class Native {
-    static class N { static native int f(); }
-    public static int run() { return N.f(); }
+    static class N { static native int f(char[] text, int at); }
+    public static int run(char[] t) { return N.f(t, 0); }
+}
+"]);
+    let imported: Vec<(&str, &str)> = module
+        .imports
+        .iter()
+        .map(|import| (import.module.as_str(), import.name.as_str()))
+        .collect();
+    assert_eq!(imported, vec![("Native$N", "f([CI)I")]);
+}
+
+/// Imports occupy the low end of the function index space, so every defined function moves up by
+/// their count — and the export section, which names indices, has to move with them.
+///
+/// The regression this pins is silent: an export that still named index 0 would name the *import*,
+/// which is a perfectly well-formed module that calls the host when it was asked for the project's
+/// own method.
+#[test]
+fn an_import_shifts_every_defined_function_index() {
+    let module = module_of(&[r"
+public class Native {
+    static native int host();
+    public static int run() { return host(); }
+}
+"]);
+    assert_eq!(module.imports.len(), 1);
+    let (_, _, exported) = module
+        .exports
+        .iter()
+        .find(|(name, ..)| name == "run")
+        .expect("`run` is exported");
+    assert_eq!(
+        *exported, 1,
+        "the one defined function sits after the import"
+    );
+    assert!(
+        body_of(&module, "run").contains("Call(0)"),
+        "the call reaches the import: {}",
+        body_of(&module, "run")
+    );
+}
+
+/// A `native` method whose body *is* there is not imported: the declaration is a Java error this
+/// backend never checks, and the honest reading of it is "there is a body".
+#[test]
+fn a_native_method_with_a_body_is_compiled_rather_than_imported() {
+    let module = module_of(&[r"
+public class Native {
+    static native int host();
+}
+"
+    .replace("native int host();", "native int host() { return 7; }")
+    .as_str()]);
+    assert!(module.imports.is_empty(), "{:?}", module.imports);
+}
+
+/// A native package's classes are compiled into the module and are *not* its surface.
+///
+/// Two failures hide behind getting this wrong, and neither is visible in a build. A library's
+/// `static` method under the same bare name as a project's takes the export, because the first one
+/// wins and the second is dropped without a word. And a `static native` method has no defined
+/// function at all, so exporting it would name an *import* index — a module that validates and
+/// calls the host when the caller asked for the project.
+#[test]
+fn a_library_class_static_method_is_not_exported() {
+    let module = module_of_parts(
+        &["public class App { public static int run() { return Lib.help() + Lib.reach(); } }"],
+        &[r"
+public class Lib {
+    public static native int reach();
+    public static int help() { return 1; }
+}
+"],
+        WasmOptions::default(),
+    );
+    let exported: Vec<&str> = module
+        .exports
+        .iter()
+        .map(|(name, ..)| name.as_str())
+        .collect();
+    assert_eq!(exported, vec!["run"], "only the project's own surface");
+    assert_eq!(
+        module.imports.len(),
+        1,
+        "the library's `native` still links"
+    );
+}
+
+/// A project method and a library method of the same bare name: the project keeps the export.
+#[test]
+fn a_library_never_takes_a_project_export() {
+    let module = module_of_parts(
+        &["public class App { public static int run() { return Lib.run(); } }"],
+        &["public class Lib { public static int run() { return 2; } }"],
+        WasmOptions::default(),
+    );
+    let project = body_of(&module, "run");
+    assert!(
+        project.contains("Call("),
+        "the exported `run` is the project's, which calls the library's: {project}"
+    );
+    assert_eq!(module.exports.len(), 1);
+}
+
+/// A body-less method that did not say `native` is still a refusal, and still its own one: what is
+/// missing there is an implementation that was expected, not one the embedder supplies.
+#[test]
+fn a_body_less_method_that_is_not_native_is_still_reported() {
+    let source = r"
+public class Missing {
+    interface Shape { int area(); }
+    static int use(Shape s) { return s.area(); }
+    public static int run() { return use(null); }
 }
 ";
     let root = jals_exec::block_on_inline(jals_syntax::Parse::parse(source)).syntax();
@@ -579,14 +711,12 @@ public class Native {
     let analysis = jals_exec::block_on_inline(FileAnalysis::of(&root));
     let semantics = analysis.in_project(&index, FileId(0));
     let typed = jals_exec::block_on_inline(semantics.typed());
-    let error = CompileWasm::module(&[typed], &index, WasmOptions::default())
-        .expect_err("a refusal, not a trap");
-    assert!(
-        error
-            .to_string()
-            .contains("no body for it is compiled into the module"),
-        "the report names the missing implementation: {error}"
-    );
+    let module = CompileWasm::module(&[typed], &[], &index, WasmOptions::default());
+    // Either answer is a refusal rather than a trap; what must not happen is an import appearing
+    // for a method nobody declared `native`.
+    if let Ok(module) = module {
+        assert!(module.imports.is_empty(), "{:?}", module.imports);
+    }
 }
 
 /// `assert` is compiled into nothing by default, and that is not a gap: a JVM evaluates one only
@@ -653,7 +783,7 @@ public class S {
     let analysis = jals_exec::block_on_inline(FileAnalysis::of(&root));
     let semantics = analysis.in_project(&index, FileId(0));
     let typed = jals_exec::block_on_inline(semantics.typed());
-    let error = CompileWasm::module(&[typed], &index, WasmOptions { assertions: true })
+    let error = CompileWasm::module(&[typed], &[], &index, WasmOptions { assertions: true })
         .expect_err("the condition is compiled now, and it names a library type");
     assert!(
         error

@@ -408,7 +408,9 @@ impl<'a> ProjectQueries<'a> {
         let (file, range) = match item.origin {
             ItemOrigin::Project | ItemOrigin::Source => (item.file, item.name_range.clone()),
             ItemOrigin::Classpath => item.source_location.clone()?,
-            ItemOrigin::Stdlib => return None,
+            // Neither has a file the host owns: a stub describes a JDK nobody here has, and a
+            // native package's Java is a compile-time constant in the binary that shipped it.
+            ItemOrigin::Stdlib | ItemOrigin::Native => return None,
         };
         Some(FileRange { file, range })
     }

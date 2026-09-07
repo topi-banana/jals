@@ -45,6 +45,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::formatting::Formatting;
 use crate::host::LspHost;
+use crate::natives::Natives;
 use crate::state::{DetachedWorkspaces, DocumentStore, OpenDocument, ProjectWorkspace, UriConfigs};
 
 /// The reply channel of one request command: the response payload, or a protocol error the
@@ -206,6 +207,13 @@ pub(crate) struct AssembledWorkspace {
     build_features: BTreeSet<String>,
     library_sources: Vec<FileKey>,
     source_dep_sources: Vec<FileKey>,
+    /// The Java each selected native package publishes.
+    ///
+    /// Indexed like any other source so a project that named a package resolves the names it
+    /// writes. Nothing here *runs* a module, so the package's Rust half is never called — the
+    /// registry is built with a sink that discards, which is what "this host reads a package and
+    /// never executes one" looks like.
+    native_sources: Vec<jals_editor::PackageSource>,
     materialized: BTreeMap<FileKey, PathBuf>,
     watch_policy: ProjectWatchPolicy,
     /// The script `[build] script` names, kept apart from the diagnostics anchored to it.
@@ -1112,6 +1120,7 @@ impl Actor {
             build_features,
             library_sources,
             source_dep_sources,
+            native_sources,
             materialized,
             watch_policy,
             configured_script,
@@ -1143,6 +1152,7 @@ impl Actor {
             &classpath_classes,
             library_sources,
             source_dep_sources,
+            native_sources,
             materialized,
             feature_set,
             build_features,
@@ -2054,6 +2064,7 @@ impl AssembledWorkspace {
             build_features,
             library_sources,
             source_dep_sources,
+            native_sources: Natives::layout_sources(effective_manifest),
             materialized,
             watch_policy,
             configured_script,

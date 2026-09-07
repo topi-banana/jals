@@ -315,14 +315,20 @@ impl BackendSelection {
     /// than being probed for. A native host calls `BackendSelection::for_host` instead, which adds
     /// the `javac` arm and delegates the other two straight back here — so every [`BackendKind`] is
     /// answered in exactly one place.
-    pub fn in_process(backend: BackendKind, release: Option<u32>, assertions: Assertions) -> Self {
+    pub fn in_process(
+        backend: BackendKind,
+        release: Option<u32>,
+        assertions: Assertions,
+        natives: jals_native::NativePackageSet,
+    ) -> Self {
         match backend {
             BackendKind::Jals {} => Self::Available(Box::new(crate::JalsBackend::new(release))),
             // wasm is a different *target*, not just a different tool: one module for the whole
             // project, and the host's collector rather than a JVM's. It is also the only backend
-            // that reads `assertions`: the other two produce class files a JVM applies `-ea` to.
+            // that reads `assertions` and `natives`: the other two produce class files a JVM
+            // applies `-ea` to, and a class file has nowhere to put a host function.
             BackendKind::JalsWasm {} => {
-                Self::Available(Box::new(crate::JalsBackend::wasm(assertions)))
+                Self::Available(Box::new(crate::JalsBackend::wasm(assertions, natives)))
             }
             BackendKind::Javac {} => Self::Absent {
                 id: backend.tag_name(),
@@ -454,7 +460,8 @@ mod tests {
             available_id(&BackendSelection::in_process(
                 BackendKind::Jals {},
                 None,
-                Assertions::Disabled
+                Assertions::Disabled,
+                jals_native::NativePackageSet::empty(),
             )),
             Some(BackendKind::Jals {}.tag_name())
         );
@@ -463,12 +470,18 @@ mod tests {
                 BackendKind::JalsWasm {},
                 None,
                 Assertions::Disabled,
+                jals_native::NativePackageSet::empty(),
             )),
             Some(BackendKind::JalsWasm {}.tag_name())
         );
 
         // javac is absent as a *value* carrying its reason, not an error raised later.
-        match BackendSelection::in_process(BackendKind::Javac {}, None, Assertions::Disabled) {
+        match BackendSelection::in_process(
+            BackendKind::Javac {},
+            None,
+            Assertions::Disabled,
+            jals_native::NativePackageSet::empty(),
+        ) {
             BackendSelection::Absent { id, reason } => {
                 assert_eq!(id, BackendKind::Javac {}.tag_name());
                 assert_eq!(reason, BackendAbsence::NoHostProcess);
@@ -494,6 +507,7 @@ mod tests {
             BackendKind::Jals {},
             release,
             Assertions::Disabled,
+            jals_native::NativePackageSet::empty(),
         ) {
             BackendSelection::Available(backend) => backend.config_digest(&request),
             BackendSelection::Absent { .. } => panic!("the jals backend is always available"),

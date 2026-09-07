@@ -109,7 +109,7 @@ fn hierarchy_module() -> Module {
         locals: vec![ValType::Ref(RefType::nullable(HeapType::Concrete(sub)))],
         body: body.into_body(),
     });
-    let index = Module::func_index(0);
+    let index = module.func_index(0);
     module
         .exports
         .push(("bump".to_owned(), ExportKind::Func, index));
@@ -276,7 +276,7 @@ fn signature(module: &mut Module, params: Vec<ValType>, results: Vec<ValType>) -
 
 /// Export the `defined`-th function under `name`.
 fn export(module: &mut Module, name: &str, defined: usize) {
-    let index = Module::func_index(defined);
+    let index = module.func_index(defined);
     module
         .exports
         .push((name.to_owned(), ExportKind::Func, index));
@@ -402,7 +402,7 @@ fn reference_module() -> Module {
     // `ref.null none` inhabits every nullable reference type, which is what lets Java's untyped
     // `null` be stored without knowing the target type first.
     body.ref_null(HeapType::None).local_set(0);
-    body.call(Module::func_index(0)).local_set(1);
+    body.call(module.func_index(0)).local_set(1);
     body.local_get(0).ref_is_null();
     body.local_get(1).local_get(1).ref_eq();
     body.numeric(NumOp::Add, ValType::I32).expect("i32.add");
@@ -491,7 +491,7 @@ fn global_module() -> Module {
         body: wide.into_body(),
     });
 
-    module.start = Some(Module::func_index(0));
+    module.start = Some(module.func_index(0));
     export(&mut module, "get", 1);
     export(&mut module, "wide", 2);
     module
@@ -529,7 +529,7 @@ fn exception_module() -> Module {
     let mut catcher = Insn::new();
     catcher.block();
     catcher.try_table(&[(0, 0)]);
-    catcher.call(Module::func_index(0));
+    catcher.call(module.func_index(0));
     // The call always throws, so the fallthrough is a path the program cannot reach.
     catcher.unreachable();
     catcher.end();
@@ -594,4 +594,75 @@ fn a_hand_built_module_with_typed_blocks_and_a_branch_table_validates() {
             .finish()
             .expect("a module whose lengths all fit"),
     );
+}
+
+/// A module that imports one host function and calls it from an exported one.
+///
+/// Two things about imports are only decidable by a validator, and both are here. Their function
+/// types are declared as **their own type-section entries** rather than inside the single
+/// recursive group every other type shares — the group is what lets two classes reference each
+/// other, and an engine canonicalises a host function on its own, so a signature allocated in the
+/// group links against nothing. And the imports occupy the *low* function indices, so the exported
+/// definition below is index 1 while the `call` in its body names index 0.
+fn importing_module() -> Module {
+    let mut module = Module::new();
+    // A declared type in the group, so the section really has both shapes in it — the import's
+    // entry has to sit beside a `rec` group, not replace one.
+    let holder = module.add_type(SubType::plain(CompType::Struct(vec![FieldType {
+        storage: StorageType::Val(ValType::I32),
+        mutable: true,
+    }])));
+    let import = module.add_import(
+        "test/host/Host".to_owned(),
+        "answer(I)I".to_owned(),
+        vec![ValType::I32],
+        vec![ValType::I32],
+    );
+    assert_eq!(import, 0, "an import takes the first function index");
+
+    let signature = signature(&mut module, vec![ValType::I32], vec![ValType::I32]);
+    let mut body = Insn::new();
+    body.local_get(0).call(import);
+    module.funcs.push(Func {
+        type_index: signature,
+        locals: Vec::new(),
+        body: body.into_body(),
+    });
+    // The one defined function is index 1, not 0: `func_index` offsets by the import count.
+    assert_eq!(module.func_index(0), 1);
+    export(&mut module, "ask", 0);
+    // The struct above is in the section only so the import's entry sits *beside* a `rec` group;
+    // nothing references it.
+    let _ = holder;
+    module
+}
+
+#[test]
+fn a_module_that_imports_a_host_function_validates() {
+    validate(
+        &importing_module()
+            .finish()
+            .expect("a module whose lengths all fit"),
+    );
+}
+
+/// The two names an import is spelled with reach the encoded module verbatim.
+///
+/// They are the *link symbol*: a host registers its implementation under exactly these strings, so
+/// what the encoder writes and what a package binds have to be the same bytes. Read out of the
+/// finished module rather than off an offset, because the claim is about the strings and not about
+/// where the section starts.
+#[test]
+fn an_import_carries_both_of_its_names_into_the_bytes() {
+    let module = importing_module();
+    let bytes = module.finish().expect("a module whose lengths all fit");
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(
+        text.contains("test/host/Host"),
+        "the module name is encoded"
+    );
+    assert!(text.contains("answer(I)I"), "the field name is encoded");
+    assert_eq!(module.imports.len(), 1);
+    assert_eq!(module.imports[0].params, vec![ValType::I32]);
+    assert_eq!(module.imports[0].results, vec![ValType::I32]);
 }

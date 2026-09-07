@@ -330,6 +330,38 @@ pub struct Func {
     pub body: Vec<Instr>,
 }
 
+/// A function this module imports from its host.
+///
+/// The two names are not free-form. `module` is the declaring class's **internal name** and `name`
+/// is the method's **name with its descriptor**, so the pair is derivable from the `native`
+/// declaration alone — which is what lets the host that supplies the implementation key its table
+/// on exactly the same two strings, and what makes a signature they disagree about an *unresolved
+/// import* rather than a mismatch somebody has to notice.
+///
+/// # Why the signature is held here rather than as a type index
+///
+/// An imported function's type must be **its own type-section entry**, and it must be final with
+/// no supertype. That is not a style choice: a host function is canonicalised on its own, so an
+/// engine matches it against a declared type only when that type is a recursive group of one — and
+/// every type this backend declares otherwise lives in the single `rec` group that lets two Java
+/// classes reference each other. An import whose signature was allocated in *that* group links
+/// against nothing, with the engine reporting only "incompatible import type".
+///
+/// So the signature travels with the import and [`Module::finish`] gives it an entry of its own,
+/// after the group. Holding a `type_index` instead would put the choice of where the type was
+/// allocated at every call site.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Import {
+    /// The declaring class's internal name, e.g. `jals/io/Out`.
+    pub module: String,
+    /// The method's name followed by its descriptor, e.g. `writeChar(I)V`.
+    pub name: String,
+    /// The imported function's parameters.
+    pub params: Vec<ValType>,
+    /// Its results — at most one, since a Java method returns at most one value.
+    pub results: Vec<ValType>,
+}
+
 /// A module under construction.
 #[derive(Debug, Default)]
 pub struct Module {
@@ -337,6 +369,10 @@ pub struct Module {
     /// other — a class whose method takes its own type, or two mutually-referencing classes, would
     /// otherwise be unorderable.
     types: Vec<SubType>,
+    /// Host functions this module imports, in the order they occupy the function index space —
+    /// which is *before* every defined function, so [`func_index`](Self::func_index) offsets by
+    /// their count.
+    pub imports: Vec<Import>,
     pub funcs: Vec<Func>,
     /// Exception tags, by the index of the function type that gives each one's payload. One tag is
     /// enough for Java: every thrown value is a reference, so the payload type is the same for all of
@@ -365,6 +401,7 @@ impl Module {
     pub const fn new() -> Self {
         Self {
             types: Vec::new(),
+            imports: Vec::new(),
             funcs: Vec::new(),
             tags: Vec::new(),
             globals: Vec::new(),
@@ -403,11 +440,39 @@ impl Module {
         }
     }
 
-    /// The index a defined function will have. Nothing is imported yet, so the function index
-    /// space starts at the definitions; a host import would occupy the low indices and shift these,
-    /// which is why the mapping is written out rather than assumed at the call site.
-    pub fn func_index(defined: usize) -> u32 {
-        u32::try_from(defined).unwrap_or(u32::MAX)
+    /// Declare a host import and return the function index it takes.
+    ///
+    /// Imports occupy the low end of the function index space, so every one of them has to be
+    /// declared before the first [`func_index`](Self::func_index) is handed out — otherwise a
+    /// defined function is given an index an import later takes. That ordering is the lowering's
+    /// to keep, and it keeps it by collecting every `native` declaration in a sweep of its own.
+    ///
+    /// The signature is taken by value rather than as a type index, because where its type is
+    /// *allocated* is load-bearing — see [`Import`].
+    pub fn add_import(
+        &mut self,
+        module: String,
+        name: String,
+        params: Vec<ValType>,
+        results: Vec<ValType>,
+    ) -> u32 {
+        self.imports.push(Import {
+            module,
+            name,
+            params,
+            results,
+        });
+        u32::try_from(self.imports.len() - 1).unwrap_or(u32::MAX)
+    }
+
+    /// The index the `defined`-th defined function has.
+    ///
+    /// The function index space starts with the imports, so this is an offset and not an identity.
+    /// Written out rather than assumed at the call site for exactly that reason: a lowering that
+    /// spelled `defined` directly would be correct for every module with no import and wrong for
+    /// every module with one.
+    pub fn func_index(&self, defined: usize) -> u32 {
+        u32::try_from(self.imports.len().saturating_add(defined)).unwrap_or(u32::MAX)
     }
 
     /// Encode the whole module, or `None` when a length did not fit the `u32` the format spells it
@@ -417,14 +482,49 @@ impl Module {
         let mut out = Bytes::new();
         out.raw(b"\0asm").raw(&1u32.to_le_bytes());
 
-        if !self.types.is_empty() {
+        if !self.types.is_empty() || !self.imports.is_empty() {
             let mut section = Bytes::new();
-            // One vector entry, holding one recursive group of every type.
-            section.count(1).byte(0x4E).count(self.types.len());
-            for ty in &self.types {
-                ty.write(&mut section);
+            // One vector entry holding one recursive group of every declared type, then one entry
+            // of its own per import. The split is what makes an import linkable at all: a host
+            // function is canonicalised alone, so it matches a declared type only when that type
+            // is a group of one — see `Import`.
+            let groups = usize::from(!self.types.is_empty()) + self.imports.len();
+            section.count(groups);
+            if !self.types.is_empty() {
+                section.byte(0x4E).count(self.types.len());
+                for ty in &self.types {
+                    ty.write(&mut section);
+                }
+            }
+            for import in &self.imports {
+                SubType::plain(CompType::Func {
+                    params: import.params.clone(),
+                    results: import.results.clone(),
+                })
+                .write(&mut section);
             }
             Self::section(&mut out, 1, &section);
+        }
+
+        // The import section comes between the types and the functions, which is where the binary
+        // format puts it — and it has to, because the function index space it opens is what the
+        // function section continues.
+        if !self.imports.is_empty() {
+            let mut section = Bytes::new();
+            section.count(self.imports.len());
+            for (offset, import) in self.imports.iter().enumerate() {
+                section
+                    .name(&import.module)
+                    .name(&import.name)
+                    // Import descriptor 0x00 is `func`, followed by its type index — which is its
+                    // own entry after the declared group, in the order the imports were added.
+                    .byte(0x00);
+                match u32::try_from(self.types.len() + offset) {
+                    Ok(index) => section.u32(index),
+                    Err(_) => section.count(usize::MAX),
+                };
+            }
+            Self::section(&mut out, 2, &section);
         }
 
         if !self.funcs.is_empty() {

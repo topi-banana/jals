@@ -123,6 +123,15 @@ impl Engine {
                 result.outcome = Outcome::Rejected(message);
                 return;
             }
+            // A module that imports host functions cannot be instantiated by an external engine:
+            // the implementations are Rust closures a *host* supplies, and this harness drives
+            // `wasmtime` as a process. Stopped one rung below `instantiated`, under its own name,
+            // because the reason is the harness's and not the backend's — `jals-build`'s own tests
+            // are where a linked module is run.
+            if result.imports > 0 {
+                result.outcome = Outcome::NeedsHost(result.imports);
+                return;
+            }
             if let Some(message) = self.instantiate(&path) {
                 result.outcome = Outcome::Trapped(message);
                 return;

@@ -1,9 +1,10 @@
-//! The three `FileId` id-spaces a [`Workspace`](super::Workspace) addresses.
+//! The four `FileId` id-spaces a [`Workspace`](super::Workspace) addresses.
 //!
 //! A [`jals_hir::FileId`] is opaque to `jals-hir` (the host assigns it; the index only compares and
-//! stores it), so the workspace partitions the single `u32` address space into three disjoint
-//! regions — the project's own `.java`, a `-sources.jar` overlay, and a `git`/`path` source
-//! dependency. That partition is an invariant nothing in the raw `u32` enforces;
+//! stores it), so the workspace partitions the single `u32` address space into four disjoint
+//! regions — the project's own `.java`, a `-sources.jar` overlay, a `git`/`path` source
+//! dependency, and the Java a native package publishes. That partition is an invariant nothing in
+//! the raw `u32` enforces;
 //! [`WorkspaceFileId`] makes it a type: [`from_raw`](WorkspaceFileId::from_raw) /
 //! [`to_raw`](WorkspaceFileId::to_raw) are the *only* place the bit-ranges live, so allocation is
 //! a constructor and routing ([`ws_file`](super::Workspace::ws_file)) is one exhaustive match.
@@ -16,9 +17,13 @@ use jals_hir::FileId;
 const LIBRARY_FILE_BASE: u32 = 1 << 31;
 
 /// Base [`FileId`] for `git`/`path` library-source files, a third id space above
-/// [`LIBRARY_FILE_BASE`] (giving each space ~2³⁰ ids) and still below `jals-hir`'s reserved
-/// stub/classfile block near `u32::MAX`, so project / `-sources.jar` / `git`-`path` ids never collide.
+/// [`LIBRARY_FILE_BASE`], so project / `-sources.jar` / `git`-`path` ids never collide.
 const SOURCE_DEP_FILE_BASE: u32 = (1 << 31) + (1 << 30);
+
+/// Base [`FileId`] for the Java a native package publishes, a fourth id space above
+/// [`SOURCE_DEP_FILE_BASE`] and still below `jals-hir`'s reserved stub/classfile block near
+/// `u32::MAX`.
+const NATIVE_FILE_BASE: u32 = (1 << 31) + (1 << 30) + (1 << 29);
 
 /// Which of the workspace's three id-spaces a [`FileId`] belongs to, plus its index within that
 /// space. The partition of the raw `u32` lives entirely in [`from_raw`](Self::from_raw) /
@@ -32,6 +37,12 @@ pub(crate) enum WorkspaceFileId {
     /// A `git`/`path` source dependency: an index input *and* a navigation target. Id
     /// <code>[SOURCE_DEP_FILE_BASE] + index</code>.
     SourceDep(u32),
+    /// A native package's Java: an index input with **no file behind it**. Its text is a
+    /// compile-time constant in the binary that shipped the package, so
+    /// [`ws_file`](super::Workspace::ws_file) answers `None` for one — the same answer
+    /// [`ItemOrigin::Native`](jals_hir::ItemOrigin::Native) gives a go-to-definition. Id
+    /// <code>[NATIVE_FILE_BASE] + index</code>.
+    Native(u32),
 }
 
 impl WorkspaceFileId {
@@ -39,13 +50,15 @@ impl WorkspaceFileId {
     /// regions tile `[0, u32::MAX]`).
     ///
     /// `jals-hir` reserves the top of the `u32` range (`u32::MAX - i`) for its stub/classfile
-    /// pseudo-files, which numerically lands in [`SourceDep`](Self::SourceDep)'s upper end. That is
-    /// intentional and harmless: such an id decodes to `SourceDep(huge)`, and the caller's bounds
-    /// check (`source_dep_files.get(huge)`) then yields `None` — the same "no real file" result the
-    /// old range check produced, with no special fourth case to maintain.
+    /// pseudo-files, which numerically lands in [`Native`](Self::Native)'s upper end. That is
+    /// intentional and harmless: such an id decodes to `Native(huge)`, and the caller's bounds
+    /// check then yields `None` — the same "no real file" result the old range check produced,
+    /// with no special fifth case to maintain.
     #[inline]
     pub(crate) const fn from_raw(id: FileId) -> Self {
-        if id.0 >= SOURCE_DEP_FILE_BASE {
+        if id.0 >= NATIVE_FILE_BASE {
+            Self::Native(id.0 - NATIVE_FILE_BASE)
+        } else if id.0 >= SOURCE_DEP_FILE_BASE {
             Self::SourceDep(id.0 - SOURCE_DEP_FILE_BASE)
         } else if id.0 >= LIBRARY_FILE_BASE {
             Self::Library(id.0 - LIBRARY_FILE_BASE)
@@ -61,6 +74,7 @@ impl WorkspaceFileId {
             Self::Project(i) => FileId(i),
             Self::Library(i) => FileId(LIBRARY_FILE_BASE + i),
             Self::SourceDep(i) => FileId(SOURCE_DEP_FILE_BASE + i),
+            Self::Native(i) => FileId(NATIVE_FILE_BASE + i),
         }
     }
 
@@ -102,6 +116,14 @@ mod tests {
             WorkspaceFileId::from_raw(FileId(SOURCE_DEP_FILE_BASE + 5)),
             WorkspaceFileId::SourceDep(5)
         );
+        assert_eq!(
+            WorkspaceFileId::from_raw(FileId(NATIVE_FILE_BASE)),
+            WorkspaceFileId::Native(0)
+        );
+        assert_eq!(
+            WorkspaceFileId::from_raw(FileId(NATIVE_FILE_BASE + 2)),
+            WorkspaceFileId::Native(2)
+        );
     }
 
     #[test]
@@ -116,6 +138,10 @@ mod tests {
             WorkspaceFileId::from_raw(FileId(SOURCE_DEP_FILE_BASE - 1)),
             WorkspaceFileId::Library(SOURCE_DEP_FILE_BASE - 1 - LIBRARY_FILE_BASE)
         );
+        assert_eq!(
+            WorkspaceFileId::from_raw(FileId(NATIVE_FILE_BASE - 1)),
+            WorkspaceFileId::SourceDep(NATIVE_FILE_BASE - 1 - SOURCE_DEP_FILE_BASE)
+        );
     }
 
     #[test]
@@ -127,18 +153,20 @@ mod tests {
             WorkspaceFileId::Library(99),
             WorkspaceFileId::SourceDep(0),
             WorkspaceFileId::SourceDep(1234),
+            WorkspaceFileId::Native(0),
+            WorkspaceFileId::Native(7),
         ] {
             assert_eq!(WorkspaceFileId::from_raw(wfid.to_raw()), wfid);
         }
     }
 
     #[test]
-    fn reserved_block_decodes_to_source_dep_out_of_range() {
-        // A `jals-hir` reserved stub/classfile id (top of the u32 range) decodes into SourceDep with
-        // an index far past any real file — the caller's `.get` then returns `None`.
+    fn reserved_block_decodes_to_native_out_of_range() {
+        // A `jals-hir` reserved stub/classfile id (top of the u32 range) decodes into Native with
+        // an index far past any real entry — and `ws_file` answers `None` for that space anyway.
         match WorkspaceFileId::from_raw(FileId(u32::MAX)) {
-            WorkspaceFileId::SourceDep(i) => assert_eq!(i, u32::MAX - SOURCE_DEP_FILE_BASE),
-            other => panic!("expected SourceDep, got {other:?}"),
+            WorkspaceFileId::Native(i) => assert_eq!(i, u32::MAX - NATIVE_FILE_BASE),
+            other => panic!("expected Native, got {other:?}"),
         }
     }
 }

@@ -1129,6 +1129,7 @@ dependencies = [
  "jals-exec",
  "jals-hir",
  "jals-javac",
+ "jals-native",
  "jals-progress",
  "jals-storage",
  "jals-syntax",
@@ -1189,6 +1190,7 @@ dependencies = [
  "jals-fmt",
  "jals-frontend",
  "jals-lsp",
+ "jals-native",
  "jals-progress",
  "jals-project",
  "jals-storage",
@@ -1319,6 +1321,7 @@ dependencies = [
  "jals-exec",
  "jals-fmt",
  "jals-hir",
+ "jals-native",
  "jals-progress",
  "jals-project",
  "jals-storage",
@@ -1328,6 +1331,10 @@ dependencies = [
  "tokio-util",
  "tower",
 ]
+
+[[package]]
+name = "jals-native"
+version = "0.1.0"
 
 [[package]]
 name = "jals-playground"
@@ -1344,6 +1351,7 @@ dependencies = [
  "jals-fmt",
  "jals-frontend",
  "jals-hir",
+ "jals-native",
  "jals-progress",
  "jals-project",
  "jals-storage",

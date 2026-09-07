@@ -1,0 +1,14 @@
+[package]
+name = "hello_world_native"
+version = "0.1.0"
+
+# One WebAssembly module for the whole project, and a Java package whose implementation is Rust.
+#
+# `native-packages` is the pair's other half: `jals.io` publishes Java that is compiled into this
+# same module, and one host import per `native` method it declares. Only this backend can take one
+# in — a class file has nowhere to put a host function — so `jals.toml` refuses the two apart.
+[build]
+backend = { type = "jals-wasm" }
+native-packages = ["jals.io"]
+source-dirs = ["src/main/java"]
+classes-dir = "target/classes"   # where project.wasm lands (also what `jals clean` removes)

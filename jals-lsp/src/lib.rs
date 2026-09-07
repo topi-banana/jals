@@ -19,6 +19,7 @@
 mod actor;
 mod formatting;
 mod host;
+mod natives;
 mod server;
 mod state;
 

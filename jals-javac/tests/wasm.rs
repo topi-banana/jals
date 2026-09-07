@@ -65,7 +65,7 @@ fn compile_with(sources: &[&str], options: WasmOptions) -> Result<Vec<u8>, WasmE
         .iter()
         .map(|binding| jals_exec::block_on_inline(binding.typed()))
         .collect();
-    CompileWasm::project(&inputs, &index, options)
+    CompileWasm::project(&inputs, &[], &index, options)
 }
 
 /// `wasm-tools validate` is the specification's own answer to "is this a module".

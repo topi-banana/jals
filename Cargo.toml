@@ -17,6 +17,7 @@ members = [
   "jals-javac",
   "jals-lint",
   "jals-lsp",
+  "jals-native",
   "jals-playground",
   "jals-progress",
   "jals-project",
@@ -68,6 +69,10 @@ jals-hir = { path = "jals-hir" }
 jals-javac = { path = "jals-javac" }
 jals-lint = { path = "jals-lint" }
 jals-lsp = { path = "jals-lsp" }
+# Featureless by design, like `jinja`: a Java package written in Rust is pure data plus closures,
+# so a plain `cargo check` is this crate's portability check and a package author's crate needs
+# nothing else on its dependency line.
+jals-native = { path = "jals-native" }
 jals-progress = { path = "jals-progress" }
 jals-project = { path = "jals-project", default-features = false }
 jals-syntax = { path = "jals-syntax" }

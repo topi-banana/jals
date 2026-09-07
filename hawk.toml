@@ -61,6 +61,21 @@ reason = "generated AST; uniform pub accessor surface emitted from java.ungram b
 # stanza for every module the crate grows; the flag needs none, and `crates/jinja`'s own
 # `tests/render.rs` is what keeps the surface honest instead.
 
+# `jals-native` has no stanza here and is excluded on the command line beside `jinja`
+# (`cargo hawk check --exclude-crate jinja --exclude-crate jals_native`), for the same
+# reason and with the same consequence. Its API is what a *package author* is offered —
+# `NativePackage::bind`, the `NativeHost` seam a binding reads arrays through, `Args`,
+# `Results`, `NativeError`, `Provenance` — and the closed world here holds exactly one
+# package (`jals.io`) plus three hosts that select one. Narrowing the surface to what
+# those call is how a crate meant to be depended on stops being depend-on-able: the
+# whole point of the crate is that somebody outside this workspace writes the second
+# package.
+#
+# What keeps it honest instead is `jals-native/tests/package.rs`, which drives every
+# published item — the same arrangement `crates/jinja/tests/render.rs` is. A published
+# item lands with the test that drives it, or it lands unreachable with nothing
+# reporting it.
+
 # `jals_fmt::import` lowers native formatter configs (Eclipse / IntelliJ / GJF /
 # Palantir / Spotless) into a jals `Config`. `jals fmt` / `jals init` now reach the
 # file-backed importers through `jals-cli/src/migrate.rs`, but three things here

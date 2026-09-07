@@ -78,7 +78,7 @@ fn main() -> ExitCode {
     let typed: TypedFile<'_> = jals_exec::block_on_inline(semantics.typed());
 
     if wasm {
-        match CompileWasm::project(&[typed], &index, WasmOptions::default()) {
+        match CompileWasm::project(&[typed], &[], &index, WasmOptions::default()) {
             Ok(bytes) => {
                 if let Err(error) = std::fs::write(destination, &bytes) {
                     eprintln!("error: write {destination}: {error}");

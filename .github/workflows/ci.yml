@@ -25,7 +25,7 @@ env:
   WASM_PACKAGES: >-
     --package jals-editor --package jals-syntax --package jals-classfile --package jals-hir
     --package jals-decompile --package jals-fmt --package jals-lint --package jals-storage
-    --package jals-config --package jals-progress --package jinja
+    --package jals-config --package jals-native --package jals-progress --package jinja
   # jals-classpath's HTTP/archive adapters are behind features; `--no-default-features` builds its
   # `no_std + alloc` storage-driven core. jals-build's host half (`SubprocessToolchain`, JDK
   # discovery + spawning) is likewise behind its `native` feature, so its no-`native` core is built
@@ -55,7 +55,8 @@ env:
   WASM_TEST_PACKAGES: >-
     --package jals-syntax --package jals-hir --package jals-lint --package jals-fmt
     --package jals-config --package jals-decompile --package jals-editor --package jals-frontend
-    --package jals-javac --package jals-classfile --package jals-progress --package jinja
+    --package jals-javac --package jals-classfile --package jals-native --package jals-progress
+    --package jinja
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -372,7 +373,7 @@ jobs:
       # boundary: that crate's surface is minijinja's, not one consumer's, and hawk.toml says why.
       - name: Run the closed-world visibility gate
         shell: bash
-        run: rustup run "$HAWK_RUSTC" cargo hawk check --exclude-crate jinja -D warnings
+        run: rustup run "$HAWK_RUSTC" cargo hawk check --exclude-crate jinja --exclude-crate jals_native -D warnings
 
   typos:
     name: typos
@@ -555,6 +556,15 @@ jobs:
             dir: examples/hello_world_wasm
             run: true
             invoke: --invoke greetingLength
+          # The seam the cell above is the "before" of: the same greeting, printed, because a
+          # native package supplies the three host functions its Java calls. `invoke` is again what
+          # makes it an assertion — the export runs the package's own Java, which calls the
+          # imports, which reach Rust. A module whose imports did not link would fail here and
+          # nowhere else, since linking happens at instantiation and nothing before it looks.
+          - name: hello_world_native
+            dir: examples/hello_world_native
+            run: true
+            invoke: --invoke greet
           - name: rhai_build_script
             dir: examples/rhai_build_script
             run: true
