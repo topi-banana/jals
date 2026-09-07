@@ -228,13 +228,14 @@ impl BackendSelection {
         staged: &StagedTree,
         inputs: &HostCompileInputs<'_>,
         assertions: crate::Assertions,
+        natives: jals_native::NativePackageSet,
         exec: &Exec,
     ) -> Self {
         match manifest.build.backend {
             BackendKind::Javac {} => Self::Available(Box::new(
                 JavacBackend::new(manifest, project_root, staged, inputs, exec).await,
             )),
-            other => Self::in_process(other, manifest.build.release, assertions),
+            other => Self::in_process(other, manifest.build.release, assertions, natives),
         }
     }
 }
@@ -464,6 +465,7 @@ mod tests {
                 &staged,
                 &inputs,
                 crate::Assertions::Disabled,
+                jals_native::NativePackageSet::empty(),
                 &Exec::inline(),
             ));
             match selection {

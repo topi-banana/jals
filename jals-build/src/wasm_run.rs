@@ -35,9 +35,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
 
+use jals_native::{Args, NativeBindings, NativeError, NativeHost, NativeValue, RefSlot, Results};
 use jals_progress::{Activity, Outcome, Progress};
-use tinywasm::types::WasmType;
-use tinywasm::{ExternItem, ModuleInstance, Store};
+use tinywasm::types::{ImportType, WasmType};
+use tinywasm::{ExternItem, FuncContext, HostFunction, Imports, ModuleInstance, RefValue, Store};
 
 /// What to run, and what to call in it.
 pub struct WasmRunRequest<'a> {
@@ -52,6 +53,12 @@ pub struct WasmRunRequest<'a> {
     /// position. A caller that parsed them first would have to know the signature to do it, which
     /// is the thing it is calling this to find out.
     pub args: &'a [String],
+    /// The implementations of every `native` method the module imports.
+    ///
+    /// Empty for a project that selected no package, which is every module with no import section
+    /// — so passing [`NativeBindings::new`] is not a degraded mode, it is what "this module needs
+    /// nothing from the host" looks like.
+    pub natives: &'a NativeBindings,
     /// Where the run reports what it is doing.
     pub progress: &'a Progress,
 }
@@ -123,6 +130,19 @@ pub enum WasmRunError {
     /// is what happened to the name it asked for: an export name is bare, with no owner in it, so
     /// two `static` methods sharing a name — an overload pair, or one method per class — collide
     /// and the second is dropped when the module is built. The list is the only evidence of that.
+    /// The module imports a `native` method nothing supplies an implementation for.
+    ///
+    /// Reported when the module is linked, before any of its code runs, and carrying every key the
+    /// selection *does* bind — which is the only evidence a reader gets that a signature was
+    /// spelled two ways, since the import's own name carries the descriptor.
+    UnresolvedImport {
+        /// The declaring class's internal name, as the module imports it.
+        module: String,
+        /// The method's name with its descriptor, as the module imports it.
+        name: String,
+        /// Every `<owner>.<signature>` the selected packages bind.
+        available: Vec<String>,
+    },
     NoSuchExport {
         name: String,
         available: Vec<String>,
@@ -202,6 +222,21 @@ impl fmt::Display for WasmRunError {
             Self::Instantiate(message) => {
                 write!(f, "the module could not be instantiated: {message}")
             }
+            Self::UnresolvedImport {
+                module,
+                name,
+                available,
+            } => {
+                write!(
+                    f,
+                    "the module imports `{name}` from `{module}`, and no selected native package \
+                     supplies it"
+                )?;
+                if available.is_empty() {
+                    return f.write_str(" (no package is selected)");
+                }
+                write!(f, "; the selection binds {}", available.join(", "))
+            }
             Self::NoSuchExport { name, available } => {
                 write!(f, "the module exports no function named `{name}`")?;
                 if available.is_empty() {
@@ -267,6 +302,131 @@ impl fmt::Debug for ParsedModule {
     }
 }
 
+/// The engine, as a native binding sees it.
+///
+/// Built per call and thrown away with it, which is what makes a [`RefSlot`] meaningful: the slots
+/// index *this* call's live references, so one from another call names nothing and cannot be made
+/// to.
+struct EngineHost<'a> {
+    ctx: FuncContext<'a>,
+    /// Every non-null reference this call has made live, in the order slots were handed out.
+    refs: Vec<RefValue>,
+}
+
+impl EngineHost<'_> {
+    /// A package's refusal, as the engine's error. It becomes a trap, which is what a JVM does with
+    /// a `native` method that cannot be linked or does not return.
+    fn trap(error: &NativeError) -> tinywasm::Error {
+        tinywasm::Error::Other(alloc::format!("{error}"))
+    }
+
+    /// One engine value as the vocabulary a package reads, registering a reference if it is one.
+    fn decode(&mut self, value: &tinywasm::WasmValue) -> Result<NativeValue, NativeError> {
+        Ok(match value {
+            tinywasm::WasmValue::I32(value) => NativeValue::I32(*value),
+            tinywasm::WasmValue::I64(value) => NativeValue::I64(*value),
+            tinywasm::WasmValue::F32(value) => NativeValue::F32(*value),
+            tinywasm::WasmValue::F64(value) => NativeValue::F64(*value),
+            tinywasm::WasmValue::Ref(RefValue::Null) => NativeValue::Null,
+            tinywasm::WasmValue::Ref(reference) => {
+                self.refs.push(reference.clone());
+                let slot = u32::try_from(self.refs.len() - 1).unwrap_or(u32::MAX);
+                NativeValue::Ref(RefSlot::new(slot))
+            }
+            // A `v128` is not a type this backend emits — Java has no vector primitive — so a
+            // package can never be handed one, and inventing a reading for it would be a lie about
+            // what the module declared.
+            tinywasm::WasmValue::V128(_) => {
+                return Err(NativeError::Message(alloc::string::String::from(
+                    "a v128 argument has no reading in a native package",
+                )));
+            }
+        })
+    }
+
+    /// The reverse, for a value a binding wrote.
+    fn encode(&self, value: NativeValue) -> Result<tinywasm::WasmValue, NativeError> {
+        Ok(match value {
+            NativeValue::I32(value) => tinywasm::WasmValue::I32(value),
+            NativeValue::I64(value) => tinywasm::WasmValue::I64(value),
+            NativeValue::F32(value) => tinywasm::WasmValue::F32(value),
+            NativeValue::F64(value) => tinywasm::WasmValue::F64(value),
+            NativeValue::Null => tinywasm::WasmValue::Ref(RefValue::Null),
+            NativeValue::Ref(slot) => tinywasm::WasmValue::Ref(self.reference(slot)?.clone()),
+        })
+    }
+
+    /// The reference a slot names, or a refusal naming what went wrong.
+    fn reference(&self, slot: RefSlot) -> Result<&RefValue, NativeError> {
+        self.refs
+            .get(slot.index() as usize)
+            .ok_or(NativeError::NotAnArray)
+    }
+
+    /// The array a slot names.
+    fn array(&self, slot: RefSlot) -> Result<tinywasm::ArrayRef, NativeError> {
+        match self.reference(slot)? {
+            RefValue::Any(value) => value.as_array().ok_or(NativeError::NotAnArray),
+            _ => Err(NativeError::NotAnArray),
+        }
+    }
+}
+
+impl NativeHost for EngineHost<'_> {
+    fn array_len(&mut self, slot: RefSlot) -> Result<u32, NativeError> {
+        let array = self.array(slot)?;
+        let len = array
+            .len(self.ctx.store())
+            .map_err(|error| NativeError::Call(error.to_string()))?;
+        Ok(u32::try_from(len).unwrap_or(u32::MAX))
+    }
+
+    fn array_get(&mut self, slot: RefSlot, index: u32) -> Result<NativeValue, NativeError> {
+        let array = self.array(slot)?;
+        let value = array
+            .get(self.ctx.store_mut(), index as usize)
+            .map_err(|error| NativeError::Call(error.to_string()))?;
+        self.decode(&value)
+    }
+
+    fn array_set(
+        &mut self,
+        slot: RefSlot,
+        index: u32,
+        value: NativeValue,
+    ) -> Result<(), NativeError> {
+        let array = self.array(slot)?;
+        let encoded = self.encode(value)?;
+        array
+            .set(self.ctx.store_mut(), index as usize, encoded)
+            .map_err(|error| NativeError::Call(error.to_string()))
+    }
+
+    fn call_export(
+        &mut self,
+        name: &str,
+        args: &[NativeValue],
+        results: &mut [NativeValue],
+    ) -> Result<(), NativeError> {
+        let instance = self.ctx.module().clone();
+        let func = instance
+            .func_untyped(self.ctx.store(), name)
+            .map_err(|error| NativeError::Call(error.to_string()))?;
+        let encoded: Vec<tinywasm::WasmValue> = args
+            .iter()
+            .map(|value| self.encode(*value))
+            .collect::<Result<_, _>>()?;
+        let mut returned = alloc::vec![tinywasm::WasmValue::I32(0); results.len()];
+        self.ctx
+            .call_untyped(&func, &encoded, &mut returned)
+            .map_err(|error| NativeError::Call(error.to_string()))?;
+        for (slot, value) in results.iter_mut().zip(&returned) {
+            *slot = self.decode(value)?;
+        }
+        Ok(())
+    }
+}
+
 /// Runs a `jals-wasm` module with the embedded interpreter.
 ///
 /// A namespace rather than a value: the engine holds no configuration of its own, and a `Store` is
@@ -278,7 +438,7 @@ impl WasmRunner {
     pub fn run(request: &WasmRunRequest<'_>) -> Result<WasmRunOutcome, WasmRunError> {
         Self::reporting(request.progress, request.invoke, || {
             let module = Self::parse(request.module)?;
-            Self::invoke(&module, request.invoke, request.args)
+            Self::invoke(&module, request.invoke, request.args, request.natives)
         })
     }
 
@@ -291,9 +451,12 @@ impl WasmRunner {
         module: &ParsedModule,
         invoke: Option<&str>,
         args: &[String],
+        natives: &NativeBindings,
         progress: &Progress,
     ) -> Result<WasmRunOutcome, WasmRunError> {
-        Self::reporting(progress, invoke, || Self::invoke(module, invoke, args))
+        Self::reporting(progress, invoke, || {
+            Self::invoke(module, invoke, args, natives)
+        })
     }
 
     /// Decode and validate the bytes, without running anything.
@@ -352,8 +515,10 @@ impl WasmRunner {
         module: &ParsedModule,
         invoke: Option<&str>,
         args: &[String],
+        natives: &NativeBindings,
     ) -> Result<WasmRunOutcome, WasmRunError> {
         let module = &module.0;
+        let imports = Self::link(module, natives)?;
         let mut store = Store::default();
         // Instantiating in two halves rather than through `instantiate`, which is exactly these
         // two calls. Only the first is *linking* — a malformed module, an unknown import, a
@@ -361,7 +526,7 @@ impl WasmRunner {
         // `static` initialisers are lowered, so it is already the project's own code executing:
         // folding its failure into `Instantiate` reported a divide-by-zero in a `static {}` block
         // as "the module could not be instantiated", which sends the reader to the encoding.
-        let instance = ModuleInstance::instantiate_no_start(&mut store, module, None)
+        let instance = ModuleInstance::instantiate_no_start(&mut store, module, Some(&imports))
             .map_err(|error| WasmRunError::Instantiate(error.to_string()))?;
         instance
             .start(&mut store)
@@ -418,6 +583,76 @@ impl WasmRunner {
         Ok(WasmRunOutcome::Returned(
             returned.iter().map(Self::value).collect(),
         ))
+    }
+
+    /// Build the import set the module declares, out of the implementations the selection supplies.
+    ///
+    /// The type each host function is defined under is **the one the module itself declared for
+    /// that import**, read back out of its import section. Nothing here re-derives a wasm type
+    /// from a Java descriptor, and that is the whole reason the two halves of a native package
+    /// cannot disagree about one: the engine links a host function only when its type is *equal*
+    /// to the import's, and passing the import's own type makes that equality structural rather
+    /// than something a mapping table has to keep true.
+    ///
+    /// What is left to check is therefore only whether a name is bound at all — and because the
+    /// import's field name carries the method's descriptor, a Rust half that spelled the signature
+    /// differently shows up exactly here, as an unresolved import listing what *is* registered.
+    fn link(module: &tinywasm::Module, natives: &NativeBindings) -> Result<Imports, WasmRunError> {
+        let mut imports = Imports::new();
+        for import in module.imports() {
+            let ImportType::Func(signature) = import.ty else {
+                // The backend emits function imports and nothing else. A module carrying another
+                // kind did not come from it, and guessing at one is worse than saying so.
+                return Err(WasmRunError::UnresolvedImport {
+                    module: import.module.to_owned(),
+                    name: import.name.to_owned(),
+                    available: natives.keys().map(|(o, s)| format!("{o}.{s}")).collect(),
+                });
+            };
+            let Some(binding) = natives.get(import.module, import.name) else {
+                return Err(WasmRunError::UnresolvedImport {
+                    module: import.module.to_owned(),
+                    name: import.name.to_owned(),
+                    available: natives.keys().map(|(o, s)| format!("{o}.{s}")).collect(),
+                });
+            };
+            let binding = binding.clone();
+            imports.define(
+                import.module,
+                import.name,
+                HostFunction::from_untyped(signature, move |ctx, args, results| {
+                    Self::dispatch(&binding, ctx, args, results)
+                }),
+            );
+        }
+        Ok(imports)
+    }
+
+    /// One call into a native binding: decode the arguments, run it, encode what it wrote back.
+    fn dispatch(
+        binding: &jals_native::NativeFn,
+        ctx: FuncContext<'_>,
+        args: &[tinywasm::WasmValue],
+        results: &mut [tinywasm::WasmValue],
+    ) -> tinywasm::Result<()> {
+        let mut host = EngineHost {
+            ctx,
+            refs: Vec::new(),
+        };
+        let decoded: Vec<NativeValue> = args
+            .iter()
+            .map(|value| host.decode(value))
+            .collect::<Result<_, _>>()
+            .map_err(|error| EngineHost::trap(&error))?;
+        let mut written = alloc::vec![NativeValue::Null; results.len()];
+        binding(&mut host, Args::new(&decoded), Results::new(&mut written))
+            .map_err(|error| EngineHost::trap(&error))?;
+        for (slot, value) in results.iter_mut().zip(&written) {
+            *slot = host
+                .encode(*value)
+                .map_err(|error| EngineHost::trap(&error))?;
+        }
+        Ok(())
     }
 
     /// One failure of the project's own code, as this crate's vocabulary.
@@ -517,12 +752,48 @@ mod tests {
     use crate::jals_backend::JalsBackend;
     use jals_storage::{CacheKey, CacheNamespace, ContentDigest, RelativePath};
 
+    /// A package publishing `Host.answer()`, over `sink`.
+    ///
+    /// The whole shape of a native package in eight lines, which is what makes it a fixture: the
+    /// Java declares one `native` method, the Rust binds the two strings the compiler derives from
+    /// that declaration, and nothing between the halves restates a type.
+    fn answering_package(answer: i32) -> jals_native::NativePackage {
+        let mut package = jals_native::NativePackage::new("test.host", 1);
+        package.source(
+            "test/host/Host.java",
+            "package test.host;\npublic final class Host { public static native int answer(); }\n",
+        );
+        package.bind(
+            "test/host/Host",
+            "answer()I",
+            move |_host, _args, mut results: jals_native::Results<'_>| {
+                results.set(0, jals_native::NativeValue::I32(answer));
+                Ok(())
+            },
+        );
+        package
+    }
+
+    /// One selection holding [`answering_package`].
+    fn answering_selection(answer: i32) -> jals_native::NativePackageSet {
+        let mut registry = jals_native::NativeRegistry::new();
+        registry.add(answering_package(answer));
+        registry
+            .select(&["test.host".to_owned()])
+            .expect("just registered")
+    }
+
     /// Compile one Java source with the wasm backend and hand back the module.
     ///
     /// The whole fixture is in-crate: the backend that produced the bytes lives here, so a test
     /// needs no external tool and no committed binary — which is also what lets it run in the CI
     /// cell that has neither a JVM nor a wasm engine on the host.
     fn module(text: &str) -> Vec<u8> {
+        module_with(text, jals_native::NativePackageSet::empty())
+    }
+
+    /// [`module`], with a native package selected.
+    fn module_with(text: &str, natives: jals_native::NativePackageSet) -> Vec<u8> {
         let bytes = text.as_bytes().to_vec();
         let tree = [BackendSource {
             path: RelativePath::parse("Main.java").expect("a valid path"),
@@ -540,7 +811,7 @@ mod tests {
             options: &options,
             progress: &Progress::SILENT,
         };
-        let backend = JalsBackend::wasm(crate::Assertions::Disabled);
+        let backend = JalsBackend::wasm(crate::Assertions::Disabled, natives);
         let outcome =
             jals_exec::block_on_inline(backend.compile(&request)).expect("the backend ran");
         assert!(
@@ -558,12 +829,179 @@ mod tests {
         invoke: Option<&str>,
         args: &[String],
     ) -> Result<WasmRunOutcome, WasmRunError> {
+        run_with(module, invoke, args, &NativeBindings::new())
+    }
+
+    fn run_with(
+        module: &[u8],
+        invoke: Option<&str>,
+        args: &[String],
+        natives: &NativeBindings,
+    ) -> Result<WasmRunOutcome, WasmRunError> {
         WasmRunner::run(&WasmRunRequest {
             module,
             invoke,
             args,
+            natives,
             progress: &Progress::SILENT,
         })
+    }
+
+    /// The whole seam, end to end and in this process: a `native` method becomes an import, the
+    /// runner links it against the package that declared it, and the project's call reaches Rust.
+    #[test]
+    fn a_native_method_is_linked_against_the_package_that_declares_it() {
+        let selection = answering_selection(42);
+        let module = module_with(
+            "import test.host.Host;\n\
+             public class Main {\n\
+             \x20   public static int run() { return Host.answer() + 1; }\n\
+             }\n",
+            selection.clone(),
+        );
+        let outcome = run_with(&module, Some("run"), &[], &selection.bindings())
+            .expect("the module links and runs");
+        assert!(
+            matches!(outcome, WasmRunOutcome::Returned(ref values) if values == &[WasmValue::I32(43)])
+        );
+    }
+
+    /// A package's own `static` methods are compiled into the module and are not its surface.
+    #[test]
+    fn a_packages_methods_are_not_module_exports() {
+        let selection = answering_selection(1);
+        let module = module_with(
+            "public class Main { public static int run() { return 0; } }\n",
+            selection.clone(),
+        );
+        let Err(WasmRunError::NoSuchExport { available, .. }) =
+            run_with(&module, Some("absent"), &[], &selection.bindings())
+        else {
+            panic!("the export is missing");
+        };
+        assert_eq!(available, vec!["run".to_owned()]);
+    }
+
+    /// Nothing bound is a *link* failure, reported before any of the module's code runs and
+    /// carrying what the selection does bind.
+    ///
+    /// This is also the whole signature check. The import's field name carries the method's
+    /// descriptor, so a Rust half that spelled the signature differently arrives here rather than
+    /// as a type mismatch somebody has to notice — which is why the test binds a real package
+    /// under a wrong descriptor rather than binding nothing.
+    #[test]
+    fn an_import_nothing_supplies_is_refused_with_what_is_bound() {
+        let module = module_with(
+            "import test.host.Host;\n\
+             public class Main { public static int run() { return Host.answer(); } }\n",
+            answering_selection(1),
+        );
+
+        let mut wrong = jals_native::NativeRegistry::new();
+        let mut package = jals_native::NativePackage::new("test.host", 1);
+        package.source("test/host/Host.java", "package test.host;\n");
+        // `()J` where the declaration says `()I`: one character, and the whole difference between
+        // a linked module and this.
+        package.bind("test/host/Host", "answer()J", |_, _, _| Ok(()));
+        wrong.add(package);
+        let wrong = wrong
+            .select(&["test.host".to_owned()])
+            .expect("just registered")
+            .bindings();
+
+        let Err(error @ WasmRunError::UnresolvedImport { .. }) =
+            run_with(&module, Some("run"), &[], &wrong)
+        else {
+            panic!("the import is unresolved");
+        };
+        let WasmRunError::UnresolvedImport {
+            module: owner,
+            name,
+            available,
+        } = &error
+        else {
+            unreachable!()
+        };
+        assert_eq!(owner, "test/host/Host");
+        assert_eq!(name, "answer()I");
+        assert_eq!(available, &vec!["test/host/Host.answer()J".to_owned()]);
+        assert!(error.to_string().contains("answer()J"));
+
+        // And with nothing selected at all, the message says that rather than listing nothing.
+        let Err(error) = run_with(&module, Some("run"), &[], &NativeBindings::new()) else {
+            panic!("the import is unresolved");
+        };
+        assert!(error.to_string().contains("no package is selected"));
+    }
+
+    /// A binding may read the arrays the module hands it, which is what a package's Java is
+    /// written on top of.
+    #[test]
+    fn a_binding_reads_an_array_the_module_allocated() {
+        let mut package = jals_native::NativePackage::new("test.sum", 1);
+        package.source(
+            "test/sum/Sum.java",
+            "package test.sum;\npublic final class Sum { public static native int of(int[] values); }\n",
+        );
+        package.bind(
+            "test/sum/Sum",
+            "of([I)I",
+            |host: &mut dyn jals_native::NativeHost,
+             args: jals_native::Args<'_>,
+             mut results: jals_native::Results<'_>| {
+                let slot = args.reference(0)?;
+                let total: i32 = host.array_i32(slot)?.iter().sum();
+                results.set(0, jals_native::NativeValue::I32(total));
+                Ok(())
+            },
+        );
+        let mut registry = jals_native::NativeRegistry::new();
+        registry.add(package);
+        let selection = registry
+            .select(&["test.sum".to_owned()])
+            .expect("just registered");
+
+        let module = module_with(
+            "import test.sum.Sum;\n\
+             public class Main {\n\
+             \x20   public static int run() { return Sum.of(new int[]{1, 2, 3, 4}); }\n\
+             }\n",
+            selection.clone(),
+        );
+        let outcome = run_with(&module, Some("run"), &[], &selection.bindings())
+            .expect("the module links and runs");
+        assert!(
+            matches!(outcome, WasmRunOutcome::Returned(ref values) if values == &[WasmValue::I32(10)])
+        );
+    }
+
+    /// A binding that refuses is a trap, which is what a JVM does with a `native` method that
+    /// cannot answer — never a silent zero.
+    #[test]
+    fn a_binding_that_refuses_traps_rather_than_answering() {
+        let mut package = jals_native::NativePackage::new("test.no", 1);
+        package.source(
+            "test/no/No.java",
+            "package test.no;\npublic final class No { public static native int answer(); }\n",
+        );
+        package.bind("test/no/No", "answer()I", |_, _, _| {
+            Err(jals_native::NativeError::Message("said no".to_owned()))
+        });
+        let mut registry = jals_native::NativeRegistry::new();
+        registry.add(package);
+        let selection = registry
+            .select(&["test.no".to_owned()])
+            .expect("just registered");
+
+        let module = module_with(
+            "import test.no.No;\n\
+             public class Main { public static int run() { return No.answer(); } }\n",
+            selection.clone(),
+        );
+        let Err(error) = run_with(&module, Some("run"), &[], &selection.bindings()) else {
+            panic!("the binding refused");
+        };
+        assert!(error.to_string().contains("said no"), "{error}");
     }
 
     #[test]

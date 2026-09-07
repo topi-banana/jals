@@ -1,0 +1,18 @@
+[package]
+name = "jals-native"
+version.workspace = true
+edition.workspace = true
+description = "Java packages implemented in Rust: the Java a package publishes, the host functions its `native` methods bind to, and the registry a host selects from"
+repository.workspace = true
+homepage.workspace = true
+license.workspace = true
+
+# Featureless by design, and dependency-free for the same reason `crates/jinja` is: a package
+# author's crate depends on this one and on nothing else. The engine that links a package into a
+# module is `jals-build`'s, behind its `wasm-run` feature, and it is reached through the
+# `NativeHost` seam here rather than named. So a plain `cargo check` *is* this crate's portability
+# check.
+[dependencies]
+
+[lints]
+workspace = true

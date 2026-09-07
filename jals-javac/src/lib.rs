@@ -28,8 +28,13 @@
 //!   Crate-internal: it answers *about the source*, and a consumer wanting that should ask
 //!   [`jals_hir`] rather than reach through a compiler.
 //! - [`desc`] — erasure: a resolved [`jals_hir::Ty`] to the class file's internal names and
-//!   descriptors. The JVM backend's; the wasm one maps types through its own `Layout` and names
-//!   nothing here.
+//!   descriptors. The JVM backend's, with one exception: the wasm backend reads a `native`
+//!   method's **link symbol** here, because that symbol is the canonical spelling of a *Java
+//!   signature* and the JVM's descriptor grammar is what that spelling is. Writing a second
+//!   erasure inside `wasm/` to avoid naming this module would be the failure
+//!   `no-wasm-into-jvm-lowering`'s note describes — a fact with two implementations — arriving
+//!   through the door that rule does not cover. Nothing else in `wasm/` reads it: types are mapped
+//!   through its own `Layout`.
 //! - [`jvm`] — the JVM backend: a label-based assembler over `jals_classfile::Instruction` that
 //!   resolves branches, sizes the frame, and derives the `StackMapTable`.
 //! - [`lower`] — the compiler proper: a parsed source file plus its semantic index in, class files

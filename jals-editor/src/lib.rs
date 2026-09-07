@@ -34,7 +34,7 @@ pub use queries::{
 };
 pub use selection::SelectionChains;
 pub use semantic::{SemanticToken, SemanticTokenKind, SemanticTokens};
-pub use workspace::{ProjectLayout, Workspace};
+pub use workspace::{PackageSource, ProjectLayout, Workspace};
 
 /// The neutral query layer, crate-internal: the only public way in is [`Editor`], whose host
 /// renders every answer into a protocol's own types. Publishing these would publish a second,

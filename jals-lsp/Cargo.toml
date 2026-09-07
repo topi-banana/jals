@@ -12,6 +12,9 @@ jals-classfile.workspace = true
 jals-classpath.workspace = true
 jals-config.workspace = true
 jals-editor.workspace = true
+# Read for the Java a native package publishes and nothing else: this server indexes a package's
+# declarations so a project that selected one resolves, and instantiates no module ever.
+jals-native.workspace = true
 jals-exec = { workspace = true, features = ["tokio"] }
 jals-fmt.workspace = true
 jals-progress.workspace = true

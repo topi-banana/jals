@@ -36,6 +36,12 @@ build front end (`jals build` / `run` / `test` / `clean` / `init`) wraps the JDK
   `cargo nextest`-shaped output, and `jals build` compiles none of them into the project's classes.
   `[toolchain] runtime = "wasm"` runs the same tests as WebAssembly exports on the engine compiled
   into `jals` instead — no JDK at any step.
+- **Java packages written in Rust.** A `native` method compiles to a WebAssembly import, and a
+  **native package** is one Rust crate holding both halves of that declaration: the Java it
+  publishes and the host functions behind it. The two cannot disagree about a signature, because
+  the import's name *is* the descriptor. `jals` ships `jals.io`, which is what makes
+  `examples/hello_world_native` print `Hello, world!` from a module that still has no `String`
+  in it.
 - **Cargo-style Java builds.** A `jals.toml` manifest — the Java analogue of `Cargo.toml` —
   drives `jals build` / `run` / `test` / `clean` / `init`. Optional Rhai scripts run before `javac`, using
   bounded storage-only APIs to generate sources and augment flags, classpaths, and environments.
@@ -44,14 +50,14 @@ build front end (`jals build` / `run` / `test` / `clean` / `init`) wraps the JDK
   then projected into verified source/classpath artifacts without mutating dependency trees.
 - **`wasm32`-ready core.** The syntax, formatting, linting, and semantic-analysis layers
   (`jals-editor`, `jals-syntax`, `jals-fmt`, `jals-lint`, `jals-hir`, `jals-classfile`,
-  `jals-decompile`, `jals-javac`, `jals-storage`, `jals-config`) are `no_std` and build for
-  `wasm32-unknown-unknown`; `jals-classpath`'s resolution core, `jals-project`'s in-memory graph, and
+  `jals-decompile`, `jals-javac`, `jals-native`, `jals-storage`, `jals-config`) are `no_std` and
+  build for `wasm32-unknown-unknown`; `jals-classpath`'s resolution core, `jals-project`'s in-memory graph, and
   `jals-build`'s Rhai runner do too (host I/O sits behind `native` features). The browser playground
   therefore runs the same analysis, project-graph, and build-script stack client-side.
 
 ## Workspace layout
 
-`jals` is a Cargo workspace of seventeen product crates, including a browser playground:
+`jals` is a Cargo workspace of eighteen product crates, including a browser playground:
 
 | Crate                                | Description                                                                                                                                                                                                                                                                                                                                                                                                         |
 | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -70,6 +76,7 @@ build front end (`jals build` / `run` / `test` / `clean` / `init`) wraps the JDK
 | [`jals-project`](jals-project)       | Discovers the transitive path/Git/JAR project graph with stable node identity, probes only each selected root's exact `jals.toml`, enforces the resolved-to-preprocessed phase transition, and publishes dependency inputs only as node-scoped verified artifacts for `jals-classpath`. Includes portable in-memory and native acquisition hosts.                                                                   |
 | [`jals-build`](jals-build)           | A Cargo-style build orchestrator: it turns `jals.toml` into `javac`/`java` plans, clean keys, and scaffolding, and optionally runs sandboxed Rhai pre-build scripts over revisioned project storage. Backs `jals build`/`run`/`clean`/`init` and the LSP/playground build phase.                                                                                                                                    |
 | [`jals-lsp`](jals-lsp)               | A Language Server Protocol server (the `jals lsp` subcommand) providing diagnostics, document symbols, formatting, hover, go-to-definition, find-references, and more from the same CST and semantic layer. Host-only.                                                                                                                                                                                              |
+| [`jals-native`](jals-native)         | A Java package whose implementation is Rust: the Java it publishes and the host functions its `native` methods bind to, in one value. `[build] native-packages` selects one; the wasm backend turns each `native` method into an import and the runner links it. Ships `jals.io`.                                                                                                                                                                                                                       |
 | [`jals-progress`](jals-progress)     | What a run is doing, as data: the event vocabulary portable crates report through, plus the timing ledger `--timings` renders as a self-contained HTML page. Draws nothing — a host decides what a fact looks like.                                                                                                                            |
 | [`jals-cli`](jals-cli)               | The `jals` command-line binary. Owns the terminal: one `Shell` writes every byte, and a cargo-shaped display turns the event stream into status lines and progress bars.                                                                                                                                                                                                                                                                                                                                                                                     |
 | [`jals-playground`](jals-playground) | A browser playground built with [Yew](https://yew.rs) and served by [Trunk](https://trunkrs.dev). It compiles to `wasm32` and runs the syntax/formatting/analysis layers entirely in the browser.                                                                                                                                                                                                                   |
@@ -92,6 +99,7 @@ jals/
 ├── jals-classpath/   # classpath + dependency resolution        (no_std + wasm-compatible core)
 ├── jals-config/      # jals.toml/jalsfmt.toml/jalslint.toml models (no_std, wasm-compatible)
 ├── jals-exec/        # current-thread execution + worker fan-out (no_std, wasm-compatible)
+├── jals-native/      # a Java package implemented in Rust      (no_std, wasm-compatible)
 ├── jals-progress/    # what a run is doing, as data + --timings  (no_std, wasm-compatible)
 ├── jals-storage/     # revisioned project storage               (no_std, wasm-compatible)
 ├── jals-project/     # transitive source-project graph          (no_std + wasm-compatible core)

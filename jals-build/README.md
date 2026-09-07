@@ -110,6 +110,7 @@ release = 21                       # javac --release N
 # target = 17                      # javac --target N  (only when release is unset)
 classpath = ["libs/guava.jar"]    # -classpath entries (jars or dirs)
 javac-flags = ["-Xlint:all"]      # appended verbatim, before the source files
+# native-packages = ["jals.io"]    # Java packages implemented in Rust (jals-wasm backend only)
 
 # [build.resources]                # a sub-table, so it goes *after* every bare [build] key above
 # template = ["fabric.mod.json"]   # globs naming which resources are rendered as templates
@@ -221,7 +222,56 @@ nothing still leaves every dependency script cached.
 | `target`        | integer          | —                        | `--target N` — only when `release` is unset                                                                                                                     |
 | `classpath`     | array of strings | `[]`                     | `-classpath` (joined with the platform separator); omitted entirely when empty                                                                                  |
 | `javac-flags`   | array of strings | `[]`                     | appended **verbatim** after the generated flags, before the source files — an escape hatch for anything the manifest does not model yet                         |
+| `native-packages` | array of strings | `[]`                   | the **native packages** to link — Java packages whose `native` methods are implemented in Rust. `jals-wasm` backend only (see below)                            |
 | `resources`     | sub-table        | `{ template = [] }`      | how resources become jar members; `template` is the globs rendered rather than copied (see below). A sub-table, so it goes after every bare `[build]` key       |
+
+### Native packages
+
+A **native package** is a Java package whose `native` methods are implemented in Rust. Selecting one
+does two things: its Java is compiled into the same artifact the project is, and each `native`
+method it declares becomes a WebAssembly **import** the runner links against the package's Rust half.
+
+```toml
+[build]
+backend = { type = "jals-wasm" }
+native-packages = ["jals.io"]
+```
+
+```java
+import jals.io.Out;
+
+public class Hello {
+    public static void greet() {
+        Out.println(new char[] {'h', 'i'});
+    }
+}
+```
+
+Four things about this are worth stating, because each one is a rule rather than a detail.
+
+**Only the `jals-wasm` backend can take one in.** A package's implementation is a host function
+supplied to a module, and a class file has nowhere to put one — so `native-packages` beside a
+class-file backend is a manifest error, the same shape `[toolchain] runtime = "wasm"` beside one is.
+
+**Which packages exist is a property of the binary, not of the manifest.** `jals` ships `jals.io`;
+the browser playground ships its own; a program embedding this toolchain registers whatever it
+likes. A name this build does not offer is reported with the names it does. `jals build` refuses it;
+`jals lint` and the language server warn and carry on, exactly as they do for any other analysis
+input they cannot resolve.
+
+**A package's methods are not module exports.** Every `static` method of the *project* is exported
+under its bare name; a package's are not. Otherwise a library's internals would fill the list
+`jals run --invoke <name>` offers on a miss, and — since the first export of a name wins and the
+second is dropped without a word — a package method could take a project method's export away
+from it.
+
+**The two halves cannot disagree about a signature.** An import is named by the declaring class's
+internal name and the method's name-with-descriptor (`jals/io/Out`, `writeChars([CII)V`), which are
+the two strings the Rust half registers under. One that spelled it differently produces an import
+nothing satisfies, refused when the module is instantiated with both spellings listed.
+
+See [`jals-native`](../jals-native/README.md) for how to write one, and
+[`examples/hello_world_native`](../examples/hello_world_native) for one end to end.
 
 ### Resource templates
 

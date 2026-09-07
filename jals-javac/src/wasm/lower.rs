@@ -52,6 +52,7 @@ use jals_syntax::SyntaxKind::{
 use jals_syntax::ast::{self, AstNode as _};
 use jals_syntax::{SyntaxNode, SyntaxToken};
 
+use crate::desc::Descriptor;
 use crate::facts::{ArmLabels, Facts, Literal};
 use crate::facts::{Numeric, Operator, Unary};
 use crate::wasm::encode::{
@@ -180,16 +181,18 @@ pub struct WasmOptions {
 }
 
 impl CompileWasm {
-    /// Emit the module's bytes. `index` must have been built over exactly `inputs`.
+    /// Emit the module's bytes. `index` must have been built over exactly `inputs` and
+    /// `libraries`.
     ///
     /// [`module`](Self::module) with its encoding run; a module whose own lengths do not fit the
     /// `u32` the format spells them with is refused rather than truncated.
     pub fn project(
         inputs: &[TypedFile<'_>],
+        libraries: &[TypedFile<'_>],
         index: &ProjectIndex,
         options: WasmOptions,
     ) -> Result<Vec<u8>> {
-        Self::module(inputs, index, options)?
+        Self::module(inputs, libraries, index, options)?
             .finish()
             .ok_or(WasmError::TooLarge)
     }
@@ -228,9 +231,22 @@ impl CompileWasm {
 
     pub fn module(
         inputs: &[TypedFile<'_>],
+        libraries: &[TypedFile<'_>],
         index: &ProjectIndex,
         options: WasmOptions,
     ) -> Result<Module> {
+        // Everything below reads one list. A library class is laid out, has its bodies lowered and
+        // is called exactly as a project class is — the *only* thing the two lists decide is which
+        // declarations reach the export section, which is what `exported` carries into
+        // `collect_methods`. `TypedFile` is `Copy`, so joining them costs one pointer-sized copy
+        // each and saves every pass below from taking two slices and an index rule.
+        let project_inputs = inputs.len();
+        let inputs: Vec<TypedFile<'_>> = inputs
+            .iter()
+            .copied()
+            .chain(libraries.iter().copied())
+            .collect();
+        let inputs = inputs.as_slice();
         let mut module = Module::new();
         let mut layout = Layout {
             object: index.item_by_fqn("java.lang.Object"),
@@ -288,6 +304,12 @@ impl CompileWasm {
                 layout.declare_array(&ty, &mut module)?;
             }
         }
+        // Every `native` method becomes a host import, and every import occupies the function
+        // index space *before* the first defined function — so they are all declared here, in a
+        // sweep of their own, ahead of anything that asks the module for an index.
+        for input in inputs {
+            Self::collect_imports(input, index, &mut layout, &mut module)?;
+        }
         // Now every index is known, so the struct bodies can name array types and vice versa.
         for &item in &classes {
             layout.fill_class(item, index, &mut module)?;
@@ -315,6 +337,7 @@ impl CompileWasm {
             Self::collect_methods(
                 input,
                 position,
+                position < project_inputs,
                 index,
                 &mut layout,
                 &mut module,
@@ -401,7 +424,7 @@ impl CompileWasm {
                 params: Vec::new(),
                 results: Vec::new(),
             }));
-            let start = Module::func_index(module.funcs.len());
+            let start = module.func_index(module.funcs.len());
             module.funcs.push(Func {
                 type_index: signature,
                 locals: Vec::new(),
@@ -468,7 +491,7 @@ impl CompileWasm {
             let flag = u32::try_from(module.globals.len() - 1).unwrap_or(0);
             layout
                 .class_inits
-                .insert(owner, (Module::func_index(next), flag));
+                .insert(owner, (module.func_index(next), flag));
             next += 1;
         }
     }
@@ -628,7 +651,7 @@ impl CompileWasm {
                         params,
                         results: Vec::new(),
                     }));
-                    let function = Module::func_index(methods.len() + out.len());
+                    let function = module.func_index(methods.len() + out.len());
                     layout.functions.insert(ctor, function);
                     out.push(Func {
                         type_index: signature,
@@ -658,7 +681,7 @@ impl CompileWasm {
                         params: alloc::vec![this],
                         results: alloc::vec![ty],
                     }));
-                    let function = Module::func_index(methods.len() + out.len());
+                    let function = module.func_index(methods.len() + out.len());
                     layout.functions.insert(accessor, function);
                     out.push(Func {
                         type_index: signature,
@@ -858,10 +881,107 @@ impl CompileWasm {
         }
     }
 
+    /// Declare a host import for every `native` method `input` declares.
+    ///
+    /// Java has had a word for "the body is not in this class file" since 1.0, and on this target
+    /// it means an import: the module says what it needs, the embedder supplies it, and the
+    /// engine refuses to instantiate a module whose needs are unmet. Nothing else in the lowering
+    /// changes — the member lands in `layout.functions` exactly as a defined method does, so a
+    /// call site emits the same `call` and never learns which kind of function it reached.
+    ///
+    /// # The two names
+    ///
+    /// The import's module name is the declaring class's **internal name** and its field name is
+    /// the method's **name with its JVM descriptor**. Both are derived here from the declaration
+    /// alone, which is what lets the host key its implementation table on the same two strings
+    /// without either side restating the other's type mapping. A host that spells the descriptor
+    /// differently therefore produces an import nothing satisfies — reported when the module is
+    /// instantiated, with both spellings in hand — rather than a type mismatch somebody has to
+    /// notice.
+    ///
+    /// The descriptor is read through [`Descriptor`](crate::desc::Descriptor), which is otherwise
+    /// the JVM backend's. That is deliberate: the link symbol is the canonical spelling of a
+    /// *Java signature*, the JVM's descriptor grammar is what that spelling is, and this backend
+    /// writing its own erasure would be the second copy of a rule — the regression
+    /// `no-wasm-into-jvm-lowering`'s note describes, arriving through the door that rule does not
+    /// cover.
+    ///
+    /// # Why it is a sweep of its own
+    ///
+    /// Imports occupy the function index space *before* every defined function. So every one of
+    /// them has to be declared before [`Module::func_index`] is asked for anything, and a single
+    /// pass that declared imports and defined methods as it met them would hand out indices an
+    /// import declared later then took.
+    fn collect_imports(
+        input: &TypedFile<'_>,
+        index: &ProjectIndex,
+        layout: &mut Layout,
+        module: &mut Module,
+    ) -> Result<()> {
+        for class in Self::type_declarations(input.root()) {
+            let Some(item) = Self::item_of(&class, input, index)? else {
+                continue;
+            };
+            let Some(body) = class
+                .children()
+                .find(|child| matches!(child.kind(), CLASS_BODY | ENUM_BODY))
+            else {
+                continue;
+            };
+            for node in body.children() {
+                if node.kind() != METHOD_DECL
+                    || !Facts::has_modifier(&node, jals_syntax::SyntaxKind::NATIVE_KW)
+                {
+                    continue;
+                }
+                // A `native` method with a body is not a method this backend has to import — the
+                // body is right there, and `collect_methods` will give it a function. Java rejects
+                // the combination, but this backend never checks, so the honest reading of a
+                // declaration that has both is "there is a body".
+                if node.children().find_map(ast::Block::cast).is_some() {
+                    continue;
+                }
+                let member_name = Self::member_name_token(&node, false)
+                    .ok_or(WasmError::Unsupported("a member with no name"))?;
+                let member = Facts::of(*input).member_at(&member_name)?;
+                let is_static = index.member(member).modifiers.is_static;
+
+                let mut params = Vec::new();
+                if !is_static {
+                    params.push(layout.class_ref(item)?);
+                }
+                for ty in index.resolved_param_tys(member) {
+                    layout.declare_array(&ty, module)?;
+                    params.push(layout.val_type(&ty)?);
+                }
+                let returned = index.resolved_member_ty(member);
+                layout.declare_array(&returned, module)?;
+                let results = match returned {
+                    Ty::Void => Vec::new(),
+                    ty => alloc::vec![layout.val_type(&ty)?],
+                };
+                let descriptor = Descriptor::method_descriptor(member, index, false)
+                    .map_err(|_| WasmError::NoRepresentation(Self::member_path(member, index)))?;
+                let owner = Descriptor::internal_name_of(item, index);
+                let name = alloc::format!("{}{descriptor}", index.member(member).name);
+                let function = module.add_import(owner, name, params, results);
+                layout.functions.insert(member, function);
+            }
+        }
+        Ok(())
+    }
+
+    /// `<owner fqn>.<member name>`, the way every diagnostic in this module names a method.
+    fn member_path(member: MemberId, index: &ProjectIndex) -> String {
+        let owner = index.item(index.member(member).owner).fqn.as_str();
+        alloc::format!("{owner}.{}", index.member(member).name)
+    }
+
     /// Register every method and constructor `input` declares.
     fn collect_methods(
         input: &TypedFile<'_>,
         position: usize,
+        exported: bool,
         index: &ProjectIndex,
         layout: &mut Layout,
         module: &mut Module,
@@ -902,7 +1022,7 @@ impl CompileWasm {
                 };
                 let result = results.first().copied();
                 let signature = module.add_type(SubType::plain(CompType::Func { params, results }));
-                let function = Module::func_index(out.len());
+                let function = module.func_index(out.len());
                 layout.functions.insert(member, function);
                 out.push(Method {
                     owner: Some(item),
@@ -947,7 +1067,7 @@ impl CompileWasm {
                     params: alloc::vec![layout.class_ref(item)?],
                     results: Vec::new(),
                 }));
-                let function = Module::func_index(out.len());
+                let function = module.func_index(out.len());
                 layout.default_constructors.insert(item, function);
                 out.push(Method {
                     owner: Some(item),
@@ -1014,7 +1134,7 @@ impl CompileWasm {
 
                 let result = results.first().copied();
                 let signature = module.add_type(SubType::plain(CompType::Func { params, results }));
-                let function = Module::func_index(out.len());
+                let function = module.func_index(out.len());
                 layout.functions.insert(member, function);
                 out.push(Method {
                     owner: (!is_static).then_some(item),
@@ -1022,14 +1142,18 @@ impl CompileWasm {
                     input: position,
                     signature,
                     index: function,
-                    // A `public static` method is the module's surface: a wasm host has no `main`
-                    // convention, so every one of them is exported by name.
                     result,
                     encloses,
                     captures: captured.len(),
                     initialises: None,
                     lambda: None,
-                    export: (is_static && !is_constructor)
+                    // A native package's classes are compiled into this module but are not its
+                    // surface: exporting their `static` methods would put library internals in
+                    // the list `--invoke` offers, and — because the first export of a name wins
+                    // and the second is dropped — would silently take a project method's export
+                    // away from it. `exported` is which list the declaration came from, and it is
+                    // the only thing the two lists decide.
+                    export: (exported && is_static && !is_constructor)
                         .then(|| index.member(member).name.clone()),
                     is_constructor,
                 });
@@ -5448,7 +5572,8 @@ impl Lowering<'_> {
             //
             // - **A `static` call is not a dispatch.** `static native int f()` has no body and no
             //   receiver, so "no object can exist" says nothing about it; the module simply lacks
-            //   the body, which is a refusal.
+            //   the body, which is a refusal — unless the declaration said `native`, in which case
+            //   it has an import and never reaches this match at all.
             //
             // An *interface* owner stays in, and soundly: a value of interface type comes either
             // from a laid-out struct — which the override scan above covers, lambdas and method
@@ -5476,9 +5601,12 @@ impl Lowering<'_> {
             // needing one is what puts a case outside this backend's subset, not a gap in it.
             // `System.out.println` is the everyday shape: nothing in such a file declares a library
             // type, so the case reached this far before naming the one it needs.
-            // A project type whose body this module does not hold: `native`, or an interface
-            // method implemented only by a lambda or a method reference. Its own report, because
-            // the library-type one would send a reader looking for a dependency that is not there.
+            // A project type whose body this module does not hold: an interface method
+            // implemented only by a lambda or a method reference this backend does not lay out.
+            // Its own report, because the library-type one would send a reader looking for a
+            // dependency that is not there. A `native` method no longer reaches here — it has an
+            // import and therefore a function index — so what is left is a body that was expected
+            // and is missing, rather than one that was never going to be here.
             None if self
                 .layout
                 .structs
@@ -5488,10 +5616,8 @@ impl Lowering<'_> {
                     .interfaces
                     .contains(&self.index.member(member).owner) =>
             {
-                let owner = self.index.item(self.index.member(member).owner).fqn.clone();
-                return Err(WasmError::NoImplementation(alloc::format!(
-                    "{owner}.{}",
-                    self.index.member(member).name
+                return Err(WasmError::NoImplementation(CompileWasm::member_path(
+                    member, self.index,
                 )));
             }
             None => {

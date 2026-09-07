@@ -27,6 +27,10 @@ jals-fmt = { workspace = true }
 jals-frontend = { workspace = true }
 jals-storage = { workspace = true }
 jals-hir = { workspace = true }
+# The native packages this tab offers: a Java package whose `native` methods are implemented in
+# Rust. `[build] native-packages` selects out of the registry `natives.rs` builds, whose `jals.io`
+# console appends to the Run pane.
+jals-native = { workspace = true }
 jals-syntax = { workspace = true }
 # `futures::lock::Mutex` — the FIFO-fair, single-thread-safe async lock serializing every
 # workspace touch (providers hold it across their awaits; no `RefCell` borrow crosses an await).

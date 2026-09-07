@@ -103,6 +103,14 @@ filesystem reads into portable interfaces.
     `deny_unknown_fields` would let one stale name stop every *other* rule in the file from
     loading; `Config::unknown_keys` is how a host reports what it kept.
 
+  `[build] native-packages` names the **native packages** a project links, and `Manifest::validate`
+  refuses a non-empty list under any backend but `jals-wasm` — the mirror of
+  `WasmRuntimeWithoutWasmBackend`, and for the same reason: a package's implementation is a host
+  function supplied to a WebAssembly module, and no other backend emits one for it to be supplied
+  to. What a name *is* is checked here (non-empty, not repeated); whether it **exists** is not — the
+  set is a property of the binary that holds the registry, so an unknown name is reported by the
+  host, with the names it does offer.
+
   An option is always a value with every reachable state named — never an `Option<bool>`, and never
   two exclusive rules a config could ask for both of (clippy's `print_stdout`/`print_stderr` are one
   `streams` key). `Lint<O>`'s serialized *shape* follows the options **type**
@@ -363,6 +371,20 @@ filesystem reads into portable interfaces.
     and the `StackMapTable`, which is emitted as `full_frame` only. On the wasm side the host's
     collector owns every object — `struct.new_default`, declared subtyping, no `memory` section,
     and no allocator or collector of its own.
+  - **A `native` method is a wasm import, and a library input is never exported.** `collect_imports`
+    is a sweep of its own because imports occupy the *low* function indices, so every one has to be
+    declared before `Module::func_index` hands out anything. The import's function type is **its own
+    type-section entry**, outside the single `rec` group every declared type shares — an engine
+    canonicalises a host function alone, so a signature allocated in that group links against
+    nothing and reports only "incompatible import type". `CompileWasm::project` takes the project's
+    sources and a native package's as **two slices** because exactly one thing differs between them:
+    a library declaration is never exported. Otherwise a package's `static` methods would fill the
+    list `--invoke` offers and — since the first export of a name wins and the second is dropped
+    without a word — could take a project method's export away from it. The link symbol's descriptor
+    is read through `desc`, which is otherwise the JVM backend's: that symbol is the canonical
+    spelling of a *Java signature*, and a second erasure written inside `wasm/` to avoid naming the
+    module would be a fact with two implementations, arriving through the door
+    `no-wasm-into-jvm-lowering` does not cover.
   - **Both backends publish the layer beneath their entry point, and neither materializes bytes
     before `finish`.** `jvm` exports `Assembler`, which records items and resolves them in
     `finish`; `wasm` exports `Insn`/`Instr` and `Module`, which hold a body as instructions until
@@ -437,6 +459,14 @@ filesystem reads into portable interfaces.
   `Unknown` in by exclusion — `!= No`, `== Yes` — is what silently reclassifies it when a fourth
   answer is added, so the two policies have names and the `match` is exhaustive.
 
+  A **native package's** Java is folded in through `with_native_packages` as its own
+  `ItemOrigin::Native`, ranked after the project's own sources and its `git`/`path` library sources
+  and **ahead of the classpath and the stubs**: a package's Java is compiled into the same artifact
+  the project is, so where it and a stub declare one name, the one with a body is the one that will
+  run. It is *complete* rather than lenient for the same reason, and it is the one origin with no
+  file behind it at all — the text is a constant in the binary that shipped the package, so nothing
+  navigates into one.
+
   `jals-hir` states *facts* (`DeadIf`, `UnreportedException`, `TypeMismatch` with its
   `MismatchKind`, `UnresolvedType` and its value/method sibling `UnresolvedName`, `UnusedImport`,
   and the `unused_defs` a `Def`'s `is_private` / `is_annotated` let a consumer narrow); the
@@ -459,6 +489,34 @@ filesystem reads into portable interfaces.
   and a class file's are decoded by `jals-classfile` and not lowered here, so for those two it means
   *nobody looked* — `ItemOrigin::carries_annotations` is the question a consumer that reads silence
   as a claim must ask first, and getting it wrong reports every `null` the standard library accepts.
+- `jals-native`: a **Java package whose implementation is Rust** — the Java it publishes and the
+  host functions its `native` methods bind to, in one value. (`native` here is Java's keyword, not
+  the Cargo feature several crates gate host I/O with; this crate has no features at all, and no
+  dependencies, so a package author's crate depends on it and on nothing else.) Three properties
+  are load-bearing.
+  - **One crate owns both halves, and there is exactly one place they are checked against each
+    other.** A binding is keyed by the declaring class's internal name and the method's
+    name-with-descriptor — the two strings `jals-javac`'s wasm backend writes into the import
+    section for the same declaration. So a Rust half that spells a signature differently produces
+    an *unresolved import*, refused at instantiation with both spellings listed, rather than a type
+    mismatch somebody has to notice. Nothing re-derives a wasm type from a descriptor either: the
+    runner defines each host function under the type **the module itself declared**, which is what
+    makes the engine's own equality check the link.
+  - **The `NativeHost` seam is a trait for the reason `jinja`'s `Object` is** — the engine is the
+    consumer's (`jals-build`'s tinywasm, behind `wasm-run`), and a crate that named it would stop
+    being a crate a package author can depend on alone. Through it a binding reads and writes Java
+    arrays and calls the module's own exports; it cannot **allocate** a Java object, because a wasm
+    embedder has no `struct.new` of its own, so a `native` method returning one calls a `static`
+    factory the package's Java declares.
+  - **The host supplies the state.** This crate is `no_std`, so a package that writes text is
+    *constructed with* its sink — `jals-cli` passes one writing through `Shell`, the playground one
+    appending to the Run pane, the tests one appending to a `String`. Bindings are therefore `!Send`
+    by construction, which is why `WasmTestLauncher::run` runs its cases in order when a package is
+    linked and fans out only when none is.
+
+  `NativePackage::new` takes a version and it is the **package author's**, for the reason
+  `FrontendCaps::version` exists: a consumer memoizes a compile against everything it observed, and
+  a Rust closure's body is the one input it cannot observe.
 - `jals-lint`: the rule engine. A rule is a name, a `Category` (the `jalslint.toml` section it is
   configured under), a level accessor into `jals_config::lint`, and a checker; `RuleInfo::all()`
   publishes the registry so a consumer enumerates rules instead of restating them. **The rule name

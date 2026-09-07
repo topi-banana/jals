@@ -30,6 +30,10 @@ jals-syntax = { workspace = true }
 # memory/native aggregate used by the builtin backend. `jals-exec` supplies the execution context
 # handle and the blocking-pool escape the native half runs its syscalls through.
 jals-config.workspace = true
+# What a Java package written in Rust *is*: the Java it publishes and the host functions its
+# `native` methods bind to. Featureless and dependency-free, so it is unconditional here — a
+# `--no-default-features` build still describes a selection, and `wasm-run` is what links one.
+jals-native.workspace = true
 jals-exec.workspace = true
 jals-progress.workspace = true
 jals-storage.workspace = true

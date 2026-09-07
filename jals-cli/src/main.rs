@@ -1,6 +1,7 @@
 //! `jals` command-line interface.
 
 mod migrate;
+mod natives;
 mod report;
 mod session;
 mod shell;
@@ -979,6 +980,7 @@ impl BuildArgs {
             tree,
             &inputs,
             Lowering::Build,
+            natives::Natives::select(session.shell(), &manifest)?,
             exec,
             session.for_package(App::package_ref(&manifest)),
         )
@@ -1146,6 +1148,10 @@ impl RunArgs {
                 extra_classpath: &inputs.extra_classpath,
                 run_env: &inputs.run_env,
             });
+        // One selection for the whole command: the same packages are compiled into the module and
+        // linked when it is instantiated, so resolving twice would build a second console buffer
+        // for the half that runs.
+        let natives = natives::Natives::select(session.shell(), &manifest)?;
         // The compile step goes through the same `[build] backend` selection `jals build` uses, so a
         // manifest asking for the in-process compiler gets it here too. The run step is selected
         // independently from `[toolchain] runtime`: `"builtin"` is the in-process dummy, anything
@@ -1157,6 +1163,7 @@ impl RunArgs {
             tree,
             &inputs,
             Lowering::Build,
+            natives.clone(),
             exec,
             session.for_package(App::package_ref(&manifest)),
         )
@@ -1206,7 +1213,7 @@ impl RunArgs {
         // The two are built together, so one without the other cannot happen; the module arm is
         // what the `else` is.
         let (Some(runtime), Some(run_request)) = (&runtime, &run_request) else {
-            return self.run_module(session, &outcome, &package);
+            return self.run_module(session, &outcome, &natives, &package);
         };
         let running = package.begin(jals_progress::Activity::Run, run_request.main_class);
         // The child owns this terminal from here on and never gives it back, so the display comes
@@ -1240,6 +1247,7 @@ impl RunArgs {
         &self,
         session: &Session,
         outcome: &jals_build::BackendOutcome,
+        natives: &jals_native::NativePackageSet,
         progress: &jals_progress::Progress,
     ) -> Result<ExitCode> {
         let module = outcome
@@ -1254,6 +1262,10 @@ impl RunArgs {
             module,
             invoke: self.invoke.as_deref(),
             args: &self.args,
+            // The implementations of every `native` method the module imports. A module that
+            // imports none links against an empty table, which is what every project that selected
+            // no package produces.
+            natives: &natives.bindings(),
             progress,
         };
         match jals_build::WasmRunner::run(&request).map_err(|error| anyhow!("{error}"))? {
@@ -1364,6 +1376,9 @@ impl TestArgs {
             session,
         )
         .await?;
+        // One selection for the whole command, for the reason `jals run` resolves one: the module
+        // the backend compiles and the module the launcher instantiates are the same module.
+        let natives = natives::Natives::select(session.shell(), &manifest)?;
         let plan = CompilePlan::prepare(
             &manifest,
             &root,
@@ -1371,6 +1386,7 @@ impl TestArgs {
             tree,
             &inputs,
             lowering,
+            natives.clone(),
             exec,
             session.for_package(App::package_ref(&manifest)),
         )
@@ -1422,7 +1438,7 @@ impl TestArgs {
                 })
                 .collect();
             Launcher::Wasm(
-                jals_build::WasmTestLauncher::resolve(module, entries)
+                jals_build::WasmTestLauncher::resolve(module, entries, natives.bindings())
                     .map_err(|e| anyhow!("{e}"))?,
             )
         } else {
@@ -1870,6 +1886,36 @@ impl LintProject {
     const MOUNT_ROOT: &'static str = ".jals/lint";
 
     /// Discover the project upward from `start_dir` and open its aggregate.
+    /// The Java a selected native package publishes, as the analysis layer takes it.
+    ///
+    /// The analysis has to see a package's declarations for the same reason the compile does: a
+    /// project that selected one writes `jals.io.Out.println(…)`, and a `Workspace` that did not
+    /// index the package would report every such name as unresolved — an analysis reporting the
+    /// absence of code the build compiles.
+    ///
+    /// A failed selection is a *warning* here rather than the error `jals build` raises. Lint is
+    /// best-effort about every other input it cannot resolve (an unbuilt dependency, a missing
+    /// classpath entry), and refusing to lint a file because one package name is misspelled would
+    /// be the one input that stops the command outright.
+    fn native_layout_sources(
+        shell: &std::sync::Arc<Shell>,
+        manifest: &Manifest,
+    ) -> Vec<jals_editor::PackageSource> {
+        match natives::Natives::select(shell, manifest) {
+            Ok(selection) => selection
+                .sources()
+                .map(|(_, source)| jals_editor::PackageSource {
+                    path: source.path.to_owned(),
+                    text: source.text.to_owned(),
+                })
+                .collect(),
+            Err(error) => {
+                shell.warn(format_args!("{error:#}"));
+                Vec::new()
+            }
+        }
+    }
+
     async fn open(
         start_dir: &Path,
         exec: &Exec,
@@ -1986,6 +2032,7 @@ impl LintProject {
                     layout: jals_editor::ProjectLayout {
                         feature_set: manifest.feature_set(),
                         build_features: features.into_features(),
+                        native_sources: Self::native_layout_sources(shell, &manifest),
                         ..jals_editor::ProjectLayout::new(source_roots)
                     },
                 });
@@ -1996,6 +2043,7 @@ impl LintProject {
             // Resolved once by the assembly, so no host re-lowers `[build] source-dirs` itself.
             source_roots: inputs.source_roots,
             feature_set: inputs.feature_set,
+            native_sources: Self::native_layout_sources(shell, &manifest),
             // What each project file's `#[cfg(feature = "…")]` evaluates against, read only when
             // `feature_set` enables the `attributes` dialect — so an attribute-free project's lint
             // output is independent of `--features`.
@@ -2255,6 +2303,7 @@ impl CompilePlan {
         tree: Vec<jals_build::BackendSource>,
         inputs: &HostProjectInputs,
         lowering: Lowering,
+        natives: jals_native::NativePackageSet,
         exec: &Exec,
         progress: jals_progress::Progress,
     ) -> Result<Self> {
@@ -2274,6 +2323,11 @@ impl CompilePlan {
             // emitted is a property of *this compile*, not of the project — the same wasm project
             // builds without them and tests with them.
             lowering.assertions(),
+            // What `[build] native-packages` selected. Only the wasm backend takes one in, and
+            // the manifest is already refused if a selection reaches any other — so the selection
+            // travels to the factory rather than being matched on here, exactly as the backend
+            // kind does.
+            natives,
             exec,
         )
         .await;

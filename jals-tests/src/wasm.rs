@@ -25,6 +25,12 @@
 //! | instantiated | `wasmtime` instantiated it, which is where the start function runs |
 //! | agreed | every jointly-callable method answered what javac's class file answers on a JVM |
 //!
+//! A module that declares **host imports** stops at `validated`. A `native` method is lowered to an
+//! import, and what satisfies one is a Rust closure a host supplies (`jals-native`); this harness
+//! drives `wasmtime` as a process and has nowhere to take one from. That is a fact about the
+//! harness rather than about the backend, so it is [`Outcome::NeedsHost`] with its own name rather
+//! than a trap — `jals-build`'s own tests are where a linked module is instantiated and run.
+//!
 //! `validated` is this harness's `verified`. The encoder writes its own type indices, block types
 //! and local counts, and nothing upstream of a validator has an opinion on whether they cohere —
 //! `Module::finish` will happily encode a body whose stack does not balance.
@@ -117,6 +123,14 @@ pub enum Outcome {
     /// `wasm-tools` refused the module. The bytes are not a WebAssembly module, and this is the
     /// finding the harness exists to produce.
     Rejected(String),
+    /// The module validated and declares **host imports**, so this harness cannot instantiate it.
+    ///
+    /// A `native` method is lowered to an import (`jals-native`), and the implementations that
+    /// satisfy one are Rust closures a *host* supplies. This harness drives an external `wasmtime`,
+    /// which has nowhere to take them from — so the case stops one rung below `instantiated` for a
+    /// reason that is about the harness and not about the backend, and it is its own outcome rather
+    /// than a `Trapped` so it never reads as a defect.
+    NeedsHost(usize),
     /// The module was emitted but the engine stage did not run (`--no-validate`, or no tools).
     Unvalidated,
     /// Lowering refused the file because it names a type this backend does not represent — a
@@ -135,9 +149,10 @@ pub enum Outcome {
     /// Lowering refused the file because a name did not resolve. The message quotes the corpus's
     /// own identifier, which is elided so equivalent failures bucket together.
     Unresolved(String),
-    /// Lowering refused the file because a method it *declares* has no body in the module — a
-    /// `native` one, or an interface method whose only implementation in the source is a lambda or a
-    /// method reference this backend does not lower into a struct.
+    /// Lowering refused the file because a method it *declares* has no body in the module — an
+    /// interface method whose only implementation in the source is a lambda or a method reference
+    /// this backend does not lower into a struct. A `native` method is not this: it becomes a host
+    /// import, and the case stops at [`NeedsHost`](Self::NeedsHost) instead.
     ///
     /// Kept apart from [`OutOfSubset`](Self::OutOfSubset), which is the library-type refusal: the
     /// owner here is a project type, so the case is squarely *inside* the subset and this is a gap
@@ -163,6 +178,7 @@ impl Outcome {
             Self::NotRun => "not-run",
             Self::Trapped(_) => "trapped",
             Self::Rejected(_) => "wasm-rejected",
+            Self::NeedsHost(_) => "needs-host",
             Self::Unvalidated => "unvalidated",
             Self::OutOfSubset(_) => "out-of-subset",
             Self::TooLarge => "too-large",
@@ -222,8 +238,12 @@ impl Outcome {
     }
 
     /// Whether an engine instantiated it, running the start function.
+    ///
+    /// A module that imports host functions is *not* instantiated here, and never counted as one:
+    /// an external engine has nowhere to take an implementation from, so the rung genuinely did
+    /// not run.
     const fn instantiated(&self) -> bool {
-        self.validated() && !matches!(self, Self::Trapped(_))
+        self.validated() && !matches!(self, Self::Trapped(_) | Self::NeedsHost(_))
     }
 
     /// Whether every jointly-callable method agreed with javac's own — the top rung.
@@ -253,14 +273,17 @@ impl Outcome {
             Self::TooLarge => 4,
             Self::Unsupported(_) | Self::Unresolved(_) | Self::NoImplementation(_) => 5,
             Self::Trapped(_) => 6,
-            Self::Unvalidated => 7,
-            Self::NotRun => 8,
-            Self::Agreed => 9,
+            // Beside `Trapped`, and above it: the module validated, and what stopped it is a
+            // property of this harness rather than of the module.
+            Self::NeedsHost(_) => 7,
+            Self::Unvalidated => 8,
+            Self::NotRun => 9,
+            Self::Agreed => 10,
             // Not rungs at all: one compared nothing, one is outside what this backend compiles,
             // and one is a case the harness never saw the source of.
-            Self::Unjudged(_) => 10,
-            Self::OutOfSubset(_) => 11,
-            Self::ReadError => 12,
+            Self::Unjudged(_) => 11,
+            Self::OutOfSubset(_) => 12,
+            Self::ReadError => 13,
         }
     }
 
@@ -403,6 +426,9 @@ pub struct CaseResult {
     pub outcome: Outcome,
     /// The module's bytes, while the engine stages still need them.
     module: Option<Vec<u8>>,
+    /// How many host functions the module imports, which is what stops the engine rung at
+    /// [`Outcome::NeedsHost`] — an external engine has nowhere to take an implementation from.
+    imports: usize,
     /// The methods this case offers both compilers, empty until the module validates.
     callable: Vec<Callable>,
     /// Whether javac's own class files for the case read at all — the difference between "there
@@ -863,6 +889,7 @@ impl CaseResult {
             rel: case.rel.clone(),
             outcome: lowered.outcome,
             module: lowered.module,
+            imports: lowered.imports,
             callable: lowered.callable,
             expected_readable: lowered.expected_readable,
             valued: 0,
@@ -895,7 +922,7 @@ impl CaseResult {
             );
             let semantics = analysis.in_project(&index, FileId(0));
             let typed = jals_exec::block_on_inline(semantics.typed());
-            let module = match CompileWasm::module(&[typed], &index, WasmOptions::default()) {
+            let module = match CompileWasm::module(&[typed], &[], &index, WasmOptions::default()) {
                 Ok(module) => module,
                 Err(WasmError::NoRepresentation(ty)) => {
                     return Lowered::stopped(Outcome::OutOfSubset(ty));
@@ -926,6 +953,7 @@ impl CaseResult {
             Lowered {
                 outcome: Outcome::Unvalidated,
                 module: Some(bytes),
+                imports: module.imports.len(),
                 callable,
                 expected_readable,
             }
@@ -1040,6 +1068,9 @@ impl CaseResult {
 struct Lowered {
     outcome: Outcome,
     module: Option<Vec<u8>>,
+    /// How many host functions the module imports — non-zero only for a case declaring a `native`
+    /// method, and what stops the engine rung at [`Outcome::NeedsHost`].
+    imports: usize,
     callable: Vec<Callable>,
     expected_readable: bool,
 }
@@ -1050,6 +1081,7 @@ impl Lowered {
         Self {
             outcome,
             module: None,
+            imports: 0,
             callable: Vec::new(),
             expected_readable: false,
         }
@@ -1151,6 +1183,7 @@ mod tests {
     #[test]
     fn an_ambiguous_export_outranks_an_absent_one() {
         let case = |callable: Vec<Callable>, expected_readable: bool| CaseResult {
+            imports: 0,
             rel: PathBuf::from("Case.java"),
             outcome: Outcome::NotRun,
             module: None,
@@ -1205,6 +1238,9 @@ mod tests {
             Outcome::Trapped("t".to_owned()),
             Outcome::Rejected("r".to_owned()),
             Outcome::Unvalidated,
+            // Validated, and one rung below `instantiated` — an external engine has nowhere to
+            // take a host implementation from, so that rung genuinely did not run.
+            Outcome::NeedsHost(1),
             Outcome::Unsupported("u"),
             Outcome::ParseError(1),
         ] {
@@ -1223,6 +1259,12 @@ mod tests {
                 );
             }
         }
+        // The one claim the loop above cannot make on its own: a module needing a host reached the
+        // validator and stopped there, rather than being scored as a module that ran.
+        let needs_host = Outcome::NeedsHost(2);
+        assert!(needs_host.validated());
+        assert!(!needs_host.instantiated());
+        assert!(!needs_host.is_invariant_violation());
     }
 
     /// Read a file that lives beside this crate, by a path relative to its manifest dir.
